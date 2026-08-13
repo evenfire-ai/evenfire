@@ -729,18 +729,24 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
   catalogKeys: string[]
   serverNames: string[]
   recipeKeys: string[]
+  hookKeys: string[]
 }> {
-  if (!gateway) return { catalogKeys: [], serverNames: [], recipeKeys: [] }
+  if (!gateway) return { catalogKeys: [], serverNames: [], recipeKeys: [], hookKeys: [] }
 
-  const [servers, recipes] = await Promise.all([
+  const [servers, recipes, hooks] = await Promise.all([
     gateway.listResource('mcpservers', config.mcpServersNamespace),
     // Matches /admin/recipes and the WorkflowRecipe namespace invariant:
     // parent WorkflowRecipe CRDs live only in sandbox-recipes.
     gateway.listResource('workflowrecipes', config.sandboxNamespace),
+    // Installed guardrail hooks (LlmHook CRs) live in the llm-hooks namespace
+    // and carry the same catalog-id/version annotations the install-hook saga
+    // stamps, so the marketplace can render them as installed (§8.5).
+    gateway.listResource('llmhooks', config.llmHooksNamespace),
   ])
   const catalogKeys = new Set<string>()
   const serverNames = new Set<string>()
   const recipeKeys = new Set<string>()
+  const hookKeys = new Set<string>()
 
   // catalog-id / catalog-version live in ANNOTATIONS (org-scoped names contain
   // '@' and '/', illegal as label values). Fall back to labels so resources
@@ -774,10 +780,24 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
     if (catalogId && catalogVersion) recipeKeys.add(`${catalogId}@${catalogVersion}`)
   }
 
+  for (const hook of hooks as Array<{
+    metadata?: {
+      deletionTimestamp?: string
+      labels?: Record<string, string>
+      annotations?: Record<string, string>
+    }
+  }>) {
+    if (hook.metadata?.deletionTimestamp) continue
+    const catalogId = getCatalogId(hook.metadata)
+    const catalogVersion = getCatalogVersion(hook.metadata)
+    if (catalogId && catalogVersion) hookKeys.add(`${catalogId}@${catalogVersion}`)
+  }
+
   return {
     catalogKeys: [...catalogKeys].sort((a, b) => a.localeCompare(b)),
     serverNames: [...serverNames].sort((a, b) => a.localeCompare(b)),
     recipeKeys: [...recipeKeys].sort((a, b) => a.localeCompare(b)),
+    hookKeys: [...hookKeys].sort((a, b) => a.localeCompare(b)),
   }
 }
 

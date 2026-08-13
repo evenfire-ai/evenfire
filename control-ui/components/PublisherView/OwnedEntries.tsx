@@ -120,6 +120,7 @@ export function OwnedEntries({
   const [installedCatalogKeys, setInstalledCatalogKeys] = useState<Set<string>>(new Set())
   const [installedServerNames, setInstalledServerNames] = useState<Set<string>>(new Set())
   const [installedRecipeKeys, setInstalledRecipeKeys] = useState<Set<string>>(new Set())
+  const [installedHookKeys, setInstalledHookKeys] = useState<Set<string>>(new Set())
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -134,6 +135,7 @@ export function OwnedEntries({
         setInstalledCatalogKeys(new Set(catalog.installed.catalogKeys))
         setInstalledServerNames(new Set(catalog.installed.serverNames))
         setInstalledRecipeKeys(new Set(catalog.installed.recipeKeys))
+        setInstalledHookKeys(new Set(catalog.installed.hookKeys ?? []))
       }
     } catch {
       setError(true)
@@ -181,6 +183,7 @@ export function OwnedEntries({
     if (kind === 'mcp-server') {
       return installedCatalogKeys.has(key) || installedServerNames.has(e.name)
     }
+    if (kind === 'llm-hook') return installedHookKeys.has(key)
     return installedRecipeKeys.has(key)
   }
 

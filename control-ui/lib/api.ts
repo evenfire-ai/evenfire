@@ -2790,6 +2790,7 @@ export type RegistryInstalledState = {
   catalogKeys: string[]
   serverNames: string[]
   recipeKeys: string[]
+  hookKeys?: string[]
 }
 export type RegistryCatalogResponse = RegistryEntryListResponse & {
   categories: string[]
