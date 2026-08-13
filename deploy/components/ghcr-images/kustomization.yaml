@@ -31,70 +31,70 @@ configurations:
 images:
   - name: clerum/channel-reader
     newName: ghcr.io/evenfire-ai/channel-reader
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/workflow-approval-request-reader
     newName: ghcr.io/evenfire-ai/workflow-approval-request-reader
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/control-api
     newName: ghcr.io/evenfire-ai/control-api
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/control-ui
     newName: ghcr.io/evenfire-ai/control-ui
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/external-rest-api
     newName: ghcr.io/evenfire-ai/external-rest-api
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/host-context-controller
     newName: ghcr.io/evenfire-ai/host-context-controller
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/mcp-host
     newName: ghcr.io/evenfire-ai/mcp-host
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/mcp-host-slim
     newName: ghcr.io/evenfire-ai/mcp-host-slim
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/mcp-host-full
     newName: ghcr.io/evenfire-ai/mcp-host-full
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/mcp-proxy
     newName: ghcr.io/evenfire-ai/mcp-proxy
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/gfs-controller
     newName: ghcr.io/evenfire-ai/gfs-controller
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/nginx-egress-proxy
     newName: ghcr.io/evenfire-ai/nginx-egress-proxy
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/profile-ui
     newName: ghcr.io/evenfire-ai/profile-ui
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/rpc-proxy
     newName: ghcr.io/evenfire-ai/rpc-proxy
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/workflow-recipes
     newName: ghcr.io/evenfire-ai/workflow-recipes
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/workflow-coordinator
     newName: ghcr.io/evenfire-ai/workflow-coordinator
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/workflow-snippet-runner
     newName: ghcr.io/evenfire-ai/workflow-snippet-runner
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/stdio-bridge
     newName: ghcr.io/evenfire-ai/stdio-bridge
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/workspace-files-controller
     newName: ghcr.io/evenfire-ai/workspace-files-controller
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/mock-mcp-server
     newName: ghcr.io/evenfire-ai/mock-mcp-server
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/mock-stdio-mcp-server
     newName: ghcr.io/evenfire-ai/mock-stdio-mcp-server
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/webhook-gateway
     newName: ghcr.io/evenfire-ai/webhook-gateway
-    newTag: v0.6.0
+    newTag: v0.7.0
   - name: clerum/webhook-proxy
     newName: ghcr.io/evenfire-ai/webhook-proxy
-    newTag: v0.6.0
+    newTag: v0.7.0

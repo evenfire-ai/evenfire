@@ -17,6 +17,7 @@ import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { SLACK_NEW_APP_URL } from '@constants/slack'
 import { apiGet, apiSend } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
 import { copyTextToClipboard } from '@lib/clipboard'
@@ -28,9 +29,11 @@ import {
 } from '@lib/communicationChannelProviders'
 import {
   type CommunicationChannelItem,
+  slackWebhookUrlForChannelName,
   teamsWebhookPathForChannelName,
   teamsWebhookUrlForChannelName,
 } from '@lib/communicationChannels'
+import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
 import { toKebabCase, toKebabInput } from '@lib/string'
 
 type HostItem = {
@@ -222,6 +225,26 @@ export default function CreateCommunicationChannelPage() {
       }),
     [draft.teamsAppName, teamsWebhookUrl]
   )
+  // Slack's order is manifest first, credentials second: the bot token only exists
+  // after the app is installed, so a manifest offered only once the channel is saved
+  // arrives after the step it describes. The Request URL encodes namespace and name
+  // only, so it is derivable here — from the NORMALIZED name, which is what the save
+  // will persist. Deriving it from the raw input would hand over a URL for a channel
+  // that never exists, which is the failure this manifest was written to remove.
+  const slackRequestUrl = useMemo(
+    () =>
+      normalizedChannelName && canUseBrowserWebhookOrigin
+        ? slackWebhookUrlForChannelName(normalizedChannelName)
+        : null,
+    [canUseBrowserWebhookOrigin, normalizedChannelName]
+  )
+  // No app name, no manifest: the name becomes display_information.name, and a
+  // placeholder would install an app under a name the operator never chose.
+  const slackManifest = useMemo(() => {
+    const appName = draft.slackBotHandle.trim()
+    if (!appName || !slackRequestUrl || !canGenerateSlackAppManifest(slackRequestUrl)) return null
+    return slackAppManifest(appName, slackRequestUrl)
+  }, [draft.slackBotHandle, slackRequestUrl])
   const teamsBotNameIsValid = isValidTeamsBotName(draft.teamsAppName)
 
   useEffect(() => {
@@ -339,6 +362,17 @@ export default function CreateCommunicationChannelPage() {
       copied
         ? 'Teams bot command copied.'
         : 'Could not copy to clipboard. Select the command and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copySlackAppManifest() {
+    if (!slackManifest) return
+    const copied = await copyTextToClipboard(slackManifest)
+    showToast(
+      copied
+        ? 'Slack app manifest copied.'
+        : 'Could not copy to clipboard. Select the manifest and copy it manually.',
       { tone: copied ? 'success' : 'error' }
     )
   }
@@ -604,6 +638,61 @@ export default function CreateCommunicationChannelPage() {
                           autoComplete="off"
                         />
                       </Field>
+                      {slackManifest ? (
+                        <div className="cu-field">
+                          <span className="cu-field__label">Slack App Manifest</span>
+                          <div className="cu-command-block">
+                            <div className="cu-command-block__toolbar">
+                              <span>YAML</span>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="cu-command-block__copy"
+                                onClick={copySlackAppManifest}
+                                disabled={saving}
+                                aria-label="Copy Slack app manifest"
+                              >
+                                <IconCopy width={15} height={15} />
+                                Copy
+                              </Button>
+                            </div>
+                            <pre className="cu-command-block__pre cu-slack-manifest__pre">
+                              <code>{slackManifest}</code>
+                            </pre>
+                          </div>
+                          <span className="cu-field__hint">
+                            Copy this, then{' '}
+                            <a
+                              className="cu-link"
+                              href={SLACK_NEW_APP_URL}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              create your Slack app
+                            </a>{' '}
+                            — choose <strong>From an app manifest</strong>, pick the workspace, and
+                            paste. It sets the scopes, the events, and both Request URLs, so the app
+                            is ready before you come back here for the token below. Opens in a new
+                            tab so this form keeps what you have typed.
+                          </span>
+                          <span className="cu-field__hint">
+                            The Request URLs point at <code>{normalizedChannelName}</code>, so this
+                            channel has to be created under that name.
+                          </span>
+                        </div>
+                      ) : draft.slackBotHandle.trim() && normalizedChannelName ? (
+                        // Named and ready, but no absolute URL resolved: a manifest with a
+                        // relative request_url is invalid to Slack. Say so rather than render
+                        // nothing -- the operator is following a guide that promises a manifest
+                        // here, and silence gives them no cause to chase.
+                        <div className="cu-banner cu-banner--warning">
+                          No app manifest: this deployment has no public webhook address, so the
+                          Request URL would be a path Slack cannot reach. Expose the webhook proxy
+                          publicly and set NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL to that
+                          address, then reload this page.
+                        </div>
+                      ) : null}
                       <ChannelCredentialsPanel
                         ccName={channelName.trim()}
                         pending={true}
