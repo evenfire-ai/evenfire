@@ -1,3 +1,4 @@
+import { validateDisplayField } from '@clerum/display-field'
 import { RFC1123_RE } from '../../http/rfc1123.js'
 
 /**
@@ -17,28 +18,12 @@ import { RFC1123_RE } from '../../http/rfc1123.js'
  *     never blocked for unrelated edits.
  */
 
-/** Max length for a free-text display field (post-trim). */
-export const DISPLAY_FIELD_MAX_LENGTH = 120
-
-// Characters rejected in display fields:
-//   - C0 range + DEL (\x00-\x1f, \x7f): newlines and tabs are control characters
-//     too — a display name is a single-line label.
-//   - C1 range (\x80-\x9f): the second control block. U+0085 (NEL) is a line
-//     terminator that breaks the "single-line label" invariant, and U+009B (CSI)
-//     opens an ANSI escape sequence — both must be rejected like C0/DEL.
-//   - Unicode bidirectional formatting: embeddings/overrides (U+202A–U+202E:
-//     LRE/RLE/PDF/LRO/RLO) and isolates (U+2066–U+2069: LRI/RLI/FSI/PDI). These
-//     reorder surrounding text and let an admin craft a spec.host/displayName
-//     that visually impersonates another resource in the UI/desktop (spoofing).
-//   - Line/paragraph separators (U+2028/U+2029): line breaks a single-line label
-//     must not contain (JS regex `.`/`\s` and JSON treat them specially too).
-// Deliberately NOT rejected: directional marks (U+200E/U+200F/U+061C) and
-// zero-width/invisible characters (U+200B–U+200D, U+2060, U+FEFF). This set is
-// the canonical Trojan-Source bidi mitigation; zero-width joiners (U+200D) are
-// legitimate in emoji sequences, so blanket-rejecting them would break valid
-// display names. Confusable/invisible-glyph spoofing is out of scope here.
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHAR_RE = /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\u2028\u2029]/
+// Display-field validation (free-text: control/bidi chars + trimmed length) is
+// the single source of truth in `@clerum/display-field`, shared browser-safe so
+// control-ui's edit preflight applies the same rule without re-deriving the
+// regex (D4). Re-exported here under the same names so existing consumers/tests
+// that import from `resourceFieldValidation.js` keep working.
+export { validateDisplayField, DISPLAY_FIELD_MAX_LENGTH } from '@clerum/display-field'
 
 export interface FieldIssue {
   field: string
@@ -62,33 +47,6 @@ export function validateResourceName(
       'metadata.name must be a valid RFC1123 DNS label: lowercase alphanumeric characters or ' +
       "'-', starting and ending with an alphanumeric character, at most 63 characters.",
   }
-}
-
-/**
- * Validate a free-text display field (present only). Returns an issue or null.
- * Skips when the field is absent (undefined) — display fields are optional.
- */
-export function validateDisplayField(value: unknown, field: string): FieldIssue | null {
-  if (value === undefined) return null
-  if (typeof value !== 'string') {
-    return { field, message: `${field} must be a string` }
-  }
-  if (CONTROL_CHAR_RE.test(value)) {
-    return {
-      field,
-      message: `${field} must not contain control or bidirectional formatting characters`,
-    }
-  }
-  if (value.trim().length === 0) {
-    return { field, message: `${field} must not be empty or whitespace-only` }
-  }
-  if (value.trim().length > DISPLAY_FIELD_MAX_LENGTH) {
-    return {
-      field,
-      message: `${field} must be at most ${DISPLAY_FIELD_MAX_LENGTH} characters`,
-    }
-  }
-  return null
 }
 
 /**
