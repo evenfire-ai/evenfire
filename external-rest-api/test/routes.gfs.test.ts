@@ -232,31 +232,97 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(clientMock.controlApiStreamRequest).not.toHaveBeenCalled()
   })
 
-  it('keeps the token edge bucket separate from authenticated GFS traffic', async () => {
-    clientMock.controlApiRequest.mockResolvedValue({ token: 'gfs-tok', expiresInSeconds: 300 })
+  it('preserves per-client fairness before spending aggregate capacity', async () => {
     const app = buildApp({
-      aggregatePerMin: 10,
-      authenticatedIpPerMin: 10,
-      tokenIpPerMin: 2,
+      aggregatePerMin: 3,
+      authenticatedIpPerMin: 2,
+      tokenIpPerMin: 1,
     })
+    app.set('trust proxy', 1)
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await request(app)
-        .post('/me/gfs/token')
+        .get('/me/gfs/not-classified')
         .set('authorization', 'Bearer sess-xyz')
-        .send({})
-        .expect(200)
+        .set('x-forwarded-for', '198.51.100.10')
+        .expect(404)
     }
+
+    const clientAExhausted = await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.10')
+    expect(clientAExhausted.status).toBe(429)
+    expect(clientAExhausted.body.rateLimitBucket).toBe('authenticated-ip')
+
+    await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.11')
+      .expect(404)
+
+    const aggregateExhausted = await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.12')
+    expect(aggregateExhausted.status).toBe(429)
+    expect(aggregateExhausted.body.rateLimitBucket).toBe('aggregate-ip')
+
+    const clientAStillExhausted = await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.10')
+    expect(clientAStillExhausted.status).toBe(429)
+    expect(clientAStillExhausted.body.rateLimitBucket).toBe('authenticated-ip')
+    expect(authTokenMock.verifyToken).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not spend wider edge buckets when the token bucket rejects', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({ token: 'gfs-tok', expiresInSeconds: 300 })
+    const app = buildApp({
+      aggregatePerMin: 3,
+      authenticatedIpPerMin: 2,
+      tokenIpPerMin: 1,
+    })
+    app.set('trust proxy', 1)
+
+    await request(app)
+      .post('/me/gfs/token')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.10')
+      .send({})
+      .expect(200)
+
     const exhausted = await request(app)
       .post('/me/gfs/token')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.10')
       .send({})
 
     expect(exhausted.status).toBe(429)
     expect(exhausted.headers['retry-after']).toMatch(/^\d+$/)
-    expect(exhausted.headers['ratelimit']).toContain('limit=2')
+    expect(exhausted.headers['ratelimit']).toContain('limit=1')
     expect(exhausted.body.rateLimitBucket).toBe('token-ip')
-    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(2)
+
+    await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.10')
+      .expect(404)
+    await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.11')
+      .expect(404)
+
+    const aggregateExhausted = await request(app)
+      .get('/me/gfs/not-classified')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-forwarded-for', '198.51.100.12')
+    expect(aggregateExhausted.status).toBe(429)
+    expect(aggregateExhausted.body.rateLimitBucket).toBe('aggregate-ip')
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(1)
+    expect(authTokenMock.verifyToken).toHaveBeenCalledTimes(3)
   })
 
   it('propagates a control-api no-escalation 403 verbatim', async () => {
@@ -517,27 +583,24 @@ describe('GET /me/gfs/shares (delegation list passthrough)', () => {
 
   it('keeps the aggregate edge backstop process-wide across source IPs', async () => {
     const app = buildApp({
-      aggregatePerMin: 2,
-      authenticatedIpPerMin: 100,
-      tokenIpPerMin: 100,
+      aggregatePerMin: 3,
+      authenticatedIpPerMin: 2,
+      tokenIpPerMin: 1,
     })
     app.set('trust proxy', 1)
 
-    await request(app)
-      .get('/me/gfs/not-classified')
-      .set('authorization', 'Bearer sess-xyz')
-      .set('x-forwarded-for', '198.51.100.10')
-      .expect(404)
-    await request(app)
-      .get('/me/gfs/not-classified')
-      .set('authorization', 'Bearer sess-xyz')
-      .set('x-forwarded-for', '198.51.100.11')
-      .expect(404)
+    for (const ip of ['198.51.100.10', '198.51.100.11', '198.51.100.12']) {
+      await request(app)
+        .get('/me/gfs/not-classified')
+        .set('authorization', 'Bearer sess-xyz')
+        .set('x-forwarded-for', ip)
+        .expect(404)
+    }
 
     const exhausted = await request(app)
       .get('/me/gfs/not-classified')
       .set('authorization', 'Bearer sess-xyz')
-      .set('x-forwarded-for', '198.51.100.12')
+      .set('x-forwarded-for', '198.51.100.13')
     expect(exhausted.status).toBe(429)
     expect(exhausted.body.rateLimitBucket).toBe('aggregate-ip')
   })

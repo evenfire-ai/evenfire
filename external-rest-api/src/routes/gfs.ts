@@ -171,20 +171,22 @@ export function createGfsRouter(options?: { edgeLimits?: ExternalGfsEdgeLimits }
   // client from using the proxy hop to make auth or downstream requests
   // unbounded. The aggregate and authenticated class buckets are deliberately
   // sized for a shared NAT address; the token bucket remains tighter. The
-  // Control API owns the authoritative per-user/session/actor budgets.
+  // narrower buckets run first so their rejected requests do not consume
+  // broader capacity. The Control API owns the authoritative per-user/session/
+  // actor budgets.
   router.use('/me/gfs', attachGfsRequestId)
+  router.use('/me/gfs/token', edgeLimiter(edgeLimits.tokenIpPerMin, 'token-ip'))
+  router.use('/me/gfs', edgeLimiter(edgeLimits.authenticatedIpPerMin, 'authenticated-ip'))
   router.use(
     '/me/gfs',
     edgeLimiter(edgeLimits.aggregatePerMin, 'aggregate-ip', {
       // This is intentionally a process-wide backstop, not another per-IP
-      // bucket. The authenticated-IP limiter below owns client fairness;
+      // bucket. The authenticated-IP limiter above owns client fairness;
       // keeping a constant key makes distributed source-IP floods observable
       // at this edge instead of allowing the aggregate budget to be bypassed.
       keyGenerator: () => 'gfs-edge-aggregate',
     })
   )
-  router.use('/me/gfs', edgeLimiter(edgeLimits.authenticatedIpPerMin, 'authenticated-ip'))
-  router.use('/me/gfs/token', edgeLimiter(edgeLimits.tokenIpPerMin, 'token-ip'))
   router.use('/me/gfs', requireAuth)
 
   router.post('/me/gfs/token', async (req: AuthedRequest, res, next) => {
