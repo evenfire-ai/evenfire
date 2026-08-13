@@ -21,6 +21,7 @@ function route(source: 'host' | 'sandbox' = 'host'): DesktopShortcutRoute {
     id: 1,
     isDestroyed: () => false,
     isFocused: () => source === 'host',
+    focus: vi.fn(),
     on: vi.fn(),
     removeListener: vi.fn(),
     send: vi.fn(),
@@ -35,6 +36,7 @@ function route(source: 'host' | 'sandbox' = 'host'): DesktopShortcutRoute {
             id: 2,
             isDestroyed: () => false,
             isFocused: () => true,
+            focus: vi.fn(),
             on: vi.fn(),
             removeListener: vi.fn(),
             send: vi.fn(),
@@ -50,6 +52,7 @@ describe('main-process Desktop shortcut routing', () => {
     const preventDefault = vi.fn()
     expect(routeDesktopShortcut(current, { preventDefault }, input())).toBe(true)
     expect(preventDefault).toHaveBeenCalledOnce()
+    expect(current.trustedRenderer.focus).toHaveBeenCalledOnce()
     expect(current.trustedRenderer.send).toHaveBeenCalledWith('shortcuts:command', {
       commandId: 'search.open',
       source: 'sandbox',
@@ -58,6 +61,7 @@ describe('main-process Desktop shortcut routing', () => {
     current.isCurrentSource = () => false
     expect(routeDesktopShortcut(current, { preventDefault }, input())).toBe(false)
     expect(current.trustedRenderer.send).toHaveBeenCalledTimes(1)
+    expect(current.trustedRenderer.focus).toHaveBeenCalledTimes(1)
   })
 
   it('routes global and contextual search distinctly from sandbox focus', () => {

@@ -10,7 +10,7 @@ import {
 type ShortcutEvent = { preventDefault(): void }
 type ShortcutWebContents = Pick<
   WebContents,
-  'id' | 'isDestroyed' | 'isFocused' | 'on' | 'removeListener' | 'send'
+  'focus' | 'id' | 'isDestroyed' | 'isFocused' | 'on' | 'removeListener' | 'send'
 >
 
 export type DesktopShortcutRoute = {
@@ -41,6 +41,9 @@ export function routeDesktopShortcut(
   )
   if (!command) return false
   event.preventDefault()
+  if (route.source === 'sandbox' && !route.trustedRenderer.isFocused()) {
+    route.trustedRenderer.focus()
+  }
   route.trustedRenderer.send('shortcuts:command', {
     commandId: command.id,
     source: route.source,
