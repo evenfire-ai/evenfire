@@ -11,7 +11,7 @@ export type DesktopCommandEligibility =
 
 export type SemanticShortcutBinding = {
   key: string
-  mod: true
+  modifier: 'mod' | 'control'
   shift?: true
 }
 
@@ -49,7 +49,7 @@ function tabSelectCommand<const Id extends `tabs.select${1 | 2 | 3 | 4 | 5 | 6 |
     description: `Switch to chat tab ${number}.`,
     group: 'Navigation' as const,
     order: 30 + tabIndex,
-    defaultBinding: { key: String(number), mod: true as const },
+    defaultBinding: { key: String(number), modifier: 'mod' as const },
     sources: ['host', 'sandbox'] as const,
     eligibility: 'tab-index' as const,
     tabIndex,
@@ -79,7 +79,7 @@ const definitions = [
     description: 'Open a blank chat view tab.',
     group: 'Chat',
     order: 10,
-    defaultBinding: { key: 't', mod: true },
+    defaultBinding: { key: 't', modifier: 'mod' },
     sources: ['host', 'sandbox'],
     eligibility: 'always',
     editingPolicy: 'allow',
@@ -94,7 +94,7 @@ const definitions = [
     description: 'Close the active chat view without deleting its conversation.',
     group: 'Chat',
     order: 20,
-    defaultBinding: { key: 'w', mod: true },
+    defaultBinding: { key: 'w', modifier: 'mod' },
     sources: ['host', 'sandbox'],
     eligibility: 'tab-exists',
     editingPolicy: 'allow',
@@ -110,7 +110,7 @@ const definitions = [
     description: 'Switch to the last open chat tab.',
     group: 'Navigation',
     order: 40,
-    defaultBinding: { key: '9', mod: true },
+    defaultBinding: { key: '9', modifier: 'mod' },
     sources: ['host', 'sandbox'],
     eligibility: 'tab-exists',
     editingPolicy: 'allow',
@@ -125,7 +125,7 @@ const definitions = [
     description: 'Switch to the next chat tab, wrapping at the end.',
     group: 'Navigation',
     order: 50,
-    defaultBinding: { key: 'Tab', mod: true },
+    defaultBinding: { key: 'Tab', modifier: 'control' },
     sources: ['host', 'sandbox'],
     eligibility: 'multiple-tabs',
     editingPolicy: 'allow',
@@ -140,7 +140,7 @@ const definitions = [
     description: 'Switch to the previous chat tab, wrapping at the start.',
     group: 'Navigation',
     order: 60,
-    defaultBinding: { key: 'Tab', mod: true, shift: true },
+    defaultBinding: { key: 'Tab', modifier: 'control', shift: true },
     sources: ['host', 'sandbox'],
     eligibility: 'multiple-tabs',
     editingPolicy: 'allow',
@@ -155,7 +155,7 @@ const definitions = [
     description: 'Open and focus the existing Desktop application search.',
     group: 'Search',
     order: 70,
-    defaultBinding: { key: 'f', mod: true },
+    defaultBinding: { key: 'f', modifier: 'mod' },
     sources: ['host', 'sandbox'],
     eligibility: 'always',
     editingPolicy: 'allow',
@@ -170,7 +170,7 @@ const definitions = [
     description: 'Find text in the current chat or app.',
     group: 'Search',
     order: 80,
-    defaultBinding: { key: 'f', mod: true, shift: true },
+    defaultBinding: { key: 'f', modifier: 'mod', shift: true },
     sources: ['host', 'sandbox'],
     eligibility: 'searchable-content',
     editingPolicy: 'allow',
@@ -185,7 +185,7 @@ const definitions = [
     description: 'Move keyboard focus to the current chat composer.',
     group: 'Chat',
     order: 90,
-    defaultBinding: { key: 'l', mod: true, shift: true },
+    defaultBinding: { key: 'l', modifier: 'mod', shift: true },
     sources: ['host', 'sandbox'],
     eligibility: 'composer-available',
     editingPolicy: 'allow',
@@ -200,7 +200,7 @@ const definitions = [
     description: 'Search and run available Desktop commands.',
     group: 'Commands',
     order: 100,
-    defaultBinding: { key: 'k', mod: true },
+    defaultBinding: { key: 'k', modifier: 'mod' },
     sources: ['host', 'sandbox'],
     eligibility: 'always',
     editingPolicy: 'allow',
@@ -287,7 +287,7 @@ export function bindingMatchesInput(
 ): boolean {
   if (input.type !== 'keyDown' || input.isAutoRepeat || input.isComposing || input.alt) return false
   if (input.control && input.alt) return false
-  const usesMeta = platform === 'darwin'
+  const usesMeta = binding.modifier === 'mod' && platform === 'darwin'
   if (usesMeta ? !input.meta || input.control : !input.control || input.meta) return false
   if (Boolean(binding.shift) !== input.shift) return false
   return normalizedKey(binding.key) === normalizedKey(input.key)
@@ -313,10 +313,17 @@ export function formatDesktopShortcut(
   platform: DesktopShortcutPlatform
 ): string {
   const key = binding.key === 'Tab' ? 'Tab' : binding.key.toUpperCase()
-  if (platform === 'darwin') return `⌘${binding.shift ? '⇧' : ''}${key}`
+  if (platform === 'darwin' && binding.modifier === 'mod') {
+    return `⌘${binding.shift ? '⇧' : ''}${key}`
+  }
+  if (platform === 'darwin') return `⌃${binding.shift ? '⇧' : ''}${key}`
   return `Ctrl+${binding.shift ? 'Shift+' : ''}${key}`
 }
 
-export function desktopBindingCollisionKey(binding: SemanticShortcutBinding): string {
-  return `mod+${binding.shift ? 'shift+' : ''}${normalizedKey(binding.key)}`
+export function desktopBindingCollisionKey(
+  binding: SemanticShortcutBinding,
+  platform: DesktopShortcutPlatform
+): string {
+  const modifier = binding.modifier === 'mod' && platform === 'darwin' ? 'meta' : 'control'
+  return `${modifier}+${binding.shift ? 'shift+' : ''}${normalizedKey(binding.key)}`
 }

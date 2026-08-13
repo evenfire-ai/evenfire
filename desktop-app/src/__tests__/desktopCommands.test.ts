@@ -26,22 +26,24 @@ function input(overrides: Partial<DesktopShortcutInput> = {}): DesktopShortcutIn
 describe('Desktop command registry', () => {
   it('has unique stable IDs and no binding collisions within a source', () => {
     expect(new Set(DESKTOP_COMMANDS.map(command => command.id)).size).toBe(DESKTOP_COMMANDS.length)
-    for (const source of ['host', 'sandbox'] as const) {
-      const keys = DESKTOP_COMMANDS.filter(
-        command => command.defaultBinding && command.sources.includes(source)
-      ).map(command => desktopBindingCollisionKey(command.defaultBinding!))
-      expect(new Set(keys).size).toBe(keys.length)
+    for (const platform of ['darwin', 'win32'] as const) {
+      for (const source of ['host', 'sandbox'] as const) {
+        const keys = DESKTOP_COMMANDS.filter(
+          command => command.defaultBinding && command.sources.includes(source)
+        ).map(command => desktopBindingCollisionKey(command.defaultBinding!, platform))
+        expect(new Set(keys).size).toBe(keys.length)
+      }
     }
   })
 
   it('keeps reserved Electron and OS roles outside the registry', () => {
-    const keys = new Set(
+    const macKeys = new Set(
       DESKTOP_COMMANDS.flatMap(command =>
-        command.defaultBinding ? [desktopBindingCollisionKey(command.defaultBinding)] : []
+        command.defaultBinding ? [desktopBindingCollisionKey(command.defaultBinding, 'darwin')] : []
       )
     )
-    for (const reserved of ['mod+q', 'mod+h', 'mod+m', 'mod+p', 'mod+r']) {
-      expect(keys.has(reserved)).toBe(false)
+    for (const reserved of ['meta+q', 'meta+h', 'meta+m', 'meta+p', 'meta+r', 'meta+Tab']) {
+      expect(macKeys.has(reserved)).toBe(false)
     }
   })
 
@@ -68,6 +70,19 @@ describe('Desktop command registry', () => {
   it('maps Mod+9 to last-tab semantics rather than a ninth-index command', () => {
     expect(matchDesktopCommand(input({ key: '9' }), 'darwin', 'host')?.id).toBe('tabs.selectLast')
     expect(DESKTOP_COMMANDS.some(command => command.id === 'tabs.select9')).toBe(false)
+  })
+
+  it('uses Control for tab cycling on macOS to avoid the reserved Command+Tab app switcher', () => {
+    const next = getDesktopCommand('tabs.next').defaultBinding!
+    const previous = getDesktopCommand('tabs.previous').defaultBinding!
+    expect(formatDesktopShortcut(next, 'darwin')).toBe('⌃Tab')
+    expect(formatDesktopShortcut(previous, 'darwin')).toBe('⌃⇧Tab')
+    expect(formatDesktopShortcut(next, 'win32')).toBe('Ctrl+Tab')
+    expect(formatDesktopShortcut(previous, 'win32')).toBe('Ctrl+Shift+Tab')
+    expect(
+      matchDesktopCommand(input({ key: 'Tab', meta: false, control: true }), 'darwin', 'host')?.id
+    ).toBe('tabs.next')
+    expect(matchDesktopCommand(input({ key: 'Tab' }), 'darwin', 'host')).toBeNull()
   })
 
   it('enables commands from the same registry context used by keyboard and palette actions', () => {
