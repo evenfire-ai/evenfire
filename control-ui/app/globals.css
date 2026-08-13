@@ -1199,7 +1199,13 @@ body.cu-body {
   margin-bottom: 1rem;
 }
 
-.cu-field label {
+/* `.cu-field__label` captions a block that is not a form control -- a Request URL
+   or a generated manifest sitting in a <pre>. A <label> would be the wrong element
+   there because it labels nothing, so the class carries the same treatment as a
+   real field label instead. Without it the caption falls back to body type and
+   renders larger than the inputs it sits above. */
+.cu-field label,
+.cu-field__label {
   font-size: 0.75rem;
   font-weight: 500;
   color: var(--cu-text-muted);
