@@ -11,11 +11,27 @@ const limiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 vi.mock('../src/services/rateLimiterService.js', () => limiter)
 
 const operations = [
-  ['session_lifecycle', 'external_session_lifecycle'],
-  ['invitation_mutation', 'external_invitation_mutation'],
-  ['invitation_sensitive_action', 'external_invitation_sensitive_action'],
-  ['invitation_read', 'external_invitation_read'],
-  ['access_capabilities', 'external_access_capabilities'],
+  ['session_lifecycle', 'external_session_lifecycle', 10],
+  ['invitation_mutation', 'external_invitation_mutation', 10],
+  ['invitation_sensitive_action', 'external_invitation_sensitive_action', 10],
+  ['invitation_read', 'external_invitation_read', 10],
+  ['access_capabilities', 'external_access_capabilities', 10],
+  ['oauth_grant_read', 'external_oauth_grant_read', 30],
+  ['oauth_grant_mutation', 'external_oauth_grant_mutation', 10],
+  ['member_read', 'external_member_read', 30],
+  ['member_mutation', 'external_member_mutation', 10],
+  ['shared_filesystem_read', 'external_shared_filesystem_read', 30],
+  ['workflow_approval_medium_read', 'external_workflow_approval_medium_read', 30],
+  ['workflow_approval_medium_mutation', 'external_workflow_approval_medium_mutation', 10],
+  ['notification_preference_read', 'external_notification_preference_read', 30],
+  ['notification_preference_mutation', 'external_notification_preference_mutation', 10],
+  ['authentication_attempt', 'external_authentication_attempt', 5],
+  ['session_verify', 'external_session_verify', 10],
+  ['rpc_token', 'external_rpc_token', 10],
+  ['gfs_read', 'external_gfs_read', 30],
+  ['gfs_mutation', 'external_gfs_mutation', 10],
+  ['team_user_read', 'external_team_user_read', 30],
+  ['team_user_mutation', 'external_team_user_mutation', 10],
 ] as const
 
 function allowedResult() {
@@ -33,7 +49,7 @@ describe('external user rate-limit policy', () => {
 
   it.each(operations)(
     'keys authenticated %s by the server-authenticated user',
-    async (operation, bucket) => {
+    async (operation, bucket, maxPerMinute) => {
       limiter.checkAndIncrement.mockResolvedValueOnce(allowedResult())
       const app = express()
       app.use((req, _res, next) => {
@@ -56,7 +72,10 @@ describe('external user rate-limit policy', () => {
         .set('x-user-session-token', 'never-used-as-a-key')
         .expect(204)
 
-      expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(`${bucket}:user:server-user`, 10)
+      expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(
+        `${bucket}:user:server-user`,
+        maxPerMinute
+      )
     }
   )
 
