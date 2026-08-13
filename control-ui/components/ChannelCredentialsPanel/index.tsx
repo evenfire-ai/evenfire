@@ -30,13 +30,17 @@ const UNKNOWN_PLACEHOLDER = 'Stored value unknown'
 const STORED_KEYS_ERROR =
   'Could not check which credentials are stored. You can still rotate a value; deleting one needs a successful read.'
 /**
- * Slack offers four secrets and this platform uses two of them. The "app is
- * ready" dialog puts the App-Level Token next to the bot token, and the Signing
- * Secret is filed next to a Client Secret on a page the dialog never links to,
- * so both wrong values are the easy ones to grab.
+ * Slack offers four secrets and this platform uses two of them, with the "app is
+ * ready" dialog putting the App-Level Token right next to the bot token — so the
+ * wrong value is the easy one to grab.
+ *
+ * This note carries only that "ignore these" half. WHERE each value lives is on
+ * the field that asks for it (see CHANNEL_CREDENTIAL_FIELDS), because that is
+ * where someone hunting for it is looking; a paragraph under both inputs is easy
+ * to skip.
  */
 const SLACK_CREDENTIAL_NOTE =
-  'You do not need the App-Level Token (xapp-) or the Client Secret. Slack hands out the xapp- token beside the xoxb- one, and the Signing Secret is not in that dialog at all: find it on Basic Information, under App Credentials.'
+  'You do not need the App-Level Token (xapp-) or the Client Secret. Slack offers the xapp- token right beside the xoxb- one, so it is easy to copy the wrong value.'
 
 /**
  * Per-CommunicationChannel provider credential form.

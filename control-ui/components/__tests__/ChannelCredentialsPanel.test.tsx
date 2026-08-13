@@ -431,10 +431,10 @@ describe('ChannelCredentialsPanel — failed stored-key read', () => {
 /** The Slack note, written out rather than imported: this copy IS the feature,
  *  so a reworded panel must fail here instead of quietly passing. */
 const SLACK_CREDENTIAL_NOTE =
-  'You do not need the App-Level Token (xapp-) or the Client Secret. Slack hands out the xapp- token beside the xoxb- one, and the Signing Secret is not in that dialog at all: find it on Basic Information, under App Credentials.'
+  'You do not need the App-Level Token (xapp-) or the Client Secret. Slack offers the xapp- token right beside the xoxb- one, so it is easy to copy the wrong value.'
 
 describe('ChannelCredentialsPanel — Slack credential note', () => {
-  it('tells the operator which Slack values are NOT needed and where the Signing Secret is', () => {
+  it('tells the operator which Slack values are NOT needed', () => {
     // Slack's "app is ready" dialog hands out xoxb- and xapp- side by side, and
     // the Signing Secret sits next to a Client Secret on another page entirely.
     // Without this note the operator pastes the wrong two values.
@@ -455,5 +455,38 @@ describe('ChannelCredentialsPanel — Slack credential note', () => {
   it('does not show the Slack note when no provider is selected', () => {
     renderPanel({ ccName: 'cc-empty', visibleChannelTypes: [] })
     expect(screen.queryByText(SLACK_CREDENTIAL_NOTE)).not.toBeInTheDocument()
+  })
+})
+
+describe('ChannelCredentialsPanel — where the Slack credentials live', () => {
+  // Both Slack values are on different pages of the Slack app, and the signing
+  // secret is the one people cannot find: it is absent from the "app is ready"
+  // dialog that hands over the bot token, so the natural assumption is that the
+  // dialog showed everything. Naming the page is the whole value of this hint --
+  // asserting on the location, not the phrasing, so copy can be reworded freely.
+  /** The hint rendered directly under a given credential input, not the panel note. */
+  function hintFor(label: string): string {
+    const input = screen.getByLabelText(label, { exact: true })
+    const row = input.closest('.cu-field') ?? input.parentElement?.parentElement
+    return row?.querySelector('.cu-field__hint')?.textContent ?? ''
+  }
+
+  it('names the Slack page holding the signing secret, on the field itself', () => {
+    renderPanel({ ccName: 'cc-slack', visibleChannelTypes: ['slack'] })
+    // Must be on the field, not only in the panel note below it: the note is a
+    // paragraph people skip, and this is the value they cannot locate.
+    // "Settings" matters: Slack's sidebar has Basic Information under Settings and
+    // a separate Features group, and the path is useless without the group name.
+    expect(hintFor('Slack Signing Secret')).toMatch(/Settings\s*(?:→|->|>)\s*Basic Information/i)
+  })
+
+  it('warns the signing secret is absent from the post-install dialog', () => {
+    renderPanel({ ccName: 'cc-slack', visibleChannelTypes: ['slack'] })
+    expect(hintFor('Slack Signing Secret')).toMatch(/dialog|install/i)
+  })
+
+  it('names the Slack page holding the bot token, on the field itself', () => {
+    renderPanel({ ccName: 'cc-slack', visibleChannelTypes: ['slack'] })
+    expect(hintFor('Slack Bot User OAuth Token')).toMatch(/OAuth & Permissions/i)
   })
 })
