@@ -7679,20 +7679,23 @@ textarea.cu-input {
     .cu-llm-model-group__toggle,
     .cu-filter-select__copy,
     .cu-filter-select__icon,
-    .cu-chip
+    .cu-chip,
+    .cu-px-provider
   )
   .cu-llm-provider-icon[data-provider='openai']
   img {
   filter: brightness(0);
 }
 
-.cu-chip:has(.cu-llm-provider-icon) {
+.cu-chip:has(.cu-llm-provider-icon),
+.cu-px-provider {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
 }
 
-.cu-chip .cu-llm-provider-icon {
+.cu-chip .cu-llm-provider-icon,
+.cu-px-provider .cu-llm-provider-icon {
   width: 0.85rem;
   height: 0.85rem;
   flex: 0 0 0.85rem;
@@ -7702,7 +7705,8 @@ textarea.cu-input {
   font-size: 0.6rem;
 }
 
-.cu-chip .cu-llm-provider-icon img {
+.cu-chip .cu-llm-provider-icon img,
+.cu-px-provider .cu-llm-provider-icon img {
   padding: 0;
 }
 
