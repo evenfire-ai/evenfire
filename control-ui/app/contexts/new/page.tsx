@@ -2,6 +2,11 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import {
+  CONTROL_CHAR_RE,
+  DISPLAY_FIELD_MAX_LENGTH,
+  validateDisplayField,
+} from '@clerum/display-field'
 import { AuthGate } from '@components/AuthGate'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
@@ -12,9 +17,57 @@ import { IconGroupWork } from '@components/Sidebar/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { createContext, getMcpServers } from '@lib/api'
-import { toKebabCase } from '@lib/string'
+import { RFC1123_MAX_LENGTH, isValidResourceSlug, toKebabCase } from '@lib/string'
 
 const STEPS = ['Context', 'Connectors'] as const
+
+// The exact free-text value the create call writes to spec.displayName. Only a
+// non-empty trimmed name is sent (an empty one is omitted from the payload), so
+// the display gate mirrors precisely what the server will validate.
+function displayNameValue(rawName: string): string {
+  return rawName.trim()
+}
+
+// True when the derived slug AND the displayName the server would receive are
+// both acceptable. Mirrors the two server constraints client-side:
+//   - slug: RFC1123 DNS label ≤63 (isValidResourceSlug, same as HostWizard).
+//   - display: the shared @clerum/display-field rule (D4 — the RULE lives in the
+//     package, the same one the server applies; here we only consume it). Empty
+//     display is valid: it is omitted from the payload, and the empty case is
+//     already blocked by the slug gate.
+function contextNameIsValid(rawName: string): boolean {
+  if (!isValidResourceSlug(rawName)) return false
+  const display = displayNameValue(rawName)
+  if (display.length === 0) return true
+  return validateDisplayField(display, 'spec.displayName') === null
+}
+
+// Human-readable reason the derived slug fails the server RFC1123 constraint, or
+// null when valid (or empty — the empty case is surfaced by the field's own
+// "must contain letters or numbers" message). Matches HostWizard.slugConstraintMessage.
+function slugConstraintMessage(rawName: string): string | null {
+  const slug = toKebabCase(rawName)
+  if (slug.length === 0) return null
+  if (slug.length > RFC1123_MAX_LENGTH) return 'Identifier must be at most 63 characters.'
+  if (!isValidResourceSlug(rawName)) return 'Identifier must be a valid RFC1123 identifier.'
+  return null
+}
+
+// Human-readable reason the free-text spec.displayName value is rejected, or null
+// when acceptable. The RULE of validity is owned by @clerum/display-field (the
+// SAME rule the server applies, D4); this only maps the machine issue to a
+// message. Empty is intentionally NOT surfaced here — it is omitted from the
+// payload and the empty case is covered by the slug message.
+function displayNamePreflightMessage(rawName: string): string | null {
+  const value = displayNameValue(rawName)
+  if (value.length === 0) return null
+  if (!validateDisplayField(value, 'spec.displayName')) return null
+  if (CONTROL_CHAR_RE.test(value))
+    return "Context name can't contain control or formatting characters."
+  if (value.trim().length > DISPLAY_FIELD_MAX_LENGTH)
+    return `Context name is too long (max ${DISPLAY_FIELD_MAX_LENGTH} characters).`
+  return null
+}
 
 const STEP_DETAILS = [
   {
@@ -71,15 +124,17 @@ export default function CreateContextPage() {
     void loadServers()
   }, [])
 
-  // Gate on the DERIVED slug, not the raw text: a name with no ASCII
-  // alphanumerics ("!!!", "日本語", "---", whitespace) trims to a non-empty
-  // string but toKebabCase()s to "", which would send metadata.name/contextId: "".
-  const canSubmit = useMemo(() => toKebabCase(contextName).length > 0 && !busy, [busy, contextName])
-  const canContinue = step === 0 ? toKebabCase(contextName).length > 0 : true
+  // Gate on the FULL server rules, not just "derived slug non-empty": the slug
+  // must be a valid RFC1123 label (≤63) AND the free-text displayName the server
+  // will receive must satisfy @clerum/display-field. A name that only clears
+  // "non-empty slug" — an over-long slug, or a bidi/control/over-120 display —
+  // passes the client and the server then rejects it (invalid_name / display).
+  const canSubmit = useMemo(() => contextNameIsValid(contextName) && !busy, [busy, contextName])
+  const canContinue = step === 0 ? contextNameIsValid(contextName) : true
 
   function canSelectStep(targetStep: number) {
     if (targetStep <= step) return true
-    return toKebabCase(contextName).length > 0
+    return contextNameIsValid(contextName)
   }
 
   async function handleCreateContext() {
@@ -89,6 +144,14 @@ export default function CreateContextPage() {
     try {
       const nextName = toKebabCase(contextName)
       const trimmedDisplay = contextName.trim()
+      // Hard guard (defense if the gate is bypassed): the displayName is free
+      // text the server validates with @clerum/display-field (D4 — the RULE is
+      // the package's, the same one the server applies). Fail before any write
+      // instead of round-tripping a doomed create.
+      if (trimmedDisplay && validateDisplayField(trimmedDisplay, 'spec.displayName')) {
+        setError(displayNamePreflightMessage(contextName) || 'Context name is not valid.')
+        return
+      }
       await createContext({
         metadata: { name: nextName },
         spec: {
@@ -143,15 +206,23 @@ export default function CreateContextPage() {
                     placeholder="Context 1"
                     autoFocus
                   />
-                  {toKebabCase(contextName) ? (
+                  {!toKebabCase(contextName) ? (
+                    contextName.trim() ? (
+                      <span className="cu-field__error">
+                        Context name must contain letters or numbers.
+                      </span>
+                    ) : null
+                  ) : slugConstraintMessage(contextName) ? (
+                    <span className="cu-field__error">{slugConstraintMessage(contextName)}</span>
+                  ) : displayNamePreflightMessage(contextName) ? (
+                    <span className="cu-field__error">
+                      {displayNamePreflightMessage(contextName)}
+                    </span>
+                  ) : (
                     <span className="cu-field__hint">
                       Identifier: <code>{toKebabCase(contextName)}</code>
                     </span>
-                  ) : contextName.trim() ? (
-                    <span className="cu-field__error">
-                      Context name must contain letters or numbers.
-                    </span>
-                  ) : null}
+                  )}
                 </Field>
 
                 <Field label="Description" htmlFor="ctx-description">
