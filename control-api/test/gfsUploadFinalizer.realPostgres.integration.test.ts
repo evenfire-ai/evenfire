@@ -43,7 +43,7 @@ function session(uploadId: string, drive: string, parentRid: string): UploadSess
     requestFingerprint: 'real-finalizer-test',
     parentRid,
     resourceRid: null,
-    resourceName: 'payload.bin',
+    resourceName: `payload-${uploadId}.bin`,
     ifMatch: null,
     expectedBytes: BODY.length,
     partBytes: BODY.length,
@@ -200,7 +200,7 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
     expect(receipt.rows[0]).toMatchObject({
       state: 'completed',
       result_resource_id: result.resourceId,
-      result_version: result.version,
+      result_version: String(result.version),
       result_sha256: BODY_SHA256,
     })
     const resource = await pool.query(
@@ -211,7 +211,7 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
     expect(resource.rows[0]).toMatchObject({
       drive,
       parent_resource_id: parentId,
-      bytes: BODY.length,
+      bytes: String(BODY.length),
       content_sha256: BODY_SHA256,
     })
     const manifests = await pool.query(
