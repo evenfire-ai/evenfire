@@ -28,6 +28,7 @@ import {
   communicationChannelInitialTab,
   createCommunicationChannelDraft,
   hasSlackConfigForRequestUrl,
+  hasTeamsConfig,
 } from '@lib/communicationChannelEdit'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
@@ -38,7 +39,7 @@ import {
 import {
   type CommunicationChannelItem,
   slackWebhookUrlForChannelName,
-  teamsWebhookUrlForChannel,
+  teamsWebhookUrlForChannelName,
 } from '@lib/communicationChannels'
 import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
 
@@ -224,7 +225,19 @@ export default function EditCommunicationChannelPage() {
           item?.metadata?.namespace
         )
       : null
-  const teamsRequestUrl = item ? teamsWebhookUrlForChannel(item) : null
+  // Gated on the DRAFT, not the persisted item, for the same reason as Slack
+  // above: the Teams bot credentials only exist after `teams app create` has
+  // run, and that command needs this URL. A URL that required a saved
+  // teamsSettings could only appear after the operator had already done the
+  // step it describes. The URL depends only on namespace/name, both fixed at
+  // create time, and the reader resolves that id regardless of teamsSettings.
+  const teamsRequestUrl =
+    draft && hasTeamsConfig(draft)
+      ? teamsWebhookUrlForChannelName(
+          item?.metadata?.name?.trim() || name,
+          item?.metadata?.namespace
+        )
+      : null
   // A relative request_url is invalid to Slack, so warn instead of handing over a manifest that
   // cannot work. slackWebhookUrlForChannelName falls back to a bare path when the deployment has
   // no public webhook address.

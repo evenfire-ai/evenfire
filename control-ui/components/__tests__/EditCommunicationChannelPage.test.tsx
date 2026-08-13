@@ -1,6 +1,7 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ToastProvider } from '@components/Toast'
 import EditCommunicationChannelPage from '../../app/communication-channels/[name]/edit/page'
 import * as api from '../../lib/api'
@@ -501,5 +502,18 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     ])
     // Nothing was persisted to get here: no PUT, and the manifest is on screen.
     expect(vi.mocked(api.apiSend)).not.toHaveBeenCalled()
+  })
+})
+
+describe('EditCommunicationChannelPage Teams request URL', () => {
+  it('shows the Teams request URL from an unsaved draft, before any Teams settings are persisted', async () => {
+    mockChannel('teams-support', { hostRef: 'agentjose' })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+
+    expect(await screen.findByText(/\/webhooks\/teams\/teams%3A/)).toBeInTheDocument()
   })
 })
