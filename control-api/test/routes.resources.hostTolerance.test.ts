@@ -97,3 +97,68 @@ describe('Host tolerance audit — emit only after persist (mini-spec 01)', () =
     expect(log.warn).not.toHaveBeenCalled()
   })
 })
+
+// Characterization of the two-tier role model at the write gate. NOT a bug repro:
+// the behavior pinned here is the CONSCIOUS design the owner accepted for R1-H2.
+// The two-tier model (primary strict vs any = fallback ∪ subset ∪ primary) only
+// guards the ACTIVE `primary` slot; a disabled model that was a subset-only entry
+// may be promoted to a fallback because it stays disabled in runtime (never enters
+// the LLM allowlist ConfigMap) and never becomes the active default. This test
+// exists so a later review round does not re-file that promotion as a
+// "no-worsening violation" — the PR body wording ("keeps or degrades its role")
+// was corrected separately; the intent lives here as an executable invariant.
+describe('R1-H2 — intentional two-tier tolerance (characterization, not a bug)', () => {
+  it('tolerates subset→fallback promotion of a disabled model — intentional two-tier design, not a bug (R1-H2)', async () => {
+    const gateway = new MockGateway(HOSTS_NS)
+    // Stored fixture derived from the real producer (MockGateway.createResource →
+    // getResource, T1) — NOT hand-built: primary A (enabled), subset [A, M] with M
+    // disabled globally by the beforeEach allowlist stub.
+    await gateway.createResource(
+      'hosts',
+      {
+        metadata: { name: 'h1' },
+        spec: {
+          model: { provider: 'claude', name: 'A' },
+          allowedModels: [
+            { provider: 'claude', model: 'A' },
+            { provider: 'claude', model: 'M' },
+          ],
+        },
+      },
+      HOSTS_NS
+    )
+
+    // Incoming write moves the disabled M from subset-only into a fallback slot
+    // (subset→fallback promotion), keeping A as the active primary and not shrinking
+    // coverage. The active `primary` slot stays A (enabled), so the strict primary
+    // gate is untouched; M is promoted only among the NON-active roles.
+    const res = await request(buildApp(gateway))
+      .put('/admin/hosts/h1')
+      .send({
+        spec: {
+          model: { provider: 'claude', name: 'A' },
+          llmPolicy: { fallbacks: [{ provider: 'claude', model: 'M' }] },
+          allowedModels: [
+            { provider: 'claude', model: 'A' },
+            { provider: 'claude', model: 'M' },
+          ],
+        },
+      })
+
+    // Observable result (T4): the write is TOLERATED — 200, and the persisted CR
+    // audits M at the fallback gate. This is the intentional two-tier behavior: M
+    // remains disabled in runtime (out of the ConfigMap), so promoting it to a
+    // non-active fallback is pure non-worsening, not a role elevation.
+    expect(res.status).toBe(200)
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'host_spec_incoherence_tolerated',
+        gate: 'fallback',
+        provider: 'claude',
+        model: 'M',
+        name: 'h1',
+      }),
+      expect.any(String)
+    )
+  })
+})
