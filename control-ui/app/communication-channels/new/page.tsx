@@ -733,10 +733,8 @@ export default function CreateCommunicationChannelPage() {
                         </Field>
                         <ol className="cu-teams-setup__instructions">
                           <li>
-                            Run this from the project directory that has the Teams CLI project.
-                          </li>
-                          <li>
-                            The command writes generated Teams bot values into <code>.env</code>.
+                            Run this from any directory. The command writes CLIENT_ID, TENANT_ID and
+                            CLIENT_SECRET into .env in whichever directory you run it from.
                           </li>
                           <li>
                             In Teams Developer Portal, enable{' '}

@@ -248,7 +248,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
 
     expect(botNameInput).toHaveValue('evenfire-bot')
     expect(
-      screen.getByText(/The command writes generated Teams bot values into/i)
+      screen.getByText(/The command writes CLIENT_ID, TENANT_ID and CLIENT_SECRET into/i)
     ).toBeInTheDocument()
     expect(screen.getByText('Upload and download files')).toBeInTheDocument()
 
@@ -614,5 +614,20 @@ describe('CreateCommunicationChannelPage — Slack app manifest', () => {
     await goToSlackProviderStep('support-bot')
 
     expect(screen.queryByText(/display_information:/)).not.toBeInTheDocument()
+  })
+})
+
+describe('CreateCommunicationChannelPage — Teams CLI instruction', () => {
+  it('does not tell the operator to run the command from a Teams CLI project directory', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+
+    expect(screen.queryByText(/project directory that has the Teams CLI project/i)).toBeNull()
   })
 })
