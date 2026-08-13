@@ -73,5 +73,11 @@ describe('routes/rpc /rpc/token', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.token).toBe('t')
+    expect(rpcServiceMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      'session-xyz',
+      ['host:message:invoke'],
+      ['pro-agent'],
+      '::ffff:127.0.0.1'
+    )
   })
 })

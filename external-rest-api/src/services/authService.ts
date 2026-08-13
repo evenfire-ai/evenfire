@@ -20,9 +20,13 @@ type LoginResult = {
   isNewUser: boolean
 }
 
-export async function loginWithGoogle(google: GoogleLoginInput): Promise<LoginResult> {
+export async function loginWithGoogle(
+  google: GoogleLoginInput,
+  clientIp?: string
+): Promise<LoginResult> {
   const payload = await controlApiRequest<LoginResult>('POST', '/external/auth/google-login', {
     body: google,
+    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
   })
   return payload
 }
@@ -30,13 +34,15 @@ export async function loginWithGoogle(google: GoogleLoginInput): Promise<LoginRe
 export async function loginWithPassword(
   email: string,
   password: string,
-  sessionContract?: 'v2'
+  sessionContract?: 'v2',
+  clientIp?: string
 ): Promise<Omit<LoginResult, 'isNewUser'>> {
   const payload = await controlApiRequest<Omit<LoginResult, 'isNewUser'>>(
     'POST',
     '/external/auth/password-login',
     {
       body: { email, password, ...(sessionContract ? { sessionContract } : {}) },
+      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
   return payload

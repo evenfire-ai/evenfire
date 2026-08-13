@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { logoutUserSession, renewUserSession } from '../src/services/authService.js'
+import {
+  loginWithGoogle,
+  loginWithPassword,
+  logoutUserSession,
+  renewUserSession,
+} from '../src/services/authService.js'
 import { switchTeam } from '../src/services/meService.js'
+import { issueRpcAccessToken } from '../src/services/rpcService.js'
 import { createTeamForUser } from '../src/services/teamService.js'
 
 const client = vi.hoisted(() => ({ controlApiRequest: vi.fn() }))
@@ -39,6 +45,36 @@ describe('external-user client IP forwarding', () => {
         userSessionToken: 'session-token',
         extraHeaders: headers,
       }
+    )
+  })
+
+  it('forwards the trusted client IP for credential and RPC issuance boundaries', async () => {
+    client.controlApiRequest
+      .mockResolvedValueOnce({ token: 'google-session' })
+      .mockResolvedValueOnce({ token: 'password-session' })
+      .mockResolvedValueOnce({ token: 'rpc-token' })
+
+    await loginWithGoogle({ idToken: 'google-token' }, clientIp)
+    await loginWithPassword('user@example.test', 'password', undefined, clientIp)
+    await issueRpcAccessToken('session-token', ['host:message:invoke'], ['agent-a'], clientIp)
+
+    expect(client.controlApiRequest).toHaveBeenNthCalledWith(
+      1,
+      'POST',
+      '/external/auth/google-login',
+      expect.objectContaining({ extraHeaders: headers })
+    )
+    expect(client.controlApiRequest).toHaveBeenNthCalledWith(
+      2,
+      'POST',
+      '/external/auth/password-login',
+      expect.objectContaining({ extraHeaders: headers })
+    )
+    expect(client.controlApiRequest).toHaveBeenNthCalledWith(
+      3,
+      'POST',
+      '/external/rpc/token',
+      expect.objectContaining({ extraHeaders: headers })
     )
   })
 
