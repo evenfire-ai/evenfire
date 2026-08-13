@@ -5,6 +5,7 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
 import { mcpHostHttpMetrics } from '../../middleware/mcpHostHttpMetrics.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
@@ -378,6 +379,9 @@ export function createExternalNotificationsRouter(): Router {
     '/external/me/notification-preferences',
     mcpHostHttpMetrics('external_notification_preferences_get'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('notification_preference_read', 'authenticated')
+    ),
     asyncHandler(async (req: Request, res: Response) => {
       const extReq = req as ExternalAuthedRequest
       const claims = extReq.externalAuth
@@ -393,6 +397,9 @@ export function createExternalNotificationsRouter(): Router {
     '/external/me/notification-preferences',
     mcpHostHttpMetrics('external_notification_preferences_put'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('notification_preference_mutation', 'authenticated')
+    ),
     asyncHandler(async (req: Request, res: Response) => {
       const extReq = req as ExternalAuthedRequest
       const claims = extReq.externalAuth

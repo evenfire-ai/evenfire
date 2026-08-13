@@ -16,6 +16,8 @@ export type ExternalUserRateLimitOperation =
   | 'shared_filesystem_read'
   | 'workflow_approval_medium_read'
   | 'workflow_approval_medium_mutation'
+  | 'notification_preference_read'
+  | 'notification_preference_mutation'
 
 export type ExternalUserRateLimitStage = 'pre_auth' | 'authenticated'
 
@@ -46,6 +48,14 @@ const POLICIES: Readonly<Record<ExternalUserRateLimitOperation, Policy>> = {
   },
   workflow_approval_medium_mutation: {
     bucketType: 'external_workflow_approval_medium_mutation',
+    maxPerMinute: 10,
+  },
+  notification_preference_read: {
+    bucketType: 'external_notification_preference_read',
+    maxPerMinute: 30,
+  },
+  notification_preference_mutation: {
+    bucketType: 'external_notification_preference_mutation',
     maxPerMinute: 10,
   },
 }
