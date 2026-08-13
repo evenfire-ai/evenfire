@@ -8515,6 +8515,30 @@ textarea.cu-input {
   background: var(--cu-warning);
 }
 
+.cu-host-providers {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.cu-host-providers__chip {
+  display: inline-flex;
+}
+
+.cu-host-providers__chip .cu-llm-provider-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-basis: 1.25rem;
+  border-color: transparent;
+  background: transparent;
+  border-radius: 0.25rem;
+}
+
+.cu-host-providers__chip .cu-llm-provider-icon img {
+  padding: 0;
+}
+
 .cu-cell--right {
   text-align: right;
 }
