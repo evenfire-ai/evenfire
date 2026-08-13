@@ -122,6 +122,7 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       await waitForSdkSandboxUiNotification(appRecipe)
     })
 
+    if (!app) throw new Error('Desktop app did not launch for responsive layout assertions')
     const page = await app.firstWindow()
     await test.step('desktop tray cards stay compact and top aligned', async () => {
       await resizeDesktop(app!, 1200)
