@@ -130,17 +130,17 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
 }
 
 export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
+  'profile-admin',
   'hosts',
   'contexts',
   'registry-catalog',
   'mcp-servers',
   'workflow-recipes',
   'directories',
-  'profile-admin',
-  'cost',
   'communication-channels',
   'llm-models',
   'llm-secrets',
+  'cost',
   'traces',
   'settings',
 ]

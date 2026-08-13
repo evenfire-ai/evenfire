@@ -62,17 +62,17 @@ describe('Sidebar publisher gating', () => {
       item.querySelector('.cu-sidebar__label')?.textContent?.trim()
     )
     expect(labels).toEqual([
+      'Users & Teams',
       'Agents',
       'Contexts',
       'Marketplace',
       'Installed connectors',
       'Installed plugins',
       'Files',
-      'Users & Teams',
-      'Cost & Usage',
       'External Channels',
       'LLM Models',
       'Secrets',
+      'Cost & Usage',
     ])
   })
 
