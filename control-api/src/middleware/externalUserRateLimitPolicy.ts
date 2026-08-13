@@ -21,6 +21,8 @@ export type ExternalUserRateLimitOperation =
   | 'authentication_attempt'
   | 'session_verify'
   | 'rpc_token'
+  | 'gfs_read'
+  | 'gfs_mutation'
 
 export type ExternalUserRateLimitStage = 'pre_auth' | 'authenticated'
 
@@ -67,6 +69,8 @@ const POLICIES: Readonly<Record<ExternalUserRateLimitOperation, Policy>> = {
   },
   session_verify: { bucketType: 'external_session_verify', maxPerMinute: 10 },
   rpc_token: { bucketType: 'external_rpc_token', maxPerMinute: 10 },
+  gfs_read: { bucketType: 'external_gfs_read', maxPerMinute: 30 },
+  gfs_mutation: { bucketType: 'external_gfs_mutation', maxPerMinute: 10 },
 }
 
 function boundedIp(req: Request): string {
