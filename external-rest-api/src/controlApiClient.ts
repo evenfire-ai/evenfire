@@ -5,12 +5,39 @@ type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 export class ControlApiError extends Error {
   status: number
   body: unknown
-  constructor(message: string, status: number, body: unknown) {
+  responseHeaders: Record<string, string>
+  constructor(
+    message: string,
+    status: number,
+    body: unknown,
+    responseHeaders: Record<string, string> = {}
+  ) {
     super(message)
     this.name = 'ControlApiError'
     this.status = status
     this.body = body
+    this.responseHeaders = responseHeaders
   }
+}
+
+const SAFE_RATE_LIMIT_RESPONSE_HEADERS = [
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+] as const
+
+function safeRateLimitResponseHeaders(headers: Headers): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const name of SAFE_RATE_LIMIT_RESPONSE_HEADERS) {
+    const raw = headers.get(name)
+    if (!raw || !/^\d{1,10}$/.test(raw)) continue
+    const value = Number(raw)
+    if (!Number.isSafeInteger(value) || value < 0) continue
+    if (name === 'retry-after' && (value < 1 || value > 86_400)) continue
+    result[name] = String(value)
+  }
+  return result
 }
 
 function buildUrl(path: string, query?: Record<string, string | undefined>): string {
@@ -102,7 +129,8 @@ export async function controlApiRequestWithStatus<T>(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status}): ${errorMessage}`,
       response.status,
-      parsed
+      parsed,
+      safeRateLimitResponseHeaders(response.headers)
     )
   }
 
@@ -155,7 +183,8 @@ export async function controlApiBinaryRequestWithStatus(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
-      parsed
+      parsed,
+      safeRateLimitResponseHeaders(response.headers)
     )
   }
 
@@ -211,7 +240,8 @@ export async function controlApiStreamRequest(
     throw new ControlApiError(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
-      parsed
+      parsed,
+      safeRateLimitResponseHeaders(response.headers)
     )
   }
   return response

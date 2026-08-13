@@ -8,7 +8,8 @@ const { ControlApiError, clientMock } = vi.hoisted(() => {
     constructor(
       message: string,
       public status: number,
-      public body: unknown
+      public body: unknown,
+      public responseHeaders: Record<string, string> = {}
     ) {
       super(message)
     }
@@ -292,10 +293,20 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
 
   it('propagates the delegation-plane 429 with retryAfterSeconds intact', async () => {
     clientMock.controlApiRequest.mockRejectedValue(
-      new ControlApiError('rate limited', 429, {
-        error: 'Too Many Requests',
-        retryAfterSeconds: 17,
-      })
+      new ControlApiError(
+        'rate limited',
+        429,
+        {
+          error: 'Too Many Requests',
+          retryAfterSeconds: 17,
+        },
+        {
+          'retry-after': '17',
+          'x-ratelimit-limit': '30',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1900000000',
+        }
+      )
     )
     const res = await request(buildApp())
       .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
@@ -310,5 +321,9 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
         details: { retryAfterSeconds: 17 },
       },
     })
+    expect(res.headers['retry-after']).toBe('17')
+    expect(res.headers['x-ratelimit-limit']).toBe('30')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.headers['x-ratelimit-reset']).toBe('1900000000')
   })
 })

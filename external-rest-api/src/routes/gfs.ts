@@ -3,7 +3,10 @@ import type { NextFunction, Response } from 'express'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
-import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
+import {
+  sanitizeControlApiPublicError,
+  sendSanitizedControlApiPublicError,
+} from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 /**
@@ -26,7 +29,7 @@ const STREAM_HEADERS = ['content-type', 'content-length', 'content-disposition']
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   const sanitized = sanitizeControlApiPublicError(error, PROPAGATED)
   if (sanitized) {
-    res.status(sanitized.status).json(sanitized.body)
+    sendSanitizedControlApiPublicError(res, sanitized)
     return
   }
   next(error)

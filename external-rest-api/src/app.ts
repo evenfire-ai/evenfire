@@ -1,7 +1,11 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
-import { sendPublicApiError } from './http/publicApiError.js'
+import {
+  sanitizeControlApiPublicError,
+  sendPublicApiError,
+  sendSanitizedControlApiPublicError,
+} from './http/publicApiError.js'
 import { requireTrustedBrowserMutation } from './middleware/browserMutationGuard.js'
 import { createAccessRouter } from './routes/access.js'
 import { createAuthRouter } from './routes/auth.js'
@@ -72,6 +76,12 @@ export function externalRestPublicErrorHandler(
   res: Response,
   _next: NextFunction
 ): void {
+  const rateLimitError = sanitizeControlApiPublicError(err, new Set([429]))
+  if (rateLimitError) {
+    sendSanitizedControlApiPublicError(res, rateLimitError)
+    return
+  }
+
   const status =
     err instanceof Error && typeof (err as Error & { status?: unknown }).status === 'number'
       ? (err as Error & { status: number }).status

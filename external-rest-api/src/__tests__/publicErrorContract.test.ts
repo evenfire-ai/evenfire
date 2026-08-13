@@ -49,9 +49,24 @@ describe('External REST public error contract', () => {
   })
 
   it('maps upstream throttling to the stable retryable rate-limit error', async () => {
-    const response = await request(
-      appThrowing(new ControlApiError('raw rate limiter state', 429, { internal: 'bucket-key' }))
-    ).get('/failure')
+    const upstream = new ControlApiError(
+      'raw rate limiter state',
+      429,
+      {
+        error: {
+          code: 'rate_limited',
+          details: { retryAfterSeconds: 17, bucket: 'secret-internal-bucket' },
+        },
+      },
+      {
+        'retry-after': '17',
+        'x-ratelimit-limit': '30',
+        'x-ratelimit-remaining': '0',
+        'x-ratelimit-reset': '1900000000',
+        'x-internal-bucket': 'secret-internal-bucket',
+      }
+    )
+    const response = await request(appThrowing(upstream)).get('/failure')
 
     expect(response.status).toBe(429)
     expect(response.body.error).toEqual({
@@ -59,8 +74,14 @@ describe('External REST public error contract', () => {
       message: 'Too many requests; retry later.',
       correlationId: expect.any(String),
       retryable: true,
+      details: { retryAfterSeconds: 17 },
     })
-    expect(JSON.stringify(response.body)).not.toContain('bucket-key')
+    expect(response.headers['retry-after']).toBe('17')
+    expect(response.headers['x-ratelimit-limit']).toBe('30')
+    expect(response.headers['x-ratelimit-remaining']).toBe('0')
+    expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
+    expect(response.headers['x-internal-bucket']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toContain('secret-internal-bucket')
   })
 
   it('preserves only a bounded retry delay from legacy rate-limit bodies', () => {
