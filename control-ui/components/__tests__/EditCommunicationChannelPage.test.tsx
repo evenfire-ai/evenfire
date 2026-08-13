@@ -562,3 +562,77 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
     expect(await screen.findByText(/\/webhooks\/teams\/teams%3A/)).toBeInTheDocument()
   })
 })
+
+/**
+ * The `teams app create` command previously existed only on the create page, so
+ * an operator returning to fix or recreate a saved Teams channel had no way back
+ * to it -- including the repair path when a channel is recreated under a new
+ * name, which only needs the Name field retyped to regenerate a correct command.
+ */
+describe('EditCommunicationChannelPage Teams setup command', () => {
+  it('renders the create command with an absolute endpoint once the webhook origin is public', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', {
+      teamsSettings: { appName: 'evenfire', appId: '', tenantId: '' },
+    })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Create the Teams bot')).toBeInTheDocument()
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('--name "evenfire"')
+    expect(command).toHaveTextContent('--endpoint "https://webhook.example.com/webhooks/teams/')
+    expect(command).toHaveTextContent('--env .env')
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+    expect(screen.queryByText(/no public webhook origin/)).not.toBeInTheDocument()
+
+    // Repair path: retyping the Name field, as when a channel is recreated under
+    // a new name, regenerates the command with the new name and the same origin.
+    await user.clear(screen.getByLabelText(/name/i))
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot-2')
+    const updatedCommand = screen.getByText(/teams app create/).closest('pre')
+    expect(updatedCommand).toHaveTextContent('--name "evenfire-bot-2"')
+  })
+
+  it('warns instead of showing a command when the deployment has no public webhook origin', async () => {
+    // No NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL and jsdom's hostname is
+    // localhost, which is the minikube case: the Teams Request URL above renders
+    // as a bare path, and registering a bot against that path would point the
+    // CLI at a host that does not exist. Warn instead of handing over a command
+    // built from a placeholder origin.
+    mockChannel('teams-channel', {
+      teamsSettings: { appName: 'evenfire', appId: '', tenantId: '' },
+    })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.queryByText('Create the Teams bot')).not.toBeInTheDocument()
+    expect(screen.queryByText(/teams app create/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Copy Teams bot create command' })
+    ).not.toBeInTheDocument()
+    const warning = document.querySelector('.cu-banner--warning')
+    expect(warning?.textContent ?? '').toMatch(/no public webhook origin/)
+    expect(screen.getByText('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL')).toBeInTheDocument()
+  })
+
+  it('renders neither the command nor the warning until this channel has Teams config', async () => {
+    // Mirrors the Slack manifest gate: a URL or a command on a channel with no
+    // real Teams provider is a copyable dead end, so both wait for the draft to
+    // carry actual Teams config.
+    mockChannel('telegram-channel', { telegramSettings: { botHandle: '@ops_bot' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('Create the Teams bot')).not.toBeInTheDocument()
+    expect(screen.queryByText(/teams app create/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/no public webhook origin/)).not.toBeInTheDocument()
+  })
+})

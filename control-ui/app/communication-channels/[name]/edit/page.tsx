@@ -42,6 +42,11 @@ import {
   teamsWebhookUrlForChannelName,
 } from '@lib/communicationChannels'
 import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
+import {
+  LOCAL_TEAMS_ENDPOINT_ORIGIN,
+  buildTeamsAppCreateCommand,
+  canGenerateTeamsCommand,
+} from '@lib/teamsSetup'
 
 type ChannelProvider = CommunicationChannelProvider
 type DraftState = CommunicationChannelDraftState
@@ -245,6 +250,18 @@ export default function EditCommunicationChannelPage() {
     slackRequestUrl && canGenerateSlackAppManifest(slackRequestUrl)
       ? slackAppManifest(draft?.slackBotHandle.trim() || DEFAULT_SLACK_APP_NAME, slackRequestUrl)
       : null
+  // Same reasoning as the Slack manifest above: a relative endpoint would point
+  // the Teams CLI at a host that does not exist, so warn instead of handing over
+  // a command built from a placeholder. This is also the repair path when a
+  // channel is recreated under a new name: retyping the Name field alone is
+  // enough to regenerate this command.
+  const teamsAppCreateCommand =
+    teamsRequestUrl && canGenerateTeamsCommand(teamsRequestUrl)
+      ? buildTeamsAppCreateCommand({
+          botName: draft?.teamsAppName || '',
+          endpoint: teamsRequestUrl,
+        })
+      : null
 
   async function persistDraft(nextDraft: DraftState, successMessage: string) {
     setSaving(true)
@@ -325,6 +342,17 @@ export default function EditCommunicationChannelPage() {
       copied
         ? 'Teams Request URL copied.'
         : 'Could not copy to clipboard. Select the URL and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copyTeamsAppCreateCommand() {
+    if (!teamsAppCreateCommand) return
+    const copied = await copyTextToClipboard(teamsAppCreateCommand)
+    showToast(
+      copied
+        ? 'Teams bot command copied.'
+        : 'Could not copy to clipboard. Select the command and copy it manually.',
       { tone: copied ? 'success' : 'error' }
     )
   }
@@ -710,6 +738,46 @@ export default function EditCommunicationChannelPage() {
                         Use this URL as the Messaging endpoint for the Teams bot app.
                       </span>
                     </div>
+                    {teamsRequestUrl ? (
+                      teamsAppCreateCommand ? (
+                        <div className="cu-field">
+                          <span className="cu-field__label">Create the Teams bot</span>
+                          <div className="cu-command-block">
+                            <div className="cu-command-block__toolbar">
+                              <span>Bash</span>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="cu-command-block__copy"
+                                onClick={copyTeamsAppCreateCommand}
+                                disabled={saving}
+                                aria-label="Copy Teams bot create command"
+                              >
+                                <IconCopy width={15} height={15} />
+                                Copy
+                              </Button>
+                            </div>
+                            <pre className="cu-command-block__pre">
+                              <code>{teamsAppCreateCommand}</code>
+                            </pre>
+                          </div>
+                          <span className="cu-field__hint">
+                            Run this to create or recreate the Teams bot, then paste the generated
+                            CLIENT_ID, TENANT_ID, and CLIENT_SECRET above. This is also the repair
+                            path when this channel was recreated under a new name.
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="cu-banner cu-banner--warning">
+                          This deployment has no public webhook origin, so the command below cannot
+                          be generated. Set{' '}
+                          <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code>, or substitute
+                          your own public origin for <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code>{' '}
+                          before running it.
+                        </div>
+                      )
+                    ) : null}
                   </>
                 )}
                 <ChannelCredentialsPanel

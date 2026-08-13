@@ -35,6 +35,11 @@ import {
 } from '@lib/communicationChannels'
 import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
 import { toKebabCase, toKebabInput } from '@lib/string'
+import {
+  LOCAL_TEAMS_ENDPOINT_ORIGIN,
+  buildTeamsAppCreateCommand,
+  canGenerateTeamsCommand,
+} from '@lib/teamsSetup'
 
 type HostItem = {
   metadata?: { name?: string }
@@ -59,7 +64,6 @@ type DraftState = {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TEAMS_BOT_NAME_RE = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/
-const LOCAL_TEAMS_ENDPOINT_ORIGIN = 'https://<public-webhook-origin>'
 const STEPS = ['Channel', 'Provider'] as const
 
 const STEP_DETAILS = [
@@ -102,22 +106,6 @@ function toTeamsBotNameInput(value: string): string {
 
 function isValidTeamsBotName(value: string): boolean {
   return TEAMS_BOT_NAME_RE.test(value.trim())
-}
-
-function commandEndpointForTeams(webhookUrl: string | null): string {
-  if (!webhookUrl) return `${LOCAL_TEAMS_ENDPOINT_ORIGIN}/webhooks/teams/<target>`
-  if (/^https?:\/\//i.test(webhookUrl)) return webhookUrl
-  return `${LOCAL_TEAMS_ENDPOINT_ORIGIN}${webhookUrl.startsWith('/') ? webhookUrl : `/${webhookUrl}`}`
-}
-
-function buildTeamsAppCreateCommand(params: { botName: string; endpoint: string }): string {
-  const botName = params.botName.trim() || '<bot-name>'
-  return [
-    'teams app create \\',
-    `  --name "${botName}" \\`,
-    `  --endpoint "${params.endpoint}" \\`,
-    '  --env .env',
-  ].join('\n')
 }
 
 function providerSettings(provider: ChannelProvider, draft: DraftState) {
@@ -217,14 +205,13 @@ export default function CreateCommunicationChannelPage() {
         : null,
     [canUseBrowserWebhookOrigin, normalizedChannelName]
   )
-  const teamsAppCreateCommand = useMemo(
-    () =>
-      buildTeamsAppCreateCommand({
-        botName: draft.teamsAppName,
-        endpoint: commandEndpointForTeams(teamsWebhookUrl),
-      }),
-    [draft.teamsAppName, teamsWebhookUrl]
-  )
+  // A relative endpoint would register a Teams bot pointing at a host that does
+  // not exist, so a deployment with no public webhook origin warns instead of
+  // handing over a command built from a placeholder.
+  const teamsAppCreateCommand = useMemo(() => {
+    if (!teamsWebhookUrl || !canGenerateTeamsCommand(teamsWebhookUrl)) return null
+    return buildTeamsAppCreateCommand({ botName: draft.teamsAppName, endpoint: teamsWebhookUrl })
+  }, [draft.teamsAppName, teamsWebhookUrl])
   // Slack's order is manifest first, credentials second: the bot token only exists
   // after the app is installed, so a manifest offered only once the channel is saved
   // arrives after the step it describes. The Request URL encodes namespace and name
@@ -357,6 +344,7 @@ export default function CreateCommunicationChannelPage() {
   }
 
   async function copyTeamsAppCreateCommand() {
+    if (!teamsAppCreateCommand) return
     const copied = await copyTextToClipboard(teamsAppCreateCommand)
     showToast(
       copied
@@ -756,26 +744,36 @@ export default function CreateCommunicationChannelPage() {
                           </li>
                           <li>Paste CLIENT_ID, TENANT_ID, and CLIENT_SECRET below.</li>
                         </ol>
-                        <div className="cu-command-block">
-                          <div className="cu-command-block__toolbar">
-                            <span>Bash</span>
-                            <Button
-                              type="button"
-                              variant="secondary"
-                              size="sm"
-                              className="cu-command-block__copy"
-                              onClick={copyTeamsAppCreateCommand}
-                              disabled={saving || !teamsBotNameIsValid}
-                              aria-label="Copy Teams bot create command"
-                            >
-                              <IconCopy width={15} height={15} />
-                              Copy
-                            </Button>
+                        {teamsAppCreateCommand ? (
+                          <div className="cu-command-block">
+                            <div className="cu-command-block__toolbar">
+                              <span>Bash</span>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="cu-command-block__copy"
+                                onClick={copyTeamsAppCreateCommand}
+                                disabled={saving || !teamsBotNameIsValid}
+                                aria-label="Copy Teams bot create command"
+                              >
+                                <IconCopy width={15} height={15} />
+                                Copy
+                              </Button>
+                            </div>
+                            <pre className="cu-command-block__pre">
+                              <code>{teamsAppCreateCommand}</code>
+                            </pre>
                           </div>
-                          <pre className="cu-command-block__pre">
-                            <code>{teamsAppCreateCommand}</code>
-                          </pre>
-                        </div>
+                        ) : (
+                          <div className="cu-banner cu-banner--warning">
+                            This deployment has no public webhook origin, so the command below
+                            cannot be generated. Set{' '}
+                            <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code>, or
+                            substitute your own public origin for{' '}
+                            <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code> before running it.
+                          </div>
+                        )}
                       </section>
                       <Field
                         description="CLIENT_ID from the generated .env file."

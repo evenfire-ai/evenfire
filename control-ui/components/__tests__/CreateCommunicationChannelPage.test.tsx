@@ -190,6 +190,10 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     vi.mocked(api.apiSend).mockResolvedValue({})
   })
 
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   it('shows provider-scoped credentials without route or Email controls', async () => {
     render(
       <ToastProvider>
@@ -224,6 +228,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
   })
 
   it('shows a Teams bot create command using generated .env labels and channel endpoint', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
     render(
       <ToastProvider>
         <CreateCommunicationChannelPage />
@@ -250,12 +255,40 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     const command = screen.getByText(/teams app create/).closest('pre')
     expect(command).toHaveTextContent('teams app create')
     expect(command).toHaveTextContent('--name "evenfire-bot"')
-    expect(command).toHaveTextContent('/webhooks/teams/')
+    expect(command).toHaveTextContent('--endpoint "https://webhook.example.com/webhooks/teams/')
     expect(command).toHaveTextContent('--env .env')
     expect(screen.getByLabelText(/^CLIENT_ID/)).toBeInTheDocument()
     expect(screen.getByLabelText(/^TENANT_ID/)).toBeInTheDocument()
     expect(screen.getByLabelText('CLIENT_SECRET')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+  })
+
+  it('warns instead of showing a command when the deployment has no public webhook origin', async () => {
+    // No NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL and jsdom's hostname is
+    // localhost (not app.*), which is the minikube case. The endpoint the CLI
+    // would need is a bare path here, and registering a Teams bot against a bare
+    // path points it at a host that does not exist -- warn instead of handing
+    // over a command built from a placeholder origin.
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), {
+      target: { value: 'Evenfire Bot!' },
+    })
+
+    expect(screen.queryByText(/teams app create/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Copy Teams bot create command' })
+    ).not.toBeInTheDocument()
+    const panel = document.querySelector('.cu-channel-provider-panel')
+    expect(panel?.textContent ?? '').toMatch(
+      /NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL|no public webhook origin/i
+    )
   })
 
   it('validates Teams CLIENT_ID and TENANT_ID before submission', async () => {
