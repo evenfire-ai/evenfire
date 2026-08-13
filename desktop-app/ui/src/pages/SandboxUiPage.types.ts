@@ -24,6 +24,7 @@ export type SandboxUiPageProps = {
   toastShellOverlayOpen?: boolean
   shortcutApp?: ActiveSandboxUiApp | null
   shortcutOpenRequestId?: number
+  localSearchRequestId?: number
   onBackToConversation?: () => void | Promise<void>
   onEmbeddedAppOpening?: (app: ActiveSandboxUiApp) => void
   onEmbeddedAppBack?: () => void

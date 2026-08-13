@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   SANDBOX_UI_COOKIE_NAME,
   applySandboxUiClientRoute,
+  beginSandboxUiFind,
   canApplySandboxUiClientRoute,
   extractSandboxUiCookie,
   extractSandboxUiPath,
@@ -11,6 +12,56 @@ import {
   resolveSandboxUiDefaultPath,
   resolveSandboxUiSharePath,
 } from '../sandboxUiDriver.js'
+
+describe('sandbox WebContents local find', () => {
+  it('uses the native producer, filters request IDs, minimizes results, and removes its listener', () => {
+    let listener: ((event: Electron.Event, result: Electron.FoundInPageResult) => void) | undefined
+    const webContents = {
+      findInPage: vi.fn(() => 41),
+      on: vi.fn((_name: string, callback: typeof listener) => {
+        listener = callback
+        return webContents
+      }),
+      removeListener: vi.fn(() => webContents),
+    }
+    const onResult = vi.fn()
+    const session = beginSandboxUiFind(
+      webContents as never,
+      'invoice',
+      { forward: false, findNext: true },
+      onResult
+    )
+
+    expect(session.requestId).toBe(41)
+    expect(webContents.findInPage).toHaveBeenCalledWith('invoice', {
+      forward: false,
+      findNext: true,
+    })
+    listener?.({} as Electron.Event, {
+      requestId: 40,
+      activeMatchOrdinal: 1,
+      matches: 9,
+      selectionArea: { x: 0, y: 0, width: 1, height: 1 },
+      finalUpdate: true,
+    })
+    expect(onResult).not.toHaveBeenCalled()
+    listener?.({} as Electron.Event, {
+      requestId: 41,
+      activeMatchOrdinal: 2,
+      matches: 4,
+      selectionArea: { x: 8, y: 8, width: 100, height: 40 },
+      finalUpdate: true,
+    })
+    expect(onResult).toHaveBeenCalledWith({
+      requestId: 41,
+      activeMatchOrdinal: 2,
+      matches: 4,
+      finalUpdate: true,
+    })
+    session.cleanup()
+    expect(webContents.removeListener).toHaveBeenCalledWith('found-in-page', listener)
+  })
+})
 
 describe('applySandboxUiClientRoute', () => {
   it('hands a nested route to the loaded app without requesting it from the server', async () => {

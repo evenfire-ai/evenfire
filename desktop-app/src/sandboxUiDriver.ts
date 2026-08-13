@@ -48,6 +48,13 @@ export type SandboxUiBounds = {
   dpr?: number
 }
 
+export type SandboxUiFindResult = {
+  requestId: number
+  activeMatchOrdinal: number
+  matches: number
+  finalUpdate: boolean
+}
+
 function toViewBounds(
   bounds: SandboxUiBounds,
   parentWindow: BrowserWindow
@@ -108,6 +115,8 @@ type ActiveView = {
   cleanupClientRouteHandoff?: () => void
   cleanupParentClosed?: () => void
   cleanupShortcutRouting?: () => void
+  cleanupFindResults?: () => void
+  activeFindRequestId?: number
 }
 
 let active: ActiveView | null = null
@@ -280,6 +289,10 @@ async function teardownActive(reason: 'replaced' | 'closed' | 'parent_closed'): 
     current.cleanupClientRouteHandoff?.()
     current.cleanupParentClosed?.()
     current.cleanupShortcutRouting?.()
+    current.cleanupFindResults?.()
+    if (!current.view.webContents.isDestroyed()) {
+      current.view.webContents.stopFindInPage('clearSelection')
+    }
     // contentView.removeChildView is the documented teardown step; it both
     // detaches the view from layout AND severs the parent's ownership ref.
     if (!current.parentWindow.isDestroyed()) {
@@ -675,6 +688,67 @@ export function setSandboxUiBounds(bounds: SandboxUiBounds): void {
 export function setSandboxUiVisible(visible: boolean): void {
   if (!active) return
   active.view.setVisible(visible)
+}
+
+type FindableSandboxWebContents = Pick<
+  WebContentsView['webContents'],
+  'findInPage' | 'on' | 'removeListener'
+>
+
+export function beginSandboxUiFind(
+  webContents: FindableSandboxWebContents,
+  query: string,
+  options: { forward: boolean; findNext: boolean },
+  onResult: (result: SandboxUiFindResult) => void,
+  isCurrent: () => boolean = () => true
+): { requestId: number; cleanup: () => void } {
+  let requestId = -1
+  const listener = (_event: Electron.Event, result: Electron.FoundInPageResult) => {
+    if (!isCurrent() || result.requestId !== requestId) return
+    onResult({
+      requestId: result.requestId,
+      activeMatchOrdinal: result.activeMatchOrdinal,
+      matches: result.matches,
+      finalUpdate: result.finalUpdate,
+    })
+  }
+  webContents.on('found-in-page', listener)
+  requestId = webContents.findInPage(query, options)
+  return {
+    requestId,
+    cleanup: () => webContents.removeListener('found-in-page', listener),
+  }
+}
+
+export function findInActiveSandboxUi(
+  query: string,
+  options: { forward: boolean; findNext: boolean },
+  onResult: (result: SandboxUiFindResult) => void
+): number | null {
+  if (!active || active.view.webContents.isDestroyed()) return null
+  const current = active
+  const webContents = current.view.webContents
+  current.cleanupFindResults?.()
+  const session = beginSandboxUiFind(
+    webContents,
+    query,
+    options,
+    onResult,
+    () => active === current
+  )
+  current.cleanupFindResults = session.cleanup
+  current.activeFindRequestId = session.requestId
+  return session.requestId
+}
+
+export function stopActiveSandboxUiFind(): void {
+  if (!active) return
+  active.cleanupFindResults?.()
+  active.cleanupFindResults = undefined
+  active.activeFindRequestId = undefined
+  if (!active.view.webContents.isDestroyed()) {
+    active.view.webContents.stopFindInPage('clearSelection')
+  }
 }
 
 export async function captureSandboxUiPreview(): Promise<string | null> {

@@ -14822,3 +14822,33 @@ pre {
 .chat-view-workspace {
   display: contents;
 }
+
+/* Contextual find surfaces remain in trusted Desktop chrome. */
+.current-content-search {
+  align-items: center;
+  align-self: flex-end;
+  background: var(--surface-strong);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: var(--space-1);
+  margin: var(--space-2) var(--space-3) 0;
+  padding: var(--space-1);
+  position: relative;
+  z-index: var(--layer-header);
+}
+
+.current-content-search__input {
+  min-width: 220px;
+}
+
+.current-content-search__count {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  min-width: 44px;
+  text-align: center;
+}
+
+.chat-bubble[data-current-search-match='true'] {
+  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.9);
+}

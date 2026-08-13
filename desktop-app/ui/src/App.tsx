@@ -11,6 +11,7 @@ import {
 } from '@contexts/index'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
+import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatTabs } from '@components/ChatTabs'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
@@ -253,6 +254,10 @@ export function App() {
   )
   const chatViewTabsRef = React.useRef(chatViewTabs)
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
+  const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
+  const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
+  const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
+  const chatLocalSearchPreviousFocusRef = React.useRef<HTMLElement | null>(null)
   const contentPanelRef = React.useRef<HTMLElement | null>(null)
   const activeConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
@@ -317,6 +322,15 @@ export function App() {
     setChatViewTabs(next)
     revealChatViewTab(activeChatViewTab(next))
   }, [nextChatTabId, revealChatViewTab, vm.selectedAgent])
+
+  const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {
+    setChatLocalSearchOpen(false)
+    if (!restoreFocus) return
+    const previous = chatLocalSearchPreviousFocusRef.current
+    requestAnimationFrame(() => {
+      if (previous?.isConnected) previous.focus()
+    })
+  }, [])
 
   const handleSelectChatAgentWithTabs = React.useCallback(
     (
@@ -1018,6 +1032,9 @@ export function App() {
     nextChatTabSequenceRef.current = 2
     setChatViewTabs(createChatViewTabsState('chat-tab-1'))
     setComposerFocusRequestId(0)
+    setGlobalSearchFocusRequestId(0)
+    setChatLocalSearchOpen(false)
+    setSandboxLocalSearchRequestId(0)
   }, [vm.authenticatedPrincipalIdentity])
 
   React.useEffect(() => {
@@ -1029,10 +1046,12 @@ export function App() {
       const command = getDesktopCommand(commandId)
       const state = chatViewTabsRef.current
       if (commandId === 'chat.newTab') {
+        closeChatLocalSearch(false)
         handleNewChatViewTab()
         return
       }
       if (commandId === 'chat.closeTab') {
+        closeChatLocalSearch(false)
         handleCloseChatViewTab(state.activeTabId)
         return
       }
@@ -1058,11 +1077,36 @@ export function App() {
         return
       }
       if (commandId === 'composer.focus') {
+        closeChatLocalSearch(false)
         revealChatViewTab(activeChatViewTab(state))
         setComposerFocusRequestId(value => value + 1)
+        return
+      }
+      if (commandId === 'search.open') {
+        closeChatLocalSearch(false)
+        setGlobalSearchFocusRequestId(value => value + 1)
+        return
+      }
+      if (commandId === 'search.current') {
+        if (activeSandboxUiApp && vm.navItem === DESKTOP_ROUTES.apps) {
+          closeChatLocalSearch(false)
+          setSandboxLocalSearchRequestId(value => value + 1)
+        } else if (vm.navItem === DESKTOP_ROUTES.chat && vm.activeChatId) {
+          chatLocalSearchPreviousFocusRef.current = document.activeElement as HTMLElement | null
+          setChatLocalSearchOpen(true)
+        }
       }
     })
-  }, [handleCloseChatViewTab, handleNewChatViewTab, revealChatViewTab, vm.isAuthenticated])
+  }, [
+    activeSandboxUiApp,
+    closeChatLocalSearch,
+    handleCloseChatViewTab,
+    handleNewChatViewTab,
+    revealChatViewTab,
+    vm.activeChatId,
+    vm.isAuthenticated,
+    vm.navItem,
+  ])
 
   const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
@@ -1546,6 +1590,7 @@ export function App() {
                               }`}
                             >
                               <AppHeader
+                                searchFocusRequestId={globalSearchFocusRequestId}
                                 notificationTrayMode={
                                   notificationTrayUsesDrawer ? 'drawer' : 'overlay'
                                 }
@@ -1562,6 +1607,12 @@ export function App() {
                                     onSelect={handleSelectChatViewTab}
                                     onClose={handleCloseChatViewTab}
                                   />
+                                  {chatLocalSearchOpen ? (
+                                    <ChatLocalSearch
+                                      messages={vm.activeMessages}
+                                      onClose={closeChatLocalSearch}
+                                    />
+                                  ) : null}
                                   <ChatPage scrollContainerRef={contentPanelRef} />
                                 </section>
                               )}
@@ -1591,6 +1642,7 @@ export function App() {
                                   toastShellOverlayOpen={vm.toasts.length > 0}
                                   shortcutApp={activeSandboxUiApp}
                                   shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
+                                  localSearchRequestId={sandboxLocalSearchRequestId}
                                   onBackToConversation={handleSandboxUiBackToConversation}
                                   onEmbeddedAppOpening={handleSandboxUiOpening}
                                   onEmbeddedAppBack={handleSandboxUiClosed}

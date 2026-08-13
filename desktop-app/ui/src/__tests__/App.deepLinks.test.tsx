@@ -16,9 +16,16 @@ const confirmDialogHarness = vi.hoisted(() => ({
   },
 }))
 
+const appHeaderHarness = vi.hoisted(() => ({
+  props: null as null | { searchFocusRequestId?: number },
+}))
+
+const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
+
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
     shortcutOpenRequestId?: number
+    localSearchRequestId?: number
     onEmbeddedAppOpening?: (app: {
       appRef: string
       label: string
@@ -41,7 +48,18 @@ vi.mock('@hooks/useAgentChatActionsValue', () => ({
   useAgentChatActionsValue: () => ({}),
 }))
 
-vi.mock('@components/AppHeader', () => ({ AppHeader: () => null }))
+vi.mock('@components/AppHeader', () => ({
+  AppHeader: (props: NonNullable<typeof appHeaderHarness.props>) => {
+    appHeaderHarness.props = props
+    return null
+  },
+}))
+vi.mock('@components/ChatLocalSearch', () => ({
+  ChatLocalSearch: () => {
+    chatLocalSearchHarness.rendered()
+    return null
+  },
+}))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({
@@ -168,6 +186,8 @@ describe('App deep-link orchestration', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     confirmDialogHarness.props = null
+    appHeaderHarness.props = null
+    chatLocalSearchHarness.rendered.mockReset()
     sandboxUiPageHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
@@ -221,6 +241,43 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith('alpha', {
       selectLatest: false,
     })
+  })
+
+  it('keeps global and contextual search commands on distinct host surfaces', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+    } as Partial<AppController>)
+    render(<App />)
+
+    act(() => emitCommand?.('search.open'))
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
+    expect(chatLocalSearchHarness.rendered).not.toHaveBeenCalled()
+
+    act(() => emitCommand?.('search.current'))
+    expect(chatLocalSearchHarness.rendered).toHaveBeenCalled()
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
+  })
+
+  it('routes contextual search to the current sandbox app without opening global search', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      selectedAgent: 'alpha',
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+
+    act(() => emitCommand?.('search.current'))
+    expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(1)
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(0)
   })
 
   afterEach(() => {

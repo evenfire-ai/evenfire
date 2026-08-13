@@ -13,6 +13,9 @@ const sandboxUi = {
   setBounds: vi.fn(),
   setVisible: vi.fn(),
   capturePreview: vi.fn(),
+  findInPage: vi.fn(),
+  stopFindInPage: vi.fn(),
+  onFindResult: vi.fn(() => vi.fn()),
   onClosed: vi.fn(() => vi.fn()),
   onRefreshError: vi.fn(() => vi.fn()),
 }
@@ -26,6 +29,8 @@ describe('SandboxUiPage', () => {
     vi.clearAllMocks()
     sandboxUi.setBounds.mockResolvedValue(undefined)
     sandboxUi.setVisible.mockResolvedValue(undefined)
+    sandboxUi.findInPage.mockResolvedValue(17)
+    sandboxUi.stopFindInPage.mockResolvedValue(undefined)
     installClerumApi()
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
       cb(0)
@@ -163,6 +168,41 @@ describe('SandboxUiPage', () => {
     })
     expect(await screen.findByRole('button', { name: 'Back to apps' })).toBeTruthy()
     expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
+  })
+
+  it('runs contextual find only against the mounted active WebContents contract', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(<SandboxUiPage localSearchRequestId={1} />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    const input = await screen.findByRole('textbox', { name: 'Find in current app' })
+    fireEvent.change(input, { target: { value: 'invoice' } })
+    await waitFor(() => {
+      expect(sandboxUi.findInPage).toHaveBeenCalledWith('invoice', {
+        forward: true,
+        findNext: false,
+      })
+    })
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+    expect(sandboxUi.findInPage).toHaveBeenLastCalledWith('invoice', {
+      forward: false,
+      findNext: true,
+    })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(sandboxUi.stopFindInPage).toHaveBeenCalled()
+    expect(screen.queryByRole('textbox', { name: 'Find in current app' })).toBeNull()
   })
 
   it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {

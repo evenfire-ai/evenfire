@@ -33,6 +33,7 @@ import {
 } from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
 import type { ChatMessageAttachment } from '../../../../src/types'
+import { chatMessageDomId } from '../../lib/chatLocalSearch'
 import {
   getChatMessageAttachmentTypeLabel,
   parseChatMessageDisplay,
@@ -610,6 +611,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                       return (
                         <article
                           key={message.messageKey}
+                          id={chatMessageDomId(message.id)}
+                          data-chat-message-id={message.id}
                           data-testid={message.role === 'assistant' ? 'agent-response' : undefined}
                           className={`chat-bubble ${message.role}${message.isError ? ' chat-bubble--error' : ''}${
                             htmlPreview || hasHtmlArtifactMention ? ' chat-bubble--wide' : ''

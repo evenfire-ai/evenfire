@@ -1544,6 +1544,32 @@ export function registerIpcHandlers(service: AppService): void {
     return service.captureSandboxUiPreview()
   })
 
+  ipcMain.handle(
+    'sandboxUi:findInPage',
+    async (event, payload: { query?: unknown; forward?: unknown; findNext?: unknown }) => {
+      assertTrustedSender(event)
+      const query = typeof payload?.query === 'string' ? payload.query : ''
+      if (!query.trim() || query.length > 500) {
+        throw new Error('find query must contain 1 to 500 characters')
+      }
+      if (typeof payload?.forward !== 'boolean' || typeof payload?.findNext !== 'boolean') {
+        throw new Error('find direction options must be boolean')
+      }
+      return service.findInActiveSandboxUi(
+        query,
+        { forward: payload.forward, findNext: payload.findNext },
+        result => {
+          if (!event.sender.isDestroyed()) event.sender.send('sandboxUi:findResult', result)
+        }
+      )
+    }
+  )
+
+  ipcMain.handle('sandboxUi:stopFindInPage', async event => {
+    assertTrustedSender(event)
+    await service.stopActiveSandboxUiFind()
+  })
+
   // Embed-side refresh request. NOTE: this IPC is exposed to *untrusted*
   // recipe JS via the embed preload, so we deliberately do NOT call
   // `assertTrustedSender` (the embed loads from the rpc-proxy URL, not

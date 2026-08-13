@@ -554,6 +554,19 @@ declare global {
         }) => Promise<void>
         setVisible: (visible: boolean) => Promise<void>
         capturePreview: () => Promise<string | null>
+        findInPage: (
+          query: string,
+          options: { forward: boolean; findNext: boolean }
+        ) => Promise<number | null>
+        stopFindInPage: () => Promise<void>
+        onFindResult: (
+          callback: (result: {
+            requestId: number
+            activeMatchOrdinal: number
+            matches: number
+            finalUpdate: boolean
+          }) => void
+        ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
         onClosed: (callback: (args: { appRef: string }) => void) => () => void
         onRefreshError: (

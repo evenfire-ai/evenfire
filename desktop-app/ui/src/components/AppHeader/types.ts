@@ -1,4 +1,5 @@
 export type AppHeaderProps = {
+  searchFocusRequestId?: number
   notificationTrayMode?: 'overlay' | 'drawer'
   notificationTrayReady?: boolean
   onNotificationTrayOpenChange?: (open: boolean) => void

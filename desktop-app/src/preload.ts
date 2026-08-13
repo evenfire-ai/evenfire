@@ -464,6 +464,36 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
+    findInPage: (query: string, options: { forward: boolean; findNext: boolean }) =>
+      ipcRenderer.invoke('sandboxUi:findInPage', { query, ...options }) as Promise<number | null>,
+    stopFindInPage: () => ipcRenderer.invoke('sandboxUi:stopFindInPage') as Promise<void>,
+    onFindResult: (
+      callback: (result: {
+        requestId: number
+        activeMatchOrdinal: number
+        matches: number
+        finalUpdate: boolean
+      }) => void
+    ) => {
+      const listener = (_event: unknown, result: unknown) => {
+        const value = result as Record<string, unknown>
+        if (
+          Number.isInteger(value?.requestId) &&
+          Number.isInteger(value?.activeMatchOrdinal) &&
+          Number.isInteger(value?.matches) &&
+          typeof value?.finalUpdate === 'boolean'
+        ) {
+          callback({
+            requestId: Number(value.requestId),
+            activeMatchOrdinal: Number(value.activeMatchOrdinal),
+            matches: Number(value.matches),
+            finalUpdate: value.finalUpdate,
+          })
+        }
+      }
+      ipcRenderer.on('sandboxUi:findResult', listener)
+      return () => ipcRenderer.off('sandboxUi:findResult', listener)
+    },
     onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => {
       const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
       ipcRenderer.on('sandboxUi:deepLink', listener)

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, StatusBanner } from '@components/Common'
+import { Button, StatusBanner, TextInput } from '@components/Common'
 import {
   IconChat,
   IconClose,
@@ -154,6 +154,7 @@ export function SandboxUiPage({
   toastShellOverlayOpen = false,
   shortcutApp = null,
   shortcutOpenRequestId = 0,
+  localSearchRequestId = 0,
   onBackToConversation,
   onEmbeddedAppOpening,
   onEmbeddedAppBack,
@@ -168,7 +169,14 @@ export function SandboxUiPage({
   const [refreshError, setRefreshError] = useState<{ appRef: string; message: string } | null>(null)
   const [appsPage, setAppsPage] = useState(0)
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
+  const [localSearchOpen, setLocalSearchOpen] = useState(false)
+  const [localSearchQuery, setLocalSearchQuery] = useState('')
+  const [localSearchResult, setLocalSearchResult] = useState({ current: 0, total: 0 })
   const embedSlotRef = useRef<HTMLDivElement>(null)
+  const localSearchInputRef = useRef<HTMLInputElement>(null)
+  const activeFindRequestIdRef = useRef<number | null>(null)
+  const lastLocalSearchRequestIdRef = useRef(0)
+  const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
   const shellOverlayOpen =
     headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
@@ -212,6 +220,53 @@ export function SandboxUiPage({
   useEffect(() => {
     return window.clerum.sandboxUi.onRefreshError(args => setRefreshError(args))
   }, [])
+
+  useEffect(() => {
+    return window.clerum.sandboxUi.onFindResult(result => {
+      if (result.requestId !== activeFindRequestIdRef.current) return
+      setLocalSearchResult({ current: result.activeMatchOrdinal, total: result.matches })
+    })
+  }, [])
+
+  const stopLocalSearch = useCallback(() => {
+    activeFindRequestIdRef.current = null
+    setLocalSearchOpen(false)
+    setLocalSearchQuery('')
+    setLocalSearchResult({ current: 0, total: 0 })
+    void window.clerum.sandboxUi.stopFindInPage().catch(() => undefined)
+    const previous = localSearchPreviousFocusRef.current
+    requestAnimationFrame(() => {
+      if (previous?.isConnected) previous.focus()
+    })
+  }, [])
+
+  const runLocalSearch = useCallback(
+    async (query: string, options: { forward: boolean; findNext: boolean }) => {
+      if (!query.trim()) {
+        activeFindRequestIdRef.current = null
+        setLocalSearchResult({ current: 0, total: 0 })
+        await window.clerum.sandboxUi.stopFindInPage()
+        return
+      }
+      activeFindRequestIdRef.current = await window.clerum.sandboxUi.findInPage(query, options)
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (localSearchRequestId <= lastLocalSearchRequestIdRef.current || launch.kind !== 'mounted') {
+      return
+    }
+    lastLocalSearchRequestIdRef.current = localSearchRequestId
+    localSearchPreviousFocusRef.current = document.activeElement as HTMLElement | null
+    setLocalSearchOpen(true)
+    requestAnimationFrame(() => localSearchInputRef.current?.focus())
+  }, [launch.kind, localSearchRequestId])
+
+  useEffect(() => {
+    if (launch.kind === 'mounted' || !localSearchOpen) return
+    stopLocalSearch()
+  }, [launch.kind, localSearchOpen, stopLocalSearch])
 
   // Tear down the embed when this page unmounts (user navigates away).
   useLayoutEffect(() => {
@@ -486,6 +541,68 @@ export function SandboxUiPage({
             text={`Session refresh failed: ${refreshError.message}. Close and re-open the app to continue.`}
           />
         )}
+        {localSearchOpen ? (
+          <div className="current-content-search" role="search" aria-label="Search current app">
+            <TextInput
+              ref={localSearchInputRef}
+              aria-label="Find in current app"
+              className="current-content-search__input"
+              onChange={event => {
+                const query = event.currentTarget.value
+                setLocalSearchQuery(query)
+                void runLocalSearch(query, { forward: true, findNext: false })
+              }}
+              onKeyDown={event => {
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  stopLocalSearch()
+                } else if (event.key === 'Enter') {
+                  event.preventDefault()
+                  void runLocalSearch(localSearchQuery, {
+                    forward: !event.shiftKey,
+                    findNext: true,
+                  })
+                }
+              }}
+              placeholder="Find in current app"
+              value={localSearchQuery}
+            />
+            <span className="current-content-search__count" role="status" aria-live="polite">
+              {localSearchResult.current}/{localSearchResult.total}
+            </span>
+            <Button
+              aria-label="Previous app match"
+              color="neutral"
+              onClick={() =>
+                void runLocalSearch(localSearchQuery, { forward: false, findNext: true })
+              }
+              size="xs"
+              variant="ghost"
+            >
+              ↑
+            </Button>
+            <Button
+              aria-label="Next app match"
+              color="neutral"
+              onClick={() =>
+                void runLocalSearch(localSearchQuery, { forward: true, findNext: true })
+              }
+              size="xs"
+              variant="ghost"
+            >
+              ↓
+            </Button>
+            <Button
+              aria-label="Close current app search"
+              color="neutral"
+              onClick={stopLocalSearch}
+              size="xs"
+              variant="ghost"
+            >
+              ×
+            </Button>
+          </div>
+        ) : null}
         {/* The slot div is the rectangle the WebContentsView floats above
             after the selected app completes its initial load. */}
         <div ref={embedSlotRef} className="sandbox-ui-embed-slot">

@@ -242,4 +242,18 @@ describe('AppHeader notification tray presentation', () => {
       'Search teams, contexts, members, agents or connectors...'
     )
   })
+
+  it('opens and focuses the existing global search for a command request', () => {
+    const { rerender } = render(<AppHeader searchFocusRequestId={0} />)
+    const other = document.createElement('button')
+    document.body.append(other)
+    other.focus()
+
+    rerender(<AppHeader searchFocusRequestId={1} />)
+
+    const search = screen.getByRole('textbox', { name: 'Search' })
+    expect(document.activeElement).toBe(search)
+    expect(search.getAttribute('aria-label')).toBe('Search')
+    other.remove()
+  })
 })
