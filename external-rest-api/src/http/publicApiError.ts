@@ -156,7 +156,8 @@ export function sanitizeControlApiPublicError(
     reason === 'subjects_invalid'
       ? safeInvalidIndexes(rawDetails?.invalidIndexes ?? rawBody?.invalidIndexes)
       : undefined
-  const headerRetryAfterSeconds = Number(error.responseHeaders['retry-after'])
+  const responseHeaders = error.responseHeaders ?? {}
+  const headerRetryAfterSeconds = Number(responseHeaders['retry-after'])
   const rawRetryAfterSeconds =
     rawDetails?.retryAfterSeconds ??
     rawBody?.retryAfterSeconds ??
@@ -181,7 +182,7 @@ export function sanitizeControlApiPublicError(
 
   return {
     status: error.status,
-    headers: code === 'rate_limited' ? safePublicRateLimitHeaders(error.responseHeaders) : {},
+    headers: code === 'rate_limited' ? safePublicRateLimitHeaders(responseHeaders) : {},
     body: {
       error: {
         code,
