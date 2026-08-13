@@ -15,6 +15,11 @@ const storeMock = vi.hoisted(() => ({
 }))
 vi.mock('../src/oauth/store.js', () => storeMock)
 
+const rateLimitMock = vi.hoisted(() => ({
+  checkAndIncrement: vi.fn(),
+}))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
+
 // Mirror the exact pattern from routes.external.workflowApprovalMediums.test.ts:
 // mock requireValidExternalSessionToken to inject req.externalAuth.
 vi.mock('../src/middleware/externalSessionAuth.js', () => ({
@@ -47,6 +52,13 @@ describe('/external/oauth/grants', () => {
     vi.clearAllMocks()
     storeMock.listUserOAuthGrants.mockResolvedValue([])
     storeMock.deleteOAuthGrant.mockResolvedValue(undefined)
+    rateLimitMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      count: 1,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
   })
 
   it("GET lists only the caller's grants (userId from session)", async () => {
@@ -81,5 +93,50 @@ describe('/external/oauth/grants', () => {
         oauthClientId: 'google-gmail',
       })
     )
+  })
+
+  it('rate limits reads by authenticated user before listing grants', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      count: 31,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
+
+    const res = await request(makeApp()).get('/external/oauth/grants')
+
+    expect(res.status).toBe(429)
+    expect(res.headers['retry-after']).toBeDefined()
+    expect(res.headers['x-ratelimit-limit']).toBe('30')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.body).toMatchObject({ error: { code: 'rate_limited', retryable: true } })
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      'external_oauth_grant_read:user:user-1',
+      30
+    )
+    expect(storeMock.listUserOAuthGrants).not.toHaveBeenCalled()
+  })
+
+  it('rate limits revocation by authenticated user before deleting a grant', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      count: 11,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
+
+    const res = await request(makeApp()).delete(
+      '/external/oauth/grants/sandbox-recipes/leadforge/google-gmail'
+    )
+
+    expect(res.status).toBe(429)
+    expect(res.headers['x-ratelimit-limit']).toBe('10')
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      'external_oauth_grant_mutation:user:user-1',
+      10
+    )
+    expect(storeMock.deleteOAuthGrant).not.toHaveBeenCalled()
   })
 })
