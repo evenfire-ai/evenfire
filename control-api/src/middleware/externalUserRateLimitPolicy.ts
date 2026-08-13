@@ -14,6 +14,8 @@ export type ExternalUserRateLimitOperation =
   | 'member_read'
   | 'member_mutation'
   | 'shared_filesystem_read'
+  | 'workflow_approval_medium_read'
+  | 'workflow_approval_medium_mutation'
 
 export type ExternalUserRateLimitStage = 'pre_auth' | 'authenticated'
 
@@ -37,6 +39,14 @@ const POLICIES: Readonly<Record<ExternalUserRateLimitOperation, Policy>> = {
   shared_filesystem_read: {
     bucketType: 'external_shared_filesystem_read',
     maxPerMinute: 30,
+  },
+  workflow_approval_medium_read: {
+    bucketType: 'external_workflow_approval_medium_read',
+    maxPerMinute: 30,
+  },
+  workflow_approval_medium_mutation: {
+    bucketType: 'external_workflow_approval_medium_mutation',
+    maxPerMinute: 10,
   },
 }
 

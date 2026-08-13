@@ -4,7 +4,9 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
 import { mcpHostHttpMetrics } from '../../middleware/mcpHostHttpMetrics.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   confirmMediumChallenge,
   createMediumChallenge,
@@ -75,6 +77,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
     '/external/workflow-approval-mediums/challenges',
     mcpHostHttpMetrics('external_workflow_approval_medium_challenge'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('workflow_approval_medium_mutation', 'authenticated')
+    ),
     (req, res, next) => {
       void (async () => {
         try {
@@ -162,6 +167,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
     '/external/workflow-approval-mediums/link-sessions',
     mcpHostHttpMetrics('external_workflow_approval_medium_link_session'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('workflow_approval_medium_mutation', 'authenticated')
+    ),
     (req, res, next) => {
       void (async () => {
         try {
@@ -251,6 +259,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
     '/external/workflow-approval-mediums/challenges/:id/confirm',
     mcpHostHttpMetrics('external_workflow_approval_medium_confirm'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('workflow_approval_medium_mutation', 'authenticated')
+    ),
     (req, res, next) => {
       void (async () => {
         try {
@@ -296,6 +307,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
     '/external/workflow-approval-mediums',
     mcpHostHttpMetrics('external_workflow_approval_medium_list'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('workflow_approval_medium_read', 'authenticated')
+    ),
     (req, res, next) => {
       void (async () => {
         try {
@@ -329,6 +343,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
     '/external/workflow-approval-mediums/targets',
     mcpHostHttpMetrics('external_workflow_approval_medium_targets'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('workflow_approval_medium_read', 'authenticated')
+    ),
     (req, res, next) => {
       void (async () => {
         try {
@@ -363,6 +380,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
     '/external/workflow-approval-mediums/:id/preference',
     mcpHostHttpMetrics('external_workflow_approval_medium_preference'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('workflow_approval_medium_mutation', 'authenticated')
+    ),
     (req, res, next) => {
       void (async () => {
         try {
@@ -387,6 +407,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
     '/external/workflow-approval-mediums/:id/display-name',
     mcpHostHttpMetrics('external_workflow_approval_medium_display_name'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('workflow_approval_medium_mutation', 'authenticated')
+    ),
     (req, res, next) => {
       void (async () => {
         try {
@@ -424,6 +447,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
     '/external/workflow-approval-mediums/:id',
     mcpHostHttpMetrics('external_workflow_approval_medium_delete'),
     requireValidExternalSessionToken,
+    rateLimitMiddleware(
+      externalUserRateLimitOptions('workflow_approval_medium_mutation', 'authenticated')
+    ),
     (req, res, next) => {
       void (async () => {
         try {
