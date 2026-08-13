@@ -84,102 +84,110 @@ function requireLegacySessionTokenPayload(req: Request, res: Response, next: Nex
 export function createExternalAuthRouter(gateway: K8sGateway): Router {
   const router = Router()
 
-  router.post('/external/auth/google-login', async (req, res, next) => {
-    try {
-      const idToken = String(req.body?.idToken || '').trim()
-      if (!idToken) return res.status(400).json({ error: 'idToken is required' })
-      const google = await verifyGoogleIdToken(idToken)
-      const policy = await resolveEffectiveUserAccessPolicy()
-      const login = await googleLoginData({
-        email: google.email,
-        name: google.name,
-        picture: google.picture,
-      })
-      const role = login.membership.role
-      const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
-      if (selection.status !== 'selected') {
-        return res.status(426).json({ error: 'upgrade_required' })
-      }
-      const issued = await issueExternalUserSession(
-        {
-          contract: selection.contract,
-          userId: login.user.id,
+  router.post(
+    '/external/auth/google-login',
+    rateLimitMiddleware(externalUserRateLimitOptions('authentication_attempt', 'pre_auth')),
+    async (req, res, next) => {
+      try {
+        const idToken = String(req.body?.idToken || '').trim()
+        if (!idToken) return res.status(400).json({ error: 'idToken is required' })
+        const google = await verifyGoogleIdToken(idToken)
+        const policy = await resolveEffectiveUserAccessPolicy()
+        const login = await googleLoginData({
           email: google.email,
-          teamId: login.membership.team_id || null,
-          role,
-          authenticationMethods: ['google'],
-        },
-        { policy }
-      )
-      return res.status(200).json({
-        token: issued.token,
-        sessionContract: issued.contract,
-        me: {
-          id: login.user.id,
-          email: google.email,
-          name: login.user.name,
-          picture: login.user.picture,
-          teamId: login.membership.team_id,
-          teamName: login.membership.team_name,
-          role,
-        },
-        isNewUser: login.isNewUser,
-      })
-    } catch (error) {
-      return next(error)
-    }
-  })
-
-  router.post('/external/auth/password-login', async (req, res, next) => {
-    try {
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const password = String(req.body?.password || '')
-      if (!email || !password) {
-        return res.status(400).json({ error: 'email and password are required' })
-      }
-
-      const policy = await resolveEffectiveUserAccessPolicy()
-      const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
-      if (selection.status !== 'selected') {
-        return res.status(426).json({ error: 'upgrade_required' })
-      }
-      const login = await authenticatePasswordAndIssueSession({
-        email,
-        password,
-        contract: selection.contract,
-        policy,
-      })
-      if (!login) {
-        return res.status(401).json({ error: 'Unauthorized' })
-      }
-      if ('error' in login) {
-        if (login.error === 'password_not_set') {
-          return res.status(409).json({ error: 'password_not_set' })
+          name: google.name,
+          picture: google.picture,
+        })
+        const role = login.membership.role
+        const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
+        if (selection.status !== 'selected') {
+          return res.status(426).json({ error: 'upgrade_required' })
         }
-        return res.status(403).json({ error: 'membership_not_found' })
+        const issued = await issueExternalUserSession(
+          {
+            contract: selection.contract,
+            userId: login.user.id,
+            email: google.email,
+            teamId: login.membership.team_id || null,
+            role,
+            authenticationMethods: ['google'],
+          },
+          { policy }
+        )
+        return res.status(200).json({
+          token: issued.token,
+          sessionContract: issued.contract,
+          me: {
+            id: login.user.id,
+            email: google.email,
+            name: login.user.name,
+            picture: login.user.picture,
+            teamId: login.membership.team_id,
+            teamName: login.membership.team_name,
+            role,
+          },
+          isNewUser: login.isNewUser,
+        })
+      } catch (error) {
+        return next(error)
       }
-
-      const role = login.membership.role
-      const issued = login.issued
-      return res.status(200).json({
-        token: issued.token,
-        sessionContract: issued.contract,
-        me: {
-          id: login.user.id,
-          email: login.user.email,
-          name: login.user.name,
-          picture: login.user.picture,
-          teamId: login.membership.team_id || null,
-          teamName: login.membership.team_name,
-          role,
-        },
-      })
-    } catch (error) {
-      return next(error)
     }
-  })
+  )
+
+  router.post(
+    '/external/auth/password-login',
+    rateLimitMiddleware(externalUserRateLimitOptions('authentication_attempt', 'pre_auth')),
+    async (req, res, next) => {
+      try {
+        const email = String(req.body?.email || '')
+          .trim()
+          .toLowerCase()
+        const password = String(req.body?.password || '')
+        if (!email || !password) {
+          return res.status(400).json({ error: 'email and password are required' })
+        }
+
+        const policy = await resolveEffectiveUserAccessPolicy()
+        const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
+        if (selection.status !== 'selected') {
+          return res.status(426).json({ error: 'upgrade_required' })
+        }
+        const login = await authenticatePasswordAndIssueSession({
+          email,
+          password,
+          contract: selection.contract,
+          policy,
+        })
+        if (!login) {
+          return res.status(401).json({ error: 'Unauthorized' })
+        }
+        if ('error' in login) {
+          if (login.error === 'password_not_set') {
+            return res.status(409).json({ error: 'password_not_set' })
+          }
+          return res.status(403).json({ error: 'membership_not_found' })
+        }
+
+        const role = login.membership.role
+        const issued = login.issued
+        return res.status(200).json({
+          token: issued.token,
+          sessionContract: issued.contract,
+          me: {
+            id: login.user.id,
+            email: login.user.email,
+            name: login.user.name,
+            picture: login.user.picture,
+            teamId: login.membership.team_id || null,
+            teamName: login.membership.team_name,
+            role,
+          },
+        })
+      } catch (error) {
+        return next(error)
+      }
+    }
+  )
 
   router.post(
     '/external/auth/password-reset/request',
@@ -206,37 +214,41 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     }
   )
 
-  router.post('/external/auth/verify', async (req, res, next) => {
-    try {
-      const token = String(req.body?.token || '').trim()
-      if (!token || token.length > 4096) {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
+  router.post(
+    '/external/auth/verify',
+    rateLimitMiddleware(externalUserRateLimitOptions('session_verify', 'pre_auth')),
+    async (req, res, next) => {
+      try {
+        const token = String(req.body?.token || '').trim()
+        if (!token || token.length > 4096) {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        const authentication = await authenticateExternalUserSession(token, {
+          purpose: 'verify',
+          client: externalSessionClient(req),
+        })
+        if (authentication.status === 'upgrade_required') {
+          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+          return
+        }
+        if (authentication.status !== 'authenticated') {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        return res.status(200).json({ claims: authentication.claims })
+      } catch {
+        sendPublicApiError(
+          req,
+          res,
+          503,
+          'authority_unavailable',
+          'Session authority is temporarily unavailable.',
+          true
+        )
       }
-      const authentication = await authenticateExternalUserSession(token, {
-        purpose: 'verify',
-        client: externalSessionClient(req),
-      })
-      if (authentication.status === 'upgrade_required') {
-        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-        return
-      }
-      if (authentication.status !== 'authenticated') {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
-      return res.status(200).json({ claims: authentication.claims })
-    } catch {
-      sendPublicApiError(
-        req,
-        res,
-        503,
-        'authority_unavailable',
-        'Session authority is temporarily unavailable.',
-        true
-      )
     }
-  })
+  )
 
   router.post(
     '/external/auth/session-token',
@@ -465,98 +477,103 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     }
   )
 
-  router.post('/external/rpc/token', async (req, res, next) => {
-    try {
-      const sessionToken = String(req.body?.sessionToken || '').trim()
-      if (!sessionToken || sessionToken.length > 4096)
-        return res.status(401).json({ error: 'Unauthorized' })
-      const authentication = await authenticateExternalUserSession(sessionToken, {
-        purpose: 'rpc_legacy',
-        client: externalSessionClient(req),
-      })
-      if (authentication.status === 'upgrade_required') {
-        return res.status(426).json({ error: 'upgrade_required' })
-      }
-      if (authentication.status !== 'authenticated') {
-        return res.status(401).json({ error: 'Unauthorized' })
-      }
-      const claims = authentication.claims
-      let liveTeam: Awaited<ReturnType<typeof getLiveTeamMembership>> = null
+  router.post(
+    '/external/rpc/token',
+    rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'pre_auth')),
+    requireExternalSessionRateLimitContext({
+      purpose: 'rpc_legacy',
+      client: externalSessionClient,
+    }),
+    requireAuthenticatedExternalUserRateLimitContext,
+    rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'authenticated')),
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
-        liveTeam = claims.teamId ? await getLiveTeamMembership(claims.userId, claims.teamId) : null
-      } catch {
-        sendPublicApiError(
-          req,
-          res,
-          503,
-          'authority_unavailable',
-          'Authorization is temporarily unavailable.',
-          true
-        )
-        return
-      }
-      const requestedScopes = normalizeRequestedScopes(req.body?.scopes)
-      const hostRefs = normalizeRequestedHostRefs(req.body?.hostRefs)
-      if (hostRefs.length === 0) {
-        return res.status(403).json({ error: 'invalid_host_refs' })
-      }
-
-      const requestsSandboxUiScope = requestedScopes.includes('sandbox:ui:view')
-      const includesSandboxUiHostRef = hostRefs.includes(SANDBOX_UI_RPC_HOST_REF)
-      if (requestsSandboxUiScope && !includesSandboxUiHostRef) {
-        return res.status(403).json({ error: 'sandbox_ui_host_ref_required' })
-      }
-      if (includesSandboxUiHostRef && !requestsSandboxUiScope) {
-        return res.status(403).json({ error: 'sandbox_ui_scope_required' })
-      }
-
-      const agentHostRefs = hostRefs.filter(hostRef => hostRef !== SANDBOX_UI_RPC_HOST_REF)
-      if (includesSandboxUiHostRef && agentHostRefs.length > 0) {
-        return res.status(403).json({ error: 'sandbox_ui_host_ref_exclusive' })
-      }
-      if (agentHostRefs.length > 0) {
-        const userAgents = await getUserAgents(claims.userId)
-        const grantedHostRefs = new Set(userAgents.agentNames)
-        if (liveTeam) {
-          const teamAgents = await getTeamAgents(liveTeam.teamId)
-          for (const agentName of teamAgents.agentNames) grantedHostRefs.add(agentName)
+        const authentication = req.externalSessionAuthentication!
+        const claims = authentication.claims
+        let liveTeam: Awaited<ReturnType<typeof getLiveTeamMembership>> = null
+        try {
+          liveTeam = claims.teamId
+            ? await getLiveTeamMembership(claims.userId, claims.teamId)
+            : null
+        } catch {
+          sendPublicApiError(
+            req,
+            res,
+            503,
+            'authority_unavailable',
+            'Authorization is temporarily unavailable.',
+            true
+          )
+          return
         }
-        if (agentHostRefs.some(hostRef => !grantedHostRefs.has(hostRef))) {
-          return res.status(403).json({
-            error: liveTeam ? 'host_access_denied' : 'direct_host_access_required',
-          })
+        const requestedScopes = normalizeRequestedScopes(req.body?.scopes)
+        const hostRefs = normalizeRequestedHostRefs(req.body?.hostRefs)
+        if (hostRefs.length === 0) {
+          return res.status(403).json({ error: 'invalid_host_refs' })
         }
-      }
 
-      const extraScopes: RpcScope[] = []
-      // Resolve the K8s+DB sandbox UI grant only when the client explicitly
-      // asks for the scope. This keeps ordinary agent-token issuance from
-      // paying the sandbox UI recipe lookup cost or receiving unused grants.
-      if (
-        requestsSandboxUiScope &&
-        (await userHasUiBearingRecipeAccess(claims.userId, gateway, pool, liveTeam?.teamId ?? null))
-      ) {
-        extraScopes.push('sandbox:ui:view')
+        const requestsSandboxUiScope = requestedScopes.includes('sandbox:ui:view')
+        const includesSandboxUiHostRef = hostRefs.includes(SANDBOX_UI_RPC_HOST_REF)
+        if (requestsSandboxUiScope && !includesSandboxUiHostRef) {
+          return res.status(403).json({ error: 'sandbox_ui_host_ref_required' })
+        }
+        if (includesSandboxUiHostRef && !requestsSandboxUiScope) {
+          return res.status(403).json({ error: 'sandbox_ui_scope_required' })
+        }
+
+        const agentHostRefs = hostRefs.filter(hostRef => hostRef !== SANDBOX_UI_RPC_HOST_REF)
+        if (includesSandboxUiHostRef && agentHostRefs.length > 0) {
+          return res.status(403).json({ error: 'sandbox_ui_host_ref_exclusive' })
+        }
+        if (agentHostRefs.length > 0) {
+          const userAgents = await getUserAgents(claims.userId)
+          const grantedHostRefs = new Set(userAgents.agentNames)
+          if (liveTeam) {
+            const teamAgents = await getTeamAgents(liveTeam.teamId)
+            for (const agentName of teamAgents.agentNames) grantedHostRefs.add(agentName)
+          }
+          if (agentHostRefs.some(hostRef => !grantedHostRefs.has(hostRef))) {
+            return res.status(403).json({
+              error: liveTeam ? 'host_access_denied' : 'direct_host_access_required',
+            })
+          }
+        }
+
+        const extraScopes: RpcScope[] = []
+        // Resolve the K8s+DB sandbox UI grant only when the client explicitly
+        // asks for the scope. This keeps ordinary agent-token issuance from
+        // paying the sandbox UI recipe lookup cost or receiving unused grants.
+        if (
+          requestsSandboxUiScope &&
+          (await userHasUiBearingRecipeAccess(
+            claims.userId,
+            gateway,
+            pool,
+            liveTeam?.teamId ?? null
+          ))
+        ) {
+          extraScopes.push('sandbox:ui:view')
+        }
+        const auth = {
+          userId: claims.userId,
+          teamId: liveTeam?.teamId ?? null,
+          role: liveTeam?.role ?? 'member',
+        }
+        const result = issueRpcAccessToken(auth, req.body?.scopes, hostRefs, extraScopes)
+        if (!result) {
+          // Distinguish "you need a team for this" from a generic scope failure so
+          // the desktop app can act on it (e.g. prompt to join/switch a team)
+          // instead of surfacing an opaque "no access" state.
+          return res
+            .status(403)
+            .json({ error: classifyRpcTokenDenial(auth, req.body?.scopes, extraScopes) })
+        }
+        return res.status(200).json(result)
+      } catch (error) {
+        return next(error)
       }
-      const auth = {
-        userId: claims.userId,
-        teamId: liveTeam?.teamId ?? null,
-        role: liveTeam?.role ?? 'member',
-      }
-      const result = issueRpcAccessToken(auth, req.body?.scopes, hostRefs, extraScopes)
-      if (!result) {
-        // Distinguish "you need a team for this" from a generic scope failure so
-        // the desktop app can act on it (e.g. prompt to join/switch a team)
-        // instead of surfacing an opaque "no access" state.
-        return res
-          .status(403)
-          .json({ error: classifyRpcTokenDenial(auth, req.body?.scopes, extraScopes) })
-      }
-      return res.status(200).json(result)
-    } catch (error) {
-      return next(error)
     }
-  })
+  )
 
   return router
 }

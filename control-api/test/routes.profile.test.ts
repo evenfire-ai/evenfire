@@ -1022,4 +1022,86 @@ describe('routes/profile', () => {
       picture: 'https://example.com/avatar.png',
     })
   })
+
+  it('rate limits external credential attempts before authentication work', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 6,
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuth(
+      request(app).post('/external/auth/google-login')
+    ).send({ idToken: 'google-id-token' })
+
+    expect(response.status).toBe(429)
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      expect.stringMatching(/^external_authentication_attempt:ip:/),
+      5
+    )
+    expect(googleAuthMock.verifyGoogleIdToken).not.toHaveBeenCalled()
+  })
+
+  it('rate limits session verification before session authority work', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 11,
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuth(request(app).post('/external/auth/verify')).send(
+      { token: userSessionToken }
+    )
+
+    expect(response.status).toBe(429)
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
+      expect.stringMatching(/^external_session_verify:ip:/),
+      10
+    )
+  })
+
+  it('rate limits RPC token issuance by trusted authenticated user before minting', async () => {
+    rateLimitMock.checkAndIncrement
+      .mockResolvedValueOnce({
+        allowed: true,
+        remaining: 9,
+        resetMs: Date.now() + 60_000,
+        windowStartMs: Date.now(),
+        count: 1,
+      })
+      .mockResolvedValueOnce({
+        allowed: false,
+        remaining: 0,
+        resetMs: Date.now() + 60_000,
+        windowStartMs: Date.now(),
+        count: 11,
+      })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuth(request(app).post('/external/rpc/token')).send({
+      sessionToken: userSessionToken,
+      scopes: ['mcp:servers:list'],
+      hostRefs: ['agent-a'],
+    })
+
+    expect(response.status).toBe(429)
+    expect(rateLimitMock.checkAndIncrement).toHaveBeenNthCalledWith(
+      2,
+      'external_rpc_token:user:u1',
+      10
+    )
+    expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
+  })
 })
