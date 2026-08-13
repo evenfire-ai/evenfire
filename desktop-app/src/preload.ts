@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { type DesktopCommandId, isDesktopCommandId } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   HostMessageRequest,
@@ -7,6 +8,15 @@ import type {
 } from './types.js'
 
 const clerum = Object.freeze({
+  shortcuts: {
+    onCommand: (callback: (commandId: DesktopCommandId) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { commandId?: unknown }) => {
+        if (isDesktopCommandId(payload?.commandId)) callback(payload.commandId)
+      }
+      ipcRenderer.on('shortcuts:command', listener)
+      return () => ipcRenderer.off('shortcuts:command', listener)
+    },
+  },
   auth: {
     getSessionState: () => ipcRenderer.invoke('auth:getSessionState'),
     getDependenciesHealth: () => ipcRenderer.invoke('auth:getDependenciesHealth'),

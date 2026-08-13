@@ -1,3 +1,4 @@
+import type { DesktopCommandId } from './desktopCommands.js'
 import type {
   PluginAuditEntryView,
   PluginConsentRequest,
@@ -53,6 +54,9 @@ import {
 declare global {
   interface Window {
     clerum: {
+      shortcuts: {
+        onCommand: (callback: (commandId: DesktopCommandId) => void) => () => void
+      }
       auth: {
         getSessionState: () => Promise<SessionState>
         getDependenciesHealth: () => Promise<{

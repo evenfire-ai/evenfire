@@ -8,6 +8,7 @@ import {
   applySandboxUiPartitionPolicies,
   isSandboxUiNavigationWithinPrefix as isNavigationWithinPrefix,
 } from './sandboxUiPartitionPolicies.js'
+import { wireDesktopShortcutRouting } from './shortcutRouter.js'
 
 /**
  * Sandbox UI embed driver. Owns the lifecycle of the single active
@@ -106,6 +107,7 @@ type ActiveView = {
   rpcProxyOrigin: string
   cleanupClientRouteHandoff?: () => void
   cleanupParentClosed?: () => void
+  cleanupShortcutRouting?: () => void
 }
 
 let active: ActiveView | null = null
@@ -277,6 +279,7 @@ async function teardownActive(reason: 'replaced' | 'closed' | 'parent_closed'): 
   try {
     current.cleanupClientRouteHandoff?.()
     current.cleanupParentClosed?.()
+    current.cleanupShortcutRouting?.()
     // contentView.removeChildView is the documented teardown step; it both
     // detaches the view from layout AND severs the parent's ownership ref.
     if (!current.parentWindow.isDestroyed()) {
@@ -410,6 +413,13 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     rpcProxyOrigin: proxyOriginUrl,
     cleanupParentClosed,
   }
+
+  active.cleanupShortcutRouting = wireDesktopShortcutRouting({
+    source: 'sandbox',
+    sourceWebContents: view.webContents,
+    trustedRenderer: parentWindow.webContents,
+    isCurrentSource: () => active?.view.webContents.id === view.webContents.id,
+  })
 
   parentWindow.contentView.addChildView(view)
   // Re-apply bounds after attach. On macOS at fractional DPR (e.g. 2.4 on a
