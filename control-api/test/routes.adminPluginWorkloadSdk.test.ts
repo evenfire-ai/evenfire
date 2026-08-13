@@ -470,7 +470,34 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         capabilityFamily: 'promptBridge',
         provider: 'zai',
         allowedCallers: ['api'],
-        quotaLimits: { maxRequestsPerRun: 10 },
+        // Issue #348 (plan 2.6, RED until the strip lands): the deprecated
+        // per-run key is tolerated on write but STRIPPED before persistence —
+        // the persisted quotaLimits must be empty, not { maxRequestsPerRun: 10 }.
+        quotaLimits: {},
+      }),
+      '11111111-1111-4111-8111-111111111111'
+    )
+  })
+
+  it('accepts deprecated per-run keys, strips them, keeps active keys', async () => {
+    // Issue #348 (plan 2.6/2.7): deprecated per-run keys stay shape-validated
+    // (malformed still 400s, pinned above) but are dropped on write, while the
+    // active per-minute/token keys persist untouched.
+    vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        quotaLimits: {
+          maxRequestsPerRun: 5,
+          maxNotificationsPerRun: 7,
+          maxInvocationsPerMinute: 30,
+        },
+      })
+    expect(res.status).toBe(200)
+    expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
+      expect.objectContaining({
+        quotaLimits: { maxInvocationsPerMinute: 30 },
       }),
       '11111111-1111-4111-8111-111111111111'
     )

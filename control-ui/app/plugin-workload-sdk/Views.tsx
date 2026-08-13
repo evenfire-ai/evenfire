@@ -131,10 +131,6 @@ export function GrantsView({
                     )
                   : grant.allowedEventTypes
               const quotaParts: string[] = []
-              if (grant.quotaLimits.maxRequestsPerRun)
-                quotaParts.push(`${grant.quotaLimits.maxRequestsPerRun}/run`)
-              if (grant.quotaLimits.maxNotificationsPerRun)
-                quotaParts.push(`${grant.quotaLimits.maxNotificationsPerRun}/run`)
               if (grant.quotaLimits.maxInvocationsPerMinute)
                 quotaParts.push(`${grant.quotaLimits.maxInvocationsPerMinute}/min`)
               if (grant.quotaLimits.maxNotificationsPerMinute)
@@ -169,7 +165,8 @@ export function GrantsView({
                       <span className="cu-field__hint"> · users: {userRefsDisplay}</span>
                     ) : null}
                   </td>
-                  <td>{quotaParts.length === 0 ? '-' : quotaParts.join(', ')}</td>
+                  {/* No grant-level overrides: the platform per-minute ENV rate limits apply. */}
+                  <td>{quotaParts.length === 0 ? 'platform defaults' : quotaParts.join(', ')}</td>
                   <td className="cu-cell--right">
                     <Button type="button" variant="ghost" size="sm" onClick={() => onEdit(grant)}>
                       Edit

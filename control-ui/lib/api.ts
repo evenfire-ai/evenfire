@@ -3228,7 +3228,15 @@ export type PluginWorkloadSdkPromptTarget = {
 }
 
 export type PluginWorkloadSdkQuotaLimits = {
+  /**
+   * @deprecated No longer enforced (issue #348); platform per-minute ENV rate
+   * limits apply. Still returned on legacy grants; never sent by this UI.
+   */
   maxRequestsPerRun?: number
+  /**
+   * @deprecated No longer enforced (issue #348); platform per-minute ENV rate
+   * limits apply. Still returned on legacy grants; never sent by this UI.
+   */
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number

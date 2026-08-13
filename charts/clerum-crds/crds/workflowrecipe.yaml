@@ -1707,6 +1707,11 @@ spec:
                         maxRequestsPerRun:
                           type: integer
                           minimum: 1
+                          description: >-
+                            DEPRECATED — accepted for compatibility but no
+                            longer enforced. Platform per-minute rate limits
+                            apply instead. Scheduled for removal in a future
+                            version.
                         maxRequestContentBytes:
                           type: integer
                           minimum: 1
@@ -1757,6 +1762,11 @@ spec:
                         maxNotificationsPerRun:
                           type: integer
                           minimum: 1
+                          description: >-
+                            DEPRECATED — notifications per-run quota is
+                            accepted for compatibility but no longer enforced.
+                            Platform per-minute rate limits apply instead.
+                            Scheduled for removal in a future version.
                         maxNotificationsPerMinute:
                           type: integer
                           minimum: 1

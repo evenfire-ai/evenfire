@@ -1375,13 +1375,13 @@ Declaring this block forces an always-on `mcp-host`. Runtime enforcement is addi
 | -------------------------------------------- | -------- | --------- | --------------------------------------------------------------------------- |
 | `promptBridge.allowedModels`                 | string[] | No        | Max 32.                                                                     |
 | `promptBridge.maxOutputTokens`               | integer  | No        | Min 1.                                                                      |
-| `promptBridge.maxRequestsPerRun`             | integer  | No        | Min 1.                                                                      |
+| `promptBridge.maxRequestsPerRun`             | integer  | No        | Min 1. **Deprecated:** accepted but ignored; platform per-minute rate limits apply. Removal planned. |
 | `promptBridge.maxConcurrentInvocations`      | integer  | No        | Min 1. Runtime default 5.                                                   |
-| `promptBridge.maxInvocationsPerMinute`       | integer  | No        | Min 1. Runtime default 60.                                                  |
+| `promptBridge.maxInvocationsPerMinute`       | integer  | No        | Min 1. Platform default 180 when unset (ENV `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN`, issue #348). |
 | `clientNotifications.allowedEventTypes`      | string[] | **Yes**\† | 1–64 entries.                                                               |
 | `clientNotifications.allowedTargetRefs`      | string[] | No        | Max 64.                                                                     |
 | `clientNotifications.allowedUserRefs`        | boolean  | No        | Whether `userRef` targets are permitted.                                    |
-| `clientNotifications.maxNotificationsPerRun` | integer  | No        | Min 1.                                                                      |
+| `clientNotifications.maxNotificationsPerRun` | integer  | No        | Min 1. **Deprecated:** accepted but ignored; platform per-minute rate limits apply. Removal planned. |
 | `allowedCallers`                             | string[] | No        | Workload ids permitted to call the SDK. **Empty = all declared workloads.** |
 | `idempotencyKeyPattern`                      | string   | No        | Regex; runtime default `^[a-zA-Z0-9_-]{1,128}$`. Must compile.              |
 
