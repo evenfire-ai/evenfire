@@ -77,7 +77,9 @@ function groupByName(
 // "Connector" / "Plugin" mirror the labels in PublishToRegistryForm.
 function entryTypeLabel(e: OwnedRegistryEntry): string {
   const kind = e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
-  return kind === 'mcp-server' ? 'Connector' : 'Plugin'
+  if (kind === 'mcp-server') return 'Connector'
+  if (kind === 'llm-hook') return 'Guardrail hook'
+  return 'Plugin'
 }
 
 /**

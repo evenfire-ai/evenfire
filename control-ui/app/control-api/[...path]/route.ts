@@ -108,9 +108,17 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade',
 ])
 
-function buildUpstreamUrl(req: NextRequest, path: string[]): string {
+function buildUpstreamUrl(req: NextRequest): string {
   const base = CONTROL_API_INTERNAL_URL.replace(/\/$/, '')
-  return `${base}/${path.join('/')}${req.nextUrl.search}`
+  // Forward the RAW, still-percent-encoded path — NOT the decoded [...path]
+  // catch-all params. Next.js decodes catch-all segments, so `path.join('/')`
+  // turns an encoded `%2F` inside an org-scoped registry name (`@org/name`) into a
+  // real `/`, which splits the segment and 404s control-api's path-param routes
+  // (e.g. entries/:name/versions/:version). Reading the pathname off the raw URL
+  // preserves the original encoding, keeping `@org/name` a single `:name` segment
+  // downstream. The `/control-api` mount prefix is stripped to match the upstream.
+  const rawPath = new URL(req.url).pathname.replace(/^\/control-api(?=\/|$)/, '')
+  return `${base}${rawPath}${req.nextUrl.search}`
 }
 
 function copyRequestHeaders(req: NextRequest): Headers {
@@ -150,11 +158,11 @@ function copyResponseHeaders(source: Headers): Headers {
 
 async function proxyControlApi(
   req: NextRequest,
-  context: { params: { path: string[] } | Promise<{ path: string[] }> }
+  _context: { params: { path: string[] } | Promise<{ path: string[] }> }
 ): Promise<NextResponse> {
-  const params = await context.params
-  const path = Array.isArray(params.path) ? params.path : []
-  const upstreamUrl = buildUpstreamUrl(req, path)
+  // Path comes from the raw request URL (encoding-preserving), not context.params
+  // (which Next.js decodes — see buildUpstreamUrl).
+  const upstreamUrl = buildUpstreamUrl(req)
   const headers = copyRequestHeaders(req)
 
   const hasBody = req.method !== 'GET' && req.method !== 'HEAD'
