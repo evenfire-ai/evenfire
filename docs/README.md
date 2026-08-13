@@ -48,6 +48,7 @@ Use this index for long-form docs.
 | Doc                                                                           | Description                                                |
 | ----------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | [Connect Telegram](how-to/connect-telegram.md)                                | Minikube env or CRD channel path                           |
+| [Connect Slack](how-to/connect-slack.md)                                      | Slack app scopes, request URL, conversation verification   |
 | [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                               |
 | [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON or CRD allowlist path                        |
 | [LLM providers overview](llm-providers/README.md)                             | Which providers are supported and how they fit together    |
