@@ -159,6 +159,7 @@ describe('embed preload contract', () => {
     const source = await fs.readFile(PRELOAD_PATH, 'utf8')
     expect(source).not.toContain('findInPage')
     expect(source).not.toContain('stopFindInPage')
+    expect(source).not.toContain('focusActive')
     expect(source).not.toContain('shortcuts:command')
   })
 })
