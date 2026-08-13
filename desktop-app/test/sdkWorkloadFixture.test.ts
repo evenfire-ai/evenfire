@@ -3,7 +3,21 @@ import { createSdkWorkloadGrants } from './e2e-playwright/sdk-client-notificatio
 
 type GrantRequest = {
   allowedCallers: string[]
+  allowedEventTypes?: string[]
+  allowedModels?: string[]
+  allowedUserRefs?: string[]
   capabilityFamily: 'clientNotifications' | 'promptBridge'
+  defaultTargetRef?: string
+  promptTargets?: Array<{
+    credentialSlot: string
+    model: string
+    provider: string
+    targetRef: string
+  }>
+  provider?: string
+  quotaLimits: Record<string, number>
+  recipeName: string
+  recipeNamespace: string
 }
 
 const originalAdminPassword = process.env.E2E_ADMIN_PASSWORD
@@ -36,23 +50,42 @@ describe('createSdkWorkloadGrants', () => {
     await createSdkWorkloadGrants('recipe-default', 'user-default')
 
     expect(capturedGrantRequests()).toEqual([
-      expect.objectContaining({ capabilityFamily: 'promptBridge', allowedCallers: ['sdk-caller'] }),
-      expect.objectContaining({
-        capabilityFamily: 'clientNotifications',
+      {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'recipe-default',
+        capabilityFamily: 'promptBridge',
+        provider: 'openai',
+        allowedModels: ['gpt-5.4-mini'],
+        promptTargets: [
+          {
+            targetRef: 'primary-openai',
+            provider: 'openai',
+            model: 'gpt-5.4-mini',
+            credentialSlot: 'openai-api-key',
+          },
+        ],
+        defaultTargetRef: 'primary-openai',
         allowedCallers: ['sdk-caller'],
-      }),
+        quotaLimits: { maxRequestsPerRun: 3 },
+      },
+      {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'recipe-default',
+        capabilityFamily: 'clientNotifications',
+        allowedEventTypes: ['e2e.test.notification'],
+        allowedUserRefs: ['user-default'],
+        allowedCallers: ['sdk-caller'],
+        quotaLimits: { maxNotificationsPerRun: 10 },
+      },
     ])
   })
 
   it('uses explicit callers for promptBridge and clientNotifications', async () => {
     await createSdkWorkloadGrants('recipe-sandbox', 'user-sandbox', ['sandbox-ui'], true)
 
-    expect(capturedGrantRequests()).toEqual([
-      expect.objectContaining({ capabilityFamily: 'promptBridge', allowedCallers: ['sandbox-ui'] }),
-      expect.objectContaining({
-        capabilityFamily: 'clientNotifications',
-        allowedCallers: ['sandbox-ui'],
-      }),
+    expect(capturedGrantRequests().map(request => request.allowedCallers)).toEqual([
+      ['sandbox-ui'],
+      ['sandbox-ui'],
     ])
   })
 
@@ -60,10 +93,15 @@ describe('createSdkWorkloadGrants', () => {
     await createSdkWorkloadGrants('recipe-notification-only', 'user-sandbox', ['sandbox-ui'], false)
 
     expect(capturedGrantRequests()).toEqual([
-      expect.objectContaining({
+      {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'recipe-notification-only',
         capabilityFamily: 'clientNotifications',
+        allowedEventTypes: ['e2e.test.notification'],
+        allowedUserRefs: ['user-sandbox'],
         allowedCallers: ['sandbox-ui'],
-      }),
+        quotaLimits: { maxNotificationsPerRun: 10 },
+      },
     ])
   })
 })
