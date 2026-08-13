@@ -1175,7 +1175,9 @@ export default function HostDetailsPage() {
 
         {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
 
-        {activeTab === 'access' && <HostAccessTab hostName={routeName} />}
+        {activeTab === 'access' && (
+          <HostAccessTab hasPendingRename={hasPendingRename} hostName={routeName} />
+        )}
       </div>
       {showDeleteAgentConfirm && (
         <div
