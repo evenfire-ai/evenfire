@@ -194,18 +194,32 @@ PG_DATABASE="$(secret_value POSTGRES_DB)"
 
 TMP_DIR="$(mktemp -d)"
 PORT_FORWARD_PID=''
-cleanup() {
-  local status=$?
-  if [[ -n "${PORT_FORWARD_PID}" ]]; then
+LOCAL_PORT=''
+stop_port_forward() {
+  if [[ -z "${PORT_FORWARD_PID}" ]] || ! kill -0 "${PORT_FORWARD_PID}" >/dev/null 2>&1; then
+    PORT_FORWARD_PID=''
+    return 0
+  fi
+  local command_line
+  command_line="$(ps -p "${PORT_FORWARD_PID}" -o command= 2>/dev/null || true)"
+  if [[ "${command_line}" == *'port-forward'* &&
+        "${command_line}" == *"svc/${PG_SERVICE}"* &&
+        "${command_line}" == *"${LOCAL_PORT}:5432"* ]]; then
     kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
     wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   fi
+  PORT_FORWARD_PID=''
+}
+cleanup() {
+  local status=$?
+  stop_port_forward
   rm -rf "${TMP_DIR}"
   exit "${status}"
 }
 trap cleanup EXIT
 
-LOCAL_PORT="$(python3 - <<'PY'
+choose_local_port() {
+  python3 - <<'PY'
 import socket
 
 sock = socket.socket()
@@ -213,24 +227,38 @@ sock.bind(("127.0.0.1", 0))
 print(sock.getsockname()[1])
 sock.close()
 PY
-)"
-kubectl --context="${CONTEXT}" -n "${CONTROL_NS}" port-forward \
-  --address=127.0.0.1 "svc/${PG_SERVICE}" "${LOCAL_PORT}:5432" \
-  >"${TMP_DIR}/port-forward.log" 2>&1 &
-PORT_FORWARD_PID=$!
-wait_for_tcp "${LOCAL_PORT}" || {
+}
+
+port_forward_ready=false
+for _attempt in 1 2 3 4 5; do
+  LOCAL_PORT="$(choose_local_port)"
+  kubectl --context="${CONTEXT}" -n "${CONTROL_NS}" port-forward \
+    --address=127.0.0.1 "svc/${PG_SERVICE}" "${LOCAL_PORT}:5432" \
+    >"${TMP_DIR}/port-forward.log" 2>&1 &
+  PORT_FORWARD_PID=$!
+  if wait_for_tcp "${LOCAL_PORT}"; then
+    port_forward_ready=true
+    break
+  fi
+  stop_port_forward
+done
+[[ "${port_forward_ready}" == true ]] || {
   cat "${TMP_DIR}/port-forward.log" >&2 || true
   die 'Minikube PostgreSQL port-forward did not become reachable'
 }
 
-ADMIN_DSN="$(python3 - "${PG_USER}" "${PG_PASSWORD}" "${LOCAL_PORT}" <<'PY'
+ADMIN_DSN="$(printf '%s\0%s\0%s' "${PG_USER}" "${PG_PASSWORD}" "${LOCAL_PORT}" | python3 -c '
 from urllib.parse import quote
 import sys
 
-user, password, port = sys.argv[1:]
-print(f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}@127.0.0.1:{port}/postgres", end="")
-PY
-)"
+user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
+user = user.decode()
+password = password.decode()
+port = port.decode()
+print("postgresql://{}:{}@127.0.0.1:{}/postgres".format(
+    quote(user, safe=""), quote(password, safe=""), port
+), end="")
+')"
 unset PG_USER PG_PASSWORD PG_DATABASE
 
 run_suite control-api
