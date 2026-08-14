@@ -11,9 +11,9 @@ import { readFileSync } from 'node:fs'
  * not weaken these assertions to pass early.
  *
  * Covered:
- *   1. Code defaults 200/180/600/600 (decision Q3: recalibrated upward from
- *      the old hardcoded 120/60; request-bucket and pre-auth unchanged at 600
- *      but moved to ENV).
+ *   1. Code defaults 150/120/600/600 (decision Q3: recalibrated from the old
+ *      hardcoded 120/60; request-bucket and pre-auth unchanged at 600 but
+ *      moved to ENV).
  *   2. Each ENV override honored.
  *   3. Invalid values fail loudly at import (positiveIntegerFromEnv).
  *   4. Empty string falls back to the code default.
@@ -37,12 +37,12 @@ const EXPECTED: Array<{ env: RateLimitKey; field: string; defaultValue: number }
   {
     env: 'CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN',
     field: 'pluginSdkNotificationsRlPerMin',
-    defaultValue: 200,
+    defaultValue: 150,
   },
   {
     env: 'CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN',
     field: 'pluginSdkPromptBridgeRlPerMin',
-    defaultValue: 180,
+    defaultValue: 120,
   },
   {
     env: 'CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN',
@@ -97,11 +97,11 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     vi.resetModules()
   })
 
-  it('defaults the four platform rate limits to 200/180/600/600', async () => {
+  it('defaults the four platform rate limits to 150/120/600/600', async () => {
     const config = await loadConfigWith({})
 
-    expect(config.pluginSdkNotificationsRlPerMin).toBe(200)
-    expect(config.pluginSdkPromptBridgeRlPerMin).toBe(180)
+    expect(config.pluginSdkNotificationsRlPerMin).toBe(150)
+    expect(config.pluginSdkPromptBridgeRlPerMin).toBe(120)
     expect(config.pluginSdkRequestBucketRlPerMin).toBe(600)
     expect(config.pluginSdkPreauthRlPerMin).toBe(600)
   })
@@ -126,8 +126,8 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
       CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: '',
     })
 
-    expect(config.pluginSdkNotificationsRlPerMin).toBe(200)
-    expect(config.pluginSdkPromptBridgeRlPerMin).toBe(180)
+    expect(config.pluginSdkNotificationsRlPerMin).toBe(150)
+    expect(config.pluginSdkPromptBridgeRlPerMin).toBe(120)
     expect(config.pluginSdkRequestBucketRlPerMin).toBe(600)
     expect(config.pluginSdkPreauthRlPerMin).toBe(600)
   })

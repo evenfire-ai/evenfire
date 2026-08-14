@@ -729,11 +729,11 @@ export const config: Config = {
   // would effectively fail open.
   pluginSdkNotificationsRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN',
-    200
+    150
   ),
   pluginSdkPromptBridgeRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN',
-    180
+    120
   ),
   pluginSdkRequestBucketRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN',

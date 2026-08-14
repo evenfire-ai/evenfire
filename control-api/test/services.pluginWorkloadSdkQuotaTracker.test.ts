@@ -52,10 +52,11 @@ const grant = (
 // ─── Issue #348 (plan D3) — platform per-minute defaults ─────────────────
 //
 // RED-FIRST (plan §6.6): these tests assert the POST-change ceilings
-// (promptBridge 180/min, clientNotifications 200/min, sourced from
+// (promptBridge 120/min, clientNotifications 150/min, sourced from
 // config.pluginSdkPromptBridgeRlPerMin / config.pluginSdkNotificationsRlPerMin).
-// Against pre-change code the hardcoded defaults are 60/120, so the
-// exactly-at-the-ceiling cases FAIL until Phase 1 step 1.4 lands. Do not
+// Each case is POSITIVE (at the ceiling → allowed) AND NEGATIVE (one over → denied
+// with quota_exceeded). Against pre-change code the hardcoded defaults are 60/120,
+// so the exactly-at-the-ceiling cases FAIL until Phase 1 step 1.4 lands. Do not
 // weaken them to pass early.
 //
 // Plan D3.3 (per-run leg inert): after Phase 1, `consumeQuota` is DELETED
@@ -70,29 +71,32 @@ describe('checkRateLimit — platform per-minute rate limits (issue #348)', () =
     vi.mocked(sdkDb.countRecentInvocations).mockReset()
   })
 
-  it('allows promptBridge at exactly 180/minute and denies at 181 (platform default)', async () => {
+  it('allows promptBridge at exactly 120/minute (positive) and denies at 121 (negative, platform default)', async () => {
     const noOverrides = grant({ quotaLimits: {} })
 
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(180)
+    // POSITIVE: at the ceiling → allowed.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(120)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
     ).resolves.toEqual({ ok: true })
 
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(181)
+    // NEGATIVE: one over the ceiling → denied.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(121)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
     ).resolves.toMatchObject({
       ok: false,
       error: 'quota_exceeded',
       retryable: false,
-      message: expect.stringContaining('180/minute'),
+      message: expect.stringContaining('120/minute'),
     })
   })
 
-  it('allows clientNotifications at exactly 200/minute and denies at 201, narrowed to the eventType', async () => {
+  it('allows clientNotifications at exactly 150/minute (positive) and denies at 151 (negative), narrowed to the eventType', async () => {
     const noOverrides = grant({ capabilityFamily: 'clientNotifications', quotaLimits: {} })
 
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(200)
+    // POSITIVE: at the ceiling → allowed.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(150)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'clientNotifications', noOverrides, {
         eventType: 'lead.followup.due',
@@ -105,7 +109,8 @@ describe('checkRateLimit — platform per-minute rate limits (issue #348)', () =
       { detail: 'lead.followup.due' }
     )
 
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(201)
+    // NEGATIVE: one over the ceiling → denied.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(151)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'clientNotifications', noOverrides, {
         eventType: 'lead.followup.due',
@@ -114,14 +119,14 @@ describe('checkRateLimit — platform per-minute rate limits (issue #348)', () =
       ok: false,
       error: 'quota_exceeded',
       retryable: false,
-      message: expect.stringContaining('200/minute'),
+      message: expect.stringContaining('150/minute'),
     })
   })
 
-  it('frees the recipe once the trailing window drains (deny at 181, allow at 0)', async () => {
+  it('frees the recipe once the trailing window drains (deny at 121, allow at 0)', async () => {
     const noOverrides = grant({ quotaLimits: {} })
 
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(181)
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(121)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
     ).resolves.toMatchObject({ ok: false, error: 'quota_exceeded' })

@@ -330,7 +330,7 @@ describeRealPostgres(
     })
 
     it('enforces the per-minute window from the audit trail and frees after 61 seconds (backdated)', async () => {
-      // promptBridge at the 180/min platform default: 181 in-window rows deny.
+      // promptBridge at the 120/min platform default: 121 in-window rows deny.
       const bridgeRecipe = `stepless-window-bridge-${randomBytes(4).toString('hex')}`
       await assertStepless(bridgeRecipe)
       await seedPromptBridgeGrant(bridgeRecipe, {})
@@ -340,7 +340,7 @@ describeRealPostgres(
         if (!grant) throw new Error(`seeded promptBridge grant not found for ${bridgeRecipe}`)
         return grant
       })()
-      await seedInvocationWindowRows(bridgeRecipe, 'promptBridge', 'window-probe', 181)
+      await seedInvocationWindowRows(bridgeRecipe, 'promptBridge', 'window-probe', 121)
 
       await expect(
         quotaTracker.checkRateLimit(NS, bridgeRecipe, 'promptBridge', bridgeGrant)
@@ -348,7 +348,7 @@ describeRealPostgres(
         ok: false,
         error: 'quota_exceeded',
         retryable: false,
-        message: expect.stringContaining('180/minute'),
+        message: expect.stringContaining('120/minute'),
       })
 
       // Backdate the whole burst out of the trailing minute (the window clock is
@@ -363,7 +363,7 @@ describeRealPostgres(
         quotaTracker.checkRateLimit(NS, bridgeRecipe, 'promptBridge', bridgeGrant)
       ).resolves.toEqual({ ok: true })
 
-      // clientNotifications mirror at the 200/min platform default, narrowed to
+      // clientNotifications mirror at the 150/min platform default, narrowed to
       // the eventType (detail column).
       const notifRecipe = `stepless-window-notif-${randomBytes(4).toString('hex')}`
       await assertStepless(notifRecipe)
@@ -374,7 +374,7 @@ describeRealPostgres(
         if (!grant) throw new Error(`seeded clientNotifications grant not found for ${notifRecipe}`)
         return grant
       })()
-      await seedInvocationWindowRows(notifRecipe, 'clientNotifications', 'lead.followup.due', 201)
+      await seedInvocationWindowRows(notifRecipe, 'clientNotifications', 'lead.followup.due', 151)
 
       await expect(
         quotaTracker.checkRateLimit(NS, notifRecipe, 'clientNotifications', notifGrant, {
@@ -384,7 +384,7 @@ describeRealPostgres(
         ok: false,
         error: 'quota_exceeded',
         retryable: false,
-        message: expect.stringContaining('200/minute'),
+        message: expect.stringContaining('150/minute'),
       })
 
       await db.pool.query(

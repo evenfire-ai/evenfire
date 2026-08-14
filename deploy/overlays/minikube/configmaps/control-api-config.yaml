@@ -56,10 +56,10 @@ data:
   # Plugin Workload SDK platform rate limits (issue #348). This overlay is a
   # FULL-COPY of the base ConfigMap — omitting a key here silently falls back
   # to code defaults, so all four keys are registered at the code defaults
-  # (200/180/600/600). Per-run SDK quotas are deprecated and ignored; the
+  # (150/120/600/600). Per-run SDK quotas are deprecated and ignored; the
   # per-minute windows reset every 60s.
-  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "200"
-  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "180"
+  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "150"
+  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "120"
   CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "600"
   CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: "600"
   # OSS default: point at the shared registry so a self-hoster browses the

@@ -59,8 +59,8 @@ a window is throttled for at most one minute and is never permanently trapped
 
 | ENV variable | Default | Limits |
 |---|---|---|
-| `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN` | `200` | clientNotifications invocations per minute |
-| `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN` | `180` | promptBridge invocations per minute |
+| `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN` | `150` | clientNotifications invocations per minute |
+| `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN` | `120` | promptBridge invocations per minute |
 | `CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN` | `600` | shared SDK request bucket per minute |
 | `CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN` | `600` | pre-authorization checks per minute |
 
