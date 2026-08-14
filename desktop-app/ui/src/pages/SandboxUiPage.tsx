@@ -180,7 +180,7 @@ export function SandboxUiPage({
   const embedSlotRef = useRef<HTMLDivElement>(null)
   const activeFindClientRequestIdRef = useRef<number | null>(null)
   const localSearchStateRef = useRef<AppFindState>({ status: 'idle' })
-  const lastLocalSearchRequestIdRef = useRef(0)
+  const lastLocalSearchRequestIdRef = useRef(shortcutApp ? localSearchRequestId : 0)
   const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
   const lastActionRequestIdRef = useRef(0)

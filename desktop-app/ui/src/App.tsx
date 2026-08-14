@@ -574,7 +574,6 @@ export function App() {
   }, [vm.authenticatedPrincipalIdentity])
 
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
-    setSandboxLocalSearchRequestId(0)
     setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
   }, [])

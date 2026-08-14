@@ -124,8 +124,14 @@ describe('SandboxUiPage contextual-search focus ownership', () => {
     await screen.findByRole('textbox', { name: 'Find in current app' })
     first.unmount()
 
-    render(<SandboxUiPage localSearchRequestId={0} />)
-    await openApp()
+    render(
+      <SandboxUiPage
+        localSearchRequestId={1}
+        shortcutApp={{ appRef: apps[0]!.appRef, defaultPath: '/', title: 'Sales CRM' }}
+        shortcutOpenRequestId={1}
+      />
+    )
+    await screen.findByRole('button', { name: 'Back to apps' })
     await new Promise(resolve => window.setTimeout(resolve, 0))
 
     expect(screen.queryByRole('textbox', { name: 'Find in current app' })).toBeNull()

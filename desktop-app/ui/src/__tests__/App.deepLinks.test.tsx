@@ -339,6 +339,17 @@ describe('App deep-link orchestration', () => {
     act(() => emitCommand?.('search.current'))
     expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(1)
     expect(appHeaderHarness.props?.searchFocusRequestId).toBe(0)
+
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/replacement',
+        label: 'Replacement app',
+        defaultPath: '/',
+      })
+      sandboxUiPageHarness.props?.onEmbeddedAppMounted?.()
+    })
+    act(() => emitCommand?.('search.current'))
+    expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(2)
   })
 
   it('opens the palette, executes eligible registry actions, and captures the sandbox view', () => {
