@@ -166,10 +166,10 @@ export default function UserDetailsPage() {
         .filter(agentName => !assignedAgentNames.includes(agentName))
         .map(agentName => ({
           value: agentName,
-          label: getAgentDisplayName(agentName),
+          label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
-    [assignedAgentNames, hostNameOptions]
+    [assignedAgentNames, hostNameOptions, hosts]
   )
   const userCommunicationConversations = useMemo(
     () =>

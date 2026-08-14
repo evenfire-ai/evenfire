@@ -63,6 +63,28 @@ describe('GfsGrantList', () => {
     expect(screen.getByText('1st:mcp-host/unknown')).toBeTruthy()
   })
 
+  it('labels a host subject by its displayName, falling back to the identifier when blank', () => {
+    render(
+      <GfsGrantList
+        agents={[
+          { id: '1st:mcp-host/withdisplay', name: 'withdisplay', displayName: 'Support Bot' },
+          { id: '1st:mcp-host/blankdisplay', name: 'blankdisplay', displayName: '   ' },
+        ]}
+        items={[
+          grantItem({ id: 'g-1', subject: { type: 'host', id: '1st:mcp-host/withdisplay' } }),
+          grantItem({ id: 'g-2', subject: { type: 'host', id: '1st:mcp-host/blankdisplay' } }),
+        ]}
+        onRevoke={vi.fn()}
+        subjects={subjects}
+      />
+    )
+
+    // Present displayName wins over the identifier.
+    expect(screen.getByText('Support Bot')).toBeTruthy()
+    // A whitespace-only displayName must NOT render a blank label — fall back to the id-based name.
+    expect(screen.getByText('blankdisplay')).toBeTruthy()
+  })
+
   it('fires the revoke callback from the row button with an accessible name', () => {
     const onRevoke = vi.fn()
     const item = grantItem({ id: 'grant-1' })

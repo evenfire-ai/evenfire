@@ -4,6 +4,7 @@ import { Button, DataTable, EmptyState, ReferenceTag } from '@components/Common'
 import type { TeamMember } from '../../../src/types'
 import { useAuthContext } from '../contexts/AuthContext'
 import { useNavigationContext } from '../contexts/NavigationContext'
+import { useAgentsDataController } from '../hooks/domain/useAgentsDataController'
 import { useTeamsDataController } from '../hooks/domain/useTeamsDataController'
 import { clickableRowProps } from '../lib/clickableRowProps'
 
@@ -32,6 +33,7 @@ export function TeamsPage() {
   const { teams, loading, error, teamDirectory, teamDirectoryHydrated, truncated, refresh } =
     useTeamsDataController()
   const { selectedTeam, handleOpenContextDetails, handleOpenTeamDetails } = useNavigationContext()
+  const { agentDisplayByName } = useAgentsDataController()
   const [floatingTooltip, setFloatingTooltip] = useState<TeamFloatingTooltip | null>(null)
 
   const setFloatingTooltipNode = useCallback(
@@ -95,7 +97,10 @@ export function TeamsPage() {
       kind: 'agent',
       ...position,
       title: `Active agents (${agentNames.length})`,
-      items: visibleItems,
+      // Visible agent name (spec.host). The catalog map only covers the current
+      // user's accessible agents; other teams' agents have no display source here,
+      // so fall back to the identifier for those (not the Decision #6 `|| name`).
+      items: visibleItems.map(agentName => agentDisplayByName[agentName] ?? agentName),
       overflowCount,
     })
   }
