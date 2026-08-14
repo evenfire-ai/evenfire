@@ -2091,6 +2091,10 @@ export class AppService {
       onClearPersisted: uploadId => this.clearDesktopGfsUpload(uploadId),
     })
     const promise = job.start()
+    // Capability/auth failures can reject before a resumable session exists.
+    // Observe that early rejection immediately; once a session exists, the
+    // lifecycle observer below records the durable failed state as usual.
+    void promise.catch(() => undefined)
     const pending = { job, promise, scope }
     this.gfsPendingUploadJobs.add(pending)
     let session: DesktopUploadSession
