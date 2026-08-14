@@ -38,7 +38,13 @@ vi.mock('../../control-api/src/middleware/externalSessionAuth.js', () => ({
     next()
   },
 }))
-vi.mock('../../control-api/src/services/directory/index.js', () => directoryMock)
+vi.mock('../../control-api/src/services/directory/index.js', async () => {
+  const actual = await import('../../control-api/src/services/directory/membership.js')
+  directoryMock.createManagedInvitationForUser.mockImplementation(
+    actual.createManagedInvitationForUser
+  )
+  return directoryMock
+})
 vi.mock('../../control-api/src/services/rateLimiterService.js', () => rateLimitMock)
 
 const claims = {
@@ -63,6 +69,20 @@ function makeExternalApp() {
   return app
 }
 
+function stubControlApiFetch(controlApp: express.Express) {
+  const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+    const upstream = await request(controlApp).post('/external/members/invitations').send(body)
+
+    return new Response(JSON.stringify(upstream.body), {
+      status: upstream.status,
+      headers: { 'content-type': 'application/json' },
+    })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
 describe('member invitation cross-service error contract', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -82,16 +102,7 @@ describe('member invitation cross-service error contract', () => {
 
   it('preserves the authoritative invalid-email response through the real client parser', async () => {
     const controlApp = makeControlApp()
-    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
-      const upstream = await request(controlApp).post('/external/members/invitations').send(body)
-
-      return new Response(JSON.stringify(upstream.body), {
-        status: upstream.status,
-        headers: { 'content-type': 'application/json' },
-      })
-    })
-    vi.stubGlobal('fetch', fetchMock)
+    const fetchMock = stubControlApiFetch(controlApp)
 
     await request(makeExternalApp())
       .post('/members/invite')
@@ -112,4 +123,49 @@ describe('member invitation cross-service error contract', () => {
     )
     expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
   })
+
+  it.each([
+    {
+      label: 'empty assignments',
+      body: { email: 'invitee@example.com', teams: [] },
+      publicError: 'Email and at least one team are required',
+      directoryCalls: 1,
+    },
+    {
+      label: 'an overlong name',
+      body: {
+        email: 'invitee@example.com',
+        name: 'a'.repeat(121),
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      },
+      publicError: 'Name is too long',
+      directoryCalls: 0,
+    },
+    {
+      label: 'too many teams',
+      body: {
+        email: 'invitee@example.com',
+        teams: Array.from({ length: 51 }, (_, index) => ({
+          teamId: `team-${index}`,
+          role: 'member',
+        })),
+      },
+      publicError: 'Too many teams selected',
+      directoryCalls: 0,
+    },
+  ])(
+    'preserves the authoritative response for $label through the real client parser',
+    async ({ body, publicError, directoryCalls }) => {
+      const fetchMock = stubControlApiFetch(makeControlApp())
+
+      await request(makeExternalApp())
+        .post('/members/invite')
+        .set('authorization', 'Bearer good-token')
+        .send(body)
+        .expect(400, { error: publicError })
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(directoryMock.createManagedInvitationForUser).toHaveBeenCalledTimes(directoryCalls)
+    }
+  )
 })
