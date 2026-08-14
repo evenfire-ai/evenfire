@@ -210,8 +210,9 @@ describe('useGfsBrowserController', () => {
     ['403 Forbidden: escalation_rejected', false],
     ['403 Forbidden: foreign_agent_forbidden', false],
     ['403 Forbidden: operator_link_inactive', true],
+    ['401 Unauthorized', true],
   ] as const)(
-    'distinguishes per-operation 403s from session authority (%s)',
+    'distinguishes resource policy verdicts from session authority (%s)',
     (message, expected) => {
       expect(isGfsSessionAuthorityFailure(message, 'operation')).toBe(expected)
     }
@@ -460,11 +461,26 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('current').textContent).toBe('none')
   })
 
-  it('clears cached operator state after a 403 and retries only through fresh server discovery', async () => {
+  it('downgrades a revoked operator link to ordinary user scope through fresh discovery', async () => {
     const rootResourceId = '11111111-1111-1111-1111-111111111111'
-    let active = true
+    const ordinaryResource = {
+      resourceId: '33333333-3333-4333-8333-333333333333',
+      rid: '33333333333343338333333333333333',
+      gfsUri: 'gfs://main/33333333333343338333333333333333',
+      name: 'Shared report.md',
+      kind: 'file' as const,
+      path: '/Shared report.md',
+      version: 1,
+      bytes: 12,
+      permissions: ['read'],
+    }
+    let state: 'operator' | 'revoking' | 'ordinary' = 'operator'
     const listAccessible = vi.fn(async () => {
-      if (!active) throw new Error('403 operator_link_inactive')
+      if (state === 'revoking') {
+        state = 'ordinary'
+        throw new Error('403 operator_link_inactive')
+      }
+      if (state === 'ordinary') return { items: [ordinaryResource], nextCursor: null }
       return { items: [], nextCursor: null, rootResourceId, view: 'operator' as const }
     })
     Object.defineProperty(window, 'clerum', {
@@ -487,19 +503,51 @@ describe('useGfsBrowserController', () => {
     render(<Probe />, { wrapper: Harness })
     await waitFor(() => expect(screen.getByTestId('operator-root').textContent).toBe('yes'))
 
-    active = false
+    state = 'revoking'
     await act(async () => {
       screen.getByRole('button', { name: 'reset browser' }).click()
     })
-    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('active'))
+    await waitFor(() => expect(screen.getByTestId('view').textContent).toBe('shared'))
     expect(screen.getByTestId('current').textContent).toBe('none')
-    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(screen.getByTestId('operator-root').textContent).toBe('no')
+    expect(listAccessible).toHaveBeenCalledTimes(3)
+  })
 
-    active = true
-    await act(async () => {
-      screen.getByRole('button', { name: 'retry access' }).click()
+  it('fails closed after a second lifecycle denial instead of retrying forever', async () => {
+    const rootResourceId = '11111111-1111-1111-1111-111111111111'
+    let deny = false
+    const listAccessible = vi.fn(async () => {
+      if (deny) throw new Error('403 operator_link_inactive')
+      return { items: [], nextCursor: null, rootResourceId, view: 'operator' as const }
     })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
     await waitFor(() => expect(screen.getByTestId('operator-root').textContent).toBe('yes'))
+
+    deny = true
+    await act(async () => {
+      screen.getByRole('button', { name: 'reset browser' }).click()
+    })
+
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
     expect(listAccessible).toHaveBeenCalledTimes(3)
   })
 

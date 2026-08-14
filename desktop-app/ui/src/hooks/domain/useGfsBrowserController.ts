@@ -149,6 +149,11 @@ export function isGfsSessionAuthorityFailure(
   )
 }
 
+/** A revoked operator link downgrades an active Desktop session to user scope. */
+export function isGfsOperatorLinkRevocation(message: string): boolean {
+  return message.toLowerCase().includes('operator_link_inactive')
+}
+
 /** Stable user-facing state for root/folder read failures crossing Electron IPC. */
 export function describeGfsBrowserFailure(message: string): GfsBrowserFailure {
   if (isUninitializedDriveError(message)) {
@@ -209,6 +214,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // capability decision: a later server-backed request is the only way out.
   const [accessState, setAccessState] = useState<GfsBrowserAccessState>('active')
   const previousSessionScopeRef = useRef<string | null>(null)
+  const operatorViewRef = useRef(false)
+  const operatorRecoveryAttemptedRef = useRef(false)
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
   const currentIsDirectory = current?.kind === 'directory'
@@ -230,6 +237,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       setCrumbs([])
       setOpenError(null)
       setAccessState('active')
+      operatorViewRef.current = false
+      operatorRecoveryAttemptedRef.current = false
       void queryClient.removeQueries({ queryKey: [...desktopQueryKeys.gfsRoot, previous] })
     }
   }, [queryClient, sessionScope])
@@ -265,6 +274,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     () => (operatorRootResourceId ? rootCrumb(operatorRootResourceId) : null),
     [operatorRootResourceId]
   )
+
+  useEffect(() => {
+    if (view === 'operator') {
+      const wasOperator = operatorViewRef.current
+      operatorViewRef.current = true
+      // A successful operator discovery starts a fresh recovery cycle. Do not
+      // reset the guard on every render while stale operator data is still
+      // visible after a failed discovery; the next lifecycle denial must then
+      // fail closed instead of retrying indefinitely.
+      if (!wasOperator && firstAccessiblePage) operatorRecoveryAttemptedRef.current = false
+    } else if (view === 'shared' && accessState === 'active' && firstAccessiblePage) {
+      operatorViewRef.current = false
+      operatorRecoveryAttemptedRef.current = false
+    }
+  }, [accessState, firstAccessiblePage, view])
   const rootContractError =
     firstAccessiblePage?.view === 'operator' && !operatorRoot
       ? 'operator_root_missing: operator view did not include a valid rootResourceId'
@@ -360,8 +384,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     enabled:
       Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
-  const revokeAccess = useCallback(() => {
-    setAccessState('revoked')
+  const clearGfsState = useCallback(() => {
     setCrumbs([])
     setOpenError(null)
     // Remove every GFS response for this Desktop session. In particular, never
@@ -369,17 +392,37 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // revocation response.
     queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
   }, [queryClient])
+  const revokeAccess = useCallback(() => {
+    setAccessState('revoked')
+    clearGfsState()
+  }, [clearGfsState])
+  const downgradeToOrdinaryUser = useCallback(() => {
+    // A link revoke removes only operator authority. The authenticated Desktop
+    // user remains eligible for explicitly shared GFS resources, so clear the
+    // operator cache and let fresh discovery resolve the user view.
+    setAccessState('active')
+    clearGfsState()
+  }, [clearGfsState])
+  const handleAuthorityFailure = useCallback(
+    (message: string, surface: 'discovery' | 'operation' = 'operation'): boolean => {
+      if (!isGfsSessionAuthorityFailure(message, surface)) return false
+      if (isGfsOperatorLinkRevocation(message) && !operatorRecoveryAttemptedRef.current) {
+        operatorRecoveryAttemptedRef.current = true
+        downgradeToOrdinaryUser()
+      } else revokeAccess()
+      return true
+    },
+    [downgradeToOrdinaryUser, revokeAccess]
+  )
   const retryAccess = useCallback(() => {
     // This does not restore a local capability. It only permits the normal
     // discovery request to run again, so an explicit server-side reactivation
     // remains the sole authority that can restore the operator root.
     setAccessState('active')
   }, [])
-  // Root discovery is a session/authority boundary. A children request is a
-  // per-resource read: a generic 401/403 there can mean that one shared
-  // folder was revoked while the rest of the session remains valid. Only
-  // explicit lifecycle codes may revoke from that surface; do not collapse
-  // the entire browser state for a resource-scoped policy denial.
+  // Root discovery is a session/authority boundary. A resource-scoped 403 is
+  // a policy verdict and must remain local, while a 401 still means the
+  // authenticated session is no longer accepted and revokes session state.
   const queryAuthorizationError = [
     accessibleQuery.error
       ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
@@ -387,14 +430,37 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     childrenQuery.error
       ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
       : null,
+    affordancesQuery.error
+      ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
+      : null,
+    grantsQuery.error
+      ? { message: toMessage(grantsQuery.error), surface: 'operation' as const }
+      : null,
+    sharesQuery.error
+      ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
+      : null,
   ]
     .filter(
       (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
     )
     .find(entry => isGfsSessionAuthorityFailure(entry.message, entry.surface))
   useEffect(() => {
-    if (queryAuthorizationError && accessState !== 'revoked') revokeAccess()
-  }, [accessState, queryAuthorizationError, revokeAccess])
+    if (!queryAuthorizationError || accessState === 'revoked') return
+    const genericOperatorDiscoveryFailure =
+      queryAuthorizationError.surface === 'discovery' &&
+      operatorViewRef.current &&
+      !/(^|\D)401(\D|$)/.test(queryAuthorizationError.message.toLowerCase())
+    if (
+      (genericOperatorDiscoveryFailure ||
+        isGfsOperatorLinkRevocation(queryAuthorizationError.message)) &&
+      !operatorRecoveryAttemptedRef.current
+    ) {
+      operatorRecoveryAttemptedRef.current = true
+      downgradeToOrdinaryUser()
+      return
+    }
+    revokeAccess()
+  }, [accessState, downgradeToOrdinaryUser, queryAuthorizationError, revokeAccess])
   const refreshShares = useCallback(async () => {
     const resourceId = current?.resourceId
     if (!resourceId) return
@@ -546,14 +612,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         // Opening a URI is an operation on one resource. A generic 403 may be
         // a per-resource policy decision; only typed lifecycle failures or a
         // bare 401 invalidate the session-wide authority state.
-        if (isGfsSessionAuthorityFailure(message, 'operation')) revokeAccess()
-        else setOpenError(message)
+        if (!handleAuthorityFailure(message, 'operation')) setOpenError(message)
         return false
       } finally {
         setResolving(false)
       }
     },
-    [operatorRoot, revokeAccess]
+    [handleAuthorityFailure, operatorRoot]
   )
 
   const openChild = useCallback((child: GfsBrowserChild) => {
@@ -659,6 +724,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     goToCrumb,
     reset,
     revokeAccess,
+    downgradeToOrdinaryUser,
+    handleAuthorityFailure,
     retryAccess,
     refreshAffordances,
     grant,

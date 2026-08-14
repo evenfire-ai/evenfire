@@ -251,25 +251,32 @@ describe('retireDesktopUser', () => {
     expect(String(mocks.txQuery.mock.calls[6]?.[0])).toContain("outcome = 'deleted'")
   })
 
-  it('fails closed for retained tombstone history with no active generation', async () => {
+  it('retires a user after the Control UI already revoked the operator generation', async () => {
     const { retireDesktopUser } = await import('../src/services/directory/users.js')
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
       .mockResolvedValueOnce({ rows: [{ has_link_history: true }], rowCount: 1 })
-    mocks.retireParentInTransaction.mockResolvedValueOnce(false)
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    mocks.retireParentInTransaction.mockResolvedValueOnce(true)
 
     await expect(
       retireDesktopUser(
         { kind: 'control_admin', controlAdminId: ADMIN_ID },
         USER_ID,
-        'tombstone cannot be retired twice',
+        'retire after operator revoke',
         'idem-tombstone-1',
         'request-tombstone-1'
       )
-    ).rejects.toMatchObject({ code: 'retirement_conflict' })
-    expect(mocks.txQuery).toHaveBeenCalledTimes(3)
-    expect(mocks.txQuery.mock.calls.map(([sql]) => String(sql))).not.toEqual(
+    ).resolves.toMatchObject({
+      id: USER_ID,
+      outcome: 'retired',
+      operationId: OPERATION_ID,
+      lifecycleVersion: 2,
+      replayed: false,
+    })
+    expect(mocks.txQuery.mock.calls.map(([sql]) => String(sql))).toEqual(
       expect.arrayContaining([expect.stringContaining("lifecycle_state = 'retired'")])
     )
   })

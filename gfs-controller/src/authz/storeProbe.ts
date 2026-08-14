@@ -30,7 +30,6 @@ export interface PingPool {
     release(err?: Error): void;
   }>;
 }
-
 /** Minimal ephemeral-client surface (structurally satisfied by pg.Client). */
 export interface ProbeClient {
   connect(): Promise<void>;
@@ -123,6 +122,21 @@ const AUTHORITY_PROJECTION_SQL =
   "(attname = 'session_version' AND atttypid = 'int4'::regtype)) " +
   "FROM pg_attribute WHERE attrelid = 'control_admin_users'::regclass AND attnum > 0 AND NOT attisdropped " +
   "AND attname = ANY (ARRAY['id','status','session_version'])) AS authority_admin_columns_ready" +
+  ", (SELECT count(*) = 1 " +
+  "AND EXISTS (SELECT 1 FROM pg_attrdef defs JOIN pg_attribute attrs " +
+  "ON attrs.attrelid = defs.adrelid AND attrs.attnum = defs.adnum " +
+  "WHERE defs.adrelid = 'control_admin_users'::regclass " +
+  "AND attrs.attname = 'session_version' " +
+  "AND attrs.attnotnull " +
+  "AND pg_get_expr(defs.adbin, defs.adrelid) IN ('1', '1::integer')) " +
+  "AND NOT EXISTS (SELECT 1 FROM control_admin_users WHERE session_version < 1) " +
+  "AND EXISTS (SELECT 1 FROM pg_constraint " +
+  "WHERE conrelid = 'control_admin_users'::regclass " +
+  "AND conname = 'control_admin_session_version_positive' " +
+  "AND contype = 'c' AND convalidated) " +
+  "FROM pg_attribute WHERE attrelid = 'control_admin_users'::regclass " +
+  "AND attname = 'session_version' AND attnum > 0 AND NOT attisdropped) " +
+  'AS authority_admin_session_epoch_ready' +
   ", (SELECT count(*) = 7 AND bool_and((attname = 'id' AND atttypid = 'uuid'::regtype) OR " +
   "(attname = 'lineage_id' AND atttypid = 'uuid'::regtype) OR " +
   "(attname = 'generation' AND atttypid = 'int4'::regtype) OR " +
@@ -296,6 +310,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       if (
         row?.authority_users_columns_ready !== true ||
         row?.authority_admin_columns_ready !== true ||
+        row?.authority_admin_session_epoch_ready !== true ||
         row?.authority_links_columns_ready !== true ||
         row?.authority_users_privileges_ready !== true ||
         row?.authority_admin_privileges_ready !== true ||
@@ -303,7 +318,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: GFS lifecycle authority projection is missing " +
-            "(control-api migration 0095 not applied?)"
+            "(control-api migration 0095/0096 not applied?)"
         );
       }
       if (

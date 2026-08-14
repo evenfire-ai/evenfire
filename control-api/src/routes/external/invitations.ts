@@ -1,8 +1,7 @@
 import { Router } from 'express'
-import { rateLimit } from 'express-rate-limit'
 import { randomBytes } from 'node:crypto'
 import { config } from '../../config.js'
-import { externalClientRateLimitKey } from '../../middleware/externalClientIdentity.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -35,16 +34,14 @@ function invitationLookupIpKey(req: {
 
 export function createExternalInvitationsRouter(): Router {
   const router = Router()
-  const externalInvitationsEdgeRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: config.approvalRlExternalEdgePerMin,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    keyGenerator: externalClientRateLimitKey,
-  })
+  const externalInvitationsEdgeRateLimits = createExternalClientRateLimiters(
+    'invitations',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
   // Keep one edge limiter at the common prefix so every invitation endpoint,
   // including Desktop authorization, is covered once.
-  router.use('/external/invitations', externalInvitationsEdgeRateLimit)
+  router.use('/external/invitations', ...externalInvitationsEdgeRateLimits)
   router.get(
     '/external/invitations/token/:token',
     rateLimitMiddleware({

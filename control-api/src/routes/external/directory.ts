@@ -1,7 +1,6 @@
 import { Router } from 'express'
-import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
-import { externalClientRateLimitKey } from '../../middleware/externalClientIdentity.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   requireExternalTeamParamMatch,
   requireValidExternalSessionToken,
@@ -10,14 +9,16 @@ import { searchDirectory } from '../../services/directory/index.js'
 
 export function createExternalDirectoryRouter(): Router {
   const router = Router()
-  const externalDirectoryRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: config.approvalRlExternalEdgePerMin,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    keyGenerator: externalClientRateLimitKey,
-  })
-  router.use('/external/directory', externalDirectoryRateLimit, requireValidExternalSessionToken)
+  const externalDirectoryRateLimits = createExternalClientRateLimiters(
+    'directory',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
+  router.use(
+    '/external/directory',
+    ...externalDirectoryRateLimits,
+    requireValidExternalSessionToken
+  )
 
   router.get(
     '/external/directory/search',

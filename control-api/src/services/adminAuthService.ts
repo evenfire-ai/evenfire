@@ -562,6 +562,22 @@ export async function deleteControlAdmin(
         LIMIT 1`,
       [actorAdminId]
     )
+
+    // Serialize retirement against a concurrent delete/disable. The lifecycle
+    // transition is active -> disabled; a replay must be a stable not-found
+    // result and must not revoke another generation or append duplicate audit.
+    const targetResult = await db.query(
+      `SELECT id, username, email, status
+         FROM control_admin_users
+        WHERE id = $1
+        FOR UPDATE`,
+      [adminId]
+    )
+    const target = targetResult.rows[0] as
+      | { id: string; username: string; email: string | null; status: 'active' | 'disabled' }
+      | undefined
+    if (!target || target.status !== 'active') return { error: 'not_found' as const }
+
     await gfsDesktopOperatorLinkService.retireParentInTransaction(db, {
       kind: 'control_admin',
       parentId: adminId,
@@ -572,6 +588,7 @@ export async function deleteControlAdmin(
       `UPDATE control_admin_users
           SET status = 'disabled', session_version = session_version + 1, updated_at = NOW()
         WHERE id = $1
+          AND status = 'active'
         RETURNING id, username, email`,
       [adminId]
     )

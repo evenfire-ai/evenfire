@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { GFS_FILE_UPLOAD_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
-import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import { type GfsCrumb, isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
 import type { Tone } from '@/uiTypes'
 import { FilesPage } from '../FilesPage'
 
@@ -20,6 +20,7 @@ vi.mock('@hooks/domain/useGfsBrowserController', async importOriginal => ({
 }))
 
 function baseController() {
+  const revokeAccess = vi.fn()
   return {
     current: null,
     crumbs: [],
@@ -69,7 +70,14 @@ function baseController() {
     deleteResource: vi.fn(),
     mutating: false,
     reset: vi.fn(),
-    revokeAccess: vi.fn(),
+    revokeAccess,
+    handleAuthorityFailure: vi.fn(
+      (message: string, surface: 'discovery' | 'operation' = 'operation') => {
+        const handled = isGfsSessionAuthorityFailure(message, surface)
+        if (handled) revokeAccess()
+        return handled
+      }
+    ),
     retryAccess: vi.fn(),
     refreshAffordances: vi.fn(),
   }
@@ -295,6 +303,50 @@ describe('FilesPage', () => {
       )
     }
   )
+
+  it('keeps the session and mutation controls after a resource-scoped 403', async () => {
+    const rootResourceId = '11111111-1111-1111-1111-111111111111'
+    const createFolder = vi.fn(async () => {
+      throw new Error('403 Forbidden: manage_acl_required')
+    })
+    const revokeAccess = vi.fn()
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      view: 'operator',
+      isOperatorRoot: true,
+      current: {
+        resourceId: rootResourceId,
+        gfsUri: 'gfs://main/11111111111111111111111111111111',
+        name: 'Global File System',
+        kind: 'directory',
+        version: 0,
+        bytes: 0,
+        isDriveRoot: true,
+      },
+      affordances: {
+        held: ['read', 'write', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'write', 'manage_acl'],
+        canCreateShare: true,
+      },
+      createFolder,
+      revokeAccess,
+    })
+
+    renderFilesPage(pushToast)
+    fireEvent.click(screen.getByTestId('gfs-create-folder-action'))
+    const form = screen.getByRole('form', { name: 'Create folder' })
+    fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'Denied' } })
+    fireEvent.click(form.querySelector('button[type="submit"]')!)
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('403 Forbidden: manage_acl_required', 'error')
+    )
+    expect(revokeAccess).not.toHaveBeenCalled()
+    expect(screen.getByRole('form', { name: 'Create folder' })).toBeTruthy()
+    expect(screen.getByTestId('gfs-manage-access-action')).toBeTruthy()
+  })
 
   it.each([
     ['unauthorized', '403 Forbidden: operator_link_inactive', 'File access is not authorized'],
@@ -1389,6 +1441,52 @@ describe('FilesPage', () => {
       await vi.advanceTimersByTimeAsync(10_000)
     })
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-download')
+  })
+
+  it('revokes browser authority when a download reports a session failure', async () => {
+    const download = vi.fn(async () => {
+      throw new Error('401 Unauthorized')
+    })
+    const revokeAccess = vi.fn()
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      revokeAccess,
+      handleAuthorityFailure: vi.fn(
+        (message: string, surface: 'discovery' | 'operation' = 'operation') => {
+          const handled = isGfsSessionAuthorityFailure(message, surface)
+          if (handled) revokeAccess()
+          return handled
+        }
+      ),
+      accessibleResources: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'report.pdf',
+          kind: 'file',
+          path: '/report.pdf',
+          version: 0,
+          bytes: 3,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    fireEvent.click(screen.getByRole('button', { name: 'Download report.pdf' }))
+
+    await waitFor(() => expect(revokeAccess).toHaveBeenCalledOnce())
+    expect(pushToast).toHaveBeenCalledWith('401 Unauthorized', 'error')
   })
 
   it('previews an image file in a closable modal without downloading it to disk', async () => {

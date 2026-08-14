@@ -111,6 +111,10 @@ export function createContextSharedFilesystemsRouter(): Router {
         // shared filesystem object must never be downloaded just to suppress
         // its body at the public Express boundary.
         if (req.method === 'HEAD') {
+          // Fetch normally exposes a null body for HEAD, but cancel an unusual
+          // non-null stream explicitly so a custom upstream cannot retain a
+          // connection after the metadata response is complete.
+          if (upstreamRes.body) void upstreamRes.body.cancel().catch(() => undefined)
           res.end()
           return
         }

@@ -64,21 +64,46 @@ header coherence are tracked as independent global follow-ups:
 - [Issue #352](https://github.com/evenfire-ai/evenfire/issues/352)
 - [Issue #353](https://github.com/evenfire-ai/evenfire/issues/353)
 
+The non-GFS external directory, team, member, invitation, workflow, decision,
+notification, and OAuth route families also retain two independent edge gates:
+the source-IP backstop is 1,200/min and the per-session fairness bucket is
+120/min; authenticated operation buckets remain at 60/min where the route
+defines them. The enforced hierarchy is `60 <= 120 < 1,200`. The IP gate is intentionally first, so rotating or malformed session
+tokens cannot evade the source-IP ceiling, while a shared NAT is not limited to
+the narrower per-session budget. These gates do not change the GFS
+read/mutation budgets above.
+
 ## Migration sequence
 
-| Migration | Responsibility |
-| --- | --- |
-| `0091_gfs_desktop_operator_links` | Explicit `initial_setup` Desktop/Admin relationship. |
-| `0092_gfs_audit_actor_correlation` | Desktop actor, effective admin, source, and request correlation. |
-| `0093_gfs_desktop_operator_link_generations` | Immutable generations, lineage, tombstones, CAS, and restrictive parent FKs. |
-| `0094_desktop_user_retirement_lifecycle` | Active/retired Desktop lifecycle, typed retirement actors, and idempotent outcomes. |
-| `0095_gfs_lifecycle_authority_projection` | GFSC lifecycle projection, readiness checks, and least-privilege reads. |
-| `0096_control_admin_session_version_default` | Safe session-generation defaults for existing Control Admin rows. |
+| Migration                                    | Responsibility                                                                      |
+| -------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `0091_gfs_desktop_operator_links`            | Explicit `initial_setup` Desktop/Admin relationship.                                |
+| `0092_gfs_audit_actor_correlation`           | Desktop actor, effective admin, source, and request correlation.                    |
+| `0093_gfs_desktop_operator_link_generations` | Immutable generations, lineage, tombstones, CAS, and restrictive parent FKs.        |
+| `0094_desktop_user_retirement_lifecycle`     | Active/retired Desktop lifecycle, typed retirement actors, and idempotent outcomes. |
+| `0095_gfs_lifecycle_authority_projection`    | GFSC lifecycle projection, readiness checks, and least-privilege reads.             |
+| `0096_control_admin_session_version_default` | Safe session-generation defaults for existing Control Admin rows.                   |
 
 The deployment pre-gate applies migrations in order, reconciles the runtime
 roles and ACL manifest, verifies readiness, and only then exposes consumers.
 Rollback disables new issuance and mutations; it does not down-migrate or
 delete retained lifecycle evidence.
+
+## Rollout and compatibility contract
+
+The first deployment of generation-aware authority deliberately invalidates
+older external session tokens that do not carry `authGeneration`. Operators
+must expect an ordinary sign-in again after the rollout; this is a bounded
+security migration, not a legacy-token grace path. Deploy the Control API
+token producer only after the GFSC lifecycle projection and readiness gate are
+green, so a mixed fleet cannot issue claims an older data-plane verifier would
+silently ignore.
+
+The external member-retirement endpoint now requires a non-empty `reason` and
+an `Idempotency-Key`. First-party Profile UI callers send both values. Clients
+using the external API directly must adopt this contract before upgrading; the
+server does not synthesize an idempotency key because doing so would make a
+retry non-deterministic and could duplicate a retirement side effect.
 
 ## Validation surface
 

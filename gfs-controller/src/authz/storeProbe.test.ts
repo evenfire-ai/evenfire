@@ -69,6 +69,7 @@ interface FakeClientBehavior {
   auditActorCorrelationConstraintReady?: boolean;
   authorityUsersColumnsReady?: boolean;
   authorityAdminColumnsReady?: boolean;
+  authorityAdminSessionEpochReady?: boolean;
   authorityLinksColumnsReady?: boolean;
   authorityUsersPrivilegesReady?: boolean;
   authorityAdminPrivilegesReady?: boolean;
@@ -130,6 +131,7 @@ function fakeClientFactory(behavior: FakeClientBehavior): {
                 behavior.auditActorCorrelationConstraintReady !== false,
               authority_users_columns_ready: behavior.authorityUsersColumnsReady !== false,
               authority_admin_columns_ready: behavior.authorityAdminColumnsReady !== false,
+              authority_admin_session_epoch_ready: behavior.authorityAdminSessionEpochReady !== false,
               authority_links_columns_ready: behavior.authorityLinksColumnsReady !== false,
               authority_users_privileges_ready: behavior.authorityUsersPrivilegesReady !== false,
               authority_admin_privileges_ready: behavior.authorityAdminPrivilegesReady !== false,
@@ -229,6 +231,19 @@ describe("createPermissionStoreProbe", () => {
     expect(probeClient.lastSql()).toContain("FROM pg_attribute");
     expect(probeClient.lastSql()).toContain("'cached_authorization_source'");
     expect(probeClient.lastSql()).toContain("gfs_audit_record_type_fields_valid");
+  });
+
+  it("rejects readiness when migration 0096 default or backfill is incomplete", async () => {
+    const { factory } = fakeClientFactory({ authorityAdminSessionEpochReady: false });
+    const probe = createPermissionStoreProbe({
+      pool: fakePool(),
+      connectionString: DSN,
+      intervalMs: INTERVAL,
+      storageRole: "reader",
+      clientFactory: factory,
+      now: () => 0,
+    });
+    await expect(probe()).rejects.toThrow(/0095\/0096/);
   });
 
   it.each([
@@ -396,6 +411,7 @@ describe("createPermissionStoreProbe", () => {
     expect(sql).toContain("NOT attnotnull");
     expect(sql).toContain("authority_users_columns_ready");
     expect(sql).toContain("authority_admin_columns_ready");
+    expect(sql).toContain("authority_admin_session_epoch_ready");
     expect(sql).toContain("authority_links_columns_ready");
     expect(sql).toContain("authority_users_privileges_ready");
     expect(sql).toContain("authority_admin_privileges_ready");

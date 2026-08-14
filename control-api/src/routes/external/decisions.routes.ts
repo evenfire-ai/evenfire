@@ -1,8 +1,7 @@
 import { NextFunction, Request, Response, Router } from 'express'
-import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import { requireApprovalDecisionAccess } from '../../middleware/approvalDecisionAccess.js'
-import { externalClientRateLimitKey } from '../../middleware/externalClientIdentity.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import { requireValidExternalSessionToken } from '../../middleware/externalSessionAuth.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import { mcpHostHttpMetrics } from '../../middleware/mcpHostHttpMetrics.js'
@@ -45,17 +44,15 @@ function userAgent(req: Request): string | null {
 
 export function createExternalUserApprovalDecisionsRouter(): Router {
   const router = Router()
-  const externalApprovalEdgeRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: config.approvalRlExternalEdgePerMin,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    keyGenerator: externalClientRateLimitKey,
-  })
+  const externalApprovalEdgeRateLimits = createExternalClientRateLimiters(
+    'workflow-approvals',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
 
   router.get(
     '/external/workflow-approvals/pending',
-    externalApprovalEdgeRateLimit,
+    ...externalApprovalEdgeRateLimits,
     mcpHostHttpMetrics('external_user_approval_requests_pending'),
     requireValidExternalSessionToken,
     rateLimitMiddleware({
@@ -93,7 +90,7 @@ export function createExternalUserApprovalDecisionsRouter(): Router {
 
   router.post(
     '/external/workflow-approvals/:id/decide',
-    externalApprovalEdgeRateLimit,
+    ...externalApprovalEdgeRateLimits,
     mcpHostHttpMetrics('external_user_approval_requests_decide'),
     requireValidExternalSessionToken,
     requireValidApprovalIdParam,

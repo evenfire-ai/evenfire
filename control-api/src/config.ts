@@ -132,6 +132,7 @@ type Config = {
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
   approvalRlExternalEdgePerMin: number
+  approvalRlExternalClientIpPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
   // External Desktop GFS is a separate authority plane. The process-local
@@ -357,6 +358,23 @@ function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
   if (raw === 'managed' || raw === 'self-hosted') return raw
   throw new Error(`REGISTRY_CONNECTION_MODE must be 'managed' or 'self-hosted' (got '${raw}')`)
 }
+
+// External routes intentionally have three independent dimensions: the
+// operation/user budget is the narrowest, the session edge budget is wider,
+// and the source-IP backstop is widest so a shared NAT cannot become a
+// platform-wide choke point. Reject an incoherent deployment at boot instead
+// of silently running with a different security/capacity contract.
+const externalRateLimitConfig = (() => {
+  const operation = positiveIntegerFromEnv('APPROVAL_RL_EXTERNAL_PER_MIN', 60)
+  const session = positiveIntegerFromEnv('APPROVAL_RL_EXTERNAL_EDGE_PER_MIN', 120)
+  const clientIp = positiveIntegerFromEnv('APPROVAL_RL_EXTERNAL_CLIENT_IP_PER_MIN', 1200)
+  if (!(operation <= session && session < clientIp)) {
+    throw new Error(
+      'APPROVAL_RL_EXTERNAL_PER_MIN must be <= APPROVAL_RL_EXTERNAL_EDGE_PER_MIN < APPROVAL_RL_EXTERNAL_CLIENT_IP_PER_MIN'
+    )
+  }
+  return { operation, session, clientIp }
+})()
 
 function failClosedBooleanFromEnv(name: string): boolean {
   const raw = process.env[name]
@@ -743,8 +761,13 @@ export const config: Config = {
   ),
   approvalRlRequestPerMin: Number(process.env.APPROVAL_RL_REQUEST_PER_MIN || 120),
   approvalRlRefreshPerMin: Number(process.env.APPROVAL_RL_REFRESH_PER_MIN || 20),
-  approvalRlExternalPerMin: Number(process.env.APPROVAL_RL_EXTERNAL_PER_MIN || 60),
-  approvalRlExternalEdgePerMin: Number(process.env.APPROVAL_RL_EXTERNAL_EDGE_PER_MIN || 120),
+  approvalRlExternalPerMin: externalRateLimitConfig.operation,
+  approvalRlExternalEdgePerMin: externalRateLimitConfig.session,
+  // The source-IP backstop is intentionally wider than the per-session edge
+  // bucket. A shared NAT must not turn a 120/min fairness budget into a
+  // platform-wide ceiling; token/session fairness remains independently
+  // bounded by approvalRlExternalEdgePerMin.
+  approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
   // Approved GFS authority-boundary budgets. Keep them fixed here rather than

@@ -398,9 +398,11 @@ export async function findMembership(userId: string, teamId: string) {
     `SELECT tm.team_id, tm.role, t.name AS team_name
        FROM team_members tm
        JOIN teams t ON t.id = tm.team_id
+       JOIN users u ON u.id = tm.user_id
       WHERE tm.user_id = $1
         AND tm.team_id = $2
         AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [userId, teamId]
   )
@@ -419,6 +421,7 @@ export async function getMe(userId: string, teamId: string) {
   LEFT JOIN teams t ON t.id = tm.team_id
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE u.id = $1
+        AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [userId, teamId]
   )
@@ -481,6 +484,7 @@ export async function listMembers(teamId: string) {
        JOIN users u ON u.id = tm.user_id
       WHERE tm.team_id = $1
         AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
    ORDER BY u.email ASC`,
     [teamId]
   )
@@ -491,9 +495,11 @@ export async function findMemberRole(teamId: string, userId: string) {
   const result = await pool.query(
     `SELECT role
        FROM team_members
+       JOIN users u ON u.id = team_members.user_id
       WHERE team_id = $1
         AND user_id = $2
         AND status = 'active'
+        AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [teamId, userId]
   )
@@ -843,6 +849,7 @@ export async function requestProfilePasswordReset(email: string): Promise<{ requ
     `SELECT id, email, name
        FROM users
       WHERE email = $1
+        AND lifecycle_state = 'active'
       LIMIT 1`,
     [normalizedEmail]
   )
@@ -1404,6 +1411,7 @@ export async function searchDirectory(teamId: string, q: string) {
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE tm.team_id = $1
         AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
         AND (
           u.email ILIKE $2
           OR COALESCE(u.name, '') ILIKE $2
@@ -1421,9 +1429,11 @@ export async function listManageableTeamsForUser(userId: string) {
     `SELECT t.id, t.name, tm.role
        FROM team_members tm
        JOIN teams t ON t.id = tm.team_id
+       JOIN users u ON u.id = tm.user_id
       WHERE tm.user_id = $1
         AND tm.status = 'active'
         AND tm.role IN ('admin', 'inviter')
+        AND u.lifecycle_state = 'active'
       ORDER BY t.name ASC`,
     [userId.trim()]
   )
@@ -1441,12 +1451,14 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
   const result = normalizedTargetUserId
     ? await pool.query(
         `WITH managed_teams AS (
-           SELECT tm.team_id, tm.role AS manager_role, t.name AS team_name
+         SELECT tm.team_id, tm.role AS manager_role, t.name AS team_name
              FROM team_members tm
              JOIN teams t ON t.id = tm.team_id
+             JOIN users manager ON manager.id = tm.user_id
             WHERE tm.user_id = $1
               AND tm.status = 'active'
               AND tm.role IN ('admin', 'inviter')
+              AND manager.lifecycle_state = 'active'
          ),
          eligible_target AS (
            SELECT 1
@@ -1487,6 +1499,7 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
       LEFT JOIN managed_teams mt ON mt.team_id = target_tm.team_id
       LEFT JOIN profiles p ON p.user_id = u.id
           WHERE u.id::text = $2
+            AND u.lifecycle_state = 'active'
             AND EXISTS (SELECT 1 FROM eligible_target)
        GROUP BY u.id, u.email, u.name, u.picture, p.display_name
        ORDER BY COALESCE(p.display_name, u.name, u.email) ASC`,
@@ -1497,9 +1510,11 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
            SELECT tm.team_id, tm.role AS manager_role, t.name AS team_name
              FROM team_members tm
              JOIN teams t ON t.id = tm.team_id
+             JOIN users manager ON manager.id = tm.user_id
             WHERE tm.user_id = $1
               AND tm.status = 'active'
               AND tm.role IN ('admin', 'inviter')
+              AND manager.lifecycle_state = 'active'
          ),
          visible_users AS (
            SELECT DISTINCT target_tm.user_id
@@ -1507,6 +1522,8 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
              JOIN team_members target_tm
                ON target_tm.team_id = mt.team_id
               AND target_tm.status = 'active'
+             JOIN users visible ON visible.id = target_tm.user_id
+              AND visible.lifecycle_state = 'active'
          )
          SELECT u.id,
                 u.email,
@@ -1581,10 +1598,12 @@ async function getManagerRolesForTeams(
   if (teamIds.length === 0) return new Map()
   const result = await pool.query(
     `SELECT team_id, role
-       FROM team_members
+       FROM team_members tm
+       JOIN users u ON u.id = tm.user_id
       WHERE user_id = $1
         AND team_id = ANY($2::uuid[])
-        AND status = 'active'`,
+        AND status = 'active'
+        AND u.lifecycle_state = 'active'`,
     [managerUserId.trim(), teamIds]
   )
   return new Map(
@@ -1617,11 +1636,13 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
   const normalizedManagerUserId = managerUserId.trim()
   const result = await pool.query(
     `WITH managed_teams AS (
-       SELECT tm.team_id, tm.role AS manager_role
+     SELECT tm.team_id, tm.role AS manager_role
          FROM team_members tm
+         JOIN users manager ON manager.id = tm.user_id
         WHERE tm.user_id = $1
           AND tm.status = 'active'
           AND tm.role IN ('admin', 'inviter')
+          AND manager.lifecycle_state = 'active'
      )
      SELECT DISTINCT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
@@ -1675,10 +1696,12 @@ export async function createManagedInvitationForUser(
     `SELECT tm.team_id, tm.role, t.name AS team_name
        FROM team_members tm
        JOIN teams t ON t.id = tm.team_id
+       JOIN users manager ON manager.id = tm.user_id
       WHERE tm.user_id = $1
         AND tm.team_id = ANY($2::uuid[])
         AND tm.status = 'active'
-        AND tm.role IN ('admin', 'inviter')`,
+        AND tm.role IN ('admin', 'inviter')
+        AND manager.lifecycle_state = 'active'`,
     [managerUserId.trim(), assignments.map(assignment => assignment.teamId)]
   )
   const managerRoles = new Map(
@@ -1792,9 +1815,11 @@ export async function deleteManagedUserForUser(
 
   const teamsResult = await pool.query(
     `SELECT team_id
-       FROM team_members
+       FROM team_members tm
+       JOIN users target ON target.id = tm.user_id
       WHERE user_id = $1
-        AND status = 'active'`,
+        AND status = 'active'
+        AND target.lifecycle_state = 'active'`,
     [normalizedTargetUserId]
   )
   const teamIds = (teamsResult.rows as Array<{ team_id: string }>).map(row => row.team_id)

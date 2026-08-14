@@ -27,5 +27,8 @@ describe('0096_control_admin_session_version_default migration', () => {
 
     expect(sql).toContain('SET session_version = 1')
     expect(sql).toContain('ALTER COLUMN session_version SET DEFAULT 1')
+    expect(sql).toContain('ALTER COLUMN session_version SET NOT NULL')
+    expect(sql).toContain('control_admin_session_version_positive')
+    expect(sql).toContain('CHECK (session_version >= 1)')
   })
 })

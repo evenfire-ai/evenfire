@@ -266,6 +266,45 @@ describe('GfsDesktopOperatorLinkService', () => {
     ])
   })
 
+  it('retains an existing tombstone and emits only parent retirement evidence', async () => {
+    txQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          ...storedLink(),
+          id: '88888888-8888-4888-8888-888888888888',
+          lineage_id: '99999999-9999-4999-8999-999999999999',
+          generation: 1,
+          state: 'revoked',
+          row_version: 2,
+          revoked_at: new Date('2026-08-10T12:05:00.000Z'),
+          revocation_reason: 'control_ui_revoke',
+        },
+      ],
+      rowCount: 1,
+    })
+
+    await expect(
+      service.retireParentInTransaction({ query: txQuery } as DbClient, {
+        kind: 'desktop_user',
+        parentId: DESKTOP_USER_ID,
+        actor: { kind: 'control_admin', controlAdminId: OPERATOR_ID },
+        reason: 'account_retired_after_revoke',
+        requestId: 'request-tombstone',
+      })
+    ).resolves.toBe(true)
+
+    expect(appendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        changes: [
+          expect.objectContaining({ detailRef: expect.stringContaining('event:parent.retired') }),
+        ],
+      })
+    )
+    expect(txQuery).toHaveBeenCalledOnce()
+    expect(String(txQuery.mock.calls[0]?.[0])).toContain('ORDER BY generation DESC')
+  })
+
   it.each([
     {
       label: 'Desktop user',

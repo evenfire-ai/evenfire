@@ -191,6 +191,56 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0095_gfs_lifecycle_authority_projection'
     )
+    expect(secondVersions.rows.map(row => row.version)).toContain(
+      '0096_control_admin_session_version_default'
+    )
+
+    const sessionVersionContract = await dbPool.query<{
+      column_default: string | null
+      is_nullable: string
+      constraint_validated: boolean
+    }>(
+      `SELECT column_default,
+              is_nullable,
+              EXISTS (
+                SELECT 1
+                  FROM pg_constraint
+                 WHERE conrelid = 'control_admin_users'::regclass
+                   AND conname = 'control_admin_session_version_positive'
+                   AND convalidated
+              ) AS constraint_validated
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'control_admin_users'
+          AND column_name = 'session_version'`
+    )
+    expect(sessionVersionContract.rows).toEqual([
+      {
+        column_default: '1',
+        is_nullable: 'NO',
+        constraint_validated: true,
+      },
+    ])
+
+    const contractAdminId = randomUUID()
+    await dbPool.query(
+      `INSERT INTO control_admin_users (id, username, password_hash)
+       VALUES ($1, $2, 'migration-test-hash')`,
+      [contractAdminId, `migration-contract-${contractAdminId}`]
+    )
+    const defaultEpoch = await dbPool.query<{ session_version: number }>(
+      `SELECT session_version FROM control_admin_users WHERE id = $1`,
+      [contractAdminId]
+    )
+    expect(defaultEpoch.rows).toEqual([{ session_version: 1 }])
+    await expect(
+      dbPool.query(
+        `INSERT INTO control_admin_users (id, username, password_hash, session_version)
+         VALUES ($1, $2, 'migration-test-hash', 0)`,
+        [randomUUID(), `migration-invalid-${randomUUID()}`]
+      )
+    ).rejects.toThrow(/session_version|control_admin_session_version_positive/)
+    await dbPool.query(`DELETE FROM control_admin_users WHERE id = $1`, [contractAdminId])
 
     await dbPool.query(`
       DELETE FROM schema_migrations

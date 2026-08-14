@@ -21,6 +21,7 @@ async function findFirstActiveMembership(
     `SELECT tm.team_id, tm.role, t.name AS team_name
        FROM team_members tm
        JOIN teams t ON t.id = tm.team_id
+       JOIN users member_user ON member_user.id = tm.user_id
   LEFT JOIN LATERAL (
          SELECT MAX(i.accepted_at) AS accepted_at
            FROM invitations i
@@ -32,6 +33,7 @@ async function findFirstActiveMembership(
        ) accepted_invitation ON TRUE
       WHERE tm.user_id = $1
         AND tm.status = 'active'
+        AND member_user.lifecycle_state = 'active'
    ORDER BY
          CASE WHEN accepted_invitation.accepted_at IS NULL THEN 1 ELSE 0 END,
          accepted_invitation.accepted_at DESC NULLS LAST,

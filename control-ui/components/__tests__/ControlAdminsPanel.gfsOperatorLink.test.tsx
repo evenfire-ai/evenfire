@@ -161,6 +161,34 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     expect(await screen.findByTestId('gfs-operator-link-admin-2')).toHaveTextContent('Not linked')
   })
 
+  it('keeps disabled admin tombstones out of the operational action list after refresh', async () => {
+    vi.mocked(getControlAdmins).mockResolvedValueOnce({
+      admins: [
+        {
+          id: 'disabled-admin',
+          username: 'retired-admin',
+          email: 'retired@example.com',
+          memberId: LINK.desktopUserId,
+          status: 'disabled',
+          gfsOperatorLink: { ...LINK, controlAdminId: 'disabled-admin', status: 'revoked' },
+          gfsOperatorLinkStatus: 'revoked',
+          lastLoginAt: null,
+          createdAt: '2026-08-10T11:00:00.000Z',
+        },
+      ],
+      invitations: [],
+    })
+
+    render(<ControlAdminsPanel />)
+    await waitFor(() => expect(getControlAdmins).toHaveBeenCalled())
+    expect(screen.queryByText('retired-admin')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', {
+        name: /Reactivate Desktop GFS operator access for retired-admin/,
+      })
+    ).not.toBeInTheDocument()
+  })
+
   it('reactivates a retained revoked generation through the visible Control UI action', async () => {
     vi.mocked(getControlAdmins).mockResolvedValueOnce({
       admins: [

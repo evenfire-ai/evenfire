@@ -150,13 +150,14 @@ describe('Method gating', () => {
     const getReader = vi.fn(() => {
       throw new Error('HEAD body must not be read')
     })
+    const cancel = vi.fn(() => Promise.reject(new Error('upstream disconnect')))
     controlApiClientMock.controlApiStreamRequest.mockResolvedValue({
       status: 200,
       headers: new Headers({
         'content-type': 'application/octet-stream',
         'content-length': '1234',
       }),
-      body: { getReader },
+      body: { getReader, cancel },
     } as unknown as Response)
 
     const res = await request(buildApp())
@@ -166,6 +167,7 @@ describe('Method gating', () => {
     expect(res.status).toBe(200)
     expect(res.headers['content-length']).toBe('1234')
     expect(getReader).not.toHaveBeenCalled()
+    expect(cancel).toHaveBeenCalledOnce()
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'HEAD',
       '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1',

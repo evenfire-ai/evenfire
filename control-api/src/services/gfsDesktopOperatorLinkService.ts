@@ -806,46 +806,59 @@ export class GfsDesktopOperatorLinkService {
     const rows = await db.query(
       `SELECT id::text AS id, lineage_id::text AS lineage_id, generation,
               predecessor_id::text AS predecessor_id, state, row_version,
+              revoked_at, revocation_reason,
               user_id::text AS user_id, control_admin_id::text AS control_admin_id,
               source, created_at
          FROM gfs_desktop_operator_links
-        WHERE ${column} = $1::uuid AND state = 'active'
+        WHERE ${column} = $1::uuid
+        ORDER BY generation DESC
         LIMIT 1 FOR UPDATE`,
       [parentId]
     )
     if (rows.rows.length === 0) return false
     const link = mapStoredLink(rows.rows[0])
+    const parentRetiredChange = {
+      action: 'revoke' as const,
+      resourceClass: `gfs_desktop_operator_${input.kind}`,
+      resourceRef: `${input.kind}:${parentId}`,
+      subject:
+        input.kind === 'desktop_user'
+          ? { kind: 'user' as const, id: parentId }
+          : {
+              kind: 'service' as const,
+              id: `control_admin:${parentId}`,
+              principalKind: 'operator' as const,
+            },
+      sourceAuditRef: `gfs_desktop_operator_link_source:${link.source}`,
+      status: 'retired',
+      detailRef: [
+        'event:parent.retired',
+        `desktop_user_id:${link.desktopUserId}`,
+        `control_admin_id:${link.controlAdminId}`,
+        `source:${link.source}`,
+        `actor_type:${actor.kind}`,
+        actor.kind === 'control_admin'
+          ? `actor_control_admin_id:${actor.controlAdminId}`
+          : `actor_desktop_user_id:${actor.desktopUserId}`,
+        `reason:${reason}`,
+      ].join(';'),
+    }
     await this.dependencies.appendPermissionEvents(db, {
       operatorSub,
       operatorKind: actor.kind,
       requestId: input.requestId,
       operationId: input.operationId,
-      changes: [
-        lifecycleChange('revoke', link, reason, 'link.revoked', actor),
-        {
-          action: 'revoke',
-          resourceClass: `gfs_desktop_operator_${input.kind}`,
-          resourceRef: `${input.kind}:${parentId}`,
-          subject:
-            input.kind === 'desktop_user'
-              ? { kind: 'user', id: parentId }
-              : { kind: 'service', id: `control_admin:${parentId}`, principalKind: 'operator' },
-          sourceAuditRef: `gfs_desktop_operator_link_source:${link.source}`,
-          status: 'retired',
-          detailRef: [
-            'event:parent.retired',
-            `desktop_user_id:${link.desktopUserId}`,
-            `control_admin_id:${link.controlAdminId}`,
-            `source:${link.source}`,
-            `actor_type:${actor.kind}`,
-            actor.kind === 'control_admin'
-              ? `actor_control_admin_id:${actor.controlAdminId}`
-              : `actor_desktop_user_id:${actor.desktopUserId}`,
-            `reason:${reason}`,
-          ].join(';'),
-        },
-      ],
+      changes:
+        link.state === 'revoked'
+          ? [parentRetiredChange]
+          : [lifecycleChange('revoke', link, reason, 'link.revoked', actor), parentRetiredChange],
     })
+
+    // A prior Control UI revoke already created the immutable tombstone. The
+    // parent can still be retired afterwards; preserve that history and emit
+    // only the missing parent.retired evidence without creating a generation.
+    if (link.state === 'revoked') return true
+
     const updated = await db.query(
       `UPDATE gfs_desktop_operator_links
           SET state = 'revoked',

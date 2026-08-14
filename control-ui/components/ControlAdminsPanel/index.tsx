@@ -104,8 +104,13 @@ export function ControlAdminsPanel({
   }, [invitations, normalizedSearch])
 
   const filteredAdmins = useMemo(() => {
-    if (!normalizedSearch) return admins
-    return admins.filter(admin =>
+    // Disabled admins are retained for audit/lifecycle history, but they are
+    // not part of the operational admin list. Keeping them here would make a
+    // refresh re-expose Delete, member-access, and GFS-reactivation actions
+    // that the server correctly refuses after retirement.
+    const operationalAdmins = admins.filter(admin => admin.status !== 'disabled')
+    if (!normalizedSearch) return operationalAdmins
+    return operationalAdmins.filter(admin =>
       [admin.username, admin.email, admin.status]
         .filter((value): value is string => typeof value === 'string')
         .some(value => value.toLowerCase().includes(normalizedSearch))

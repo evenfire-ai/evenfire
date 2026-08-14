@@ -1,4 +1,11 @@
-import { type DragEvent as ReactDragEvent, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type DragEvent as ReactDragEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
 import { GfsImagePreview } from '@components/GfsImagePreview'
@@ -16,7 +23,6 @@ import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   type GfsBrowserFailure,
   describeGfsBrowserFailure,
-  isGfsSessionAuthorityFailure,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
@@ -143,6 +149,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  const handlePreviewDownloadError = useCallback(
+    (error: unknown) => {
+      ctrl.handleAuthorityFailure(
+        error instanceof Error ? error.message : String(error),
+        'operation'
+      )
+    },
+    [ctrl.handleAuthorityFailure]
+  )
   const {
     current,
     crumbs,
@@ -258,8 +273,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const surfaceContentMutationError = (mutationError: unknown) => {
     const raw = mutationError instanceof Error ? mutationError.message : String(mutationError)
     const failure = describeGfsBrowserFailure(raw)
-    if (isGfsSessionAuthorityFailure(raw, 'operation')) {
-      ctrl.revokeAccess()
+    if (ctrl.handleAuthorityFailure(raw, 'operation')) {
       setMutationFailure(failure)
       pushToast?.(failure.message, 'error')
       return
@@ -312,7 +326,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   // forced false for files by the panel.
   const failClosedOnAuthorizationError = (error: unknown): never => {
     const message = error instanceof Error ? error.message : String(error)
-    if (isGfsSessionAuthorityFailure(message, 'operation')) ctrl.revokeAccess()
+    ctrl.handleAuthorityFailure(message, 'operation')
     throw error
   }
   const handleGrant = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
@@ -334,7 +348,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.revokeGrant(grantId)
       pushToast?.(`Access revoked for ${label}`, 'success')
     } catch (revokeError) {
-      if (isGfsSessionAuthorityFailure(String(revokeError), 'operation')) ctrl.revokeAccess()
+      ctrl.handleAuthorityFailure(String(revokeError), 'operation')
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }
@@ -357,7 +371,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.revokeShare(shareId)
       pushToast?.(`Shared access revoked for ${label}`, 'success')
     } catch (revokeError) {
-      if (isGfsSessionAuthorityFailure(String(revokeError), 'operation')) ctrl.revokeAccess()
+      ctrl.handleAuthorityFailure(String(revokeError), 'operation')
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }
@@ -372,8 +386,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       anchor.click()
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
       pushToast?.(`Downloaded ${name}`, 'success')
-    } catch (uploadError) {
-      pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
+    } catch (downloadError) {
+      ctrl.handleAuthorityFailure(String(downloadError), 'operation')
+      pushToast?.(
+        downloadError instanceof Error ? downloadError.message : String(downloadError),
+        'error'
+      )
     }
   }
 
@@ -1264,6 +1282,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           gfsUri={filePreview.gfsUri}
           mimeType={filePreview.mimeType}
           onClose={() => setFilePreview(null)}
+          onDownloadError={handlePreviewDownloadError}
         />
       ) : null}
 
@@ -1273,6 +1292,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           fileName={filePreview.name}
           gfsUri={filePreview.gfsUri}
           onClose={() => setFilePreview(null)}
+          onDownloadError={handlePreviewDownloadError}
         />
       ) : null}
     </section>

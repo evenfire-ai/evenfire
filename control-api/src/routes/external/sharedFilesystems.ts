@@ -1,9 +1,8 @@
 import { Router } from 'express'
-import { rateLimit } from 'express-rate-limit'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
-import { externalClientRateLimitKey } from '../../middleware/externalClientIdentity.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
@@ -183,19 +182,17 @@ function curatedSfsMessage(phase: string | null | undefined): string | null {
 
 export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Router {
   const router = Router()
-  const externalSharedFilesystemsRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: config.approvalRlExternalEdgePerMin,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    keyGenerator: externalClientRateLimitKey,
-  })
+  const externalSharedFilesystemsRateLimits = createExternalClientRateLimiters(
+    'shared-filesystems',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
   const sfsNs = config.sharedFilesystemsNamespace
   const ctxNs = config.contextsNamespace
 
   router.use(
     '/external/contexts/:contextId/shared-filesystems',
-    externalSharedFilesystemsRateLimit,
+    ...externalSharedFilesystemsRateLimits,
     requireValidExternalSessionToken
   )
 

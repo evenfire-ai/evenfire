@@ -35,3 +35,33 @@ test('deleteManagedUser sends the governed retirement contract', async () => {
     globalThis.fetch = previousFetch
   }
 })
+
+test('deleteManagedUser default caller path supplies generated idempotency and correlation values', async () => {
+  const previousFetch = globalThis.fetch
+  let request: { url: string; init?: RequestInit } | undefined
+  globalThis.fetch = (async (input, init) => {
+    request = { url: String(input), init }
+    return new Response(JSON.stringify({ deleted: true, id: USER_ID }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }) as typeof fetch
+  try {
+    await deleteManagedUser(USER_ID)
+    assert.ok(request)
+    const headers = new Headers(request.init?.headers)
+    assert.match(
+      headers.get('Idempotency-Key') || '',
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
+    assert.match(
+      headers.get('x-correlation-id') || '',
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
+    assert.deepEqual(JSON.parse(String(request.init?.body)), {
+      reason: 'profile_ui_user_retirement',
+    })
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})

@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
+import { gfsDesktopOperatorLinkService } from '../src/services/gfsDesktopOperatorLinkService.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -173,5 +174,74 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
         lifecycle_operation_id: result.operationId,
       },
     ])
+  })
+
+  it('retires a user after the Control UI already revoked the link without changing the tombstone', async () => {
+    const userId = await seedDesktopUser('revoked-before-retire')
+    const linkId = randomUUID()
+    const lineageId = randomUUID()
+    await testPool.query(
+      `INSERT INTO gfs_desktop_operator_links
+         (id, lineage_id, generation, user_id, control_admin_id, state, source, created_by, row_version)
+       VALUES ($1::uuid, $2::uuid, 1, $3::uuid, $4::uuid,
+               'active', 'initial_setup', $4::uuid, 1)`,
+      [linkId, lineageId, userId, actorId]
+    )
+
+    const revoked = await gfsDesktopOperatorLinkService.unlink({
+      desktopUserId: userId,
+      controlAdminId: actorId,
+      operatorSub: actorId,
+      rowVersion: 1,
+      reason: 'control_ui_revoke_before_retire',
+      requestId: 'real-pg-revoke-before-retire',
+    })
+    expect(revoked.unlinked).toBe(true)
+
+    const result = await retireDesktopUser(
+      { kind: 'control_admin', controlAdminId: actorId },
+      userId,
+      'retire after prior operator revoke',
+      'real-pg-revoke-before-retire-v1',
+      'retirement-after-revoke-request-v1'
+    )
+    expect(result).toMatchObject({ id: userId, outcome: 'retired', lifecycleVersion: 2 })
+
+    const [user, link] = await Promise.all([
+      testPool.query(
+        `SELECT lifecycle_state, lifecycle_version, retirement_operation_id::text AS retirement_operation_id
+           FROM users WHERE id = $1::uuid`,
+        [userId]
+      ),
+      testPool.query(
+        `SELECT id::text AS id, lineage_id::text AS lineage_id, generation, state, row_version
+           FROM gfs_desktop_operator_links WHERE user_id = $1::uuid`,
+        [userId]
+      ),
+    ])
+    expect(user.rows).toEqual([
+      {
+        lifecycle_state: 'retired',
+        lifecycle_version: '2',
+        retirement_operation_id: expect.any(String),
+      },
+    ])
+    expect(link.rows).toEqual([
+      { id: linkId, lineage_id: lineageId, generation: 1, state: 'revoked', row_version: '2' },
+    ])
+
+    const events = await testPool.query(
+      `SELECT action, target_ref, payload_metadata->>'detail_ref' AS detail_ref
+         FROM administrative_events
+        WHERE operation_id = $1::uuid
+        ORDER BY ingest_sequence ASC`,
+      [user.rows[0].retirement_operation_id]
+    )
+    expect(events.rows).toHaveLength(1)
+    expect(events.rows[0]).toMatchObject({
+      action: 'permission_revoke',
+      target_ref: `desktop_user:${userId}`,
+    })
+    expect(events.rows[0].detail_ref).toContain('event:parent.retired')
   })
 })

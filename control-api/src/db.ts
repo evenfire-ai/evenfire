@@ -2965,7 +2965,21 @@ async function applyControlAdminSessionVersionDefaultSchema(db: DbClient): Promi
        SET session_version = 1
      WHERE session_version IS NULL OR session_version < 1;
     ALTER TABLE control_admin_users
-      ALTER COLUMN session_version SET DEFAULT 1;
+      ALTER COLUMN session_version SET DEFAULT 1,
+      ALTER COLUMN session_version SET NOT NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conrelid = 'control_admin_users'::regclass
+           AND conname = 'control_admin_session_version_positive'
+      ) THEN
+        ALTER TABLE control_admin_users
+          ADD CONSTRAINT control_admin_session_version_positive
+          CHECK (session_version >= 1);
+      END IF;
+    END $$;
   `)
 }
 
