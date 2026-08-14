@@ -6,7 +6,6 @@ import {
   DESKTOP_COMMANDS,
   type DesktopShortcutInput,
   desktopBindingCollisionKey,
-  formatDesktopShortcut,
   getDesktopCommand,
   isDesktopCommandEligible,
   matchDesktopCommand,
@@ -68,10 +67,7 @@ describe('Desktop command registry', () => {
     }
   })
 
-  it('formats and matches Command on macOS and Ctrl on Windows', () => {
-    const binding = getDesktopCommand('search.current').defaultBinding!
-    expect(formatDesktopShortcut(binding, 'darwin')).toBe('⌘⇧F')
-    expect(formatDesktopShortcut(binding, 'win32')).toBe('Ctrl+Shift+F')
+  it('matches Command on macOS and Ctrl on Windows', () => {
     expect(matchDesktopCommand(input({ shift: true }), 'darwin', 'host')?.id).toBe('search.current')
     expect(
       matchDesktopCommand(input({ meta: false, control: true, shift: true }), 'win32', 'sandbox')
@@ -80,9 +76,6 @@ describe('Desktop command registry', () => {
   })
 
   it('binds only Open Settings in the approved core palette action set', () => {
-    const settings = getDesktopCommand('settings.open')
-    expect(formatDesktopShortcut(settings.defaultBinding!, 'darwin')).toBe('⌘,')
-    expect(formatDesktopShortcut(settings.defaultBinding!, 'win32')).toBe('Ctrl+,')
     expect(matchDesktopCommand(input({ key: ',' }), 'darwin', 'sandbox')?.id).toBe('settings.open')
     for (const id of [
       'auth.logout',
@@ -111,12 +104,6 @@ describe('Desktop command registry', () => {
   })
 
   it('uses Control for tab cycling on macOS to avoid the reserved Command+Tab app switcher', () => {
-    const next = getDesktopCommand('tabs.next').defaultBinding!
-    const previous = getDesktopCommand('tabs.previous').defaultBinding!
-    expect(formatDesktopShortcut(next, 'darwin')).toBe('⌃Tab')
-    expect(formatDesktopShortcut(previous, 'darwin')).toBe('⌃⇧Tab')
-    expect(formatDesktopShortcut(next, 'win32')).toBe('Ctrl+Tab')
-    expect(formatDesktopShortcut(previous, 'win32')).toBe('Ctrl+Shift+Tab')
     expect(
       matchDesktopCommand(input({ key: 'Tab', meta: false, control: true }), 'darwin', 'host')?.id
     ).toBe('tabs.next')

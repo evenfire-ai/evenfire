@@ -554,9 +554,9 @@ export function formatDesktopShortcut(
 ): string {
   const key = binding.key === 'Tab' ? 'Tab' : binding.key.toUpperCase()
   if (platform === 'darwin' && binding.modifier === 'mod') {
-    return `⌘${binding.shift ? '⇧' : ''}${key}`
+    return binding.shift ? `⌘ Shift ${key}` : `⌘${key}`
   }
-  if (platform === 'darwin') return `⌃${binding.shift ? '⇧' : ''}${key}`
+  if (platform === 'darwin') return binding.shift ? `⌃ Shift ${key}` : `⌃${key}`
   return `Ctrl+${binding.shift ? 'Shift+' : ''}${key}`
 }
 
