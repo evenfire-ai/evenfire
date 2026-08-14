@@ -35,10 +35,19 @@ const SUBMIT_INPUT: CreateLlmModelInput = {
   model: 'claude-haiku-4-5',
   enabled: false,
 }
+// A rename keeps the row enabled but changes the (provider, model) identity, so
+// control-api gates it over the OLD pair (R1-H1). The `mock` prefix lets the
+// hoisted vi.mock factory close over it; each test sets what the form emits.
+let mockSubmitInput: CreateLlmModelInput = SUBMIT_INPUT
+const RENAME_INPUT: CreateLlmModelInput = {
+  provider: 'claude',
+  model: 'claude-opus-4-8',
+  enabled: true,
+}
 const SUBMIT_LABEL = 'Submit model edit'
 vi.mock('@components/LlmModelForm', () => ({
   LlmModelForm: ({ onSubmit }: { onSubmit: (input: CreateLlmModelInput) => void }) => (
-    <button type="button" onClick={() => onSubmit(SUBMIT_INPUT)}>
+    <button type="button" onClick={() => onSubmit(mockSubmitInput)}>
       {SUBMIT_LABEL}
     </button>
   ),
@@ -98,6 +107,7 @@ describe('edit page disable impact gate (409 model_in_use → force)', () => {
   beforeEach(() => {
     mockPush.mockClear()
     mockShowToast.mockClear()
+    mockSubmitInput = SUBMIT_INPUT
     vi.mocked(getLlmModel).mockResolvedValue(model)
   })
 
@@ -128,6 +138,43 @@ describe('edit page disable impact gate (409 model_in_use → force)', () => {
     expect(vi.mocked(updateLlmModel).mock.calls[1]).toEqual([
       'model-1',
       SUBMIT_INPUT,
+      { force: true },
+    ])
+    await waitFor(() => expect(mockPush).toHaveBeenCalled())
+  })
+
+  // R1-H1 widened the gate: renaming an enabled pair also trips the 409, computed
+  // over the OLD pair. The confirm must name that old pair (from the impact body,
+  // not the freshly-typed new identity) and say "Rename", not "Disable".
+  it('names the old pair and offers a rename override when a rename is gated', async () => {
+    mockSubmitInput = RENAME_INPUT
+    vi.mocked(updateLlmModel).mockRejectedValueOnce(inUseError()).mockResolvedValueOnce(model)
+
+    render(<EditLlmModelPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: SUBMIT_LABEL }))
+
+    // The verb is "Rename", not "Disable" — nothing is being disabled here.
+    expect(await screen.findByRole('button', { name: 'Rename anyway' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Disable anyway' })).not.toBeInTheDocument()
+    // Names the OLD, still-referenced pair (impact body) and the new target — never
+    // claims the new identity "is still referenced".
+    expect(
+      screen.getByText(
+        /claude\/claude-haiku-4-5 is still referenced\. Renaming it to claude\/claude-opus-4-8/
+      )
+    ).toBeInTheDocument()
+    expect(screen.getByText('mcp-host/agent-a')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename anyway' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(2)
+    })
+    expect(vi.mocked(updateLlmModel).mock.calls[0]).toEqual(['model-1', RENAME_INPUT, {}])
+    expect(vi.mocked(updateLlmModel).mock.calls[1]).toEqual([
+      'model-1',
+      RENAME_INPUT,
       { force: true },
     ])
     await waitFor(() => expect(mockPush).toHaveBeenCalled())

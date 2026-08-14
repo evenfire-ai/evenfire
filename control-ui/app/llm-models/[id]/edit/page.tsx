@@ -64,9 +64,13 @@ export default function EditLlmModelPage() {
     await saveWithImpactGate(input, false)
   }
 
-  // Disabling a referenced model (enabled→false) is gated by control-api: without
-  // `?force` it answers 409 `model_in_use` with the impact. Show it and let the
-  // operator confirm a forced retry — never force automatically (spec Fase 3/5).
+  // A write that pulls a still-referenced pair out of the runtime allowlist is
+  // gated by control-api: without `?force` it answers 409 `model_in_use` with the
+  // impact. TWO mutations trip it (spec Fase 3, gate widened by R1-H1): DISABLING
+  // the model (enabled→false), and RENAMING an enabled pair — a rename strands the
+  // OLD identity, whose references `impact.provider/impact.model` names. Show the
+  // impact and let the operator confirm a forced retry — never force automatically
+  // (spec Fase 3/5).
   async function saveWithImpactGate(input: CreateLlmModelInput, force: boolean) {
     setSaving(true)
     setSaveError('')
@@ -95,19 +99,28 @@ export default function EditLlmModelPage() {
       setSaving(false)
     }
 
-    const forceDisable = await confirm({
+    // control-api computes the impact over the pair that leaves the ConfigMap: the
+    // CURRENT pair on a disable, the OLD pair on a rename. Name that pair from the
+    // impact body (never `input`, which on a rename is the new, not-yet-referenced
+    // identity) and match the verb to the mutation so the confirm states the real
+    // consequence.
+    const renamed = !!model && (input.provider !== model.provider || input.model !== model.model)
+    const affectedPair = `${impact.provider}/${impact.model}`
+    const forced = await confirm({
       title: 'Model still in use',
-      message: `${input.provider}/${input.model} is still referenced. Disabling it leaves these references pointing at a disabled model:`,
+      message: renamed
+        ? `${affectedPair} is still referenced. Renaming it to ${input.provider}/${input.model} strands these references, leaving them pointing at a model that no longer exists:`
+        : `${affectedPair} is still referenced. Disabling it leaves these references pointing at a disabled model:`,
       details: (
         <ModelReferences
           hostsAffected={impact.hostsAffected}
           grantsAffected={impact.grantsAffected}
         />
       ),
-      confirmLabel: 'Disable anyway',
+      confirmLabel: renamed ? 'Rename anyway' : 'Disable anyway',
       tone: 'danger',
     })
-    if (forceDisable) await saveWithImpactGate(input, true)
+    if (forced) await saveWithImpactGate(input, true)
   }
 
   return (
