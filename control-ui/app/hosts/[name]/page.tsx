@@ -100,6 +100,17 @@ export default function HostDetailsPage() {
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
+  // Last server-backed snapshot of the Overview-owned fields, captured at every
+  // (re)load. Cancel (and re-opening Edit) reverts the whole class of Overview
+  // drafts to THIS — the last SAVED state — so a discarded edit (e.g. a Display
+  // name typed then cancelled) can never leak into a later saveHost PUT.
+  const savedOverviewRef = useRef({
+    hostName: routeName,
+    hostDisplay: '',
+    contextRef: '',
+    channels: [] as string[],
+    stateless: false,
+  })
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
   // model is always kept selectable even if it fell out of the allowlist
@@ -216,13 +227,20 @@ export default function HostDetailsPage() {
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
       if (resetDrafts === 'all' || resetDrafts === 'overview') {
-        setHostNameDraft(String(host.metadata?.name || routeName))
-        setHostDisplayDraft(String(spec.host || host.metadata?.name || routeName))
-        setContextRefDraft(String(spec.contextRef || ''))
-        setChannelsDraft(
-          Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : []
-        )
-        setStatelessDraft(spec.lifecycle?.stateless === true)
+        // Snapshot the saved Overview state so Cancel/Edit can revert to it.
+        const overview = {
+          hostName: String(host.metadata?.name || routeName),
+          hostDisplay: String(spec.host || host.metadata?.name || routeName),
+          contextRef: String(spec.contextRef || ''),
+          channels: Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : [],
+          stateless: spec.lifecycle?.stateless === true,
+        }
+        savedOverviewRef.current = overview
+        setHostNameDraft(overview.hostName)
+        setHostDisplayDraft(overview.hostDisplay)
+        setContextRefDraft(overview.contextRef)
+        setChannelsDraft(overview.channels)
+        setStatelessDraft(overview.stateless)
       }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
@@ -319,6 +337,23 @@ export default function HostDetailsPage() {
       return Array.from(set)
     })
     setLlmPolicyDraft(next)
+  }
+
+  // Revert every Overview-owned draft to the last SAVED snapshot. Used by Cancel
+  // and by Edit-open so an edit session always starts from server-backed values
+  // — never a stale draft left behind by a prior discarded edit (any Overview
+  // field, not just Display name: the whole class shares this reset).
+  function resetOverviewDrafts() {
+    const saved = savedOverviewRef.current
+    setHostNameDraft(saved.hostName)
+    setHostDisplayDraft(saved.hostDisplay)
+    // contextRef is written by the Overview save (saveHost), so reset it here to
+    // block a stale leak — EXCEPT while the Context tab has a live edit open: it
+    // is a legitimate concurrent writer of contextRefDraft (its editingContext
+    // session), and reverting an in-progress selection would silently discard it.
+    if (!editingContext) setContextRefDraft(saved.contextRef)
+    setChannelsDraft(saved.channels)
+    setStatelessDraft(saved.stateless)
   }
 
   async function saveHost(): Promise<boolean> {
@@ -634,7 +669,13 @@ export default function HostDetailsPage() {
                     <button
                       type="button"
                       className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => setEditingOverview(false)}
+                      onClick={() => {
+                        // Discard any unsaved Overview edits before leaving edit
+                        // mode, so the read-only view and the next save reflect
+                        // the last SAVED state — not the abandoned draft.
+                        resetOverviewDrafts()
+                        setEditingOverview(false)
+                      }}
                       disabled={busy}
                     >
                       Cancel
@@ -658,7 +699,16 @@ export default function HostDetailsPage() {
                   <button
                     type="button"
                     className="cu-btn cu-btn--ghost cu-btn--sm"
-                    onClick={() => setEditingOverview(true)}
+                    onClick={() => {
+                      // Defensive: start every edit session from the last SAVED
+                      // snapshot, so a stale draft never leaks into this Overview
+                      // save. resetOverviewDrafts deliberately leaves contextRef
+                      // untouched while the Context tab is mid-edit — that tab is a
+                      // legitimate live writer of contextRefDraft, not a stale
+                      // leftover, so its in-progress selection must be preserved.
+                      resetOverviewDrafts()
+                      setEditingOverview(true)
+                    }}
                     disabled={busy}
                   >
                     Edit

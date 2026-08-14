@@ -489,7 +489,6 @@ function AccessGrantModal({
   titleId,
   value,
 }: AccessGrantModalProps) {
-  const blocked = busy
   return (
     <div
       style={{
@@ -504,7 +503,7 @@ function AccessGrantModal({
       }}
       role="presentation"
       onClick={e => {
-        if (e.target === e.currentTarget && !blocked) onClose()
+        if (e.target === e.currentTarget && !busy) onClose()
       }}
     >
       <div
@@ -521,7 +520,7 @@ function AccessGrantModal({
             type="button"
             className="cu-btn cu-btn--icon cu-btn--ghost"
             onClick={onClose}
-            disabled={blocked}
+            disabled={busy}
             aria-label="Close"
           >
             <IconX width={18} height={18} />
@@ -534,7 +533,7 @@ function AccessGrantModal({
             emptyLabel={emptyLabel}
             id={id}
             inline
-            disabled={blocked}
+            disabled={busy}
             onChange={onChange}
             options={options}
             placeholder={placeholder}
@@ -549,7 +548,7 @@ function AccessGrantModal({
             type="button"
             className="cu-btn cu-btn--ghost cu-btn--sm"
             onClick={onClose}
-            disabled={blocked}
+            disabled={busy}
           >
             Cancel
           </button>
@@ -557,7 +556,7 @@ function AccessGrantModal({
             type="button"
             className="cu-btn cu-btn--primary"
             onClick={() => void onConfirm()}
-            disabled={blocked || value.length === 0}
+            disabled={busy || value.length === 0}
           >
             {submitLabel}
           </button>

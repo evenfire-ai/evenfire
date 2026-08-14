@@ -229,4 +229,94 @@ describe('HostDetailsPage identity integration', () => {
     expect(replaceMock).not.toHaveBeenCalledWith('/agents/Product Agents')
     expect(pushMock).not.toHaveBeenCalledWith('/agents/Product Agents')
   })
+
+  // Regression: Cancel must DISCARD the Display-name edit, not carry the stale
+  // draft into the read-only view and the next save. Before the resetOverview
+  // fix, a cancelled "Display name" edit silently persisted on the following
+  // Save (spec.host written to the abandoned value).
+  it('discards a cancelled Display name edit — read-only reverts and a later save keeps the saved value', async () => {
+    render(<HostDetailsPage />)
+
+    const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+    await waitFor(() => expect(overviewEditButton).toBeEnabled())
+    fireEvent.click(overviewEditButton)
+
+    // Type a Display name the operator then abandons.
+    fireEvent.change(screen.getByLabelText('Display name'), {
+      target: { value: 'Discarded Draft' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    // Observable #1 (T4): the read-only view shows the last-SAVED value, not the
+    // abandoned draft.
+    expect(screen.getByText('foo-display')).toBeInTheDocument()
+    expect(screen.queryByText('Discarded Draft')).not.toBeInTheDocument()
+
+    // Re-open Edit and Save without touching Display name again.
+    const [overviewEditButton2] = await screen.findAllByRole('button', { name: 'Edit' })
+    fireEvent.click(overviewEditButton2)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+
+    // Observable #2 (T4, PINNING): the persisted spec.host is the saved value,
+    // NOT the discarded draft. This assertion goes red pre-fix.
+    const putCall = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
+      c => c[0] === 'PUT' && c[1] === '/api/v1/admin/hosts/foo'
+    )
+    expect(putCall![2].spec.host).toBe('foo-display')
+  })
+
+  // Collateral regression: resetOverviewDrafts must NOT clobber a LIVE Context-tab
+  // edit. contextRefDraft is written by both saveHost (Overview) and the Context
+  // tab's own editingContext session; reverting it on Overview Edit-open/Cancel
+  // while that session is open silently discards the operator's in-progress pick.
+  it('preserves a live Context-tab selection across an Overview Edit-open/Cancel', async () => {
+    // Two contexts so the Context tab can switch selection; saved = ctx-a.
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: { ...host, spec: { ...host.spec, contextRef: 'ctx-a' } },
+      contexts: [
+        { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a' } },
+        { metadata: { name: 'ctx-b' }, spec: { contextId: 'ctx-b' } },
+      ],
+      secrets: [{ name: 'openai-secret' }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+
+    // Land on the Context tab, open its edit session, pick a DIFFERENT context.
+    mockParams = { name: 'foo', tab: 'contexts' }
+    const view = render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit context' }))
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ctx-b' } })
+    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('ctx-b')
+
+    // Switch to Overview and fire BOTH resetOverviewDrafts sites: Edit-open, Cancel.
+    mockParams = { name: 'foo' }
+    view.rerender(
+      <ToastProvider>
+        <HostDetailsPage />
+      </ToastProvider>
+    )
+    const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+    await waitFor(() => expect(overviewEditButton).toBeEnabled())
+    fireEvent.click(overviewEditButton)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    // Back on the Context tab (still editing): the in-progress ctx-b must survive.
+    mockParams = { name: 'foo', tab: 'contexts' }
+    view.rerender(
+      <ToastProvider>
+        <HostDetailsPage />
+      </ToastProvider>
+    )
+
+    // PINNING (T4): the Context select still shows the unsaved ctx-b, not the
+    // reverted saved ctx-a. Pre-collateral-fix this reads 'ctx-a'.
+    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('ctx-b')
+  })
 })
