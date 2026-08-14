@@ -850,7 +850,11 @@ spec:
                 lifecyclePoints:
                   type: array
                   minItems: 1
+                  maxItems: 4                             # bounds the CEL exists() cost below
                   items: { type: string, enum: [preCall, moderate, postCallSuccess, onError] }
+                contentAccess:                           # §8.4/§8.7 content projection: content = bodies, metadata = no bodies.
+                  type: string                           # moderate/postCallSuccess/onError are inherently content; only a
+                  enum: [metadata, content]              # preCall-only hook may be metadata. Omit ⇒ platform infers.
                 order:      { type: integer, default: 100 }
                 failMode:   { type: string, enum: [open, closed], default: closed }
                 timeoutMs:  { type: integer, default: 5000, minimum: 1 }
@@ -869,6 +873,8 @@ spec:
                   message: "remote.baseUrl must be https://"
                 - rule: "!(has(self.capabilities) && self.capabilities.exists(c, c == 'may_deny')) || self.failMode == 'closed'"
                   message: "a deny-authoritative hook (may_deny) must fail closed"
+                - rule: "!has(self.contentAccess) || self.contentAccess == 'content' || !self.lifecyclePoints.exists(p, p == 'moderate' || p == 'postCallSuccess' || p == 'onError')"
+                  message: "contentAccess: metadata is not allowed for a moderate/postCallSuccess/onError hook"
             status:                                    # reconciler-written; surfaced in control-ui, like McpServer.status
               type: object
               properties:
@@ -1088,9 +1094,11 @@ reserved range (§8.2), so a hook can never declare a cluster-internal destinati
 
 ### 8.4 · Content exposure
 
-An installed hook receives message/response **content** only for the lifecycle points that need it
-(`moderate`/`post_call` get content; `pre_call` shaping gets model+params+metadata, not bodies) **and**
-only if it clears the admin's trust floor. **The trust decision uses only inputs the hook author does not
+An installed hook receives message/response **content** only where it is needed **and** only if it clears
+the admin's trust floor. `moderate` / `post_call` / `on_error` are inherently content-bearing; `pre_call`
+declares its need via `spec.contentAccess` — a **metadata-only shaper** (`metadata`: model+params+usage, no
+bodies) or a **content-aware rewriter** (`content`: full projected messages, e.g. an input-token
+optimizer). The archetypes and the content×egress→trust matrix are catalogued in §8.7. **The trust decision uses only inputs the hook author does not
 control:** a hook's **`trust_level`** (low/mid/high) is **assigned by the platform at install**
 (registry vetting) and stamped onto the CR by the saga — the author cannot set it — and the floor is the
 admin-authored **`Host.spec.guardrails.minInstalledHookTrustLevel`** (§5). Content is granted only when
@@ -1103,11 +1111,13 @@ construction**: a hook's `/v1` request body is built only from the redacted cont
 never appears anywhere on the hook path. The hook's own credentials live in its own Secret (`envSecret`,
 resolved only in `llm-hooks`, §12.1/N9).
 
-**Content + egress are separated by default (exfiltration control).** A hook subscribed to a
-content-bearing lifecycle point (`moderate`/`post_call`) **MUST NOT** declare `egressBindings` unless its
-`trust_level` is `high` — a hook that both *sees content* and *can reach the network* is an exfiltration
-path, so the two are combined only for an explicitly high-trust, vetted hook (e.g. an approved PII
-processor). This is enforced at **install** (the saga/HCC refuses a content-bearing hook with egress below
+**Content + egress are separated by default (exfiltration control).** A **content-bearing** hook — any hook
+that receives message/response bodies: `moderate` / `post_call` / `on_error`, or a `pre_call` hook with
+`contentAccess: content` — **MUST NOT** declare `egressBindings` unless its `trust_level` is `high`. A hook
+that both *sees content* and *can reach the network* is an exfiltration path, so the two are combined only
+for an explicitly high-trust, vetted hook (e.g. an approved PII processor). A **content-free** hook
+(`pre_call` with `contentAccess: metadata`) has no conversation to leak and so **may** carry egress at
+low/mid trust (§8.7 matrix). This is enforced at **install** (the saga/HCC refuses a content-bearing hook with egress below
 `high`), since `trust_level` is set at install, not in the CR. A **`remote`-mode** content-bearing hook is
 external egress *by construction* — its `target` **is** the destination, so there are no `egressBindings`
 to gate — and is therefore admissible **only at `trust_level: high`**, the same content-plus-network bar.
@@ -1116,6 +1126,34 @@ exfiltration channel — including DNS-tunneling via `toFQDN` lookups and timing
 `trust_level` mitigates but cannot eliminate; that is why content-bearing calls are audit-logged. Prefer
 content-free (`pre_call`-metadata) hooks, or in-cluster (`image`/`service`) content hooks with **no**
 `egressBindings` (§12.4).
+
+**The content projection (`projectForHook`) — normative contract.** mcp-host **MUST** build every `/v1`
+request body from a per-point projection, never by handing the hook the raw `ToolCompletionRequest`/response.
+The projection has exactly two jobs — it **scopes** (selects fields), it does **not scrub** (never masks
+values inside a field it does send, so a PII/moderation hook still sees the raw content it exists to
+inspect; redaction stays a hook's `post_call` **output** transform, never an input filter). Per point:
+
+| Point (§8.1) | `contentAccess` | Body fields sent |
+|---|---|---|
+| `pre_call` | `metadata` | `model, params, usage, config`, tool **schemas** (names/params) — **no `messages`** |
+| `pre_call` | `content` | the above **+** non-system `messages` |
+| `moderate` | (always `content`) | non-system `messages`, `model, usage, config` |
+| `post_call` | (always `content`) | `response{content,tool_calls,finish_reason}, usage` |
+| `on_error` | (always `content`) | `error`, non-system `messages`, `model, usage` |
+
+Two invariants hold for **every** projection, regardless of `contentAccess`:
+1. **System prompt is never exposed.** All system-role messages are stripped (the modern `systemPromptParts`
+   path already keeps it out of `messages`; the projection closes the legacy in-band path) — an installed
+   hook never sees the first-party system prompt, only edits non-system messages (§8.1).
+2. **`contentAccess` is a self-enforcing declaration, not self-certification (§12.1).** Declaring `metadata`
+   only *reduces* what the hook receives (runtime-enforced by this projection); declaring `content` only
+   *tightens* its own install gate. So an author-set `contentAccess` can never widen access — the
+   platform-assigned `trust_level` is untouched — which is why it is admissible as a CR field.
+
+The install gate (§8.5) then keys "content-bearing" on `contentAccess == 'content'`. **Sequencing (§12.4):**
+the gate must switch to keying on `contentAccess` **only together with** this projection — until the
+projection is enforced, the gate conservatively treats every message-carrying point as content-bearing
+(interim fix A), so a `pre_call`/`on_error` egress hook can't dodge the high-trust bar.
 
 ### 8.5 · Registry install (organization-scoped)
 
@@ -1149,6 +1187,112 @@ the hooked LLM port is rebuilt per logical request, the state lives in a process
 `HookBreakerRegistry` keyed by hook identity (`endpoint+path`), so a trip survives across requests and a
 down hook is short-circuited (not re-dialed and re-timed-out) until its cooldown elapses, then re-probed
 once. (`mcp-host/src/core/guardrails/hooks/hookBreaker.ts`.)
+
+### 8.7 · Hook archetypes (what we expect people to install)
+
+A hook is not defined by its vendor brand but by **four independent axes**, and those axes — not the name
+on the box — decide how it is delivered, what data it sees, and what trust tier it needs. Everything in
+§8.1–§8.6 is the machinery; this section is the catalog of shapes that machinery is built to carry.
+
+- **Lifecycle point(s)** (§7.1/§8.1) — `pre_call`, `moderate`, `post_call`, `on_error`. One hook may serve
+  several (e.g. a firewall that screens the prompt at `moderate` and the answer at `post_call`).
+- **Content need** (`spec.contentAccess`: `metadata` | `content`) — whether the hook receives message /
+  response **bodies** or only `model+params+usage` metadata. `moderate` / `post_call` / `on_error` are
+  **inherently `content`**. `pre_call` is the **only** point with two flavors: a **metadata-only shaper**
+  (`metadata`) or a **content-aware rewriter** (`content`, e.g. an input-token optimizer). See "Two flavors
+  of `pre_call`" below.
+- **Egress** — **none** (in-cluster `image`/`service` under default-deny, N3/N5) or **network**
+  (`egressBindings`, or a `remote` target which is egress by construction).
+- **Delivery / trust** — `image` (HCC-deployed, hardened pod, N8), `service` (existing in-cluster Service),
+  `remote` (external SaaS), or a first-party **built-in** (in-process, full trust, **outside §8.4
+  entirely** — §7.2).
+
+**The gating rule is one line (§8.4): _content **and** egress ⇒ `trust_level: high`._** Content alone, or
+egress alone, is admissible at low/mid trust — the danger was never "sees content," it is "sees content
+**and** can ship it out."
+
+| Sees content? | Can egress? | Trust needed | Why |
+|---|---|---|---|
+| no (`metadata`) | no | **low** | shapes params only; reaches nothing |
+| no (`metadata`) | yes | **low/mid** | can call out, but has no conversation to leak |
+| yes (`content`) | no | **low/mid** | reads prompt/response, but default-deny egress means it can't exfiltrate |
+| yes (`content`) | yes (`egressBindings` / `remote`) | **high** | sees content **and** can ship it out — the exfiltration path §8.4 gates |
+
+**Two flavors of `pre_call`.** `pre_call` is where a hook acts *before* the model call, and it splits by
+content need:
+- **Metadata-only shaper** (`contentAccess: metadata`) — tunes `params`, adds untrusted context, or gates
+  on request metadata, **without** seeing message bodies. Content-free, so it may carry `egressBindings` at
+  low trust (e.g. a budget guard that prices a request against a billing service).
+- **Content-aware rewriter** (`contentAccess: content`) — reads the messages to **rewrite** them, e.g. an
+  input-token optimizer (prompt compression / LLMLingua-style, semantic dedup, RAG-context pruning). It is
+  content-bearing and gated as such; done as an in-cluster hook with **no egress** it stays low/mid trust
+  (it compresses locally and can't exfiltrate). The system prompt stays immutable (§8.1) — an optimizer
+  edits only non-system messages. Platform-owned token optimization should instead be the **`token-trim`
+  built-in** (§7.2), which runs in-process and sidesteps §8.4 altogether.
+
+**Archetype catalog.**
+
+| # | Archetype | Point(s) | `contentAccess` | Egress | Capabilities | Delivery | Trust | Representative |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Inbound moderation / prompt-injection screen | `moderate` | content | remote / image+egress | `may_deny` (failMode closed) | `remote` or `image` | **high** | OpenAI Moderation, Google Model Armor (prompt), CrowdStrike Falcon AIDR, Aporia, Akto |
+| 2 | Outbound response moderation / DLP | `post_call` | content | remote / image+egress | `may_deny` \| `may_substitute_result` | `remote` or `image` | **high** | same vendors, response side |
+| 3 | In-cluster PII redactor | `post_call` (+`moderate`) | content | **none** | `may_substitute_result` | `image` | **low/mid** | Presidio-based redactor |
+| 4 | Content-aware input optimizer | `pre_call` | content | **none** | `may_rewrite` | `image` | **low/mid** | token/prompt compression, semantic dedup, RAG pruning |
+| 5 | Metadata-only shaper / policy guard | `pre_call` | metadata | allowed (low trust) | `may_rewrite` (params) \| `may_add_context` | `image` or `remote` | **low/mid** | budget / fees guard, deployment param tuning |
+| 6 | Error fallback / recovery | `on_error` | content | none | `may_substitute_result` (text-only) | `image` | **low/mid** | safe canned-response provider |
+| 7 | First-party built-ins | any | n/a (in-process) | n/a | full trust | **built-in** (§7.2) | trusted plane | `prompt-shaping`, `token-trim` |
+
+**Worked examples.** Archetypes 1–3 follow the §8.2 CRs (`acme-scan`, `pii-redact`). The two below make
+the `pre_call` split concrete — a content-aware optimizer that stays **low-trust because it has no egress**,
+and a metadata-only guard that **may egress at low trust because it sees no content**:
+
+```yaml
+# Archetype 4 — content-aware INPUT-TOKEN OPTIMIZER.
+# Reads messages to compress them (contentAccess: content) but declares NO
+# egressBindings → content-without-egress → low/mid trust is sufficient: it
+# rewrites the prompt locally and cannot exfiltrate it. System prompt is
+# immutable to it (§8.1); it edits only non-system messages.
+apiVersion: clerum.io/v1alpha1
+kind: LlmHook
+metadata: { name: prompt-compactor, namespace: llm-hooks }
+spec:
+  target:
+    image: { ref: registry.evenfire.io/hooks/prompt-compactor@sha256:c0ffee…, port: 8080 }
+    # no egressBindings ⇒ default-deny egress (N5): local compute only
+  contentAccess: content            # needs the message bodies to compress them
+  lifecyclePoints: [preCall]        # POSTed at {svc}/v1/pre_call
+  order: 5                          # run early, before content moderation
+  failMode: open                    # advisory optimizer → may fail open
+  onUnavailable: { mode: breaker, failureThreshold: 5, cooldownMs: 30000 }
+  capabilities: [may_rewrite]       # rewrites (drops/compresses) non-system messages
+---
+# Archetype 5 — METADATA-ONLY BUDGET GUARD.
+# Sees model+params+usage but NOT message bodies (contentAccess: metadata), so
+# it may carry egressBindings at low trust: it can call a billing service but has
+# no conversation content to leak.
+apiVersion: clerum.io/v1alpha1
+kind: LlmHook
+metadata: { name: budget-guard, namespace: llm-hooks }
+spec:
+  target:
+    image:
+      ref: registry.evenfire.io/hooks/budget-guard@sha256:b00c…, port: 8080
+      egressBindings:
+        - { toFQDN: billing.internal.example, ports: [443] }   # priced against a billing API
+  contentAccess: metadata           # model+params+usage only — no bodies
+  lifecyclePoints: [preCall]
+  order: 10
+  failMode: open
+  capabilities: [may_add_context]   # annotates the request with budget context (untrusted-framed, §12.4)
+```
+
+**Status.** `spec.contentAccess` is in the CRD schema (optional, CEL-guarded so it can't contradict an
+inherently-content point). The install gate is closed conservatively today — it treats **every**
+message-carrying point (`pre_call`/`moderate`/`post_call`/`on_error`) as content-bearing (interim fix A,
+shipped), so a `pre_call`/`on_error` egress hook already requires `high` trust. The one remaining piece is
+the runtime **content projection** (`projectForHook`, §8.4): once it enforces `contentAccess`, the gate
+keys on the declaration instead of the static set and a `metadata` `pre_call` shaper may drop back to
+low/mid trust. Tracked in §12.4.
 
 ---
 
@@ -1292,6 +1436,20 @@ which a guardrail `allow` never bypasses.
 
 ### 12.4 · Known residual risks & follow-ups
 
+- **Content projection is not yet built — the gate is closed conservatively in the meantime (§8.4/§8.7).**
+  The runtime still sends the full `ToolCompletionRequest` (messages) to `pre_call` **and** `on_error` (not
+  only `moderate`/`post_call`), and **no `projectForHook` projection redacts/scopes anything yet** — every
+  point receives the raw request/response. **Fix A (shipped):** the install gate now treats every
+  message-carrying point (`pre_call`, `moderate`, `post_call`, `on_error`) as content-bearing, so a
+  `pre_call`/`on_error` hook with `egressBindings` or a `remote` target already requires `high` trust — the
+  exfiltration path is closed. `spec.contentAccess` is also in the CRD schema (advisory until the projection
+  enforces it). **Fix B (remaining):** implement the §8.4 `projectForHook` projection so a `metadata`
+  `pre_call` shaper genuinely receives no bodies (and may egress at low/mid trust) while a `content`
+  `pre_call` optimizer is gated like any content hook; the gate then keys on `contentAccess`. The gate-switch
+  and the projection **must land together** (§8.4 sequencing) — keying on `contentAccess` before the
+  projection enforces it would let a hook declare `metadata` to dodge the gate while still receiving content.
+  Until B lands, the §8.1 wire table (which lists `messages` in the `pre_call`/`on_error` bodies) is what the
+  code follows.
 - **`remote`-hook egress is range-scoped, not domain-scoped.** At the **network** layer the broad lane
   excludes all cluster/private/metadata ranges via `ipBlock.except` (N12/§8.3), so mcp-host and hooks cannot
   reach a cluster-internal or metadata IP on 443/80. What the network layer does **not** do is pin the
