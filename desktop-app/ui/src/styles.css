@@ -2202,7 +2202,7 @@ h3 {
   overflow: hidden;
   min-height: 0;
   height: 100vh;
-  padding: var(--space-4) var(--space-4) 0;
+  padding: var(--space-4) var(--space-4) 0 calc(var(--space-4) / 2);
   gap: 0;
 }
 
@@ -14927,13 +14927,37 @@ pre {
   flex: 0 0 auto;
   max-width: 220px;
   min-width: 0;
+  transition: background var(--motion-fast);
 }
 
 .chat-view-tab.is-active {
   background: var(--surface-strong);
-  border-color: var(--accent);
-  border-bottom-color: var(--surface-strong);
+  border-color: var(--chat-view-selected-border);
+  border-bottom: 0;
   margin-bottom: -1px;
+  position: relative;
+  z-index: 1;
+}
+
+.chat-view-tab.is-active::after {
+  background: inherit;
+  bottom: -1px;
+  content: '';
+  height: 1px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+}
+
+.chat-view-tab:hover {
+  background: var(--surface-hover);
+}
+
+.chat-view-tab .chat-view-tab__select.ui-button:hover:enabled,
+.chat-view-tab .chat-view-tab__close.ui-button:hover:enabled {
+  background: transparent;
+  border-color: transparent;
 }
 
 .chat-view-tab__select {
@@ -14956,6 +14980,8 @@ pre {
 }
 
 .chat-view-workspace {
+  --chat-view-selected-border: rgba(var(--accent-rgb), 0.25);
+
   display: flex;
   flex: 1 1 0;
   flex-direction: column;
@@ -14966,9 +14992,9 @@ pre {
 
 .chat-view-surface {
   background: var(--surface-strong);
-  border-top-color: var(--accent);
-  border-top-style: solid;
-  border-top-width: 1px;
+  border-color: var(--chat-view-selected-border);
+  border-style: solid;
+  border-width: 1px;
   border-radius: 0 var(--radius-sm) 0 0;
   display: flex;
   flex: 1 1 0;
@@ -14976,6 +15002,7 @@ pre {
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  padding-left: var(--space-3);
   width: 100%;
 }
 

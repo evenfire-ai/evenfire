@@ -19,7 +19,10 @@ const tabs = [
 beforeEach(() => {
   const style = document.createElement('style')
   style.dataset.testStyles = 'chat-workspace'
-  style.textContent = `:root { --accent: #3b82f6; --surface-strong: #111827; }
+  style.textContent = `${readFileSync(
+    path.join(process.cwd(), 'ui', 'src', 'styles', 'tokens.css'),
+    'utf8'
+  )}
 ${readFileSync(path.join(process.cwd(), 'ui', 'src', 'styles.css'), 'utf8')}`
   document.head.append(style)
 })
@@ -56,6 +59,10 @@ describe('ChatViewWorkspace', () => {
     expect(surface.contains(screen.getByTestId('chat-state'))).toBe(true)
     expect(getComputedStyle(list).overflowX).toBe('auto')
     expect(getComputedStyle(surface).borderTopStyle).toBe('solid')
+    expect(getComputedStyle(surface).borderLeftStyle).toBe('solid')
+    expect(getComputedStyle(surface).borderRightStyle).toBe('solid')
+    expect(getComputedStyle(surface).borderBottomStyle).toBe('solid')
+    expect(getComputedStyle(surface).paddingLeft).toBe('var(--space-3)')
     expect(container.querySelector('.chat-view-tab.is-active')).toBeTruthy()
   })
 
