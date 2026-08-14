@@ -174,7 +174,8 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
     fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
 
-    expect(screen.getByText(/Providers: OpenAI, Amazon Bedrock/)).toBeInTheDocument()
+    const option = screen.getByRole('option', { name: /shared-llm-keys/ })
+    expect(option).toHaveTextContent(/Providers: OpenAI, Amazon Bedrock/)
   })
 
   it('matches the primary provider to the selected credential', async () => {
@@ -219,11 +220,11 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
     const existingCard = screen.getByLabelText(/Use an existing Secret/i).closest('label')
-    const newCard = screen.getByLabelText(/New credential/i).closest('label')
+    const newCard = screen.getByLabelText(/New secret/i).closest('label')
     expect(existingCard).not.toBeNull()
     expect(newCard).not.toBeNull()
     expect(screen.getByLabelText(/Use an existing Secret/i)).toBeChecked()
-    expect(screen.getByLabelText(/New credential/i)).not.toBeChecked()
+    expect(screen.getByLabelText(/New secret/i)).not.toBeChecked()
     expect(screen.getByText('Credential', { selector: 'strong' })).toBeInTheDocument()
     expect(existingCard?.compareDocumentPosition(newCard as Node)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING
@@ -252,7 +253,7 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
     // Step 2: explicitly create a new Secret and make the OpenAI primary usable.
-    fireEvent.click(screen.getByLabelText(/New credential/i))
+    fireEvent.click(screen.getByLabelText(/New secret/i))
     fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
 
     // Add a fallback and switch it to Bedrock (a different provider than the
