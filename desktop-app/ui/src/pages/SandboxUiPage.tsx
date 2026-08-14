@@ -155,6 +155,7 @@ type AppFindState =
   | { status: 'error'; message: string }
 
 export function SandboxUiPage({
+  actionRequest = null,
   boundsRefreshKey = 0,
   conversationOrigin = null,
   currentTeamId = '',
@@ -188,6 +189,7 @@ export function SandboxUiPage({
   const lastLocalSearchRequestIdRef = useRef(0)
   const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
+  const lastActionRequestIdRef = useRef(0)
   const shellOverlayOpen =
     headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
 
@@ -446,6 +448,18 @@ export function SandboxUiPage({
   const onRefresh = useCallback(() => {
     void window.clerum.sandboxUi.reload()
   }, [])
+
+  useEffect(() => {
+    if (!actionRequest || actionRequest.id <= lastActionRequestIdRef.current) return
+    lastActionRequestIdRef.current = actionRequest.id
+    if (actionRequest.action === 'refresh') {
+      onRefresh()
+    } else if (actionRequest.action === 'back-to-apps') {
+      void onBackToApps()
+    } else {
+      void handleBackToConversation()
+    }
+  }, [actionRequest, handleBackToConversation, onBackToApps, onRefresh])
 
   const onCopyDeepLink = useCallback(async () => {
     try {

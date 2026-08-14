@@ -16,6 +16,10 @@ export type SandboxUiShortcutOpenResult =
   | { status: 'failed'; message: string }
 
 export type SandboxUiPageProps = {
+  actionRequest?: {
+    id: number
+    action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+  } | null
   boundsRefreshKey?: string | number
   conversationOrigin?: SandboxUiConversationOrigin | null
   currentTeamId?: string

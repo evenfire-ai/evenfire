@@ -35,6 +35,15 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'navigate.apps',
   'navigate.agents',
   'notifications.open',
+  'navigate.plugins',
+  'navigate.contexts',
+  'navigate.teams',
+  'navigate.connectors',
+  'navigate.files',
+  'sidebar.toggle',
+  'app.refresh',
+  'app.backToApps',
+  'app.backToConversation',
 ])
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {

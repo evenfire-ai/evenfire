@@ -185,6 +185,79 @@ describe('SandboxUiPage', () => {
     expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
   })
 
+  it('routes controlled refresh and back requests through mounted-app owners', async () => {
+    sandboxUi.listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: 'Sales CRM',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValue(undefined)
+    sandboxUi.close.mockResolvedValue(undefined)
+    sandboxUi.reload.mockResolvedValue(undefined)
+    const onEmbeddedAppBack = vi.fn()
+    const { rerender } = render(
+      <SandboxUiPage actionRequest={null} onEmbeddedAppBack={onEmbeddedAppBack} />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
+
+    rerender(
+      <SandboxUiPage
+        actionRequest={{ id: 1, action: 'refresh' }}
+        onEmbeddedAppBack={onEmbeddedAppBack}
+      />
+    )
+    expect(sandboxUi.reload).toHaveBeenCalledOnce()
+
+    rerender(
+      <SandboxUiPage
+        actionRequest={{ id: 2, action: 'back-to-apps' }}
+        onEmbeddedAppBack={onEmbeddedAppBack}
+      />
+    )
+    await waitFor(() => {
+      expect(sandboxUi.close).toHaveBeenCalledOnce()
+      expect(onEmbeddedAppBack).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('routes controlled conversation return through the existing transition owner', async () => {
+    sandboxUi.listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: 'Sales CRM',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValue(undefined)
+    sandboxUi.close.mockResolvedValue(undefined)
+    const onBackToConversation = vi.fn().mockResolvedValue(undefined)
+    const props = {
+      conversationOrigin: { agentName: 'agent', chatId: 'chat', title: 'Conversation' },
+      onBackToConversation,
+    }
+    const { rerender } = render(<SandboxUiPage {...props} actionRequest={null} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
+
+    rerender(<SandboxUiPage {...props} actionRequest={{ id: 1, action: 'back-to-conversation' }} />)
+
+    await waitFor(() => {
+      expect(onBackToConversation).toHaveBeenCalledOnce()
+      expect(sandboxUi.close).toHaveBeenCalledOnce()
+    })
+  })
+
   it('runs contextual find only against the mounted active WebContents contract', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [

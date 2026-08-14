@@ -124,12 +124,48 @@ describe('Desktop command registry', () => {
   })
 
   it('enables commands from the same registry context used by keyboard and palette actions', () => {
-    const context = { tabCount: 1, searchableContent: false, composerAvailable: false }
+    const context = {
+      tabCount: 1,
+      searchableContent: false,
+      composerAvailable: false,
+      appMounted: false,
+      conversationOriginAvailable: false,
+    }
     expect(isDesktopCommandEligible(getDesktopCommand('tabs.select1'), context)).toBe(true)
     expect(isDesktopCommandEligible(getDesktopCommand('tabs.select2'), context)).toBe(false)
     expect(isDesktopCommandEligible(getDesktopCommand('tabs.next'), context)).toBe(false)
     expect(isDesktopCommandEligible(getDesktopCommand('search.current'), context)).toBe(false)
     expect(isDesktopCommandEligible(getDesktopCommand('composer.focus'), context)).toBe(false)
     expect(isDesktopCommandEligible(getDesktopCommand('search.open'), context)).toBe(true)
+    expect(isDesktopCommandEligible(getDesktopCommand('app.refresh'), context)).toBe(false)
+    expect(
+      isDesktopCommandEligible(getDesktopCommand('app.refresh'), { ...context, appMounted: true })
+    ).toBe(true)
+    expect(
+      isDesktopCommandEligible(getDesktopCommand('app.backToConversation'), {
+        ...context,
+        appMounted: true,
+        conversationOriginAvailable: true,
+      })
+    ).toBe(true)
+  })
+
+  it('keeps every approved contextual palette action unbound', () => {
+    for (const id of [
+      'navigate.plugins',
+      'navigate.contexts',
+      'navigate.teams',
+      'navigate.connectors',
+      'navigate.files',
+      'sidebar.toggle',
+      'app.refresh',
+      'app.backToApps',
+      'app.backToConversation',
+    ] as const) {
+      const command = getDesktopCommand(id)
+      expect(command.defaultBinding).toBeNull()
+      expect(command.visibleInPalette).toBe(true)
+      expect(command.visibleInSettings).toBe(false)
+    }
   })
 })

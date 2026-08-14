@@ -45,6 +45,7 @@ export function SidebarNav({
   onOpenSandboxUiApp,
   onSettingsMenuOpenChange,
   onSelect,
+  toggleRequestId = 0,
 }: SidebarNavProps) {
   const { busy, me, handleLogout: onLogout } = useAuthContext()
   const { activeChatId, latestChatSessions, latestChatSessionsLoading, sessionStateByChatKey } =
@@ -67,6 +68,7 @@ export function SidebarNav({
     chatId: string
     title: string
   } | null>(null)
+  const lastToggleRequestIdRef = useRef(0)
   const desktopAppInfo = useDesktopAppInfo()
   const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
   const sidebarRef = useRef<HTMLElement | null>(null)
@@ -88,6 +90,16 @@ export function SidebarNav({
   })
   useClickOutside(sidebarRef, mobileMenuOpen, () => setMobileMenuOpen(false))
   useClickOutside(sessionsRef, Boolean(sessionMenuId), () => setSessionMenuId(null))
+
+  useEffect(() => {
+    if (toggleRequestId <= lastToggleRequestIdRef.current) return
+    lastToggleRequestIdRef.current = toggleRequestId
+    if (isMobileSidebarViewport()) {
+      setMobileMenuOpen(open => !open)
+    } else {
+      onCollapsedChange(!collapsed)
+    }
+  }, [collapsed, onCollapsedChange, toggleRequestId])
 
   const email = me?.email
   const displayName = me?.name || email?.split('@')[0] || 'Unknown'

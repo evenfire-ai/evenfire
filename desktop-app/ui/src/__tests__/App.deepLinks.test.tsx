@@ -30,11 +30,19 @@ const commandPaletteHarness = vi.hoisted(() => ({
   },
 }))
 
+const sidebarHarness = vi.hoisted(() => ({
+  props: null as null | { toggleRequestId?: number },
+}))
+
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
     headerShellOverlayOpen?: boolean
     shortcutOpenRequestId?: number
     localSearchRequestId?: number
+    actionRequest?: {
+      id: number
+      action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+    } | null
     onEmbeddedAppOpening?: (app: {
       appRef: string
       label: string
@@ -84,7 +92,12 @@ vi.mock('@components/ConfirmDialog', () => ({
     return null
   },
 }))
-vi.mock('@components/SidebarNav', () => ({ SidebarNav: () => null }))
+vi.mock('@components/SidebarNav', () => ({
+  SidebarNav: (props: NonNullable<typeof sidebarHarness.props>) => {
+    sidebarHarness.props = props
+    return null
+  },
+}))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
@@ -215,6 +228,7 @@ describe('App deep-link orchestration', () => {
     commandPaletteHarness.props = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
+    sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
     listPendingDeepLinks.mockResolvedValue({ links: [] })
@@ -389,6 +403,42 @@ describe('App deep-link orchestration', () => {
     expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(1)
     act(() => commandPaletteHarness.props?.onExecute('auth.logout'))
     expect(currentController.handleLogout).toHaveBeenCalledOnce()
+  })
+
+  it('routes approved contextual palette actions through shell and app owners', () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    act(() => emitCommand?.('commands.open'))
+
+    for (const [commandId, route] of [
+      ['navigate.plugins', DESKTOP_ROUTES.plugins],
+      ['navigate.contexts', DESKTOP_ROUTES.contexts],
+      ['navigate.teams', DESKTOP_ROUTES.teams],
+      ['navigate.connectors', DESKTOP_ROUTES.connectors],
+      ['navigate.files', DESKTOP_ROUTES.files],
+    ] as const) {
+      act(() => commandPaletteHarness.props?.onExecute(commandId))
+      expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(route)
+    }
+
+    act(() => commandPaletteHarness.props?.onExecute('sidebar.toggle'))
+    expect(sidebarHarness.props?.toggleRequestId).toBe(1)
+
+    currentController.navItem = DESKTOP_ROUTES.apps
+    act(() => emitCommand?.('commands.open'))
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(true)
+    act(() => commandPaletteHarness.props?.onExecute('app.refresh'))
+    expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 1, action: 'refresh' })
+    act(() => commandPaletteHarness.props?.onExecute('app.backToApps'))
+    expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 2, action: 'back-to-apps' })
+    expect(commandPaletteHarness.props?.isEligible('app.backToConversation')).toBe(false)
   })
 
   afterEach(() => {

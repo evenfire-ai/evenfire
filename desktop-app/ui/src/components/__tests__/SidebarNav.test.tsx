@@ -113,6 +113,42 @@ describe('SidebarNav logo', () => {
     expect(screen.getByTestId('nav-files').textContent).toContain('Global File System')
     expect(screen.queryByRole('menuitem', { name: 'Files' })).toBeNull()
   })
+
+  it('routes a controlled palette request through desktop collapse behavior', () => {
+    const onCollapsedChange = vi.fn()
+    const { rerender } = render(
+      <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
+    )
+
+    rerender(<SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 1 })} />)
+
+    expect(onCollapsedChange).toHaveBeenCalledWith(true)
+  })
+
+  it('routes a controlled palette request through the mobile drawer behavior', () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      query =>
+        ({
+          matches: true,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as MediaQueryList
+    )
+    const onCollapsedChange = vi.fn()
+    const { container, rerender } = render(
+      <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
+    )
+
+    rerender(<SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 1 })} />)
+
+    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(true)
+    expect(onCollapsedChange).not.toHaveBeenCalled()
+  })
 })
 
 describe('SidebarNav new-chat affordance', () => {

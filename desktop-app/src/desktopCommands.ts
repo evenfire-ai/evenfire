@@ -14,6 +14,8 @@ export type DesktopCommandEligibility =
   | 'tab-index'
   | 'searchable-content'
   | 'composer-available'
+  | 'app-mounted'
+  | 'conversation-origin'
 
 export type SemanticShortcutBinding = {
   key: string
@@ -42,6 +44,8 @@ export type DesktopCommandRuntimeContext = {
   tabCount: number
   searchableContent: boolean
   composerAvailable: boolean
+  appMounted: boolean
+  conversationOriginAvailable: boolean
 }
 
 function tabSelectCommand<const Id extends `tabs.select${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8}`>(
@@ -320,6 +324,141 @@ const definitions = [
     visibleInPalette: true,
     visibleInSettings: false,
   },
+  {
+    id: 'navigate.plugins',
+    label: 'Go to Plugins',
+    description: 'Open the Plugins workspace.',
+    group: 'Navigation',
+    order: 180,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'always',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
+  {
+    id: 'navigate.contexts',
+    label: 'Go to Contexts',
+    description: 'Open the Contexts workspace.',
+    group: 'Navigation',
+    order: 190,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'always',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
+  {
+    id: 'navigate.teams',
+    label: 'Go to Teams',
+    description: 'Open the Teams workspace.',
+    group: 'Navigation',
+    order: 200,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'always',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
+  {
+    id: 'navigate.connectors',
+    label: 'Go to Connectors',
+    description: 'Open the Connectors workspace.',
+    group: 'Navigation',
+    order: 210,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'always',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
+  {
+    id: 'navigate.files',
+    label: 'Go to Global File System',
+    description: 'Open the Global File System browser.',
+    group: 'Navigation',
+    order: 220,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'always',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
+  {
+    id: 'sidebar.toggle',
+    label: 'Toggle sidebar',
+    description: 'Collapse, expand, or open the responsive sidebar.',
+    group: 'Workspace',
+    order: 230,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'always',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
+  {
+    id: 'app.refresh',
+    label: 'Refresh current app',
+    description: 'Refresh the currently mounted app.',
+    group: 'Workspace',
+    order: 240,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'app-mounted',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
+  {
+    id: 'app.backToApps',
+    label: 'Back to Apps',
+    description: 'Close the current app and return to Apps.',
+    group: 'Workspace',
+    order: 250,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'app-mounted',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
+  {
+    id: 'app.backToConversation',
+    label: 'Back to conversation',
+    description: 'Return to the conversation that opened the current app.',
+    group: 'Workspace',
+    order: 260,
+    defaultBinding: null,
+    sources: ['host', 'sandbox'],
+    eligibility: 'conversation-origin',
+    editingPolicy: 'suppress',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: false,
+  },
 ] as const satisfies readonly DesktopCommandDefinition[]
 
 export type DesktopCommandId = (typeof definitions)[number]['id']
@@ -358,6 +497,8 @@ export function isDesktopCommandEligible(
     return command.tabIndex !== undefined && command.tabIndex < context.tabCount
   }
   if (command.eligibility === 'searchable-content') return context.searchableContent
+  if (command.eligibility === 'app-mounted') return context.appMounted
+  if (command.eligibility === 'conversation-origin') return context.conversationOriginAvailable
   return context.composerAvailable
 }
 

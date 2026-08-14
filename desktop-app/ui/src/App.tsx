@@ -270,12 +270,17 @@ export function App() {
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
+  const [sidebarToggleRequestId, setSidebarToggleRequestId] = React.useState(0)
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
   const [chatLocalSearchState, setChatLocalSearchState] = React.useState<{
     query: string
     currentMatch: ChatLocalMatch | null
   }>({ query: '', currentMatch: null })
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
+  const [sandboxActionRequest, setSandboxActionRequest] = React.useState<{
+    id: number
+    action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+  } | null>(null)
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
   const [settingsShortcutsRequestId, setSettingsShortcutsRequestId] = React.useState(0)
@@ -1086,8 +1091,20 @@ export function App() {
         vm.navItem === DESKTOP_ROUTES.chat &&
         Boolean(activeChatViewTab(chatViewTabs).agentRef) &&
         vm.hostRuntimeStatus?.degraded?.reason !== 'llm_key_missing',
+      appMounted: vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp),
+      conversationOriginAvailable:
+        vm.navItem === DESKTOP_ROUTES.apps &&
+        Boolean(activeSandboxUiApp) &&
+        Boolean(sandboxUiConversationOrigin),
     }),
-    [activeSandboxUiApp, chatViewTabs, vm.activeChatId, vm.hostRuntimeStatus, vm.navItem]
+    [
+      activeSandboxUiApp,
+      chatViewTabs,
+      sandboxUiConversationOrigin,
+      vm.activeChatId,
+      vm.hostRuntimeStatus,
+      vm.navItem,
+    ]
   )
 
   const isCommandEligible = React.useCallback(
@@ -1168,6 +1185,41 @@ export function App() {
       }
       if (commandId === 'notifications.open') {
         setNotificationOpenRequestId(value => value + 1)
+        return
+      }
+      if (
+        commandId === 'navigate.plugins' ||
+        commandId === 'navigate.contexts' ||
+        commandId === 'navigate.teams' ||
+        commandId === 'navigate.connectors' ||
+        commandId === 'navigate.files'
+      ) {
+        const routes = {
+          'navigate.plugins': DESKTOP_ROUTES.plugins,
+          'navigate.contexts': DESKTOP_ROUTES.contexts,
+          'navigate.teams': DESKTOP_ROUTES.teams,
+          'navigate.connectors': DESKTOP_ROUTES.connectors,
+          'navigate.files': DESKTOP_ROUTES.files,
+        } as const
+        handleSidebarNavSelect(routes[commandId])
+        return
+      }
+      if (commandId === 'sidebar.toggle') {
+        setSidebarToggleRequestId(value => value + 1)
+        return
+      }
+      if (
+        commandId === 'app.refresh' ||
+        commandId === 'app.backToApps' ||
+        commandId === 'app.backToConversation'
+      ) {
+        const action =
+          commandId === 'app.refresh'
+            ? 'refresh'
+            : commandId === 'app.backToApps'
+              ? 'back-to-apps'
+              : 'back-to-conversation'
+        setSandboxActionRequest(previous => ({ id: (previous?.id ?? 0) + 1, action }))
         return
       }
       if (commandId === 'chat.newTab') {
@@ -1729,6 +1781,7 @@ export function App() {
                             onOpenSandboxUiApp={handleOpenSandboxUiApp}
                             onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                             onSelect={handleSidebarNavSelect}
+                            toggleRequestId={sidebarToggleRequestId}
                           />
                           <section className="workspace-layout">
                             <section
@@ -1789,6 +1842,7 @@ export function App() {
                               {vm.navItem === DESKTOP_ROUTES.apps && (
                                 <SandboxUiPage
                                   boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                  actionRequest={sandboxActionRequest}
                                   conversationOrigin={sandboxUiConversationOrigin}
                                   currentTeamId={vm.currentTeamId}
                                   headerShellOverlayOpen={

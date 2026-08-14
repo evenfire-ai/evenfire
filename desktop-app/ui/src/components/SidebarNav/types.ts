@@ -9,4 +9,5 @@ export type SidebarNavProps = {
   onOpenSandboxUiApp: (app: ActiveSandboxUiApp) => void
   onSettingsMenuOpenChange?: (open: boolean) => void
   onSelect: (item: NavItem) => void
+  toggleRequestId?: number
 }
