@@ -21,13 +21,13 @@ type GfsRouterOptions = {
  */
 
 // 5xx included so control-api's gfsc failure codes reach the desktop verbatim:
-// 504 gfsc_timeout, 502 gfsc_unreachable, plus 500/503 forwarded from gfsc. Without
-// them forwardControlApiError falls through to the global handler, which collapses
-// every 5xx to a generic 500 and the documented codes become unobservable at the
-// client (a wedged gfsc looks identical to an internal bug).
-const PROPAGATED = new Set([
-  400, 401, 403, 404, 409, 410, 411, 412, 413, 422, 429, 500, 502, 503, 504,
-])
+// Preserve the GFS transport contract at this boundary. The client retry policy
+// distinguishes transient 408/425/5xx responses from terminal 507 storage
+// exhaustion, so collapsing an unlisted status into the process-wide 500 handler
+// would change the meaning of a writer response. The 4xx allowlist remains
+// explicit; every 5xx is safe to forward because it is already a ControlApiError
+// produced by the authenticated control-plane request.
+const PROPAGATED = new Set([400, 401, 403, 404, 408, 409, 410, 411, 412, 413, 422, 425, 429, 507])
 const STREAM_HEADERS = [
   'content-type',
   'content-length',
@@ -51,7 +51,10 @@ const STREAM_HEADERS = [
 ]
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  if (error instanceof ControlApiError && PROPAGATED.has(error.status)) {
+  const shouldPropagate =
+    error instanceof ControlApiError &&
+    (PROPAGATED.has(error.status) || (error.status >= 500 && error.status <= 599))
+  if (shouldPropagate) {
     const body =
       error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
     for (const header of STREAM_HEADERS) {

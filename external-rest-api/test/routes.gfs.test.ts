@@ -341,18 +341,28 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(res.body).toEqual({ error: 'escalation_rejected' })
   })
 
-  it('propagates control-api gfsc 5xx codes (504/502) verbatim, not a generic 500', async () => {
-    // control-api emits 504 gfsc_timeout / 502 gfsc_unreachable on the me-path;
-    // without them in PROPAGATED, forwardControlApiError fell through to the global
-    // handler which collapses every 5xx to 500 — the documented codes became
-    // unobservable at the desktop (a wedged gfsc looked like an internal bug).
+  it('propagates GFS transport statuses/body/headers without changing retry semantics', async () => {
+    // 507 is terminal for Desktop/Control UI, while 408/425 and the transient
+    // 5xx family are retryable. The public relay must not turn any of them into
+    // a generic 500 before the client can apply that policy.
     for (const [status, error] of [
-      [504, 'gfsc_timeout'],
+      [408, 'request_timeout'],
+      [425, 'too_early'],
+      [500, 'gfsc_internal'],
       [502, 'gfsc_unreachable'],
+      [503, 'gfsc_unavailable'],
+      [504, 'gfsc_timeout'],
+      [507, 'insufficient_storage'],
+      [599, 'upstream_unknown'],
     ] as const) {
       clientMock.controlApiRequest.mockReset()
       clientMock.controlApiRequest.mockRejectedValue(
-        new ControlApiError('gfsc failure', status, { error })
+        new ControlApiError(
+          'gfsc failure',
+          status,
+          { error },
+          new Headers({ 'retry-after': '7', 'x-ratelimit-limit': '16' })
+        )
       )
       const res = await request(buildApp())
         .put('/me/gfs/resources/abc/content?drive=main')
@@ -360,6 +370,8 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         .send({ contentBase64: 'AAAA' })
       expect(res.status).toBe(status)
       expect(res.body).toEqual({ error })
+      expect(res.headers['retry-after']).toBe('7')
+      expect(res.headers['x-ratelimit-limit']).toBe('16')
     }
   })
 
