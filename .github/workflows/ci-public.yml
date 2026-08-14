@@ -107,6 +107,11 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm run build
 
+      - name: Install Playwright Chromium
+        if: matrix.service == 'desktop-app'
+        working-directory: desktop-app
+        run: npx playwright install --with-deps chromium
+
       - name: Test
         working-directory: ${{ matrix.service }}
         run: npm test

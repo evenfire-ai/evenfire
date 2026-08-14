@@ -11472,7 +11472,7 @@ pre {
   display: grid;
   gap: var(--space-2);
   justify-items: start;
-  padding-right: 360px;
+  padding-right: var(--app-header-utilities-width);
 }
 
 .apps-page-header-text h2 {
@@ -12423,6 +12423,18 @@ pre {
 }
 
 @media (min-width: 901px) and (max-width: 1220px) {
+  .content-panel {
+    --app-header-utilities-width: calc(
+      clamp(160px, 32vw, var(--app-notification-drawer-width)) + var(--space-2) + 36px
+    );
+  }
+
+  .content-panel.content-panel--app-notification-drawer-open {
+    --app-header-utilities-width: calc(
+      var(--app-notification-drawer-width) + var(--space-2) + 36px
+    );
+  }
+
   .global-search {
     width: clamp(160px, 32vw, var(--app-notification-drawer-width));
     min-width: 160px;
