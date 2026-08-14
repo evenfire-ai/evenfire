@@ -1599,7 +1599,7 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     page,
   }) => {
     await login(page)
-    await page.getByRole('link', { name: 'Connectors' }).click()
+    await page.getByRole('link', { name: 'Installed connectors', exact: true }).click()
     await expect(page).toHaveURL(/\/mcp-servers/)
 
     const serverRow = page.locator('tr', { hasText: exactServerName })
@@ -1761,7 +1761,7 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await login(page)
 
     await test.step('create exact-host connector from the visible form flow', async () => {
-      await page.getByRole('link', { name: 'Connectors' }).click()
+      await page.getByRole('link', { name: 'Installed connectors', exact: true }).click()
       await expect(page).toHaveURL(/\/mcp-servers/)
       await page.getByRole('button', { name: 'Create Connector' }).click()
       await expect(page).toHaveURL(/\/mcp-servers\/new/)
