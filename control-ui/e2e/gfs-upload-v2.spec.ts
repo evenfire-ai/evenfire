@@ -106,6 +106,10 @@ async function observeTwoProgressValues(
     .toBeGreaterThanOrEqual(2)
 }
 
+function isSuccessfulResponse(response: import('@playwright/test').Response): boolean {
+  return response.status() >= 200 && response.status() < 300
+}
+
 function uploadIdFromEnvelope(body: unknown): string {
   if (!body || typeof body !== 'object' || Array.isArray(body))
     throw new Error('upload response is not an object')
@@ -135,17 +139,21 @@ async function exerciseCreate(
       response =>
         response.request().method() === 'POST' &&
         response.url().includes('/gfs/proxy/v1/uploads') &&
-        !response.url().endsWith('/complete')
+        !response.url().endsWith('/complete') &&
+        isSuccessfulResponse(response)
     )
     const completeResponse = page.waitForResponse(
-      response => response.request().method() === 'POST' && response.url().endsWith('/complete')
+      response =>
+        response.request().method() === 'POST' &&
+        response.url().endsWith('/complete') &&
+        isSuccessfulResponse(response)
     )
     await page.getByRole('button', { name: 'Upload file', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Upload file' })
     await dialog.getByLabel('Choose file to upload').setInputFiles(source.filePath)
     await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
     const created = await createResponse
-    expect(created.status(), `${created.url()} ${await created.text()}`).toBeGreaterThanOrEqual(200)
+    expect(isSuccessfulResponse(created), `${created.url()} ${await created.text()}`).toBe(true)
     const progress = page.getByRole('progressbar', {
       name: `Upload progress for ${source.fileName}`,
     })
@@ -200,10 +208,14 @@ async function exerciseReplace(
       response =>
         response.request().method() === 'POST' &&
         response.url().includes('/gfs/proxy/v1/uploads') &&
-        !response.url().endsWith('/complete')
+        !response.url().endsWith('/complete') &&
+        isSuccessfulResponse(response)
     )
     const completeResponse = page.waitForResponse(
-      response => response.request().method() === 'POST' && response.url().endsWith('/complete')
+      response =>
+        response.request().method() === 'POST' &&
+        response.url().endsWith('/complete') &&
+        isSuccessfulResponse(response)
     )
     const row = current.getByRole('listitem').filter({ hasText: fixture.fileName })
     await expect(row).toBeVisible({ timeout: 30_000 })
@@ -215,7 +227,7 @@ async function exerciseReplace(
     })
     await expect(progress).toBeVisible()
     const created = await createResponse
-    expect(created.status(), `${created.url()} ${await created.text()}`).toBeGreaterThanOrEqual(200)
+    expect(isSuccessfulResponse(created), `${created.url()} ${await created.text()}`).toBe(true)
     await observeTwoProgressValues(progress)
     const completed = await completeResponse
     expect(
@@ -283,14 +295,15 @@ test.describe('GFS Upload v2 — Control UI large-upload project', () => {
         response =>
           response.request().method() === 'POST' &&
           response.url().includes('/gfs/proxy/v1/uploads') &&
-          !response.url().endsWith('/complete')
+          !response.url().endsWith('/complete') &&
+          isSuccessfulResponse(response)
       )
       await page.getByRole('button', { name: 'Upload file', exact: true }).click()
       let dialog = page.getByRole('dialog', { name: 'Upload file' })
       await dropFileIntoUploadDialog(dialog, source.filePath)
       await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
       const created = await createResponse
-      expect(created.status()).toBeGreaterThanOrEqual(200)
+      expect(isSuccessfulResponse(created)).toBe(true)
       const uploadId = uploadIdFromEnvelope(await created.json())
 
       const progress = page.getByRole('progressbar', {
@@ -310,7 +323,8 @@ test.describe('GFS Upload v2 — Control UI large-upload project', () => {
         response =>
           response.request().method() === 'GET' &&
           response.url().includes('/gfs/proxy/v1/uploads/') &&
-          response.url().includes('/status')
+          response.url().includes('/status') &&
+          isSuccessfulResponse(response)
       )
       await dropFileIntoUploadDialog(dialog, source.filePath)
       await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
@@ -432,13 +446,15 @@ test.describe('GFS Upload v2 — approved negative Control UI journeys', () => {
       const capabilitiesResponse = page.waitForResponse(
         response =>
           response.request().method() === 'GET' &&
-          response.url().includes('/gfs/proxy/v1/capabilities')
+          response.url().includes('/gfs/proxy/v1/capabilities') &&
+          isSuccessfulResponse(response)
       )
       const createResponse = page.waitForResponse(
         response =>
           response.request().method() === 'POST' &&
           response.url().includes('/gfs/proxy/v1/uploads') &&
-          !response.url().endsWith('/complete')
+          !response.url().endsWith('/complete') &&
+          isSuccessfulResponse(response)
       )
       await page.getByRole('button', { name: 'Upload file', exact: true }).click()
       const dialog = page.getByRole('dialog', { name: 'Upload file' })
@@ -461,7 +477,7 @@ test.describe('GFS Upload v2 — approved negative Control UI journeys', () => {
       ).toBe(true)
       const created = await createResponse
       const createdBody = await created.text()
-      expect(created.status(), `${created.url()} ${createdBody}`).toBeGreaterThanOrEqual(200)
+      expect(isSuccessfulResponse(created), `${created.url()} ${createdBody}`).toBe(true)
       expect(createdBody).toMatch(/uploadId|upload_id|data/)
       const progress = page.getByRole('progressbar', {
         name: `Upload progress for ${source.fileName}`,
