@@ -3,7 +3,6 @@ WORKDIR /app
 
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/image-policy ./packages/image-policy
-COPY packages/display-field ./packages/display-field
 # Shared prebuilt data-only providers package (no build step). Copied before
 # both the workflow-runtime-core build (it depends on it) and control-api's
 # npm ci (control-api validates the provider set from it, R4).

@@ -18,9 +18,6 @@ RUN npm ci \
   && rm -rf node_modules/@clerum/workflow-recipe-capability-policy \
   && mkdir -p node_modules/@clerum \
   && cp -R ../packages/workflow-recipe-capability-policy node_modules/@clerum/workflow-recipe-capability-policy \
-  && rm -rf node_modules/@clerum/display-field \
-  && mkdir -p node_modules/@clerum \
-  && cp -R ../packages/display-field node_modules/@clerum/display-field \
   && rm -rf node_modules/@clerum/llm-providers \
   && cp -R ../packages/llm-providers node_modules/@clerum/llm-providers \
   && rm -rf node_modules/@clerum/display-field \
