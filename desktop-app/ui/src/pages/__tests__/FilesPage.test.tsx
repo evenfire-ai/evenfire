@@ -25,6 +25,10 @@ function baseController() {
     affordances: null,
     affordancesError: null,
     loadingAffordances: false,
+    rowAffordancesResourceId: null,
+    setRowAffordancesResourceId: vi.fn(),
+    rowAffordances: null,
+    rowAffordancesError: null,
     loadingAccessible: false,
     loading: false,
     accessibleError: null,
@@ -1179,6 +1183,153 @@ describe('FilesPage', () => {
     expect(
       [...listIconSvg].filter(svg => svg.getAttribute('viewBox') === '0 0 512 512')
     ).toHaveLength(5)
+  })
+
+  it('deletes a folder child from its row menu once delete affordances resolve', async () => {
+    const pushToast = vi.fn()
+    const deleteResource = vi.fn(async () => ({}))
+    const setRowAffordancesResourceId = vi.fn()
+    const child = {
+      resourceId: 'child-1',
+      rid: 'child-1',
+      gfsUri: 'gfs://main/child-1',
+      drive: 'main',
+      parentResourceId: 'folder-1',
+      name: 'notes.txt',
+      kind: 'file',
+      path: '/Product/notes.txt',
+      version: 3,
+      bytes: 12,
+    }
+    const controller = {
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      items: [child],
+      deleteResource,
+      setRowAffordancesResourceId,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controller)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    expect(setRowAffordancesResourceId).toHaveBeenCalledWith('child-1')
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller,
+      rowAffordancesResourceId: 'child-1',
+      rowAffordances: {
+        held: ['read', 'write', 'delete'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+    })
+    await act(async () => {
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <FilesPage pushToast={pushToast} />
+        </QueryClientProvider>
+      )
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    })
+    const dialog = screen.getByRole('dialog', { name: 'Delete notes.txt?' })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+    })
+
+    expect(deleteResource).toHaveBeenCalledWith('child-1', 3)
+    expect(pushToast).toHaveBeenCalledWith('Deleted notes.txt', 'success')
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('offers row delete on shared resources that carry the delete permission', async () => {
+    const pushToast = vi.fn()
+    const deleteResource = vi.fn(async () => ({}))
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      deleteResource,
+      accessibleResources: [
+        {
+          resourceId: 'shared-1',
+          rid: 'shared-1',
+          gfsUri: 'gfs://main/shared-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'shared-report.txt',
+          kind: 'file',
+          path: '/shared-report.txt',
+          version: 2,
+          bytes: 8,
+          sources: ['grant'],
+          permissions: ['read', 'delete'],
+          coversDescendants: false,
+        },
+        {
+          resourceId: 'shared-2',
+          rid: 'shared-2',
+          gfsUri: 'gfs://main/shared-2',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'readonly-notes.txt',
+          kind: 'file',
+          path: '/readonly-notes.txt',
+          version: 1,
+          bytes: 4,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for readonly-notes.txt' }))
+    })
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for shared-report.txt' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    })
+    const dialog = screen.getByRole('dialog', { name: 'Delete shared-report.txt?' })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+    })
+
+    expect(deleteResource).toHaveBeenCalledWith('shared-1', 2)
+    expect(pushToast).toHaveBeenCalledWith('Deleted shared-report.txt', 'success')
   })
 
   it('previews an image file in a closable modal without downloading it to disk', async () => {

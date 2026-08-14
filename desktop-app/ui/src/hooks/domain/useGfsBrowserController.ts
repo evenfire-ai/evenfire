@@ -155,6 +155,23 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       refetchType: 'active',
     })
   }, [current?.resourceId, queryClient, sessionScope])
+
+  /**
+   * Row-level affordances for the one resource whose ⋯ menu is open. Children
+   * listings carry no permission bits, so the Files page lazily resolves the
+   * delete gate per menu instead of per row. Shares the affordances cache with
+   * the Manage dialog, so opening Manage for the same resource is free.
+   */
+  const [rowAffordancesResourceId, setRowAffordancesResourceId] = useState<string | null>(null)
+  const rowAffordancesQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsAffordances(
+      sessionScope ?? 'anonymous',
+      rowAffordancesResourceId ?? '',
+      DRIVE
+    ),
+    queryFn: () => window.clerum.gfs.affordances(rowAffordancesResourceId!, DRIVE),
+    enabled: Boolean(sessionScope) && Boolean(rowAffordancesResourceId),
+  })
   // The grants listing is the revoke-id source (the grant PUT returns no ids),
   // so writes must refetch it. Enabled only while the Manage dialog is open.
   const grantsQuery = useQuery({
@@ -370,6 +387,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     affordances: (affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null,
     affordancesError: affordancesQuery.error ? toMessage(affordancesQuery.error) : null,
     loadingAffordances: affordancesQuery.isFetching,
+    rowAffordancesResourceId,
+    setRowAffordancesResourceId,
+    rowAffordances: (rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null,
+    rowAffordancesError: rowAffordancesQuery.error ? toMessage(rowAffordancesQuery.error) : null,
     loading: childrenQuery.isFetching && items.length === 0,
     loadingAccessible:
       canListAccessibleResources && accessibleQuery.isFetching && accessibleResources.length === 0,

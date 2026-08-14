@@ -12,6 +12,7 @@ export function GfsResourceMenu({
   onCreateFolder,
   onDelete,
   onOpen,
+  onOpenChange,
   onPreview,
   onDownload,
   onRename,
@@ -20,6 +21,25 @@ export function GfsResourceMenu({
   const menuRef = useRef<HTMLSpanElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const closeMenu = useCallback(() => setOpen(false), [])
+  const onOpenChangeRef = useRef(onOpenChange)
+  const prevOpenRef = useRef(false)
+
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange
+  }, [onOpenChange])
+
+  useEffect(() => {
+    if (prevOpenRef.current === open) return
+    prevOpenRef.current = open
+    onOpenChangeRef.current?.(open)
+  }, [open])
+
+  useEffect(
+    () => () => {
+      if (prevOpenRef.current) onOpenChangeRef.current?.(false)
+    },
+    []
+  )
 
   useClickOutside(menuRef, open, closeMenu)
 

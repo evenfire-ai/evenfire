@@ -1,6 +1,7 @@
 import { type DragEvent as ReactDragEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
+import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
@@ -123,6 +124,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [renameName, setRenameName] = useState('')
   const [renameOpen, setRenameOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<GfsDriveResource | null>(null)
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
@@ -455,6 +457,32 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     }
   }
 
+  const handleDeleteResource = async (resource: GfsDriveResource) => {
+    try {
+      await ctrl.deleteResource(resource.resourceId, resource.version)
+      pushToast?.(`Deleted ${resource.name}`, 'success')
+    } catch (deleteError) {
+      pushToast?.(deleteError instanceof Error ? deleteError.message : String(deleteError), 'error')
+    } finally {
+      setDeleteTarget(null)
+    }
+  }
+
+  /**
+   * Delete gate for list rows. Root "shared with me" rows already carry their
+   * permission bits; folder children don't, so their gate resolves lazily from
+   * the affordances of the one row whose ⋯ menu is open.
+   */
+  const rowCanDelete = (resource: GfsDriveResource): boolean => {
+    if (currentIsFolder) {
+      return (
+        ctrl.rowAffordancesResourceId === resource.resourceId &&
+        Boolean(ctrl.rowAffordances?.held.includes('delete'))
+      )
+    }
+    return Boolean(resource.permissions?.includes('delete'))
+  }
+
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
     const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
     return [...resources].sort((left, right) => {
@@ -700,8 +728,14 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                         resourceName={resource.name}
                         onManage={() => openManage(resource)}
                         onCopyLink={() => void handleCopyLink(resource.gfsUri)}
+                        onDelete={
+                          rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined
+                        }
                         onOpen={
                           resource.kind === 'directory' ? () => openResource(resource) : undefined
+                        }
+                        onOpenChange={open =>
+                          ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
                         }
                         onPreview={
                           isGfsPreviewFile(resource.name)
@@ -1067,6 +1101,21 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           fileName={filePreview.name}
           gfsUri={filePreview.gfsUri}
           onClose={() => setFilePreview(null)}
+        />
+      ) : null}
+
+      {deleteTarget ? (
+        <ConfirmDialog
+          body={
+            deleteTarget.kind === 'directory'
+              ? 'The folder and everything inside it will be deleted for everyone with access.'
+              : 'The file will be deleted for everyone with access.'
+          }
+          confirmLabel="Delete"
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => void handleDeleteResource(deleteTarget)}
+          title={`Delete ${deleteTarget.name}?`}
+          tone="danger"
         />
       ) : null}
     </section>
