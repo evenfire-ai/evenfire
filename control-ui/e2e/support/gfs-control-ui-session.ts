@@ -64,7 +64,7 @@ export async function loginControlUi(page: Page): Promise<void> {
 }
 
 export async function openGlobalFileSystemFromSidebar(page: Page): Promise<void> {
-  const directoriesSection = page.getByRole('button', { name: 'Directories', exact: true })
+  const directoriesSection = page.getByRole('button', { name: 'Files', exact: true })
   await expect(directoriesSection).toBeVisible()
   await directoriesSection.click()
   const globalFileSystem = page.getByRole('link', {
