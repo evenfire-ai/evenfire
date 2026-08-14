@@ -359,21 +359,47 @@ function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
   throw new Error(`REGISTRY_CONNECTION_MODE must be 'managed' or 'self-hosted' (got '${raw}')`)
 }
 
-// External routes intentionally have three independent dimensions: the
-// operation/user budget is the narrowest, the session edge budget is wider,
-// and the source-IP backstop is widest so a shared NAT cannot become a
-// platform-wide choke point. Reject an incoherent deployment at boot instead
-// of silently running with a different security/capacity contract.
+type ExternalRateLimitSource = 'default' | 'environment'
+
+function externalRateLimitSettingFromEnv(
+  name: string,
+  defaultValue: number
+): { value: number; source: ExternalRateLimitSource } {
+  const raw = process.env[name]
+  return {
+    value: positiveIntegerFromEnv(name, defaultValue),
+    source: raw === undefined || raw.trim() === '' ? 'default' : 'environment',
+  }
+}
+
+// External routes intentionally have three independent dimensions with
+// different scopes. operation <= session < clientIp is the recommended
+// capacity topology, but it is not a correctness invariant: an operator may
+// deliberately tune any one scope without changing the other two. Keep scalar
+// values fail-closed, preserve exact overrides, and make a crossed topology an
+// actionable boot advisory instead of a service-startup failure.
 const externalRateLimitConfig = (() => {
-  const operation = positiveIntegerFromEnv('APPROVAL_RL_EXTERNAL_PER_MIN', 60)
-  const session = positiveIntegerFromEnv('APPROVAL_RL_EXTERNAL_EDGE_PER_MIN', 120)
-  const clientIp = positiveIntegerFromEnv('APPROVAL_RL_EXTERNAL_CLIENT_IP_PER_MIN', 1200)
-  if (!(operation <= session && session < clientIp)) {
-    throw new Error(
-      'APPROVAL_RL_EXTERNAL_PER_MIN must be <= APPROVAL_RL_EXTERNAL_EDGE_PER_MIN < APPROVAL_RL_EXTERNAL_CLIENT_IP_PER_MIN'
+  const operation = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_PER_MIN', 60)
+  const session = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_EDGE_PER_MIN', 120)
+  const clientIp = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_CLIENT_IP_PER_MIN', 1200)
+  const followsRecommendedTopology =
+    operation.value <= session.value && session.value < clientIp.value
+
+  if (!followsRecommendedTopology) {
+    console.warn(
+      '[ControlAPI] External rate-limit configuration crosses the recommended operation <= session < clientIp topology; preserving exact configured values',
+      {
+        resolved: { operation, session, clientIp },
+        recommendedTopology: 'operation <= session < clientIp',
+      }
     )
   }
-  return { operation, session, clientIp }
+
+  return {
+    operation: operation.value,
+    session: session.value,
+    clientIp: clientIp.value,
+  }
 })()
 
 function failClosedBooleanFromEnv(name: string): boolean {

@@ -66,12 +66,18 @@ header coherence are tracked as independent global follow-ups:
 
 The non-GFS external directory, team, member, invitation, workflow, decision,
 notification, and OAuth route families also retain two independent edge gates:
-the source-IP backstop is 1,200/min and the per-session fairness bucket is
-120/min; authenticated operation buckets remain at 60/min where the route
-defines them. The enforced hierarchy is `60 <= 120 < 1,200`. The IP gate is intentionally first, so rotating or malformed session
-tokens cannot evade the source-IP ceiling, while a shared NAT is not limited to
-the narrower per-session budget. These gates do not change the GFS
-read/mutation budgets above.
+the source-IP backstop defaults to 1,200/min and the per-session fairness
+bucket defaults to 120/min; authenticated operation buckets default to 60/min
+where the route defines them. These are independent scopes, not one global
+numeric hierarchy: an operator may override any value without making the
+Control API fail to boot, and the service preserves the exact positive integer
+provided. At startup, a crossed recommendation (`operation > session` or
+`session >= client-IP`) emits an advisory diagnostic because one bucket may
+dominate or become redundant; it never silently clamps the operator's value.
+The IP gate is intentionally first, so rotating or malformed session tokens
+cannot evade the source-IP ceiling, while a shared NAT is not limited to the
+narrower per-session budget. These gates do not change the GFS read/mutation
+budgets above.
 
 ## Migration sequence
 
@@ -104,6 +110,11 @@ an `Idempotency-Key`. First-party Profile UI callers send both values. Clients
 using the external API directly must adopt this contract before upgrading; the
 server does not synthesize an idempotency key because doing so would make a
 retry non-deterministic and could duplicate a retirement side effect.
+
+This is a version-one contract change: a direct caller that omits either field
+receives `400` and must be upgraded before the new Control API is rolled out.
+The first generation-aware deployment likewise invalidates pre-existing session
+tokens without `authGeneration`; users must sign in once after the rollout.
 
 ## Validation surface
 
