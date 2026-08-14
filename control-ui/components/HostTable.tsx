@@ -49,7 +49,7 @@ function getHostLifecycleInfo(host: HostItem): HostLifecycleInfo {
   }
 }
 
-function collectProviderIds(spec: Record<string, unknown>): string[] {
+export function collectProviderIds(spec: Record<string, unknown>): string[] {
   const primary = String(
     (spec.model as { provider?: string } | undefined)?.provider || ''
   ).trim()
