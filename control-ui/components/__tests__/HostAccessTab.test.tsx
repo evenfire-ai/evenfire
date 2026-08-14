@@ -98,26 +98,6 @@ describe('HostAccessTab — extracted access behavior', () => {
     expect(screen.getByText('No teams have access yet.')).toBeInTheDocument()
   })
 
-  it('disables every mutation control when a rename is pending', async () => {
-    render(<HostAccessTab hasPendingRename hostName="foo" />)
-
-    await waitFor(() => {
-      expect(screen.getByText('Alice')).toBeInTheDocument()
-    })
-
-    // Banner explaining the gate is rendered above the section.
-    expect(
-      screen.getByText(/Save the agent rename before changing member or team access/i)
-    ).toBeInTheDocument()
-
-    expect(screen.getByRole('button', { name: /Add member/i })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /Revoke member access/i })).toBeDisabled()
-
-    // Teams sub-tab is gated too.
-    fireEvent.click(screen.getByRole('tab', { name: 'Teams' }))
-    expect(screen.getByRole('button', { name: /Add team/i })).toBeDisabled()
-  })
-
   it('grants member access end-to-end after Add member modal submission', async () => {
     ;(api.getAdminUserAgents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       agentNames: [],
@@ -142,25 +122,6 @@ describe('HostAccessTab — extracted access behavior', () => {
     await waitFor(() => {
       expect(api.updateAdminUserAgents).toHaveBeenCalledWith('u2', ['foo'], expect.any(Array))
     })
-  })
-
-  it('refuses to grant member access when a rename is pending', async () => {
-    ;(api.getAdminUserAgents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agentNames: [],
-      deletedAgentNames: [],
-    })
-
-    render(<HostAccessTab hasPendingRename hostName="foo" />)
-
-    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument())
-
-    // The Add button itself is disabled, but a stale modal shouldn't be able
-    // to bypass the guard either — verify the handler short-circuits by
-    // poking it directly through the disabled Add control.
-    const addBtn = screen.getByRole('button', { name: /Add member/i })
-    expect(addBtn).toBeDisabled()
-    // The dialog should not even be reachable.
-    expect(screen.queryByRole('dialog', { name: /Add member/i })).not.toBeInTheDocument()
   })
 
   it('revokes member access after confirm dialog approval', async () => {

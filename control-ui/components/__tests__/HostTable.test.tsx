@@ -222,3 +222,63 @@ describe('HostTable providers column rendering', () => {
     expect(within(row).getByText('-')).toBeInTheDocument()
   })
 })
+
+// UT-9 — the row shows the editable display name (spec.host) as the primary
+// label, with the immutable identifier (metadata.name / slug) as visible
+// secondary text; the search haystack matches BOTH.
+describe('HostTable display name column (UT-9)', () => {
+  function makeDisplayHost(name: string, displayName: string): HostItem {
+    return {
+      metadata: { name, namespace: 'mcp-host' },
+      spec: {
+        host: displayName,
+        contextRef: 'context1',
+        model: { provider: 'zai', name: 'glm-5.1' },
+      },
+    }
+  }
+
+  it('renders the display name as primary and the slug as secondary', () => {
+    renderHostTable([makeDisplayHost('prod-x', 'Prod X')])
+
+    const row = screen.getByLabelText('Open agent prod-x')
+    expect(within(row).getByText('Prod X')).toBeInTheDocument()
+    expect(within(row).getByText('prod-x')).toBeInTheDocument()
+  })
+
+  it('falls back to the slug as the primary label when spec.host is blank', () => {
+    renderHostTable([makeDisplayHost('prod-x', '   ')])
+
+    const row = screen.getByLabelText('Open agent prod-x')
+    // Only the slug renders — no separate secondary line duplicating it.
+    expect(within(row).getAllByText('prod-x')).toHaveLength(1)
+  })
+
+  it('filters rows by the display name', () => {
+    renderHostTable([
+      makeDisplayHost('prod-x', 'Prod X'),
+      makeDisplayHost('sales-agent', 'Sales Agent'),
+    ])
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search agents' }), {
+      target: { value: 'Prod' },
+    })
+
+    expect(screen.getByText('Prod X')).toBeInTheDocument()
+    expect(screen.queryByText('Sales Agent')).not.toBeInTheDocument()
+  })
+
+  it('filters rows by the slug identifier', () => {
+    renderHostTable([
+      makeDisplayHost('prod-x', 'Prod X'),
+      makeDisplayHost('sales-agent', 'Sales Agent'),
+    ])
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search agents' }), {
+      target: { value: 'sales-agent' },
+    })
+
+    expect(screen.getByText('Sales Agent')).toBeInTheDocument()
+    expect(screen.queryByText('Prod X')).not.toBeInTheDocument()
+  })
+})

@@ -44,18 +44,23 @@ export function ContextTable({
     () =>
       items.map(item => {
         const name = item.metadata?.name || 'unknown'
+        // Visible name is the optional spec.displayName; fall back to the slug
+        // (metadata.name) when it is absent OR blank-after-trim — a displayName
+        // written out-of-band (e.g. kubectl) as '' or '   ' must not render a
+        // blank label. Mirrors HostTable.tsx (`.trim() || name`).
+        const displayName = (item.spec?.displayName ?? '').trim() || name
         const key = name
         const mcpServers = Array.isArray(item.spec?.mcpServers) ? item.spec?.mcpServers : []
-        return { key, name, item, mcpServers }
+        return { key, name, displayName, item, mcpServers }
       }),
     [items]
   )
   const normalizedSearch = searchQuery.trim().toLowerCase()
   const filteredRows = useMemo(() => {
     if (!normalizedSearch) return rows
-    return rows.filter(({ name, item, mcpServers }) => {
+    return rows.filter(({ name, displayName, item, mcpServers }) => {
       const description = String(item.spec?.description || '').trim()
-      return [name, description, String(mcpServers.length), ...mcpServers.map(String)]
+      return [name, displayName, description, String(mcpServers.length), ...mcpServers.map(String)]
         .join(' ')
         .toLowerCase()
         .includes(normalizedSearch)
@@ -136,7 +141,7 @@ export function ContextTable({
               <TableHeaderRow columns={CONTEXT_COLUMNS} />
             </thead>
             <tbody>
-              {filteredRows.map(({ key, name, item, mcpServers }) => (
+              {filteredRows.map(({ key, name, displayName, item, mcpServers }) => (
                 <tr
                   key={key}
                   className="cu-table__row cu-table__row--clickable"
@@ -146,7 +151,10 @@ export function ContextTable({
                   aria-label={`Open context ${name}`}
                 >
                   <td>
-                    <span className="cu-expandable-row__name">{name}</span>
+                    <span className="cu-expandable-row__name">{displayName}</span>
+                    {displayName !== name ? (
+                      <div className="cu-table__cell-subtle">{name}</div>
+                    ) : null}
                     <div className="cu-registry-description" title={item.spec?.description || '—'}>
                       {item.spec?.description || '—'}
                     </div>

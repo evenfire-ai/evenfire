@@ -29,5 +29,7 @@ export interface FilesPageProps {
  */
 export interface MyAgentEntry {
   name: string
+  /** Visible name (Agent CRD `spec.host`) surfaced on the wire; may be absent on older builds. */
+  displayName?: string
   gfsSubject?: { type: string; id: string }
 }

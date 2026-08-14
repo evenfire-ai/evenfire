@@ -38,6 +38,14 @@ export type ChannelMapping = {
  */
 export type AgentWithMcpServers = {
   name: string
+  /**
+   * Human-facing display name for the agent (control-api Host `spec.host`).
+   * Optional in the TS contract for back-compat; control-api always emits it
+   * (falling back to `name` when `spec.host` is empty). It survives the
+   * passthrough as a pure cast at runtime — declaring it here makes it visible
+   * to downstream consumers instead of being an undocumented extra field.
+   */
+  displayName?: string
   contextRef: string | null
   mcpServers: Array<{ name: string }>
 }
