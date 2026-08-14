@@ -4,6 +4,11 @@ import {
   isLlmProviderId,
   isRunnableLlmModelId,
 } from '@clerum/llm-providers'
+import {
+  advisoryLockModelNames,
+  boundCarrierTransactionIdleTimeout,
+  withTransaction,
+} from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { createPluginWorkloadSdkAdminRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
@@ -262,6 +267,19 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
   return targets
 }
 
+// A rejection produced by the enabled-ness write-gate WHILE it runs inside the
+// carrier transaction that holds the per-model advisory locks (R1-H3 fase 2).
+// It is THROWN (not `res.json`-ed inline) so the transaction ROLLS BACK — the
+// upsert never persists and no Pieza D audit is emitted — then mapped back to
+// the SAME 400 body the gate has always returned. `body` is byte-stable with
+// the pre-fase-2 responses (`model_not_allowed`, `modelPolicies.*` drift).
+class GrantModelGateError extends Error {
+  constructor(readonly body: Record<string, unknown>) {
+    super('grant_model_gate_rejected')
+    this.name = 'GrantModelGateError'
+  }
+}
+
 export interface AdminPluginWorkloadSdkRouterDeps {
   /**
    * Emit the audit signal for a tolerated pre-existing model_not_allowed
@@ -421,159 +439,217 @@ export function createAdminPluginWorkloadSdkRouter(
         const defaultTarget = promptTargets[0]!
         // `provider` remains the bootstrap host binding during the compatibility
         // window. It cannot authorize routes by itself and must agree with the
-        // policy default instead of being silently reconciled.
+        // policy default instead of being silently reconciled. Pure check, kept
+        // OUTSIDE the carrier transaction (no model read, no lock needed).
         if (provider !== defaultTarget.provider) {
           res.status(400).json({ error: 'policy_bootstrap_mismatch' })
           return
         }
-        const modelsByProvider = new Map<string, string[]>()
-        for (const target of promptTargets) {
-          modelsByProvider.set(target.provider, [
-            ...(modelsByProvider.get(target.provider) ?? []),
-            target.model,
-          ])
-        }
-        // Pieza D — role-scoped no-worsening tolerance (editability trap, mini-spec
-        // 01). A grant that references a model later disabled globally would
-        // otherwise be uneditable (every save 400s `model_not_allowed`). Tolerate a
-        // disabled `(provider, model)` iff (b) the incoming `allowed_models` does
-        // NOT shrink the stored coverage AND it kept its ROLE: the incoming DEFAULT
-        // target (`promptTargets[0]`) is tolerated only if it was the stored default
-        // target; a NON-default target only if it was any stored target (demotion is
-        // not worsening). Promoting a disabled non-default target to the default slot
-        // is NOT tolerated. A brand-new disabled model is never tolerated. The stored
-        // grant is read lazily — only when a candidate rejection appears — so the
-        // all-enabled happy path keeps its single-query cost.
-        const incomingDefaultKey = offeredKey(promptTargets[0]!.provider, promptTargets[0]!.model)
-        let storedLoaded = false
-        let storedDefaultTarget = new Set<string>()
-        let storedAnyTarget = new Set<string>()
-        // Grant `allowed_models` is a flat model-name list; treat it as a literal
-        // finite coverage set (NOT the Host UNIVERSAL-on-empty semantics) so an
-        // emptied list is a strict reduction, not a widening.
-        const incomingCoverage: CoverageSet = new Set(allowedModels)
-        let storedCoverage: CoverageSet = new Set<string>()
-        const loadStoredGrant = async (): Promise<void> => {
-          if (storedLoaded) return
-          storedLoaded = true
-          const storedGrant = (await listGrants({ recipeNamespace, recipeName }))?.find(
-            existing => existing.capabilityFamily === capabilityFamily
-          )
-          const storedTargets = storedGrant?.promptTargets ?? []
-          storedDefaultTarget = new Set(
-            storedTargets[0] ? [offeredKey(storedTargets[0].provider, storedTargets[0].model)] : []
-          )
-          storedAnyTarget = new Set(storedTargets.map(t => offeredKey(t.provider, t.model)))
-          storedCoverage = new Set(storedGrant?.allowedModels ?? [])
-        }
-        for (const [targetProvider, targetModels] of modelsByProvider) {
-          const enabledRows = await listEnabledModelsWithStaleForProvider(targetProvider)
-          const enabled = new Set(enabledRows.map(row => row.model))
-          const staleEnabled = new Set(enabledRows.filter(row => row.stale).map(row => row.model))
+      }
 
-          // Fase 6 soft quarantine: warn (never block) when a NEW target assigns an
-          // ENABLED but `stale` model. A live reference already in the stored grant
-          // is not revalidated (spec §3.3). The stored grant is loaded lazily — only
-          // when a stale-enabled candidate is actually present — so the all-fresh /
-          // no-stale happy path keeps its single-query cost.
-          for (const model of targetModels) {
-            if (!enabled.has(model) || !staleEnabled.has(model)) continue
-            const pairKey = offeredKey(targetProvider, model)
-            if (grantWarnedKeys.has(pairKey)) continue
-            grantWarnedKeys.add(pairKey)
-            await loadStoredGrant()
-            if (storedAnyTarget.has(pairKey)) continue
-            const i = promptTargets.findIndex(
-              target => target.provider === targetProvider && target.model === model
+      // R1-H3 fase 2 — carrier transaction that serializes this grant upsert
+      // against a concurrent llm-model disable/delete (the reductor, fase 1).
+      // The reductor enumerates grants by NAME in `allowed_models` under
+      // `advisoryLockModelName`; so the upsert takes the SAME per-name locks over
+      // ALL incoming `allowed_models` names, HOLDS them across the enabled-ness
+      // re-validation, and commits the write atomically. Ordering is the global
+      // invariant (adenda A5): every `llm-model:*` lock is taken BEFORE the
+      // recipe lock (`plugin_workload_sdk:*`, taken inside `upsertGrant`). If the
+      // reductor commits first, the gate below re-reads `llm_allowed_models`
+      // under the lock and rejects (400); if the grant commits first, the
+      // reductor sees it and answers 409 — neither can strand a dangling grant.
+      // Enabled-ness is validated only for promptBridge targets, EXACTLY as
+      // before (serialization only, no accept/reject change): a disabled model
+      // reachable solely through `allowed_models` (no promptTarget) is a
+      // PRE-EXISTING gap, out of R1-H3 scope.
+      let grant: Awaited<ReturnType<typeof upsertGrant>>
+      try {
+        grant = await withTransaction(async db => {
+          // Bound idle-in-transaction tenancy for parity with the reductor
+          // (fase 1). This seam is PG-only (no K8s write under the lock), so the
+          // lock is never held across an external round-trip — cheap, defensive.
+          await boundCarrierTransactionIdleTimeout(db)
+          // Model-name locks FIRST, deduped + totally ordered, over EVERY incoming
+          // `allowed_models` name (the reductor matches by name across families).
+          // Empty list = no-op. Taken before the recipe lock (global order A5).
+          await advisoryLockModelNames(db, allowedModels)
+
+          if (capabilityFamily === 'promptBridge') {
+            const modelsByProvider = new Map<string, string[]>()
+            for (const target of promptTargets) {
+              modelsByProvider.set(target.provider, [
+                ...(modelsByProvider.get(target.provider) ?? []),
+                target.model,
+              ])
+            }
+            // Pieza D — role-scoped no-worsening tolerance (editability trap,
+            // mini-spec 01). A grant that references a model later disabled
+            // globally would otherwise be uneditable (every save 400s
+            // `model_not_allowed`). Tolerate a disabled `(provider, model)` iff
+            // (b) the incoming `allowed_models` does NOT shrink the stored
+            // coverage AND it kept its ROLE: the incoming DEFAULT target
+            // (`promptTargets[0]`) is tolerated only if it was the stored default
+            // target; a NON-default target only if it was any stored target
+            // (demotion is not worsening). Promoting a disabled non-default target
+            // to the default slot is NOT tolerated. A brand-new disabled model is
+            // never tolerated. The stored grant is read lazily — only when a
+            // candidate rejection appears — so the all-enabled happy path keeps
+            // its single-query cost.
+            const incomingDefaultKey = offeredKey(
+              promptTargets[0]!.provider,
+              promptTargets[0]!.model
             )
-            grantWarnings.push({
-              code: STALE_MODEL_ASSIGNED,
-              provider: targetProvider,
-              model,
-              field: i >= 0 ? `promptTargets[${i}].model` : 'promptTargets',
-            })
-          }
+            let storedLoaded = false
+            let storedDefaultTarget = new Set<string>()
+            let storedAnyTarget = new Set<string>()
+            // Grant `allowed_models` is a flat model-name list; treat it as a
+            // literal finite coverage set (NOT the Host UNIVERSAL-on-empty
+            // semantics) so an emptied list is a strict reduction, not a widening.
+            const incomingCoverage: CoverageSet = new Set(allowedModels)
+            let storedCoverage: CoverageSet = new Set<string>()
+            const loadStoredGrant = async (): Promise<void> => {
+              if (storedLoaded) return
+              storedLoaded = true
+              // Read the stored grant on the CARRIER connection (holds the model
+              // locks) so no extra pool checkout happens under the lock (A3).
+              const storedGrant = (await listGrants({ recipeNamespace, recipeName }, db))?.find(
+                existing => existing.capabilityFamily === capabilityFamily
+              )
+              const storedTargets = storedGrant?.promptTargets ?? []
+              storedDefaultTarget = new Set(
+                storedTargets[0]
+                  ? [offeredKey(storedTargets[0].provider, storedTargets[0].model)]
+                  : []
+              )
+              storedAnyTarget = new Set(storedTargets.map(t => offeredKey(t.provider, t.model)))
+              storedCoverage = new Set(storedGrant?.allowedModels ?? [])
+            }
+            for (const [targetProvider, targetModels] of modelsByProvider) {
+              // Enabled-ness re-read UNDER the model locks, on the carrier `db`
+              // (NOT the global pool) — this is the read the reductor races.
+              const enabledRows = await listEnabledModelsWithStaleForProvider(targetProvider, db)
+              const enabled = new Set(enabledRows.map(row => row.model))
+              const staleEnabled = new Set(
+                enabledRows.filter(row => row.stale).map(row => row.model)
+              )
 
-          const rawOffenders = targetModels.filter(model => !enabled.has(model))
-          if (rawOffenders.length === 0) continue
-          await loadStoredGrant()
-          const offenders: string[] = []
-          for (const model of rawOffenders) {
-            const pairKey = offeredKey(targetProvider, model)
-            // Role of the offending pair in the INCOMING grant: the default slot
-            // (`promptTargets[0]`) must have been the stored default; any other
-            // target may have been any stored target.
-            const storedRoleSet =
-              pairKey === incomingDefaultKey ? storedDefaultTarget : storedAnyTarget
-            const tolerated = isNonWorseningToleration({
-              pairKey,
-              storedReferencedPairKeys: storedRoleSet,
-              incomingCoverage,
-              storedCoverage,
-            })
-            if (tolerated) {
-              pendingGrantTolerations.push({
-                resourceKind: 'grant',
-                namespace: recipeNamespace,
-                name: recipeName,
-                provider: targetProvider,
-                model,
-                gate: 'grant',
-                offeredBefore: storedCoverage,
-                offeredAfter: incomingCoverage,
-              })
-            } else {
-              offenders.push(model)
+              // Fase 6 soft quarantine: warn (never block) when a NEW target
+              // assigns an ENABLED but `stale` model. A live reference already in
+              // the stored grant is not revalidated (spec §3.3). The stored grant
+              // is loaded lazily — only when a stale-enabled candidate is actually
+              // present — so the all-fresh / no-stale happy path keeps its
+              // single-query cost.
+              for (const model of targetModels) {
+                if (!enabled.has(model) || !staleEnabled.has(model)) continue
+                const pairKey = offeredKey(targetProvider, model)
+                if (grantWarnedKeys.has(pairKey)) continue
+                grantWarnedKeys.add(pairKey)
+                await loadStoredGrant()
+                if (storedAnyTarget.has(pairKey)) continue
+                const i = promptTargets.findIndex(
+                  target => target.provider === targetProvider && target.model === model
+                )
+                grantWarnings.push({
+                  code: STALE_MODEL_ASSIGNED,
+                  provider: targetProvider,
+                  model,
+                  field: i >= 0 ? `promptTargets[${i}].model` : 'promptTargets',
+                })
+              }
+
+              const rawOffenders = targetModels.filter(model => !enabled.has(model))
+              if (rawOffenders.length === 0) continue
+              await loadStoredGrant()
+              const offenders: string[] = []
+              for (const model of rawOffenders) {
+                const pairKey = offeredKey(targetProvider, model)
+                // Role of the offending pair in the INCOMING grant: the default
+                // slot (`promptTargets[0]`) must have been the stored default; any
+                // other target may have been any stored target.
+                const storedRoleSet =
+                  pairKey === incomingDefaultKey ? storedDefaultTarget : storedAnyTarget
+                const tolerated = isNonWorseningToleration({
+                  pairKey,
+                  storedReferencedPairKeys: storedRoleSet,
+                  incomingCoverage,
+                  storedCoverage,
+                })
+                if (tolerated) {
+                  pendingGrantTolerations.push({
+                    resourceKind: 'grant',
+                    namespace: recipeNamespace,
+                    name: recipeName,
+                    provider: targetProvider,
+                    model,
+                    gate: 'grant',
+                    offeredBefore: storedCoverage,
+                    offeredAfter: incomingCoverage,
+                  })
+                } else {
+                  offenders.push(model)
+                }
+              }
+              if (offenders.length > 0) {
+                // THROW (not res.json) so the transaction rolls back — the upsert
+                // never runs and no Pieza D audit fires — mapped to the byte-stable
+                // 400 `model_not_allowed` body outside the transaction.
+                throw new GrantModelGateError({
+                  error: 'model_not_allowed',
+                  provider: targetProvider,
+                  models: offenders,
+                })
+              }
+            }
+            // A modelPolicyRef names an already-authorized target, not a second
+            // routing authority. Keep the older record shape but reject drift.
+            // Runs AFTER the enabled-ness gate to preserve error precedence.
+            for (const [ref, policy] of Object.entries(modelPolicies)) {
+              if (
+                !promptTargets.some(
+                  target => target.provider === policy.provider && target.model === policy.model
+                )
+              ) {
+                throw new GrantModelGateError({
+                  error: `modelPolicies.${ref} does not match an authorized target`,
+                })
+              }
             }
           }
-          if (offenders.length > 0) {
-            res.status(400).json({
-              error: 'model_not_allowed',
-              provider: targetProvider,
-              models: offenders,
-            })
-            return
-          }
-        }
-        // A modelPolicyRef names an already-authorized target, not a second
-        // routing authority. Keep the older record shape but reject drift.
-        for (const [ref, policy] of Object.entries(modelPolicies)) {
-          if (
-            !promptTargets.some(
-              target => target.provider === policy.provider && target.model === policy.model
-            )
-          ) {
-            res
-              .status(400)
-              .json({ error: `modelPolicies.${ref} does not match an authorized target` })
-            return
-          }
-        }
-      }
 
-      if (allowedCallers.length === 0) {
-        res.status(400).json({ error: 'allowedCallers must be non-empty' })
-        return
-      }
+          if (allowedCallers.length === 0) {
+            throw new GrantModelGateError({ error: 'allowedCallers must be non-empty' })
+          }
 
-      const grant = await upsertGrant(
-        {
-          recipeNamespace,
-          recipeName,
-          capabilityFamily: capabilityFamily as PluginWorkloadSdkFamily,
-          provider,
-          allowedModels,
-          allowedEventTypes,
-          allowedTargetRefs,
-          allowedUserRefs,
-          allowedCallers,
-          quotaLimits,
-          modelPolicies,
-          promptTargets,
-          defaultTargetRef: defaultTargetRef || undefined,
-        },
-        (req as UiAuthedRequest).adminAuth!.sub
-      )
+          // Reuse THIS transaction: `upsertGrant` takes the recipe lock as its
+          // first statement — AFTER the model locks above (global order A5) — and
+          // commits the write in the same critical section as the re-validation.
+          return upsertGrant(
+            {
+              recipeNamespace,
+              recipeName,
+              capabilityFamily: capabilityFamily as PluginWorkloadSdkFamily,
+              provider,
+              allowedModels,
+              allowedEventTypes,
+              allowedTargetRefs,
+              allowedUserRefs,
+              allowedCallers,
+              quotaLimits,
+              modelPolicies,
+              promptTargets,
+              defaultTargetRef: defaultTargetRef || undefined,
+            },
+            (req as UiAuthedRequest).adminAuth!.sub,
+            db
+          )
+        })
+      } catch (err) {
+        if (err instanceof GrantModelGateError) {
+          res.status(400).json(err.body)
+          return
+        }
+        throw err
+      }
       // Grant PERSISTED: NOW emit any Pieza D tolerations (never before the upsert
       // lands, so a failed upsert leaves no audit record — mini-spec 01).
       for (const event of pendingGrantTolerations) emitIncoherenceTolerated(event)
