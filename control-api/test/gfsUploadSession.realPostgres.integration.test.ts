@@ -705,11 +705,11 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
       `SELECT state, session_epoch, finalizing_started_at FROM gfs_upload_sessions WHERE upload_id = $1`,
       [created.session.uploadId]
     )
-    expect(row.rows[0]).toEqual({
+    expect(row.rows[0]).toMatchObject({
       state: 'uploading',
-      session_epoch: Number(before.rows[0]?.session_epoch) + 1,
       finalizing_started_at: null,
     })
+    expect(Number(row.rows[0]?.session_epoch)).toBe(Number(before.rows[0]?.session_epoch) + 1)
   })
 
   it('rejects cancel during finalization and leaves one completed receipt', async () => {
