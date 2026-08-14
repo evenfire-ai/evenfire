@@ -144,6 +144,7 @@ function useEmbedBounds(
 
 const APP_PAGE_SIZE = 6
 let pendingSandboxUiUnmountCleanup: number | null = null
+let nextSandboxFindClientRequestId = 0
 
 export function SandboxUiPage({
   boundsRefreshKey = 0,
@@ -174,7 +175,6 @@ export function SandboxUiPage({
   const [localSearchResult, setLocalSearchResult] = useState({ current: 0, total: 0 })
   const embedSlotRef = useRef<HTMLDivElement>(null)
   const localSearchInputRef = useRef<HTMLInputElement>(null)
-  const nextFindClientRequestIdRef = useRef(0)
   const activeFindClientRequestIdRef = useRef<number | null>(null)
   const lastLocalSearchRequestIdRef = useRef(0)
   const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
@@ -257,7 +257,7 @@ export function SandboxUiPage({
         return
       }
       if (!options.findNext) setLocalSearchResult({ current: 0, total: 0 })
-      const clientRequestId = ++nextFindClientRequestIdRef.current
+      const clientRequestId = ++nextSandboxFindClientRequestId
       activeFindClientRequestIdRef.current = clientRequestId
       await window.clerum.sandboxUi.findInPage(query, { ...options, clientRequestId })
     },

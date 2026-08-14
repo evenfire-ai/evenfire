@@ -279,6 +279,49 @@ describe('SandboxUiPage', () => {
     await waitFor(() => expect(screen.getByRole('status').textContent).toBe('1/1'))
   })
 
+  it('rejects a queued find result from a prior mounted page', async () => {
+    const listing = {
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    }
+    sandboxUi.listApps.mockResolvedValue(listing)
+    sandboxUi.open.mockResolvedValue(undefined)
+
+    const first = render(<SandboxUiPage localSearchRequestId={1} />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Find in current app' }), {
+      target: { value: 'old' },
+    })
+    const oldOptions = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    const emitOldResult = emitFindResult
+    first.unmount()
+
+    render(<SandboxUiPage localSearchRequestId={1} />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Find in current app' }), {
+      target: { value: 'new' },
+    })
+    const newOptions = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    expect(newOptions.clientRequestId).not.toBe(oldOptions.clientRequestId)
+
+    emitOldResult?.({
+      requestId: 17,
+      clientRequestId: oldOptions.clientRequestId,
+      activeMatchOrdinal: 7,
+      matches: 7,
+      finalUpdate: true,
+    })
+    expect(screen.getByRole('status').textContent).toBe('0/0')
+  })
+
   it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
     sandboxUi.open.mockResolvedValueOnce(undefined)
