@@ -111,6 +111,20 @@ const nextConfig = {
       { source: '/publisher/:path*', destination: '/marketplace/org/entries', permanent: true },
       { source: '/cost', destination: '/cost-and-usage/usage', permanent: true },
       { source: '/cost/:path*', destination: '/cost-and-usage/:path*', permanent: true },
+      // Host detail tab consolidation (R1-H1 in feat/agent-ux-polish PR
+      // review): the old top-level tabs are now sub-tabs under the new
+      // `access` and `advanced` parents. Send each old slug to its new
+      // parent so bookmarks, shared links, and the approval-tools E2E
+      // (which navigates to /hosts/<name>/approvals) still reach the
+      // section they used to.
+      {
+        source: '/agents/:name/member-access',
+        destination: '/agents/:name/access',
+        permanent: true,
+      },
+      { source: '/agents/:name/team-access', destination: '/agents/:name/access', permanent: true },
+      { source: '/agents/:name/approvals', destination: '/agents/:name/advanced', permanent: true },
+      { source: '/agents/:name/env-vars', destination: '/agents/:name/advanced', permanent: true },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },
       { source: '/cost-and-usage', destination: '/cost-and-usage/usage', permanent: true },
       {

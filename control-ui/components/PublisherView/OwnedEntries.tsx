@@ -15,6 +15,7 @@ import { type RowAction, RowActionsMenu } from '../RowActionsMenu'
 import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
+import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
 import { Button } from '../ui'
 import { GrantAccessModal } from './GrantAccessModal'
@@ -196,165 +197,176 @@ export function OwnedEntries({
     )
   }
 
-  if (loading) {
-    return <SectionLoadingSkeleton label="Loading published entries" />
-  }
-  if (error) {
-    return (
-      <RetryBanner message="Could not load your published entries." onRetry={() => void load()} />
-    )
-  }
-  if (entries.length === 0) {
-    return <p>You haven’t published any registry entries yet.</p>
-  }
-
   const hasPrivateEntries = entries.some(e => e.visibility === 'private')
   // Collapse same-named entries into one row (latest leads); expanding a row
   // reveals the previous versions, each individually installable.
   const grouped = groupByName(entries)
 
   return (
-    <>
-      {sharingUnavailable && hasPrivateEntries ? (
-        <p className="cu-banner cu-banner--info">
-          Cross-org sharing isn’t available on this deployment, so private entries stay visible only
-          to your org.
-        </p>
-      ) : null}
-      <div className="cu-table-wrap">
-        <table className="cu-table">
-          <thead>
-            <TableHeaderRow columns={COLUMNS} />
-          </thead>
-          <tbody>
-            {grouped.map(({ latest: e, versions }) => {
-              const isPrivate = e.visibility === 'private'
-              const isGranting = grantTarget?.entryName === e.name
-              const expanded = expandedNames.has(e.name)
-              const hasPrevious = versions.length > 1
-              const rowActions: RowAction[] = [
-                {
-                  key: 'edit',
-                  label: 'Edit',
-                  onClick: () =>
-                    router.push(CONTROL_ROUTES.marketplace.editEntry(e.name, e.version)),
-                },
-                {
-                  key: 'remove',
-                  label: 'Remove from Marketplace',
-                  danger: true,
-                  onClick: () => void handleRemove(e),
-                },
-              ]
-              return (
-                <Fragment key={e.name}>
-                  <tr
-                    className={
-                      hasPrevious
-                        ? 'cu-table__row cu-table__row--clickable cu-expandable-row'
-                        : undefined
-                    }
-                    onClick={hasPrevious ? () => toggleExpanded(e.name) : undefined}
-                    onKeyDown={
-                      hasPrevious
-                        ? event => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault()
-                              toggleExpanded(e.name)
+    <section>
+      <div className="cu-card cu-card--viewport-fill">
+        <TablePanelHeader
+          title="Published entries"
+          subtitle={
+            sharingUnavailable && hasPrivateEntries
+              ? 'Cross-org sharing isn’t available on this deployment, so private entries stay visible only to your org.'
+              : undefined
+          }
+        />
+        <div className="cu-card__body">
+          {loading ? <SectionLoadingSkeleton label="Loading published entries" /> : null}
+          {error ? (
+            <RetryBanner
+              message="Could not load your published entries."
+              onRetry={() => void load()}
+            />
+          ) : null}
+          {!loading && !error && entries.length === 0 ? (
+            <p>You haven’t published any registry entries yet.</p>
+          ) : null}
+          {!loading && !error && entries.length > 0 ? (
+            <>
+              <div className="cu-table-wrap">
+                <table className="cu-table">
+                  <thead>
+                    <TableHeaderRow columns={COLUMNS} />
+                  </thead>
+                  <tbody>
+                    {grouped.map(({ latest: e, versions }) => {
+                      const isPrivate = e.visibility === 'private'
+                      const isGranting = grantTarget?.entryName === e.name
+                      const expanded = expandedNames.has(e.name)
+                      const hasPrevious = versions.length > 1
+                      const rowActions: RowAction[] = [
+                        {
+                          key: 'edit',
+                          label: 'Edit',
+                          onClick: () =>
+                            router.push(CONTROL_ROUTES.marketplace.editEntry(e.name, e.version)),
+                        },
+                        {
+                          key: 'remove',
+                          label: 'Remove from Marketplace',
+                          danger: true,
+                          onClick: () => void handleRemove(e),
+                        },
+                      ]
+                      return (
+                        <Fragment key={e.name}>
+                          <tr
+                            className={
+                              hasPrevious
+                                ? 'cu-table__row cu-table__row--clickable cu-expandable-row'
+                                : undefined
                             }
-                          }
-                        : undefined
-                    }
-                    tabIndex={hasPrevious ? 0 : undefined}
-                    aria-expanded={hasPrevious ? expanded : undefined}
-                  >
-                    <td className="cu-expandable-row__chevron" aria-hidden="true">
-                      {hasPrevious ? (
-                        <IconChevronRight
-                          className={expanded ? 'is-expanded' : undefined}
-                          width={18}
-                          height={18}
-                        />
-                      ) : null}
-                    </td>
-                    <td>
-                      <code>{e.name}</code>
-                    </td>
-                    <td>{entryTypeLabel(e)}</td>
-                    <td>
-                      {e.version}
-                      {hasPrevious ? (
-                        <span className="cu-muted"> +{versions.length - 1} more</span>
-                      ) : null}
-                    </td>
-                    <td>
-                      <span
-                        className={`cu-registry-chip cu-registry-chip--visibility-${e.visibility}`}
-                      >
-                        {e.visibility}
-                      </span>
-                    </td>
-                    <td>{e.status}</td>
-                    <td
-                      onClick={hasPrevious ? event => event.stopPropagation() : undefined}
-                      onKeyDown={hasPrevious ? event => event.stopPropagation() : undefined}
-                    >
-                      <div className="cu-table-actions">
-                        {renderInstall(e)}
-                        {isPrivate && canShare ? (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            aria-haspopup="dialog"
-                            aria-expanded={isGranting}
-                            onClick={event =>
-                              setGrantTarget({ entryName: e.name, opener: event.currentTarget })
+                            onClick={hasPrevious ? () => toggleExpanded(e.name) : undefined}
+                            onKeyDown={
+                              hasPrevious
+                                ? event => {
+                                    if (event.key === 'Enter' || event.key === ' ') {
+                                      event.preventDefault()
+                                      toggleExpanded(e.name)
+                                    }
+                                  }
+                                : undefined
                             }
+                            tabIndex={hasPrevious ? 0 : undefined}
+                            aria-expanded={hasPrevious ? expanded : undefined}
                           >
-                            Share access
-                          </Button>
-                        ) : !isPrivate ? (
-                          <span className="cu-muted">Public — no grant needed</span>
-                        ) : null}
-                        <RowActionsMenu
-                          ariaLabel={`Actions for ${e.name} v${e.version}`}
-                          actions={rowActions}
-                        />
-                      </div>
-                    </td>
-                  </tr>
-                  {expanded && hasPrevious ? (
-                    <tr className="cu-expandable-detail-row">
-                      <td colSpan={COLUMNS.length}>
-                        <div className="cu-expandable-detail">
-                          <div className="cu-marketplace-versions">
-                            <span className="cu-expandable-field__label">Previous versions</span>
-                            {versions.slice(1).map(v => (
-                              <div
-                                key={entryKey(v)}
-                                className="cu-table-actions"
-                                style={{ justifyContent: 'space-between' }}
+                            <td className="cu-expandable-row__chevron" aria-hidden="true">
+                              {hasPrevious ? (
+                                <IconChevronRight
+                                  className={expanded ? 'is-expanded' : undefined}
+                                  width={18}
+                                  height={18}
+                                />
+                              ) : null}
+                            </td>
+                            <td>
+                              <code>{e.name}</code>
+                            </td>
+                            <td>{entryTypeLabel(e)}</td>
+                            <td>
+                              {e.version}
+                              {hasPrevious ? (
+                                <span className="cu-muted"> +{versions.length - 1} more</span>
+                              ) : null}
+                            </td>
+                            <td>
+                              <span
+                                className={`cu-registry-chip cu-registry-chip--visibility-${e.visibility}`}
                               >
-                                <code className="cu-code-text">
-                                  {v.version}
-                                  {isInstalled(v) ? (
-                                    <span className="cu-muted"> · installed</span>
-                                  ) : null}
-                                </code>
-                                {renderInstall(v)}
+                                {e.visibility}
+                              </span>
+                            </td>
+                            <td>{e.status}</td>
+                            <td
+                              onClick={hasPrevious ? event => event.stopPropagation() : undefined}
+                              onKeyDown={hasPrevious ? event => event.stopPropagation() : undefined}
+                            >
+                              <div className="cu-table-actions">
+                                {renderInstall(e)}
+                                {isPrivate && canShare ? (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    aria-haspopup="dialog"
+                                    aria-expanded={isGranting}
+                                    onClick={event =>
+                                      setGrantTarget({
+                                        entryName: e.name,
+                                        opener: event.currentTarget,
+                                      })
+                                    }
+                                  >
+                                    Share access
+                                  </Button>
+                                ) : null}
+                                <RowActionsMenu
+                                  ariaLabel={`Actions for ${e.name} v${e.version}`}
+                                  actions={rowActions}
+                                />
                               </div>
-                            ))}
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : null}
-                </Fragment>
-              )
-            })}
-          </tbody>
-        </table>
+                            </td>
+                          </tr>
+                          {expanded && hasPrevious ? (
+                            <tr className="cu-expandable-detail-row">
+                              <td colSpan={COLUMNS.length}>
+                                <div className="cu-expandable-detail">
+                                  <div className="cu-marketplace-versions">
+                                    <span className="cu-expandable-field__label">
+                                      Previous versions
+                                    </span>
+                                    {versions.slice(1).map(v => (
+                                      <div
+                                        key={entryKey(v)}
+                                        className="cu-table-actions"
+                                        style={{ justifyContent: 'space-between' }}
+                                      >
+                                        <code className="cu-code-text">
+                                          {v.version}
+                                          {isInstalled(v) ? (
+                                            <span className="cu-muted"> · installed</span>
+                                          ) : null}
+                                        </code>
+                                        {renderInstall(v)}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+        </div>
       </div>
       {grantTarget ? (
         <GrantAccessModal
@@ -365,6 +377,6 @@ export function OwnedEntries({
         />
       ) : null}
       {confirmDialog}
-    </>
+    </section>
   )
 }

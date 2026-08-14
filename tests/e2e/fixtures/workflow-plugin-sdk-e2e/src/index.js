@@ -18,6 +18,7 @@
 //   E2E_SDK_QUOTA_EXCEEDED_OK                    (N+1 call correctly rejected)
 //   E2E_SDK_QUOTA_EXCEEDED_FAIL=<reason>
 //   E2E_SDK_DONE
+import http from 'node:http'
 
 const ENDPOINT = process.env.PLUGIN_WORKLOAD_SDK_ENDPOINT || ''
 const TOKEN = process.env.PLUGIN_WORKLOAD_SDK_TOKEN || ''
@@ -27,6 +28,7 @@ const USER_REF = process.env.E2E_SDK_USER_REF || 'e2e-test-user'
 const RUN_ID = process.env.E2E_SDK_RUN_ID || String(Date.now())
 const QUOTA_LIMIT = parseInt(process.env.E2E_SDK_QUOTA_LIMIT || '4', 10)
 const EXPLICIT_TARGET_REF = process.env.E2E_SDK_EXPLICIT_TARGET_REF || ''
+const SANDBOX_UI_MAX_ATTEMPTS = parseInt(process.env.E2E_SDK_SANDBOX_UI_MAX_ATTEMPTS || '10', 10)
 // Every SDK request must fail closed if the server stops responding.  The
 // outer shell gate also has bounded polling, but fetch itself otherwise has no
 // implicit deadline and could keep a fixture alive indefinitely.
@@ -142,6 +144,70 @@ async function exerciseClientNotification() {
   }
 }
 
+/**
+ * The mounted Sandbox UI fixture uses the same production SDK client-notification
+ * route as the background workload. Keeping this in the fixture image lets the
+ * Desktop E2E establish its notification from the app it actually mounts.
+ */
+async function emitSandboxUiNotification() {
+  for (let attempt = 1; attempt <= SANDBOX_UI_MAX_ATTEMPTS; attempt++) {
+    try {
+      const { status, body } = await callSdk('/v1/client-notifications', {
+        eventType: EVENT_TYPE,
+        userRef: USER_REF,
+        idempotencyKey: `e2e-sandbox-ui-notify-${RUN_ID}`,
+        notification: {
+          title: 'E2E Sandbox UI notification',
+          body: 'Sent by the mounted Plugin Workload SDK Sandbox UI fixture.',
+        },
+      })
+      if (status === 200 && body && body.notificationId) {
+        log(`E2E_SDK_SANDBOX_UI_NOTIFICATION_OK=${body.notificationId}`)
+        return body.notificationId
+      }
+      const code = (body && (body.error || body.code)) || `http_${status}`
+      if (attempt === SANDBOX_UI_MAX_ATTEMPTS) {
+        throw new Error(`client notification failed: ${code}`)
+      }
+    } catch (err) {
+      if (attempt === SANDBOX_UI_MAX_ATTEMPTS) throw err
+    }
+    await sleep(3000)
+  }
+  throw new Error('sandbox-ui notification retry loop exhausted')
+}
+
+function startSandboxUiFixture() {
+  let notification = null
+  const server = http.createServer(async (req, res) => {
+    if (req.url === '/healthz') {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('ok')
+      return
+    }
+    notification ??= emitSandboxUiNotification()
+    try {
+      const notificationId = await notification
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(
+        `<!doctype html><title>E2E Layout Notification App</title><main><h1>E2E Layout Notification App</h1><p data-notification-id="${notificationId}">Notification sent.</p></main>`
+      )
+    } catch (error) {
+      const reason =
+        error instanceof Error &&
+        /^client notification failed: (?:[a-z0-9_-]+|http_\d+)$/i.test(error.message)
+          ? error.message.replace('client notification failed: ', '')
+          : 'notification_emit_failed'
+      log(`E2E_SDK_SANDBOX_UI_FAIL=${reason}`)
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('Could not emit Sandbox UI notification.')
+    }
+  })
+  server.listen(Number(process.env.PORT || '8080'), '0.0.0.0', () => {
+    log('E2E_SDK_SANDBOX_UI_READY')
+  })
+}
+
 // Explicit selector: the backend can request one target from the operator's
 // ordered policy. The targetRef is injected as non-secret recipe configuration;
 // the workload never receives a provider key or credential slot value.
@@ -249,6 +315,14 @@ async function exerciseQuotaEnforcement() {
 }
 
 async function main() {
+  if (process.env.E2E_SDK_MODE === 'sandbox-ui') {
+    if (!ENDPOINT || !TOKEN) {
+      log('E2E_SDK_SANDBOX_UI_FAIL=missing_endpoint_or_token')
+      return
+    }
+    startSandboxUiFixture()
+    return
+  }
   if (!ENDPOINT || !TOKEN) {
     log('E2E_SDK_PROMPT_BRIDGE_FAIL=missing_endpoint_or_token')
     log('E2E_SDK_CLIENT_NOTIFICATION_FAIL=missing_endpoint_or_token')
