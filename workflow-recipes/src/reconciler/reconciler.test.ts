@@ -10103,6 +10103,13 @@ describe('WorkflowRecipeReconciler', () => {
           'wl-egress-test-recipe-worker'
       )
       expect(workloadNpCreates).toHaveLength(0)
+      // Mutation guard (PR335): a "delete the live NP then throw on catalog 404"
+      // regression must fail here — a cold start has no live NP to delete, and a
+      // catalog blip must never delete a workload egress policy.
+      const workloadNpDeletes = mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        c => (c[0] as { name: string }).name === 'wl-egress-test-recipe-worker'
+      )
+      expect(workloadNpDeletes).toHaveLength(0)
     })
 
     it('RED-2 (WRC-001): a provider declaration on an exact-host binding fails the recipe', async () => {
@@ -10326,6 +10333,88 @@ describe('WorkflowRecipeReconciler', () => {
       const pairs = collectIpBlockPairs(body)
       expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
       // No /32 window entries — DNS failed this round; the catalog carries egress.
+      expect(pairs.filter(p => p.cidr.endsWith('/32'))).toHaveLength(0)
+    })
+
+    it('FIX3-WL (PR335): a PERMANENTLY blocked/absent A record on a provider binding still renders the workload catalog CIDRs (no fail-close) — the blocked /32 is dropped, the pool serves', async () => {
+      // Completes FIX2: a *permanent* controller-DNS failure (blocked range /
+      // no-records, retryable=false) previously threw BEFORE provider resolution,
+      // fail-closing a provider binding whose catalog CIDRs were already in hand.
+      // Catalog coverage does not depend on the controller's own DNS.
+      mockProviderNetblocksCm()
+      const reconciler = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: async () => ({
+          kind: 'error',
+          error: 'queryA returned a blocked/private address (permanent)',
+          retryable: false,
+        }),
+      })
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(result.phase).toBe('active')
+      const body = createdPolicyByName('wl-egress-test-recipe-worker')
+      const pairs = collectIpBlockPairs(body)
+      expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+      // The permanently blocked /32 is never rendered; only the catalog pool.
+      expect(pairs.filter(p => p.cidr.endsWith('/32'))).toHaveLength(0)
+    })
+
+    it('FIX3-UI (PR335): a PERMANENTLY blocked/absent A record on a UI provider binding still renders the catalog CIDRs (no fail-close)', async () => {
+      mockProviderNetblocksCm()
+      const reconciler = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: async () => ({
+          kind: 'error',
+          error: 'queryA returned a blocked/private address (permanent)',
+          retryable: false,
+        }),
+      })
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+          ui: {
+            workloadRef: 'frontend',
+            port: 8080,
+            egress: {
+              external: [
+                {
+                  fqdn: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          },
+        },
+      })
+
+      await reconciler.reconcile(recipe)
+
+      const body = createdPolicyByName('ui-egress-test-recipe')
+      const pairs = collectIpBlockPairs(body)
+      expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
       expect(pairs.filter(p => p.cidr.endsWith('/32'))).toHaveLength(0)
     })
 

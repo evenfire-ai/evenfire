@@ -85,11 +85,15 @@ reads enforcement state, so the degradation floor is always Phase-1 behavior.
 | Env / CNI | NP egress enforced? | Verdict |
 |---|---|---|
 | minikube · Calico | yes | expected — GATE 2/3 pending |
-| GKE · Calico addon | yes | works |
-| GKE · Dataplane-V2 (Cilium) | yes | works (Cilium `ipBlock` matches *world* dsts; pin `except` conformance) |
+| GKE · Calico addon | yes | expected (CNI conformance) — unverified † |
+| GKE · Dataplane-V2 (Cilium) | yes | expected — unverified † (Cilium `ipBlock` matches *world* dsts; pin `except` conformance) |
 | EKS · **default VPC CNI** | **no — policies inert** | **no-op-safe**: detect + document, never certify as enforcing |
-| EKS · Calico addon / VPC-CNI NP agent (strict) | yes | works |
-| DOKS · Cilium | yes | works |
+| EKS · Calico addon / VPC-CNI NP agent (strict) | yes | expected (CNI conformance) — unverified † |
+| DOKS · Cilium | yes | expected — unverified † |
+
+† "expected" rows are semantic expectations from CNI NetworkPolicy `ipBlock` conformance, **not**
+live-verified in this repo. Only minikube · Calico has a planned live gate (GATE 2/3, pending — the
+`e2e-provider-cidr-egress.sh` make target is not yet a CI job). Do not read "expected" as "proven".
 
 **IPv6 stance:** provider ranges are stored family-keyed but rendered **IPv4-only**. On
 dual-stack, v4-only rules are fail-closed for v6 (safe). IPv6-only clusters are unsupported.

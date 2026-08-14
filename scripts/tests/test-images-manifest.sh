@@ -476,7 +476,7 @@ assert_network_policy_core_change_rebuilds_all_consumers() {
         }
       }
 
-      const expectedFilterKeys = ["host-context-controller", "workflow-recipes"]
+      const expectedFilterKeys = ["control-api", "host-context-controller", "workflow-recipes"]
       const coreFilterKeys = Object.entries(filters)
         .filter(([, paths]) => paths.includes(sourcePath))
         .map(([key]) => key)
@@ -505,6 +505,7 @@ assert_network_policy_core_change_rebuilds_all_consumers() {
 
       const expectedImages = [
         "clerum-workflow-base",
+        "control-api",
         "host-context-controller",
         "workflow-coordinator",
         "workflow-recipes",
