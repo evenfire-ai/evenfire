@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { ControlApiError } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   cancelManagedInvitation,
@@ -14,9 +15,15 @@ import {
 } from '../services/memberManagementService.js'
 import { TEAM_ROLES, TeamRole } from '../types.js'
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const MAX_INVITATION_EMAIL_LENGTH = 320
 const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
 const MAX_INVITEE_NAME_LENGTH = 120
+
+function isInvalidInvitationEmailError(error: unknown): boolean {
+  if (!(error instanceof ControlApiError) || error.status !== 400) return false
+  if (!error.body || typeof error.body !== 'object') return false
+  return (error.body as { error?: unknown }).error === 'invalid_email'
+}
 
 export function createMembersRouter(): Router {
   const router = Router()
@@ -60,15 +67,14 @@ export function createMembersRouter(): Router {
 
   router.post('/members/invite', requireAuth, async (req: AuthedRequest, res, next) => {
     try {
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const name = String(req.body?.name || '').trim()
-      const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
-      if (!EMAIL_PATTERN.test(email)) {
+      const rawEmail = req.body?.email
+      if (typeof rawEmail !== 'string' || rawEmail.length > MAX_INVITATION_EMAIL_LENGTH) {
         res.status(400).json({ error: 'Valid email is required' })
         return
       }
+      const email = rawEmail.trim().toLowerCase()
+      const name = String(req.body?.name || '').trim()
+      const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
       if (name.length > MAX_INVITEE_NAME_LENGTH) {
         res.status(400).json({ error: 'Name is too long' })
         return
@@ -85,7 +91,7 @@ export function createMembersRouter(): Router {
           return teamId && TEAM_ROLES.includes(role) ? { teamId, role } : null
         })
         .filter((item): item is { teamId: string; role: TeamRole } => Boolean(item))
-      if (!email || assignments.length === 0) {
+      if (assignments.length === 0) {
         res.status(400).json({ error: 'Email and at least one team are required' })
         return
       }
@@ -93,6 +99,10 @@ export function createMembersRouter(): Router {
         .status(201)
         .json(await inviteManagedMember(email, name, assignments, extractAuthToken(req)))
     } catch (error) {
+      if (isInvalidInvitationEmailError(error)) {
+        res.status(400).json({ error: 'Valid email is required' })
+        return
+      }
       const message = error instanceof Error ? error.message : ''
       if (message.includes('(403)')) {
         res.status(403).json({ error: 'You are not allowed to invite with those permissions' })

@@ -80,6 +80,76 @@ describe('external members routes', () => {
     )
   })
 
+  it('rejects raw invitation emails longer than 320 characters before directory work', async () => {
+    const overlongEmail = `${'a'.repeat(315)}@a.com`
+    directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
+      invitation: { id: 'inv-overlong', token: 'secret' },
+    })
+
+    await request(makeApp())
+      .post('/external/members/invitations')
+      .send({
+        email: overlongEmail,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'invalid_email' })
+
+    expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a missing domain dot', 'invitee@example'],
+    ['a second at sign', 'invitee@@example.com'],
+    ['whitespace', 'invitee @example.com'],
+    ['pathological dotted input', `!@!${'!.'.repeat(100)}@`],
+  ])('rejects bounded invitation email with %s before directory work', async (_case, email) => {
+    await request(makeApp())
+      .post('/external/members/invitations')
+      .send({
+        email,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'invalid_email' })
+
+    expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
+  })
+
+  it.each(['invitee@.example.com', 'invitee@example.com.'])(
+    'preserves bounded legacy domain-dot acceptance for %s',
+    async email => {
+      directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
+        invitation: { id: 'inv-compat', token: 'secret' },
+      })
+
+      await request(makeApp())
+        .post('/external/members/invitations')
+        .send({
+          email,
+          teams: [{ teamId: 'team-1', role: 'member' }],
+        })
+        .expect(201, { id: 'inv-compat' })
+
+      expect(directoryMock.createManagedInvitationForUser).toHaveBeenCalledWith(
+        'manager-1',
+        email,
+        [{ teamId: 'team-1', role: 'member' }],
+        ''
+      )
+    }
+  )
+
+  it('rejects non-string invitation email input before directory work', async () => {
+    await request(makeApp())
+      .post('/external/members/invitations')
+      .send({
+        email: { address: 'invitee@example.com' },
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'invalid_email' })
+
+    expect(directoryMock.createManagedInvitationForUser).not.toHaveBeenCalled()
+  })
+
   it('rejects overlong invitee names', async () => {
     await request(makeApp())
       .post('/external/members/invitations')

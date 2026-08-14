@@ -18,8 +18,8 @@ import {
   updateManagedMemberRoleForUser,
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
+import { normalizeInvitationEmail } from './invitationEmail.js'
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
 const MAX_INVITEE_NAME_LENGTH = 120
 
@@ -97,14 +97,12 @@ export function createExternalMembersRouter(): Router {
       try {
         const managerUserId = currentUserId(req)
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-        const email = String(req.body?.email || '')
-          .trim()
-          .toLowerCase()
-        const name = String(req.body?.name || '').trim()
-        const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
-        if (!EMAIL_PATTERN.test(email)) {
+        const email = normalizeInvitationEmail(req.body?.email)
+        if (!email) {
           return res.status(400).json({ error: 'invalid_email' })
         }
+        const name = String(req.body?.name || '').trim()
+        const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
         if (name.length > MAX_INVITEE_NAME_LENGTH) {
           return res.status(400).json({ error: 'invalid_name' })
         }
