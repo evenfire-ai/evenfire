@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { chatMessageDomId } from '@lib/chatLocalSearch'
+import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { ChatLocalSearch } from '.'
 
 describe('ChatLocalSearch', () => {
@@ -33,10 +34,10 @@ describe('ChatLocalSearch', () => {
     const onSearchStateChange = vi.fn()
     render(
       <ChatLocalSearch
-        messages={[
+        models={buildLoadedChatSemanticModels([
           { id: 'one', role: 'user', content: 'Needle once', timestamp: 1 },
           { id: 'two', role: 'assistant', content: 'needle twice needle', timestamp: 2 },
-        ]}
+        ])}
         onClose={onClose}
         onSearchStateChange={onSearchStateChange}
       />

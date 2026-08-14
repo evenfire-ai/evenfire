@@ -13,6 +13,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { MessageToolStep } from '../../../../../src/types'
 import { findLoadedChatMessageMatches } from '../../../lib/chatLocalSearch'
+import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
 import type { AgentChatMessage, TaskProgress } from '../../../uiTypes'
 // vi.mock calls are hoisted above this import, so ChatThread binds the mocks.
 import { ChatThread } from '../ChatThread'
@@ -40,6 +41,10 @@ let threadStateValue: {
   handleLoadOlderMessages: ReturnType<typeof vi.fn>
   localSearchQuery: string
   localSearchCurrentMatch: { messageId: string; occurrence: number } | null
+  semanticModelsByMessageId: ReadonlyMap<
+    string,
+    ReturnType<typeof buildLoadedChatSemanticModels>[number]
+  >
 }
 
 vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => navValue }))
@@ -103,6 +108,9 @@ function setThreadState(
     handleLoadOlderMessages: vi.fn().mockResolvedValue(undefined),
     localSearchQuery: '',
     localSearchCurrentMatch: null,
+    semanticModelsByMessageId: new Map(
+      buildLoadedChatSemanticModels(activeMessages).map(model => [model.messageId, model])
+    ),
   }
 }
 
@@ -125,7 +133,9 @@ describe('ChatThread local-search highlighting', () => {
 
     const renderedMatches = document.querySelectorAll('.chat-search-match')
     expect(renderedMatches).toHaveLength(2)
-    expect(findLoadedChatMessageMatches([assistant], 'needle')).toHaveLength(renderedMatches.length)
+    expect(
+      findLoadedChatMessageMatches(buildLoadedChatSemanticModels([assistant]), 'needle')
+    ).toHaveLength(renderedMatches.length)
   })
 
   it('renders every plain and Markdown match and distinguishes the selected occurrence', () => {
@@ -158,7 +168,9 @@ describe('ChatThread local-search highlighting', () => {
 
     const renderedMatches = document.querySelectorAll('.chat-search-match')
     expect(renderedMatches).toHaveLength(4)
-    expect(findLoadedChatMessageMatches(messages, 'needle')).toHaveLength(renderedMatches.length)
+    expect(
+      findLoadedChatMessageMatches(buildLoadedChatSemanticModels(messages), 'needle')
+    ).toHaveLength(renderedMatches.length)
     const active = screen.getByTestId('chat-search-current-match')
     expect(active.textContent).toBe('needle')
     expect(active.closest('a')?.getAttribute('href')).toBe('https://needle.example/needle')
@@ -171,6 +183,46 @@ describe('ChatThread local-search highlighting', () => {
     threadStateValue.localSearchCurrentMatch = null
     rerender(<ChatThread />)
     expect(document.querySelector('.chat-search-match')).toBeNull()
+  })
+
+  it('renders one logical match across inline nodes with shared mark identity', () => {
+    const assistant: AgentChatMessage = {
+      id: 'cross-inline',
+      role: 'assistant',
+      content: 'A cross **node** remains one result.',
+      timestamp: 2,
+    }
+    setThreadState([{ role: 'assistant', items: [assistant] }])
+    threadStateValue.localSearchQuery = 'cross node'
+    threadStateValue.localSearchCurrentMatch = { messageId: assistant.id, occurrence: 0 }
+
+    render(<ChatThread />)
+
+    const marks = [...document.querySelectorAll<HTMLElement>('.chat-search-match')]
+    expect(
+      findLoadedChatMessageMatches(
+        [...threadStateValue.semanticModelsByMessageId.values()],
+        'cross node'
+      )
+    ).toHaveLength(1)
+    expect(marks).toHaveLength(2)
+    expect(new Set(marks.map(mark => mark.dataset.chatSearchMatchId))).toHaveProperty('size', 1)
+  })
+
+  it('keeps raw HTML inert and unsafe Markdown URLs sanitized', () => {
+    const assistant: AgentChatMessage = {
+      id: 'safe-markdown',
+      role: 'assistant',
+      content: '[unsafe](javascript:alert(1)) <button onclick="evil()">literal</button>',
+      timestamp: 2,
+    }
+    setThreadState([{ role: 'assistant', items: [assistant] }])
+
+    render(<ChatThread />)
+
+    expect(document.querySelector('a')?.getAttribute('href')).toBe('')
+    expect(document.querySelector('button[onclick]')).toBeNull()
+    expect(screen.getByText(/<button onclick="evil\(\)">literal<\/button>/)).toBeTruthy()
   })
 })
 

@@ -25,6 +25,7 @@ import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
+import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import {
   activeChatViewTab,
   addBlankChatViewTab,
@@ -1533,6 +1534,11 @@ export function App() {
     ]
   )
 
+  const chatSemanticModels = React.useMemo(
+    () => buildLoadedChatSemanticModels(vm.activeMessages),
+    [vm.activeMessages]
+  )
+
   const chatThreadStateValue = React.useMemo(
     () => ({
       activeChatId: vm.activeChatId,
@@ -1546,6 +1552,9 @@ export function App() {
       progressByMessageId: vm.progressByMessageId,
       localSearchQuery: chatLocalSearchOpen ? chatLocalSearchState.query : '',
       localSearchCurrentMatch: chatLocalSearchOpen ? chatLocalSearchState.currentMatch : null,
+      semanticModelsByMessageId: new Map(
+        chatSemanticModels.map(model => [model.messageId, model] as const)
+      ),
     }),
     [
       vm.activeChatId,
@@ -1559,6 +1568,7 @@ export function App() {
       vm.progressByMessageId,
       chatLocalSearchOpen,
       chatLocalSearchState,
+      chatSemanticModels,
     ]
   )
 
@@ -1721,7 +1731,7 @@ export function App() {
                                   />
                                   {chatLocalSearchOpen ? (
                                     <ChatLocalSearch
-                                      messages={vm.activeMessages}
+                                      models={chatSemanticModels}
                                       onClose={closeChatLocalSearch}
                                       onSearchStateChange={handleChatLocalSearchStateChange}
                                     />

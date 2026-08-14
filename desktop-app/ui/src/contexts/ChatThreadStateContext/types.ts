@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { ChatLocalMatch } from '../../lib/chatLocalSearch'
+import type { ChatMessageSemanticModel } from '../../lib/chatMessageSemantics'
 import type { AgentChatMessage, AgentMessageActivity, TaskProgress } from '../../uiTypes'
 
 /**
@@ -20,6 +21,7 @@ export interface ChatThreadStateContextValue {
   progressByMessageId: Record<string, TaskProgress>
   localSearchQuery: string
   localSearchCurrentMatch: ChatLocalMatch | null
+  semanticModelsByMessageId: ReadonlyMap<string, ChatMessageSemanticModel>
 }
 
 export interface ChatThreadStateProviderProps {

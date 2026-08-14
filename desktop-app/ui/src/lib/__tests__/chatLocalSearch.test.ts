@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentChatMessage } from '../../uiTypes'
-import {
-  findLoadedChatMessageMatches,
-  markdownSearchableText,
-  wrapMatchIndex,
-} from '../chatLocalSearch'
+import { findLoadedChatMessageMatches, wrapMatchIndex } from '../chatLocalSearch'
+import { buildLoadedChatSemanticModels } from '../chatMessageSemantics'
 
 function message(id: string, content: string, role: AgentChatMessage['role'] = 'assistant') {
   return { id, content, role, timestamp: 1 } satisfies AgentChatMessage
@@ -14,7 +11,10 @@ describe('loaded chat local search', () => {
   it('matches case-insensitively across renderer-owned loaded message data', () => {
     expect(
       findLoadedChatMessageMatches(
-        [message('one', 'Alpha alpha'), message('two', 'BETA Alpha')],
+        buildLoadedChatSemanticModels([
+          message('one', 'Alpha alpha'),
+          message('two', 'BETA Alpha'),
+        ]),
         'ALPHA'
       )
     ).toEqual([
@@ -28,10 +28,16 @@ describe('loaded chat local search', () => {
     const content =
       'Visible question\n\nUSER-ATTACHED CONTEXT: The user selected these capabilities/files for this message.\nPlugins: hidden-search-plugin.'
     expect(
-      findLoadedChatMessageMatches([message('user', content, 'user')], 'visible')
+      findLoadedChatMessageMatches(
+        buildLoadedChatSemanticModels([message('user', content, 'user')]),
+        'visible'
+      )
     ).toHaveLength(1)
     expect(
-      findLoadedChatMessageMatches([message('user', content, 'user')], 'hidden-search')
+      findLoadedChatMessageMatches(
+        buildLoadedChatSemanticModels([message('user', content, 'user')]),
+        'hidden-search'
+      )
     ).toEqual([])
   })
 
@@ -45,8 +51,12 @@ describe('loaded chat local search', () => {
       '[hidden-ref]: https://example.test/needle "needle title"',
     ].join('\n')
 
-    expect(markdownSearchableText(content)).not.toContain('needle.example')
-    expect(findLoadedChatMessageMatches([message('assistant', content)], 'needle')).toEqual([
+    expect(
+      findLoadedChatMessageMatches(
+        buildLoadedChatSemanticModels([message('assistant', content)]),
+        'needle'
+      )
+    ).toEqual([
       { messageId: 'assistant', occurrence: 0 },
       { messageId: 'assistant', occurrence: 1 },
       { messageId: 'assistant', occurrence: 2 },
@@ -55,7 +65,12 @@ describe('loaded chat local search', () => {
 
   it('keeps code lines that are not valid closers for a longer fence', () => {
     const content = ['````typescript', '```needle', 'visible needle', '````'].join('\n')
-    expect(findLoadedChatMessageMatches([message('assistant', content)], 'needle')).toEqual([
+    expect(
+      findLoadedChatMessageMatches(
+        buildLoadedChatSemanticModels([message('assistant', content)]),
+        'needle'
+      )
+    ).toEqual([
       { messageId: 'assistant', occurrence: 0 },
       { messageId: 'assistant', occurrence: 1 },
     ])

@@ -13,8 +13,6 @@ import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { Button, IconButton, MenuItem } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
@@ -33,11 +31,7 @@ import {
 } from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
 import type { ChatMessageAttachment } from '../../../../src/types'
-import {
-  chatMessageDomId,
-  createChatSearchRehypePlugin,
-  highlightChatText,
-} from '../../lib/chatLocalSearch'
+import { chatMessageDomId } from '../../lib/chatLocalSearch'
 import {
   getChatMessageAttachmentTypeLabel,
   parseChatMessageDisplay,
@@ -51,6 +45,7 @@ import {
 import { resolveTaskActionState } from '../../pages/AgentsPage.helpers'
 import type { AgentChatMessage, ProgressStep, TaskProgress } from '../../uiTypes'
 import { ProgressStepper } from '../ProgressStepper'
+import { ChatMarkdownContent } from './ChatMarkdownContent'
 import { ChatStateBadge } from './ChatStateBadge'
 import { InFlightAssistantPlaceholder } from './InFlightAssistantPlaceholder'
 import { MessageTokens } from './MessageTokens'
@@ -235,6 +230,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     progressByMessageId,
     localSearchQuery,
     localSearchCurrentMatch,
+    semanticModelsByMessageId,
   } = useChatThreadStateContext()
   const {
     chatList,
@@ -574,6 +570,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                       const parsedUserMessage =
                         message.role === 'user' ? parseChatMessageDisplay(message.content) : null
                       const displayContent = parsedUserMessage?.content ?? message.content
+                      const semanticModel = semanticModelsByMessageId.get(message.id)
+                      if (!semanticModel) return null
                       const activeSearchOccurrence =
                         localSearchCurrentMatch?.messageId === message.id
                           ? localSearchCurrentMatch.occurrence
@@ -639,13 +637,11 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                     : ''}
                                 </div>
                                 <div className="error-bubble-message">
-                                  {highlightChatText(
-                                    localSearchQuery || message.content.length <= 180
-                                      ? message.content
-                                      : `${message.content.slice(0, 177)}...`,
-                                    localSearchQuery,
-                                    activeSearchOccurrence
-                                  )}
+                                  <ChatMarkdownContent
+                                    model={semanticModel}
+                                    query={localSearchQuery}
+                                    activeOccurrence={activeSearchOccurrence}
+                                  />
                                 </div>
                                 <details className="error-bubble-details">
                                   <summary>Details</summary>
@@ -665,25 +661,19 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                               )}
                               {isJson ? (
                                 <pre className="message-block json-content">
-                                  {highlightChatText(
-                                    displayContent,
-                                    localSearchQuery,
-                                    activeSearchOccurrence
-                                  )}
+                                  <ChatMarkdownContent
+                                    model={semanticModel}
+                                    query={localSearchQuery}
+                                    activeOccurrence={activeSearchOccurrence}
+                                  />
                                 </pre>
                               ) : message.role === 'assistant' ? (
                                 <div className="message-block markdown-content">
-                                  <ReactMarkdown
-                                    remarkPlugins={[remarkGfm]}
-                                    rehypePlugins={[
-                                      createChatSearchRehypePlugin(
-                                        localSearchQuery,
-                                        activeSearchOccurrence
-                                      ),
-                                    ]}
-                                  >
-                                    {displayContent}
-                                  </ReactMarkdown>
+                                  <ChatMarkdownContent
+                                    model={semanticModel}
+                                    query={localSearchQuery}
+                                    activeOccurrence={activeSearchOccurrence}
+                                  />
                                   {selectedAgent && !hasResponseFileAttachment && (
                                     <MessageArtifactActions
                                       hostRef={selectedAgent}
@@ -698,11 +688,11 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                 </div>
                               ) : displayContent ? (
                                 <p className="message-block">
-                                  {highlightChatText(
-                                    displayContent,
-                                    localSearchQuery,
-                                    activeSearchOccurrence
-                                  )}
+                                  <ChatMarkdownContent
+                                    model={semanticModel}
+                                    query={localSearchQuery}
+                                    activeOccurrence={activeSearchOccurrence}
+                                  />
                                 </p>
                               ) : null}
                               <MessageAttachmentList attachments={displayAttachments} />

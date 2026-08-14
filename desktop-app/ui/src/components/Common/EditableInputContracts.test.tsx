@@ -26,7 +26,7 @@ describe('Desktop editable input contracts', () => {
   })
 
   it('does not cancel editing commands in current-chat search', () => {
-    render(<ChatLocalSearch messages={[]} onClose={vi.fn()} onSearchStateChange={vi.fn()} />)
+    render(<ChatLocalSearch models={[]} onClose={vi.fn()} onSearchStateChange={vi.fn()} />)
     expectEditingEventsRemainNative(screen.getByRole('textbox', { name: 'Find in current chat' }))
   })
 

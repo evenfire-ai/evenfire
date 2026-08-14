@@ -3,11 +3,11 @@ import { Button, TextInput } from '@components/Common'
 import { findLoadedChatMessageMatches, wrapMatchIndex } from '@lib/chatLocalSearch'
 import type { ChatLocalSearchProps } from './types'
 
-export function ChatLocalSearch({ messages, onClose, onSearchStateChange }: ChatLocalSearchProps) {
+export function ChatLocalSearch({ models, onClose, onSearchStateChange }: ChatLocalSearchProps) {
   const [query, setQuery] = useState('')
   const [currentIndex, setCurrentIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
-  const matches = useMemo(() => findLoadedChatMessageMatches(messages, query), [messages, query])
+  const matches = useMemo(() => findLoadedChatMessageMatches(models, query), [models, query])
   const currentMatch = matches[currentIndex] ?? null
 
   useEffect(() => {
