@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import { collectProviderIds, HostTable } from '../HostTable'
+import { HostTable, collectProviderIds } from '../HostTable'
 import type { HostItem } from '../HostTable.types'
 
 function makeHost(overrides: {
@@ -153,9 +153,9 @@ describe('collectProviderIds (HostTable provider extraction)', () => {
 // assertions bind the cell's DOM contract to the helper's output.
 describe('HostTable providers column rendering', () => {
   function chipTitles(cell: HTMLElement): string[] {
-    return Array.from(
-      cell.querySelectorAll<HTMLElement>('.cu-host-providers__chip')
-    ).map(chip => chip.getAttribute('title') || '')
+    return Array.from(cell.querySelectorAll<HTMLElement>('.cu-host-providers__chip')).map(
+      chip => chip.getAttribute('title') || ''
+    )
   }
 
   function providersCell(row: HTMLElement): HTMLElement {
@@ -179,11 +179,10 @@ describe('HostTable providers column rendering', () => {
 
   it('renders one icon per unique provider in primary-then-fallback order', () => {
     renderHostTable([
-      hostWithModel(
-        'chatllm',
-        { provider: 'openai' },
-        [{ provider: 'claude' }, { provider: 'zai' }]
-      ),
+      hostWithModel('chatllm', { provider: 'openai' }, [
+        { provider: 'claude' },
+        { provider: 'zai' },
+      ]),
     ])
 
     const row = screen.getByLabelText('Open agent chatllm')
@@ -198,11 +197,10 @@ describe('HostTable providers column rendering', () => {
 
   it('renders a single icon when a fallback duplicates the primary', () => {
     renderHostTable([
-      hostWithModel(
-        'chatllm',
+      hostWithModel('chatllm', { provider: 'openai' }, [
         { provider: 'openai' },
-        [{ provider: 'openai' }, { provider: 'zai' }]
-      ),
+        { provider: 'zai' },
+      ]),
     ])
 
     const row = screen.getByLabelText('Open agent chatllm')

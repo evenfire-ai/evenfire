@@ -4,6 +4,11 @@ import { getDesktopRelease } from './api'
 
 export type ReleaseIdentity = {
   releaseId: string
+  // The commit the serving external-rest-api image was built from. Empty when
+  // the image predates the build stamp or nothing stamped it. Between releases
+  // this is the only part of the identity that moves: releaseId is frozen at
+  // the last cut.
+  buildRevision: string
 }
 
 export type ReleaseIdentityFetcher = () => Promise<unknown>
@@ -48,13 +53,27 @@ export function normalizeReleaseIdentity(payload: unknown): ReleaseIdentity | nu
   // "[object Object]" and accept it as a release name.
   if (typeof raw !== 'string') return null
   const releaseId = raw.trim()
-  return releaseId ? { releaseId } : null
+  if (!releaseId) return null
+
+  const rawRevision = (payload as { buildRevision?: unknown }).buildRevision
+  const buildRevision = typeof rawRevision === 'string' ? rawRevision.trim() : ''
+  return { releaseId, buildRevision }
 }
 
-export function formatReleaseTitle(releaseId: string | null): string | undefined {
-  return releaseId ? `${RELEASE_PREFIX} ${releaseId}` : undefined
+// The release names the lineage; the build names what is actually running.
+// Between releases only the build moves, which is why the two are shown
+// together here rather than the release alone.
+export function formatReleaseTitle(
+  releaseId: string | null,
+  buildRevision = ''
+): string | undefined {
+  if (!releaseId) return undefined
+  const release = `${RELEASE_PREFIX} ${releaseId}`
+  return buildRevision ? `${release} (build ${buildRevision})` : release
 }
 
+// Release only, deliberately: the settings header is read by users, for whom the
+// build revision is noise. The sidebar brand title carries the build for support.
 export function formatReleaseLabel(releaseId: string | null, loading = false): string {
   const title = formatReleaseTitle(releaseId)
   if (title) return title

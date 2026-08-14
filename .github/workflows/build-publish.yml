@@ -386,6 +386,11 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
+          # Same revision as the label above, but readable from inside the
+          # running container. A Dockerfile that declares no BUILD_REVISION arg
+          # simply ignores this; only images that opt in carry it.
+          build-args: |
+            BUILD_REVISION=${{ github.sha }}
           # Per-arch scope: each arch now builds in its own job/leg (see the
           # split above), so each needs its own gha cache scope. Before this
           # change, one job built both platforms in a single buildx

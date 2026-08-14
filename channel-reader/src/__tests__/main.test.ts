@@ -397,22 +397,24 @@ describe('ChannelReader Teams handoff', () => {
   it('turns an exact-run Teams download action into a personal-chat file consent card', async () => {
     const workflowRunId = '11111111-2222-4333-8444-555555555555'
     const rpc = rpcClient()
-    rpc.downloadWorkflowResultByRun = vi.fn(async (): Promise<MessageResponse> => ({
-      success: true,
-      status: 'completed',
-      response: 'Result ready.',
-      attachments: [
-        {
-          id: 'artifact-1',
-          kind: 'file',
-          mimeType: 'application/pdf',
-          encoding: 'base64',
-          dataBase64: Buffer.from('pdf bytes').toString('base64'),
-          filename: 'result.pdf',
-          sourceTool: 'workflow_result',
-        },
-      ],
-    }))
+    rpc.downloadWorkflowResultByRun = vi.fn(
+      async (): Promise<MessageResponse> => ({
+        success: true,
+        status: 'completed',
+        response: 'Result ready.',
+        attachments: [
+          {
+            id: 'artifact-1',
+            kind: 'file',
+            mimeType: 'application/pdf',
+            encoding: 'base64',
+            dataBase64: Buffer.from('pdf bytes').toString('base64'),
+            filename: 'result.pdf',
+            sourceTool: 'workflow_result',
+          },
+        ],
+      })
+    )
     const adapter = new TeamsAdapter()
     const sendFileConsent = vi.spyOn(adapter, 'sendFileConsent').mockResolvedValue('consent-1')
     const reader = new ChannelReader({
@@ -462,22 +464,24 @@ describe('ChannelReader Teams handoff', () => {
   it('uploads the exact artifact after Teams file consent is accepted', async () => {
     const workflowRunId = '11111111-2222-4333-8444-555555555555'
     const rpc = rpcClient()
-    rpc.downloadWorkflowResultByRun = vi.fn(async (): Promise<MessageResponse> => ({
-      success: true,
-      status: 'completed',
-      response: 'Result ready.',
-      attachments: [
-        {
-          id: 'artifact-1',
-          kind: 'file',
-          mimeType: 'application/pdf',
-          encoding: 'base64',
-          dataBase64: Buffer.from('pdf bytes').toString('base64'),
-          filename: 'result.pdf',
-          sourceTool: 'workflow_result',
-        },
-      ],
-    }))
+    rpc.downloadWorkflowResultByRun = vi.fn(
+      async (): Promise<MessageResponse> => ({
+        success: true,
+        status: 'completed',
+        response: 'Result ready.',
+        attachments: [
+          {
+            id: 'artifact-1',
+            kind: 'file',
+            mimeType: 'application/pdf',
+            encoding: 'base64',
+            dataBase64: Buffer.from('pdf bytes').toString('base64'),
+            filename: 'result.pdf',
+            sourceTool: 'workflow_result',
+          },
+        ],
+      })
+    )
     const adapter = new TeamsAdapter()
     const uploadConsentedFile = vi
       .spyOn(adapter, 'uploadConsentedFile')
