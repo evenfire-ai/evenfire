@@ -29,7 +29,12 @@ import { FailoverEngine } from '../failover/engine'
 import type { LlmPolicy, ModelPair } from '../failover/types'
 import { OpenAICompatibleProvider } from '../openaiCompatible'
 import type { ClassifiedError } from '../types'
-import { anthropicApiError, openaiApiError } from './sdkErrorFixtures'
+import {
+  anthropicApiError,
+  bedrockResourceNotFound,
+  openaiApiError,
+  vertexApiError,
+} from './sdkErrorFixtures'
 
 const PRIMARY: ModelPair = { provider: 'claude', model: 'claude-sonnet-4-6' }
 
@@ -50,10 +55,11 @@ const zai = new OpenAICompatibleProvider(
 const claude = new ClaudeProvider('fake-key', 'claude-sonnet-4-6')
 
 // Real SDK-shaped 404 payloads (the boundary these classifiers consume), one
-// per arm. The OpenAI/Anthropic arms derive from their SDK error constructors
-// (T1); Vertex/Bedrock use plain GCP/AWS-shaped errors (their producers are not
-// exposed SDK error classes). The ClassifiedError/LlmError below are produced
-// by the real classifiers, not hand-written.
+// per arm. All four arms derive from the real SDK error constructor (T1):
+// OpenAI/Anthropic via `*.APIError.generate`, Vertex via `new ApiError`
+// (@google/genai), Bedrock via `new ResourceNotFoundException`
+// (@aws-sdk/client-bedrock-runtime). The ClassifiedError/LlmError below are
+// produced by the real classifiers, not hand-written.
 const CASES: ReadonlyArray<[string, Classifier, string, unknown]> = [
   [
     'openai-compat (zai)',
@@ -71,17 +77,15 @@ const CASES: ReadonlyArray<[string, Classifier, string, unknown]> = [
     'vertex (google)',
     classifyGoogleError,
     'vertex',
-    { status: 404, message: 'Publisher Model `x` was not found' },
+    vertexApiError(404, {
+      error: { code: 404, message: 'Publisher Model `x` was not found', status: 'NOT_FOUND' },
+    }),
   ],
   [
     'bedrock',
     classifyBedrockError,
     'bedrock',
-    {
-      name: 'ResourceNotFoundException',
-      message: 'The provided model identifier is invalid',
-      $metadata: { httpStatusCode: 404 },
-    },
+    bedrockResourceNotFound('The provided model identifier is invalid'),
   ],
 ]
 
