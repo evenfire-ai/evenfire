@@ -89,6 +89,26 @@ describe('chat message Markdown semantic model', () => {
     expect(findChatSemanticMatches(model, '**not valid JSON**')).toHaveLength(1)
   })
 
+  it('removes attachment prompt metadata only from user-message display semantics', () => {
+    const content = 'Visible\n[Attached context]\n- source.txt'
+    const userModel = buildChatMessageSemanticModel({
+      id: 'user-1',
+      role: 'user',
+      content,
+      timestamp: 1,
+    })
+    const errorModel = buildChatMessageSemanticModel({
+      id: 'error-1',
+      role: 'assistant',
+      content,
+      timestamp: 2,
+      isError: true,
+    })
+
+    expect(userModel.searchText).toBe('Visible')
+    expect(errorModel.searchText).toBe(content)
+  })
+
   it('maps Unicode case-fold expansions back to valid original UTF-16 slices', () => {
     const model = buildChatMessageSemanticModel(assistant('İstanbul 😀 STRASSE'))
     const dotted = findChatSemanticMatches(model, 'i̇stanbul')

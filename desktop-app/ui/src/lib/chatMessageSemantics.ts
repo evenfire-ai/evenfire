@@ -123,8 +123,8 @@ export function buildChatMessageSemanticModel(message: AgentChatMessage): ChatMe
       ? 'markdown'
       : 'plain'
   const displayed =
-    representation === 'plain'
-      ? (parseChatMessageDisplay(message.content)?.content ?? message.content)
+    representation === 'plain' && message.role === 'user'
+      ? parseChatMessageDisplay(message.content).content
       : message.content
   const processor = unified()
     .use(remarkParse)
