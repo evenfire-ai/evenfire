@@ -13,18 +13,7 @@ import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconPencil, IconX } from '../../../components/icons'
-import {
-  apiGet,
-  apiSend,
-  getAdminTeamAgents,
-  getAdminUserAgents,
-  getAgentTeams,
-  getAgentUsers,
-  getHost,
-  getHostDetailBundle,
-  updateAdminTeamAgents,
-  updateAdminUserAgents,
-} from '../../../lib/api'
+import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
@@ -45,7 +34,7 @@ import {
   validateLlmPolicy,
   validateLlmSecretData,
 } from '../../../lib/llm'
-import type { ChannelResource, HostTab } from './types'
+import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
@@ -151,7 +140,6 @@ export default function HostDetailsPage() {
   const [availableContexts, setAvailableContexts] = useState<string[]>([])
   const [availableSecrets, setAvailableSecrets] = useState<string[]>([])
 
-  const hasPendingRename = hostNameDraft.trim() && hostNameDraft.trim() !== routeName
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, providerDraft),
     [allowedCatalog, providerDraft]
@@ -363,155 +351,6 @@ export default function HostDetailsPage() {
         ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
           ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
           : {}),
-      }
-
-      if (nextHostName !== routeName) {
-        let createdNewHost = false
-        const updatedChannels: Array<{ name: string; previousSpec: ChannelResource['spec'] }> = []
-        const previousUserAgentNamesById = new Map<string, string[]>()
-        const previousTeamAgentNamesById = new Map<string, string[]>()
-        try {
-          await apiSend('POST', '/api/v1/admin/hosts', {
-            metadata: { name: nextHostName },
-            spec: nextSpec,
-          })
-          createdNewHost = true
-
-          const channels = (await apiGet('/api/v1/admin/communication-channels')) as {
-            items?: ChannelResource[]
-          }
-          for (const channel of channels.items || []) {
-            if (String(channel.spec?.hostRef || '').trim() !== routeName) continue
-            const channelName = String(channel.metadata?.name || '').trim()
-            if (!channelName) continue
-            await apiSend(
-              'PUT',
-              `/api/v1/admin/communication-channels/${encodeURIComponent(channelName)}`,
-              {
-                spec: {
-                  ...(channel.spec || {}),
-                  hostRef: nextHostName,
-                },
-              }
-            )
-            updatedChannels.push({ name: channelName, previousSpec: channel.spec })
-          }
-
-          // Fetch the freshest user/team access lists so a grant/revoke done
-          // in the Access tab right before this rename still applies here.
-          const [usersAccessSnapshot, teamsAccessSnapshot] = await Promise.all([
-            getAgentUsers(routeName),
-            getAgentTeams(routeName),
-          ])
-          const renameUsersWithAccess = Array.isArray(usersAccessSnapshot.items)
-            ? usersAccessSnapshot.items
-            : []
-          const renameTeamsWithAccess = Array.isArray(teamsAccessSnapshot.items)
-            ? teamsAccessSnapshot.items
-            : []
-
-          for (const user of renameUsersWithAccess) {
-            const userAccess = await getAdminUserAgents(user.id)
-            const previousAgentNames = (userAccess.agentNames || [])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-            previousUserAgentNamesById.set(user.id, previousAgentNames)
-            const nextAgentNames = Array.from(
-              new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
-            )
-            await updateAdminUserAgents(user.id, nextAgentNames, [
-              ...(userAccess.agentNames || []),
-              ...(userAccess.deletedAgentNames || []),
-            ])
-          }
-
-          for (const team of renameTeamsWithAccess) {
-            const teamAccess = await getAdminTeamAgents(team.id)
-            const previousAgentNames = (teamAccess.agentNames || [])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-            previousTeamAgentNamesById.set(team.id, previousAgentNames)
-            const nextAgentNames = Array.from(
-              new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
-            )
-            await updateAdminTeamAgents(team.id, nextAgentNames, [
-              ...(teamAccess.agentNames || []),
-              ...(teamAccess.deletedAgentNames || []),
-            ])
-          }
-
-          await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
-          showToast('Agent renamed and updated.', { tone: 'success' })
-          router.replace(CONTROL_ROUTES.agents.detail(nextHostName))
-          return true
-        } catch (renameError) {
-          const rollbackErrors: string[] = []
-          if (createdNewHost) {
-            for (const [teamId, previousAgentNames] of Array.from(
-              previousTeamAgentNamesById.entries()
-            ).reverse()) {
-              try {
-                const current = await getAdminTeamAgents(teamId)
-                await updateAdminTeamAgents(teamId, previousAgentNames, [
-                  ...(current.agentNames || []),
-                  ...(current.deletedAgentNames || []),
-                ])
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`team ${teamId}: ${rollbackMessage}`)
-              }
-            }
-            for (const [userId, previousAgentNames] of Array.from(
-              previousUserAgentNamesById.entries()
-            ).reverse()) {
-              try {
-                const current = await getAdminUserAgents(userId)
-                await updateAdminUserAgents(userId, previousAgentNames, [
-                  ...(current.agentNames || []),
-                  ...(current.deletedAgentNames || []),
-                ])
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`member ${userId}: ${rollbackMessage}`)
-              }
-            }
-            for (const channel of [...updatedChannels].reverse()) {
-              try {
-                await apiSend(
-                  'PUT',
-                  `/api/v1/admin/communication-channels/${encodeURIComponent(channel.name)}`,
-                  {
-                    spec: {
-                      ...(channel.previousSpec || {}),
-                      hostRef: routeName,
-                    },
-                  }
-                )
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`channel ${channel.name}: ${rollbackMessage}`)
-              }
-            }
-            try {
-              await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(nextHostName)}`)
-            } catch (rollbackError) {
-              const rollbackMessage =
-                rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-              rollbackErrors.push(`agent ${nextHostName}: ${rollbackMessage}`)
-            }
-          }
-          if (rollbackErrors.length > 0) {
-            const renameMessage =
-              renameError instanceof Error ? renameError.message : 'Failed to rename agent'
-            throw new Error(`${renameMessage} (rollback issues: ${rollbackErrors.join('; ')})`)
-          }
-          throw renameError
-        }
       }
 
       const formResourceVersion = formResourceVersionRef.current
@@ -749,13 +588,6 @@ export default function HostDetailsPage() {
       backLabel="Back to agents"
       error={error}
       icon={<IconRobot />}
-      notice={
-        hasPendingRename ? (
-          <div className="cu-banner cu-banner--warning">
-            Save agent rename before changing user or team access.
-          </div>
-        ) : null
-      }
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
       subtitle="Configuration and access for this agent."
@@ -838,15 +670,28 @@ export default function HostDetailsPage() {
               <div className="cu-field">
                 <label htmlFor="host-name">Name</label>
                 {editingOverview ? (
+                  <>
+                    <input id="host-name" value={hostNameDraft} readOnly />
+                    <span className="cu-field__hint">
+                      This is the agent identifier, not editable.
+                    </span>
+                  </>
+                ) : (
+                  <div className="cu-field__readonly">{hostNameDraft}</div>
+                )}
+              </div>
+              <div className="cu-field">
+                <label htmlFor="host-display">Display name</label>
+                {editingOverview ? (
                   <input
-                    id="host-name"
-                    value={hostNameDraft}
-                    onChange={e => setHostNameDraft(e.target.value)}
+                    id="host-display"
+                    value={hostDisplayDraft}
+                    onChange={e => setHostDisplayDraft(e.target.value)}
                     disabled={busy}
                     autoFocus
                   />
                 ) : (
-                  <div className="cu-field__readonly">{hostNameDraft}</div>
+                  <div className="cu-field__readonly">{hostDisplayDraft}</div>
                 )}
               </div>
               <div className="cu-field" style={{ marginBottom: 0 }}>
@@ -1175,9 +1020,7 @@ export default function HostDetailsPage() {
 
         {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
 
-        {activeTab === 'access' && (
-          <HostAccessTab hasPendingRename={hasPendingRename} hostName={routeName} />
-        )}
+        {activeTab === 'access' && <HostAccessTab hostName={routeName} />}
       </div>
       {showDeleteAgentConfirm && (
         <div
