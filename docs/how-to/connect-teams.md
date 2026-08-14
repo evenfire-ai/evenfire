@@ -73,8 +73,11 @@ binary and login works without them. An `Azure CLI: not installed` line in
    encoded into the endpoint, and channels cannot be renamed.
 3. Choose the **Microsoft Teams** provider. The tab opens on Telegram, so this
    is an explicit click.
-4. Enter the bot **Name**, lowercase letters, numbers and hyphens, starting with
-   a letter. This becomes the bot's display name in Teams.
+4. Enter the bot **Name**. This becomes the bot's display name in Teams, so a
+   human-readable name like `Evenfire Support` is fine. Any non-empty name up to
+   80 characters is accepted, matching what the CRD and the API allow. Avoid
+   quotes and shell metacharacters, since the name is interpolated into the
+   command you are about to copy.
 5. Decide whether the bot answers only when mentioned.
 
 The panel now shows the `teams app create` command with your endpoint filled in.
