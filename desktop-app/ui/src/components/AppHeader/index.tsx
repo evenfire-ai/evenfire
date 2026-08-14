@@ -8,14 +8,17 @@ import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
+import { useSearchPluginsAppsController } from '@hooks/domain/useSearchPluginsAppsController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { notificationKindLabel, notificationPreviewText } from '@/lib/notifications'
 import type { AppNotificationKind } from '@/uiTypes'
 import type {
   AppHeaderProps,
+  SearchAppResult,
   SearchEntityResult,
   SearchMemberResult,
+  SearchPluginResult,
   SearchTeamResult,
 } from './types'
 
@@ -100,6 +103,12 @@ export const AppHeader = React.memo(function AppHeader({
     currentTeamId,
     ensureHydrated: onEnsureTeamDirectory,
   } = useTeamsDataController()
+  const {
+    plugins: searchPlugins,
+    apps: searchApps,
+    loading: pluginsAppsLoading,
+    ensureLoaded: ensurePluginsAppsLoaded,
+  } = useSearchPluginsAppsController()
   const { navItem, handleNavSelect, handleOpenContextDetails, handleOpenTeamDetails } =
     useNavigationContext()
   const {
@@ -482,13 +491,52 @@ export const AppHeader = React.memo(function AppHeader({
         : [],
     [currentTeamId, hasSearch, normalizedSearch, teamDirectory, teamMembers.length, teams]
   )
+  const filteredPlugins = useMemo<SearchPluginResult[]>(
+    () =>
+      hasSearch
+        ? searchPlugins
+            .filter(
+              plugin =>
+                plugin.name.toLowerCase().includes(normalizedSearch) ||
+                plugin.namespace.toLowerCase().includes(normalizedSearch)
+            )
+            .sort((left, right) => left.name.localeCompare(right.name))
+            .map(plugin => ({
+              key: `${plugin.namespace}/${plugin.name}`,
+              name: plugin.name,
+              namespace: plugin.namespace,
+              status: plugin.status ?? null,
+            }))
+        : [],
+    [hasSearch, normalizedSearch, searchPlugins]
+  )
+  const filteredApps = useMemo<SearchAppResult[]>(() => {
+    if (!hasSearch) return []
+    return searchApps
+      .map(app => ({
+        key: app.appRef,
+        appRef: app.appRef,
+        label: (app.title ?? '').trim() || app.appRef,
+        description: (app.description ?? '').trim() || null,
+        ready: app.ready,
+      }))
+      .filter(
+        app =>
+          app.label.toLowerCase().includes(normalizedSearch) ||
+          app.appRef.toLowerCase().includes(normalizedSearch) ||
+          (app.description?.toLowerCase().includes(normalizedSearch) ?? false)
+      )
+      .sort((left, right) => left.label.localeCompare(right.label))
+  }, [hasSearch, normalizedSearch, searchApps])
 
   const totalMatches =
     filteredTeams.length +
     filteredMembers.length +
     filteredAgents.length +
     filteredContexts.length +
-    filteredConnectors.length
+    filteredConnectors.length +
+    filteredPlugins.length +
+    filteredApps.length
   const pendingApprovalsCount = pendingApprovals.length
   const inboxNotificationCount = notifications.length
   const totalAttentionCount = pendingApprovalsCount + unreadNotificationCount
@@ -497,13 +545,17 @@ export const AppHeader = React.memo(function AppHeader({
       ? 'Inbox'
       : `${totalAttentionCount} item${totalAttentionCount === 1 ? '' : 's'} in inbox`
 
-  const navigateToSection = (target: 'agents' | 'connectors') => {
+  const navigateToSection = (target: 'agents' | 'connectors' | 'plugins' | 'apps') => {
     setSearchOpen(false)
     if (target === 'agents') {
       onOpenAgents()
       return
     }
-    onOpenConnectors()
+    if (target === 'connectors') {
+      onOpenConnectors()
+      return
+    }
+    handleNavSelect(target === 'plugins' ? DESKTOP_ROUTES.plugins : DESKTOP_ROUTES.apps)
   }
 
   const navigateToTeam = (teamId: string) => {
@@ -532,6 +584,11 @@ export const AppHeader = React.memo(function AppHeader({
         searchDirectoryInFlightRef.current = false
       })
   }, [hasSearch, normalizedSearch, onEnsureTeamDirectory, searchOpen, teamDirectoryLoading])
+
+  useEffect(() => {
+    if (!searchOpen || !hasSearch) return
+    void ensurePluginsAppsLoaded()
+  }, [ensurePluginsAppsLoaded, hasSearch, searchOpen])
 
   return (
     <header className="top-bar">
@@ -569,6 +626,10 @@ export const AppHeader = React.memo(function AppHeader({
                   <p className="search-results-loading">
                     Loading members and agents from your other teams...
                   </p>
+                )}
+
+                {pluginsAppsLoading && !searchPlugins.length && !searchApps.length && (
+                  <p className="search-results-loading">Loading plugins and apps...</p>
                 )}
 
                 {Boolean(filteredTeams.length) && (
@@ -705,10 +766,59 @@ export const AppHeader = React.memo(function AppHeader({
                   </section>
                 )}
 
-                {!totalMatches && !teamDirectoryLoading && (
+                {Boolean(filteredPlugins.length) && (
+                  <section className="search-results-group">
+                    <header className="search-results-group-title">Plugins</header>
+                    <div className="search-results-list">
+                      {filteredPlugins.map(plugin => (
+                        <SelectableOption
+                          key={plugin.key}
+                          className="search-result-item search-result-item-button"
+                          onClick={() => navigateToSection('plugins')}
+                          size="sm"
+                        >
+                          <div className="search-result-main">
+                            <strong>{plugin.name}</strong>
+                            <span className="search-result-subline">
+                              {plugin.namespace} · {plugin.status ?? 'Status unknown'}
+                            </span>
+                          </div>
+                          <span className="search-result-tag">Plugin</span>
+                        </SelectableOption>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {Boolean(filteredApps.length) && (
+                  <section className="search-results-group">
+                    <header className="search-results-group-title">Apps</header>
+                    <div className="search-results-list">
+                      {filteredApps.map(app => (
+                        <SelectableOption
+                          key={app.key}
+                          className="search-result-item search-result-item-button"
+                          onClick={() => navigateToSection('apps')}
+                          size="sm"
+                        >
+                          <div className="search-result-main">
+                            <strong>{app.label}</strong>
+                            <span className="search-result-subline">
+                              {app.description ? `${app.description} · ` : ''}
+                              {app.ready ? 'Ready' : 'Starting up'}
+                            </span>
+                          </div>
+                          <span className="search-result-tag">App</span>
+                        </SelectableOption>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {!totalMatches && !teamDirectoryLoading && !pluginsAppsLoading && (
                   <p className="search-results-empty">
                     No matches for "{searchQuery.trim()}". Try a member email, team name, context,
-                    agent, or connector.
+                    agent, connector, plugin, or app.
                   </p>
                 )}
               </div>

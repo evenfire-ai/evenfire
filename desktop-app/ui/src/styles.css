@@ -13768,6 +13768,13 @@ pre {
   border-bottom: 0;
 }
 
+.da-gfs-drive__title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-0-5);
+}
+
 .da-gfs-drive__breadcrumbs {
   min-width: 0;
   display: flex;
@@ -13945,8 +13952,7 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-drive__type,
-.da-gfs-drive__source {
+.da-gfs-drive__type {
   min-width: 0;
   overflow: hidden;
   color: var(--text-muted);
@@ -14163,7 +14169,7 @@ pre {
   min-height: 0;
   overflow: auto;
   padding: var(--space-5);
-  background: rgba(var(--overlay-rgb), 0.32);
+  background: var(--panel);
 }
 
 .da-gfs-markdown-preview-dialog__loading {
@@ -14653,9 +14659,7 @@ pre {
   }
 
   .da-gfs-drive__type-column,
-  .da-gfs-drive__source-column,
-  .da-gfs-drive__type,
-  .da-gfs-drive__source {
+  .da-gfs-drive__type {
     display: none;
   }
 

@@ -11250,6 +11250,15 @@ button.cu-gfs-tree__button:focus-visible,
   background: var(--cu-surface-hover);
 }
 
+.cu-gfs-list__row--clickable {
+  cursor: pointer;
+}
+
+.cu-gfs-list__row--clickable:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: -2px;
+}
+
 .cu-gfs-list__icon {
   width: 2.25rem;
   height: 2.25rem;

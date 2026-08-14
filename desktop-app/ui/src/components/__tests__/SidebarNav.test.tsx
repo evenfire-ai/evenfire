@@ -105,13 +105,17 @@ describe('SidebarNav logo', () => {
     expect(container.querySelector('.sidebar-logo-copy')).toBeNull()
   })
 
-  it('labels the Files destination as Global File System in Resources', () => {
+  it('renders Files as a top-level nav item labelled Files (not under Resources)', () => {
     render(<SidebarNav {...baseProps()} />)
 
-    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+    // Files is always visible as a primary nav destination — no menu opening needed.
+    const filesItem = screen.getByTestId('nav-files')
+    expect(filesItem.textContent).toContain('Files')
+    expect(filesItem.textContent).not.toContain('Global File System')
 
-    expect(screen.getByTestId('nav-files').textContent).toContain('Global File System')
-    expect(screen.queryByRole('menuitem', { name: 'Files' })).toBeNull()
+    // Files is no longer nested under the Settings → Resources submenu.
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+    expect(screen.getByTestId('nav-data-menu').textContent).not.toContain('Global File System')
   })
 })
 
