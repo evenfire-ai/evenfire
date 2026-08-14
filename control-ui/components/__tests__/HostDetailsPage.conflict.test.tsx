@@ -31,6 +31,12 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
+vi.mock('../HostAccessTab', () => ({
+  HostAccessTab: ({ hostName }: { hostName: string }) => (
+    <div data-testid="access-tab">Access editor for {hostName}</div>
+  ),
+}))
+
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
