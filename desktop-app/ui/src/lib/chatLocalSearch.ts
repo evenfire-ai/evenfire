@@ -18,19 +18,26 @@ export function chatMessageDomId(messageId: string): string {
  * and fenced-code language identifiers).
  */
 export function markdownSearchableText(source: string): string {
-  let fence: '`' | '~' | null = null
+  let fence: { marker: '`' | '~'; length: number } | null = null
   return source
     .split(/(\r?\n)/)
     .map(part => {
       if (part === '\n' || part === '\r\n') return part
-      const fenceMatch = part.match(/^\s{0,3}(`{3,}|~{3,})/)
-      if (fenceMatch) {
-        const marker = fenceMatch[1]?.[0] as '`' | '~'
-        if (fence === null) fence = marker
-        else if (fence === marker) fence = null
+      const fenceMatch = part.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/)
+      if (fence === null && fenceMatch) {
+        const run = fenceMatch[1]!
+        fence = { marker: run[0] as '`' | '~', length: run.length }
         return ' '.repeat(part.length)
       }
-      if (fence !== null) return part
+      if (fence !== null) {
+        const run = fenceMatch?.[1] ?? ''
+        const trailing = fenceMatch?.[2] ?? ''
+        if (run[0] === fence.marker && run.length >= fence.length && trailing.trim().length === 0) {
+          fence = null
+          return ' '.repeat(part.length)
+        }
+        return part
+      }
       if (/^\s{0,3}\[[^\]]+\]:\s*/.test(part)) return ' '.repeat(part.length)
       return part
         .replace(/\]\((?:\\.|[^)])*\)/g, match => `]${' '.repeat(match.length - 1)}`)

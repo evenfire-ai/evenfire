@@ -53,6 +53,14 @@ describe('loaded chat local search', () => {
     ])
   })
 
+  it('keeps code lines that are not valid closers for a longer fence', () => {
+    const content = ['````typescript', '```needle', 'visible needle', '````'].join('\n')
+    expect(findLoadedChatMessageMatches([message('assistant', content)], 'needle')).toEqual([
+      { messageId: 'assistant', occurrence: 0 },
+      { messageId: 'assistant', occurrence: 1 },
+    ])
+  })
+
   it('wraps forward and backward through loaded matches', () => {
     expect(wrapMatchIndex(2, 3, 1)).toBe(0)
     expect(wrapMatchIndex(0, 3, -1)).toBe(2)

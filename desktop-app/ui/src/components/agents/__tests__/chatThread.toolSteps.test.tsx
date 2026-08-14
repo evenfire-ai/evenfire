@@ -107,6 +107,27 @@ function setThreadState(
 }
 
 describe('ChatThread local-search highlighting', () => {
+  it('keeps calculated and rendered matches aligned inside longer Markdown fences', () => {
+    const assistant: AgentChatMessage = {
+      id: 'turn-1-assistant',
+      role: 'assistant',
+      content: ['````typescript', '```needle', 'visible needle', '````'].join('\n'),
+      timestamp: 2,
+    }
+    setThreadState([{ role: 'assistant', items: [assistant] }])
+    threadStateValue.localSearchQuery = 'needle'
+    threadStateValue.localSearchCurrentMatch = {
+      messageId: assistant.id,
+      occurrence: 0,
+    }
+
+    render(<ChatThread />)
+
+    const renderedMatches = document.querySelectorAll('.chat-search-match')
+    expect(renderedMatches).toHaveLength(2)
+    expect(findLoadedChatMessageMatches([assistant], 'needle')).toHaveLength(renderedMatches.length)
+  })
+
   it('renders every plain and Markdown match and distinguishes the selected occurrence', () => {
     const messages: AgentChatMessage[] = [
       { ...userMsg, content: 'Needle then needle' },
