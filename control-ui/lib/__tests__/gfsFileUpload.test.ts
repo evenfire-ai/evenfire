@@ -47,12 +47,14 @@ describe('normalizeInstabilityFailureThreshold', () => {
 describe('isRetryableUploadStatus', () => {
   it('uses the same transient allowlist as Desktop and does not retry storage exhaustion', () => {
     expect(isRetryableUploadStatus(503)).toBe(true)
+    expect(isRetryableUploadStatus(413)).toBe(false)
     expect(isRetryableUploadStatus(507)).toBe(false)
     expect(isRetryableUploadStatus(501)).toBe(false)
   })
 
   it('only reconciles statuses whose response may follow a committed write', () => {
     expect(isAmbiguousUploadStatus(500)).toBe(true)
+    expect(isAmbiguousUploadStatus(413)).toBe(false)
     expect(isAmbiguousUploadStatus(429)).toBe(false)
     expect(isAmbiguousUploadStatus(507)).toBe(false)
     expect(isAmbiguousUploadStatus(501)).toBe(false)

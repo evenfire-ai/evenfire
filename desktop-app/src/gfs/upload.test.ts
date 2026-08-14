@@ -34,9 +34,11 @@ describe('desktop GFS indexed uploader', () => {
 
   it('uses the same transient status allowlist as Control UI', () => {
     expect(isRetryableUploadStatus(503)).toBe(true)
+    expect(isRetryableUploadStatus(413)).toBe(false)
     expect(isRetryableUploadStatus(507)).toBe(false)
     expect(isRetryableUploadStatus(501)).toBe(false)
     expect(isAmbiguousUploadStatus(500)).toBe(true)
+    expect(isAmbiguousUploadStatus(413)).toBe(false)
     expect(isAmbiguousUploadStatus(429)).toBe(false)
     expect(isAmbiguousUploadStatus(507)).toBe(false)
   })

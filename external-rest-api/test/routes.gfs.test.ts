@@ -341,6 +341,42 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(res.body).toEqual({ error: 'escalation_rejected' })
   })
 
+  it('preserves a public 413 payload_too_large response and its safe transport headers', async () => {
+    const body = {
+      ok: false,
+      error: {
+        code: 'payload_too_large',
+        message: 'upload exceeds the 200 MiB product limit',
+      },
+    }
+    clientMock.controlApiRequest.mockRejectedValue(
+      new ControlApiError(
+        'payload too large',
+        413,
+        body,
+        new Headers({
+          'content-type': 'application/json',
+          'retry-after': '9',
+          'upload-length': '209715200',
+          'x-ratelimit-limit': '16',
+          'x-internal-secret': 'must-not-cross-the-public-boundary',
+        })
+      )
+    )
+
+    const res = await request(buildApp())
+      .put('/me/gfs/resources/abc/content?drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ contentBase64: 'AAAA' })
+
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual(body)
+    expect(res.headers['retry-after']).toBe('9')
+    expect(res.headers['upload-length']).toBe('209715200')
+    expect(res.headers['x-ratelimit-limit']).toBe('16')
+    expect(res.headers['x-internal-secret']).toBeUndefined()
+  })
+
   it('propagates GFS transport statuses/body/headers without changing retry semantics', async () => {
     // 507 is terminal for Desktop/Control UI, while 408/425 and the transient
     // 5xx family are retryable. The public relay must not turn any of them into

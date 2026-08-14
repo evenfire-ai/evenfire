@@ -11,6 +11,7 @@ import {
   isGfsUploadV2Route,
   partCountFor,
   partGeometry,
+  validateGeometry,
   validatePartGeometry,
 } from './protocol'
 
@@ -60,6 +61,35 @@ describe('GFS Upload v2 frozen contract', () => {
     expect(() => validatePartGeometry(geometry, { ...finalPart, lengthBytes: 8_388_608 })).toThrow(
       'length must be 1'
     )
+  })
+
+  it('pins the preferred and hard part boundaries and rejects invalid geometry deterministically', () => {
+    const preferred = {
+      expectedBytes: GFS_UPLOAD_V2_PREFERRED_PART_BYTES,
+      partBytes: GFS_UPLOAD_V2_PREFERRED_PART_BYTES,
+    }
+    expect(partCountFor(preferred)).toBe(1)
+    expect(partGeometry(preferred, 0).lengthBytes).toBe(GFS_UPLOAD_V2_PREFERRED_PART_BYTES)
+
+    const hardMaximum = {
+      expectedBytes: GFS_UPLOAD_V2_MAX_PART_BYTES,
+      partBytes: GFS_UPLOAD_V2_MAX_PART_BYTES,
+    }
+    expect(partCountFor(hardMaximum)).toBe(1)
+    expect(partGeometry(hardMaximum, 0).lengthBytes).toBe(GFS_UPLOAD_V2_MAX_PART_BYTES)
+
+    expect(() => validateGeometry({ expectedBytes: 1, partBytes: 0 })).toThrow(
+      'partBytes must be an integer'
+    )
+    expect(() =>
+      validateGeometry({
+        expectedBytes: GFS_UPLOAD_V2_MAX_PART_BYTES,
+        partBytes: GFS_UPLOAD_V2_MAX_PART_BYTES + 1,
+      })
+    ).toThrow('partBytes must be an integer')
+    expect(() =>
+      partGeometry({ expectedBytes: 0, partBytes: GFS_UPLOAD_V2_PREFERRED_PART_BYTES }, 0)
+    ).toThrow('invalid part number')
   })
 
   it.each([

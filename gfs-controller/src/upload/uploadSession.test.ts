@@ -11,7 +11,7 @@ import {
   type Transactor,
   type TxClient,
 } from '../db/writeStore'
-import { partGeometry } from './protocol'
+import { GFS_UPLOAD_V2_PRODUCT_MAX_BYTES, partGeometry } from './protocol'
 import { GfsUploadSessionService, type UploadSessionServiceDeps } from './uploadSession'
 
 type Row = Record<string, unknown>
@@ -503,6 +503,48 @@ async function settleWithin<T>(
 }
 
 describe('GfsUploadSessionService', () => {
+  it('accepts exactly 200 MiB, rejects one byte over before allocation, and enforces part-count geometry', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-boundary-'))
+    const input = {
+      ...principal,
+      operation: 'create' as const,
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'boundary.bin',
+    }
+
+    const exactDb = new MemoryDb()
+    const exact = await service(exactDb, CONFIG).create({
+      ...input,
+      sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+      idempotencyKey: '11111111-1111-4111-8111-111111111112',
+    })
+    expect(exact.created).toBe(true)
+    expect(exact.session.expectedBytes).toBe(GFS_UPLOAD_V2_PRODUCT_MAX_BYTES)
+    expect(exact.session.partBytes).toBe(8 * 1024 * 1024)
+    expect(exact.session.partCount).toBe(25)
+    expect(exactDb.sessions).toHaveLength(1)
+
+    const overDb = new MemoryDb()
+    await expect(
+      service(overDb, CONFIG).create({
+        ...input,
+        sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES + 1,
+        idempotencyKey: '11111111-1111-4111-8111-111111111113',
+      })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(overDb.sessions).toHaveLength(0)
+
+    const partCountDb = new MemoryDb()
+    await expect(
+      service(partCountDb, { ...CONFIG, maxPartCount: 24 }).create({
+        ...input,
+        sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+        idempotencyKey: '11111111-1111-4111-8111-111111111114',
+      })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(partCountDb.sessions).toHaveLength(0)
+  })
+
   it(
     'creates idempotent sessions and keeps indexed commits separate from contiguous progress',
     { timeout: 15_000 },
