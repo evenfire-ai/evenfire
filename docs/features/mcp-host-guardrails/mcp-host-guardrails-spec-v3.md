@@ -872,11 +872,23 @@ spec:
             status:                                    # reconciler-written; surfaced in control-ui, like McpServer.status
               type: object
               properties:
-                phase:          { type: string, enum: [Pending, Deploying, Ready, Degraded, Failed] }
-                readyReplicas:  { type: integer }
                 observedDigest: { type: string }       # image digest actually running
-                message:        { type: string }
+                readyReplicas:  { type: integer }      # ready replicas of the hook Deployment (image target)
                 lastReconciled: { type: string }       # RFC3339
+                conditions:                            # standard K8s conditions (Deployed, Ready, …) — the
+                                                       # reconcile state is a conditions[] array, NOT flat
+                                                       # phase/message fields. control-ui reads .conditions.
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type:               { type: string }                       # e.g. Ready, Deployed
+                      status:             { type: string, enum: ['True','False','Unknown'] }
+                      reason:             { type: string }
+                      message:            { type: string }                       # human-readable explanation
+                      lastTransitionTime: { type: string }                       # RFC3339
+                      observedGeneration: { type: integer }
       subresources:
         status: {}                                     # HCC writes status; the mcp-host runtime cannot
 ```
@@ -1085,8 +1097,11 @@ admin-authored **`Host.spec.guardrails.minInstalledHookTrustLevel`** (§5). Cont
 `trust_level ≥ minInstalledHookTrustLevel` (a hook below the floor does not run at all). The hook's own
 `spec.config` is **opaque hook settings passed through to the container and is never consulted for any
 trust or exposure decision** — a hook cannot self-certify its own access. Every content-bearing call is
-audit-logged (hook + phase + request id, not the content). `LlmHookContext.host` omits `llmSecretName`; the
-hook's own credentials live in its own Secret.
+audit-logged (hook + phase + request id, not the content). The mcp-host LLM secret name is **omitted by
+construction**: a hook's `/v1` request body is built only from the redacted content projection above
+(messages/response/params/usage) — there is no host-context object threaded to hooks, so `llmSecretName`
+never appears anywhere on the hook path. The hook's own credentials live in its own Secret (`envSecret`,
+resolved only in `llm-hooks`, §12.1/N9).
 
 **Content + egress are separated by default (exfiltration control).** A hook subscribed to a
 content-bearing lifecycle point (`moderate`/`post_call`) **MUST NOT** declare `egressBindings` unless its
@@ -1109,9 +1124,11 @@ org's own vetted entries, not a public/global marketplace, and **not** arbitrary
 images (out of scope for v1). An admin installs a hook from that catalog; there is no path to run an image
 that isn't a registry entry.
 
-- Registry `entry_type: 'llm_hook'`, **org-scoped**, with `hook_meta { target(image|service|remote),
-  lifecyclePoints[], credential_schema, defaultConfig, requiredEgress[] }`. Extending the
-  `evenfire-registry` schema is a prerequisite we own.
+- Registry `entry_type: 'llm-hook'` (hyphen, as the code checks it — `registry.ts`), **org-scoped**, with
+  `hook_meta { target(image|service|remote), lifecyclePoints[], path, defaultConfig, requiredEgress[] }`.
+  The **`credential_schema` is fetched via a separate registry endpoint** (`getCredentialSchema()`) at
+  install time, not carried as a `hook_meta` subfield. Extending the `evenfire-registry` schema is a
+  prerequisite we own (the schema lives in the external registry service, not this repo).
 - `POST /admin/registry/install-hook` saga (cloned from `install-recipe`): verify sha256 bundle digest →
   validate + store credential Secret → build the `LlmHook` `target` → image-allowlist preflight → stamp
   `catalog-id/version` → create CR → rollback on failure → `reportInstall`. Installed-state derived from
@@ -1125,8 +1142,13 @@ that isn't a registry entry.
 
 Fail-closed is the default and **mandatory for any deny-authoritative hook** (built-in or installed). A
 `breaker` (trip to fail-open after N failures, alert, re-probe) is permitted **only** for non-authoritative
-(advisory/observability) hooks and **only** when admin policy opts in. `RemoteLlmHook` owns per-hook
-breaker state so a down hook degrades per its declared mode, not globally.
+(advisory/observability) hooks and **only** when admin policy opts in (`onUnavailable.mode: breaker`,
+§8.2). A `may_deny` hook always dials `strict` — its breaker is ignored so it can never be tripped into
+failing open. Breaker state is **per-hook, not global** (one hook tripping never affects another): because
+the hooked LLM port is rebuilt per logical request, the state lives in a process-shared
+`HookBreakerRegistry` keyed by hook identity (`endpoint+path`), so a trip survives across requests and a
+down hook is short-circuited (not re-dialed and re-timed-out) until its cooldown elapses, then re-probed
+once. (`mcp-host/src/core/guardrails/hooks/hookBreaker.ts`.)
 
 ---
 
@@ -1216,7 +1238,7 @@ controller-generated NetworkPolicy on top of a deny-everything baseline. All inv
 | N9 | **Secret isolation** | A hook's `envSecret` is resolved only within `llm-hooks` and can never name the mcp-host LLM key or any Host secret. Because hooks and their secrets are confined to their own namespace under scoped RBAC, one hook cannot read another hook's — or the platform's — credentials. Secret material never crosses the namespace boundary into a hook. | Enforced |
 | N10 | **Runtime can't widen its own reach** | The per-Host mcp-host ServiceAccount may **read** (`get`/`list`/`watch`) `LlmHook` CRs only within its own **tenant-scoped** `llm-hooks` namespace — so it sees only its tenant's hooks (multi-tenant uses a per-tenant namespace prefix; cross-tenant isolation comes from that namespace boundary, not from withholding read) — and has **no write** verbs, so it cannot mutate any `Host`/`LlmHook` CR or touch any NetworkPolicy. A compromised mcp-host pod therefore cannot rewrite guardrail policy or open new network paths for itself; policy authorship stays entirely in the trusted control plane (control-api / HCC). | Enforced |
 | N11 | **Fail-closed provisioning** | If HCC cannot build a correct scoped policy for a hook — e.g. the referenced Service has no selector, or a reference can't be resolved — it declines to create an over-broad allow and leaves the hook unreachable under the default-deny baseline. Reachability only appears when a precise allow is successfully provisioned; a provisioning failure fails **closed**, not open. (The separate hook-resolution fail-posture at load time is still open — see §12.4.) | Enforced |
-| N12 | **No internal reach via broad egress** | The broad *external* egress lanes — mcp-host's `0.0.0.0/0:443\|80` LLM / `http_request` lane, and each hook's `egressBindings` — exclude the cluster pod/service/node CIDRs and all private/link-local/metadata/reserved ranges, so neither mcp-host nor a hook can reach a cluster-internal or metadata IP through them. Enforced by `ipBlock.except` on the mcp-host lane (the network mirror of the app-layer `isPrivateIp` guard, §8.3) and by `isAllowedExternalEgressCidr` validation of hook `egressBindings` at reconcile. Cluster-internal destinations stay reachable only through the narrow, explicit per-destination lanes. **Ops:** the mcp-host `except` is **filled by kustomize `replacements`** (`deploy/base/kustomization.yaml`) from the canonical `PublicEgressExceptionSet` (`deploy/base/public-egress-exceptions.yaml`) — the same source used for mcp-server public-web egress and `PUBLIC_EGRESS_EXCEPT_CIDRS`; the base NP keeps `except: []`. A raw (non-kustomize) base apply leaves it empty, which is why the dev cluster needed a live patch. | Enforced |
+| N12 | **No internal reach via broad egress** | The broad *external* egress lanes — mcp-host's `0.0.0.0/0:443\|80` LLM / `http_request` lane, and each hook's `egressBindings` — exclude the cluster pod/service/node CIDRs and all private/link-local/metadata/reserved ranges, so neither mcp-host nor a hook can reach a cluster-internal or metadata IP through them. Enforced by `ipBlock.except` on the mcp-host lane (the network mirror of the app-layer `isPrivateIp` guard, §8.3) and by `isAllowedExternalEgressCidr` validation of hook `egressBindings` at reconcile. Cluster-internal destinations stay reachable only through the narrow, explicit per-destination lanes. **Ops:** the same canonical CIDR set is applied through **two mechanisms** for two different lanes. (1) The **static** mcp-host base-manifest lane: its `except` is **filled by kustomize `replacements`** (`deploy/base/kustomization.yaml`) from the canonical `PublicEgressExceptionSet` (`deploy/base/public-egress-exceptions.yaml`); the base NP keeps `except: []`, and a raw (non-kustomize) base apply leaves it empty — which is why the dev cluster needed a live patch. (2) The **HCC-generated** mcp-server public-web egress lane: `networkPolicyReconciler` writes the same ranges directly from its `PUBLIC_EGRESS_EXCEPT_CIDRS` code constant (not via kustomize), and validates every hook `egressBinding` against it with `isAllowedExternalEgressCidr`. Same list, two owners (static base vs. controller). | Enforced |
 
 ---
 
@@ -1317,18 +1339,23 @@ N1 holds at pod granularity, and image hardening (N8) covers the intra-pod bound
 
 ## 13 · Implementation plan
 
-**Status: proposed — greenfield.** None of the LlmHook CRD, its reconciler, the `/v1` protocol, or the
-guardrail engine exists in code yet; the files referenced throughout (`charts/clerum-crds/crds/llmhook.yaml`,
-`llmHookReconciler.ts`, `hookedLlmPort.ts`, …) are to be created. The build is **phased so each phase is
-independently shippable** and de-risks the next, and it follows the §10 decisions: the engine is
-**in-process** (#4), **rules + built-ins carry the hot path** (#2), **installed hooks are the only
-out-of-process piece** (#4), and `ask` is **tool-lane-only** (#1).
+**Status: implemented (Phases 1–4).** The LlmHook CRD (`charts/clerum-crds/crds/llmhook.yaml`), its
+reconciler (`host-context-controller/src/llmHookReconciler.ts`), the `/v1` protocol client
+(`mcp-host/src/core/guardrails/hooks/remoteLlmHook.ts`), the in-process engine + hooked LLM port
+(`mcp-host/src/core/guardrails/`, `core/adapters/hookedLlmPort.ts`), the org-registry install/upgrade
+sagas (`control-api/src/routes/admin/registry.ts`), and the control-ui hook dashboard
+(`control-ui/app/guardrails/`) are all in code, and the network/pod isolation invariants (§11.1 N1–N12)
+are enforced in the cluster. The plan below is retained as the design-of-record for how the build was
+**phased so each phase is independently shippable** and de-risks the next, following the §10 decisions:
+the engine is **in-process** (#4), **rules + built-ins carry the hot path** (#2), **installed hooks are
+the only out-of-process piece** (#4), and `ask` is **tool-lane-only** (#1). Known deltas between this spec
+and the code are tracked in §12.4.
 
 ### 13.0 · Prerequisites (own before the phase that needs them)
 
 - **`llm-hooks` namespace** + `CONTROL_API_LLM_HOOKS_NAMESPACE` config — before Phase 3.
 - **`@clerum/image-policy`** allowlist entries + enforcement flag for hook images (§8.2/§12.4) — before Phase 3.
-- **`evenfire-registry`** schema extension for `entry_type: llm_hook` + `hook_meta` (§8.5) — before Phase 4.
+- **`evenfire-registry`** schema extension for `entry_type: llm-hook` + `hook_meta` (§8.5) — before Phase 4.
 
 ### 13.1 · Phase 1 — Core engine + tool-lane rules (in-process, no hooks)
 
@@ -1377,7 +1404,7 @@ out-of-process piece** (#4), and `ask` is **tool-lane-only** (#1).
 
 ### 13.4 · Phase 4 — Org-registry install + control-ui management
 
-- **Org-scoped registry** `entry_type: 'llm_hook'` + `hook_meta` (§8.5); the **`install-hook` saga** in
+- **Org-scoped registry** `entry_type: 'llm-hook'` + `hook_meta` (§8.5); the **`install-hook` saga** in
   control-api (digest verify → credential Secret → image-allowlist preflight → create CR → rollback).
   Installed hooks come **only** from this catalog — no private BYO-image hooks.
 - **control-ui — a hook-management dashboard** (mirrors the mcp-server experience; all admin-RBAC-gated
