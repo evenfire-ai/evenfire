@@ -30,8 +30,10 @@ const exceeded = (message: string): QuotaDecision => ({
 })
 
 /**
- * Read-only rate check — call BEFORE recording the invocation so a denied
- * call never consumes the idempotency key or a period quota unit.
+ * Read-only per-minute rate check against the invocation audit trail. The
+ * invocation row is recorded before this runs (record-first), so the trailing
+ * 60s window count includes the current call and the deny threshold is
+ * `recent > limit` (issue #348 removed the per-run/period-quota leg).
  */
 export async function checkRateLimit(
   recipeNamespace: string,

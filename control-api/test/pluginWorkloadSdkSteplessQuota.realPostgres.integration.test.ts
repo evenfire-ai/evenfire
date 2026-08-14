@@ -46,11 +46,12 @@ import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 // Repo convention (matches the other *.realPostgres.integration.test.ts suites):
-// gate on the DB env so the DB-less unit lane stays green. This suite is EXECUTED
-// for real in the DB-provisioned lane (T2 / minikube: point
-// CONTROL_API_REAL_PG_ADMIN_URL at the cluster Postgres). The T2 gate asserts this
-// suite actually ran (total>0, not skipped) so it can never pass by silent
-// omission (issue #348, plan D4; local run gated per owner decision).
+// gate on the DB env so the DB-less unit lane stays green. This suite RUNS
+// non-skipped in CI via the Postgres-backed lane in
+// .github/workflows/ci-public.yml (which sets CONTROL_API_REAL_PG_ADMIN_URL
+// against a Postgres 16 service and runs the realPostgres suites), and was
+// proven live on minikube (issue #348, plan D4). Local DB-less runs skip per
+// owner decision.
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
 const database = `control_api_sdk_stepless_${randomBytes(6).toString('hex')}`

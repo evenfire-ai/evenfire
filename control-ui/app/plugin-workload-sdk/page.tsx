@@ -986,7 +986,7 @@ function GrantFormModal({
                 htmlFor="sdk-callers"
                 required
                 error={callersMissing ? 'At least one caller is required.' : undefined}
-                description="Workload ids permitted to call. Comma- or newline-separated. Request rate limits are enforced platform-wide (per-minute) and are not configured per grant."
+                description="Workload ids permitted to call. Comma- or newline-separated. Per-minute rate limits use platform defaults and are not set in this form; a grant may still carry a per-minute override via the API."
               >
                 <TextInput
                   id="sdk-callers"
