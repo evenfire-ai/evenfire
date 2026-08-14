@@ -17,20 +17,21 @@ the endpoint is settled.
 
 ## Before you start
 
-| You need                          | Because                                            |
-| --------------------------------- | -------------------------------------------------- |
-| Admin of the Teams organization   | Enabling custom app upload                          |
-| The Teams desktop or web client   | Installing the app                                  |
-| Admin in the Control UI           | Creating the channel                                |
-| An existing agent (`Host`)        | `spec.hostRef` is required                          |
-| Node.js 20 or later               | Installing `@microsoft/teams.cli`                   |
-| A publicly reachable cluster      | Microsoft must reach `webhook-proxy`                |
+| You need                        | Because                              |
+| ------------------------------- | ------------------------------------ |
+| Admin of the Teams organization | Enabling custom app upload           |
+| The Teams desktop or web client | Installing the app                   |
+| Admin in the Control UI         | Creating the channel                 |
+| An existing agent (`Host`)      | `spec.hostRef` is required           |
+| Node.js 20 or later             | Installing `@microsoft/teams.cli`    |
+| A publicly reachable cluster    | Microsoft must reach `webhook-proxy` |
 
 ## Enable custom app upload
 
 In the [Teams admin center](https://admin.teams.microsoft.com), open Teams apps
+
 > **Setup policies**, click the name **Global (Org-wide default)**, turn on
-**Upload custom apps**, and save.
+> **Upload custom apps**, and save.
 
 That enables sideloading for everyone in the tenant, which is what you want on a
 test tenant. Check it first, since it is often already on. In a production org,
