@@ -8,6 +8,7 @@ ENV NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES=${NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_
 
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/display-field ./packages/display-field
 COPY control-ui/package*.json ./control-ui/
 WORKDIR /app/control-ui
 # Next's bundler does not follow file: symlinks reliably, so materialize the
@@ -18,7 +19,9 @@ RUN npm ci \
   && mkdir -p node_modules/@clerum \
   && cp -R ../packages/workflow-recipe-capability-policy node_modules/@clerum/workflow-recipe-capability-policy \
   && rm -rf node_modules/@clerum/llm-providers \
-  && cp -R ../packages/llm-providers node_modules/@clerum/llm-providers
+  && cp -R ../packages/llm-providers node_modules/@clerum/llm-providers \
+  && rm -rf node_modules/@clerum/display-field \
+  && cp -R ../packages/display-field node_modules/@clerum/display-field
 
 # Next type-checks the Playwright config, which imports this shared loader.
 COPY scripts/qa-recorder /app/scripts/qa-recorder

@@ -22,7 +22,8 @@
         "control-api/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-recipe-capability-policy/**",
-        "packages/image-policy/**"
+        "packages/image-policy/**",
+        "packages/display-field/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -31,7 +32,11 @@
       "name": "control-ui",
       "path": "control-ui",
       "rooted": true,
-      "source_paths": ["control-ui/**", "packages/workflow-recipe-capability-policy/**"],
+      "source_paths": [
+        "control-ui/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/display-field/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
