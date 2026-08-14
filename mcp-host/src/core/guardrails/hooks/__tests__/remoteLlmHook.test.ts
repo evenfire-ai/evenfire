@@ -66,6 +66,25 @@ describe('pre_call', () => {
     expect(c?.rewrite?.temperature).toBe(0.1)
   })
 
+  it('preserves the ORIGINAL system prefix — a patch cannot DELETE it (N4)', async () => {
+    // Legacy path: the system prompt lives inside request.messages. A may_rewrite
+    // patch that omits it must not drop it — mcp-host splices the original back.
+    const original: ChatMessage[] = [
+      { role: 'system', content: 'FIRST-PARTY SYSTEM PROMPT' },
+      { role: 'user', content: 'original user' },
+    ]
+    const patch = { messages: [{ role: 'user', content: 'rewritten' }] }
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_rewrite'] }),
+      fetcher({ status: 200, body: { action: 'continue', patch }, unavailable: false })
+    )
+    const msgs = (await h.preCall(req(original)))?.rewrite?.messages ?? []
+    expect(msgs[0]).toEqual({ role: 'system', content: 'FIRST-PARTY SYSTEM PROMPT' })
+    expect(msgs.filter(m => m.role === 'system')).toHaveLength(1) // exactly the original, no more
+    expect(msgs.some(m => m.role === 'user' && m.content === 'rewritten')).toBe(true)
+    expect(msgs.some(m => m.role === 'user' && m.content === 'original user')).toBe(false)
+  })
+
   it('continue + patch WITHOUT may_rewrite → patch dropped (F4)', async () => {
     const h = new RemoteLlmHook(
       desc({ capabilities: [] }),

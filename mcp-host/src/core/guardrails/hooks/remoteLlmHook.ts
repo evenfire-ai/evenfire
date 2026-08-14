@@ -207,7 +207,13 @@ export class RemoteLlmHook {
   ): ToolCompletionRequest {
     const next: ToolCompletionRequest = { ...request }
     if (Array.isArray(patch.messages)) {
-      next.messages = stripSystemRole(patch.messages as ChatMessage[])
+      // N4: the system prompt is immutable to installed hooks — neither added nor
+      // REMOVED. The patch replaces only the non-system messages; the original
+      // system prefix is spliced back so a hook can't drop it by omission (on the
+      // legacy path the system prompt lives inside `messages`; on the tiered path
+      // there is none here and it rides `systemPromptParts`, preserved by the spread).
+      const originalSystem = request.messages.filter(m => m.role === 'system')
+      next.messages = [...originalSystem, ...stripSystemRole(patch.messages as ChatMessage[])]
     }
     const params = isRecord(patch.params) ? patch.params : undefined
     if (params) {

@@ -771,13 +771,17 @@ what `may_substitute_result` already promises (it changes the caller-visible res
 authoritative action flow, §4.3/§6). The same rule applies to a `post_call` transform: it may remove
 `tool_calls` but never introduce them.
 
-**The system prompt is immutable to installed hooks.** A `pre_call` `patch` may edit only **non-system**
-`messages` and `params`; the system prompt / any system-role message is preserved from the original
-request and cannot be added, replaced, or overridden by an installed hook — neither via a
-`systemPromptParts` field (removed) **nor** by injecting a system-role entry into the `messages` patch,
-which mcp-host drops and audits. Authoritative system-prompt shaping stays a **first-party** privilege: the
-`prompt-shaping` built-in (§7.2). Any context an installed hook adds is message-level and untrusted-framed
-(§12.4) — a `may_rewrite` grant never confers system-level authority.
+**The system prompt is immutable to installed hooks — neither added nor removed.** A `pre_call` `patch`
+may edit only the **non-system** `messages` and `params`; the original system prefix is **preserved
+byte-for-byte** and cannot be added, replaced, overridden, **or deleted**. mcp-host enforces this
+structurally: a `messages` patch replaces only the non-system messages, and the original system-role
+message(s) are **spliced back at the front** — so a hook can neither *inject* a system-role entry (it is
+stripped from the patch) nor *drop* the existing one (it is re-added from the original request, not taken
+from the patch). This holds on both prompt paths: the tiered path carries the system prompt out-of-band in
+`systemPromptParts` (never in the hook-visible `messages`, and untouched by the patch), and the legacy path
+carries it inside `messages` where the splice restores it. Authoritative system-prompt shaping stays a
+**first-party** privilege: the `prompt-shaping` built-in (§7.2). Any context an installed hook adds is
+message-level and untrusted-framed (§12.4) — a `may_rewrite` grant never confers system-level authority.
 
 ### 8.2 · The `LlmHook` CRD
 
