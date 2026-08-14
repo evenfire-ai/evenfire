@@ -40,6 +40,11 @@ export interface LlmHookCR {
     lifecyclePoints?: string[]
     order?: number
     failMode?: 'open' | 'closed'
+    onUnavailable?: {
+      mode?: 'strict' | 'breaker'
+      failureThreshold?: number
+      cooldownMs?: number
+    }
     capabilities?: string[]
   }
   status?: { observedDigest?: string }

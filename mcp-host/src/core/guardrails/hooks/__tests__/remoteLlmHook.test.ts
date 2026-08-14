@@ -10,6 +10,7 @@ import {
   type ToolCompletionRequest,
   type ToolCompletionResponse,
 } from '../../../types'
+import { HookBreakerRegistry } from '../hookBreaker'
 import { RemoteLlmHook } from '../remoteLlmHook'
 import type { HookDescriptor, HookFetcher, HookHttpResult } from '../types'
 
@@ -286,5 +287,94 @@ describe('quarantine (§8.2 digest mismatch → fail-closed, N11)', () => {
       throwFetcher
     )
     expect(await h.preCall(req())).toBeNull()
+  })
+})
+
+describe('circuit breaker (§8.6)', () => {
+  // Advisory hook (may_add_context, not may_deny) that opts into breaker mode.
+  const advisory = (over: Partial<HookDescriptor> = {}): HookDescriptor =>
+    desc({
+      capabilities: ['may_add_context'],
+      failMode: 'open',
+      lifecyclePoints: ['moderate'],
+      onUnavailable: { mode: 'breaker', failureThreshold: 3, cooldownMs: 1000 },
+      ...over,
+    })
+
+  /** A fetcher that counts its dials and returns whatever `getResult` yields. */
+  function countingFetcher(getResult: () => HookHttpResult) {
+    let calls = 0
+    const fetch: HookFetcher = async () => {
+      calls += 1
+      return getResult()
+    }
+    return { fetch, calls: () => calls }
+  }
+
+  const unavailable: HookHttpResult = { status: 0, body: undefined, unavailable: true }
+
+  it('trips after failureThreshold and stops dialing during cooldown', async () => {
+    const reg = new HookBreakerRegistry()
+    const cf = countingFetcher(() => unavailable)
+    const h = new RemoteLlmHook(advisory(), cf.fetch, reg, () => 0)
+
+    // 3 unavailable dials trip the breaker (each dials the network).
+    for (let i = 0; i < 3; i++) expect(await h.moderate(req())).toBeNull()
+    expect(cf.calls()).toBe(3)
+
+    // Now open: further calls short-circuit WITHOUT dialing (the resilience win).
+    expect(await h.moderate(req())).toBeNull()
+    expect(await h.moderate(req())).toBeNull()
+    expect(cf.calls()).toBe(3)
+  })
+
+  it('re-probes once after cooldown and closes on success', async () => {
+    const reg = new HookBreakerRegistry()
+    let t = 0
+    let healthy = false
+    const cf = countingFetcher(() =>
+      healthy ? { status: 200, body: {}, unavailable: false } : unavailable
+    )
+    const h = new RemoteLlmHook(advisory(), cf.fetch, reg, () => t)
+
+    for (let i = 0; i < 3; i++) await h.moderate(req()) // trip
+    await h.moderate(req()) // open → no dial
+    expect(cf.calls()).toBe(3)
+
+    t = 1000 // cooldown elapsed → half-open: one probe allowed
+    healthy = true
+    await h.moderate(req())
+    expect(cf.calls()).toBe(4)
+
+    await h.moderate(req()) // breaker closed → dials normally again
+    expect(cf.calls()).toBe(5)
+  })
+
+  it('deny-authoritative (may_deny) hook ignores breaker — always dials strict', async () => {
+    const reg = new HookBreakerRegistry()
+    const cf = countingFetcher(() => unavailable)
+    const h = new RemoteLlmHook(
+      advisory({ capabilities: ['may_deny'], failMode: 'closed' }),
+      cf.fetch,
+      reg,
+      () => 0
+    )
+    for (let i = 0; i < 6; i++) {
+      expect((await h.moderate(req()))?.decision).toBe('deny') // fail-closed each time
+    }
+    expect(cf.calls()).toBe(6) // never short-circuited
+  })
+
+  it('strict mode never trips (always dials)', async () => {
+    const reg = new HookBreakerRegistry()
+    const cf = countingFetcher(() => unavailable)
+    const h = new RemoteLlmHook(
+      advisory({ onUnavailable: { mode: 'strict', failureThreshold: 3, cooldownMs: 1000 } }),
+      cf.fetch,
+      reg,
+      () => 0
+    )
+    for (let i = 0; i < 6; i++) await h.moderate(req())
+    expect(cf.calls()).toBe(6)
   })
 })

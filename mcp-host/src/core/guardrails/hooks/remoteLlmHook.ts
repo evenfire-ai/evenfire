@@ -26,6 +26,7 @@ import type {
   ToolCompletionResponse,
 } from '../../types'
 import type { Capability, Contributor } from '../types'
+import { type HookBreakerRegistry, defaultBreakerRegistry } from './hookBreaker'
 import type { HookDescriptor, HookFetcher, HookHttpResult, LifecyclePoint } from './types'
 
 type LlmContributor = Contributor<ToolCompletionRequest, ToolCompletionResponse>
@@ -69,28 +70,75 @@ function filteredPostResponse(usage: ToolCompletionResponse['usage']): ToolCompl
 export class RemoteLlmHook {
   constructor(
     private readonly descriptor: HookDescriptor,
-    private readonly fetch: HookFetcher
+    private readonly fetch: HookFetcher,
+    /** Shared so a trip survives the per-task rebuild of this instance (§8.6). */
+    private readonly breakers: HookBreakerRegistry = defaultBreakerRegistry,
+    /** Injectable clock for deterministic breaker tests. */
+    private readonly now: () => number = () => Date.now()
   ) {}
 
   private has(cap: Capability): boolean {
     return this.descriptor.capabilities.includes(cap)
   }
 
+  /** Identity of the breaker state (per hook pod+path), shared across tasks (§8.6). */
+  private breakerKey(): string {
+    return `${this.descriptor.endpoint}${this.descriptor.path}`
+  }
+
   /**
-   * Transport with the quarantine gate (§8.2): a quarantined hook (e.g. digest
-   * mismatch) never reaches the network — every call reports `unavailable`, so
-   * each point's §8.6 fail-posture applies (deny for a `may_deny`/fail-closed
-   * hook, no contribution for an advisory one). Never a silent allow.
+   * The circuit breaker is honored only for an advisory hook that opted into
+   * `breaker` mode (§8.6): a deny-authoritative (`may_deny`) hook always dials
+   * strict so it can never be tripped into failing open.
    */
-  private fetchGuarded(args: {
+  private breakerEngaged(): boolean {
+    return this.descriptor.onUnavailable?.mode === 'breaker' && !this.has('may_deny')
+  }
+
+  /**
+   * Transport with the quarantine gate (§8.2) and the §8.6 circuit breaker.
+   *
+   * A quarantined hook (e.g. digest mismatch) never reaches the network — every
+   * call reports `unavailable`, so each point's §8.6 fail-posture applies. When a
+   * `breaker`-mode advisory hook has tripped, calls likewise short-circuit to
+   * `unavailable` WITHOUT dialing for the cooldown window, so a down hook is not
+   * re-dialed (and re-timed-out) on every request. Every branch reports
+   * `unavailable` — never a silent allow.
+   */
+  private async fetchGuarded(args: {
     point: LifecyclePoint
     descriptor: HookDescriptor
     body: unknown
   }): Promise<HookHttpResult> {
     if (this.descriptor.quarantined) {
-      return Promise.resolve({ status: 0, body: undefined, unavailable: true })
+      return { status: 0, body: undefined, unavailable: true }
     }
-    return this.fetch(args)
+    const engaged = this.breakerEngaged()
+    if (engaged && this.breakers.isOpen(this.breakerKey(), this.now())) {
+      // Breaker open: skip the dial (and its timeout); report unavailable.
+      return { status: 0, body: undefined, unavailable: true }
+    }
+    const res = await this.fetch(args)
+    if (engaged) {
+      const policy = this.descriptor.onUnavailable!
+      if (res.unavailable) {
+        const tripped = this.breakers.recordFailure(
+          this.breakerKey(),
+          policy.failureThreshold,
+          policy.cooldownMs,
+          this.now()
+        )
+        if (tripped) {
+          console.warn(
+            `[Guardrails] hook ${this.descriptor.id} breaker tripped after ${policy.failureThreshold} failures; ` +
+              `failing open for ${policy.cooldownMs}ms`
+          )
+        }
+      } else {
+        this.breakers.recordSuccess(this.breakerKey())
+      }
+    }
+    return res
   }
 
   private handles(point: LifecyclePoint): boolean {

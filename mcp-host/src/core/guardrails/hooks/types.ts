@@ -31,6 +31,20 @@ export interface HookDescriptor {
   capabilities: readonly Capability[]
   /** Fail-posture when the hook is unavailable (spec §8.6). */
   failMode: 'open' | 'closed'
+  /**
+   * Circuit-breaker policy (spec §8.6). `strict` (the default) always dials the
+   * hook and applies `failMode` on each unavailable result. `breaker` trips a
+   * per-hook breaker after `failureThreshold` consecutive unavailable results,
+   * short-circuiting to "unavailable" for `cooldownMs` (then a single re-probe)
+   * instead of re-paying the timeout on every call. Per §8.6 the breaker is only
+   * honored for advisory (non-`may_deny`) hooks; a deny-authoritative hook always
+   * dials strict so it can never fail open.
+   */
+  onUnavailable?: {
+    mode: 'strict' | 'breaker'
+    failureThreshold: number
+    cooldownMs: number
+  }
   order: number
   /**
    * True for a `remote` (external) target dialed over the public internet. Such

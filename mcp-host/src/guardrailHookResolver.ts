@@ -156,6 +156,19 @@ export async function resolveGuardrailHookDescriptors(
     const failMode: 'open' | 'closed' = cr.spec?.failMode === 'open' ? 'open' : 'closed'
     const order = typeof cr.spec?.order === 'number' ? cr.spec.order : 100
 
+    // §8.6 circuit-breaker policy (CRD defaults: strict / 5 / 30000). `strict`
+    // preserves the always-dial behavior; `breaker` is honored at runtime only
+    // for advisory (non-may_deny) hooks (RemoteLlmHook.breakerEngaged).
+    const ou = cr.spec?.onUnavailable
+    const onUnavailable = {
+      mode: ou?.mode === 'breaker' ? ('breaker' as const) : ('strict' as const),
+      failureThreshold:
+        typeof ou?.failureThreshold === 'number' && ou.failureThreshold >= 1
+          ? ou.failureThreshold
+          : 5,
+      cooldownMs: typeof ou?.cooldownMs === 'number' && ou.cooldownMs >= 0 ? ou.cooldownMs : 30000,
+    }
+
     // `remote` targets are dialed over the public internet → SSRF-guarded
     // transport (private/metadata-range reject + DNS-pin). image/service targets
     // resolve to cluster-private IPs and must bypass that guard.
@@ -185,6 +198,7 @@ export async function resolveGuardrailHookDescriptors(
       lifecyclePoints: points,
       capabilities,
       failMode,
+      onUnavailable,
       order,
       external,
       ...(quarantined ? { quarantined: true } : {}),
