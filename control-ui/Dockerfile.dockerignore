@@ -2,6 +2,8 @@
 !packages/
 !packages/workflow-recipe-capability-policy/
 !packages/workflow-recipe-capability-policy/**
+!packages/display-field/
+!packages/display-field/**
 !scripts/
 !scripts/qa-recorder/
 !scripts/qa-recorder/loadEnv.ts

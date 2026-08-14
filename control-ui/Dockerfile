@@ -7,6 +7,7 @@ ENV CONTROL_API_INTERNAL_URL=${CONTROL_API_INTERNAL_URL}
 ENV NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES=${NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES}
 
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
+COPY packages/display-field ./packages/display-field
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/display-field ./packages/display-field
 COPY control-ui/package*.json ./control-ui/
