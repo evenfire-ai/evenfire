@@ -61,8 +61,38 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
       'invitee@example.com',
-      '  Full Name  ',
+      'Full Name',
       [{ teamId: 'team-1', role: 'inviter' }],
+      'good-token'
+    )
+  })
+
+  it('preserves exact public invitation-role normalization before forwarding', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockResolvedValueOnce({ id: 'inv-roles' })
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: 'invitee@example.com',
+        teams: [
+          { teamId: 'team-admin', role: 'admin' },
+          { teamId: 'team-alias', role: 'leader' },
+          { teamId: 'team-case', role: 'ADMIN' },
+          { teamId: 'team-invalid', role: 'unexpected' },
+          { teamId: 'team-default' },
+        ],
+      })
+      .expect(201, { id: 'inv-roles' })
+
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
+      'invitee@example.com',
+      '',
+      [
+        { teamId: 'team-admin', role: 'admin' },
+        { teamId: 'team-default', role: 'member' },
+      ],
       'good-token'
     )
   })
