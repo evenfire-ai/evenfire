@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, StatusBanner, TextInput } from '@components/Common'
+import { Button, StatusBanner } from '@components/Common'
+import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
+import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
 import {
   IconChat,
   IconClose,
@@ -146,14 +148,6 @@ const APP_PAGE_SIZE = 6
 let pendingSandboxUiUnmountCleanup: number | null = null
 let nextSandboxFindClientRequestId = 0
 
-type AppFindState =
-  | { status: 'idle' }
-  | { status: 'pending' }
-  | { status: 'results'; current: number; total: number }
-  | { status: 'empty' }
-  | { status: 'unavailable'; reason: string }
-  | { status: 'error'; message: string }
-
 export function SandboxUiPage({
   actionRequest = null,
   boundsRefreshKey = 0,
@@ -184,7 +178,6 @@ export function SandboxUiPage({
   const [localSearchQuery, setLocalSearchQuery] = useState('')
   const [localSearchState, setLocalSearchState] = useState<AppFindState>({ status: 'idle' })
   const embedSlotRef = useRef<HTMLDivElement>(null)
-  const localSearchInputRef = useRef<HTMLInputElement>(null)
   const activeFindClientRequestIdRef = useRef<number | null>(null)
   const localSearchStateRef = useRef<AppFindState>({ status: 'idle' })
   const lastLocalSearchRequestIdRef = useRef(0)
@@ -322,7 +315,6 @@ export function SandboxUiPage({
     lastLocalSearchRequestIdRef.current = localSearchRequestId
     localSearchPreviousFocusRef.current = document.activeElement as HTMLElement | null
     setLocalSearchOpen(true)
-    requestAnimationFrame(() => localSearchInputRef.current?.focus())
   }, [launch.kind, localSearchRequestId])
 
   useEffect(() => {
@@ -618,71 +610,17 @@ export function SandboxUiPage({
           />
         )}
         {localSearchOpen ? (
-          <div className="current-content-search" role="search" aria-label="Search current app">
-            <TextInput
-              ref={localSearchInputRef}
-              aria-label="Find in current app"
-              className="current-content-search__input"
-              onChange={event => {
-                const query = event.currentTarget.value
-                setLocalSearchQuery(query)
-                void runLocalSearch(query, 'start')
-              }}
-              onKeyDown={event => {
-                if (event.key === 'Escape') {
-                  event.preventDefault()
-                  stopLocalSearch()
-                } else if (event.key === 'Enter') {
-                  event.preventDefault()
-                  void runLocalSearch(localSearchQuery, event.shiftKey ? 'previous' : 'next')
-                }
-              }}
-              placeholder="Find in current app"
-              value={localSearchQuery}
-            />
-            <span className="current-content-search__count" role="status" aria-live="polite">
-              {localSearchState.status === 'pending'
-                ? 'Searching…'
-                : localSearchState.status === 'results'
-                  ? `${localSearchState.current}/${localSearchState.total}`
-                  : localSearchState.status === 'empty'
-                    ? '0/0'
-                    : localSearchState.status === 'unavailable'
-                      ? localSearchState.reason
-                      : localSearchState.status === 'error'
-                        ? 'Search failed'
-                        : '—'}
-            </span>
-            <Button
-              aria-label="Previous app match"
-              color="neutral"
-              disabled={localSearchState.status !== 'results'}
-              onClick={() => void runLocalSearch(localSearchQuery, 'previous')}
-              size="xs"
-              variant="ghost"
-            >
-              ↑
-            </Button>
-            <Button
-              aria-label="Next app match"
-              color="neutral"
-              disabled={localSearchState.status !== 'results'}
-              onClick={() => void runLocalSearch(localSearchQuery, 'next')}
-              size="xs"
-              variant="ghost"
-            >
-              ↓
-            </Button>
-            <Button
-              aria-label="Close current app search"
-              color="neutral"
-              onClick={stopLocalSearch}
-              size="xs"
-              variant="ghost"
-            >
-              ×
-            </Button>
-          </div>
+          <SandboxCurrentContentSearch
+            focusRequestId={localSearchRequestId}
+            onClose={stopLocalSearch}
+            onMove={operation => void runLocalSearch(localSearchQuery, operation)}
+            onQueryChange={query => {
+              setLocalSearchQuery(query)
+              void runLocalSearch(query, 'start')
+            }}
+            query={localSearchQuery}
+            state={localSearchState}
+          />
         ) : null}
         {/* The slot div is the rectangle the WebContentsView floats above
             after the selected app completes its initial load. */}

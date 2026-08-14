@@ -334,6 +334,9 @@ describe('App deep-link orchestration', () => {
     })
 
     act(() => emitCommand?.('search.current'))
+    expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(0)
+    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    act(() => emitCommand?.('search.current'))
     expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(1)
     expect(appHeaderHarness.props?.searchFocusRequestId).toBe(0)
   })

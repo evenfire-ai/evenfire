@@ -574,6 +574,7 @@ export function App() {
   }, [vm.authenticatedPrincipalIdentity])
 
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
+    setSandboxLocalSearchRequestId(0)
     setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
   }, [])
@@ -1284,7 +1285,7 @@ export function App() {
         return
       }
       if (commandId === 'search.current') {
-        if (activeSandboxUiApp && vm.navItem === DESKTOP_ROUTES.apps) {
+        if (activeSandboxUiApp && sandboxUiMounted && vm.navItem === DESKTOP_ROUTES.apps) {
           closeChatLocalSearch(false)
           setSandboxLocalSearchRequestId(value => value + 1)
         } else if (vm.navItem === DESKTOP_ROUTES.chat && vm.activeChatId) {
@@ -1303,6 +1304,7 @@ export function App() {
       handleNewChatViewTab,
       handleSidebarNavSelect,
       revealChatViewTab,
+      sandboxUiMounted,
       vm.activeChatId,
       vm.handleNavSelect,
       vm.handleLogout,
