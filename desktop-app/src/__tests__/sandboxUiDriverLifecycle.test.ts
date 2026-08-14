@@ -257,6 +257,33 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     })
   })
 
+  it('keeps the current document searchable after same-document navigation', async () => {
+    const parentWindow = new FakeParentWindow()
+    await mountSandboxUiView(mountArgs({ parentWindow }))
+    const webContents = electronMocks.views[0]!.webContents
+    const onResult = vi.fn()
+
+    webContents.emit('did-finish-load')
+    expect(findInActiveSandboxUi('invoice', 'start', 1, onResult).status).toBe('started')
+    webContents.emit('found-in-page', {} as Electron.Event, {
+      requestId: 41,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      selectionArea: { x: 0, y: 0, width: 1, height: 1 },
+      finalUpdate: true,
+    })
+
+    webContents.emit(
+      'did-start-navigation',
+      {} as Electron.Event,
+      'https://rpc.example/app#next',
+      true,
+      true
+    )
+
+    expect(findInActiveSandboxUi('invoice', 'start', 2, onResult).status).toBe('started')
+  })
+
   it('keeps only the newest view when cookie writes complete out of order', async () => {
     const parentWindow = new FakeParentWindow()
     let resolveFirstCookie!: () => void

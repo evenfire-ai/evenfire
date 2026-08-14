@@ -455,19 +455,19 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     documentReady: false,
   }
 
-  const invalidateFindForNavigation = (): void => {
+  const invalidateFindForNavigation = (requiresDocumentLoad: boolean): void => {
     if (!active || active.view !== view) return
     active.documentGeneration += 1
-    active.documentReady = false
+    if (requiresDocumentLoad) active.documentReady = false
     stopActiveSandboxUiFind()
   }
   const onDidStartNavigation = (
     _event: Electron.Event,
     _url: string,
-    _isInPlace: boolean,
+    isInPlace: boolean,
     isMainFrame: boolean
   ): void => {
-    if (isMainFrame) invalidateFindForNavigation()
+    if (isMainFrame) invalidateFindForNavigation(!isInPlace)
   }
   const onDocumentReady = (): void => {
     if (active?.view === view) active.documentReady = true
