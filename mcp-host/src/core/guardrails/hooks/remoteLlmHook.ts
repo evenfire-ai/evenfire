@@ -26,7 +26,7 @@ import type {
   ToolCompletionResponse,
 } from '../../types'
 import type { Capability, Contributor } from '../types'
-import type { HookDescriptor, HookFetcher, LifecyclePoint } from './types'
+import type { HookDescriptor, HookFetcher, HookHttpResult, LifecyclePoint } from './types'
 
 type LlmContributor = Contributor<ToolCompletionRequest, ToolCompletionResponse>
 
@@ -76,6 +76,23 @@ export class RemoteLlmHook {
     return this.descriptor.capabilities.includes(cap)
   }
 
+  /**
+   * Transport with the quarantine gate (§8.2): a quarantined hook (e.g. digest
+   * mismatch) never reaches the network — every call reports `unavailable`, so
+   * each point's §8.6 fail-posture applies (deny for a `may_deny`/fail-closed
+   * hook, no contribution for an advisory one). Never a silent allow.
+   */
+  private fetchGuarded(args: {
+    point: LifecyclePoint
+    descriptor: HookDescriptor
+    body: unknown
+  }): Promise<HookHttpResult> {
+    if (this.descriptor.quarantined) {
+      return Promise.resolve({ status: 0, body: undefined, unavailable: true })
+    }
+    return this.fetch(args)
+  }
+
   private handles(point: LifecyclePoint): boolean {
     return this.descriptor.lifecyclePoints.includes(point)
   }
@@ -107,7 +124,11 @@ export class RemoteLlmHook {
   /** `pre_call` (spec §8.1): reject → deny (gated), continue+patch → rewrite (gated), else allow. */
   async preCall(request: ToolCompletionRequest): Promise<LlmContributor | null> {
     if (!this.handles('pre_call')) return null
-    const res = await this.fetch({ point: 'pre_call', descriptor: this.descriptor, body: request })
+    const res = await this.fetchGuarded({
+      point: 'pre_call',
+      descriptor: this.descriptor,
+      body: request,
+    })
     // §8.1: non-200 or unavailable → fail-mode (never a silent allow).
     if (res.unavailable || res.status !== 200) return this.onUnavailable()
 
@@ -157,7 +178,11 @@ export class RemoteLlmHook {
   /** `moderate` (spec §8.1): 2xx = pass (no contribution); 4xx = deny (gated). */
   async moderate(request: ToolCompletionRequest): Promise<LlmContributor | null> {
     if (!this.handles('moderate')) return null
-    const res = await this.fetch({ point: 'moderate', descriptor: this.descriptor, body: request })
+    const res = await this.fetchGuarded({
+      point: 'moderate',
+      descriptor: this.descriptor,
+      body: request,
+    })
     if (res.unavailable) return this.onUnavailable()
     if (res.status >= 200 && res.status < 300) return null // pass
 
@@ -180,7 +205,7 @@ export class RemoteLlmHook {
     response: ToolCompletionResponse
   ): Promise<LlmContributor | null> {
     if (!this.handles('post_call')) return null
-    const res = await this.fetch({
+    const res = await this.fetchGuarded({
       point: 'post_call',
       descriptor: this.descriptor,
       body: {
@@ -234,7 +259,7 @@ export class RemoteLlmHook {
    */
   async onError(request: ToolCompletionRequest, error: unknown): Promise<LlmContributor | null> {
     if (!this.handles('on_error')) return null
-    const res = await this.fetch({
+    const res = await this.fetchGuarded({
       point: 'on_error',
       descriptor: this.descriptor,
       body: { request, error },

@@ -39,6 +39,14 @@ export interface HookDescriptor {
    * cluster-private IPs and are NOT external, so they bypass that guard.
    */
   external?: boolean
+  /**
+   * True when the hook resolved but is NOT trusted to run — e.g. its reconciled
+   * image digest no longer matches the admin-pinned reference (§8.2). Every
+   * `/v1` call short-circuits to "unavailable" so the hook's fail-posture (§8.6)
+   * applies: a `may_deny` (fail-closed) hook DENIES; an advisory hook contributes
+   * nothing (skip). Never silently allows.
+   */
+  quarantined?: boolean
 }
 
 /** Result of one `/v1` HTTP call. `unavailable` = 5xx / timeout / connection error / malformed body (spec §8.1). */

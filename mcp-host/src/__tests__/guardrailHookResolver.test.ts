@@ -117,12 +117,13 @@ describe('resolveGuardrailHookDescriptors', () => {
     expect(out).toEqual([])
   })
 
-  it('skips an image hook whose reconciled digest no longer matches the ref (fail-closed)', async () => {
+  it('quarantines (not drops) an image hook whose reconciled digest no longer matches the ref', async () => {
     const cr: LlmHookCR = {
       metadata: { name: 'img' },
       spec: {
         target: { image: { ref: 'repo/img@sha256:new', port: 8080 } },
         lifecyclePoints: ['preCall'],
+        capabilities: ['may_deny'],
       },
       status: { observedDigest: 'sha256:new' },
     }
@@ -130,7 +131,10 @@ describe('resolveGuardrailHookDescriptors', () => {
       guardrails({ preCall: [{ id: 'img', digest: 'sha256:OLD' }] }),
       deps({ img: cr })
     )
-    expect(out).toEqual([])
+    // Still loaded, but quarantined → every /v1 call fails-closed (§8.2/N11).
+    expect(out).toHaveLength(1)
+    expect(out[0].quarantined).toBe(true)
+    expect(out[0].capabilities).toEqual(['may_deny'])
   })
 
   it('drops unknown capabilities and hooks with no known lifecycle points', async () => {

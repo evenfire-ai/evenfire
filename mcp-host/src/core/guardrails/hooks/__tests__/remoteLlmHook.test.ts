@@ -260,3 +260,31 @@ describe('lifecycle scoping', () => {
     expect(await h.preCall(req())).toBeNull()
   })
 })
+
+describe('quarantine (§8.2 digest mismatch → fail-closed, N11)', () => {
+  const throwFetcher: HookFetcher = async () => {
+    throw new Error('network must not be dialed for a quarantined hook')
+  }
+
+  it('may_deny + fail-closed → deny without dialing the network', async () => {
+    const h = new RemoteLlmHook(
+      desc({ quarantined: true, capabilities: ['may_deny'], failMode: 'closed' }),
+      throwFetcher
+    )
+    expect((await h.preCall(req()))?.decision).toBe('deny')
+    expect((await h.moderate(req()))?.decision).toBe('deny')
+  })
+
+  it('advisory hook (no may_deny) → no contribution (skip)', async () => {
+    const h = new RemoteLlmHook(
+      desc({
+        quarantined: true,
+        capabilities: ['may_substitute_result'],
+        failMode: 'closed',
+        lifecyclePoints: ['pre_call'],
+      }),
+      throwFetcher
+    )
+    expect(await h.preCall(req())).toBeNull()
+  })
+})

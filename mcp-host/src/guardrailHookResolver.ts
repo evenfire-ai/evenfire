@@ -149,23 +149,6 @@ export async function resolveGuardrailHookDescriptors(
       continue
     }
 
-    // Digest binding (§8.2): an image hook whose reconciled digest no longer
-    // matches the admin-pinned reference is not the reviewed image — skip it.
-    // NOTE: skipping drops the hook from the lane, which is fail-OPEN for that
-    // phase; turning a mismatch into an authoritative deny for fail-closed hooks
-    // is a tracked follow-up (resolution fail-posture).
-    if (
-      ep.kind === 'image' &&
-      refDigest &&
-      cr.status?.observedDigest &&
-      refDigest !== cr.status.observedDigest
-    ) {
-      console.warn(
-        `[Guardrails] LlmHook ${id} digest mismatch (ref=${refDigest} observed=${cr.status.observedDigest}); skipping`
-      )
-      continue
-    }
-
     const capabilities = (cr.spec?.capabilities ?? []).filter((c): c is Capability =>
       KNOWN_CAPABILITIES.includes(c)
     )
@@ -178,6 +161,23 @@ export async function resolveGuardrailHookDescriptors(
     // resolve to cluster-private IPs and must bypass that guard.
     const external = ep.kind === 'remote'
 
+    // Digest binding (§8.2): an image hook whose reconciled digest no longer
+    // matches the admin-pinned reference is not the reviewed image. Rather than
+    // drop it (fail-OPEN), QUARANTINE it — the descriptor still loads but every
+    // /v1 call short-circuits to unavailable, so a `may_deny` (fail-closed) hook
+    // DENIES and an advisory hook contributes nothing (§8.6/N11). Never a silent
+    // allow for a deny-authoritative hook whose integrity check failed.
+    const quarantined =
+      ep.kind === 'image' &&
+      !!refDigest &&
+      !!cr.status?.observedDigest &&
+      refDigest !== cr.status.observedDigest
+    if (quarantined) {
+      console.warn(
+        `[Guardrails] LlmHook ${id} digest mismatch (ref=${refDigest} observed=${cr.status?.observedDigest}); quarantining (fail-closed for may_deny)`
+      )
+    }
+
     out.push({
       id,
       endpoint: ep.endpoint,
@@ -187,9 +187,10 @@ export async function resolveGuardrailHookDescriptors(
       failMode,
       order,
       external,
+      ...(quarantined ? { quarantined: true } : {}),
     })
     console.log(
-      `[Guardrails] resolved hook ${id} -> ${ep.endpoint}${path} points=[${points.join(',')}] caps=[${capabilities.join(',')}] failMode=${failMode}${external ? ' external=true(SSRF-guarded)' : ''}`
+      `[Guardrails] resolved hook ${id} -> ${ep.endpoint}${path} points=[${points.join(',')}] caps=[${capabilities.join(',')}] failMode=${failMode}${external ? ' external=true(SSRF-guarded)' : ''}${quarantined ? ' quarantined=true(digest-mismatch)' : ''}`
     )
   }
 
