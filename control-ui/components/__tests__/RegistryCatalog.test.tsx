@@ -262,6 +262,9 @@ describe('RegistryCatalog expansion and actions', () => {
     expect(screen.getByText('Type')).toBeInTheDocument()
     const detailRow = screen.getByText('Type').closest('tr')!
     expect(within(detailRow).getAllByText('search')).toHaveLength(1)
+    expect(screen.getByText('Trust')).toBeInTheDocument()
+    expect(screen.getByText('Verification')).toBeInTheDocument()
+    expect(screen.getByText('Tags')).toBeInTheDocument()
     expect(screen.getByText('HIGH')).toBeInTheDocument()
     expect(screen.getByText('verified')).toBeInTheDocument()
     expect(screen.getByText('web')).toBeInTheDocument()

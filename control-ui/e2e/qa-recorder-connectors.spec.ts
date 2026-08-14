@@ -26,7 +26,7 @@ test.describe('optional QA recorder: Control UI connectors journey', () => {
     const credentials = adminCredentials()
     await loginThroughUi(page, credentials)
 
-    await page.getByRole('link', { name: 'Connectors', exact: true }).click()
+    await page.getByRole('link', { name: 'Installed connectors', exact: true }).click()
 
     // The rewrite keeps the URL on /connectors; assert it landed.
     await expect(page).toHaveURL(/\/connectors\/?$/, { timeout: 20_000 })
