@@ -6,6 +6,7 @@ import remarkRehype from 'remark-rehype'
 import { unified } from 'unified'
 import type { AgentChatMessage } from '../uiTypes'
 import { parseChatMessageDisplay } from './chatMessageAttachments'
+import { looksLikeJson } from './format'
 
 type SemanticText = Text & { searchFragmentId?: string }
 
@@ -117,17 +118,10 @@ function plainTree(value: string): Root {
 }
 
 export function buildChatMessageSemanticModel(message: AgentChatMessage): ChatMessageSemanticModel {
-  let parsesAsJson = false
-  if (message.role === 'assistant') {
-    try {
-      JSON.parse(message.content)
-      parsesAsJson = true
-    } catch {
-      // Normal assistant prose is Markdown.
-    }
-  }
   const representation =
-    message.role === 'assistant' && !message.isError && !parsesAsJson ? 'markdown' : 'plain'
+    message.role === 'assistant' && !message.isError && !looksLikeJson(message.content)
+      ? 'markdown'
+      : 'plain'
   const displayed =
     representation === 'plain'
       ? (parseChatMessageDisplay(message.content)?.content ?? message.content)

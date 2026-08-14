@@ -81,6 +81,14 @@ describe('chat message Markdown semantic model', () => {
     expect(findChatSemanticMatches(inline, 'alpha beta')).toHaveLength(1)
   })
 
+  it('preserves the transcript plain-text contract for JSON-shaped assistant output', () => {
+    const model = buildChatMessageSemanticModel(assistant('{**not valid JSON**}'))
+
+    expect(model.representation).toBe('plain')
+    expect(model.searchText).toBe('{**not valid JSON**}')
+    expect(findChatSemanticMatches(model, '**not valid JSON**')).toHaveLength(1)
+  })
+
   it('maps Unicode case-fold expansions back to valid original UTF-16 slices', () => {
     const model = buildChatMessageSemanticModel(assistant('İstanbul 😀 STRASSE'))
     const dotted = findChatSemanticMatches(model, 'i̇stanbul')

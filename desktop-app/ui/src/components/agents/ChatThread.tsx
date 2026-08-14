@@ -637,11 +637,17 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                     : ''}
                                 </div>
                                 <div className="error-bubble-message">
-                                  <ChatMarkdownContent
-                                    model={semanticModel}
-                                    query={localSearchQuery}
-                                    activeOccurrence={activeSearchOccurrence}
-                                  />
+                                  {localSearchQuery ? (
+                                    <ChatMarkdownContent
+                                      model={semanticModel}
+                                      query={localSearchQuery}
+                                      activeOccurrence={activeSearchOccurrence}
+                                    />
+                                  ) : message.content.length <= 180 ? (
+                                    message.content
+                                  ) : (
+                                    `${message.content.slice(0, 177)}...`
+                                  )}
                                 </div>
                                 <details className="error-bubble-details">
                                   <summary>Details</summary>
