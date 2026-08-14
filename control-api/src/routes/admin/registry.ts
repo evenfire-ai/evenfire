@@ -131,9 +131,42 @@ const NO_CREDENTIAL_SCHEMA: RegistryCredentialSchema = {
 
 // ── install-hook trust policy (guardrails spec §8.4) ────────────────────────
 const HOOK_TRUST_ORDER: Record<string, number> = { low: 0, mid: 1, high: 2 }
-// Lifecycle points that receive message/response CONTENT (§8.4). pre_call shaping
-// gets model+params+metadata, not bodies, so it is not content-bearing.
-const CONTENT_BEARING_POINTS = new Set(['moderate', 'postCallSuccess'])
+// Lifecycle points that receive message/response CONTENT (§8.4/§8.7). The runtime
+// currently sends the full ToolCompletionRequest (messages) to preCall and onError
+// as well as moderate/postCallSuccess, and no content projection redacts it yet, so
+// EVERY message-carrying point is content-bearing for this gate (interim fix A,
+// §12.4). The target model (B) keys this on the per-hook `spec.contentAccess`
+// declaration once the projection enforces it — until then, treat them all as
+// content-bearing so a preCall/onError egress hook can't dodge the high-trust bar.
+const CONTENT_BEARING_POINTS = new Set(['preCall', 'moderate', 'postCallSuccess', 'onError'])
+
+/**
+ * §8.4/§8.7 — does this hook receive message/response CONTENT at any of its
+ * lifecycle points? Interim fix A: every message-carrying point counts (see
+ * CONTENT_BEARING_POINTS). Target model B keys this on `spec.contentAccess`.
+ */
+export function isContentBearingHook(lifecyclePoints: string[] | undefined): boolean {
+  return Array.isArray(lifecyclePoints) && lifecyclePoints.some(p => CONTENT_BEARING_POINTS.has(p))
+}
+
+/**
+ * §8.4 content/egress separation gate: a content-bearing hook that can ALSO reach
+ * the network (declared `egressBindings` or a `remote` target) is an exfiltration
+ * path and is admissible only at `trust_level: high`. Returns true when the hook
+ * must be refused. Content-alone or egress-alone is fine below high.
+ */
+export function contentEgressRequiresHighTrust(args: {
+  lifecyclePoints: string[] | undefined
+  hasEgress: boolean
+  isRemote: boolean
+  trustLevel: string
+}): boolean {
+  return (
+    isContentBearingHook(args.lifecyclePoints) &&
+    (args.hasEgress || args.isRemote) &&
+    args.trustLevel !== 'high'
+  )
+}
 
 /** Registry `hook_meta` shape (mirrors the registry HookMeta / LlmHook.spec, §8.5). */
 type HookMetaShape = {
@@ -1743,15 +1776,21 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // Step 5 — content/egress separation gate (§8.4 / registry gap #2). A
         // content-bearing hook that can also reach the network is an exfiltration
         // path, admissible only for a vetted high-trust hook.
-        const isContentBearing = hookMeta.lifecyclePoints.some(p => CONTENT_BEARING_POINTS.has(p))
         const hasEgress =
           Array.isArray(hookMeta.requiredEgress) && hookMeta.requiredEgress.length > 0
         const isRemote = !!hookMeta.target.remote
-        if (isContentBearing && (hasEgress || isRemote) && trustLevel !== 'high') {
+        if (
+          contentEgressRequiresHighTrust({
+            lifecyclePoints: hookMeta.lifecyclePoints,
+            hasEgress,
+            isRemote,
+            trustLevel,
+          })
+        ) {
           res.status(403).json({
             error: 'content_egress_requires_high_trust',
             reason:
-              'a content-bearing hook (moderate/postCallSuccess) with egress or a remote target requires trust_level high (§8.4)',
+              'a content-bearing hook (preCall/moderate/postCallSuccess/onError) with egress or a remote target requires trust_level high (§8.4)',
           })
           return
         }

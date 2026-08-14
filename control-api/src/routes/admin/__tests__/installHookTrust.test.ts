@@ -8,7 +8,11 @@
  * Every non-curated org is capped at the default cap (mid).
  */
 import { describe, expect, it } from 'vitest'
-import { resolveHookTrustLevel } from '../registry.js'
+import {
+  contentEgressRequiresHighTrust,
+  isContentBearingHook,
+  resolveHookTrustLevel,
+} from '../registry.js'
 
 const entry = (name: string, trust_level: string) => ({ name, trust_level })
 
@@ -40,5 +44,78 @@ describe('resolveHookTrustLevel', () => {
 
   it('a missing/blank trust_level defaults to low', () => {
     expect(resolveHookTrustLevel(entry('@clerum/x', ''), null)).toBe('low')
+  })
+})
+
+describe('content-bearing classification (§8.4/§8.7 fix A)', () => {
+  it('every message-carrying point is content-bearing — incl. preCall and onError', () => {
+    expect(isContentBearingHook(['preCall'])).toBe(true)
+    expect(isContentBearingHook(['moderate'])).toBe(true)
+    expect(isContentBearingHook(['postCallSuccess'])).toBe(true)
+    expect(isContentBearingHook(['onError'])).toBe(true)
+  })
+
+  it('an empty/unknown point set is not content-bearing', () => {
+    expect(isContentBearingHook([])).toBe(false)
+    expect(isContentBearingHook(undefined)).toBe(false)
+    expect(isContentBearingHook(['somethingElse'])).toBe(false)
+  })
+})
+
+describe('content/egress separation gate (§8.4)', () => {
+  // The hole fix A closes: a preCall/onError egress hook below high trust must be refused.
+  it('preCall + egress at mid trust → requires high (blocked)', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: ['preCall'],
+        hasEgress: true,
+        isRemote: false,
+        trustLevel: 'mid',
+      })
+    ).toBe(true)
+  })
+
+  it('onError + remote target at low trust → requires high (blocked)', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: ['onError'],
+        hasEgress: false,
+        isRemote: true,
+        trustLevel: 'low',
+      })
+    ).toBe(true)
+  })
+
+  it('moderate + egress at high trust → allowed', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: ['moderate'],
+        hasEgress: true,
+        isRemote: false,
+        trustLevel: 'high',
+      })
+    ).toBe(false)
+  })
+
+  it('content WITHOUT egress at low trust → allowed (can see content, cannot exfiltrate)', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: ['preCall'],
+        hasEgress: false,
+        isRemote: false,
+        trustLevel: 'low',
+      })
+    ).toBe(false)
+  })
+
+  it('egress WITHOUT content at low trust → allowed (nothing to leak)', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: [],
+        hasEgress: true,
+        isRemote: false,
+        trustLevel: 'low',
+      })
+    ).toBe(false)
   })
 })
