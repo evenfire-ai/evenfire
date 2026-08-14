@@ -174,3 +174,48 @@ export class HostWatcher {
     }
   }
 }
+
+/**
+ * Watch LlmHook CRs in the (tenant-scoped) llm-hooks namespace so a hook-CR edit
+ * (capabilities/path/failMode/target) is re-resolved live (§8.2), without a pod
+ * restart. Namespace-scoped, so it only surfaces this tenant's own hooks.
+ */
+export class LlmHookWatcher {
+  private watch: k8s.Watch
+  private watchRequest: { abort: () => void } | null = null
+
+  constructor() {
+    this.watch = new k8s.Watch(kc)
+  }
+
+  async start(onChange: (name: string) => void): Promise<void> {
+    const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.llmHooksNamespace}/${LLMHOOKS_PLURAL}`
+    console.log(`[K8s] Starting watch on LlmHooks (namespace ${config.llmHooksNamespace})`)
+
+    const watchCallback = (type: string, apiObj: { metadata?: { name?: string } }) => {
+      const name = apiObj?.metadata?.name
+      if (!name) return
+      if (type === 'ADDED' || type === 'MODIFIED' || type === 'DELETED') {
+        console.log(`[K8s] LlmHook watch event: ${type} for ${name}`)
+        onChange(name)
+      }
+    }
+
+    const doneCallback = (err: Error | null) => {
+      if (err) {
+        console.error('[K8s] LlmHook watch error:', err)
+        setTimeout(() => this.start(onChange), 5000)
+      }
+    }
+
+    this.watchRequest = await this.watch.watch(path, {}, watchCallback, doneCallback)
+  }
+
+  stop(): void {
+    if (this.watchRequest) {
+      console.log('[K8s] Stopping LlmHook watch')
+      this.watchRequest.abort()
+      this.watchRequest = null
+    }
+  }
+}

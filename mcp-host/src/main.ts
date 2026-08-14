@@ -54,7 +54,7 @@ import {
   resolveGuardrailHookDescriptors,
   withResolvedHookDescriptors,
 } from './guardrailHookResolver'
-import { HostWatcher, getHost, getLlmHook } from './k8sClient'
+import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
@@ -167,7 +167,13 @@ let currentPolicy: LlmPolicy | null = null
 let failoverEngine: FailoverEngine | null = null
 let bootFallbackEntry: FallbackEntry | null = null
 let hostWatcher: HostWatcher | null = null
+let llmHookWatcher: LlmHookWatcher | null = null
 let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
+// Periodic guardrail re-resolve — a backstop for dropped LlmHook/Host watch
+// events (the LlmHookWatcher is the primary, immediate path). Host edits also
+// apply immediately via onHostChange.
+let guardrailResolveTimer: ReturnType<typeof setInterval> | null = null
+const GUARDRAIL_RESOLVE_INTERVAL_MS = 300_000
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeatTimer: ReturnType<typeof setInterval> | null = null
 let lastServerState: Map<string, string> = new Map()
@@ -996,6 +1002,26 @@ function stopMcpStatusHeartbeat(): void {
 /**
  * Handle host configuration change.
  */
+/**
+ * Resolve the current Host's installed-hook references (§8.2) into runtime
+ * descriptors and apply them to the agent. Live-callable: run at boot, on every
+ * Host change (onHostChange), on a referenced-LlmHook change (LlmHookWatcher),
+ * and on a periodic backstop tick — so an admin edit takes effect without a pod
+ * restart.
+ */
+async function applyResolvedGuardrails(): Promise<void> {
+  if (!agent) return
+  const hostGuardrails = currentHost?.spec.guardrails ?? config.guardrailsConfig
+  const resolved = await resolveGuardrailHookDescriptors(hostGuardrails, {
+    getLlmHook,
+    llmHooksNamespace: config.llmHooksNamespace,
+  }).catch(err => {
+    console.error('[Main] Guardrail hook resolution failed; running without installed hooks:', err)
+    return []
+  })
+  agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolved))
+}
+
 async function onHostChange(host: HostCRD): Promise<void> {
   console.log(`[Main] Host configuration changed: ${host.name}`)
 
@@ -1049,6 +1075,11 @@ async function onHostChange(host: HostCRD): Promise<void> {
       console.error('[Main] Failed to apply identity files:', err)
     }
   }
+
+  // Re-resolve guardrails so a Host.spec.guardrails edit (added/removed hook,
+  // changed digest, capability/failMode change) takes effect without a restart
+  // (§8.2 "resolution is live").
+  await applyResolvedGuardrails()
 }
 
 /**
@@ -1262,18 +1293,15 @@ async function initializeAgent(): Promise<void> {
   const approvalCfg = currentHost?.spec.approval || config.approvalConfig
   agent.setApprovalConfig(approvalCfg)
 
-  // Guardrails (spec §5/§6) — Host block, dev-env fallback. Absent = today.
-  // Resolve installed-hook references (§8.2) into runtime descriptors so the
-  // LLM lane actually calls the hook pods; dangling/invalid refs degrade to skip.
-  const hostGuardrails = currentHost?.spec.guardrails ?? config.guardrailsConfig
-  const resolvedHookDescriptors = await resolveGuardrailHookDescriptors(hostGuardrails, {
-    getLlmHook,
-    llmHooksNamespace: config.llmHooksNamespace,
-  }).catch(err => {
-    console.error('[Main] Guardrail hook resolution failed; running without installed hooks:', err)
-    return []
-  })
-  agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolvedHookDescriptors))
+  // Guardrails (spec §5/§6) — resolve installed-hook references (§8.2) into
+  // runtime descriptors so the LLM lane actually calls the hook pods.
+  await applyResolvedGuardrails()
+  if (!guardrailResolveTimer) {
+    guardrailResolveTimer = setInterval(
+      () => void applyResolvedGuardrails(),
+      GUARDRAIL_RESOLVE_INTERVAL_MS
+    )
+  }
   validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
   console.log(
     `[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'} (policy: ${approvalCfg?.defaultPolicy || 'none/cli_only'})`
@@ -2494,10 +2522,15 @@ async function shutdown(signal: string): Promise<void> {
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
   hostWatcher?.stop()
+  llmHookWatcher?.stop()
   configStore?.stop()
   stopContextMapperPolling()
   stopMcpStatusHeartbeat()
   statelessHeartbeat?.stop()
+  if (guardrailResolveTimer) {
+    clearInterval(guardrailResolveTimer)
+    guardrailResolveTimer = null
+  }
 
   if (agent) {
     await agent.stop()
@@ -2675,6 +2708,23 @@ async function startProductionMode(): Promise<void> {
   // Start watching for Host changes
   hostWatcher = new HostWatcher(config.hostName)
   await hostWatcher.start(onHostChange, onHostDelete)
+
+  // Watch this tenant's LlmHook CRs so a hook-CR edit (caps/path/failMode/target)
+  // that the current Host references re-resolves guardrails live (§8.2), without
+  // a restart. Namespace-scoped, so only this tenant's hooks are surfaced.
+  llmHookWatcher = new LlmHookWatcher()
+  await llmHookWatcher.start(name => {
+    const hooks = (
+      currentHost?.spec.guardrails as { hooks?: Record<string, Array<{ id?: string }>> } | undefined
+    )?.hooks
+    const referenced =
+      !!hooks &&
+      Object.values(hooks).some(refs => Array.isArray(refs) && refs.some(r => r?.id === name))
+    if (referenced) {
+      console.log(`[Main] Referenced LlmHook ${name} changed — re-resolving guardrails`)
+      void applyResolvedGuardrails()
+    }
+  })
 
   // Start MCP status heartbeat (keeps observedAt fresh for the desktop poll;
   // each tick no-ops until the MCP manager exists)
