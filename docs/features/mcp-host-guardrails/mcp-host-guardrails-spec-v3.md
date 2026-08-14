@@ -743,10 +743,16 @@ deny-authoritative, but then it must fail-closed (§8.6).
   concrete need (e.g. per-path authz across co-located hooks, which are same-image by construction anyway).
 - **Versioning** — the `v1` in the path is the contract version: changes within `v1` are **additive-only**
   (new optional fields); any breaking change is a new `/v2` path served alongside.
-- **Timeout** — bounded by the hook's `timeoutMs` (≤ `maxHookTimeoutMs`, §5); a request that exceeds it is
-  abandoned and treated as **unavailable** (below).
-- **Body cap** — request and response bodies are bounded by `maxHookOutputBytes` (§5); an over-limit or
-  non-JSON body is rejected.
+- **Timeout — bounded in time, idle-independent.** A dial is bounded by the hook's `timeoutMs` (≤
+  `maxHookTimeoutMs`, §5) enforced as an **absolute deadline** (`AbortSignal`), not a socket idle timer — a
+  peer that trickles one byte at a time cannot keep the request alive. Above the transport, mcp-host races
+  every dial against a **hard per-hook deadline** (belt-and-braces, §8.6): even a transport that fails to
+  settle resolves to **unavailable**, so a hook can never hang the awaiting turn. Exceeding either bound is
+  treated as **unavailable** (below).
+- **Body cap — bounded in bytes, while streaming.** Request and response bodies are bounded by
+  `maxHookOutputBytes` (§5); the response is capped **as it streams** and the connection destroyed once it
+  exceeds the cap, so an oversized body is never fully buffered (no memory spike). An over-limit or non-JSON
+  body is rejected → **unavailable**.
 - **Status semantics** — `200` returns the endpoint's action body (§8.1 table); a `moderate` `4xx
   {code,message}` is a **fail** (→ `deny`). **`5xx`, timeout, connection error, a malformed/oversized body,
   or a `4xx` that isn't a valid action** are all treated as **hook-unavailable** → the hook's declared
@@ -1441,6 +1447,18 @@ which a guardrail `allow` never bypasses.
 
 ### 12.4 · Known residual risks & follow-ups
 
+- **Hook transport liveness — RESOLVED (§8.1/§8.6).** Earlier the `remote` transport dropped the abort
+  signal and relied on a socket **idle** timer (reset by a trickling peer) and capped the body only **after**
+  fully buffering it — so an active-but-unbounded hook endpoint (a compromised/hijacked vendor domain, not
+  only a malicious publisher) could hang a `pre_call`/`moderate` dial forever (the promise never settled, so
+  `failMode` was bypassed, not applied) or OOM the pod; with `maxConcurrent` session slots held until a task
+  settles, a few trickling sockets could deny the whole Host. Fixed four ways: (1) the SSRF transport honors
+  the abort `signal` as an absolute deadline (`requestPinned` destroys on abort); (2) the body is capped
+  **while streaming** on both the external and in-cluster paths (never fully buffered → no `ERR_STRING_TOO_
+  LONG`); (3) `RemoteLlmHook` races every dial against a **hard per-hook deadline** so a never-settling
+  transport still yields `unavailable` → `failMode`; and (4) `main.ts` installs `uncaughtException`/
+  `unhandledRejection` guards so a stray listener throw is logged, not a silent exit. A fully-silent peer,
+  connection-refused/DNS/5xx/malformed-JSON, and the SSRF pinning were already handled.
 - **Content projection & content/egress gate — RESOLVED (§8.4/§8.7).** Earlier the install gate classified
   only `moderate`/`postCallSuccess` as content-bearing while the runtime handed the full
   `ToolCompletionRequest` (messages) to `pre_call`/`on_error` with no projection, so a low/mid-trust
