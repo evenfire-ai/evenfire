@@ -183,6 +183,8 @@ function WorkspaceHarness({
                 handleLoadOlderMessages: vi.fn(),
                 activityByMessageId: {},
                 progressByMessageId: {},
+                localSearchQuery: '',
+                localSearchCurrentMatch: null,
               }}
             >
               <ChatActionsProvider

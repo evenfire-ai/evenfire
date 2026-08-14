@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { ChatLocalMatch } from '../../lib/chatLocalSearch'
 import type { AgentChatMessage, AgentMessageActivity, TaskProgress } from '../../uiTypes'
 
 /**
@@ -17,6 +18,8 @@ export interface ChatThreadStateContextValue {
   handleLoadOlderMessages: () => Promise<void>
   activityByMessageId: Record<string, AgentMessageActivity>
   progressByMessageId: Record<string, TaskProgress>
+  localSearchQuery: string
+  localSearchCurrentMatch: ChatLocalMatch | null
 }
 
 export interface ChatThreadStateProviderProps {

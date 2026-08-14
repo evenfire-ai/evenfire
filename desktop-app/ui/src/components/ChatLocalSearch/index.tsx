@@ -1,13 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, TextInput } from '@components/Common'
-import {
-  chatMessageDomId,
-  findLoadedChatMessageMatches,
-  wrapMatchIndex,
-} from '@lib/chatLocalSearch'
+import { findLoadedChatMessageMatches, wrapMatchIndex } from '@lib/chatLocalSearch'
 import type { ChatLocalSearchProps } from './types'
 
-export function ChatLocalSearch({ messages, onClose }: ChatLocalSearchProps) {
+export function ChatLocalSearch({ messages, onClose, onSearchStateChange }: ChatLocalSearchProps) {
   const [query, setQuery] = useState('')
   const [currentIndex, setCurrentIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -23,14 +19,13 @@ export function ChatLocalSearch({ messages, onClose }: ChatLocalSearchProps) {
   }, [matches.length])
 
   useEffect(() => {
-    const previous = document.querySelector<HTMLElement>('[data-current-search-match="true"]')
-    previous?.removeAttribute('data-current-search-match')
-    if (!currentMatch) return undefined
-    const target = document.getElementById(chatMessageDomId(currentMatch.messageId))
-    target?.setAttribute('data-current-search-match', 'true')
-    target?.scrollIntoView?.({ block: 'center' })
-    return () => target?.removeAttribute('data-current-search-match')
-  }, [currentMatch])
+    onSearchStateChange(query, currentMatch)
+    if (!currentMatch) return
+    requestAnimationFrame(() => {
+      const target = document.querySelector<HTMLElement>('[data-current-search-match="true"]')
+      target?.scrollIntoView?.({ block: 'center' })
+    })
+  }, [currentMatch, onSearchStateChange, query])
 
   const move = (delta: 1 | -1) => {
     setCurrentIndex(index => wrapMatchIndex(index, matches.length, delta))

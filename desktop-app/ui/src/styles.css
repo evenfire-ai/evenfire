@@ -14967,6 +14967,14 @@ pre {
   text-align: center;
 }
 
-.chat-bubble[data-current-search-match='true'] {
+.chat-search-match {
+  background: rgba(var(--warning-rgb), 0.3);
+  border-radius: 2px;
+  color: inherit;
+  padding: 0 1px;
+}
+
+.chat-search-match--active {
+  background: rgba(var(--warning-rgb), 0.62);
   box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.9);
 }

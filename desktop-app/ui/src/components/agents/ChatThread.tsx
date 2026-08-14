@@ -33,7 +33,11 @@ import {
 } from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
 import type { ChatMessageAttachment } from '../../../../src/types'
-import { chatMessageDomId } from '../../lib/chatLocalSearch'
+import {
+  chatMessageDomId,
+  createChatSearchRehypePlugin,
+  highlightChatText,
+} from '../../lib/chatLocalSearch'
 import {
   getChatMessageAttachmentTypeLabel,
   parseChatMessageDisplay,
@@ -229,6 +233,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     activeChatId,
     activityByMessageId,
     progressByMessageId,
+    localSearchQuery,
+    localSearchCurrentMatch,
   } = useChatThreadStateContext()
   const {
     chatList,
@@ -568,6 +574,10 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                       const parsedUserMessage =
                         message.role === 'user' ? parseChatMessageDisplay(message.content) : null
                       const displayContent = parsedUserMessage?.content ?? message.content
+                      const activeSearchOccurrence =
+                        localSearchCurrentMatch?.messageId === message.id
+                          ? localSearchCurrentMatch.occurrence
+                          : null
                       const displayAttachments =
                         message.role === 'user'
                           ? message.attachments && message.attachments.length
@@ -629,9 +639,13 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                     : ''}
                                 </div>
                                 <div className="error-bubble-message">
-                                  {message.content.length > 180
-                                    ? `${message.content.slice(0, 177)}...`
-                                    : message.content}
+                                  {highlightChatText(
+                                    localSearchQuery || message.content.length <= 180
+                                      ? message.content
+                                      : `${message.content.slice(0, 177)}...`,
+                                    localSearchQuery,
+                                    activeSearchOccurrence
+                                  )}
                                 </div>
                                 <details className="error-bubble-details">
                                   <summary>Details</summary>
@@ -650,10 +664,24 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                 />
                               )}
                               {isJson ? (
-                                <pre className="message-block json-content">{displayContent}</pre>
+                                <pre className="message-block json-content">
+                                  {highlightChatText(
+                                    displayContent,
+                                    localSearchQuery,
+                                    activeSearchOccurrence
+                                  )}
+                                </pre>
                               ) : message.role === 'assistant' ? (
                                 <div className="message-block markdown-content">
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  <ReactMarkdown
+                                    remarkPlugins={[remarkGfm]}
+                                    rehypePlugins={[
+                                      createChatSearchRehypePlugin(
+                                        localSearchQuery,
+                                        activeSearchOccurrence
+                                      ),
+                                    ]}
+                                  >
                                     {displayContent}
                                   </ReactMarkdown>
                                   {selectedAgent && !hasResponseFileAttachment && (
@@ -669,7 +697,13 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                   ) : null}
                                 </div>
                               ) : displayContent ? (
-                                <p className="message-block">{displayContent}</p>
+                                <p className="message-block">
+                                  {highlightChatText(
+                                    displayContent,
+                                    localSearchQuery,
+                                    activeSearchOccurrence
+                                  )}
+                                </p>
                               ) : null}
                               <MessageAttachmentList attachments={displayAttachments} />
                             </>

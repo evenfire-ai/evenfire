@@ -24,6 +24,7 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import {
   activeChatViewTab,
   addBlankChatViewTab,
@@ -268,6 +269,10 @@ export function App() {
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
+  const [chatLocalSearchState, setChatLocalSearchState] = React.useState<{
+    query: string
+    currentMatch: ChatLocalMatch | null
+  }>({ query: '', currentMatch: null })
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
@@ -340,12 +345,26 @@ export function App() {
 
   const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {
     setChatLocalSearchOpen(false)
+    setChatLocalSearchState({ query: '', currentMatch: null })
     if (!restoreFocus) return
     const previous = chatLocalSearchPreviousFocusRef.current
     requestAnimationFrame(() => {
       if (previous?.isConnected) previous.focus()
     })
   }, [])
+
+  const handleChatLocalSearchStateChange = React.useCallback(
+    (query: string, currentMatch: ChatLocalMatch | null) => {
+      setChatLocalSearchState(previous =>
+        previous.query === query &&
+        previous.currentMatch?.messageId === currentMatch?.messageId &&
+        previous.currentMatch?.occurrence === currentMatch?.occurrence
+          ? previous
+          : { query, currentMatch }
+      )
+    },
+    []
+  )
 
   const handleSelectChatAgentWithTabs = React.useCallback(
     (
@@ -1525,6 +1544,8 @@ export function App() {
       handleLoadOlderMessages: vm.handleLoadOlderMessages,
       activityByMessageId: vm.activityByMessageId,
       progressByMessageId: vm.progressByMessageId,
+      localSearchQuery: chatLocalSearchOpen ? chatLocalSearchState.query : '',
+      localSearchCurrentMatch: chatLocalSearchOpen ? chatLocalSearchState.currentMatch : null,
     }),
     [
       vm.activeChatId,
@@ -1536,6 +1557,8 @@ export function App() {
       vm.handleLoadOlderMessages,
       vm.activityByMessageId,
       vm.progressByMessageId,
+      chatLocalSearchOpen,
+      chatLocalSearchState,
     ]
   )
 
@@ -1700,6 +1723,7 @@ export function App() {
                                     <ChatLocalSearch
                                       messages={vm.activeMessages}
                                       onClose={closeChatLocalSearch}
+                                      onSearchStateChange={handleChatLocalSearchStateChange}
                                     />
                                   ) : null}
                                   <ChatPage scrollContainerRef={contentPanelRef} />

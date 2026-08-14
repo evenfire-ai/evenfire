@@ -8,7 +8,6 @@
  *   - live progress absent    → render from `message.toolSteps`
  *   - neither                 → render nothing
  */
-import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -38,6 +37,8 @@ let threadStateValue: {
   hasOlderMessages: boolean
   olderMessagesLoading: boolean
   handleLoadOlderMessages: ReturnType<typeof vi.fn>
+  localSearchQuery: string
+  localSearchCurrentMatch: { messageId: string; occurrence: number } | null
 }
 
 vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => navValue }))
@@ -58,10 +59,6 @@ vi.mock('../InFlightAssistantPlaceholder', () => ({ InFlightAssistantPlaceholder
 vi.mock('../NudgeArea', () => ({ NudgeArea: () => null }))
 vi.mock('../ChatStateBadge', () => ({ ChatStateBadge: () => null }))
 vi.mock('@components/MessageArtifactActions', () => ({ MessageArtifactActions: () => null }))
-vi.mock('react-markdown', () => ({
-  default: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
-}))
-vi.mock('remark-gfm', () => ({ default: () => undefined }))
 
 const actEnvGlobal = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 actEnvGlobal.IS_REACT_ACT_ENVIRONMENT = true
@@ -103,8 +100,53 @@ function setThreadState(
     hasOlderMessages: options.hasOlderMessages ?? false,
     olderMessagesLoading: options.olderMessagesLoading ?? false,
     handleLoadOlderMessages: vi.fn().mockResolvedValue(undefined),
+    localSearchQuery: '',
+    localSearchCurrentMatch: null,
   }
 }
+
+describe('ChatThread local-search highlighting', () => {
+  it('renders every plain and Markdown match and distinguishes the selected occurrence', () => {
+    setThreadState([
+      {
+        role: 'user',
+        items: [{ ...userMsg, content: 'Needle then needle' }],
+      },
+      {
+        role: 'assistant',
+        items: [
+          {
+            id: 'turn-1-assistant',
+            role: 'assistant',
+            content: 'A **needle** in a [needle link](https://example.com).',
+            timestamp: 2,
+          },
+        ],
+      },
+    ])
+    threadStateValue.localSearchQuery = 'needle'
+    threadStateValue.localSearchCurrentMatch = {
+      messageId: 'turn-1-assistant',
+      occurrence: 1,
+    }
+
+    const { rerender } = render(<ChatThread />)
+
+    expect(document.querySelectorAll('.chat-search-match')).toHaveLength(4)
+    const active = screen.getByTestId('chat-search-current-match')
+    expect(active.textContent).toBe('needle')
+    expect(active.closest('a')?.getAttribute('href')).toBe('https://example.com')
+
+    threadStateValue.localSearchCurrentMatch = { messageId: 'turn-1-user', occurrence: 1 }
+    rerender(<ChatThread />)
+    expect(screen.getByTestId('chat-search-current-match').textContent).toBe('needle')
+
+    threadStateValue.localSearchQuery = 'missing'
+    threadStateValue.localSearchCurrentMatch = null
+    rerender(<ChatThread />)
+    expect(document.querySelector('.chat-search-match')).toBeNull()
+  })
+})
 
 describe('ChatThread tool-steps fallback (#582)', () => {
   it('renders assistant response-file attachments with a direct download action', () => {

@@ -30,6 +30,7 @@ describe('ChatLocalSearch', () => {
     second.id = chatMessageDomId('two')
     document.body.append(second)
     const onClose = vi.fn()
+    const onSearchStateChange = vi.fn()
     render(
       <ChatLocalSearch
         messages={[
@@ -37,17 +38,30 @@ describe('ChatLocalSearch', () => {
           { id: 'two', role: 'assistant', content: 'needle twice needle', timestamp: 2 },
         ]}
         onClose={onClose}
+        onSearchStateChange={onSearchStateChange}
       />
     )
     const input = screen.getByRole('textbox', { name: 'Find in current chat' })
     fireEvent.change(input, { target: { value: 'NEEDLE' } })
     expect(screen.getByRole('status').textContent).toBe('1/3')
+    expect(onSearchStateChange).toHaveBeenLastCalledWith('NEEDLE', {
+      messageId: 'one',
+      occurrence: 0,
+    })
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(screen.getByRole('status').textContent).toBe('2/3')
+    expect(onSearchStateChange).toHaveBeenLastCalledWith('NEEDLE', {
+      messageId: 'two',
+      occurrence: 0,
+    })
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
     expect(screen.getByRole('status').textContent).toBe('1/3')
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
     expect(screen.getByRole('status').textContent).toBe('3/3')
+    expect(onSearchStateChange).toHaveBeenLastCalledWith('NEEDLE', {
+      messageId: 'two',
+      occurrence: 1,
+    })
     fireEvent.keyDown(input, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledOnce()
     expect(loadSessionMessages).not.toHaveBeenCalled()
