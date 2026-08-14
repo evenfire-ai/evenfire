@@ -170,7 +170,8 @@ run_suite() {
     json_file="${TMP_DIR}/${package//\//_}-${suite_index}.json"
     if ! (
       cd "${PROJECT_DIR}/${package}"
-      CONTROL_API_REAL_PG_ADMIN_URL="${ADMIN_DSN}" \
+      env \
+        CONTROL_API_REAL_PG_ADMIN_URL="${ADMIN_DSN}" \
         CONTROL_API_REAL_PG_REQUIRED=1 \
         FORCE_COLOR=0 NO_COLOR=1 \
         npm test -- --run "${relative_suite}" --reporter=json --outputFile="${json_file}"
@@ -292,6 +293,7 @@ print("postgresql://{}:{}@127.0.0.1:{}/postgres".format(
 ), end="")
 ')"
 unset PG_USER PG_PASSWORD PG_DATABASE
+[[ -n "${ADMIN_DSN}" ]] || die 'constructed Minikube PostgreSQL admin DSN is empty'
 
 run_suite control-api
 run_suite gfs-controller
