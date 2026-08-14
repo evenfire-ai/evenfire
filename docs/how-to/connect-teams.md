@@ -153,7 +153,14 @@ or a screenshot.
 ## Enable file upload and download
 
 Workflow results are delivered as files, which the bot cannot send unless the
-manifest allows it:
+manifest allows it.
+
+> **Files only work in a one to one chat.** Microsoft's file consent APIs, which
+> this uses, are documented as working in the `personal` context only and not in
+> `channel` or `groupchat`. A workflow that produces a file will deliver it in a
+> direct chat with the bot and will not deliver it in a channel. That is
+> Microsoft's constraint, not ours, so test artifact delivery in a direct chat or
+> you will conclude it is broken when it is behaving as designed.
 
 ```shell
 teams app manifest update <appId> --set-json 'bots[0].supportsFiles=true' --yes
@@ -169,8 +176,13 @@ teams app manifest download <appId> ./verify.json
 ```
 
 Expect `bots[0].supportsFiles` to be `true` and the manifest version to have
-bumped. The equivalent portal path is App Features > Bot > **Upload and download
-files**.
+bumped.
+
+**There is no checkbox for this in the current Developer Portal.** Microsoft
+documents `supportsFiles` as a manifest property rather than a portal setting,
+and older guidance pointing at App features > Bot > "Upload and download files"
+describes a UI that the portal no longer presents. If you would rather not use
+the CLI, edit the manifest directly under Configure > **App package editor**.
 
 `teams app doctor <appId>` is a useful checkpoint. It reports whether the
 endpoint is reachable and shows `Sign-in audience: AzureADMyOrg` for a correctly
