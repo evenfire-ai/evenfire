@@ -37,10 +37,11 @@ import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppMani
 import { toKebabCase, toKebabInput } from '@lib/string'
 import {
   LOCAL_TEAMS_ENDPOINT_ORIGIN,
+  TEAMS_APP_NAME_MAX_LENGTH,
   buildTeamsAppCreateCommand,
   canGenerateTeamsCommand,
-  isValidTeamsBotName,
-  toTeamsBotNameInput,
+  teamsAppNameError,
+  teamsPlaceholderEndpoint,
 } from '@lib/teamsSetup'
 
 type HostItem = {
@@ -214,7 +215,7 @@ export default function CreateCommunicationChannelPage() {
     if (!teamsWebhookUrl || canGenerateTeamsCommand(teamsWebhookUrl)) return null
     return buildTeamsAppCreateCommand({
       botName: draft.teamsAppName,
-      endpoint: `${LOCAL_TEAMS_ENDPOINT_ORIGIN}${teamsWebhookUrl}`,
+      endpoint: teamsPlaceholderEndpoint(teamsWebhookUrl),
     })
   }, [draft.teamsAppName, teamsWebhookUrl])
   // Slack's order is manifest first, credentials second: the bot token only exists
@@ -237,7 +238,7 @@ export default function CreateCommunicationChannelPage() {
     if (!appName || !slackRequestUrl || !canGenerateSlackAppManifest(slackRequestUrl)) return null
     return slackAppManifest(appName, slackRequestUrl)
   }, [draft.slackBotHandle, slackRequestUrl])
-  const teamsBotNameIsValid = isValidTeamsBotName(draft.teamsAppName)
+  const teamsBotNameError = teamsAppNameError(draft.teamsAppName)
 
   useEffect(() => {
     setCanUseBrowserWebhookOrigin(true)
@@ -403,8 +404,8 @@ export default function CreateCommunicationChannelPage() {
       return
     }
     if (activeProvider === 'teams') {
-      if (!isValidTeamsBotName(draft.teamsAppName)) {
-        setError('Name must start with a letter and use lowercase letters, numbers, and hyphens.')
+      if (teamsBotNameError) {
+        setError(teamsBotNameError)
         return
       }
       if (!UUID_RE.test(draft.teamsAppId.trim())) {
@@ -727,7 +728,7 @@ export default function CreateCommunicationChannelPage() {
                           </p>
                         </div>
                         <Field
-                          description="Use lowercase letters, numbers, and hyphens. The name must start with a letter."
+                          description={`Display name for the bot, up to ${TEAMS_APP_NAME_MAX_LENGTH} characters. Spaces and capitals are fine.`}
                           htmlFor="teams-app-name"
                           label="Name"
                           required
@@ -738,13 +739,13 @@ export default function CreateCommunicationChannelPage() {
                             onChange={event =>
                               setDraft(current => ({
                                 ...current,
-                                teamsAppName: toTeamsBotNameInput(event.target.value),
+                                teamsAppName: event.target.value,
                               }))
                             }
-                            placeholder="evenfire-bot"
+                            placeholder="Evenfire Bot"
                             disabled={saving}
                             autoComplete="off"
-                            invalid={Boolean(draft.teamsAppName) && !teamsBotNameIsValid}
+                            invalid={Boolean(draft.teamsAppName) && Boolean(teamsBotNameError)}
                           />
                         </Field>
                         <ol className="cu-teams-setup__instructions">
@@ -768,7 +769,7 @@ export default function CreateCommunicationChannelPage() {
                                 size="sm"
                                 className="cu-command-block__copy"
                                 onClick={copyTeamsAppCreateCommand}
-                                disabled={saving || !teamsBotNameIsValid}
+                                disabled={saving || Boolean(teamsBotNameError)}
                                 aria-label="Copy Teams bot create command"
                               >
                                 <IconCopy width={15} height={15} />
@@ -798,7 +799,7 @@ export default function CreateCommunicationChannelPage() {
                                     size="sm"
                                     className="cu-command-block__copy"
                                     onClick={copyTeamsAppCreatePlaceholderCommand}
-                                    disabled={saving || !teamsBotNameIsValid}
+                                    disabled={saving || Boolean(teamsBotNameError)}
                                     aria-label="Copy Teams bot create command"
                                   >
                                     <IconCopy width={15} height={15} />

@@ -1642,7 +1642,14 @@ export class ChannelReader {
         // TeamsAdapter has no ephemeral concept, so the notice is a normal message.
         // Thread it under the triggering message so an unconnected user does not
         // produce a top-level post in a shared channel.
-        await adapter.sendMessage(channelId, content, msg.messageId)
+        //
+        // The reply target is the thread ROOT, the same target replyTargetMessageId
+        // picks for every other Teams reply. threadId is the root activity id
+        // (providerReplyToMessageId) and messageId is the leaf activity that just
+        // arrived; replying to the leaf does not attach the notice to the
+        // conversation, which is the whole mitigation here. The fallback is for a
+        // direct chat, which has no separate root.
+        await adapter.sendMessage(channelId, content, msg.threadId || msg.messageId)
       } else if (msg.channelType === 'telegram') {
         // No reply id: the spec fixes this as sendMessage(channelId, content) for
         // Telegram, with no threading. Group and supergroup chats do have a

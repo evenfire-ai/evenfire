@@ -44,10 +44,11 @@ import {
 import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
 import {
   LOCAL_TEAMS_ENDPOINT_ORIGIN,
+  TEAMS_APP_NAME_MAX_LENGTH,
   buildTeamsAppCreateCommand,
   canGenerateTeamsCommand,
-  isValidTeamsBotName,
-  toTeamsBotNameInput,
+  teamsAppNameError,
+  teamsPlaceholderEndpoint,
 } from '@lib/teamsSetup'
 
 type ChannelProvider = CommunicationChannelProvider
@@ -273,27 +274,48 @@ export default function EditCommunicationChannelPage() {
     teamsRequestUrl && !canGenerateTeamsCommand(teamsRequestUrl)
       ? buildTeamsAppCreateCommand({
           botName: draft?.teamsAppName || '',
-          endpoint: `${LOCAL_TEAMS_ENDPOINT_ORIGIN}${teamsRequestUrl}`,
+          endpoint: teamsPlaceholderEndpoint(teamsRequestUrl),
         })
       : null
   // hasTeamsConfigForRequestUrl is satisfied by CLIENT_ID or TENANT_ID alone,
   // so teamsAppCreateCommand can render with a blank Name -- which
   // buildTeamsAppCreateCommand fills with the literal placeholder <bot-name>.
-  // Gate Copy on a valid name the same way the create page does, so that
+  // Gate Copy on a usable name the same way the create page does, so that
   // placeholder is never handed over as if it were runnable.
-  const teamsBotNameIsValid = isValidTeamsBotName(draft?.teamsAppName || '')
+  const teamsBotNameError = teamsAppNameError(draft?.teamsAppName || '')
 
-  async function persistDraft(nextDraft: DraftState, successMessage: string) {
+  /**
+   * The single validation boundary for this page: every path that persists a
+   * full spec goes through here, Save and deleteConversation alike. Validating
+   * in handleSave instead let deleteConversation persist a value Save refuses.
+   *
+   * It validates the SPEC, not the draft, because the spec is what is sent: an
+   * empty name is omitted by buildCommunicationChannelSpec rather than written
+   * as an empty string, which is exactly what the server accepts.
+   *
+   * Returns false when nothing was persisted, so callers do not navigate away
+   * from an unsaved page -- neither on a rejected value nor on a failed PUT.
+   */
+  async function persistDraft(nextDraft: DraftState, successMessage: string): Promise<boolean> {
+    const spec = buildCommunicationChannelSpec(nextDraft)
+    const teamsAppName = spec.teamsSettings?.appName
+    const nameError = teamsAppName === undefined ? null : teamsAppNameError(teamsAppName)
+    if (nameError) {
+      setSaveError(nameError)
+      return false
+    }
     setSaving(true)
     setSaveError('')
     try {
       await apiSend('PUT', `/api/v1/admin/communication-channels/${encodeURIComponent(name)}`, {
-        spec: buildCommunicationChannelSpec(nextDraft),
+        spec,
       })
       setDraft(nextDraft)
       showToast(successMessage, { tone: 'success' })
+      return true
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : 'Failed to save communication channel')
+      return false
     } finally {
       setSaving(false)
     }
@@ -302,17 +324,8 @@ export default function EditCommunicationChannelPage() {
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!draft || saving) return
-    // buildCommunicationChannelSpec writes teamsAppName into spec.teamsSettings.appName
-    // whenever it is non-empty, regardless of which provider tab is active, so an
-    // invalid value typed on the Teams tab must block Save here rather than only
-    // gating the Teams-tab Copy button (which a user editing another tab never sees).
-    if (draft.teamsAppName.trim() && !isValidTeamsBotName(draft.teamsAppName)) {
-      setSaveError(
-        'Teams bot name must start with a letter and use lowercase letters, numbers, and hyphens.'
-      )
-      return
-    }
-    await persistDraft(draft, `Communication channel ${name} updated.`)
+    const saved = await persistDraft(draft, `Communication channel ${name} updated.`)
+    if (!saved) return
     backToChannels()
   }
 
@@ -706,20 +719,20 @@ export default function EditCommunicationChannelPage() {
                             current
                               ? {
                                   ...current,
-                                  teamsAppName: toTeamsBotNameInput(event.target.value),
+                                  teamsAppName: event.target.value,
                                   // Typed, so no longer just an inherited label.
                                   teamsAppNameFromAnnotation: false,
                                 }
                               : current
                           )
                         }
-                        placeholder="evenfire-bot"
+                        placeholder="Evenfire Bot"
                         disabled={saving}
                         autoComplete="off"
                       />
                       <span className="cu-field__hint">
-                        Name shown in the Teams bot creation output and Profile UI setup
-                        instructions.
+                        Display name shown in the Teams bot creation output and Profile UI setup
+                        instructions, up to {TEAMS_APP_NAME_MAX_LENGTH} characters.
                       </span>
                     </div>
                     <div className="cu-field">
@@ -796,7 +809,7 @@ export default function EditCommunicationChannelPage() {
                                 size="sm"
                                 className="cu-command-block__copy"
                                 onClick={copyTeamsAppCreateCommand}
-                                disabled={saving || !teamsBotNameIsValid}
+                                disabled={saving || Boolean(teamsBotNameError)}
                                 aria-label="Copy Teams bot create command"
                               >
                                 <IconCopy width={15} height={15} />
@@ -832,7 +845,7 @@ export default function EditCommunicationChannelPage() {
                                   size="sm"
                                   className="cu-command-block__copy"
                                   onClick={copyTeamsAppCreatePlaceholderCommand}
-                                  disabled={saving || !teamsBotNameIsValid}
+                                  disabled={saving || Boolean(teamsBotNameError)}
                                   aria-label="Copy Teams bot create command"
                                 >
                                   <IconCopy width={15} height={15} />

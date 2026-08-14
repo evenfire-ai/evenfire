@@ -1,5 +1,3 @@
-import { toKebabInput } from './string'
-
 /**
  * Placeholder origin shown in guidance copy, and used to build a placeholder
  * command, when the deployment has no public webhook address to substitute.
@@ -9,36 +7,63 @@ import { toKebabInput } from './string'
  */
 export const LOCAL_TEAMS_ENDPOINT_ORIGIN = 'https://<public-webhook-origin>'
 
-const TEAMS_BOT_NAME_RE = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/
+/**
+ * Longest `spec.teamsSettings.appName` control-api accepts
+ * (validateCommunicationChannelSpec).
+ */
+export const TEAMS_APP_NAME_MAX_LENGTH = 80
 
 /**
- * Teams CLI `--name` constraint: lowercase letters, numbers, and hyphens,
- * starting with a letter. Shared by the create and edit pages so both gate
- * Copy on the same rule instead of one silently drifting from the other.
+ * The one rule for a Teams app name, mirroring the server contract exactly:
+ * non-empty after trimming, at most TEAMS_APP_NAME_MAX_LENGTH characters.
+ *
+ * It is a free-form DISPLAY name, so spaces and capitals are legitimate: the
+ * CRD declares `appName` as a plain string with no pattern (unlike `tenantId`
+ * right below it, which does carry one), control-api checks only emptiness and
+ * length (unlike `appId`, which carries a UUID regex), and the Teams CLI
+ * documents `--name` as "App/bot name" with `--name "My Bot"` as its own
+ * example. A stricter UI rule would reject names Teams and the server both
+ * accept, and would block saving a channel whose stored name predates the rule.
+ *
+ * Returns the message to show, or null when the value is acceptable. Callers
+ * share this one function so no page can drift onto its own rule.
  */
-export function isValidTeamsBotName(value: string): boolean {
-  return TEAMS_BOT_NAME_RE.test(value.trim())
+export function teamsAppNameError(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return 'Teams bot name is required.'
+  if (trimmed.length > TEAMS_APP_NAME_MAX_LENGTH) {
+    return `Teams bot name must be ${TEAMS_APP_NAME_MAX_LENGTH} characters or fewer.`
+  }
+  return null
 }
 
 /**
- * Normalizes free-typed input into the Teams CLI `--name` shape as the user
- * types, so the field can never hold something isValidTeamsBotName rejects
- * except through an empty or in-progress value. Shared by the create and edit
- * pages so both normalize on the same rule instead of one drifting from the
- * other -- which is how the edit page persisted a raw, unvalidated name.
- */
-export function toTeamsBotNameInput(value: string): string {
-  return toKebabInput(value).slice(0, 64)
-}
-
-/**
- * The Teams CLI needs an absolute endpoint. A deployment with no
- * NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL and a hostname that does not
- * start with `app.` produces a bare path, which would register a bot pointing
- * at a host that does not exist. Mirrors canGenerateSlackAppManifest.
+ * The Teams CLI needs an absolute endpoint, and Microsoft requires a publicly
+ * reachable HTTPS one: a bot registered against `http://` cannot receive
+ * activities. A deployment with no NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL
+ * and a hostname that does not start with `app.` produces a bare path, which
+ * would point a bot at a host that does not exist. Unlike
+ * canGenerateSlackAppManifest, this deliberately does not accept `http://`.
  */
 export function canGenerateTeamsCommand(endpoint: string | null | undefined): boolean {
-  return /^https?:\/\//i.test(endpoint ?? '')
+  return /^https:\/\//i.test(endpoint ?? '')
+}
+
+/**
+ * Endpoint to render when canGenerateTeamsCommand said no: the marker origin
+ * plus the reader path, for the operator to substitute by hand.
+ *
+ * The rejected value is usually a bare path (the minikube case), but it can
+ * also be an absolute `http://` URL, from an http
+ * NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL or from browsing an `app.` host
+ * over http. Concatenating that onto the marker would render
+ * `https://<public-webhook-origin>http://host/path`, so the origin is dropped
+ * and only the path is kept.
+ */
+export function teamsPlaceholderEndpoint(endpoint: string): string {
+  const origin = endpoint.match(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i)
+  const path = origin ? endpoint.slice(origin[0].length) : endpoint
+  return `${LOCAL_TEAMS_ENDPOINT_ORIGIN}${path.startsWith('/') ? path : `/${path}`}`
 }
 
 /**

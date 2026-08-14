@@ -76,6 +76,20 @@ describe('describeToolError', () => {
     expect(describeToolError('429 Too Many Requests')).toBe('unavailable (rate limited).')
   })
 
+  it('does not misclassify a duration containing 429 as a rate limit', () => {
+    // Bare `429` matched inside "4291ms"; \b429\b must not.
+    expect(describeToolError('operation finished in 4291ms')).toBe('unavailable.')
+  })
+
+  it('classifies an HTTP 404 as not found', () => {
+    expect(describeToolError('HTTP/1.1 404 Not Found')).toBe('unavailable (not found).')
+  })
+
+  it('does not misclassify a duration containing 404 as not found', () => {
+    // Bare `404` matched inside "4041ms"; \b404\b must not.
+    expect(describeToolError('operation finished in 4041ms')).toBe('unavailable.')
+  })
+
   it('falls back to generic for anything unrecognised', () => {
     expect(describeToolError('kaboom {"secret":"hunter2"}')).toBe('unavailable.')
   })

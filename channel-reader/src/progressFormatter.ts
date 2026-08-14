@@ -34,8 +34,11 @@ export function describeToolError(errorSummary: string | undefined): string {
     return 'unavailable (authentication problem). Ask your administrator.'
   }
   if (/timed out|timeout|etimedout|deadline/.test(raw)) return 'unavailable (timed out).'
-  if (/rate limit|429|too many requests/.test(raw)) return 'unavailable (rate limited).'
-  if (/not found|404|no such/.test(raw)) return 'unavailable (not found).'
+  // \b-anchored for the same reason as 401/403 above: bare "429" matched inside
+  // "4291ms" and bare "404" inside "4041ms", so a duration classified as a rate
+  // limit or a missing resource.
+  if (/rate limit|\b429\b|too many requests/.test(raw)) return 'unavailable (rate limited).'
+  if (/not found|\b404\b|no such/.test(raw)) return 'unavailable (not found).'
   // Checked before the invalid-input category below: when a message carries
   // both a size-limit signal and generic "invalid" wording (e.g. "invalid
   // request, payload too large"), the size limit is the more specific and

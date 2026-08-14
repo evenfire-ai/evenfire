@@ -354,21 +354,37 @@ describe('unresolved sender notice', () => {
 })
 
 describe('unresolved sender notice on Teams', () => {
-  it('sends a threaded notice to an unresolved Teams sender', async () => {
-    const { deliver, sendMessage } = buildReader({
+  it('threads the notice under the conversation ROOT, not the activity that triggered it', async () => {
+    const { buildMessage, deliverBatch, sendMessage } = buildReader({
       medium: 'teams',
       profileUiUrl: 'https://profile.test',
     })
 
-    await deliver()
+    // Root and leaf deliberately differ. A Teams channel message carries the
+    // root activity id as threadId (providerReplyToMessageId) and the activity
+    // that just arrived as messageId; a truthiness assertion passes for either,
+    // which is why the previous version of this test could not fail.
+    await deliverBatch([
+      { ...buildMessage('C1', 'U1'), messageId: 'leaf-activity', threadId: 'root-activity' },
+    ])
 
     expect(sendMessage).toHaveBeenCalledTimes(1)
     const [channelId, content, replyToMessageId] = sendMessage.mock.calls[0]
     expect(channelId).toBe('C1')
     expect(content).toContain('https://profile.test')
     // Threading is the whole mitigation for Teams having no ephemeral concept:
-    // a top-level post would announce the notice to the entire channel.
-    expect(replyToMessageId).toBeTruthy()
+    // a reply against the leaf does not attach to the conversation, and a
+    // top-level post announces the notice to the entire channel.
+    expect(replyToMessageId).toBe('root-activity')
+  })
+
+  it('falls back to the message id in a direct chat, which has no separate root', async () => {
+    const { buildMessage, deliverBatch, sendMessage } = buildReader({ medium: 'teams' })
+
+    await deliverBatch([{ ...buildMessage('C1', 'U1'), messageId: 'leaf-activity' }])
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage.mock.calls[0][2]).toBe('leaf-activity')
   })
 
   it('sends the Teams notice at most once per user per conversation', async () => {

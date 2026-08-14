@@ -243,10 +243,13 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
 
     const botNameInput = screen.getByLabelText(/^Name/)
     fireEvent.change(botNameInput, {
-      target: { value: 'Evenfire Bot!' },
+      target: { value: 'Evenfire Bot' },
     })
 
-    expect(botNameInput).toHaveValue('evenfire-bot')
+    // appName is a free-form display name on both the CRD and control-api, and
+    // the Teams CLI documents --name the same way, so what the operator types
+    // is what the command must carry.
+    expect(botNameInput).toHaveValue('Evenfire Bot')
     expect(
       screen.getByText(/The command writes CLIENT_ID, TENANT_ID and CLIENT_SECRET into/i)
     ).toBeInTheDocument()
@@ -254,7 +257,8 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
 
     const command = screen.getByText(/teams app create/).closest('pre')
     expect(command).toHaveTextContent('teams app create')
-    expect(command).toHaveTextContent('--name "evenfire-bot"')
+    // Quoted, so a display name with a space stays one argument.
+    expect(command).toHaveTextContent('--name "Evenfire Bot"')
     expect(command).toHaveTextContent('--endpoint "https://webhook.example.com/webhooks/teams/')
     expect(command).toHaveTextContent('--env .env')
     expect(screen.getByLabelText(/^CLIENT_ID/)).toBeInTheDocument()
@@ -280,7 +284,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     await fillStep1AndContinue()
     fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
     fireEvent.change(screen.getByLabelText(/^Name/), {
-      target: { value: 'Evenfire Bot!' },
+      target: { value: 'Evenfire Bot' },
     })
 
     const panel = document.querySelector('.cu-channel-provider-panel')
@@ -289,11 +293,35 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
 
     const command = screen.getByText(/teams app create/).closest('pre')
-    expect(command).toHaveTextContent('--name "evenfire-bot"')
+    expect(command).toHaveTextContent('--name "Evenfire Bot"')
     // Pin the literal placeholder origin: this is what the operator is being
     // told to replace by hand.
     expect(command).toHaveTextContent('--endpoint "https://<public-webhook-origin>/webhooks/teams/')
     expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+  })
+
+  it('treats an http webhook origin as unusable, since Microsoft requires https', async () => {
+    // Microsoft needs a publicly reachable HTTPS messaging endpoint, so an http
+    // origin has to land in the warning branch -- and that branch must still
+    // render a usable command, not the marker origin glued onto an absolute
+    // http URL.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'http://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+
+    const panel = document.querySelector('.cu-channel-provider-panel')
+    expect(panel?.textContent ?? '').toMatch(/no public webhook origin/i)
+
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('--endpoint "https://<public-webhook-origin>/webhooks/teams/')
+    expect(command?.textContent ?? '').not.toContain('http://webhook.example.com')
   })
 
   it('validates Teams CLIENT_ID and TENANT_ID before submission', async () => {
@@ -323,6 +351,56 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     expect(api.apiSend).not.toHaveBeenCalled()
   })
 
+  it('requires a Teams bot name before submitting', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), { target: { value: 'secret' } })
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82' },
+    })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+
+    // The name is free-form, but it is not optional: control-api rejects an
+    // appName that is present and empty, and the whole setup command is built
+    // around it.
+    expect(await screen.findByText('Teams bot name is required.')).toBeInTheDocument()
+    expect(api.apiSend).not.toHaveBeenCalled()
+  })
+
+  it('rejects a Teams bot name past the 80 character server limit', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'a'.repeat(81) } })
+    fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), { target: { value: 'secret' } })
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82' },
+    })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+
+    expect(
+      await screen.findByText('Teams bot name must be 80 characters or fewer.')
+    ).toBeInTheDocument()
+    expect(api.apiSend).not.toHaveBeenCalled()
+  })
+
   it('submits Teams settings and credentials with UUID values', async () => {
     render(
       <ToastProvider>
@@ -333,7 +411,7 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     await fillStep1AndContinue()
     fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
     fireEvent.change(screen.getByLabelText(/^Name/), {
-      target: { value: 'evenfire-bot' },
+      target: { value: 'Evenfire Bot' },
     })
     fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
       target: { value: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82' },
@@ -355,7 +433,8 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
         spec: expect.objectContaining({
           hostRef: 'agent-a',
           teamsSettings: {
-            appName: 'evenfire-bot',
+            // Persisted exactly as typed: no kebab-casing on the way to the spec.
+            appName: 'Evenfire Bot',
             appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82',
             tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
             replyOnlyWhenMentioned: true,

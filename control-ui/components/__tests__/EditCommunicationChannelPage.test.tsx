@@ -725,15 +725,15 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
 })
 
 /**
- * The create page normalizes the Name field through toTeamsBotNameInput on
- * every keystroke and blocks submit on isValidTeamsBotName. This page used to
- * write event.target.value raw and never validated the field on Save, so a
- * value Create would have rejected -- e.g. one with a space, or one that
- * starts with a digit, which toTeamsBotNameInput's kebab-casing does not fix
- * -- persisted straight to spec.teamsSettings.appName.
+ * spec.teamsSettings.appName is a free-form DISPLAY name: the CRD declares it
+ * with no pattern (unlike tenantId right below it), control-api checks only
+ * non-empty and 80 characters (unlike appId, which carries a UUID regex), and
+ * the Teams CLI documents --name the same way. A kebab rule invented in the UI
+ * mangled legitimate names as they were typed and, worse, locked an operator out
+ * of saving ANY change on a channel whose stored name predated it.
  */
 describe('EditCommunicationChannelPage Teams name validation', () => {
-  it('normalizes the Name field into the Teams CLI shape as the operator types, and offers a valid placeholder', async () => {
+  it('keeps a free-form display name exactly as typed', async () => {
     mockChannel('teams-channel', { teamsSettings: { appName: '' } })
     await renderLoadedPage()
 
@@ -741,20 +741,37 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
     await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
 
     const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
-    // The old placeholder, "Your Teams Bot", is itself a value the field
-    // should reject: it has spaces and capitals.
-    expect(nameInput.placeholder).toBe('evenfire-bot')
+    // The placeholder is a display name, so it does not imply a kebab rule.
+    expect(nameInput.placeholder).toBe('Evenfire Bot')
 
-    await user.type(nameInput, 'Evenfire Bot!')
+    await user.type(nameInput, 'My Bot')
 
-    expect(nameInput).toHaveValue('evenfire-bot')
+    expect(nameInput).toHaveValue('My Bot')
   })
 
-  it('blocks Save and does not persist a Teams bot name that is still invalid after normalization', async () => {
-    // Kebab-casing lowercases and strips disallowed characters, but it does not
-    // enforce a leading letter, so a name typed as "123 Bot" survives
-    // normalization as "123-bot" -- non-empty, but still invalid because it
-    // starts with a digit. Save must catch what normalization does not.
+  it('saves an unrelated field on a channel whose stored name has a space', async () => {
+    // The regression the invented rule caused: `My Bot` is a legitimate stored
+    // appName, and the gate validated the whole hydrated draft, so this channel
+    // could not save CLIENT_ID, access, or anything else until the name was
+    // rewritten.
+    mockChannel('teams-channel', { teamsSettings: { appName: 'My Bot' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    await user.type(screen.getByLabelText(/^CLIENT_ID/), '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82')
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [string, string, { spec: unknown }]
+    const teamsSettings = (body.spec as { teamsSettings: { appName: string; appId: string } })
+      .teamsSettings
+    expect(teamsSettings.appName).toBe('My Bot')
+    expect(teamsSettings.appId).toBe('7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82')
+  })
+
+  it('blocks Save and does not persist a Teams bot name past the server limit', async () => {
     mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
     await renderLoadedPage()
 
@@ -763,21 +780,20 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
 
     const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
     await user.clear(nameInput)
-    await user.type(nameInput, '123 Bot')
-    expect(nameInput).toHaveValue('123-bot')
+    // Pasted rather than typed: 81 keystrokes through userEvent is slow, and the
+    // field holds what it is given either way.
+    fireEvent.change(nameInput, { target: { value: 'a'.repeat(81) } })
 
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
 
     expect(
-      await screen.findByText(
-        'Teams bot name must start with a letter and use lowercase letters, numbers, and hyphens.'
-      )
+      await screen.findByText('Teams bot name must be 80 characters or fewer.')
     ).toBeInTheDocument()
     expect(api.apiSend).not.toHaveBeenCalled()
     expect(navigation.push).not.toHaveBeenCalled()
   })
 
-  it('saves a valid Teams bot name typed over the previous value', async () => {
+  it('saves a display name typed over the previous value', async () => {
     mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
     await renderLoadedPage()
 
@@ -786,14 +802,71 @@ describe('EditCommunicationChannelPage Teams name validation', () => {
 
     const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
     await user.clear(nameInput)
-    await user.type(nameInput, 'evenfire-bot-2')
+    await user.type(nameInput, 'Evenfire Bot 2')
 
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
 
     await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
     const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [string, string, { spec: unknown }]
     expect((body.spec as { teamsSettings: { appName: string } }).teamsSettings.appName).toBe(
-      'evenfire-bot-2'
+      'Evenfire Bot 2'
     )
+  })
+})
+
+/**
+ * deleteConversation persists a full spec through persistDraft without going
+ * anywhere near handleSave, so a check that lived only in handleSave let it
+ * write a value Save would refuse. Validation lives on persistDraft, the one
+ * boundary both paths cross.
+ */
+describe('EditCommunicationChannelPage conversation delete validation', () => {
+  const TEAMS_CONVERSATION = {
+    channelId: '19:channel@thread.tacv2',
+    tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+    conversationType: 'channel',
+    title: 'General',
+    confirmedAt: '2026-07-10T12:00:00Z',
+  }
+
+  async function openTeamsTabWithConversation(appName: string) {
+    mockChannel('teams-channel', {
+      teamsSettings: { appName, appId: '', tenantId: '' },
+      teams: [TEAMS_CONVERSATION],
+    })
+    await renderLoadedPage()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    return user
+  }
+
+  it('deletes a conversation through the same validation as Save', async () => {
+    const user = await openTeamsTabWithConversation('My Bot')
+
+    await user.click(screen.getByRole('button', { name: 'Delete General' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [string, string, { spec: unknown }]
+    const spec = body.spec as { teams: unknown[]; teamsSettings: { appName: string } }
+    expect(spec.teams).toEqual([])
+    expect(spec.teamsSettings.appName).toBe('My Bot')
+  })
+
+  it('refuses to delete a conversation while the Name field holds a value Save would refuse', async () => {
+    const user = await openTeamsTabWithConversation('evenfire')
+
+    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    await user.clear(nameInput)
+    fireEvent.change(nameInput, { target: { value: 'a'.repeat(81) } })
+
+    await user.click(screen.getByRole('button', { name: 'Delete General' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+
+    expect(
+      await screen.findByText('Teams bot name must be 80 characters or fewer.')
+    ).toBeInTheDocument()
+    // The whole point: this path used to persist a spec Save rejects.
+    expect(api.apiSend).not.toHaveBeenCalled()
   })
 })
