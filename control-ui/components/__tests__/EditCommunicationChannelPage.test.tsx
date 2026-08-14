@@ -532,10 +532,10 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
     })
   })
 
-  it('makes the Messaging endpoint hint conditional on the URL being available', async () => {
-    // Slack makes the equivalent hint conditional; the Teams hint stayed
-    // unconditional and kept telling the operator to use a URL that was not
-    // there whenever the field renders Unavailable.
+  it('tells the operator the URL is a path when no public origin is configured', async () => {
+    // Without an origin the field renders a bare path, which Teams cannot accept
+    // as a Messaging endpoint. Saying "use this URL" there contradicts the
+    // warning directly beneath it, so the hint has three states, not two.
     mockChannel('teams-support', { hostRef: 'agentjose' })
     await renderLoadedPage()
 
@@ -546,17 +546,36 @@ describe('EditCommunicationChannelPage Teams request URL', () => {
     expect(
       screen.getByText('Enter the Name above and this channel gets its Teams Request URL.')
     ).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+
+    // A URL now exists, but it is relative, so the hint must not claim it is usable.
+    expect(
+      screen.getByText(
+        'This is a path, not a full URL. Prefix it with your public webhook origin before using it as the Messaging endpoint.'
+      )
+    ).toBeInTheDocument()
     expect(
       screen.queryByText('Use this URL as the Messaging endpoint for the Teams bot app.')
     ).not.toBeInTheDocument()
+  })
 
+  it('tells the operator to use the URL directly once a public origin is configured', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-support', { hostRef: 'agentjose' })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
     await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
 
     expect(
       screen.getByText('Use this URL as the Messaging endpoint for the Teams bot app.')
     ).toBeInTheDocument()
     expect(
-      screen.queryByText('Enter the Name above and this channel gets its Teams Request URL.')
+      screen.queryByText(
+        'This is a path, not a full URL. Prefix it with your public webhook origin before using it as the Messaging endpoint.'
+      )
     ).not.toBeInTheDocument()
   })
 

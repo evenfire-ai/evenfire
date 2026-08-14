@@ -776,9 +776,11 @@ export default function EditCommunicationChannelPage() {
                         </button>
                       </div>
                       <span className="cu-field__hint">
-                        {teamsRequestUrl
-                          ? 'Use this URL as the Messaging endpoint for the Teams bot app.'
-                          : 'Enter the Name above and this channel gets its Teams Request URL.'}
+                        {!teamsRequestUrl
+                          ? 'Enter the Name above and this channel gets its Teams Request URL.'
+                          : canGenerateTeamsCommand(teamsRequestUrl)
+                            ? 'Use this URL as the Messaging endpoint for the Teams bot app.'
+                            : 'This is a path, not a full URL. Prefix it with your public webhook origin before using it as the Messaging endpoint.'}
                       </span>
                     </div>
                     {teamsRequestUrl ? (
