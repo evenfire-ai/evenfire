@@ -20,6 +20,15 @@ const sandboxUi = {
   onClosed: vi.fn(() => vi.fn()),
   onRefreshError: vi.fn(() => vi.fn()),
 }
+let emitFindResult:
+  | ((result: {
+      requestId: number
+      clientRequestId: number
+      activeMatchOrdinal: number
+      matches: number
+      finalUpdate: boolean
+    }) => void)
+  | null = null
 
 function installClerumApi(): void {
   ;(window as unknown as { clerum: unknown }).clerum = { sandboxUi }
@@ -31,6 +40,10 @@ describe('SandboxUiPage', () => {
     sandboxUi.setBounds.mockResolvedValue(undefined)
     sandboxUi.setVisible.mockResolvedValue(undefined)
     sandboxUi.findInPage.mockResolvedValue(17)
+    sandboxUi.onFindResult.mockImplementation(callback => {
+      emitFindResult = callback
+      return vi.fn()
+    })
     sandboxUi.stopFindInPage.mockResolvedValue(undefined)
     sandboxUi.focusActive.mockResolvedValue(true)
     installClerumApi()
@@ -195,12 +208,14 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.findInPage).toHaveBeenCalledWith('invoice', {
         forward: true,
         findNext: false,
+        clientRequestId: expect.any(Number),
       })
     })
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
     expect(sandboxUi.findInPage).toHaveBeenLastCalledWith('invoice', {
       forward: false,
       findNext: true,
+      clientRequestId: expect.any(Number),
     })
     fireEvent.keyDown(input, { key: 'Escape' })
     await waitFor(() => {
@@ -208,6 +223,60 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.focusActive).toHaveBeenCalled()
     })
     expect(screen.queryByRole('textbox', { name: 'Find in current app' })).toBeNull()
+  })
+
+  it('accepts the first native find result before the invoke response resolves', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.findInPage.mockReturnValueOnce(new Promise(() => undefined))
+
+    render(<SandboxUiPage localSearchRequestId={1} />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    const input = await screen.findByRole('textbox', { name: 'Find in current app' })
+    fireEvent.change(input, { target: { value: 'invoice' } })
+    const options = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    expect(options?.clientRequestId).toEqual(expect.any(Number))
+
+    emitFindResult?.({
+      requestId: 17,
+      clientRequestId: options.clientRequestId,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
+
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('1/2'))
+
+    fireEvent.change(input, { target: { value: 'receipt' } })
+    const nextOptions = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    expect(nextOptions.clientRequestId).not.toBe(options.clientRequestId)
+    emitFindResult?.({
+      requestId: 17,
+      clientRequestId: options.clientRequestId,
+      activeMatchOrdinal: 2,
+      matches: 9,
+      finalUpdate: true,
+    })
+    expect(screen.getByRole('status').textContent).toBe('0/0')
+    emitFindResult?.({
+      requestId: 18,
+      clientRequestId: nextOptions.clientRequestId,
+      activeMatchOrdinal: 1,
+      matches: 1,
+      finalUpdate: true,
+    })
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('1/1'))
   })
 
   it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {

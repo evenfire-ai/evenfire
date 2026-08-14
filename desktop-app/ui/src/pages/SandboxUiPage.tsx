@@ -174,7 +174,8 @@ export function SandboxUiPage({
   const [localSearchResult, setLocalSearchResult] = useState({ current: 0, total: 0 })
   const embedSlotRef = useRef<HTMLDivElement>(null)
   const localSearchInputRef = useRef<HTMLInputElement>(null)
-  const activeFindRequestIdRef = useRef<number | null>(null)
+  const nextFindClientRequestIdRef = useRef(0)
+  const activeFindClientRequestIdRef = useRef<number | null>(null)
   const lastLocalSearchRequestIdRef = useRef(0)
   const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
@@ -223,14 +224,14 @@ export function SandboxUiPage({
 
   useEffect(() => {
     return window.clerum.sandboxUi.onFindResult(result => {
-      if (result.requestId !== activeFindRequestIdRef.current) return
+      if (result.clientRequestId !== activeFindClientRequestIdRef.current) return
       setLocalSearchResult({ current: result.activeMatchOrdinal, total: result.matches })
     })
   }, [])
 
   const stopLocalSearch = useCallback(() => {
     const previous = localSearchPreviousFocusRef.current
-    activeFindRequestIdRef.current = null
+    activeFindClientRequestIdRef.current = null
     setLocalSearchOpen(false)
     setLocalSearchQuery('')
     setLocalSearchResult({ current: 0, total: 0 })
@@ -250,12 +251,15 @@ export function SandboxUiPage({
   const runLocalSearch = useCallback(
     async (query: string, options: { forward: boolean; findNext: boolean }) => {
       if (!query.trim()) {
-        activeFindRequestIdRef.current = null
+        activeFindClientRequestIdRef.current = null
         setLocalSearchResult({ current: 0, total: 0 })
         await window.clerum.sandboxUi.stopFindInPage()
         return
       }
-      activeFindRequestIdRef.current = await window.clerum.sandboxUi.findInPage(query, options)
+      if (!options.findNext) setLocalSearchResult({ current: 0, total: 0 })
+      const clientRequestId = ++nextFindClientRequestIdRef.current
+      activeFindClientRequestIdRef.current = clientRequestId
+      await window.clerum.sandboxUi.findInPage(query, { ...options, clientRequestId })
     },
     []
   )

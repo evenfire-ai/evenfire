@@ -1546,7 +1546,15 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'sandboxUi:findInPage',
-    async (event, payload: { query?: unknown; forward?: unknown; findNext?: unknown }) => {
+    async (
+      event,
+      payload: {
+        query?: unknown
+        forward?: unknown
+        findNext?: unknown
+        clientRequestId?: unknown
+      }
+    ) => {
       assertTrustedSender(event)
       const query = typeof payload?.query === 'string' ? payload.query : ''
       if (!query.trim() || query.length > 500) {
@@ -1555,11 +1563,17 @@ export function registerIpcHandlers(service: AppService): void {
       if (typeof payload?.forward !== 'boolean' || typeof payload?.findNext !== 'boolean') {
         throw new Error('find direction options must be boolean')
       }
+      if (!Number.isSafeInteger(payload?.clientRequestId) || Number(payload.clientRequestId) <= 0) {
+        throw new Error('find client request ID must be a positive safe integer')
+      }
+      const clientRequestId = Number(payload.clientRequestId)
       return service.findInActiveSandboxUi(
         query,
         { forward: payload.forward, findNext: payload.findNext },
         result => {
-          if (!event.sender.isDestroyed()) event.sender.send('sandboxUi:findResult', result)
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('sandboxUi:findResult', { ...result, clientRequestId })
+          }
         }
       )
     }

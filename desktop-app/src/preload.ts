@@ -500,13 +500,17 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
-    findInPage: (query: string, options: { forward: boolean; findNext: boolean }) =>
+    findInPage: (
+      query: string,
+      options: { forward: boolean; findNext: boolean; clientRequestId: number }
+    ) =>
       ipcRenderer.invoke('sandboxUi:findInPage', { query, ...options }) as Promise<number | null>,
     stopFindInPage: () => ipcRenderer.invoke('sandboxUi:stopFindInPage') as Promise<void>,
     focusActive: () => ipcRenderer.invoke('sandboxUi:focusActive') as Promise<boolean>,
     onFindResult: (
       callback: (result: {
         requestId: number
+        clientRequestId: number
         activeMatchOrdinal: number
         matches: number
         finalUpdate: boolean
@@ -516,12 +520,15 @@ const clerum = Object.freeze({
         const value = result as Record<string, unknown>
         if (
           Number.isInteger(value?.requestId) &&
+          Number.isSafeInteger(value?.clientRequestId) &&
+          Number(value.clientRequestId) > 0 &&
           Number.isInteger(value?.activeMatchOrdinal) &&
           Number.isInteger(value?.matches) &&
           typeof value?.finalUpdate === 'boolean'
         ) {
           callback({
             requestId: Number(value.requestId),
+            clientRequestId: Number(value.clientRequestId),
             activeMatchOrdinal: Number(value.activeMatchOrdinal),
             matches: Number(value.matches),
             finalUpdate: value.finalUpdate,

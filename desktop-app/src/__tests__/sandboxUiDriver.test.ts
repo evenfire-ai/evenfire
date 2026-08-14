@@ -14,6 +14,43 @@ import {
 } from '../sandboxUiDriver.js'
 
 describe('sandbox WebContents local find', () => {
+  it('does not lose a native result delivered as the first request starts', () => {
+    let listener: ((event: Electron.Event, result: Electron.FoundInPageResult) => void) | undefined
+    const result = {
+      requestId: 41,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      selectionArea: { x: 0, y: 0, width: 1, height: 1 },
+      finalUpdate: true,
+    }
+    const webContents = {
+      findInPage: vi.fn(() => {
+        listener?.({} as Electron.Event, result)
+        return 41
+      }),
+      on: vi.fn((_name: string, callback: typeof listener) => {
+        listener = callback
+        return webContents
+      }),
+      removeListener: vi.fn(() => webContents),
+    }
+    const onResult = vi.fn()
+
+    beginSandboxUiFind(
+      webContents as never,
+      'invoice',
+      { forward: true, findNext: false },
+      onResult
+    )
+
+    expect(onResult).toHaveBeenCalledWith({
+      requestId: 41,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
+  })
+
   it('uses the native producer, filters request IDs, minimizes results, and removes its listener', () => {
     let listener: ((event: Electron.Event, result: Electron.FoundInPageResult) => void) | undefined
     const webContents = {

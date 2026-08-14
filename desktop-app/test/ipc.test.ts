@@ -24,6 +24,7 @@ function makeTrustedEvent(senderId = 77) {
   const destroyedCallbacks: Array<() => void> = []
   const sender = {
     id: senderId,
+    isDestroyed: vi.fn(() => false),
     send: vi.fn(),
     once: vi.fn((eventName: string, callback: () => void) => {
       if (eventName === 'destroyed') destroyedCallbacks.push(callback)
@@ -158,7 +159,7 @@ describe('ipc host status stream handlers', () => {
   })
 
   it('validates and forwards only bounded trusted sandbox find requests', async () => {
-    const { event } = makeTrustedEvent()
+    const { event, sender } = makeTrustedEvent()
     const handler = testState.handlers.get('sandboxUi:findInPage')
 
     await expect(
@@ -167,16 +168,42 @@ describe('ipc host status stream handlers', () => {
     await expect(
       Promise.resolve(handler?.(event, { query: 'x', forward: 'yes', findNext: false }))
     ).rejects.toThrow('direction')
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          query: 'invoice',
+          forward: true,
+          findNext: false,
+          clientRequestId: 0,
+        })
+      )
+    ).rejects.toThrow('client request ID')
     expect(service.findInActiveSandboxUi).not.toHaveBeenCalled()
 
     await expect(
-      Promise.resolve(handler?.(event, { query: 'invoice', forward: false, findNext: true }))
+      Promise.resolve(
+        handler?.(event, {
+          query: 'invoice',
+          forward: false,
+          findNext: true,
+          clientRequestId: 4,
+        })
+      )
     ).resolves.toBe(9)
     expect(service.findInActiveSandboxUi).toHaveBeenCalledWith(
       'invoice',
       { forward: false, findNext: true },
       expect.any(Function)
     )
+    const onResult = service.findInActiveSandboxUi.mock.calls.at(-1)?.[2]
+    onResult?.({ requestId: 9, activeMatchOrdinal: 1, matches: 2, finalUpdate: true })
+    expect(sender.send).toHaveBeenCalledWith('sandboxUi:findResult', {
+      requestId: 9,
+      clientRequestId: 4,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
   })
 
   it('stops active sandbox find through a trusted sender only', async () => {

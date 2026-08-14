@@ -558,13 +558,14 @@ declare global {
         capturePreview: () => Promise<string | null>
         findInPage: (
           query: string,
-          options: { forward: boolean; findNext: boolean }
+          options: { forward: boolean; findNext: boolean; clientRequestId: number }
         ) => Promise<number | null>
         stopFindInPage: () => Promise<void>
         focusActive: () => Promise<boolean>
         onFindResult: (
           callback: (result: {
             requestId: number
+            clientRequestId: number
             activeMatchOrdinal: number
             matches: number
             finalUpdate: boolean

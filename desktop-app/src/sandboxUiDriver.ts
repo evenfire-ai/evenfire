@@ -702,8 +702,13 @@ export function beginSandboxUiFind(
   onResult: (result: SandboxUiFindResult) => void,
   isCurrent: () => boolean = () => true
 ): { requestId: number; cleanup: () => void } {
-  let requestId = -1
-  const listener = (_event: Electron.Event, result: Electron.FoundInPageResult) => {
+  let requestId: number | null = null
+  const pendingResults: Electron.FoundInPageResult[] = []
+  const deliver = (result: Electron.FoundInPageResult) => {
+    if (requestId === null) {
+      pendingResults.push(result)
+      return
+    }
     if (!isCurrent() || result.requestId !== requestId) return
     onResult({
       requestId: result.requestId,
@@ -712,8 +717,10 @@ export function beginSandboxUiFind(
       finalUpdate: result.finalUpdate,
     })
   }
+  const listener = (_event: Electron.Event, result: Electron.FoundInPageResult) => deliver(result)
   webContents.on('found-in-page', listener)
   requestId = webContents.findInPage(query, options)
+  for (const result of pendingResults.splice(0)) deliver(result)
   return {
     requestId,
     cleanup: () => webContents.removeListener('found-in-page', listener),
