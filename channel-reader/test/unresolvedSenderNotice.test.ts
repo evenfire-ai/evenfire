@@ -477,7 +477,11 @@ describe('unresolved notice global cap', () => {
     expect(sendMessage).toHaveBeenCalledTimes(UNRESOLVED_NOTICE_GLOBAL_CAP)
   })
 
-  it('warns once per blocked send once the cap is reached, without deduplicating', async () => {
+  it('warns exactly once for the transition into the capped state, not once per blocked send', async () => {
+    // A prior ruling had this NOT deduplicate, on the theory that a repeated
+    // line is the signal. That was wrong: at the cap, one warning per inbound
+    // message from every unresolved sender across every provider is loudest in
+    // exactly the misconfiguration the cap exists to contain.
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const { deliverBatch, buildMessage } = buildReader({ medium: 'teams' })
 
@@ -489,12 +493,41 @@ describe('unresolved notice global cap', () => {
     const capWarnings = warnSpy.mock.calls.filter(call =>
       String(call[0]).includes('Unresolved-sender notice cap')
     )
-    // One line per blocked send (5 excess messages), not one line total: a
-    // repeated line is the signal that this is an ongoing condition.
-    expect(capWarnings).toHaveLength(5)
+    expect(capWarnings).toHaveLength(1)
     expect(String(capWarnings[0][0])).toContain(String(UNRESOLVED_NOTICE_GLOBAL_CAP))
 
     warnSpy.mockRestore()
+  })
+
+  it('warns again on a later trip into the cap, once the TTL sweep drains records below it', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { deliverBatch, buildMessage, runSweep } = buildReader({ medium: 'teams' })
+
+    const firstBatch = Array.from({ length: UNRESOLVED_NOTICE_GLOBAL_CAP + 5 }, (_, i) =>
+      buildMessage('C1', `U${i}`, 'T1')
+    )
+    await deliverBatch(firstBatch)
+
+    // Past UNRESOLVED_NOTICE_TTL_MS (24h): the sweep evicts every record from the
+    // first batch, dropping the map back under the cap.
+    await vi.advanceTimersByTimeAsync(25 * 60 * 60 * 1000)
+    runSweep()
+
+    const secondBatch = Array.from({ length: UNRESOLVED_NOTICE_GLOBAL_CAP + 5 }, (_, i) =>
+      buildMessage('C1', `V${i}`, 'T1')
+    )
+    await deliverBatch(secondBatch)
+
+    const capWarnings = warnSpy.mock.calls.filter(call =>
+      String(call[0]).includes('Unresolved-sender notice cap')
+    )
+    // One for the first trip into the cap, one for the second: still not one
+    // per blocked send within either batch.
+    expect(capWarnings).toHaveLength(2)
+
+    warnSpy.mockRestore()
+    vi.useRealTimers()
   })
 })
 

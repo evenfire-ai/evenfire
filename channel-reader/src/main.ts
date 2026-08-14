@@ -115,6 +115,13 @@ const UNRESOLVED_NOTICE_COPY_TELEGRAM =
  * into a flooder. Exported so tests assert against the real value.
  */
 export const UNRESOLVED_NOTICE_GLOBAL_CAP = 50
+/**
+ * Limiter key prefix for a provider identity with no workspace/tenant scope.
+ * Only Telegram ever reaches this: Slack and Teams identities always carry a
+ * real workspaceId (sendUnresolvedSenderNotice returns early otherwise), so
+ * this literal can never collide with an actual workspace or tenant id.
+ */
+const UNRESOLVED_NOTICE_NO_WORKSPACE_KEY = 'no-workspace'
 const SLACK_VERIFICATION_SCAN_INTERVAL_MS = 60 * 1000
 const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
 /**
@@ -301,6 +308,13 @@ export class ChannelReader {
   private processedProviderEvents: Map<string, ProcessedProviderEvent> = new Map()
   /** Unresolved-sender notices already sent, keyed by workspace + user + channel. */
   private unresolvedNoticesSent: Map<string, { seenAt: number }> = new Map()
+  /**
+   * Whether the global-cap warning below has already logged for the current
+   * capped episode. Reset to false once cleanupStaleApprovals' TTL sweep drains
+   * unresolvedNoticesSent back under UNRESOLVED_NOTICE_GLOBAL_CAP, so a later
+   * trip into the cap logs again instead of staying silent forever.
+   */
+  private unresolvedNoticeCapLogged = false
   /** Adapter route key by provider + CommunicationChannel ref. */
   private adapterKeysByCommunicationChannel: Map<string, string> = new Map()
   /** Adapter route key by provider + runtime channel id. */
@@ -1590,16 +1604,22 @@ export class ChannelReader {
     // does. The SEND still targets msg.channelId, which is what replyChannelId hands
     // every other outbound Slack call; only the dedupe identity is provider-scoped.
     const conversationId = identity?.providerChannelId?.trim() || channelId
-    const key = `${workspaceId}:${userId}:${conversationId}`
+    const key = `${workspaceId ?? UNRESOLVED_NOTICE_NO_WORKSPACE_KEY}:${userId}:${conversationId}`
     if (this.unresolvedNoticesSent.has(key)) return
     if (this.unresolvedNoticesSent.size >= UNRESOLVED_NOTICE_GLOBAL_CAP) {
-      // Not deduplicated on purpose: a repeated line is the signal that this is
-      // an ongoing condition, not a one-off, while every provider goes silent
-      // for unresolved senders until the TTL sweep frees a slot.
-      console.warn(
-        `[Main] Unresolved-sender notice cap (${UNRESOLVED_NOTICE_GLOBAL_CAP}) reached; ` +
-          `suppressing notice to ${userId} in ${channelId}.`
-      )
+      // Log only on the transition into the capped state, not on every blocked
+      // send: at the cap, every inbound message from every unresolved sender
+      // across every provider would otherwise emit its own warning, which is
+      // loudest in exactly the misconfiguration this cap exists to contain.
+      // unresolvedNoticeCapLogged resets once cleanupStaleApprovals' TTL sweep
+      // drains the map back under the cap, so a later trip logs again.
+      if (!this.unresolvedNoticeCapLogged) {
+        this.unresolvedNoticeCapLogged = true
+        console.warn(
+          `[Main] Unresolved-sender notice cap (${UNRESOLVED_NOTICE_GLOBAL_CAP}) reached; ` +
+            `suppressing further notices until the TTL sweep frees a slot.`
+        )
+      }
       return
     }
     // Record on ATTEMPT, not on success: a conversation Slack keeps rejecting
@@ -2267,6 +2287,11 @@ export class ChannelReader {
       if (now - notice.seenAt > UNRESOLVED_NOTICE_TTL_MS) {
         this.unresolvedNoticesSent.delete(key)
       }
+    }
+    // A later trip into the cap must warn again, so once eviction above drains
+    // the map back under it, allow the next crossing to log.
+    if (this.unresolvedNoticesSent.size < UNRESOLVED_NOTICE_GLOBAL_CAP) {
+      this.unresolvedNoticeCapLogged = false
     }
   }
 

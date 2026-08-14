@@ -1,3 +1,5 @@
+import { toKebabInput } from './string'
+
 /**
  * Placeholder origin shown in guidance copy, and used to build a placeholder
  * command, when the deployment has no public webhook address to substitute.
@@ -16,6 +18,17 @@ const TEAMS_BOT_NAME_RE = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/
  */
 export function isValidTeamsBotName(value: string): boolean {
   return TEAMS_BOT_NAME_RE.test(value.trim())
+}
+
+/**
+ * Normalizes free-typed input into the Teams CLI `--name` shape as the user
+ * types, so the field can never hold something isValidTeamsBotName rejects
+ * except through an empty or in-progress value. Shared by the create and edit
+ * pages so both normalize on the same rule instead of one drifting from the
+ * other -- which is how the edit page persisted a raw, unvalidated name.
+ */
+export function toTeamsBotNameInput(value: string): string {
+  return toKebabInput(value).slice(0, 64)
 }
 
 /**

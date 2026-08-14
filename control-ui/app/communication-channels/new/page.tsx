@@ -40,6 +40,7 @@ import {
   buildTeamsAppCreateCommand,
   canGenerateTeamsCommand,
   isValidTeamsBotName,
+  toTeamsBotNameInput,
 } from '@lib/teamsSetup'
 
 type HostItem = {
@@ -98,10 +99,6 @@ function credentialLabel(key: keyof CredentialDraft): string {
     default:
       return String(key)
   }
-}
-
-function toTeamsBotNameInput(value: string): string {
-  return toKebabInput(value).slice(0, 64)
 }
 
 function providerSettings(provider: ChannelProvider, draft: DraftState) {

@@ -704,3 +704,77 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
     expect(screen.queryByText(/no public webhook origin/)).not.toBeInTheDocument()
   })
 })
+
+/**
+ * The create page normalizes the Name field through toTeamsBotNameInput on
+ * every keystroke and blocks submit on isValidTeamsBotName. This page used to
+ * write event.target.value raw and never validated the field on Save, so a
+ * value Create would have rejected -- e.g. one with a space, or one that
+ * starts with a digit, which toTeamsBotNameInput's kebab-casing does not fix
+ * -- persisted straight to spec.teamsSettings.appName.
+ */
+describe('EditCommunicationChannelPage Teams name validation', () => {
+  it('normalizes the Name field into the Teams CLI shape as the operator types, and offers a valid placeholder', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: '' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    // The old placeholder, "Your Teams Bot", is itself a value the field
+    // should reject: it has spaces and capitals.
+    expect(nameInput.placeholder).toBe('evenfire-bot')
+
+    await user.type(nameInput, 'Evenfire Bot!')
+
+    expect(nameInput).toHaveValue('evenfire-bot')
+  })
+
+  it('blocks Save and does not persist a Teams bot name that is still invalid after normalization', async () => {
+    // Kebab-casing lowercases and strips disallowed characters, but it does not
+    // enforce a leading letter, so a name typed as "123 Bot" survives
+    // normalization as "123-bot" -- non-empty, but still invalid because it
+    // starts with a digit. Save must catch what normalization does not.
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    await user.clear(nameInput)
+    await user.type(nameInput, '123 Bot')
+    expect(nameInput).toHaveValue('123-bot')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(
+      await screen.findByText(
+        'Teams bot name must start with a letter and use lowercase letters, numbers, and hyphens.'
+      )
+    ).toBeInTheDocument()
+    expect(api.apiSend).not.toHaveBeenCalled()
+    expect(navigation.push).not.toHaveBeenCalled()
+  })
+
+  it('saves a valid Teams bot name typed over the previous value', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    await user.clear(nameInput)
+    await user.type(nameInput, 'evenfire-bot-2')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [string, string, { spec: unknown }]
+    expect((body.spec as { teamsSettings: { appName: string } }).teamsSettings.appName).toBe(
+      'evenfire-bot-2'
+    )
+  })
+})

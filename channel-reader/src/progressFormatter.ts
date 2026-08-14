@@ -36,6 +36,17 @@ export function describeToolError(errorSummary: string | undefined): string {
   if (/timed out|timeout|etimedout|deadline/.test(raw)) return 'unavailable (timed out).'
   if (/rate limit|429|too many requests/.test(raw)) return 'unavailable (rate limited).'
   if (/not found|404|no such/.test(raw)) return 'unavailable (not found).'
+  // Checked before the invalid-input category below: when a message carries
+  // both a size-limit signal and generic "invalid" wording (e.g. "invalid
+  // request, payload too large"), the size limit is the more specific and
+  // more useful diagnosis, so it must win deterministically.
+  if (/too large|\b413\b/.test(raw)) return 'unavailable (too large).'
+  // Anchored on whole words so this does not fire on "invalidated" (bare
+  // "invalid"), the same way the authentication check above must not fire on
+  // "author".
+  if (/\binvalid\b|\bmalformed\b|\bbad request\b|\b400\b/.test(raw)) {
+    return 'unavailable (invalid input).'
+  }
   return 'unavailable.'
 }
 

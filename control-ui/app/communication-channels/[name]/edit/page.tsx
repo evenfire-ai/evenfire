@@ -47,6 +47,7 @@ import {
   buildTeamsAppCreateCommand,
   canGenerateTeamsCommand,
   isValidTeamsBotName,
+  toTeamsBotNameInput,
 } from '@lib/teamsSetup'
 
 type ChannelProvider = CommunicationChannelProvider
@@ -301,6 +302,16 @@ export default function EditCommunicationChannelPage() {
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!draft || saving) return
+    // buildCommunicationChannelSpec writes teamsAppName into spec.teamsSettings.appName
+    // whenever it is non-empty, regardless of which provider tab is active, so an
+    // invalid value typed on the Teams tab must block Save here rather than only
+    // gating the Teams-tab Copy button (which a user editing another tab never sees).
+    if (draft.teamsAppName.trim() && !isValidTeamsBotName(draft.teamsAppName)) {
+      setSaveError(
+        'Teams bot name must start with a letter and use lowercase letters, numbers, and hyphens.'
+      )
+      return
+    }
     await persistDraft(draft, `Communication channel ${name} updated.`)
     backToChannels()
   }
@@ -695,14 +706,14 @@ export default function EditCommunicationChannelPage() {
                             current
                               ? {
                                   ...current,
-                                  teamsAppName: event.target.value,
+                                  teamsAppName: toTeamsBotNameInput(event.target.value),
                                   // Typed, so no longer just an inherited label.
                                   teamsAppNameFromAnnotation: false,
                                 }
                               : current
                           )
                         }
-                        placeholder="Your Teams Bot"
+                        placeholder="evenfire-bot"
                         disabled={saving}
                         autoComplete="off"
                       />
