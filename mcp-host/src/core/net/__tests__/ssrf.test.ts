@@ -6,7 +6,8 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as dns from 'dns/promises'
-import { SsrfBlockedError, resolvePinnedPublicIp } from '../ssrf'
+import http from 'node:http'
+import { SsrfBlockedError, requestPinned, resolvePinnedPublicIp } from '../ssrf'
 
 vi.mock('dns/promises', () => ({
   resolve4: vi.fn(),
@@ -58,5 +59,77 @@ describe('resolvePinnedPublicIp', () => {
     await expect(resolvePinnedPublicIp(new URL('https://nope.invalid/'))).rejects.toThrow(
       /DNS resolution failed/
     )
+  })
+})
+
+describe('requestPinned — bounded in time and bytes', () => {
+  let server: http.Server
+  let port: number
+  const servers: http.Server[] = []
+
+  async function startServer(handler: http.RequestListener): Promise<number> {
+    const s = http.createServer(handler)
+    servers.push(s)
+    await new Promise<void>(resolve => s.listen(0, '127.0.0.1', resolve))
+    return (s.address() as { port: number }).port
+  }
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(() => r()))))
+  })
+
+  it('resolves a normal response (happy path preserved)', async () => {
+    port = await startServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"ok":true}')
+    })
+    const out = await requestPinned({
+      url: new URL(`http://localhost:${port}/`),
+      method: 'GET',
+      headers: {},
+      pinnedIp: '127.0.0.1',
+      timeoutMs: 5000,
+    })
+    expect(out.statusCode).toBe(200)
+    expect(out.body).toBe('{"ok":true}')
+  })
+
+  it('rejects (does not buffer) once the body exceeds maxBytes', async () => {
+    port = await startServer((_req, res) => {
+      res.writeHead(200)
+      res.end('x'.repeat(200_000)) // 200 KB, well over the cap below
+    })
+    await expect(
+      requestPinned({
+        url: new URL(`http://localhost:${port}/`),
+        method: 'GET',
+        headers: {},
+        pinnedIp: '127.0.0.1',
+        timeoutMs: 5000,
+        maxBytes: 1024,
+      })
+    ).rejects.toThrow(/maxBytes/)
+  })
+
+  it('honors the abort signal even while the socket is active (absolute deadline)', async () => {
+    // Server sends headers + a byte every 20ms and NEVER ends — a Node socket
+    // idle timeout would keep resetting, but the abort must still settle it.
+    port = await startServer((_req, res) => {
+      res.writeHead(200)
+      const t = setInterval(() => res.write('.'), 20)
+      res.on('close', () => clearInterval(t))
+    })
+    const started = Date.now()
+    await expect(
+      requestPinned({
+        url: new URL(`http://localhost:${port}/`),
+        method: 'GET',
+        headers: {},
+        pinnedIp: '127.0.0.1',
+        timeoutMs: 10_000, // idle timer would only fire at 10s
+        signal: AbortSignal.timeout(80), // absolute deadline wins first
+      })
+    ).rejects.toThrow(/aborted/)
+    expect(Date.now() - started).toBeLessThan(2000) // settled promptly, not at 10s
   })
 })

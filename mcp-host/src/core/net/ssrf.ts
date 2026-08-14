@@ -247,8 +247,17 @@ export async function resolvePinnedPublicIp(url: URL): Promise<string> {
 
 /**
  * Make an HTTP(S) request to a caller-validated, DNS-pinned IP while keeping the
- * original hostname in the Host header and TLS SNI. Reads the full body (callers
- * apply their own size/parse policy) and rejects on error/timeout.
+ * original hostname in the Host header and TLS SNI. Rejects on error/timeout.
+ *
+ * The response is bounded in BOTH dimensions so an active-but-unbounded peer
+ * cannot hang or OOM the process:
+ *   - `signal` — an ABSOLUTE deadline (e.g. `AbortSignal.timeout`). Node's socket
+ *     `timeout` (below) is an IDLE timer that a trickling peer resets on every
+ *     byte; the abort settles the request regardless of activity.
+ *   - `maxBytes` — the body is capped WHILE streaming: once exceeded the request
+ *     is destroyed, so an oversized body is never fully buffered (no memory spike,
+ *     no `ERR_STRING_TOO_LONG` from `Buffer.concat().toString()`).
+ * Both are optional; omitting them preserves the prior behavior for other callers.
  */
 export function requestPinned(opts: {
   url: URL
@@ -257,9 +266,19 @@ export function requestPinned(opts: {
   body?: string
   pinnedIp: string
   timeoutMs: number
+  /** Absolute-deadline abort (idle-independent). Destroys the request on abort. */
+  signal?: AbortSignal
+  /** Hard response-body cap; destroy + reject once exceeded (bytes). */
+  maxBytes?: number
 }): Promise<{ statusCode: number; body: string }> {
-  const { url, method, headers, body, pinnedIp, timeoutMs } = opts
+  const { url, method, headers, body, pinnedIp, timeoutMs, signal, maxBytes } = opts
   return new Promise((resolve, reject) => {
+    let settled = false
+    const settle = (fn: () => void): void => {
+      if (settled) return
+      settled = true
+      fn()
+    }
     const isHttps = url.protocol === 'https:'
     const client = isHttps ? https : http
     const defaultPort = isHttps ? 443 : 80
@@ -280,16 +299,34 @@ export function requestPinned(opts: {
     }
     const req = client.request(requestOptions, res => {
       const chunks: Buffer[] = []
-      res.on('data', chunk => chunks.push(chunk))
-      res.on('end', () => {
-        resolve({ statusCode: res.statusCode!, body: Buffer.concat(chunks).toString('utf-8') })
+      let total = 0
+      res.on('data', chunk => {
+        total += chunk.length
+        if (maxBytes !== undefined && total > maxBytes) {
+          // Destroy before buffering the over-limit chunk — 'error' → reject.
+          req.destroy(new Error('response exceeded maxBytes'))
+          return
+        }
+        chunks.push(chunk)
       })
+      res.on('end', () =>
+        settle(() =>
+          resolve({ statusCode: res.statusCode!, body: Buffer.concat(chunks).toString('utf-8') })
+        )
+      )
     })
-    req.on('error', reject)
+    req.on('error', err => settle(() => reject(err)))
     req.on('timeout', () => {
       req.destroy()
-      reject(new Error('Request timeout'))
+      settle(() => reject(new Error('Request timeout')))
     })
+    if (signal) {
+      const onAbort = (): void => {
+        req.destroy(new Error('request aborted (deadline)'))
+      }
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
     if (body) req.write(body)
     req.end()
   })

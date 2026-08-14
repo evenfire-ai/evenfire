@@ -3070,6 +3070,18 @@ async function main(): Promise<void> {
 // side-effect free allows the authoritative initialization contract to be
 // regression-tested without starting the service.
 if (require.main === module) {
+  // Global crash guards (defense-in-depth): a throw that escapes a stray event
+  // listener (e.g. a transport listener) must be LOGGED, not a silent process
+  // exit. uncaughtException leaves the process in an undefined state, so we log
+  // and exit non-zero for a clean k8s restart; an unhandledRejection is logged
+  // for triage but is not treated as fatal on its own.
+  process.on('uncaughtException', (err, origin) => {
+    console.error(`[Main] FATAL uncaughtException (${origin}):`, err)
+    process.exit(1)
+  })
+  process.on('unhandledRejection', reason => {
+    console.error('[Main] unhandledRejection:', reason)
+  })
   main().catch(error => {
     console.error('[Main] Fatal error:', error)
     process.exit(1)

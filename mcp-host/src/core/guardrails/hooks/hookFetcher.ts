@@ -57,7 +57,7 @@ export function buildHookUrl(endpoint: string, path: string, point: LifecyclePoi
  * the `FetchLike` shape so the outcome classification is shared with the
  * in-cluster path. Throws `SsrfBlockedError` on a blocked/unverifiable host.
  */
-function makeSsrfGuardedFetch(timeoutMs: number): FetchLike {
+function makeSsrfGuardedFetch(timeoutMs: number, maxBytes: number): FetchLike {
   return async (urlStr, init) => {
     const url = new URL(urlStr)
     if (url.protocol !== 'https:') {
@@ -71,16 +71,58 @@ function makeSsrfGuardedFetch(timeoutMs: number): FetchLike {
       body: init.body,
       pinnedIp,
       timeoutMs,
+      // Absolute deadline (idle-independent) + streaming byte cap: a trickling or
+      // flooding remote hook can no longer hang or OOM the pod (settles → §8.6).
+      signal: init.signal,
+      maxBytes,
     })
     return { status: statusCode, text: async () => body }
+  }
+}
+
+/**
+ * In-cluster transport (default): the global `fetch` honors the abort `signal`
+ * (absolute deadline) and the body is read WITH a streaming byte cap, so an
+ * oversized in-cluster response is never fully buffered either.
+ */
+function makeInClusterFetch(maxBytes: number): FetchLike {
+  return async (urlStr, init) => {
+    const res = await (globalThis.fetch as unknown as (u: string, i: unknown) => Promise<Response>)(
+      urlStr,
+      init
+    )
+    return {
+      status: res.status,
+      text: async () => {
+        const stream = res.body as ReadableStream<Uint8Array> | null
+        if (!stream) return res.text()
+        const reader = stream.getReader()
+        const chunks: Buffer[] = []
+        let total = 0
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) {
+            total += value.length
+            if (total > maxBytes) {
+              await reader.cancel()
+              throw new Error('response exceeded maxBytes') // → caught → unavailable
+            }
+            chunks.push(Buffer.from(value))
+          }
+        }
+        return Buffer.concat(chunks).toString('utf-8')
+      },
+    }
   }
 }
 
 export function createHookFetcher(deps: HookFetcherDeps): HookFetcher {
   const timeoutMs = deps.timeoutMs ?? 5000
   const maxOutputBytes = deps.maxOutputBytes ?? 65536
-  const inClusterFetch: FetchLike = deps.fetchImpl ?? (globalThis.fetch as unknown as FetchLike)
-  const externalFetch: FetchLike = deps.externalFetchImpl ?? makeSsrfGuardedFetch(timeoutMs)
+  const inClusterFetch: FetchLike = deps.fetchImpl ?? makeInClusterFetch(maxOutputBytes)
+  const externalFetch: FetchLike =
+    deps.externalFetchImpl ?? makeSsrfGuardedFetch(timeoutMs, maxOutputBytes)
 
   return async ({ point, descriptor, body }) => {
     const url = buildHookUrl(descriptor.endpoint, descriptor.path, point)

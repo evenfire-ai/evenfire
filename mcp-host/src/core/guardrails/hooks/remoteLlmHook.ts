@@ -75,7 +75,16 @@ export class RemoteLlmHook {
     /** Shared so a trip survives the per-task rebuild of this instance (§8.6). */
     private readonly breakers: HookBreakerRegistry = defaultBreakerRegistry,
     /** Injectable clock for deterministic breaker tests. */
-    private readonly now: () => number = () => Date.now()
+    private readonly now: () => number = () => Date.now(),
+    /**
+     * Belt-and-braces hard deadline (§8.6): an ABSOLUTE ceiling on every hook
+     * dial, independent of the transport's own timeout. If the transport ever
+     * fails to settle (a signal that wasn't honored, a socket idle-timer reset by
+     * a trickling peer), the dial still resolves to `unavailable` after this,
+     * so the §8.6 fail-posture always applies and the await can never hang. Set
+     * well above the transport timeout so normal timeouts settle there first.
+     */
+    private readonly hardDeadlineMs: number = 15000
   ) {}
 
   private has(cap: Capability): boolean {
@@ -119,7 +128,7 @@ export class RemoteLlmHook {
       // Breaker open: skip the dial (and its timeout); report unavailable.
       return { status: 0, body: undefined, unavailable: true }
     }
-    const res = await this.fetch(args)
+    const res = await this.fetchWithDeadline(args)
     if (engaged) {
       const policy = this.descriptor.onUnavailable!
       if (res.unavailable) {
@@ -140,6 +149,31 @@ export class RemoteLlmHook {
       }
     }
     return res
+  }
+
+  /**
+   * Race the transport against an absolute deadline so a dial that never settles
+   * (buggy/unhonored transport timeout) still yields `unavailable` rather than
+   * hanging the awaiting turn. Promise.race attaches a handler to the loser, so a
+   * late transport rejection is not an unhandled rejection.
+   */
+  private fetchWithDeadline(args: {
+    point: LifecyclePoint
+    descriptor: HookDescriptor
+    body: unknown
+  }): Promise<HookHttpResult> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<HookHttpResult>(resolve => {
+      timer = setTimeout(
+        () => resolve({ status: 0, body: undefined, unavailable: true }),
+        this.hardDeadlineMs
+      )
+      // Don't let the backstop timer keep the event loop alive.
+      ;(timer as { unref?: () => void }).unref?.()
+    })
+    return Promise.race([this.fetch(args), deadline]).finally(() => {
+      if (timer) clearTimeout(timer)
+    })
   }
 
   private handles(point: LifecyclePoint): boolean {

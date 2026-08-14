@@ -309,6 +309,34 @@ describe('quarantine (§8.2 digest mismatch → fail-closed, N11)', () => {
   })
 })
 
+describe('hard deadline (§8.6 belt-and-braces)', () => {
+  const neverSettles: HookFetcher = () => new Promise<HookHttpResult>(() => {})
+
+  it('a transport that never settles → unavailable → fail-mode (deny for may_deny)', async () => {
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_deny'], failMode: 'closed', lifecyclePoints: ['moderate'] }),
+      neverSettles,
+      new HookBreakerRegistry(),
+      () => 0,
+      5 // hardDeadlineMs = 5ms so the deadline wins deterministically
+    )
+    const c = await h.moderate(req())
+    expect(c?.decision).toBe('deny')
+    expect(c?.reasonCode).toBe('hook_unavailable')
+  })
+
+  it('a never-settling advisory hook → no contribution (skip), not a hang', async () => {
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_add_context'], failMode: 'open', lifecyclePoints: ['pre_call'] }),
+      neverSettles,
+      new HookBreakerRegistry(),
+      () => 0,
+      5
+    )
+    expect(await h.preCall(req())).toBeNull()
+  })
+})
+
 describe('circuit breaker (§8.6)', () => {
   // Advisory hook (may_add_context, not may_deny) that opts into breaker mode.
   const advisory = (over: Partial<HookDescriptor> = {}): HookDescriptor =>
