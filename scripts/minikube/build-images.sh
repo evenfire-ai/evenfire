@@ -97,6 +97,10 @@ SKIP_PUBLIC=false
 VERIFY_ONLY=false
 PUBLIC_ONLY=false
 ONLY_SVC=""
+# The commit locally built images report as their build. Overridable so a dirty
+# worktree can stamp something honest ("local", a branch name); empty when this
+# is not a git checkout, which reads downstream as no build at all.
+BUILD_REVISION="${BUILD_REVISION:-$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo '')}"
 FAILED_IMAGES=()
 MINIKUBE_PRELOAD_BASE_IMAGES="${MINIKUBE_PRELOAD_BASE_IMAGES:-true}"
 MINIKUBE_BASE_IMAGE_PULL_RETRIES="${MINIKUBE_BASE_IMAGE_PULL_RETRIES:-3}"
@@ -587,6 +591,14 @@ build_image() {
   local docker_args=(-t "$tag")
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
+  fi
+  # Same stamp build-publish.yml applies in CI, so a locally built image reports
+  # the commit it came from instead of an empty build. Passed only to images that
+  # declare the arg: docker warns about unconsumed build-args, and that warning
+  # would be noise across the twenty-odd images that have not adopted it.
+  local dockerfile_path=${dockerfile:-"$dir/Dockerfile"}
+  if [ -n "$BUILD_REVISION" ] && grep -q '^ARG BUILD_REVISION' "$dockerfile_path" 2>/dev/null; then
+    docker_args+=(--build-arg "BUILD_REVISION=$BUILD_REVISION")
   fi
   local build_cmd=(docker build "${docker_args[@]}" "$dir")
   if ! "${build_cmd[@]}" 2>&1 | tail -3; then

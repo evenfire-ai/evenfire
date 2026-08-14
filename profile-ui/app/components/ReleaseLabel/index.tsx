@@ -7,6 +7,7 @@ import {
   readCachedReleaseIdentity,
   subscribeReleaseIdentity,
 } from '@lib/releaseIdentity'
+import type { ReleaseIdentity } from '@lib/releaseIdentity'
 import type { ReleaseIdentityState, ReleaseLabelProps } from './types'
 
 // The platform release the tenant is running, read from external-rest-api's
@@ -21,13 +22,15 @@ import type { ReleaseIdentityState, ReleaseLabelProps } from './types'
 export function useReleaseIdentity(): ReleaseIdentityState {
   const cached = readCachedReleaseIdentity()
   const [releaseId, setReleaseId] = useState<string | null>(cached?.releaseId ?? null)
+  const [buildRevision, setBuildRevision] = useState(cached?.buildRevision ?? '')
   const [loading, setLoading] = useState(!cached)
 
   useEffect(() => {
     let active = true
-    const apply = (identity: { releaseId: string } | null) => {
+    const apply = (identity: ReleaseIdentity | null) => {
       if (!active) return
       setReleaseId(identity?.releaseId ?? null)
+      setBuildRevision(identity?.buildRevision ?? '')
       setLoading(false)
     }
 
@@ -42,7 +45,7 @@ export function useReleaseIdentity(): ReleaseIdentityState {
     }
   }, [])
 
-  return { releaseId, loading }
+  return { releaseId, buildRevision, loading }
 }
 
 export function ReleaseLabel({ className }: ReleaseLabelProps) {

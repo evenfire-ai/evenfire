@@ -1,3 +1,5 @@
+import { normalizeBuildRevision } from './buildRevision.js'
+
 type Config = {
   port: number
   jsonBodyLimit: string
@@ -14,6 +16,7 @@ type Config = {
   desktopRpcProxyBaseUrl: string
   desktopAppName: string
   desktopReleaseBaseUrl: string
+  buildRevision: string
 }
 
 function required(name: string): string {
@@ -126,6 +129,10 @@ export const config: Config = {
     process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL ||
     'https://github.com/evenfire-ai/evenfire/releases'
   ).replace(/\/+$/, ''),
+  // Not an EXTERNAL_REST_API_* variable on purpose: this one is baked into the
+  // image by its Dockerfile, not configured per deployment, and every service
+  // that adopts the pattern reads the same name.
+  buildRevision: normalizeBuildRevision(process.env.BUILD_REVISION),
 }
 
 if (process.env.NODE_ENV === 'production' && config.corsOrigin === '*') {

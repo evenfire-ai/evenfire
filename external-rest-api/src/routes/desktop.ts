@@ -26,6 +26,11 @@ export function createDesktopRouter(): Router {
       rpcProxyVersion: releaseManifest.rpcProxyVersion,
       desktopVersion: releaseManifest.desktopVersion,
       minimumDesktopVersion: releaseManifest.minimumDesktopVersion,
+      // This image's own commit, not the platform's: build-publish.yml rebuilds
+      // only the services whose paths changed, so between releases each
+      // component can be from a different commit. Empty when nothing stamped it
+      // (a local build), which clients render as no build at all.
+      buildRevision: config.buildRevision,
       releaseTag: tag,
       releaseUrl: `${config.desktopReleaseBaseUrl}/tag/${encodeURIComponent(tag)}`,
     })

@@ -12,7 +12,7 @@ import type { ProfileRouteKey, ProfileSidebarItem, SidebarProps } from './types'
 export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: SidebarProps) {
   const { approvalTargets, approvalTargetsLoading, canManageMembers, manageableTeamsLoading } =
     useProfileAccess()
-  const { releaseId } = useReleaseIdentity()
+  const { releaseId, buildRevision } = useReleaseIdentity()
   const hasExternalChannelAccess = approvalTargets.length > 0
 
   const navigationItems = (
@@ -27,7 +27,7 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
       className={`cu-sidebar${isOpen ? ' cu-sidebar--open' : ''}`}
       aria-label="Main navigation"
     >
-      <div className="cu-sidebar__brand" title={formatReleaseTitle(releaseId)}>
+      <div className="cu-sidebar__brand" title={formatReleaseTitle(releaseId, buildRevision)}>
         <Image
           className="cu-sidebar__brand-mark"
           src="/brand/logo.svg"

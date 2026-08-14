@@ -9,9 +9,29 @@ import {
   resetReleaseIdentityCache,
   subscribeReleaseIdentity,
 } from '../lib/releaseIdentity'
+import type { ReleaseIdentity } from '../lib/releaseIdentity'
 
 test('normalizeReleaseIdentity keeps a trimmed release id', () => {
-  assert.deepEqual(normalizeReleaseIdentity({ releaseId: ' v0.6.0 ' }), { releaseId: 'v0.6.0' })
+  assert.deepEqual(normalizeReleaseIdentity({ releaseId: ' v0.6.0 ' }), {
+    releaseId: 'v0.6.0',
+    buildRevision: '',
+  })
+})
+
+test('normalizeReleaseIdentity keeps the build revision when the image serves one', () => {
+  assert.deepEqual(normalizeReleaseIdentity({ releaseId: 'v0.6.0', buildRevision: ' 4be949d ' }), {
+    releaseId: 'v0.6.0',
+    buildRevision: '4be949d',
+  })
+})
+
+// An external-rest-api image built before the build stamp landed omits the
+// field entirely. That must read as "no build", not break the identity.
+test('normalizeReleaseIdentity tolerates a payload with no build revision', () => {
+  assert.deepEqual(normalizeReleaseIdentity({ releaseId: 'v0.6.0', buildRevision: 42 }), {
+    releaseId: 'v0.6.0',
+    buildRevision: '',
+  })
 })
 
 test('normalizeReleaseIdentity rejects payloads that carry no release id', () => {
@@ -33,6 +53,22 @@ test('normalizeReleaseIdentity rejects a release id that is not a string', () =>
 test('formatReleaseTitle shares one prefix with the settings label', () => {
   assert.equal(formatReleaseTitle('v0.6.0'), 'Release v0.6.0')
   assert.equal(formatReleaseTitle('v0.6.0'), formatReleaseLabel('v0.6.0'))
+})
+
+// Between releases the release id is frozen, so the build is the only part that
+// tells you what is actually running.
+test('formatReleaseTitle names the build alongside the release', () => {
+  assert.equal(formatReleaseTitle('v0.6.0', '4be949d'), 'Release v0.6.0 (build 4be949d)')
+})
+
+test('formatReleaseTitle omits an empty build rather than showing an empty pair', () => {
+  assert.equal(formatReleaseTitle('v0.6.0', ''), 'Release v0.6.0')
+})
+
+// The settings header is for users; the build belongs in the support-facing
+// tooltip only.
+test('formatReleaseLabel never carries the build revision', () => {
+  assert.equal(formatReleaseLabel('v0.6.0'), 'Release v0.6.0')
 })
 
 // The sidebar brand needs an absent title, not the word "unavailable".
@@ -60,8 +96,8 @@ test('loadReleaseIdentity caches a resolved read for the page session', async ()
     return { releaseId: 'v0.6.0' }
   }
 
-  assert.deepEqual(await loadReleaseIdentity(fetcher), { releaseId: 'v0.6.0' })
-  assert.deepEqual(await loadReleaseIdentity(fetcher), { releaseId: 'v0.6.0' })
+  assert.deepEqual(await loadReleaseIdentity(fetcher), { releaseId: 'v0.6.0', buildRevision: '' })
+  assert.deepEqual(await loadReleaseIdentity(fetcher), { releaseId: 'v0.6.0', buildRevision: '' })
   assert.equal(calls, 1)
 })
 
@@ -77,8 +113,8 @@ test('loadReleaseIdentity shares one in-flight read between concurrent callers',
     loadReleaseIdentity(fetcher),
     loadReleaseIdentity(fetcher),
   ])
-  assert.deepEqual(first, { releaseId: 'v0.6.0' })
-  assert.deepEqual(second, { releaseId: 'v0.6.0' })
+  assert.deepEqual(first, { releaseId: 'v0.6.0', buildRevision: '' })
+  assert.deepEqual(second, { releaseId: 'v0.6.0', buildRevision: '' })
   assert.equal(calls, 1)
 })
 
@@ -94,7 +130,7 @@ test('loadReleaseIdentity does not cache a failed read', async () => {
   }
 
   assert.equal(await loadReleaseIdentity(fetcher), null)
-  assert.deepEqual(await loadReleaseIdentity(fetcher), { releaseId: 'v0.6.0' })
+  assert.deepEqual(await loadReleaseIdentity(fetcher), { releaseId: 'v0.6.0', buildRevision: '' })
   assert.equal(calls, 2)
 })
 
@@ -109,18 +145,18 @@ test('loadReleaseIdentity swallows a rejected read instead of surfacing it', asy
 
 test('subscribeReleaseIdentity publishes a resolved read to every listener', async () => {
   resetReleaseIdentityCache()
-  const seen: Array<{ releaseId: string } | null> = []
+  const seen: Array<ReleaseIdentity | null> = []
   const unsubscribe = subscribeReleaseIdentity(identity => seen.push(identity))
 
-  await loadReleaseIdentity(async () => ({ releaseId: 'v0.6.0' }))
+  await loadReleaseIdentity(async () => ({ releaseId: 'v0.6.0', buildRevision: '' }))
   unsubscribe()
 
-  assert.deepEqual(seen, [{ releaseId: 'v0.6.0' }])
+  assert.deepEqual(seen, [{ releaseId: 'v0.6.0', buildRevision: '' }])
 })
 
 test('subscribeReleaseIdentity publishes a failed read so labels can fall back', async () => {
   resetReleaseIdentityCache()
-  const seen: Array<{ releaseId: string } | null> = []
+  const seen: Array<ReleaseIdentity | null> = []
   const unsubscribe = subscribeReleaseIdentity(identity => seen.push(identity))
 
   await loadReleaseIdentity(async () => {
@@ -133,11 +169,11 @@ test('subscribeReleaseIdentity publishes a failed read so labels can fall back',
 
 test('subscribeReleaseIdentity stops publishing once unsubscribed', async () => {
   resetReleaseIdentityCache()
-  const seen: Array<{ releaseId: string } | null> = []
+  const seen: Array<ReleaseIdentity | null> = []
   const unsubscribe = subscribeReleaseIdentity(identity => seen.push(identity))
   unsubscribe()
 
-  await loadReleaseIdentity(async () => ({ releaseId: 'v0.6.0' }))
+  await loadReleaseIdentity(async () => ({ releaseId: 'v0.6.0', buildRevision: '' }))
 
   assert.deepEqual(seen, [])
 })
@@ -151,16 +187,22 @@ test('refreshReleaseIdentity re-reads past a cached value and republishes', asyn
     calls += 1
     return { releaseId: calls === 1 ? 'v0.6.0' : 'v0.7.0' }
   }
-  const seen: Array<{ releaseId: string } | null> = []
+  const seen: Array<ReleaseIdentity | null> = []
   const unsubscribe = subscribeReleaseIdentity(identity => seen.push(identity))
 
   await loadReleaseIdentity(fetcher)
   await loadReleaseIdentity(fetcher)
   assert.equal(calls, 1)
 
-  assert.deepEqual(await refreshReleaseIdentity(fetcher), { releaseId: 'v0.7.0' })
+  assert.deepEqual(await refreshReleaseIdentity(fetcher), {
+    releaseId: 'v0.7.0',
+    buildRevision: '',
+  })
   unsubscribe()
 
   assert.equal(calls, 2)
-  assert.deepEqual(seen, [{ releaseId: 'v0.6.0' }, { releaseId: 'v0.7.0' }])
+  assert.deepEqual(seen, [
+    { releaseId: 'v0.6.0', buildRevision: '' },
+    { releaseId: 'v0.7.0', buildRevision: '' },
+  ])
 })

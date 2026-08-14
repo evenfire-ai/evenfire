@@ -96,6 +96,27 @@ describe('Profile Sidebar release identity', () => {
     await waitFor(() => expect(brand).toHaveAttribute('title', 'Release v0.6.0'))
   })
 
+  // Between releases the release id is frozen at the last cut, so the build is
+  // the only part of the title that identifies what is actually running.
+  it('names the image build next to the release when the API serves one', async () => {
+    api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.6.0', buildRevision: '4be949d' })
+
+    const view = render(<Sidebar currentRoute="settings" onLogout={vi.fn()} />)
+    const brand = view.container.querySelector('.cu-sidebar__brand')
+
+    await waitFor(() => expect(brand).toHaveAttribute('title', 'Release v0.6.0 (build 4be949d)'))
+  })
+
+  // An external-rest-api image built before the stamp landed omits the field.
+  it('falls back to the release alone against an API that serves no build', async () => {
+    api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.6.0' })
+
+    const view = render(<Sidebar currentRoute="settings" onLogout={vi.fn()} />)
+    const brand = view.container.querySelector('.cu-sidebar__brand')
+
+    await waitFor(() => expect(brand).toHaveAttribute('title', 'Release v0.6.0'))
+  })
+
   it('leaves the brand untitled rather than naming a release it could not read', async () => {
     api.getDesktopRelease.mockRejectedValue(new Error('503 Service Unavailable'))
 

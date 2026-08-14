@@ -48,6 +48,9 @@ export type DesktopReleaseResponse = {
   rpcProxyVersion: string
   desktopVersion: string
   minimumDesktopVersion: string
+  // Optional: served only by an external-rest-api image built after the build
+  // stamp landed. Absent against an older image, which reads as no build.
+  buildRevision?: string
   releaseTag: string
   releaseUrl: string
 }

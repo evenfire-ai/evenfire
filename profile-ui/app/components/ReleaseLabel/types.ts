@@ -4,5 +4,6 @@ export type ReleaseLabelProps = {
 
 export type ReleaseIdentityState = {
   releaseId: string | null
+  buildRevision: string
   loading: boolean
 }
