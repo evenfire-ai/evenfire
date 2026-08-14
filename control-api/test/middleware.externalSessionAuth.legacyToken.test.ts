@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { rateLimit } from 'express-rate-limit'
 import jwt from 'jsonwebtoken'
 import { createPublicKey } from 'node:crypto'
 import request from 'supertest'
@@ -38,9 +39,14 @@ function legacySessionToken(): string {
 
 function app() {
   const server = express()
-  server.get('/protected', requireValidExternalSessionToken, (_req, res) => {
-    res.status(200).json({ ok: true })
-  })
+  server.get(
+    '/protected',
+    rateLimit({ windowMs: 60_000, limit: 100, standardHeaders: 'draft-7', legacyHeaders: false }),
+    requireValidExternalSessionToken,
+    (_req, res) => {
+      res.status(200).json({ ok: true })
+    }
+  )
   return server
 }
 
