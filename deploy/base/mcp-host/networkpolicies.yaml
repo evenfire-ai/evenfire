@@ -110,29 +110,11 @@ spec:
     to:
     - ipBlock:
         cidr: 0.0.0.0/0
-        # Public-internet only (N12): exclude cluster pod/service/node CIDRs and
-        # all private/link-local/metadata/reserved ranges — the SAME list HCC
-        # applies to mcp-server public-web egress (PUBLIC_EGRESS_EXCEPT_CIDRS).
-        # Internal deps ride separate dedicated lanes above, so this is safe.
-        except:
-          - 0.0.0.0/8
-          - 10.0.0.0/8
-          - 100.64.0.0/10
-          - 127.0.0.0/8
-          - 169.254.0.0/16
-          - 172.16.0.0/12
-          - 192.0.0.0/24
-          - 192.0.2.0/24
-          - 192.31.196.0/24
-          - 192.52.193.0/24
-          - 192.88.99.0/24
-          - 192.168.0.0/16
-          - 192.175.48.0/24
-          - 198.18.0.0/15
-          - 198.51.100.0/24
-          - 203.0.113.0/24
-          - 224.0.0.0/4
-          - 240.0.0.0/4
+        # N12: filled at deploy time by the kustomize `replacements` in
+        # deploy/base/kustomization.yaml from the canonical PublicEgressExceptionSet
+        # (deploy/base/public-egress-exceptions.yaml) — single source of truth,
+        # shared with mcp-server public-web egress. Keep empty here.
+        except: []
   # http_request tool: external HTTP with the same public-only boundary.
   - ports:
     - port: 80
@@ -140,29 +122,11 @@ spec:
     to:
     - ipBlock:
         cidr: 0.0.0.0/0
-        # Public-internet only (N12): exclude cluster pod/service/node CIDRs and
-        # all private/link-local/metadata/reserved ranges — the SAME list HCC
-        # applies to mcp-server public-web egress (PUBLIC_EGRESS_EXCEPT_CIDRS).
-        # Internal deps ride separate dedicated lanes above, so this is safe.
-        except:
-          - 0.0.0.0/8
-          - 10.0.0.0/8
-          - 100.64.0.0/10
-          - 127.0.0.0/8
-          - 169.254.0.0/16
-          - 172.16.0.0/12
-          - 192.0.0.0/24
-          - 192.0.2.0/24
-          - 192.31.196.0/24
-          - 192.52.193.0/24
-          - 192.88.99.0/24
-          - 192.168.0.0/16
-          - 192.175.48.0/24
-          - 198.18.0.0/15
-          - 198.51.100.0/24
-          - 203.0.113.0/24
-          - 224.0.0.0/4
-          - 240.0.0.0/4
+        # N12: filled at deploy time by the kustomize `replacements` in
+        # deploy/base/kustomization.yaml from the canonical PublicEgressExceptionSet
+        # (deploy/base/public-egress-exceptions.yaml) — single source of truth,
+        # shared with mcp-server public-web egress. Keep empty here.
+        except: []
 ---
 # ─── L1: K8s API server egress (HCC-managed mcp-host pods) ────────────────────
 # Required for getHost() and other K8s API calls in production mode.
