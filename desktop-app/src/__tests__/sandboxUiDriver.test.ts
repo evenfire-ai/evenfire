@@ -11,6 +11,7 @@ import {
   reloadSandboxUiWebContents,
   resolveSandboxUiDefaultPath,
   resolveSandboxUiSharePath,
+  sandboxFindOptionsForOperation,
 } from '../sandboxUiDriver.js'
 
 describe('sandbox WebContents local find', () => {
@@ -36,12 +37,7 @@ describe('sandbox WebContents local find', () => {
     }
     const onResult = vi.fn()
 
-    beginSandboxUiFind(
-      webContents as never,
-      'invoice',
-      { forward: true, findNext: false },
-      onResult
-    )
+    beginSandboxUiFind(webContents as never, 'invoice', { forward: true, findNext: true }, onResult)
 
     expect(onResult).toHaveBeenCalledWith({
       requestId: 41,
@@ -97,6 +93,17 @@ describe('sandbox WebContents local find', () => {
     })
     session.cleanup()
     expect(webContents.removeListener).toHaveBeenCalledWith('found-in-page', listener)
+  })
+})
+
+describe('sandbox find operation mapping', () => {
+  it('maps semantic operations to Electron find session flags', () => {
+    expect(sandboxFindOptionsForOperation('start')).toEqual({ forward: true, findNext: true })
+    expect(sandboxFindOptionsForOperation('next')).toEqual({ forward: true, findNext: false })
+    expect(sandboxFindOptionsForOperation('previous')).toEqual({
+      forward: false,
+      findNext: false,
+    })
   })
 })
 

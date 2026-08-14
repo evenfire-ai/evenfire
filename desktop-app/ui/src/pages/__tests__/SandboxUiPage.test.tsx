@@ -39,7 +39,7 @@ describe('SandboxUiPage', () => {
     vi.clearAllMocks()
     sandboxUi.setBounds.mockResolvedValue(undefined)
     sandboxUi.setVisible.mockResolvedValue(undefined)
-    sandboxUi.findInPage.mockResolvedValue(17)
+    sandboxUi.findInPage.mockResolvedValue({ status: 'started', requestId: 17 })
     sandboxUi.onFindResult.mockImplementation(callback => {
       emitFindResult = callback
       return vi.fn()
@@ -206,16 +206,24 @@ describe('SandboxUiPage', () => {
     fireEvent.change(input, { target: { value: 'invoice' } })
     await waitFor(() => {
       expect(sandboxUi.findInPage).toHaveBeenCalledWith('invoice', {
-        forward: true,
-        findNext: false,
+        operation: 'start',
         clientRequestId: expect.any(Number),
       })
     })
+    expect(screen.getByRole('status').textContent).toBe('Searching…')
+    const startOptions = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    emitFindResult?.({
+      requestId: 17,
+      clientRequestId: startOptions.clientRequestId,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('1/2'))
     fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
     expect(sandboxUi.findInPage).toHaveBeenLastCalledWith('invoice', {
-      forward: false,
-      findNext: true,
-      clientRequestId: expect.any(Number),
+      operation: 'previous',
+      clientRequestId: startOptions.clientRequestId,
     })
     fireEvent.keyDown(input, { key: 'Escape' })
     await waitFor(() => {
@@ -268,7 +276,7 @@ describe('SandboxUiPage', () => {
       matches: 9,
       finalUpdate: true,
     })
-    expect(screen.getByRole('status').textContent).toBe('0/0')
+    expect(screen.getByRole('status').textContent).toBe('Searching…')
     emitFindResult?.({
       requestId: 18,
       clientRequestId: nextOptions.clientRequestId,
@@ -319,7 +327,7 @@ describe('SandboxUiPage', () => {
       matches: 7,
       finalUpdate: true,
     })
-    expect(screen.getByRole('status').textContent).toBe('0/0')
+    expect(screen.getByRole('status').textContent).toBe('Searching…')
   })
 
   it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {

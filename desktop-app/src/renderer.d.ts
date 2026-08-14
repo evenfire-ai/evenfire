@@ -558,8 +558,17 @@ declare global {
         capturePreview: () => Promise<string | null>
         findInPage: (
           query: string,
-          options: { forward: boolean; findNext: boolean; clientRequestId: number }
-        ) => Promise<number | null>
+          options: {
+            operation: 'start' | 'next' | 'previous'
+            clientRequestId: number
+          }
+        ) => Promise<
+          | { status: 'started'; requestId: number }
+          | {
+              status: 'unavailable'
+              reason: 'no-active-view' | 'document-loading' | 'no-session'
+            }
+        >
         stopFindInPage: () => Promise<void>
         focusActive: () => Promise<boolean>
         onFindResult: (

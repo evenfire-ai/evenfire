@@ -1550,8 +1550,7 @@ export function registerIpcHandlers(service: AppService): void {
       event,
       payload: {
         query?: unknown
-        forward?: unknown
-        findNext?: unknown
+        operation?: unknown
         clientRequestId?: unknown
       }
     ) => {
@@ -1560,8 +1559,8 @@ export function registerIpcHandlers(service: AppService): void {
       if (!query.trim() || query.length > 500) {
         throw new Error('find query must contain 1 to 500 characters')
       }
-      if (typeof payload?.forward !== 'boolean' || typeof payload?.findNext !== 'boolean') {
-        throw new Error('find direction options must be boolean')
+      if (!['start', 'next', 'previous'].includes(String(payload?.operation))) {
+        throw new Error('find operation must be start, next, or previous')
       }
       if (!Number.isSafeInteger(payload?.clientRequestId) || Number(payload.clientRequestId) <= 0) {
         throw new Error('find client request ID must be a positive safe integer')
@@ -1569,7 +1568,8 @@ export function registerIpcHandlers(service: AppService): void {
       const clientRequestId = Number(payload.clientRequestId)
       return service.findInActiveSandboxUi(
         query,
-        { forward: payload.forward, findNext: payload.findNext },
+        payload.operation as 'start' | 'next' | 'previous',
+        clientRequestId,
         result => {
           if (!event.sender.isDestroyed()) {
             event.sender.send('sandboxUi:findResult', { ...result, clientRequestId })

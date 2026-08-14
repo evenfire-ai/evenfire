@@ -146,6 +146,14 @@ const APP_PAGE_SIZE = 6
 let pendingSandboxUiUnmountCleanup: number | null = null
 let nextSandboxFindClientRequestId = 0
 
+type AppFindState =
+  | { status: 'idle' }
+  | { status: 'pending' }
+  | { status: 'results'; current: number; total: number }
+  | { status: 'empty' }
+  | { status: 'unavailable'; reason: string }
+  | { status: 'error'; message: string }
+
 export function SandboxUiPage({
   boundsRefreshKey = 0,
   conversationOrigin = null,
@@ -172,10 +180,11 @@ export function SandboxUiPage({
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
   const [localSearchOpen, setLocalSearchOpen] = useState(false)
   const [localSearchQuery, setLocalSearchQuery] = useState('')
-  const [localSearchResult, setLocalSearchResult] = useState({ current: 0, total: 0 })
+  const [localSearchState, setLocalSearchState] = useState<AppFindState>({ status: 'idle' })
   const embedSlotRef = useRef<HTMLDivElement>(null)
   const localSearchInputRef = useRef<HTMLInputElement>(null)
   const activeFindClientRequestIdRef = useRef<number | null>(null)
+  const localSearchStateRef = useRef<AppFindState>({ status: 'idle' })
   const lastLocalSearchRequestIdRef = useRef(0)
   const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
@@ -225,7 +234,13 @@ export function SandboxUiPage({
   useEffect(() => {
     return window.clerum.sandboxUi.onFindResult(result => {
       if (result.clientRequestId !== activeFindClientRequestIdRef.current) return
-      setLocalSearchResult({ current: result.activeMatchOrdinal, total: result.matches })
+      if (!result.finalUpdate) return
+      const next: AppFindState =
+        result.matches > 0
+          ? { status: 'results', current: result.activeMatchOrdinal, total: result.matches }
+          : { status: 'empty' }
+      localSearchStateRef.current = next
+      setLocalSearchState(next)
     })
   }, [])
 
@@ -234,7 +249,8 @@ export function SandboxUiPage({
     activeFindClientRequestIdRef.current = null
     setLocalSearchOpen(false)
     setLocalSearchQuery('')
-    setLocalSearchResult({ current: 0, total: 0 })
+    localSearchStateRef.current = { status: 'idle' }
+    setLocalSearchState({ status: 'idle' })
     void window.clerum.sandboxUi
       .stopFindInPage()
       .then(() => window.clerum.sandboxUi.focusActive())
@@ -249,17 +265,49 @@ export function SandboxUiPage({
   }, [])
 
   const runLocalSearch = useCallback(
-    async (query: string, options: { forward: boolean; findNext: boolean }) => {
+    async (query: string, operation: 'start' | 'next' | 'previous') => {
       if (!query.trim()) {
         activeFindClientRequestIdRef.current = null
-        setLocalSearchResult({ current: 0, total: 0 })
+        localSearchStateRef.current = { status: 'idle' }
+        setLocalSearchState({ status: 'idle' })
         await window.clerum.sandboxUi.stopFindInPage()
         return
       }
-      if (!options.findNext) setLocalSearchResult({ current: 0, total: 0 })
-      const clientRequestId = ++nextSandboxFindClientRequestId
+      if (operation !== 'start' && localSearchStateRef.current.status !== 'results') return
+      const clientRequestId =
+        operation === 'start'
+          ? ++nextSandboxFindClientRequestId
+          : activeFindClientRequestIdRef.current
+      if (clientRequestId === null) return
       activeFindClientRequestIdRef.current = clientRequestId
-      await window.clerum.sandboxUi.findInPage(query, { ...options, clientRequestId })
+      localSearchStateRef.current = { status: 'pending' }
+      setLocalSearchState({ status: 'pending' })
+      try {
+        const response = await window.clerum.sandboxUi.findInPage(query, {
+          operation,
+          clientRequestId,
+        })
+        if (clientRequestId !== activeFindClientRequestIdRef.current) return
+        if (response.status === 'unavailable') {
+          const next: AppFindState = {
+            status: 'unavailable',
+            reason:
+              response.reason === 'document-loading'
+                ? 'App is still loading'
+                : 'Search is not available',
+          }
+          localSearchStateRef.current = next
+          setLocalSearchState(next)
+        }
+      } catch (error) {
+        if (clientRequestId !== activeFindClientRequestIdRef.current) return
+        const next: AppFindState = {
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Search failed',
+        }
+        localSearchStateRef.current = next
+        setLocalSearchState(next)
+      }
     },
     []
   )
@@ -561,7 +609,7 @@ export function SandboxUiPage({
               onChange={event => {
                 const query = event.currentTarget.value
                 setLocalSearchQuery(query)
-                void runLocalSearch(query, { forward: true, findNext: false })
+                void runLocalSearch(query, 'start')
               }}
               onKeyDown={event => {
                 if (event.key === 'Escape') {
@@ -569,24 +617,30 @@ export function SandboxUiPage({
                   stopLocalSearch()
                 } else if (event.key === 'Enter') {
                   event.preventDefault()
-                  void runLocalSearch(localSearchQuery, {
-                    forward: !event.shiftKey,
-                    findNext: true,
-                  })
+                  void runLocalSearch(localSearchQuery, event.shiftKey ? 'previous' : 'next')
                 }
               }}
               placeholder="Find in current app"
               value={localSearchQuery}
             />
             <span className="current-content-search__count" role="status" aria-live="polite">
-              {localSearchResult.current}/{localSearchResult.total}
+              {localSearchState.status === 'pending'
+                ? 'Searching…'
+                : localSearchState.status === 'results'
+                  ? `${localSearchState.current}/${localSearchState.total}`
+                  : localSearchState.status === 'empty'
+                    ? '0/0'
+                    : localSearchState.status === 'unavailable'
+                      ? localSearchState.reason
+                      : localSearchState.status === 'error'
+                        ? 'Search failed'
+                        : '—'}
             </span>
             <Button
               aria-label="Previous app match"
               color="neutral"
-              onClick={() =>
-                void runLocalSearch(localSearchQuery, { forward: false, findNext: true })
-              }
+              disabled={localSearchState.status !== 'results'}
+              onClick={() => void runLocalSearch(localSearchQuery, 'previous')}
               size="xs"
               variant="ghost"
             >
@@ -595,9 +649,8 @@ export function SandboxUiPage({
             <Button
               aria-label="Next app match"
               color="neutral"
-              onClick={() =>
-                void runLocalSearch(localSearchQuery, { forward: true, findNext: true })
-              }
+              disabled={localSearchState.status !== 'results'}
+              onClick={() => void runLocalSearch(localSearchQuery, 'next')}
               size="xs"
               variant="ghost"
             >

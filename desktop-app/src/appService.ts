@@ -3218,11 +3218,12 @@ export class AppService {
 
   async findInActiveSandboxUi(
     query: string,
-    options: { forward: boolean; findNext: boolean },
+    operation: import('./sandboxUiDriver.js').SandboxUiFindOperation,
+    clientRequestId: number,
     onResult: (result: import('./sandboxUiDriver.js').SandboxUiFindResult) => void
-  ): Promise<number | null> {
+  ): Promise<import('./sandboxUiDriver.js').SandboxUiFindStartResult> {
     const { findInActiveSandboxUi } = await import('./sandboxUiDriver.js')
-    return findInActiveSandboxUi(query, options, onResult)
+    return findInActiveSandboxUi(query, operation, clientRequestId, onResult)
   }
 
   async stopActiveSandboxUiFind(): Promise<void> {

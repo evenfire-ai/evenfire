@@ -163,17 +163,16 @@ describe('ipc host status stream handlers', () => {
     const handler = testState.handlers.get('sandboxUi:findInPage')
 
     await expect(
-      Promise.resolve(handler?.(event, { query: '', forward: true, findNext: false }))
+      Promise.resolve(handler?.(event, { query: '', operation: 'start', clientRequestId: 1 }))
     ).rejects.toThrow('find query')
     await expect(
-      Promise.resolve(handler?.(event, { query: 'x', forward: 'yes', findNext: false }))
-    ).rejects.toThrow('direction')
+      Promise.resolve(handler?.(event, { query: 'x', operation: 'sideways', clientRequestId: 1 }))
+    ).rejects.toThrow('operation')
     await expect(
       Promise.resolve(
         handler?.(event, {
           query: 'invoice',
-          forward: true,
-          findNext: false,
+          operation: 'start',
           clientRequestId: 0,
         })
       )
@@ -184,18 +183,18 @@ describe('ipc host status stream handlers', () => {
       Promise.resolve(
         handler?.(event, {
           query: 'invoice',
-          forward: false,
-          findNext: true,
+          operation: 'previous',
           clientRequestId: 4,
         })
       )
     ).resolves.toBe(9)
     expect(service.findInActiveSandboxUi).toHaveBeenCalledWith(
       'invoice',
-      { forward: false, findNext: true },
+      'previous',
+      4,
       expect.any(Function)
     )
-    const onResult = service.findInActiveSandboxUi.mock.calls.at(-1)?.[2]
+    const onResult = service.findInActiveSandboxUi.mock.calls.at(-1)?.[3]
     onResult?.({ requestId: 9, activeMatchOrdinal: 1, matches: 2, finalUpdate: true })
     expect(sender.send).toHaveBeenCalledWith('sandboxUi:findResult', {
       requestId: 9,

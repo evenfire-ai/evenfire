@@ -502,9 +502,12 @@ const clerum = Object.freeze({
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
     findInPage: (
       query: string,
-      options: { forward: boolean; findNext: boolean; clientRequestId: number }
+      options: { operation: 'start' | 'next' | 'previous'; clientRequestId: number }
     ) =>
-      ipcRenderer.invoke('sandboxUi:findInPage', { query, ...options }) as Promise<number | null>,
+      ipcRenderer.invoke('sandboxUi:findInPage', { query, ...options }) as Promise<
+        | { status: 'started'; requestId: number }
+        | { status: 'unavailable'; reason: 'no-active-view' | 'document-loading' | 'no-session' }
+      >,
     stopFindInPage: () => ipcRenderer.invoke('sandboxUi:stopFindInPage') as Promise<void>,
     focusActive: () => ipcRenderer.invoke('sandboxUi:focusActive') as Promise<boolean>,
     onFindResult: (

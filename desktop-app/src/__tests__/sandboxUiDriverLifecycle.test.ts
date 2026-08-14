@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  findInActiveSandboxUi,
   focusActiveSandboxUi,
   installSandboxUiCookie,
   mountSandboxUiView,
@@ -23,6 +24,7 @@ const electronMocks = vi.hoisted(() => {
     })
     setWindowOpenHandler = vi.fn()
     stopFindInPage = vi.fn()
+    findInPage = vi.fn(() => 41)
     focus = vi.fn()
 
     on(event: string, handler: (...args: unknown[]) => void): this {
@@ -210,6 +212,49 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
 
     expect(focusActiveSandboxUi()).toBe(true)
     expect(electronMocks.views[0]?.webContents.focus).toHaveBeenCalledOnce()
+  })
+
+  it('gates find by document readiness and invalidates it on main-frame navigation', async () => {
+    const parentWindow = new FakeParentWindow()
+    await mountSandboxUiView(mountArgs({ parentWindow }))
+    const webContents = electronMocks.views[0]!.webContents
+    const onResult = vi.fn()
+
+    expect(findInActiveSandboxUi('invoice', 'start', 1, onResult)).toEqual({
+      status: 'unavailable',
+      reason: 'document-loading',
+    })
+
+    webContents.emit('did-finish-load')
+    expect(findInActiveSandboxUi('invoice', 'start', 1, onResult)).toEqual({
+      status: 'started',
+      requestId: 41,
+    })
+    expect(webContents.findInPage).toHaveBeenCalledWith('invoice', {
+      forward: true,
+      findNext: true,
+    })
+    webContents.emit('found-in-page', {} as Electron.Event, {
+      requestId: 41,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      selectionArea: { x: 0, y: 0, width: 1, height: 1 },
+      finalUpdate: true,
+    })
+    expect(findInActiveSandboxUi('invoice', 'next', 1, onResult).status).toBe('started')
+
+    webContents.emit(
+      'did-start-navigation',
+      {} as Electron.Event,
+      'https://rpc.example/next',
+      false,
+      true
+    )
+    expect(webContents.stopFindInPage).toHaveBeenCalledWith('clearSelection')
+    expect(findInActiveSandboxUi('invoice', 'next', 1, onResult)).toEqual({
+      status: 'unavailable',
+      reason: 'document-loading',
+    })
   })
 
   it('keeps only the newest view when cookie writes complete out of order', async () => {
