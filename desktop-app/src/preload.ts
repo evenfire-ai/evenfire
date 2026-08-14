@@ -29,6 +29,12 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'composer.focus',
   'commands.open',
   'settings.shortcuts',
+  'settings.open',
+  'auth.logout',
+  'navigate.chat',
+  'navigate.apps',
+  'navigate.agents',
+  'notifications.open',
 ])
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {

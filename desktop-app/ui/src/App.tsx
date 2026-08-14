@@ -269,6 +269,7 @@ export function App() {
   const chatViewTabsRef = React.useRef(chatViewTabs)
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
+  const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
   const [chatLocalSearchState, setChatLocalSearchState] = React.useState<{
     query: string
@@ -1142,6 +1143,33 @@ export function App() {
         setSettingsShortcutsRequestId(value => value + 1)
         return
       }
+      if (commandId === 'settings.open') {
+        closeChatLocalSearch(false)
+        handleSidebarNavSelect(DESKTOP_ROUTES.settings)
+        return
+      }
+      if (commandId === 'auth.logout') {
+        void vm.handleLogout()
+        return
+      }
+      if (
+        commandId === 'navigate.chat' ||
+        commandId === 'navigate.apps' ||
+        commandId === 'navigate.agents'
+      ) {
+        const route =
+          commandId === 'navigate.chat'
+            ? DESKTOP_ROUTES.chat
+            : commandId === 'navigate.apps'
+              ? DESKTOP_ROUTES.apps
+              : DESKTOP_ROUTES.agents
+        handleSidebarNavSelect(route)
+        return
+      }
+      if (commandId === 'notifications.open') {
+        setNotificationOpenRequestId(value => value + 1)
+        return
+      }
       if (commandId === 'chat.newTab') {
         closeChatLocalSearch(false)
         handleNewChatViewTab()
@@ -1202,9 +1230,11 @@ export function App() {
       desktopCommandContext,
       handleCloseChatViewTab,
       handleNewChatViewTab,
+      handleSidebarNavSelect,
       revealChatViewTab,
       vm.activeChatId,
       vm.handleNavSelect,
+      vm.handleLogout,
       vm.isAuthenticated,
       vm.navItem,
     ]
@@ -1713,6 +1743,7 @@ export function App() {
                             >
                               <AppHeader
                                 searchFocusRequestId={globalSearchFocusRequestId}
+                                notificationOpenRequestId={notificationOpenRequestId}
                                 notificationTrayMode={
                                   notificationTrayUsesDrawer ? 'drawer' : 'overlay'
                                 }

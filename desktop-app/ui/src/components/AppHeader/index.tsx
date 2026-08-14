@@ -84,6 +84,7 @@ function notificationPillLabel(kind: AppNotificationKind): string {
 
 export const AppHeader = React.memo(function AppHeader({
   searchFocusRequestId = 0,
+  notificationOpenRequestId = 0,
   notificationTrayMode = 'overlay',
   notificationTrayReady = true,
   onNotificationTrayOpenChange,
@@ -160,6 +161,12 @@ export const AppHeader = React.memo(function AppHeader({
     setSearchOpen(true)
     searchInputRef.current?.focus()
   }, [searchFocusRequestId])
+
+  useEffect(() => {
+    if (notificationOpenRequestId <= 0) return
+    setSearchOpen(false)
+    setNotificationsOpen(true)
+  }, [notificationOpenRequestId])
 
   React.useLayoutEffect(() => {
     onShellOverlayOpenChange?.(searchOpen || (notificationsOpen && !notificationTrayUsesDrawer))

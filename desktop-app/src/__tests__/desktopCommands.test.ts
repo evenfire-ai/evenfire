@@ -79,6 +79,23 @@ describe('Desktop command registry', () => {
     ).toBe('search.current')
   })
 
+  it('binds only Open Settings in the approved core palette action set', () => {
+    const settings = getDesktopCommand('settings.open')
+    expect(formatDesktopShortcut(settings.defaultBinding!, 'darwin')).toBe('⌘,')
+    expect(formatDesktopShortcut(settings.defaultBinding!, 'win32')).toBe('Ctrl+,')
+    expect(matchDesktopCommand(input({ key: ',' }), 'darwin', 'sandbox')?.id).toBe('settings.open')
+    for (const id of [
+      'auth.logout',
+      'navigate.chat',
+      'navigate.apps',
+      'navigate.agents',
+      'notifications.open',
+    ] as const) {
+      expect(getDesktopCommand(id).defaultBinding).toBeNull()
+      expect(getDesktopCommand(id).visibleInSettings).toBe(false)
+    }
+  })
+
   it('ignores repeat, composition, AltGr-like input, and wrong platform modifiers', () => {
     expect(matchDesktopCommand(input({ isAutoRepeat: true }), 'darwin', 'host')).toBeNull()
     expect(matchDesktopCommand(input({ isComposing: true }), 'darwin', 'host')).toBeNull()

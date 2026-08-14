@@ -17,7 +17,7 @@ const confirmDialogHarness = vi.hoisted(() => ({
 }))
 
 const appHeaderHarness = vi.hoisted(() => ({
-  props: null as null | { searchFocusRequestId?: number },
+  props: null as null | { searchFocusRequestId?: number; notificationOpenRequestId?: number },
 }))
 
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
@@ -180,6 +180,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     getCurrentTeamId: vi.fn(() => liveTeamId),
     handleSelectChatAgent: vi.fn(),
     handleNavSelect,
+    handleLogout: vi.fn(),
     pushToast: vi.fn(),
     setStatus: noop,
     setBooting: noop,
@@ -367,6 +368,27 @@ describe('App deep-link orchestration', () => {
 
     expect(currentController.handleNavSelect).toHaveBeenCalledWith(DESKTOP_ROUTES.settings)
     expect(settingsPageHarness.props?.shortcutsFocusRequestId).toBe(1)
+  })
+
+  it('routes approved core palette actions through their existing owners', () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    act(() => emitCommand?.('commands.open'))
+
+    act(() => commandPaletteHarness.props?.onExecute('settings.open'))
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.settings)
+
+    act(() => commandPaletteHarness.props?.onExecute('navigate.chat'))
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.chat)
+    act(() => commandPaletteHarness.props?.onExecute('navigate.apps'))
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.apps)
+    act(() => commandPaletteHarness.props?.onExecute('navigate.agents'))
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.agents)
+
+    act(() => commandPaletteHarness.props?.onExecute('notifications.open'))
+    expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(1)
+    act(() => commandPaletteHarness.props?.onExecute('auth.logout'))
+    expect(currentController.handleLogout).toHaveBeenCalledOnce()
   })
 
   afterEach(() => {

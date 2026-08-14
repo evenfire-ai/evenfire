@@ -97,6 +97,15 @@ describe('AppHeader notification tray presentation', () => {
     expect(screen.queryByRole('dialog', { name: 'Notifications and approvals' })).toBeNull()
   })
 
+  it('opens through the controlled command request and preserves tray lifecycle', async () => {
+    const { rerender } = render(<AppHeader notificationOpenRequestId={0} />)
+
+    rerender(<AppHeader notificationOpenRequestId={1} />)
+
+    expect(screen.getByRole('dialog', { name: 'Notifications and approvals' })).toBeTruthy()
+    await waitFor(() => expect(notificationMocks.refresh).toHaveBeenCalledOnce())
+  })
+
   it('opens a clickable notification card with the keyboard', () => {
     const notification = {
       id: 'notification-1',
