@@ -247,11 +247,8 @@ const pendingCronResults = new ResultStore<PendingCronResult>(30 * 60 * 1000, en
  */
 const cronResultsInFlight = new Set<string>()
 
-function resolveHostRef(task?: Task): string {
-  return (
-    String(task?.sourceMessage?.hostRef || currentHost?.spec.host || config.hostName).trim() ||
-    'unknown'
-  )
+export function resolveHostRef(task?: Task, host: HostCRD | null = currentHost): string {
+  return String(task?.sourceMessage?.hostRef || host?.name || config.hostName).trim() || 'unknown'
 }
 
 function publishActivity(input: {

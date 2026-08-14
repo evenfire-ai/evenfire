@@ -580,10 +580,10 @@ export default function TeamDetailsPage() {
         .filter(agentName => !assignedAgentNames.includes(agentName))
         .map(agentName => ({
           value: agentName,
-          label: getAgentDisplayName(agentName),
+          label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
-    [assignedAgentNames, hostNameOptions]
+    [assignedAgentNames, hostNameOptions, hosts]
   )
 
   useEffect(() => {

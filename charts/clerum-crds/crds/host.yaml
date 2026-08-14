@@ -31,7 +31,11 @@ spec:
               properties:
                 host:
                   type: string
-                  description: Host identifier (e.g. chatLLM).
+                  description: >-
+                    Display name for this agent, freely editable (spaces and
+                    capitals allowed). It is the human-facing visible name, not an
+                    identifier — the immutable RFC1123 identifier is metadata.name.
+                    Length is validated by control-api (free text; no pattern here).
                 contextRef:
                   type: string
                   description: Reference to the context (e.g. context1) used for MPC servers and secrets.
