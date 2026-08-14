@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -144,6 +144,18 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
     }
     uploads = new GfsUploadSessionService(deps)
   }, 60_000)
+
+  afterEach(async () => {
+    // Each case deliberately reuses the same owner to exercise the production
+    // subject quota. Remove only this fixture's drive between cases so a
+    // prior case cannot consume the quota of a later assertion.
+    await pool
+      ?.query('DELETE FROM gfs_upload_sessions WHERE drive = $1', [drive])
+      .catch(() => undefined)
+    if (tempRoot) {
+      await rm(join(tempRoot, '.uploads'), { recursive: true, force: true }).catch(() => undefined)
+    }
+  })
 
   afterAll(async () => {
     await pool
