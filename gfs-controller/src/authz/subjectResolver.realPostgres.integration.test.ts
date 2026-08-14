@@ -124,9 +124,15 @@ describeRealPostgres('gfsc subject lifecycle resolution on real PostgreSQL', () 
 
   it('denies a linked-admin bearer when the link generation is stale', async () => {
     await db.query(
-      `UPDATE users SET lifecycle_state = 'active', lifecycle_version = 1 WHERE id = $1;
-       UPDATE control_admin_users SET status = 'active', session_version = 1 WHERE id = $2;
-       UPDATE gfs_desktop_operator_links
+      `UPDATE users SET lifecycle_state = 'active', lifecycle_version = 1 WHERE id = $1`,
+      [userId]
+    )
+    await db.query(
+      `UPDATE control_admin_users SET status = 'active', session_version = 1 WHERE id = $1`,
+      [adminId]
+    )
+    await db.query(
+      `UPDATE gfs_desktop_operator_links
        SET state = 'active', generation = 2
        WHERE user_id = $1 AND control_admin_id = $2`,
       [userId, adminId]
@@ -138,9 +144,15 @@ describeRealPostgres('gfsc subject lifecycle resolution on real PostgreSQL', () 
 
   it('denies a linked-admin bearer when the control-admin session generation is stale', async () => {
     await db.query(
-      `UPDATE users SET lifecycle_state = 'active', lifecycle_version = 1 WHERE id = $1;
-       UPDATE control_admin_users SET status = 'active', session_version = 1 WHERE id = $2;
-       UPDATE gfs_desktop_operator_links
+      `UPDATE users SET lifecycle_state = 'active', lifecycle_version = 1 WHERE id = $1`,
+      [userId]
+    )
+    await db.query(
+      `UPDATE control_admin_users SET status = 'active', session_version = 1 WHERE id = $1`,
+      [adminId]
+    )
+    await db.query(
+      `UPDATE gfs_desktop_operator_links
        SET state = 'active', generation = 1
        WHERE user_id = $1 AND control_admin_id = $2`,
       [userId, adminId]
