@@ -47,6 +47,7 @@ export type HostWizardProps = {
 export type WizardSelectOption = {
   label: ReactNode
   meta?: ReactNode
+  providers?: { id: string; label: string }[]
   value: string
 }
 
