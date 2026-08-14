@@ -78,11 +78,11 @@ describe('resolveGuardrailHookDescriptors', () => {
     expect(out[0].lifecyclePoints).toEqual(['pre_call'])
   })
 
-  it('does NOT resolve a remote-target hook (disabled pending SSRF-guarded transport, §8.3)', async () => {
+  it('resolves a remote-target hook to its baseUrl and marks it external (SSRF-guarded)', async () => {
     const cr: LlmHookCR = {
       metadata: { name: 'r' },
       spec: {
-        target: { remote: { baseUrl: 'https://hooks.example.com' } },
+        target: { remote: { baseUrl: 'https://guardrails.aporia.com' } },
         lifecyclePoints: ['preCall'],
         capabilities: ['may_deny'],
       },
@@ -91,8 +91,22 @@ describe('resolveGuardrailHookDescriptors', () => {
       guardrails({ preCall: [{ id: 'r' }] }),
       deps({ r: cr })
     )
-    // Fail-closed: the external dial is not enabled until the SSRF guard lands.
-    expect(out).toEqual([])
+    expect(out[0].endpoint).toBe('https://guardrails.aporia.com')
+    expect(out[0].external).toBe(true)
+  })
+
+  it('marks in-cluster (image/service) targets as NOT external', async () => {
+    const svc: LlmHookCR = {
+      spec: {
+        target: { service: { name: 's', namespace: NS, port: 80 } },
+        lifecyclePoints: ['moderate'],
+      },
+    }
+    const out = await resolveGuardrailHookDescriptors(
+      guardrails({ moderate: [{ id: 's' }] }),
+      deps({ s: svc })
+    )
+    expect(out[0].external).toBeFalsy()
   })
 
   it('skips a dangling reference (CR not found)', async () => {

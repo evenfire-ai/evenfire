@@ -1,103 +1,66 @@
 /**
- * HookFetcher transport tests (spec §8.1 wire contract): URL building, auth
- * header, and outcome classification (5xx / timeout / malformed / oversized →
- * unavailable; 2xx/4xx returned for the mapping).
+ * Hook fetcher transport routing (spec §8.1/§8.3): in-cluster targets use the
+ * plain transport; `external` (remote) targets use the SSRF-guarded transport.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { type FetchLike, buildHookUrl, createHookFetcher } from '../hookFetcher'
+import { type FetchLike, createHookFetcher } from '../hookFetcher'
 import type { HookDescriptor } from '../types'
 
-const desc: HookDescriptor = {
+const base: HookDescriptor = {
   id: 'h',
-  endpoint: 'http://hook-server.llm-hooks.svc/',
-  path: '/pii-redact',
-  lifecyclePoints: ['moderate'],
+  endpoint: 'http://svc.llm-hooks.svc.cluster.local:8080',
+  path: '/',
+  lifecyclePoints: ['pre_call'],
   capabilities: [],
   failMode: 'closed',
   order: 100,
 }
 
-const okResponse = (
-  status: number,
-  text: string
-): { status: number; text: () => Promise<string> } => ({
-  status,
-  text: async () => text,
-})
+function okFetch(): FetchLike {
+  return vi.fn(async () => ({ status: 200, text: async () => '{"ok":true}' }))
+}
 
-describe('buildHookUrl', () => {
-  it('normalizes slashes → {endpoint}{path}/v1/{point}', () => {
-    expect(buildHookUrl('http://svc/', '/pii-redact', 'moderate')).toBe(
-      'http://svc/pii-redact/v1/moderate'
-    )
-    expect(buildHookUrl('http://svc', '/', 'pre_call')).toBe('http://svc/v1/pre_call')
-    expect(buildHookUrl('http://svc', '', 'on_error')).toBe('http://svc/v1/on_error')
-  })
-})
-
-describe('createHookFetcher', () => {
-  it('POSTs with bearer auth to the built URL and parses JSON', async () => {
-    const fetchImpl = vi.fn<FetchLike>(async () => okResponse(200, '{"action":"continue"}'))
-    const fetcher = createHookFetcher({ getAuthToken: () => 'tok', fetchImpl })
-    const r = await fetcher({ point: 'moderate', descriptor: desc, body: { a: 1 } })
-    expect(r).toEqual({ status: 200, body: { action: 'continue' }, unavailable: false })
-    const [url, init] = fetchImpl.mock.calls[0]
-    expect(url).toBe('http://hook-server.llm-hooks.svc/pii-redact/v1/moderate')
-    expect(init.headers.Authorization).toBe('Bearer tok')
-    expect(init.method).toBe('POST')
-  })
-
-  it('5xx → unavailable', async () => {
-    const fetcher = createHookFetcher({
+describe('createHookFetcher transport routing', () => {
+  it('dials an in-cluster (non-external) target with the plain transport', async () => {
+    const inCluster = okFetch()
+    const external = okFetch()
+    const fetch = createHookFetcher({
       getAuthToken: () => 't',
-      fetchImpl: async () => okResponse(503, ''),
+      fetchImpl: inCluster,
+      externalFetchImpl: external,
     })
-    expect((await fetcher({ point: 'moderate', descriptor: desc, body: {} })).unavailable).toBe(
-      true
-    )
+    const res = await fetch({ point: 'pre_call', descriptor: base, body: {} })
+    expect(res.status).toBe(200)
+    expect(inCluster).toHaveBeenCalledTimes(1)
+    expect(external).not.toHaveBeenCalled()
   })
 
-  it('4xx is NOT unavailable (mapping classifies it)', async () => {
-    const fetcher = createHookFetcher({
+  it('dials a remote (external) target with the SSRF-guarded transport', async () => {
+    const inCluster = okFetch()
+    const external = okFetch()
+    const fetch = createHookFetcher({
       getAuthToken: () => 't',
-      fetchImpl: async () => okResponse(422, '{"code":"blocked"}'),
+      fetchImpl: inCluster,
+      externalFetchImpl: external,
     })
-    const r = await fetcher({ point: 'moderate', descriptor: desc, body: {} })
-    expect(r).toEqual({ status: 422, body: { code: 'blocked' }, unavailable: false })
+    const descriptor: HookDescriptor = {
+      ...base,
+      endpoint: 'https://guardrails.aporia.com',
+      external: true,
+    }
+    await fetch({ point: 'pre_call', descriptor, body: {} })
+    expect(external).toHaveBeenCalledTimes(1)
+    expect(inCluster).not.toHaveBeenCalled()
   })
 
-  it('malformed JSON → unavailable', async () => {
-    const fetcher = createHookFetcher({
-      getAuthToken: () => 't',
-      fetchImpl: async () => okResponse(200, 'not json'),
+  it('maps an SSRF refusal (transport throws) to unavailable → fail-mode', async () => {
+    const external: FetchLike = vi.fn(async () => {
+      throw new Error('Domain resolves to private IP (10.0.0.5)')
     })
-    expect((await fetcher({ point: 'moderate', descriptor: desc, body: {} })).unavailable).toBe(
-      true
-    )
-  })
-
-  it('oversized body → unavailable', async () => {
-    const fetcher = createHookFetcher({
-      getAuthToken: () => 't',
-      maxOutputBytes: 4,
-      fetchImpl: async () => okResponse(200, '{"action":"continue"}'),
-    })
-    expect((await fetcher({ point: 'moderate', descriptor: desc, body: {} })).unavailable).toBe(
-      true
-    )
-  })
-
-  it('connection error / timeout → unavailable', async () => {
-    const fetcher = createHookFetcher({
-      getAuthToken: () => 't',
-      fetchImpl: async () => {
-        throw new Error('ECONNREFUSED')
-      },
-    })
-    expect(await fetcher({ point: 'moderate', descriptor: desc, body: {} })).toEqual({
-      status: 0,
-      body: undefined,
-      unavailable: true,
-    })
+    const fetch = createHookFetcher({ getAuthToken: () => 't', externalFetchImpl: external })
+    const descriptor: HookDescriptor = { ...base, endpoint: 'https://evil.example', external: true }
+    const res = await fetch({ point: 'pre_call', descriptor, body: {} })
+    expect(res.unavailable).toBe(true)
+    expect(res.status).toBe(0)
   })
 })

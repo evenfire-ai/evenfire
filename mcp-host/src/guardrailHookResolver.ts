@@ -141,19 +141,6 @@ export async function resolveGuardrailHookDescriptors(
       continue
     }
 
-    // SSRF posture (§8.3): the hook fetcher has no private-range/metadata-IP
-    // guard yet and the base mcp-host egress permits 0.0.0.0/0:443, so dialing an
-    // admin-authored external URL would ship the full conversation to an arbitrary
-    // host (incl. 169.254.169.254). Remote targets are therefore NOT resolved
-    // until the SSRF-guarded transport lands — fail-closed (the hook does not run)
-    // rather than enabling an unvalidated external dial.
-    if (ep.kind === 'remote') {
-      console.warn(
-        `[Guardrails] LlmHook ${id} is a remote target — disabled pending SSRF-guarded transport (§8.3); skipping`
-      )
-      continue
-    }
-
     const points = (cr.spec?.lifecyclePoints ?? [])
       .map(p => PHASE_TO_POINT[p])
       .filter((p): p is LifecyclePoint => !!p)
@@ -186,6 +173,11 @@ export async function resolveGuardrailHookDescriptors(
     const failMode: 'open' | 'closed' = cr.spec?.failMode === 'open' ? 'open' : 'closed'
     const order = typeof cr.spec?.order === 'number' ? cr.spec.order : 100
 
+    // `remote` targets are dialed over the public internet → SSRF-guarded
+    // transport (private/metadata-range reject + DNS-pin). image/service targets
+    // resolve to cluster-private IPs and must bypass that guard.
+    const external = ep.kind === 'remote'
+
     out.push({
       id,
       endpoint: ep.endpoint,
@@ -194,9 +186,10 @@ export async function resolveGuardrailHookDescriptors(
       capabilities,
       failMode,
       order,
+      external,
     })
     console.log(
-      `[Guardrails] resolved hook ${id} -> ${ep.endpoint}${path} points=[${points.join(',')}] caps=[${capabilities.join(',')}] failMode=${failMode}`
+      `[Guardrails] resolved hook ${id} -> ${ep.endpoint}${path} points=[${points.join(',')}] caps=[${capabilities.join(',')}] failMode=${failMode}${external ? ' external=true(SSRF-guarded)' : ''}`
     )
   }
 

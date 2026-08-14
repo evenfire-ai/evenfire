@@ -8,13 +8,18 @@
  * connection error / malformed or oversized body → `unavailable` (→ the hook's
  * fail-mode, §8.6). `4xx`/`2xx` are returned for the per-point mapping to judge.
  *
- * In-cluster (`image`/`service`) targets are trusted and dialed directly. The
- * SSRF-guarded `remote`-mode transport (DNS-pin + `isPrivateIp`, spec §8.3) is a
- * later increment — pass a guarded `fetchImpl` to reuse this shell for it.
+ * In-cluster (`image`/`service`) targets resolve to cluster-private IPs and are
+ * dialed directly. A `remote` (external) target — `descriptor.external` — is
+ * dialed through the SSRF-guarded transport (`../../net/ssrf`: reject
+ * private/loopback/link-local/metadata ranges, DNS-pin the connection), so a
+ * hosted provider (e.g. guardrails.aporia.com) works while an internal/metadata
+ * URL is refused (spec §8.3). An SSRF refusal maps to `unavailable` → the hook's
+ * fail-mode.
  */
+import { SsrfBlockedError, requestPinned, resolvePinnedPublicIp } from '../../net/ssrf'
 import type { HookFetcher, LifecyclePoint } from './types'
 
-/** Minimal fetch surface (injectable for tests + a future SSRF-guarded impl). */
+/** Minimal fetch surface (injectable for tests + the in-cluster path). */
 export type FetchLike = (
   url: string,
   init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }
@@ -24,8 +29,10 @@ export interface HookFetcherDeps {
   getAuthToken: () => string
   timeoutMs?: number
   maxOutputBytes?: number
-  /** Defaults to the global `fetch`. Inject an SSRF-guarded impl for `remote` hooks. */
+  /** In-cluster transport. Defaults to the global `fetch`. */
   fetchImpl?: FetchLike
+  /** External (remote) transport. Defaults to the SSRF-guarded impl. Injectable for tests. */
+  externalFetchImpl?: FetchLike
 }
 
 const POINT_PATH: Record<LifecyclePoint, string> = {
@@ -44,13 +51,40 @@ export function buildHookUrl(endpoint: string, path: string, point: LifecyclePoi
   return `${base}${mid}/v1/${POINT_PATH[point]}`
 }
 
+/**
+ * SSRF-guarded transport for `remote` hook targets: requires https, validates
+ * the host resolves only to public IPs, and connects to a pinned IP. Adapts to
+ * the `FetchLike` shape so the outcome classification is shared with the
+ * in-cluster path. Throws `SsrfBlockedError` on a blocked/unverifiable host.
+ */
+function makeSsrfGuardedFetch(timeoutMs: number): FetchLike {
+  return async (urlStr, init) => {
+    const url = new URL(urlStr)
+    if (url.protocol !== 'https:') {
+      throw new SsrfBlockedError(`remote hook URL must be https (got ${url.protocol})`)
+    }
+    const pinnedIp = await resolvePinnedPublicIp(url) // throws SsrfBlockedError on private/unresolvable
+    const { statusCode, body } = await requestPinned({
+      url,
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      pinnedIp,
+      timeoutMs,
+    })
+    return { status: statusCode, text: async () => body }
+  }
+}
+
 export function createHookFetcher(deps: HookFetcherDeps): HookFetcher {
   const timeoutMs = deps.timeoutMs ?? 5000
   const maxOutputBytes = deps.maxOutputBytes ?? 65536
-  const doFetch: FetchLike = deps.fetchImpl ?? (globalThis.fetch as unknown as FetchLike)
+  const inClusterFetch: FetchLike = deps.fetchImpl ?? (globalThis.fetch as unknown as FetchLike)
+  const externalFetch: FetchLike = deps.externalFetchImpl ?? makeSsrfGuardedFetch(timeoutMs)
 
   return async ({ point, descriptor, body }) => {
     const url = buildHookUrl(descriptor.endpoint, descriptor.path, point)
+    const doFetch = descriptor.external ? externalFetch : inClusterFetch
     try {
       const res = await doFetch(url, {
         method: 'POST',
@@ -75,8 +109,13 @@ export function createHookFetcher(deps: HookFetcherDeps): HookFetcher {
       }
       // 5xx → unavailable; 2xx/4xx are returned for the mapping to classify.
       return { status: res.status, body: parsed, unavailable: res.status >= 500 }
-    } catch {
-      // timeout / connection error → unavailable
+    } catch (err) {
+      // timeout / connection error / SSRF refusal → unavailable (→ fail-mode, §8.6).
+      if (err instanceof SsrfBlockedError) {
+        console.warn(
+          `[Guardrails] remote hook ${descriptor.id} blocked by SSRF guard: ${err.message}`
+        )
+      }
       return { status: 0, body: undefined, unavailable: true }
     }
   }

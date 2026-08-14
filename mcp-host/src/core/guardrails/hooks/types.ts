@@ -32,6 +32,13 @@ export interface HookDescriptor {
   /** Fail-posture when the hook is unavailable (spec §8.6). */
   failMode: 'open' | 'closed'
   order: number
+  /**
+   * True for a `remote` (external) target dialed over the public internet. Such
+   * calls MUST go through the SSRF-guarded transport (reject private/metadata
+   * ranges, DNS-pin). In-cluster `image`/`service` targets resolve to
+   * cluster-private IPs and are NOT external, so they bypass that guard.
+   */
+  external?: boolean
 }
 
 /** Result of one `/v1` HTTP call. `unavailable` = 5xx / timeout / connection error / malformed body (spec §8.1). */
