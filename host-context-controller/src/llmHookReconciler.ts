@@ -553,6 +553,22 @@ export class LlmHookReconciler {
 
       failures.push('egress binding must declare toFQDN or cidr')
     }
+
+    // Scoped DNS (N5): a hook that declares outbound egress must resolve its
+    // targets at runtime, so grant egress to CoreDNS (kube-system:53) — but ONLY
+    // for hooks that opted into egress. A pure /v1 responder (no egressBindings)
+    // gets no egress at all, "no implicit DNS".
+    if (rules.length > 0) {
+      rules.push({
+        to: [
+          { namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } } },
+        ],
+        ports: [
+          { port: 53, protocol: 'UDP' },
+          { port: 53, protocol: 'TCP' },
+        ],
+      })
+    }
     return { rules, failures }
   }
 

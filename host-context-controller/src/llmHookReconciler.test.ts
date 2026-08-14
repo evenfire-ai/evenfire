@@ -778,6 +778,48 @@ describe('LlmHookReconciler', () => {
     expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
   })
 
+  it('grants scoped CoreDNS egress only when a hook declares egressBindings (N5)', async () => {
+    const withEgress = makeHook({
+      name: 'out',
+      spec: {
+        target: { image: { ref: IMG, port: 8080, egressBindings: [{ cidr: '8.8.8.8/32' }] } },
+        lifecyclePoints: ['preCall'],
+      },
+    })
+    hooks.set('out', withEgress)
+    await reconciler.reconcile(withEgress)
+
+    const np = (
+      networkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
+        body: k8s.V1NetworkPolicy
+      }
+    ).body
+    expect(np.spec?.policyTypes).toContain('Egress')
+    const egress = np.spec?.egress ?? []
+    // The declared binding …
+    expect(egress.some(r => r.to?.some(t => t.ipBlock?.cidr === '8.8.8.8/32'))).toBe(true)
+    // … plus a scoped CoreDNS allow (kube-system:53).
+    const dns = egress.find(r =>
+      r.to?.some(
+        t => t.namespaceSelector?.matchLabels?.['kubernetes.io/metadata.name'] === 'kube-system'
+      )
+    )
+    expect(dns).toBeDefined()
+    expect(dns?.ports?.map(p => p.port)).toEqual([53, 53])
+  })
+
+  it('grants NO egress (not even DNS) to a pure responder hook (no egressBindings)', async () => {
+    const responder = makeHook({ name: 'resp' }) // default image, no egressBindings
+    hooks.set('resp', responder)
+    await reconciler.reconcile(responder)
+
+    const np = networkingApi.createNamespacedNetworkPolicy.mock.calls
+      .map(c => c[0] as { body: k8s.V1NetworkPolicy })
+      .find(c => c.body.metadata?.name === podKeyResourceName(computePodKey(responder)!))!.body
+    expect(np.spec?.policyTypes).not.toContain('Egress')
+    expect(np.spec?.egress).toBeUndefined()
+  })
+
   it('allows a valid public-CIDR egress binding as an Egress NetworkPolicy rule', async () => {
     const a = makeHook({
       name: 'a',
