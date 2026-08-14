@@ -248,20 +248,43 @@ describe('delete impact gate (409 model_in_use → force)', () => {
   })
 
   // L1: the advisory banner must not keep showing an item the operator just
-  // resolved in-session. A successful mutation bumps refreshSignal → re-fetch.
-  it('re-fetches the attention feed after a successful delete', async () => {
+  // resolved in-session. A successful mutation bumps refreshSignal → re-fetch,
+  // and the banner must reflect the fresh feed. Assert the observable result
+  // (the item leaves the operator's view), not the fetch call count: a banner
+  // that re-fetches but ignores the new data would pass a call-count check.
+  it('drops a resolved item from the banner after a successful delete', async () => {
     vi.mocked(deleteLlmModel).mockResolvedValue(undefined)
+    // Mount feed carries a distinct referenced item; the post-delete re-fetch
+    // returns it resolved (empty), so the banner must stop showing it. The
+    // banner item is deliberately unrelated to the catalog row being deleted.
+    vi.mocked(getAdminAttention)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            kind: 'stale_model_referenced',
+            provider: 'openai',
+            model: 'gpt-5-mini',
+            displayName: 'GPT-5 Mini',
+            hostsAffected: [{ namespace: 'mcp-host', name: 'agent-b', roles: ['primary'] }],
+            grantsAffected: [],
+          },
+        ],
+        generatedAt: 'x',
+      })
+      .mockResolvedValue({ items: [], generatedAt: 'x' })
 
     renderSurface()
 
-    await screen.findByText('Model catalog')
-    // One fetch on mount, before any mutation.
-    await waitFor(() => expect(vi.mocked(getAdminAttention)).toHaveBeenCalledTimes(1))
+    // The stale item is visible in the banner before any mutation.
+    expect(await screen.findByText('GPT-5 Mini')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
 
-    // The successful delete triggers a second, on-demand fetch (no polling).
-    await waitFor(() => expect(vi.mocked(getAdminAttention)).toHaveBeenCalledTimes(2))
+    // After the successful delete the banner re-fetches and the resolved item
+    // is gone from the operator's view.
+    await waitFor(() => {
+      expect(screen.queryByText('GPT-5 Mini')).not.toBeInTheDocument()
+    })
   })
 })
