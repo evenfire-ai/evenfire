@@ -63,7 +63,7 @@ export function CatalogAttentionBanner({ refreshSignal }: CatalogAttentionBanner
           const hostCount = item.hostsAffected.length
           const grantCount = item.grantsAffected.length
           return (
-            <li key={`${item.provider}/${item.model}`} className="cu-model-attention__item">
+            <li key={`${item.provider}/${item.model}`}>
               <span className="cu-model-attention__head">
                 <span className="cu-model-attention__name">{label}</span>{' '}
                 <span className="cu-model-attention__meta">

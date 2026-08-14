@@ -15,14 +15,14 @@ export function ModelReferences({ hostsAffected, grantsAffected }: ModelReferenc
   return (
     <div className="cu-model-refs">
       {hostsAffected.length > 0 ? (
-        <div className="cu-model-refs__group">
+        <div>
           <span className="cu-model-refs__label">
             {hostsAffected.length} Host{hostsAffected.length === 1 ? '' : 's'}
           </span>
           <ul className="cu-model-refs__list">
             {hostsAffected.map(host => (
               <li key={`${host.namespace}/${host.name}`} className="cu-model-refs__item">
-                <span className="cu-model-refs__ref">
+                <span>
                   {host.namespace}/{host.name}
                 </span>
                 {host.roles.length > 0 ? (
@@ -34,14 +34,14 @@ export function ModelReferences({ hostsAffected, grantsAffected }: ModelReferenc
         </div>
       ) : null}
       {grantsAffected.length > 0 ? (
-        <div className="cu-model-refs__group">
+        <div>
           <span className="cu-model-refs__label">
             {grantsAffected.length} grant{grantsAffected.length === 1 ? '' : 's'}
           </span>
           <ul className="cu-model-refs__list">
             {grantsAffected.map(grant => (
               <li key={grant.id} className="cu-model-refs__item">
-                <span className="cu-model-refs__ref">
+                <span>
                   {grant.recipeNamespace}/{grant.recipeName}
                 </span>
                 <span className="cu-model-refs__meta"> · {grant.capabilityFamily}</span>
