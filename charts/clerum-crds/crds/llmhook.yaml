@@ -157,6 +157,7 @@ spec:
                 lifecyclePoints:
                   type: array
                   minItems: 1
+                  maxItems: 4
                   description: Lifecycle points this hook subscribes to.
                   items:
                     type: string
@@ -165,6 +166,23 @@ spec:
                       - moderate
                       - postCallSuccess
                       - onError
+                contentAccess:
+                  type: string
+                  enum:
+                    - metadata
+                    - content
+                  description: >-
+                    Content projection this hook receives (§8.4/§8.7). `content` =
+                    the projected non-system messages/response bodies; `metadata` =
+                    model+params+usage only, no bodies. moderate/postCallSuccess/
+                    onError are inherently content-bearing; only a preCall-only hook
+                    may be `metadata`. Omit to let the platform infer (content points
+                    -> content, preCall-only -> metadata). The install-time content/
+                    egress gate keys on this: a content hook with egress or a remote
+                    target requires trust_level high. NOTE: enforced by the runtime
+                    content projection (target model B, §12.4); until that lands the
+                    field is advisory and the gate treats every message-carrying
+                    point as content-bearing (interim fix A).
                 order:
                   type: integer
                   default: 100
@@ -222,6 +240,11 @@ spec:
                   message: "remote.baseUrl must be https://"
                 - rule: "!(has(self.capabilities) && self.capabilities.exists(c, c == 'may_deny')) || self.failMode == 'closed'"
                   message: "a deny-authoritative hook (may_deny) must fail closed"
+                # contentAccess: metadata is contradictory for an inherently content-bearing
+                # point. Absent field passes (platform infers), so this is non-breaking for
+                # existing CRs; it only rejects an explicit metadata on moderate/post/onError.
+                - rule: "!has(self.contentAccess) || self.contentAccess == 'content' || !self.lifecyclePoints.exists(p, p == 'moderate' || p == 'postCallSuccess' || p == 'onError')"
+                  message: "contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError (those points are inherently content-bearing)"
             status:
               type: object
               description: >-
