@@ -131,22 +131,26 @@ const NO_CREDENTIAL_SCHEMA: RegistryCredentialSchema = {
 
 // ── install-hook trust policy (guardrails spec §8.4) ────────────────────────
 const HOOK_TRUST_ORDER: Record<string, number> = { low: 0, mid: 1, high: 2 }
-// Lifecycle points that receive message/response CONTENT (§8.4/§8.7). The runtime
-// currently sends the full ToolCompletionRequest (messages) to preCall and onError
-// as well as moderate/postCallSuccess, and no content projection redacts it yet, so
-// EVERY message-carrying point is content-bearing for this gate (interim fix A,
-// §12.4). The target model (B) keys this on the per-hook `spec.contentAccess`
-// declaration once the projection enforces it — until then, treat them all as
-// content-bearing so a preCall/onError egress hook can't dodge the high-trust bar.
-const CONTENT_BEARING_POINTS = new Set(['preCall', 'moderate', 'postCallSuccess', 'onError'])
+// Lifecycle points that ALWAYS receive message/response content (§8.4/§8.7). preCall
+// is the one point with two flavors — content-bearing unless the hook declares
+// `contentAccess: metadata` — so it is handled separately in isContentBearingHook.
+const INHERENTLY_CONTENT_POINTS = new Set(['moderate', 'postCallSuccess', 'onError'])
 
 /**
  * §8.4/§8.7 — does this hook receive message/response CONTENT at any of its
- * lifecycle points? Interim fix A: every message-carrying point counts (see
- * CONTENT_BEARING_POINTS). Target model B keys this on `spec.contentAccess`.
+ * lifecycle points? moderate/postCallSuccess/onError always do; preCall does
+ * unless it explicitly declared `contentAccess: metadata` (mcp-host's projection
+ * enforces the same rule, so the gate and the runtime agree — the two land
+ * together, §12.4). Absent contentAccess ⇒ content-bearing (conservative).
  */
-export function isContentBearingHook(lifecyclePoints: string[] | undefined): boolean {
-  return Array.isArray(lifecyclePoints) && lifecyclePoints.some(p => CONTENT_BEARING_POINTS.has(p))
+export function isContentBearingHook(
+  lifecyclePoints: string[] | undefined,
+  contentAccess?: string
+): boolean {
+  if (!Array.isArray(lifecyclePoints)) return false
+  if (lifecyclePoints.some(p => INHERENTLY_CONTENT_POINTS.has(p))) return true
+  if (lifecyclePoints.includes('preCall')) return contentAccess !== 'metadata'
+  return false
 }
 
 /**
@@ -157,12 +161,13 @@ export function isContentBearingHook(lifecyclePoints: string[] | undefined): boo
  */
 export function contentEgressRequiresHighTrust(args: {
   lifecyclePoints: string[] | undefined
+  contentAccess?: string
   hasEgress: boolean
   isRemote: boolean
   trustLevel: string
 }): boolean {
   return (
-    isContentBearingHook(args.lifecyclePoints) &&
+    isContentBearingHook(args.lifecyclePoints, args.contentAccess) &&
     (args.hasEgress || args.isRemote) &&
     args.trustLevel !== 'high'
   )
@@ -176,6 +181,7 @@ type HookMetaShape = {
     remote?: { baseUrl?: string }
   }
   lifecyclePoints: string[]
+  contentAccess?: string
   path?: string
   defaultConfig?: Record<string, unknown>
   requiredEgress?: unknown[]
@@ -1779,9 +1785,23 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         const hasEgress =
           Array.isArray(hookMeta.requiredEgress) && hookMeta.requiredEgress.length > 0
         const isRemote = !!hookMeta.target.remote
+        // contentAccess: metadata is contradictory for an inherently content-bearing
+        // point (mirrors the CRD CEL). Reject early with a clear error.
+        if (
+          hookMeta.contentAccess === 'metadata' &&
+          hookMeta.lifecyclePoints.some(p => INHERENTLY_CONTENT_POINTS.has(p))
+        ) {
+          res.status(400).json({
+            error: 'content_access_conflict',
+            reason:
+              'contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError (§8.4)',
+          })
+          return
+        }
         if (
           contentEgressRequiresHighTrust({
             lifecyclePoints: hookMeta.lifecyclePoints,
+            contentAccess: hookMeta.contentAccess,
             hasEgress,
             isRemote,
             trustLevel,
@@ -1930,6 +1950,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           target: targetSpec,
           path: hookMeta.path ?? '/',
           lifecyclePoints: hookMeta.lifecyclePoints,
+          ...(hookMeta.contentAccess === 'metadata' || hookMeta.contentAccess === 'content'
+            ? { contentAccess: hookMeta.contentAccess }
+            : {}),
           order: typeof body.order === 'number' ? body.order : 100,
           failMode,
           ...(capabilities.length > 0 ? { capabilities } : {}),

@@ -47,12 +47,22 @@ describe('resolveHookTrustLevel', () => {
   })
 })
 
-describe('content-bearing classification (§8.4/§8.7 fix A)', () => {
-  it('every message-carrying point is content-bearing — incl. preCall and onError', () => {
-    expect(isContentBearingHook(['preCall'])).toBe(true)
+describe('content-bearing classification (§8.4/§8.7)', () => {
+  it('moderate/postCallSuccess/onError are always content-bearing', () => {
     expect(isContentBearingHook(['moderate'])).toBe(true)
     expect(isContentBearingHook(['postCallSuccess'])).toBe(true)
     expect(isContentBearingHook(['onError'])).toBe(true)
+  })
+
+  it('preCall is content-bearing by default and when content, but NOT when metadata', () => {
+    expect(isContentBearingHook(['preCall'])).toBe(true) // absent ⇒ conservative
+    expect(isContentBearingHook(['preCall'], 'content')).toBe(true)
+    expect(isContentBearingHook(['preCall'], 'metadata')).toBe(false)
+  })
+
+  it('contentAccess: metadata cannot make an inherently-content point content-free', () => {
+    expect(isContentBearingHook(['moderate'], 'metadata')).toBe(true)
+    expect(isContentBearingHook(['preCall', 'moderate'], 'metadata')).toBe(true)
   })
 
   it('an empty/unknown point set is not content-bearing', () => {
@@ -112,6 +122,18 @@ describe('content/egress separation gate (§8.4)', () => {
     expect(
       contentEgressRequiresHighTrust({
         lifecyclePoints: [],
+        hasEgress: true,
+        isRemote: false,
+        trustLevel: 'low',
+      })
+    ).toBe(false)
+  })
+
+  it('preCall metadata-only shaper + egress at low trust → allowed (content-free, B)', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: ['preCall'],
+        contentAccess: 'metadata',
         hasEgress: true,
         isRemote: false,
         trustLevel: 'low',
