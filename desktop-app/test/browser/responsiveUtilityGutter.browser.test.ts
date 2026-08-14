@@ -76,6 +76,7 @@ describe('responsive utility gutter', () => {
 
     expect(mobile.appsPaddingRight).toBe(0)
     expect(mobile.mountedPaddingRight).toBe(0)
+    expect(desktop.appsPaddingRight).toBe(466)
     expect(desktop.mountedPaddingRight).toBe(466)
   })
 })
