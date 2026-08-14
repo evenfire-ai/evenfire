@@ -1004,13 +1004,35 @@ control-ui reads it, §13.4); **mcp-host** only **watches** the CRs to resolve t
 `Host.spec.guardrails.hooks` block lists (opt-in per Host — §5; there is no auto-apply scope) and builds
 `RemoteLlmHook`s — it deploys nothing.
 
+**Credential rotation (`reconcileByEnvSecret`).** The hook's `envSecret` **name** is part of the pod key,
+but its **contents** are folded into a separate **credentials-revision** — a digest of the Secret's data
+stamped on the pod template — so rotating the Secret in place (same name, new value) changes the template
+and **rolls the hook pod onto the new credentials**, exactly the mcp-server mechanism. HCC **MUST**
+therefore watch the `llm-hooks` Secrets and re-reconcile on change — a `reconcileByEnvSecret` for `LlmHook`
+**mirroring `McpServer`** — fanning the event out to every pod key whose `envSecret` names the changed
+Secret, so a rotation converges **immediately** rather than on the periodic resync.
+
 **Hook resolution (`hooks` entry → CR).** A `guardrails.hooks` entry is `{ id, digest }`: **`id`** is the
-`LlmHook` **CR name** in the `llm-hooks` namespace, **`digest`** the expected image sha256. At load,
-mcp-host resolves `id` → the `LlmHook` CR and checks `entry.digest == status.observedDigest` (the digest
-actually running, §8.2 `status`). On **mismatch or unresolved CR**, the hook is **not loaded**:
-**fail-closed** (the guarded call denies) if the entry is deny-authoritative (`may_deny`), else
-**skipped-with-alert** for an advisory hook. This binds the admin's intended digest to the pod actually
-answering, closing the gap that mcp-host can't see the image over HTTP (§12.4).
+`LlmHook` **CR name** in the `llm-hooks` namespace, **`digest`** the expected image sha256. mcp-host
+resolves `id` → the `LlmHook` CR and checks `entry.digest == status.observedDigest` (the digest actually
+running, §8.2 `status`). On **mismatch or unresolved CR**, the hook is **not loaded**: **fail-closed** (the
+guarded call denies) if the entry is deny-authoritative (`may_deny`), else **skipped-with-alert** for an
+advisory hook. This binds the admin's intended digest to the pod actually answering, closing the gap that
+mcp-host can't see the image over HTTP.
+
+**Resolution is live, not boot-only.** mcp-host **MUST** re-resolve `Host.spec.guardrails` on every `Host`
+and `LlmHook` watch event, not only at startup, so an in-place CR edit — a changed `capabilities`, `path`,
+`order`, or `failMode`, or a moved endpoint — takes effect on the running mcp-host **without a restart**.
+Granting `may_deny` (or tightening `failMode`) via a CR edit must apply on the next guarded call, not on the
+next reboot.
+
+**Image updates are a coordinated re-install, never an in-place edit.** Because the ref digest is **pinned**
+(`{ id, digest }`), an `image`-target update **MUST** go through the control-api install/upgrade flow, which
+bumps the `LlmHook` CR image digest **and** every referencing Host's `guardrails.hooks[].digest` in one
+transaction. A bare `kubectl edit` of the `LlmHook` image is **not** a supported update path: it moves the
+pod key and `status.observedDigest` while the referencing Hosts still pin the old digest, so the digest
+check fails and the hook stops serving (fail-closed for `may_deny`, §8.2) rather than upgrading — the pin
+deliberately binds the admin-reviewed digest to the pod actually answering.
 
 ### 8.3 · `remote`-mode egress (direct, matching the status quo)
 
@@ -1030,9 +1052,21 @@ out.
    the `remote.baseUrl` `^https://` pattern + CEL in §8.2 — not by this guard.)
 3. **Payload** stays governed by the content projection (§8.4).
 
-**L3 is a backstop only.** The broad lane is the pre-existing LLM-call posture; hooks add no new class of
-egress. Optional: a Calico `destination.domains` policy scoped to the admin-declared hook hosts, programmed
-by HCC per `remote` hook — per-host precision without a proxy pod.
+**L3 (network) — range-scoped, no cluster/internal reach.** The broad external lane MUST NOT be an
+unqualified `0.0.0.0/0`: its `ipBlock.except` **MUST** exclude the cluster **pod, service, and node** CIDRs
+and all private / link-local / metadata / reserved ranges — `10.0.0.0/8`, `172.16.0.0/12`,
+`192.168.0.0/16`, `169.254.0.0/16` (incl. metadata `169.254.169.254`), `100.64.0.0/10`, `127.0.0.0/8`,
+`0.0.0.0/8` (plus the IPv6 equivalents on a dual-stack cluster). This is the **network mirror of the
+app-layer `isPrivateIp` guard**, so even a path that bypasses the app guard cannot reach a cluster-internal
+or metadata IP on 443/80 — the same lane both external LLM providers and `remote` hooks use. Cluster-internal
+destinations remain reachable **only** through the narrow, explicit per-destination lanes (HCC gateway,
+approval gateway, DNS, API server, Context mcp-servers, llm-hooks), which are separate additive allows and
+are unaffected by the `except`. This is **range**-scoping, not **domain**-scoping — per-host domain precision
+(N6) stays app-layer, with an optional Calico `destination.domains` policy as future defense-in-depth.
+
+Hook (`egressBindings`) egress carries the same guarantee by construction: HCC validates every binding CIDR
+with `isAllowedExternalEgressCidr` at reconcile and **rejects** any that overlaps a private / metadata /
+reserved range (§8.2), so a hook can never declare a cluster-internal destination in the first place.
 
 ### 8.4 · Content exposure
 
@@ -1155,9 +1189,28 @@ non-system messages/params; the system prompt is immutable to them; §8.1) · tr
 (`trust_level` is install-assigned and hook `config` is never a trust input; content/run gates compare it
 to the admin floor, §8.4) · bounded/redacted evidence · no-config compatibility.
 
-The **network & pod isolation invariants** (host↔`llm-hooks` reachability, namespace default-deny,
-mutual-hook isolation, allowlist-only egress, pod hardening) are enumerated as an enforced model with
-per-invariant status in **§12.5**.
+### 11.1 · Network & pod isolation invariants
+
+The enforced isolation model between mcp-host and the `llm-hooks` namespace, stated in full so the
+guarantee and its mechanism can be reviewed together. Enforcement is **symmetric and HCC-owned**: the
+mcp-host runtime never widens its own reach (§12.1), and every allowed flow is a narrowly-scoped,
+controller-generated NetworkPolicy on top of a deny-everything baseline. **Status:** *Enforced* =
+implemented; *In progress* = being wired; *Planned* = agreed, not yet implemented.
+
+| # | Invariant | What it guarantees & how it is enforced | Status |
+|---|---|---|---|
+| N1 | **CRD-scoped reach** | An mcp-host pod may open a connection to an installed hook **only** when its admin-authored Host CR lists that hook in `guardrails.hooks`. This is enforced at both ends: the host's egress policy permits only the hook pods/ports it references, and each hook's ingress policy admits only the mcp-hosts that reference it. A host that doesn't reference a hook is denied on both sides — it never appears in that hook's ingress allow, and the hook never appears in the host's egress allow. | ingress Enforced; egress In progress |
+| N2 | **Symmetric enforcement** | Reachability is gated independently on both sides of a connection: the source host must have an egress allow **and** the destination hook must have an ingress allow. The two policies live in different namespaces and are generated separately, so a bug or gap on one side alone cannot open a path. This is deliberate defense-in-depth — losing either policy still leaves the other blocking. | ingress Enforced; egress In progress |
+| N3 | **`llm-hooks` default-deny (both directions)** | The namespace begins in a deny-everything state: one NetworkPolicy selects all pods and governs both ingress **and** egress with no rules, so every hook pod is denied all inbound and all outbound by default. Every allowed flow is therefore something HCC explicitly opened; nothing is reachable, and no hook can reach out, unless a controller-generated policy permits it. Reply traffic on an already-accepted inbound connection is still allowed (connection tracking), so denying egress does not break a hook responding to an mcp-host. | ingress Enforced; egress Planned |
+| N4 | **Mutual hook isolation** | A hook cannot initiate a connection to another hook, to any other pod in `llm-hooks`, or to any other namespace, unless HCC has added an explicit allow. On the receiving side, each hook's ingress admits only mcp-host pods — never other hooks — so hook-to-hook traffic is refused at the destination regardless of the source's intent. With default-deny-egress (N3), both the initiating and the receiving direction of hook-to-hook communication are closed. | ingress-dir Enforced; egress-dir Planned |
+| N5 | **Allowlist-only hook egress** | When a hook legitimately needs to call out (e.g. a remote moderation API), each destination must be declared in its CRD `egressBindings`, which HCC validates (SSRF / private-range checks) before turning into an egress allow. There is **no implicit egress — not even DNS** — so a hook that declares nothing can reach nothing outbound. A hook's outbound surface is thus an explicit, reviewable allowlist rather than open internet access. | validation Enforced; default-deny-egress Planned |
+| N6 | **Remote guardrails reach only their domain** | A `remote` hook is dialed only at the `baseUrl` host declared in its CRD. The shared SSRF guard enforces this at the app layer: https-only, resolve-and-pin the host's public IP, reject private/loopback/link-local/metadata ranges, and follow no redirects — so the connection can only land on the declared host. A network-layer Calico FQDN policy was considered and deliberately **not** required; the app-layer pin is the accepted enforcement. | Enforced (app-layer) |
+| N7 | **Least-privilege scoped policies** | All mcp-host↔`llm-hooks` communication rides narrowly-scoped, HCC-generated NetworkPolicies — never a namespace-wide or wildcard allow. Ingress policies are scoped to a specific hook pod (by pod-key or Service selector) and the exact port; egress policies are scoped to the specific hook pods a host references. The interim namespace-wide egress policy is being replaced by this per-host scoped version. | ingress Enforced; egress In progress |
+| N8 | **Hardened, unprivileged hook pods** | Every hook container runs **non-root** with a **read-only root filesystem**, drops all Linux capabilities, forbids privilege escalation, uses the `RuntimeDefault` seccomp profile, and mounts **no** ServiceAccount token. HCC stamps these on the pod/container `securityContext` — they are not left to the image. This hardening is what makes pod-level (rather than strict per-hook) isolation acceptable under co-location (§12.5). | non-root/caps/seccomp/no-token Enforced; read-only-fs Planned |
+| N9 | **Secret isolation** | A hook's `envSecret` is resolved only within `llm-hooks` and can never name the mcp-host LLM key or any Host secret. Because hooks and their secrets are confined to their own namespace under scoped RBAC, one hook cannot read another hook's — or the platform's — credentials. Secret material never crosses the namespace boundary into a hook. | Enforced |
+| N10 | **Runtime can't widen its own reach** | The per-Host mcp-host ServiceAccount is read-only (`get`) on `LlmHook` CRs and cannot list/watch them, mutate any `Host`/`LlmHook` CR, or touch any NetworkPolicy. A compromised mcp-host pod therefore cannot rewrite guardrail policy, enumerate other tenants' hooks, or open new network paths for itself. Policy authorship stays entirely in the trusted control plane (control-api / HCC). | Enforced |
+| N11 | **Fail-closed provisioning** | If HCC cannot build a correct scoped policy for a hook — e.g. the referenced Service has no selector, or a reference can't be resolved — it declines to create an over-broad allow and leaves the hook unreachable under the default-deny baseline. Reachability only appears when a precise allow is successfully provisioned; a provisioning failure fails **closed**, not open. (The separate hook-resolution fail-posture at load time is still open — see §12.4.) | NP-provisioning Enforced; resolution open |
+| N12 | **No internal reach via broad egress** | The broad *external* egress lanes — mcp-host's `0.0.0.0/0:443\|80` LLM / `http_request` lane, and each hook's `egressBindings` — exclude the cluster pod/service/node CIDRs and all private/link-local/metadata/reserved ranges, so neither mcp-host nor a hook can reach a cluster-internal or metadata IP through them. Enforced by `ipBlock.except` on the mcp-host lane (the network mirror of the app-layer `isPrivateIp` guard, §8.3) and by `isAllowedExternalEgressCidr` validation of hook `egressBindings` at reconcile. Cluster-internal destinations stay reachable only through the narrow, explicit per-destination lanes. | hook `egressBindings` Enforced; mcp-host `except` Planned |
 
 ---
 
@@ -1211,12 +1264,14 @@ which a guardrail `allow` never bypasses.
 
 ### 12.4 · Known residual risks & follow-ups
 
-- **`remote`-hook egress** rides the broad public-egress lane; the network layer does **not** exclude
-  internal ranges (`443/80 → 0.0.0.0/0`), so SSRF containment is **app-layer** (N6): the shared guard is
-  https-only, DNS-pinned, rejects private/metadata ranges, and follows no redirects, so a `remote` hook can
-  reach only its `baseUrl` host. This app-layer pin is the **accepted enforcement** for N6 — a network-layer
-  Calico `destination.domains` policy is **not** required (decided) but remains a future hardening option if
-  a cluster wants defense-in-depth.
+- **`remote`-hook egress is range-scoped, not domain-scoped.** At the **network** layer the broad lane
+  excludes all cluster/private/metadata ranges via `ipBlock.except` (N12/§8.3), so mcp-host and hooks cannot
+  reach a cluster-internal or metadata IP on 443/80. What the network layer does **not** do is pin the
+  *domain* — any *public* host on 443/80 is reachable — so per-hook domain precision is **app-layer** (N6):
+  the shared SSRF guard is https-only, DNS-pinned, rejects private/metadata ranges, and follows no redirects,
+  so a `remote` hook reaches only its `baseUrl` host. The app-layer pin is the **accepted enforcement** for
+  N6; a network-layer Calico `destination.domains` policy is **not** required (decided; OSS Calico can't
+  express it anyway) but remains a future defense-in-depth option (Calico Enterprise / Cilium / egress proxy).
 - **Image trust matches the mcp-server posture** — a code-side `@clerum/image-policy` allowlist + digest
   preflight at **install** (§8.5), gated by the same enforcement flag; **not** an admission webhook and not
   verified at call time. Because CR authorship is a trusted-plane action (§12.1), this is a
@@ -1238,26 +1293,10 @@ which a guardrail `allow` never bypasses.
 - **Hook-supplied `code`/`message`** strings are untrusted response data — length-bounded, never used as
   metric labels, redacted in audit.
 
-### 12.5 · Network & pod isolation invariants
+### 12.5 · Network & pod isolation — co-location note
 
-The enforced isolation model between mcp-host and the `llm-hooks` namespace. Enforcement is **symmetric
-and HCC-owned**: mcp-host never widens its own reach (§12.1), and every allow is a narrowly-scoped,
-controller-generated NetworkPolicy. Status: **Enforced** = implemented; **In progress** = being wired;
-**Planned** = agreed, not yet implemented.
-
-| # | Invariant | Enforcement | Status |
-|---|---|---|---|
-| N1 | **CRD-scoped reach** — a host pod reaches an installed hook **only** if its admin-authored Host CR references it. | Per-host **scoped egress** NP (allows only the referenced hook pods/ports) **and** per-hook **ingress** NP admitting only referencing hosts; deny otherwise. | ingress Enforced; egress In progress |
-| N2 | **Symmetric enforcement** — reachability requires **both** the host's egress and the hook's ingress to allow it; neither alone suffices. | Two independent NetworkPolicies (`mcp-host` ns egress + `llm-hooks` ns ingress). | ingress Enforced; egress In progress |
-| N3 | **`llm-hooks` default-deny (ingress + egress)** — every pod denies all ingress **and** all egress (including DNS) unless an HCC policy explicitly allows it. | Namespace default-deny NP (`policyTypes: [Ingress, Egress]`, no rules); all allows HCC-managed. | ingress Enforced; egress Planned |
-| N4 | **Mutual hook isolation** — a hook cannot reach another hook, any other pod in `llm-hooks`, or any other namespace, unless HCC expressly allows it. | Default-deny-egress + per-hook ingress admits only mcp-hosts (never hooks); no hook→hook allow exists. | ingress-direction Enforced; egress-direction Planned (with N3) |
-| N5 | **Allowlist-only hook egress** — a hook reaches external/other destinations **only** via its CRD `egressBindings`, SSRF/private-range validated; **no implicit egress, including DNS**. | HCC builds per-podKey egress rules from validated `egressBindings`; default-deny-egress backstops. | validation Enforced; default-deny-egress Planned |
-| N6 | **Remote guardrails reach only their target domain** — a `remote` hook dials only its CRD `baseUrl` host. | App-layer SSRF guard: https-only, DNS-pinned, private/metadata ranges rejected, no redirects ⇒ only the `baseUrl` host is reachable. | Enforced (app-layer) |
-| N7 | **Least-privilege scoped policies** — all mcp-host↔`llm-hooks` communication is via narrowly-scoped HCC-generated NetworkPolicies; **no namespace-wide or wildcard allows**. | Per-host egress + per-hook ingress, scoped by pod label + port. | ingress Enforced; egress In progress (replaces interim namespace-wide egress) |
-| N8 | **Hardened, unprivileged hook pods** — hook containers run **non-root**, **read-only root filesystem**, all Linux caps dropped, no privilege escalation, seccomp `RuntimeDefault`, and **no mounted ServiceAccount token**. | Reconciler-stamped pod/container `securityContext` + `automountServiceAccountToken: false`. | non-root / caps / seccomp / no-token Enforced; read-only root fs Planned |
-| N9 | **Secret isolation** — a hook's `envSecret` resolves only within `llm-hooks` and can never reference the mcp-host LLM key or a Host secret; hooks can't read each other's secrets. | Namespace isolation + `envSecret` name-scoping + RBAC. | Enforced |
-| N10 | **Runtime can't widen its own reach** — the mcp-host per-host SA is read-only (`get`) on `LlmHook` CRs and cannot mutate `Host`/`LlmHook` CRs or any NetworkPolicy. | RBAC `get`-only on `llmhooks`; Host CR immutable to the runtime (§12.1). | Enforced |
-| N11 | **Fail-closed provisioning** — if HCC cannot provision a hook's scoped policy (missing Service selector, unresolved ref), the hook is left **unreachable**, never open. | Default-deny baseline + HCC refuses to create an over-broad allow. | NP-provisioning Enforced; hook-resolution fail-posture open (§12.4) |
+The enforced network & pod isolation invariants (**N1–N11**) are stated in full, with mechanism and
+status, in **§11.1**. This section records the one design consideration behind them.
 
 **On co-location (digest-dedup) and N1/N8.** Digest-dedup co-locates hooks that share an **identical image**
 on one pod, so a host reaching that pod can reach a co-located sibling by `path`. This is acceptable
