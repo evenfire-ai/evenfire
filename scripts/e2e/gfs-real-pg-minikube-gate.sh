@@ -151,7 +151,7 @@ real_postgres_suite_files() {
 
 run_suite() {
   local package="$1" suite_file relative_suite log_file json_file
-  local passed_files passed_tests pending_files pending_tests success
+  local total_files failed_files pending_files total_tests passed_tests pending_tests success
   local suite_index=0 suite_count=0
   local suite_files=()
   while IFS= read -r suite_file; do
@@ -186,7 +186,7 @@ run_suite() {
     sanitize_file "${log_file}"
     sanitize_file "${json_file}"
     [[ -s "${json_file}" ]] || die "${package}/${relative_suite} reporter produced no JSON result"
-    read -r passed_files passed_tests pending_files pending_tests success < <(python3 - "${json_file}" <<'PY'
+    read -r total_files _ failed_files pending_files total_tests passed_tests pending_tests success < <(python3 - "${json_file}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -194,18 +194,24 @@ from pathlib import Path
 result = json.loads(Path(sys.argv[1]).read_text())
 
 print(
+    result.get("numTotalTestSuites", 0),
     result.get("numPassedTestSuites", 0),
-    result.get("numPassedTests", 0),
+    result.get("numFailedTestSuites", 0),
     result.get("numPendingTestSuites", 0),
+    result.get("numTotalTests", 0),
+    result.get("numPassedTests", 0),
     result.get("numPendingTests", 0),
     str(bool(result.get("success"))).lower(),
 )
 PY
     )
-    [[ "${success}" == 'true' && "${passed_files}" -eq 1 ]] || \
-      die "${package}/${relative_suite} reporter did not pass"
-    [[ "${passed_tests}" -gt 0 && "${pending_files}" -eq 0 && "${pending_tests}" -eq 0 ]] || \
-      die "${package}/${relative_suite} reported zero tests or skips"
+    if [[ "${success}" != 'true' || "${total_files}" -le 0 || "${failed_files}" -ne 0 ||
+          "${pending_files}" -ne 0 || "${total_tests}" -le 0 ||
+          "${passed_tests}" -ne "${total_tests}" || "${pending_tests}" -ne 0 ]]; then
+      cat "${log_file}" >&2 || true
+      cat "${json_file}" >&2 || true
+      die "${package}/${relative_suite} reporter did not pass all tests"
+    fi
     printf '[gfs-real-pg-minikube] PASS %s (%s tests, 0 skipped)\n' \
       "${relative_suite}" "${passed_tests}"
   done
