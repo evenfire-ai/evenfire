@@ -1150,10 +1150,12 @@ Two invariants hold for **every** projection, regardless of `contentAccess`:
    *tightens* its own install gate. So an author-set `contentAccess` can never widen access — the
    platform-assigned `trust_level` is untouched — which is why it is admissible as a CR field.
 
-The install gate (§8.5) then keys "content-bearing" on `contentAccess == 'content'`. **Sequencing (§12.4):**
-the gate must switch to keying on `contentAccess` **only together with** this projection — until the
-projection is enforced, the gate conservatively treats every message-carrying point as content-bearing
-(interim fix A), so a `pre_call`/`on_error` egress hook can't dodge the high-trust bar.
+The install gate (§8.5) keys "content-bearing" on `contentAccess`: `moderate`/`post_call`/`on_error` always,
+and `pre_call` unless it declared `contentAccess: metadata`. **Implemented** — `projectForHook`
+(`mcp-host/src/core/guardrails/hooks/hookProjection.ts`) enforces the projection at every point and the
+install gate (`control-api`) keys on `contentAccess`, so the two agree by construction (the gate and the
+runtime landed together, §12.4). A `metadata` `pre_call` shaper genuinely receives no message bodies and so
+may egress at low/mid trust; a `content` `pre_call` optimizer is gated like any content hook.
 
 ### 8.5 · Registry install (organization-scoped)
 
@@ -1286,13 +1288,12 @@ spec:
   capabilities: [may_add_context]   # annotates the request with budget context (untrusted-framed, §12.4)
 ```
 
-**Status.** `spec.contentAccess` is in the CRD schema (optional, CEL-guarded so it can't contradict an
-inherently-content point). The install gate is closed conservatively today — it treats **every**
-message-carrying point (`pre_call`/`moderate`/`post_call`/`on_error`) as content-bearing (interim fix A,
-shipped), so a `pre_call`/`on_error` egress hook already requires `high` trust. The one remaining piece is
-the runtime **content projection** (`projectForHook`, §8.4): once it enforces `contentAccess`, the gate
-keys on the declaration instead of the static set and a `metadata` `pre_call` shaper may drop back to
-low/mid trust. Tracked in §12.4.
+**Status: implemented.** `spec.contentAccess` is in the CRD schema (optional, CEL-guarded so it can't
+contradict an inherently-content point). The runtime **content projection** (`projectForHook`, §8.4) scopes
+every `/v1` body per point and always strips the system prompt, and the install gate keys on `contentAccess`
+— so a `metadata` `pre_call` shaper genuinely receives no message bodies and may egress at low/mid trust,
+while a `content` (or default) `pre_call` hook is gated like any content hook. Gate and projection agree by
+construction.
 
 ---
 
@@ -1436,20 +1437,18 @@ which a guardrail `allow` never bypasses.
 
 ### 12.4 · Known residual risks & follow-ups
 
-- **Content projection is not yet built — the gate is closed conservatively in the meantime (§8.4/§8.7).**
-  The runtime still sends the full `ToolCompletionRequest` (messages) to `pre_call` **and** `on_error` (not
-  only `moderate`/`post_call`), and **no `projectForHook` projection redacts/scopes anything yet** — every
-  point receives the raw request/response. **Fix A (shipped):** the install gate now treats every
-  message-carrying point (`pre_call`, `moderate`, `post_call`, `on_error`) as content-bearing, so a
-  `pre_call`/`on_error` hook with `egressBindings` or a `remote` target already requires `high` trust — the
-  exfiltration path is closed. `spec.contentAccess` is also in the CRD schema (advisory until the projection
-  enforces it). **Fix B (remaining):** implement the §8.4 `projectForHook` projection so a `metadata`
-  `pre_call` shaper genuinely receives no bodies (and may egress at low/mid trust) while a `content`
-  `pre_call` optimizer is gated like any content hook; the gate then keys on `contentAccess`. The gate-switch
-  and the projection **must land together** (§8.4 sequencing) — keying on `contentAccess` before the
-  projection enforces it would let a hook declare `metadata` to dodge the gate while still receiving content.
-  Until B lands, the §8.1 wire table (which lists `messages` in the `pre_call`/`on_error` bodies) is what the
-  code follows.
+- **Content projection & content/egress gate — RESOLVED (§8.4/§8.7).** Earlier the install gate classified
+  only `moderate`/`postCallSuccess` as content-bearing while the runtime handed the full
+  `ToolCompletionRequest` (messages) to `pre_call`/`on_error` with no projection, so a low/mid-trust
+  `pre_call`/`on_error` egress hook could exfiltrate the whole conversation. Now: (1) `projectForHook`
+  (`mcp-host/src/core/guardrails/hooks/hookProjection.ts`) builds every `/v1` body from a per-point
+  projection — `metadata` `pre_call` gets no message bodies, content points get non-system messages, and the
+  system prompt (`role:'system'` + `systemPromptParts`) plus internal fields are stripped from **every**
+  projection; and (2) the install gate keys on `spec.contentAccess` (§8.5), so a `metadata` `pre_call`
+  shaper may egress at low/mid trust while any content-bearing hook with egress requires `high`. Gate and
+  projection agree by construction — the residual exposure is closed. Remaining nuance: the projection
+  **scopes** fields, it does not **scrub** values (a content hook still sees raw PII to detect it, §8.4);
+  content-bearing egress hooks therefore remain an operator risk-acceptance managed by `trust_level` (below).
 - **`remote`-hook egress is range-scoped, not domain-scoped.** At the **network** layer the broad lane
   excludes all cluster/private/metadata ranges via `ipBlock.except` (N12/§8.3), so mcp-host and hooks cannot
   reach a cluster-internal or metadata IP on 443/80. What the network layer does **not** do is pin the
