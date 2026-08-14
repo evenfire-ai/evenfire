@@ -56,10 +56,39 @@ function makeBoundedHttp(timeoutMs: number, maxBytes: number): FetchHttp {
         }
         let bodyText = ''
         if (res.status !== 304) {
-          const buf = await res.arrayBuffer()
-          if (buf.byteLength > maxBytes)
-            throw new Error(`response ${buf.byteLength} exceeds ${maxBytes} bytes`)
-          bodyText = new TextDecoder().decode(buf)
+          // Stream with an INCREMENTAL byte cap and abort the moment it is crossed.
+          // res.arrayBuffer() would buffer the entire body first — unbounded on a
+          // chunked response with no content-length — so a hostile or misbehaving
+          // source could OOM the control plane before the timeout fires. The cap
+          // must interrupt the stream, not just reject after the fact, to honor the
+          // "bounded request" contract in fetcherTypes (issue #299 review).
+          if (res.body) {
+            const reader = res.body.getReader()
+            const chunks: Uint8Array[] = []
+            let total = 0
+            try {
+              for (;;) {
+                const { done, value } = await reader.read()
+                if (done) break
+                if (!value) continue
+                total += value.byteLength
+                if (total > maxBytes) {
+                  controller.abort()
+                  throw new Error(`response exceeds ${maxBytes} bytes (streamed ${total})`)
+                }
+                chunks.push(value)
+              }
+            } finally {
+              reader.releaseLock()
+            }
+            const buf = new Uint8Array(total)
+            let offset = 0
+            for (const chunk of chunks) {
+              buf.set(chunk, offset)
+              offset += chunk.byteLength
+            }
+            bodyText = new TextDecoder().decode(buf)
+          }
         }
         const outHeaders: Record<string, string> = {}
         res.headers.forEach((value, key) => {

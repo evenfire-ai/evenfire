@@ -48,6 +48,7 @@ GATED_FILES=(
   control-api/src/http/validateMcpServerSpec.ts
   control-api/src/services/providerNetblocks/providerNetblocksService.ts
   control-api/src/services/providerNetblocks/providerNetblocksConfigMap.ts
+  control-api/src/services/providerNetblocks/providerNetblocksConfig.ts
   control-api/src/services/providerNetblocks/providerNetblocksCron.ts
   control-api/src/services/providerNetblocks/fetcherTypes.ts
 )
