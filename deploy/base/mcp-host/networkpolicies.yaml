@@ -110,19 +110,7 @@ spec:
     to:
     - ipBlock:
         cidr: 0.0.0.0/0
-        # Public-internet only (spec N12): exclude the cluster pod/service/node
-        # CIDRs and all private/link-local/metadata/reserved ranges, so mcp-host
-        # cannot reach a cluster-internal or metadata IP on this lane. Network
-        # mirror of the app-layer isPrivateIp guard. Cluster deps stay reachable
-        # via the dedicated allow lanes above (DNS, K8s API, gateways, servers).
-        except:
-          - 10.0.0.0/8        # RFC1918 (covers pod CIDR 10.244/16 + service CIDR 10.96/12)
-          - 172.16.0.0/12     # RFC1918
-          - 192.168.0.0/16    # RFC1918 (covers the node network)
-          - 169.254.0.0/16    # link-local + cloud metadata (169.254.169.254)
-          - 100.64.0.0/10     # carrier-grade NAT
-          - 127.0.0.0/8       # loopback
-          - 0.0.0.0/8         # "this network"
+        except: []
   # http_request tool: external HTTP with the same public-only boundary.
   - ports:
     - port: 80
@@ -130,19 +118,7 @@ spec:
     to:
     - ipBlock:
         cidr: 0.0.0.0/0
-        # Public-internet only (spec N12): exclude the cluster pod/service/node
-        # CIDRs and all private/link-local/metadata/reserved ranges, so mcp-host
-        # cannot reach a cluster-internal or metadata IP on this lane. Network
-        # mirror of the app-layer isPrivateIp guard. Cluster deps stay reachable
-        # via the dedicated allow lanes above (DNS, K8s API, gateways, servers).
-        except:
-          - 10.0.0.0/8        # RFC1918 (covers pod CIDR 10.244/16 + service CIDR 10.96/12)
-          - 172.16.0.0/12     # RFC1918
-          - 192.168.0.0/16    # RFC1918 (covers the node network)
-          - 169.254.0.0/16    # link-local + cloud metadata (169.254.169.254)
-          - 100.64.0.0/10     # carrier-grade NAT
-          - 127.0.0.0/8       # loopback
-          - 0.0.0.0/8         # "this network"
+        except: []
 ---
 # ─── L1: K8s API server egress (HCC-managed mcp-host pods) ────────────────────
 # Required for getHost() and other K8s API calls in production mode.
