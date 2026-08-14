@@ -61,7 +61,7 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
       'invitee@example.com',
-      'Full Name',
+      '  Full Name  ',
       [{ teamId: 'team-1', role: 'inviter' }],
       'good-token'
     )
@@ -156,6 +156,32 @@ describe('routes/members', () => {
     )
   })
 
+  it.each([
+    ['an overlong name', { name: 'a'.repeat(121), teams: [] }],
+    [
+      'too many teams',
+      {
+        teams: Array.from({ length: 51 }, (_, index) => ({
+          teamId: `team-${index}`,
+          role: 'member',
+        })),
+      },
+    ],
+  ])('preserves invalid-email precedence with %s', async (_case, extraBody) => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockRejectedValueOnce(
+      new ControlApiError('invalid invitation email', 400, { error: 'invalid_email' })
+    )
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({ email: 'not-an-email', ...extraBody })
+      .expect(400, { error: 'Valid email is required' })
+
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledOnce()
+  })
+
   it('preserves the public assignment error after authoritative validation', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     memberManagementMock.inviteManagedMember.mockRejectedValueOnce(
@@ -178,6 +204,9 @@ describe('routes/members', () => {
 
   it('rejects overlong invitee names', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockRejectedValueOnce(
+      new ControlApiError('invalid invitation name', 400, { error: 'invalid_name' })
+    )
 
     await request(makeApp())
       .post('/members/invite')
@@ -189,6 +218,27 @@ describe('routes/members', () => {
       })
       .expect(400, { error: 'Name is too long' })
 
-    expect(memberManagementMock.inviteManagedMember).not.toHaveBeenCalled()
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledOnce()
+  })
+
+  it('preserves the public team-count error after authoritative validation', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockRejectedValueOnce(
+      new ControlApiError('too many invitation teams', 400, { error: 'too_many_teams' })
+    )
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: 'invitee@example.com',
+        teams: Array.from({ length: 51 }, (_, index) => ({
+          teamId: `team-${index}`,
+          role: 'member',
+        })),
+      })
+      .expect(400, { error: 'Too many teams selected' })
+
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledOnce()
   })
 })

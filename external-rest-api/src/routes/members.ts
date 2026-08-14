@@ -16,8 +16,6 @@ import {
 import { TEAM_ROLES, TeamRole } from '../types.js'
 
 const MAX_INVITATION_EMAIL_LENGTH = 320
-const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
-const MAX_INVITEE_NAME_LENGTH = 120
 
 function isControlApiBadRequest(error: unknown, code: string): boolean {
   if (!(error instanceof ControlApiError) || error.status !== 400) return false
@@ -73,27 +71,16 @@ export function createMembersRouter(): Router {
         return
       }
       const email = rawEmail.trim().toLowerCase()
-      const name = String(req.body?.name || '').trim()
-      const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
-      if (name.length > MAX_INVITEE_NAME_LENGTH) {
-        res.status(400).json({ error: 'Name is too long' })
-        return
-      }
-      if (teams.length > MAX_INVITATION_TEAM_ASSIGNMENTS) {
-        res.status(400).json({ error: 'Too many teams selected' })
-        return
-      }
-      const assignments = teams
-        .map((item: unknown) => {
-          const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
-          const teamId = String(row.teamId || row.id || '').trim()
-          const role = String(row.role || 'member').trim() as TeamRole
-          return teamId && TEAM_ROLES.includes(role) ? { teamId, role } : null
-        })
-        .filter((item): item is { teamId: string; role: TeamRole } => Boolean(item))
       res
         .status(201)
-        .json(await inviteManagedMember(email, name, assignments, extractAuthToken(req)))
+        .json(
+          await inviteManagedMember(
+            email,
+            req.body?.name ?? '',
+            req.body?.teams ?? [],
+            extractAuthToken(req)
+          )
+        )
     } catch (error) {
       if (isControlApiBadRequest(error, 'invalid_email')) {
         res.status(400).json({ error: 'Valid email is required' })
@@ -101,6 +88,14 @@ export function createMembersRouter(): Router {
       }
       if (isControlApiBadRequest(error, 'invalid_payload')) {
         res.status(400).json({ error: 'Email and at least one team are required' })
+        return
+      }
+      if (isControlApiBadRequest(error, 'invalid_name')) {
+        res.status(400).json({ error: 'Name is too long' })
+        return
+      }
+      if (isControlApiBadRequest(error, 'too_many_teams')) {
+        res.status(400).json({ error: 'Too many teams selected' })
         return
       }
       const message = error instanceof Error ? error.message : ''
