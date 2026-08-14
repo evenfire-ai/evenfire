@@ -20,6 +20,7 @@ import {
 import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from './ConfirmDialog'
 import { LlmCredentialFields } from './LlmCredentialFields'
+import { LlmProviderIcon } from './LlmProviderIcon'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconKey } from './Sidebar/icons'
 import { TabBar } from './TabBar'
@@ -656,11 +657,15 @@ export function SecretsTable({
                       <td>
                         {providers.length > 0 ? (
                           <div className="cu-chip-row" aria-label={`Providers for ${name}`}>
-                            {providers.map(provider => (
-                              <span key={provider} className="cu-chip">
-                                {getProviderLabel(provider)}
-                              </span>
-                            ))}
+                            {providers.map(provider => {
+                              const label = getProviderLabel(provider)
+                              return (
+                                <span key={provider} className="cu-chip">
+                                  <LlmProviderIcon provider={provider} label={label} />
+                                  {label}
+                                </span>
+                              )
+                            })}
                           </div>
                         ) : (
                           <span style={{ color: 'var(--cu-text-soft)' }}>—</span>
