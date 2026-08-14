@@ -99,7 +99,11 @@ function agentSubjectOptions(agents: MyAgentEntry[] | undefined): GfsAgentSubjec
   for (const agent of agents) {
     // Only agents with a canonical host gfsSubject are grantable targets.
     if (agent.gfsSubject?.type !== 'host' || !agent.gfsSubject.id) continue
-    options.set(agent.gfsSubject.id, { id: agent.gfsSubject.id, name: agent.name })
+    options.set(agent.gfsSubject.id, {
+      id: agent.gfsSubject.id,
+      name: agent.name,
+      displayName: agent.displayName,
+    })
   }
   return [...options.values()].sort((left, right) => left.name.localeCompare(right.name))
 }
@@ -177,7 +181,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       ...agentSubjects.map(agent => ({
         type: 'host' as const,
         id: agent.id,
-        label: agent.name,
+        // Visible agent name (spec.displayName); the id-based `name` is the
+        // last-resort label for a blank/whitespace-only displayName so a
+        // selectable subject never renders an empty label.
+        label: (agent.displayName ?? '').trim() || agent.name,
         description: 'Agent',
         badge: 'Agent',
       })),

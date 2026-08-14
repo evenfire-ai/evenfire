@@ -88,7 +88,7 @@ async function runKubernetesTransportCall<T>(
   return result
 }
 
-type MutableResourceSnapshot = {
+export type MutableResourceSnapshot = {
   metadata?: {
     annotations?: Record<string, string>
     labels?: Record<string, string>
@@ -426,7 +426,19 @@ export class ResourceService {
       }
       spec: Record<string, unknown>
     },
-    namespace?: string
+    namespace?: string,
+    options?: {
+      /**
+       * N1 — a CR snapshot the caller ALREADY read for this same object (e.g.
+       * the admin PUT ratchet read in resources.ts). When present it is reused
+       * for the FIRST replace attempt instead of issuing a second apiserver
+       * GET, collapsing the per-PUT read count from 2 to 1. On a 409 retry the
+       * loop falls back to a fresh read (the pre-read is stale by definition),
+       * so the last-write-wins semantics are unchanged. Never used past
+       * attempt 1.
+       */
+      preReadCurrent?: MutableResourceSnapshot
+    }
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
     const intent = await persistHostIntent({ plural, action: 'update', namespace: ns, name })
@@ -435,7 +447,11 @@ export class ResourceService {
     // same payload, so the loop collapses to a single attempt.
     const maxAttempts = readerResourceVersion ? 1 : 3
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const current = (await this.getResource(plural, name, ns)) as {
+      const current = (
+        attempt === 1 && options?.preReadCurrent
+          ? options.preReadCurrent
+          : await this.getResource(plural, name, ns)
+      ) as {
         metadata?: {
           annotations?: Record<string, string>
           labels?: Record<string, string>
