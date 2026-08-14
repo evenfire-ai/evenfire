@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createSdkWorkloadGrants } from './e2e-playwright/sdk-client-notification/sdkWorkloadFixture'
+import {
+  SDK_WORKLOAD_MODEL_CONFIG,
+  createSdkWorkloadGrants,
+} from './e2e-playwright/sdk-client-notification/sdkWorkloadFixture'
 
 type GrantRequest = {
   allowedCallers: string[]
@@ -54,17 +57,10 @@ describe('createSdkWorkloadGrants', () => {
         recipeNamespace: 'sandbox-recipes',
         recipeName: 'recipe-default',
         capabilityFamily: 'promptBridge',
-        provider: 'openai',
-        allowedModels: ['gpt-5.4-mini'],
-        promptTargets: [
-          {
-            targetRef: 'primary-openai',
-            provider: 'openai',
-            model: 'gpt-5.4-mini',
-            credentialSlot: 'openai-api-key',
-          },
-        ],
-        defaultTargetRef: 'primary-openai',
+        provider: SDK_WORKLOAD_MODEL_CONFIG.provider,
+        allowedModels: [SDK_WORKLOAD_MODEL_CONFIG.model],
+        promptTargets: [SDK_WORKLOAD_MODEL_CONFIG],
+        defaultTargetRef: SDK_WORKLOAD_MODEL_CONFIG.targetRef,
         allowedCallers: ['sdk-caller'],
         quotaLimits: { maxRequestsPerRun: 3 },
       },

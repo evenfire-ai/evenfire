@@ -35,6 +35,13 @@ if (MODEL_PROVIDER !== 'openai' && MODEL_PROVIDER !== 'claude') {
 }
 const CREDENTIAL_SLOT = process.env.E2E_WORKFLOW_CREDENTIAL_SLOT || `${MODEL_PROVIDER}-api-key`
 
+export const SDK_WORKLOAD_MODEL_CONFIG = {
+  targetRef: `primary-${MODEL_PROVIDER}`,
+  provider: MODEL_PROVIDER,
+  model: MODEL_NAME,
+  credentialSlot: CREDENTIAL_SLOT,
+} as const
+
 function requireAdminPassword(): string {
   const password =
     process.env.E2E_ADMIN_PASSWORD ||
@@ -141,17 +148,10 @@ export async function createSdkWorkloadGrants(
         recipeNamespace: RECIPE_NS,
         recipeName,
         capabilityFamily: 'promptBridge',
-        provider: MODEL_PROVIDER,
-        allowedModels: [MODEL_NAME],
-        promptTargets: [
-          {
-            targetRef: `primary-${MODEL_PROVIDER}`,
-            provider: MODEL_PROVIDER,
-            model: MODEL_NAME,
-            credentialSlot: CREDENTIAL_SLOT,
-          },
-        ],
-        defaultTargetRef: `primary-${MODEL_PROVIDER}`,
+        provider: SDK_WORKLOAD_MODEL_CONFIG.provider,
+        allowedModels: [SDK_WORKLOAD_MODEL_CONFIG.model],
+        promptTargets: [SDK_WORKLOAD_MODEL_CONFIG],
+        defaultTargetRef: SDK_WORKLOAD_MODEL_CONFIG.targetRef,
         allowedCallers,
         quotaLimits: { maxRequestsPerRun: 3 },
       }),
