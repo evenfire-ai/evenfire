@@ -20,6 +20,15 @@ vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(...args),
   },
+  // R1-H3 fase 1: the reductor gate now runs inside a carrier transaction. Route
+  // the transaction client's queries through the SAME `mockPoolQuery` so the
+  // sequenced expectations are unchanged; the advisory lock / idle-timeout guards
+  // are no-ops here (serialization is covered by the real-Postgres race test).
+  withTransaction: (work: (db: { query: (...a: unknown[]) => unknown }) => Promise<unknown>) =>
+    work({ query: (...args: unknown[]) => mockPoolQuery(...args) }),
+  advisoryLockModelName: async () => {},
+  advisoryLockModelNames: async () => {},
+  boundCarrierTransactionIdleTimeout: async () => {},
 }))
 
 vi.mock('../src/utils/auth/adminAuthToken.js', () => ({

@@ -29,10 +29,15 @@ describe('enumerateHostModelReferences — example coverage (T4)', () => {
       llmPolicy: { fallbacks: [{ provider: 'zai', model: 'glm-4' }] },
     }
     expect(enumerateHostModelReferences(spec)).toEqual([
-      { key: k('claude', 'claude-haiku-4-5'), role: 'primary' },
-      { key: k('openai', 'gpt-5'), role: 'allowedModels' },
-      { key: k('groq', 'llama-4'), role: 'allowedModels' },
-      { key: k('zai', 'glm-4'), role: 'fallback' },
+      {
+        key: k('claude', 'claude-haiku-4-5'),
+        role: 'primary',
+        provider: 'claude',
+        model: 'claude-haiku-4-5',
+      },
+      { key: k('openai', 'gpt-5'), role: 'allowedModels', provider: 'openai', model: 'gpt-5' },
+      { key: k('groq', 'llama-4'), role: 'allowedModels', provider: 'groq', model: 'llama-4' },
+      { key: k('zai', 'glm-4'), role: 'fallback', provider: 'zai', model: 'glm-4' },
     ])
   })
 
@@ -44,9 +49,9 @@ describe('enumerateHostModelReferences — example coverage (T4)', () => {
     }
     const key = k('claude', 'm')
     expect(enumerateHostModelReferences(spec)).toEqual([
-      { key, role: 'primary' },
-      { key, role: 'allowedModels' },
-      { key, role: 'fallback' },
+      { key, role: 'primary', provider: 'claude', model: 'm' },
+      { key, role: 'allowedModels', provider: 'claude', model: 'm' },
+      { key, role: 'fallback', provider: 'claude', model: 'm' },
     ])
   })
 
@@ -73,9 +78,9 @@ describe('enumerateHostModelReferences — example coverage (T4)', () => {
       llmPolicy: { fallbacks: [{ provider: 'zai', model: '  glm-4' }, null] },
     }
     expect(enumerateHostModelReferences(spec)).toEqual([
-      { key: k('claude', 'm'), role: 'primary' },
-      { key: k('openai', 'gpt-5'), role: 'allowedModels' },
-      { key: k('zai', 'glm-4'), role: 'fallback' },
+      { key: k('claude', 'm'), role: 'primary', provider: 'claude', model: 'm' },
+      { key: k('openai', 'gpt-5'), role: 'allowedModels', provider: 'openai', model: 'gpt-5' },
+      { key: k('zai', 'glm-4'), role: 'fallback', provider: 'zai', model: 'glm-4' },
     ])
   })
 

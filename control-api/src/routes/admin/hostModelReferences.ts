@@ -41,6 +41,14 @@ export interface HostModelReferenceEntry {
   key: string
   /** The spec location this reference came from. */
   role: HostModelRole
+  /** The trimmed provider id, as declared in the spec. */
+  provider: string
+  /**
+   * The trimmed model name, as declared in the spec. Exposed so callers that key
+   * on the model NAME (the R1-H3 advisory lock is by name, adenda A1) reuse this
+   * one enumeration instead of re-walking the spec (regla D4).
+   */
+  model: string
 }
 
 /**
@@ -60,7 +68,8 @@ export function enumerateHostModelReferences(spec: unknown): HostModelReferenceE
   if (isPlainObject(model)) {
     const name = typeof model.name === 'string' ? model.name.trim() : ''
     const provider = typeof model.provider === 'string' ? model.provider.trim() : ''
-    if (name && provider) refs.push({ key: offeredKey(provider, name), role: 'primary' })
+    if (name && provider)
+      refs.push({ key: offeredKey(provider, name), role: 'primary', provider, model: name })
   }
 
   // 2. allowedModels — spec.allowedModels[]
@@ -70,7 +79,8 @@ export function enumerateHostModelReferences(spec: unknown): HostModelReferenceE
       if (!isPlainObject(entry)) continue
       const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
       const m = typeof entry.model === 'string' ? entry.model.trim() : ''
-      if (provider && m) refs.push({ key: offeredKey(provider, m), role: 'allowedModels' })
+      if (provider && m)
+        refs.push({ key: offeredKey(provider, m), role: 'allowedModels', provider, model: m })
     }
   }
 
@@ -81,7 +91,8 @@ export function enumerateHostModelReferences(spec: unknown): HostModelReferenceE
       if (!isPlainObject(entry)) continue
       const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
       const m = typeof entry.model === 'string' ? entry.model.trim() : ''
-      if (provider && m) refs.push({ key: offeredKey(provider, m), role: 'fallback' })
+      if (provider && m)
+        refs.push({ key: offeredKey(provider, m), role: 'fallback', provider, model: m })
     }
   }
 

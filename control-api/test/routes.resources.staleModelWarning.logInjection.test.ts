@@ -33,6 +33,22 @@ vi.mock('../src/observability/logger.js', async () => {
   return { rootLogger }
 })
 
+// R1-H3 fase 1: Host create/update wrap validation + the K8s write in a carrier
+// transaction holding a per-model-name advisory lock. Keep db.js real; stub only
+// the transaction runner + lock / idle-timeout guards so these route tests need no
+// live Postgres (serialization is covered by the real-Postgres race test).
+vi.mock('../src/db.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/db.js')>('../src/db.js')
+  return {
+    ...actual,
+    withTransaction: (work: (db: { query: (...a: unknown[]) => unknown }) => Promise<unknown>) =>
+      work({ query: async () => ({ rows: [], rowCount: 0 }) }),
+    advisoryLockModelName: async () => {},
+    advisoryLockModelNames: async () => {},
+    boundCarrierTransactionIdleTimeout: async () => {},
+  }
+})
+
 const llm = vi.hoisted(() => ({
   isModelAllowed: vi.fn(),
   getModelAllowlistState: vi.fn(),
