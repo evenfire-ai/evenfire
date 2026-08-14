@@ -153,51 +153,11 @@ describe('HostReconciler.ensureChannelReaderEgressNetworkPolicy', () => {
   })
 })
 
-describe('HostReconciler.ensureMcpHostLlmHooksEgressNetworkPolicy', () => {
-  const HOST_WITH_HOOKS: HostCRD = {
-    ...HOST,
-    spec: {
-      ...HOST.spec,
-      guardrails: { hooks: { preCall: [{ id: 'hook-x-v1-0-0-abcd1234' }] } },
-    },
-  }
-
-  it('opens host→llm-hooks egress when the Host references hooks', async () => {
-    const { reconciler, mocks } = createReconciler()
-
-    await (reconciler as any).ensureMcpHostLlmHooksEgressNetworkPolicy(HOST_WITH_HOOKS)
-
-    expect(mocks.networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-    const call = (mocks.networkingApi.createNamespacedNetworkPolicy as any).mock.calls[0][0]
-
-    expect(call.namespace).toBe('mcp-host')
-    expect(call.body.metadata.name).toBe('mcp-host-chatllm-egress-llm-hooks')
-    expect(call.body.metadata.labels['clerum.io/managed-by']).toBe('host-context-controller')
-    expect(call.body.metadata.labels['clerum.io/host']).toBe('chatllm')
-    expect(call.body.metadata.labels['clerum.io/policy-type']).toBe('llm-hooks-egress')
-    // Source pod selector requires managed-by so the policy can't be spoofed.
-    expect(call.body.spec.podSelector.matchLabels).toEqual({
-      'clerum.io/host': 'chatllm',
-      'clerum.io/managed-by': 'host-context-controller',
-    })
-    expect(call.body.spec.policyTypes).toEqual(['Egress'])
-    expect(call.body.spec.egress).toHaveLength(1)
-    expect(call.body.spec.egress[0].to[0].namespaceSelector.matchLabels).toEqual({
-      'kubernetes.io/metadata.name': 'llm-hooks',
-    })
-    // Not port-restricted: hook ports vary per hook; the hook-side ingress NP is
-    // the authoritative admission control.
-    expect(call.body.spec.egress[0].ports).toBeUndefined()
-  })
-
-  it('does not open the lane when the Host references no hooks', async () => {
-    const { reconciler, mocks } = createReconciler()
-
-    await (reconciler as any).ensureMcpHostLlmHooksEgressNetworkPolicy(HOST)
-
-    expect(mocks.networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
-  })
-})
+// NOTE: the mcp-host→llm-hooks egress policy moved to LlmHookReconciler
+// (per-host, scoped to referenced hook pods — N1/N7); see
+// src/llmHookReconciler.test.ts "per-host egress". HostReconciler still deletes
+// `mcp-host-<host>-egress-llm-hooks` on host delete (covered by the
+// deleteHostNetworkPolicies test below).
 
 describe('HostReconciler.ensureMcpHostIngressNetworkPolicy', () => {
   it('creates the ingress NP in mcp-host namespace with correct selectors', async () => {

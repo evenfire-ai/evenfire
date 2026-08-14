@@ -559,9 +559,11 @@ describe('LlmHookReconciler', () => {
     await reconciler.reconcileNetworkPoliciesForHooks(['a'])
 
     expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalled()
-    const npCall = networkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
-      body: k8s.V1NetworkPolicy
-    }
+    // The fan-out also refreshes the host egress NP (in mcp-host ns); select the
+    // hook INGRESS policy (in llm-hooks ns, name `llmhook-<podKey>`).
+    const npCall = networkingApi.createNamespacedNetworkPolicy.mock.calls
+      .map(c => c[0] as { body: k8s.V1NetworkPolicy })
+      .find(c => c.body.metadata?.name === podKeyResourceName(computePodKey(a)!))!
     const peers = (npCall.body.spec?.ingress?.[0]?._from ?? []) as Array<{
       podSelector?: { matchLabels?: Record<string, string> }
     }>
@@ -648,10 +650,10 @@ describe('LlmHookReconciler', () => {
 
       await reconciler.reconcileNetworkPoliciesForHooks(['s1'])
 
-      const npCall = networkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
-        body: k8s.V1NetworkPolicy
-      }
-      expect(npCall.body.metadata?.name).toBe('llmhook-svc-s1')
+      // The fan-out also refreshes the host egress NP; select the ingress one.
+      const npCall = networkingApi.createNamespacedNetworkPolicy.mock.calls
+        .map(c => c[0] as { body: k8s.V1NetworkPolicy })
+        .find(c => c.body.metadata?.name === 'llmhook-svc-s1')!
       const peers = (npCall.body.spec?.ingress?.[0]?._from ?? []) as Array<{
         podSelector?: { matchLabels?: Record<string, string> }
       }>
@@ -662,6 +664,78 @@ describe('LlmHookReconciler', () => {
       await reconciler.reconcileDelete('s1', null)
       expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'llmhook-svc-s1' })
+      )
+    })
+  })
+
+  // ─── Per-host scoped egress (N1/N7) ────────────────────────────────
+
+  describe('per-host egress (reconcileHostEgress)', () => {
+    it('allows egress only to the referenced image hook pod-key + port', async () => {
+      const hook = makeHook({ name: 'img1' }) // default image target, port 8080
+      hooks.set('img1', hook)
+      const host = makeHostRef('host-1', ['img1'])
+      hosts.set('host-1', host)
+
+      await reconciler.reconcileHostEgress(host)
+
+      const call = networkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
+        namespace: string
+        body: k8s.V1NetworkPolicy
+      }
+      expect(call.namespace).toBe('mcp-host')
+      expect(call.body.metadata?.name).toBe('mcp-host-host-1-egress-llm-hooks')
+      expect(call.body.spec?.policyTypes).toEqual(['Egress'])
+      expect(call.body.spec?.podSelector?.matchLabels).toEqual({
+        'clerum.io/host': 'host-1',
+        'clerum.io/managed-by': 'host-context-controller',
+      })
+      const rules = call.body.spec?.egress ?? []
+      expect(rules).toHaveLength(1)
+      expect(rules[0].to?.[0]?.namespaceSelector?.matchLabels).toEqual({
+        'kubernetes.io/metadata.name': 'llm-hooks',
+      })
+      expect(rules[0].to?.[0]?.podSelector?.matchLabels).toEqual({
+        'clerum.io/hook-pod-key': computePodKey(hook),
+      })
+      expect(rules[0].ports?.[0]?.port).toBe(8080)
+    })
+
+    it('uses the Service selector + port for a service-target hook', async () => {
+      coreApi.readNamespacedService.mockResolvedValue({
+        metadata: {},
+        spec: { selector: { app: 'svc-hook' } },
+      } as never)
+      const hook = makeHook({
+        name: 'svc1',
+        spec: {
+          target: { service: { name: 'svc-hook', namespace: 'llm-hooks', port: 9000 } },
+          lifecyclePoints: ['preCall'],
+        },
+      })
+      hooks.set('svc1', hook)
+      const host = makeHostRef('host-1', ['svc1'])
+      hosts.set('host-1', host)
+
+      await reconciler.reconcileHostEgress(host)
+
+      const call = networkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
+        body: k8s.V1NetworkPolicy
+      }
+      const rules = call.body.spec?.egress ?? []
+      expect(rules[0].to?.[0]?.podSelector?.matchLabels).toEqual({ app: 'svc-hook' })
+      expect(rules[0].ports?.[0]?.port).toBe(9000)
+    })
+
+    it('removes the policy when the Host references no resolvable hooks', async () => {
+      const host = makeHostRef('host-1', []) // references nothing
+      hosts.set('host-1', host)
+
+      await reconciler.reconcileHostEgress(host)
+
+      expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'mcp-host-host-1-egress-llm-hooks' })
       )
     })
   })

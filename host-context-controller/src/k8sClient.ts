@@ -2844,6 +2844,18 @@ export class McpServerWatcher implements McpServerProvider {
           )
         }
       }
+
+      // Keep this Host's scoped egress-to-hooks policy in sync with its CURRENT
+      // references (N1/N7) — in particular the "dropped the last hook reference"
+      // case, where the policy must be removed. On DELETE the Host reconciler's
+      // deleteHostNetworkPolicies removes it by name.
+      if (eventType !== 'DELETED') {
+        try {
+          await this.llmHookReconciler.reconcileHostEgress(host)
+        } catch (error) {
+          console.error(`[K8s] Host egress-to-hooks reconcile for "${host.name}" failed:`, error)
+        }
+      }
     }
 
     const doneCallback = (err: Error | null) => {

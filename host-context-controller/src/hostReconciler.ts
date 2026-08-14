@@ -19,7 +19,6 @@ import {
   WFC_APP_LABEL,
   sharedFileSystemHash,
 } from './k8s/sharedFileSystemFactory'
-import { referencedHookIds } from './llmHookReconciler'
 import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
@@ -3482,89 +3481,6 @@ export class HostReconciler {
   }
 
   /**
-   * Egress reverse-index for guardrail hooks (spec §8.2). Lifts the host pod's
-   * default-deny egress so it can reach installed LlmHook endpoints in the
-   * llm-hooks namespace — the counterpart to the per-podKey INGRESS reverse-index
-   * on the hook side (llmHookReconciler.buildNetworkPolicy). Without it a Host
-   * that references hooks resolves them but every `/v1` call is dropped by
-   * `deny-all-mcp-host`.
-   *
-   * The AUTHORITATIVE admission control stays the hook-side ingress NP (it admits
-   * only the referencing hosts, deny-all otherwise); this rule only opens the
-   * host→llm-hooks lane. Ports are per-hook (`img.port`) so the rule is not
-   * port-restricted — reachability is scoped by the hook-side ingress. Service
-   * targets in OTHER namespaces and remote (external) targets are out of scope
-   * (follow-up). Emitted only when the Host references ≥1 hook; otherwise the NP
-   * is removed so clearing all hooks re-closes the lane.
-   */
-  private async ensureMcpHostLlmHooksEgressNetworkPolicy(host: HostCRD): Promise<void> {
-    const policyName = `mcp-host-${host.name}-egress-llm-hooks`
-
-    if (referencedHookIds(host).length === 0) {
-      // No hooks referenced → ensure the lane is closed (idempotent, ownership-gated).
-      await this.deleteIfHccOwned(
-        'NetworkPolicy',
-        policyName,
-        host.namespace,
-        host.name,
-        () =>
-          this.networkingApi.readNamespacedNetworkPolicy({
-            name: policyName,
-            namespace: host.namespace,
-          }),
-        () =>
-          this.networkingApi.deleteNamespacedNetworkPolicy({
-            name: policyName,
-            namespace: host.namespace,
-          })
-      )
-      return
-    }
-
-    const policy: k8s.V1NetworkPolicy = {
-      apiVersion: 'networking.k8s.io/v1',
-      kind: 'NetworkPolicy',
-      metadata: {
-        name: policyName,
-        namespace: host.namespace,
-        labels: {
-          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
-          [HOST_LABEL]: host.name,
-          'clerum.io/policy-type': 'llm-hooks-egress',
-        },
-      },
-      spec: {
-        podSelector: {
-          matchLabels: {
-            [HOST_LABEL]: host.name,
-            [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
-          },
-        },
-        policyTypes: ['Egress'],
-        egress: [
-          {
-            to: [
-              {
-                namespaceSelector: {
-                  matchLabels: { 'kubernetes.io/metadata.name': config.llmHooksNamespace },
-                },
-              },
-            ],
-          },
-        ],
-      },
-    }
-
-    await applyNetworkPolicy(
-      this.networkingApi,
-      policyName,
-      host.namespace,
-      policy,
-      '[HostReconciler]'
-    )
-  }
-
-  /**
    * Delete per-Host NetworkPolicies created by this reconciler.
    * 404-tolerant — safe to call even if NPs were never created or already gone.
    */
@@ -3773,7 +3689,9 @@ export class HostReconciler {
     try {
       await this.ensureMcpHostIngressNetworkPolicy(host)
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
-      await this.ensureMcpHostLlmHooksEgressNetworkPolicy(host)
+      // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
+      // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
+      // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
       await this.ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(host)
     } catch (err) {
       console.error(`[HostReconciler] Failed to ensure mcp-host NP for "${host.name}":`, err)

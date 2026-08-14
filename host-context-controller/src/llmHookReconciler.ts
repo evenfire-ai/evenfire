@@ -268,6 +268,21 @@ export class LlmHookReconciler {
         await this.ensureNetworkPolicy(podKey, members, egress.failures.length ? [] : egress.rules)
       })
     }
+
+    // Refresh the per-host scoped EGRESS for every host referencing an affected
+    // hook, so a Host reference change (or an image bump that moves a pod key)
+    // keeps the host's egress allowlist in sync with what it may reach (N1/N7).
+    // The "host dropped its last reference" case is covered by the Host-watch
+    // calling reconcileHostEgress(host) directly.
+    const affectedHosts = new Map<string, HostCRD>()
+    for (const name of hookNames) {
+      const hook = this.hooks.get(name)
+      if (!hook) continue
+      for (const h of this.referencingHosts([hook])) affectedHosts.set(h.name, h)
+    }
+    for (const host of affectedHosts.values()) {
+      await this.reconcileHostEgress(host)
+    }
   }
 
   /**
@@ -289,6 +304,11 @@ export class LlmHookReconciler {
     }
     for (const podKey of imagePodKeys) {
       await this.runSerialized(podKey, () => this.reconcilePodKey(podKey))
+    }
+    // Converge every Host's scoped egress-to-hooks policy (N1/N7) — the periodic
+    // backstop for a missed watch event or an image bump that moved a pod key.
+    for (const host of this.hosts.values()) {
+      await this.reconcileHostEgress(host)
     }
     await this.sweepOrphanedWorkloads()
     console.log(`${LOG} Full reconciliation complete`)
@@ -767,15 +787,13 @@ export class LlmHookReconciler {
     await this.applyNetworkPolicy(this.buildNetworkPolicy(podKey, members, egressRules))
   }
 
-  /** Idempotent create-then-409-replace of a NetworkPolicy in the llm-hooks namespace. */
+  /** Idempotent create-then-409-replace of a NetworkPolicy in its own namespace. */
   private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy): Promise<void> {
     const name = policy.metadata!.name!
+    const namespace = policy.metadata!.namespace ?? config.llmHooksNamespace
     try {
-      await this.networkingApi.createNamespacedNetworkPolicy({
-        namespace: config.llmHooksNamespace,
-        body: policy,
-      })
-      console.log(`${LOG} Created NetworkPolicy "${name}"`)
+      await this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+      console.log(`${LOG} Created NetworkPolicy "${name}" (${namespace})`)
       return
     } catch (error) {
       if (getErrorCode(error) !== 409) throw error
@@ -785,17 +803,8 @@ export class LlmHookReconciler {
       logPrefix: LOG,
       body: policy,
       mergeExisting: preserveObjectAnnotations,
-      read: () =>
-        this.networkingApi.readNamespacedNetworkPolicy({
-          name,
-          namespace: config.llmHooksNamespace,
-        }),
-      replace: body =>
-        this.networkingApi.replaceNamespacedNetworkPolicy({
-          name,
-          namespace: config.llmHooksNamespace,
-          body,
-        }),
+      read: () => this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
+      replace: body => this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
     })
   }
 
@@ -819,27 +828,13 @@ export class LlmHookReconciler {
       return
     }
 
-    let selector: Record<string, string> | undefined
-    try {
-      const service = await this.coreApi.readNamespacedService({
-        name: svc.name,
-        namespace: svc.namespace,
-      })
-      selector = service.spec?.selector
-    } catch (error) {
-      if (getErrorCode(error) === 404) {
-        console.warn(
-          `${LOG} service-target hook "${hook.name}": Service ${svc.namespace}/${svc.name} not found; leaving fail-closed under default-deny`
-        )
-        return
-      }
-      throw error
-    }
-    if (!selector || Object.keys(selector).length === 0) {
-      // An empty podSelector would select ALL pods in the namespace — refuse to
-      // create such an over-broad allow; leave the pods fail-closed instead.
+    // A missing Service or an empty selector would leave us unable to scope the
+    // ingress (an empty podSelector selects ALL pods) — refuse and leave the pods
+    // fail-closed under the namespace default-deny instead.
+    const selector = await this.readServiceSelector(svc.name, svc.namespace)
+    if (!selector) {
       console.warn(
-        `${LOG} service-target hook "${hook.name}": Service ${svc.namespace}/${svc.name} has no selector; cannot scope ingress (fail-closed under default-deny)`
+        `${LOG} service-target hook "${hook.name}": Service ${svc.namespace}/${svc.name} missing or selector-less; leaving fail-closed under default-deny`
       )
       return
     }
@@ -894,6 +889,131 @@ export class LlmHookReconciler {
         console.log(`${LOG} Deleted NetworkPolicy "${name}"`)
       } else {
         console.warn(`${LOG} Skipping NetworkPolicy "${name}" delete — not HCC-owned`)
+      }
+    } catch (error) {
+      if (getErrorCode(error) !== 404) throw error
+    }
+  }
+
+  /** Read a Service's selector; undefined if missing/empty (can't scope pods). */
+  private async readServiceSelector(
+    name: string,
+    namespace: string
+  ): Promise<Record<string, string> | undefined> {
+    try {
+      const svc = await this.coreApi.readNamespacedService({ name, namespace })
+      const selector = svc.spec?.selector
+      return selector && Object.keys(selector).length > 0 ? selector : undefined
+    } catch (error) {
+      if (getErrorCode(error) === 404) return undefined
+      throw error
+    }
+  }
+
+  // ─── Per-host egress reverse-index (§8.2) ───────────────────────────
+
+  private hostEgressNpName(hostName: string): string {
+    return `mcp-host-${hostName}-egress-llm-hooks`
+  }
+
+  /**
+   * Scoped egress reverse-index (§8.2) — the SOURCE-side mirror of the hook
+   * ingress policies. A host pod may egress ONLY to the specific hook pods its
+   * Host CR references (one rule per referenced in-cluster hook), so a host now
+   * reaches only its CRD's hooks from BOTH ends rather than the whole llm-hooks
+   * namespace. Serialized per host so concurrent Host/LlmHook events don't race.
+   */
+  async reconcileHostEgress(host: HostCRD): Promise<void> {
+    await this.runSerialized(`host-egress:${host.name}`, () =>
+      this.ensureHostEgressNetworkPolicy(host)
+    )
+  }
+
+  private async ensureHostEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const rules = await this.buildHostEgressRules(host)
+    if (rules.length === 0) {
+      // No referenced in-cluster hooks → the host has no reason to reach
+      // llm-hooks; remove the policy (DNS/control-plane egress live elsewhere).
+      await this.deleteHostEgressNetworkPolicy(host.name)
+      return
+    }
+    await this.applyNetworkPolicy({
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: this.hostEgressNpName(host.name),
+        namespace: config.hostNamespace,
+        labels: {
+          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          [HOST_LABEL]: host.name,
+          [POLICY_TYPE_LABEL]: 'llm-hooks-egress',
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: { [HOST_LABEL]: host.name, [MANAGED_BY_LABEL]: MANAGED_BY_VALUE },
+        },
+        policyTypes: ['Egress'],
+        egress: rules,
+      },
+    })
+  }
+
+  /**
+   * One egress rule per referenced in-cluster hook (deduped by pod selector +
+   * port): image → `hook-pod-key` + `img.port`; service (in llm-hooks) → the
+   * target Service's selector + port. Dangling refs, cross-namespace service
+   * targets, and `remote` targets add no rule.
+   */
+  private async buildHostEgressRules(host: HostCRD): Promise<k8s.V1NetworkPolicyEgressRule[]> {
+    const llmHooksNs = config.llmHooksNamespace
+    const rules: k8s.V1NetworkPolicyEgressRule[] = []
+    const seen = new Set<string>()
+    for (const id of new Set(referencedHookIds(host))) {
+      const hook = this.hooks.get(id)
+      if (!hook) continue // dangling reference
+
+      let podSelector: Record<string, string> | undefined
+      let port: number | undefined
+      const kind = classifyTarget(hook)
+      if (kind === 'image') {
+        podSelector = { [HOOK_PODKEY_LABEL]: computePodKey(hook)! }
+        port = hook.spec.target!.image!.port
+      } else if (kind === 'service') {
+        const svc = hook.spec.target!.service!
+        if (svc.namespace !== llmHooksNs) continue // only llm-hooks is scoped (matches ingress)
+        const selector = await this.readServiceSelector(svc.name, svc.namespace)
+        if (!selector) continue
+        podSelector = selector
+        port = svc.port
+      } else {
+        continue // remote / invalid — not an in-cluster llm-hooks destination
+      }
+
+      const dedup = `${JSON.stringify(podSelector)}:${port}`
+      if (seen.has(dedup)) continue
+      seen.add(dedup)
+      rules.push({
+        to: [
+          {
+            namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': llmHooksNs } },
+            podSelector: { matchLabels: podSelector },
+          },
+        ],
+        ports: [{ port: port!, protocol: 'TCP' }],
+      })
+    }
+    return rules
+  }
+
+  private async deleteHostEgressNetworkPolicy(hostName: string): Promise<void> {
+    const name = this.hostEgressNpName(hostName)
+    const ns = config.hostNamespace
+    try {
+      const np = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace: ns })
+      if (np.metadata?.labels?.[MANAGED_BY_LABEL] === MANAGED_BY_VALUE) {
+        await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
+        console.log(`${LOG} Deleted NetworkPolicy "${name}" (${ns})`)
       }
     } catch (error) {
       if (getErrorCode(error) !== 404) throw error
