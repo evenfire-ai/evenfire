@@ -733,8 +733,14 @@ deny-authoritative, but then it must fail-closed (§8.6).
 
 **Wire contract.** Each call is an HTTP `POST` of `application/json` to `{endpoint}{path}/v1/{point}` with:
 
-- **Auth** — `Authorization: Bearer <short-lived RS256 JWT>` (broker-token signer); the hook verifies the
-  signature **and** audience before acting. Connection is NetworkPolicy-confined; no mTLS.
+- **Auth** — the **authoritative** caller control is the **network layer**: the hook's per-hook ingress
+  NetworkPolicy admits only the referencing mcp-host pods over a default-deny baseline (N1/N7), so only an
+  authorized mcp-host can open the connection; no mTLS. An app-layer `Authorization: Bearer <short-lived
+  RS256 JWT>` is a **deferred, advisory** hardening (a hook *may* verify the signature + audience for
+  defense-in-depth) — but mcp-host does **not** currently mint a per-hook token, and because a hook is an
+  untrusted third-party container it cannot be forced to verify one, so the token is not relied upon.
+  Decided: the NetworkPolicy admission is the caller boundary; per-hook token infra is out of scope until a
+  concrete need (e.g. per-path authz across co-located hooks, which are same-image by construction anyway).
 - **Versioning** — the `v1` in the path is the contract version: changes within `v1` are **additive-only**
   (new optional fields); any breaking change is a new `/v2` path served alongside.
 - **Timeout** — bounded by the hook's `timeoutMs` (≤ `maxHookTimeoutMs`, §5); a request that exceeds it is
@@ -1288,8 +1294,10 @@ which a guardrail `allow` never bypasses.
   relying on `no_decision`.
 - **Rewrite / resume** must re-aggregate the **full** deny-capable chain against the effective input
   (§4.1/§4.2), not compare policy digests alone.
-- **Hook transport** is one-way authenticated (short-lived RS256 bearer, no mTLS); the Service→pod binding
-  in the hook namespace is part of the TCB.
+- **Hook transport** caller authentication is at the **network layer** (per-hook ingress admits only the
+  referencing mcp-hosts, N1/N7); the app-layer bearer + hook-side verification (§8.1) is **deferred/advisory**
+  and not currently minted, and there is no mTLS. The Service→pod binding in the hook namespace is part of
+  the TCB.
 - **Hook-supplied `code`/`message`** strings are untrusted response data — length-bounded, never used as
   metric labels, redacted in audit.
 
