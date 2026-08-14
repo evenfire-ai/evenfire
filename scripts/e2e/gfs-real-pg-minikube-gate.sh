@@ -234,6 +234,20 @@ PG_DATABASE="$(secret_value POSTGRES_DB)"
 TMP_DIR="$(mktemp -d)"
 PORT_FORWARD_PID=''
 LOCAL_PORT=''
+restore_gfs_runtime_credentials() {
+  # The reader-role real-Postgres suite exercises the production role names,
+  # which are cluster-global even though its fixture database is temporary.
+  # Restore the branch profile before this gate exits so a failed or interrupted
+  # T1 run cannot leave GFSC in NOLOGIN and poison the following T2 journey.
+  if ! kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${CONTEXT}" \
+    bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    printf '[gfs-real-pg-minikube] ERROR: failed to restore branch-profile GFS credentials\n' >&2
+    return 1
+  fi
+}
 stop_port_forward() {
   if [[ -z "${PORT_FORWARD_PID}" ]] || ! kill -0 "${PORT_FORWARD_PID}" >/dev/null 2>&1; then
     PORT_FORWARD_PID=''
@@ -252,6 +266,9 @@ stop_port_forward() {
 cleanup() {
   local status=$?
   stop_port_forward
+  if ! restore_gfs_runtime_credentials; then
+    status=1
+  fi
   rm -rf "${TMP_DIR}"
   exit "${status}"
 }

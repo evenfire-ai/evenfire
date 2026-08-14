@@ -136,7 +136,9 @@ describe('deploy/scripts/provision-gfs-db.sh', () => {
       'reconcile_credential gfs_controller_reader reader "$READER_SECRET" gfsc-reader false'
     )
     expect(script).toContain('gfs_dsn_authenticates_as "$1" "$2"')
-    expect(probe).toContain('kc -n "$PG_NS" exec -i "$PG_PROBE_DEPLOY" -- node -e')
+    expect(probe).toContain(
+      'kc -n "$PG_NS" exec -i "$PG_PROBE_DEPLOY" -c "$probe_container" -- node -e'
+    )
     expect(probe).toContain('await client.query("SELECT current_user")')
     expect(probe).toContain('[ "$actual" = "$expected_role" ]')
     expect(probe).toContain('error.code === "28P01" || error.code === "28000"')
