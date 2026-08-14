@@ -31,6 +31,7 @@ export type SandboxUiPageProps = {
   localSearchRequestId?: number
   onBackToConversation?: () => void | Promise<void>
   onEmbeddedAppOpening?: (app: ActiveSandboxUiApp) => void
+  onEmbeddedAppMounted?: () => void
   onEmbeddedAppBack?: () => void
   onEmbeddedAppRemoved?: () => void
   onEmbedBoundsApplied?: () => void

@@ -167,6 +167,7 @@ export function SandboxUiPage({
   localSearchRequestId = 0,
   onBackToConversation,
   onEmbeddedAppOpening,
+  onEmbeddedAppMounted,
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
@@ -383,6 +384,7 @@ export function SandboxUiPage({
           bounds,
         })
         setLaunch({ kind: 'mounted', appRef: app.appRef })
+        onEmbeddedAppMounted?.()
         return { status: 'mounted' }
       } catch (err) {
         const { status, message } = statusFromError(err)
@@ -399,7 +401,7 @@ export function SandboxUiPage({
         return { status: 'failed', message: userFacing }
       }
     },
-    [onEmbeddedAppOpening, onEmbeddedAppRemoved]
+    [onEmbeddedAppMounted, onEmbeddedAppOpening, onEmbeddedAppRemoved]
   )
 
   const onOpen = useCallback(
@@ -452,6 +454,7 @@ export function SandboxUiPage({
   useEffect(() => {
     if (!actionRequest || actionRequest.id <= lastActionRequestIdRef.current) return
     lastActionRequestIdRef.current = actionRequest.id
+    if (launch.kind !== 'mounted') return
     if (actionRequest.action === 'refresh') {
       onRefresh()
     } else if (actionRequest.action === 'back-to-apps') {
@@ -459,7 +462,7 @@ export function SandboxUiPage({
     } else {
       void handleBackToConversation()
     }
-  }, [actionRequest, handleBackToConversation, onBackToApps, onRefresh])
+  }, [actionRequest, handleBackToConversation, launch.kind, onBackToApps, onRefresh])
 
   const onCopyDeepLink = useCallback(async () => {
     try {

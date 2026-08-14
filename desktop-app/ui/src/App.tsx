@@ -248,6 +248,7 @@ export function App() {
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
+  const [sandboxUiMounted, setSandboxUiMounted] = React.useState(false)
   const [sandboxUiConversationOrigin, setSandboxUiConversationOrigin] =
     React.useState<SandboxUiConversationOrigin | null>(null)
   const [sidebarSettingsMenuOpen, setSidebarSettingsMenuOpen] = React.useState(false)
@@ -300,6 +301,7 @@ export function App() {
 
   const leaveSandboxForChat = React.useCallback(() => {
     setActiveSandboxUiApp(null)
+    setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
@@ -572,11 +574,17 @@ export function App() {
   }, [vm.authenticatedPrincipalIdentity])
 
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
+    setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
+  }, [])
+
+  const handleSandboxUiMounted = React.useCallback(() => {
+    setSandboxUiMounted(true)
   }, [])
 
   const handleSandboxUiClosed = React.useCallback(() => {
     setActiveSandboxUiApp(null)
+    setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
@@ -584,6 +592,7 @@ export function App() {
 
   const handleSandboxUiRemoved = React.useCallback(() => {
     setActiveSandboxUiApp(null)
+    setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
@@ -642,6 +651,7 @@ export function App() {
     (app: ActiveSandboxUiApp, conversationOrigin: SandboxUiConversationOrigin | null) => {
       const requestId = sandboxUiShortcutOpenRequestIdRef.current + 1
       sandboxUiShortcutOpenRequestIdRef.current = requestId
+      setSandboxUiMounted(false)
       setSandboxUiConversationOrigin(conversationOrigin)
       setActiveSandboxUiApp(app)
       vm.handleNavSelect(DESKTOP_ROUTES.apps)
@@ -1074,8 +1084,12 @@ export function App() {
     setChatViewTabs(createChatViewTabsState('chat-tab-1'))
     setComposerFocusRequestId(0)
     setGlobalSearchFocusRequestId(0)
+    setNotificationOpenRequestId(0)
+    setSidebarToggleRequestId(0)
     setChatLocalSearchOpen(false)
     setSandboxLocalSearchRequestId(0)
+    setSandboxActionRequest(null)
+    setSandboxUiMounted(false)
     setCommandPaletteOpen(false)
     setCommandPaletteReturnToSandbox(false)
     setSettingsShortcutsRequestId(0)
@@ -1091,16 +1105,19 @@ export function App() {
         vm.navItem === DESKTOP_ROUTES.chat &&
         Boolean(activeChatViewTab(chatViewTabs).agentRef) &&
         vm.hostRuntimeStatus?.degraded?.reason !== 'llm_key_missing',
-      appMounted: vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp),
+      appMounted:
+        vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp) && sandboxUiMounted,
       conversationOriginAvailable:
         vm.navItem === DESKTOP_ROUTES.apps &&
         Boolean(activeSandboxUiApp) &&
+        sandboxUiMounted &&
         Boolean(sandboxUiConversationOrigin),
     }),
     [
       activeSandboxUiApp,
       chatViewTabs,
       sandboxUiConversationOrigin,
+      sandboxUiMounted,
       vm.activeChatId,
       vm.hostRuntimeStatus,
       vm.navItem,
@@ -1855,6 +1872,7 @@ export function App() {
                                   localSearchRequestId={sandboxLocalSearchRequestId}
                                   onBackToConversation={handleSandboxUiBackToConversation}
                                   onEmbeddedAppOpening={handleSandboxUiOpening}
+                                  onEmbeddedAppMounted={handleSandboxUiMounted}
                                   onEmbeddedAppBack={handleSandboxUiClosed}
                                   onEmbeddedAppRemoved={handleSandboxUiRemoved}
                                   onEmbedBoundsApplied={handleSandboxUiBoundsApplied}

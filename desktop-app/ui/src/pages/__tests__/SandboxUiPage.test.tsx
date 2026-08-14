@@ -206,6 +206,7 @@ describe('SandboxUiPage', () => {
       <SandboxUiPage actionRequest={null} onEmbeddedAppBack={onEmbeddedAppBack} />
     )
     fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
+    await screen.findByRole('button', { name: 'Refresh' })
 
     rerender(
       <SandboxUiPage
@@ -213,7 +214,7 @@ describe('SandboxUiPage', () => {
         onEmbeddedAppBack={onEmbeddedAppBack}
       />
     )
-    expect(sandboxUi.reload).toHaveBeenCalledOnce()
+    await waitFor(() => expect(sandboxUi.reload).toHaveBeenCalledOnce())
 
     rerender(
       <SandboxUiPage
@@ -225,6 +226,47 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.close).toHaveBeenCalledOnce()
       expect(onEmbeddedAppBack).toHaveBeenCalledOnce()
     })
+  })
+
+  it('does not replay an app action requested while the native view is mounting', async () => {
+    sandboxUi.listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: 'Sales CRM',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    let finishOpen!: () => void
+    sandboxUi.open.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          finishOpen = resolve
+        })
+    )
+    sandboxUi.reload.mockResolvedValue(undefined)
+    const onEmbeddedAppMounted = vi.fn()
+    const { rerender } = render(
+      <SandboxUiPage actionRequest={null} onEmbeddedAppMounted={onEmbeddedAppMounted} />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledOnce())
+
+    rerender(
+      <SandboxUiPage
+        actionRequest={{ id: 1, action: 'refresh' }}
+        onEmbeddedAppMounted={onEmbeddedAppMounted}
+      />
+    )
+    expect(sandboxUi.reload).not.toHaveBeenCalled()
+
+    finishOpen()
+    await waitFor(() => expect(onEmbeddedAppMounted).toHaveBeenCalledOnce())
+    expect(sandboxUi.reload).not.toHaveBeenCalled()
   })
 
   it('routes controlled conversation return through the existing transition owner', async () => {
@@ -249,6 +291,7 @@ describe('SandboxUiPage', () => {
     }
     const { rerender } = render(<SandboxUiPage {...props} actionRequest={null} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
+    await screen.findByRole('button', { name: 'Refresh' })
 
     rerender(<SandboxUiPage {...props} actionRequest={{ id: 1, action: 'back-to-conversation' }} />)
 

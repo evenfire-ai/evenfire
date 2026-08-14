@@ -50,6 +50,7 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
       defaultPath: string
       routePath?: string
     }) => void
+    onEmbeddedAppMounted?: () => void
     onShortcutOpenResult?: (
       requestId: number,
       result: { status: 'mounted' } | { status: 'failed'; message: string }
@@ -433,12 +434,40 @@ describe('App deep-link orchestration', () => {
         defaultPath: '/',
       })
     })
+    expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(false)
+    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
     expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(true)
     act(() => commandPaletteHarness.props?.onExecute('app.refresh'))
     expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 1, action: 'refresh' })
     act(() => commandPaletteHarness.props?.onExecute('app.backToApps'))
     expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 2, action: 'back-to-apps' })
     expect(commandPaletteHarness.props?.isEligible('app.backToConversation')).toBe(false)
+  })
+
+  it('resets controlled command requests with the authenticated shell lifetime', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    const { rerender } = render(<App />)
+
+    act(() => emitCommand?.('commands.open'))
+    act(() => commandPaletteHarness.props?.onExecute('notifications.open'))
+    act(() => commandPaletteHarness.props?.onExecute('sidebar.toggle'))
+
+    expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(1)
+    expect(sidebarHarness.props?.toggleRequestId).toBe(1)
+
+    currentController = makeController({
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-b:user-b@example.com',
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    rerender(<App />)
+
+    await waitFor(() => {
+      expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(0)
+      expect(sidebarHarness.props?.toggleRequestId).toBe(0)
+      expect(sandboxUiPageHarness.props?.actionRequest).toBeNull()
+      expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(false)
+    })
   })
 
   afterEach(() => {
