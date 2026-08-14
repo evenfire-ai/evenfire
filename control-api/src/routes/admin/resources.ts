@@ -5,6 +5,7 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
+import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import { K8sConflictError } from '../../services/resourceService.js'
 import { ClerumResourceType } from '../../types.js'
 import {
@@ -685,16 +686,22 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
     })
   )
 
-  // Uninstall. Deletes the LlmHook CR; host-context-controller garbage-collects
-  // the shared pod once the last referencing hook is gone. Removing the {id}
-  // reference from any Host.spec.guardrails.hooks is owned by the install/uninstall
-  // saga (registry.ts) alongside the credential-Secret lifecycle.
+  // Uninstall. Referential integrity (§8.2): strip the `{id}` reference from every
+  // referencing Host's guardrails.hooks FIRST, so no dangling ref is ever visible
+  // (mcp-host can't fail-closed on a vanished CR — N11), THEN delete the LlmHook
+  // CR; host-context-controller garbage-collects the shared pod once the last
+  // referencing hook is gone.
   router.delete(
     `${LLMHOOK_PATTERN}/:name`,
     asyncHandler(async (req, res) => {
       const { plural, ns } = resolveResource(req.params.resource)!
+      const unlinkedHosts = await stripHookRefFromHosts(
+        gateway,
+        req.params.name,
+        config.hostsNamespace
+      )
       const deleted = await gateway.deleteResource(plural, req.params.name, ns)
-      res.status(200).json(deleted)
+      res.status(200).json({ ...(deleted as object), unlinkedHosts })
     })
   )
 
