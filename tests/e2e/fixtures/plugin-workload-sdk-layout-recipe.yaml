@@ -1,0 +1,45 @@
+# Repository-owned Desktop layout E2E fixture. The mounted Sandbox UI workload
+# emits a client notification through the same Plugin Workload SDK route used by
+# production plugin workloads; it is not a catalog or notification mock.
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: PLACEHOLDER_RECIPE_NAME
+  namespace: sandbox-recipes
+spec:
+  agent:
+    provider: PLACEHOLDER_PROVIDER
+    model: PLACEHOLDER_MODEL
+  workloads:
+    - id: sandbox-ui
+      type: deployment
+      image: clerum/workflow-plugin-sdk-e2e:test
+      port: 8080
+      healthCheck:
+        type: http
+        path: /healthz
+        port: 8080
+      env:
+        - name: E2E_SDK_MODE
+          value: sandbox-ui
+        - name: E2E_SDK_CALLER_REF
+          value: sandbox-ui
+        - name: E2E_SDK_EVENT_TYPE
+          value: e2e.test.notification
+        - name: E2E_SDK_USER_REF
+          value: PLACEHOLDER_USER_REF
+        - name: E2E_SDK_RUN_ID
+          value: PLACEHOLDER_RUN_ID
+  ui:
+    workloadRef: sandbox-ui
+    port: 8080
+    title: E2E Layout Notification App
+    defaultPath: /
+  pluginWorkloadSdk:
+    clientNotifications:
+      allowedEventTypes:
+        - e2e.test.notification
+      allowedUserRefs: true
+      maxNotificationsPerRun: 10
+    allowedCallers:
+      - sandbox-ui

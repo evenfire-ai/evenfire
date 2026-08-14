@@ -100,9 +100,9 @@ h3 {
 
 .global-search {
   position: relative;
-  width: min(480px, 44vw);
+  width: var(--app-notification-drawer-width);
   min-width: 220px;
-  max-width: 480px;
+  max-width: 100%;
 }
 
 .global-search::before {
@@ -477,11 +477,13 @@ h3 {
   padding: var(--space-1-5);
   display: grid;
   gap: var(--space-2-5);
+  align-content: start;
 }
 
 .notification-menu-section {
   display: grid;
   gap: var(--space-1-5);
+  align-content: start;
 }
 
 .notification-menu-section + .notification-menu-section {
@@ -557,6 +559,7 @@ h3 {
 .notification-menu-list {
   display: grid;
   gap: var(--space-1-5);
+  align-content: start;
 }
 
 .notification-menu-item {
@@ -2155,6 +2158,7 @@ h3 {
 
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
+  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
 
   height: 100vh;
   min-height: 0;
@@ -12344,10 +12348,12 @@ pre {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  flex-wrap: wrap;
+  align-content: flex-start;
   gap: var(--space-2);
   min-width: 0;
   padding-top: var(--space-4);
-  padding-right: 360px;
+  padding-right: var(--app-header-utilities-width);
 }
 
 .sandbox-ui-conversation-btn,
@@ -12365,7 +12371,7 @@ pre {
 
 .sandbox-ui-conversation-btn {
   min-width: 0;
-  max-width: min(360px, 45vw);
+  max-width: min(280px, 40vw);
 }
 
 .sandbox-ui-conversation-btn span {
@@ -12405,7 +12411,7 @@ pre {
 }
 
 .content-panel.content-panel--app-notification-drawer-open > .page:has(.sandbox-ui-mounted-header) {
-  padding-right: calc(var(--app-notification-drawer-width) + var(--space-2));
+  padding-right: var(--app-header-utilities-width);
 }
 
 .content-panel.content-panel--app-notification-drawer-open .sandbox-ui-mounted-header {
@@ -12416,7 +12422,18 @@ pre {
   padding-left: var(--space-4);
 }
 
-@media (max-width: 1220px) {
+@media (min-width: 901px) and (max-width: 1220px) {
+  .global-search {
+    width: clamp(160px, 32vw, var(--app-notification-drawer-width));
+    min-width: 160px;
+  }
+
+  .apps-page-header {
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 900px) {
   .apps-page-header,
   .sandbox-ui-mounted-header {
     padding-right: 0;

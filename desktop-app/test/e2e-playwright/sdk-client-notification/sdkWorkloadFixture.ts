@@ -14,6 +14,10 @@ const SDK_RECIPE_FIXTURE = path.join(
   REPO_ROOT,
   'tests/e2e/fixtures/plugin-workload-sdk-recipe.yaml'
 )
+const SDK_LAYOUT_RECIPE_FIXTURE = path.join(
+  REPO_ROOT,
+  'tests/e2e/fixtures/plugin-workload-sdk-layout-recipe.yaml'
+)
 const CONTROL_API = process.env.CONTROL_API_BASE_URL || 'http://127.0.0.1:8090'
 const WORKLOAD_ID = 'sdk-caller'
 const EVENT_TYPE = 'e2e.test.notification'
@@ -64,7 +68,11 @@ export function makeScopedSdkRecipeName(marker: string): string {
 }
 
 export function renderSdkWorkloadRecipeYaml(recipeName: string, userRef: string): string {
-  const template = fs.readFileSync(SDK_RECIPE_FIXTURE, 'utf-8')
+  return renderSdkRecipeYaml(SDK_RECIPE_FIXTURE, recipeName, userRef)
+}
+
+function renderSdkRecipeYaml(fixture: string, recipeName: string, userRef: string): string {
+  const template = fs.readFileSync(fixture, 'utf-8')
   return template
     .replaceAll('PLACEHOLDER_PROVIDER', MODEL_PROVIDER)
     .replaceAll('PLACEHOLDER_MODEL', MODEL_NAME)
@@ -72,8 +80,25 @@ export function renderSdkWorkloadRecipeYaml(recipeName: string, userRef: string)
     .replaceAll('PLACEHOLDER_USER_REF', userRef)
 }
 
+export function renderSdkLayoutRecipeYaml(
+  recipeName: string,
+  userRef: string,
+  runId: string
+): string {
+  return renderSdkRecipeYaml(SDK_LAYOUT_RECIPE_FIXTURE, recipeName, userRef).replaceAll(
+    'PLACEHOLDER_RUN_ID',
+    runId
+  )
+}
+
 export function applySdkWorkloadRecipe(recipeName: string, userRef: string): void {
   const yaml = renderSdkWorkloadRecipeYaml(recipeName, userRef)
+  kubectl(['apply', '-f', '-'], yaml, 60_000)
+  waitForSdkRecipeValidated(recipeName)
+}
+
+export function applySdkLayoutRecipe(recipeName: string, userRef: string, runId: string): void {
+  const yaml = renderSdkLayoutRecipeYaml(recipeName, userRef, runId)
   kubectl(['apply', '-f', '-'], yaml, 60_000)
   waitForSdkRecipeValidated(recipeName)
 }
@@ -96,36 +121,43 @@ export function waitForSdkRecipeValidated(recipeName: string, timeoutMs = 180_00
   throw new Error(`WorkflowRecipe ${recipeName} never reached pluginWorkloadSdk.state=validated`)
 }
 
-export async function createSdkWorkloadGrants(recipeName: string, userRef: string): Promise<void> {
+export async function createSdkWorkloadGrants(
+  recipeName: string,
+  userRef: string,
+  allowedCallers = [WORKLOAD_ID],
+  includePromptBridge = true
+): Promise<void> {
   const token = await adminLogin()
   const headers = {
     Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
   }
 
-  const promptBridgeRes = await fetch(`${CONTROL_API}/api/v1/admin/plugin-workload-sdk/grants`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      recipeNamespace: RECIPE_NS,
-      recipeName,
-      capabilityFamily: 'promptBridge',
-      provider: MODEL_PROVIDER,
-      allowedModels: [MODEL_NAME],
-      promptTargets: [
-        {
-          targetRef: `primary-${MODEL_PROVIDER}`,
-          provider: MODEL_PROVIDER,
-          model: MODEL_NAME,
-          credentialSlot: CREDENTIAL_SLOT,
-        },
-      ],
-      defaultTargetRef: `primary-${MODEL_PROVIDER}`,
-      allowedCallers: [WORKLOAD_ID],
-      quotaLimits: { maxRequestsPerRun: 3 },
-    }),
-  })
-  expect(promptBridgeRes.status, await promptBridgeRes.text()).toBe(200)
+  if (includePromptBridge) {
+    const promptBridgeRes = await fetch(`${CONTROL_API}/api/v1/admin/plugin-workload-sdk/grants`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        recipeNamespace: RECIPE_NS,
+        recipeName,
+        capabilityFamily: 'promptBridge',
+        provider: MODEL_PROVIDER,
+        allowedModels: [MODEL_NAME],
+        promptTargets: [
+          {
+            targetRef: `primary-${MODEL_PROVIDER}`,
+            provider: MODEL_PROVIDER,
+            model: MODEL_NAME,
+            credentialSlot: CREDENTIAL_SLOT,
+          },
+        ],
+        defaultTargetRef: `primary-${MODEL_PROVIDER}`,
+        allowedCallers,
+        quotaLimits: { maxRequestsPerRun: 3 },
+      }),
+    })
+    expect(promptBridgeRes.status, await promptBridgeRes.text()).toBe(200)
+  }
 
   const clientNotificationsRes = await fetch(
     `${CONTROL_API}/api/v1/admin/plugin-workload-sdk/grants`,
@@ -138,7 +170,7 @@ export async function createSdkWorkloadGrants(recipeName: string, userRef: strin
         capabilityFamily: 'clientNotifications',
         allowedEventTypes: [EVENT_TYPE],
         allowedUserRefs: [userRef],
-        allowedCallers: [WORKLOAD_ID],
+        allowedCallers,
         quotaLimits: { maxNotificationsPerRun: 10 },
       }),
     }
@@ -242,6 +274,36 @@ export async function waitForSdkCallerNotification(
     throw new Error(`sdk-caller never reported clientNotifications success:\n${logs.slice(-2_000)}`)
   }
   return match[1]
+}
+
+export async function waitForSdkSandboxUiNotification(
+  recipeName: string,
+  timeoutMs = 120_000
+): Promise<string> {
+  const labelSelector = `clerum.io/recipe=${recipeName},clerum.io/workload=sandbox-ui`
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const pod = kubectl([
+      '-n',
+      RECIPE_NS,
+      'get',
+      'pod',
+      '-l',
+      labelSelector,
+      '-o',
+      'jsonpath={.items[0].metadata.name}',
+    ]).trim()
+    if (pod) {
+      const logs = kubectl(['-n', RECIPE_NS, 'logs', pod, '--tail=80'], undefined, 30_000)
+      const match = logs.match(/E2E_SDK_SANDBOX_UI_NOTIFICATION_OK=([0-9a-f-]{36})/i)
+      if (match?.[1]) return match[1]
+      if (logs.includes('E2E_SDK_SANDBOX_UI_FAIL=')) {
+        throw new Error(`sandbox-ui SDK producer failed:\n${logs.slice(-2_000)}`)
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, 3_000))
+  }
+  throw new Error(`sandbox-ui never emitted its client notification for recipe ${recipeName}`)
 }
 
 /**
