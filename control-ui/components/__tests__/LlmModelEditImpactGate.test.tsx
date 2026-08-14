@@ -108,6 +108,10 @@ describe('edit page disable impact gate (409 model_in_use → force)', () => {
     mockPush.mockClear()
     mockShowToast.mockClear()
     mockSubmitInput = SUBMIT_INPUT
+    // vi.clearAllMocks() in afterEach clears call history but NOT the queued
+    // mockRejectedValueOnce/mockResolvedValueOnce values; reset updateLlmModel so
+    // an unconsumed queued value from one test can never leak into the next.
+    vi.mocked(updateLlmModel).mockReset()
     vi.mocked(getLlmModel).mockResolvedValue(model)
   })
 
