@@ -5,4 +5,5 @@ export type ChatTabsProps = {
   activeTabId: string
   onSelect: (id: string) => void
   onClose: (id: string) => void
+  panelId?: string
 }

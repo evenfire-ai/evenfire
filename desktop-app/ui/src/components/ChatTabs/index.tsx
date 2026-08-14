@@ -1,7 +1,7 @@
 import { Button } from '@components/Common'
 import type { ChatTabsProps } from './types'
 
-export function ChatTabs({ tabs, activeTabId, onSelect, onClose }: ChatTabsProps) {
+export function ChatTabs({ tabs, activeTabId, onSelect, onClose, panelId }: ChatTabsProps) {
   return (
     <div className="chat-view-tabs" role="toolbar" aria-label="Chat tabs">
       <div className="chat-view-tabs__list">
@@ -11,6 +11,7 @@ export function ChatTabs({ tabs, activeTabId, onSelect, onClose }: ChatTabsProps
             <div className={`chat-view-tab${active ? ' is-active' : ''}`} key={tab.id}>
               <Button
                 align="start"
+                aria-controls={active ? panelId : undefined}
                 aria-pressed={active}
                 className="chat-view-tab__select"
                 color="neutral"

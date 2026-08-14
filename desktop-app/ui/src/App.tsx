@@ -12,7 +12,7 @@ import {
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { ChatLocalSearch } from '@components/ChatLocalSearch'
-import { ChatTabs } from '@components/ChatTabs'
+import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
@@ -1827,22 +1827,24 @@ export function App() {
                               />
                               <ToastStack items={vm.toasts} />
                               {vm.navItem === DESKTOP_ROUTES.chat && (
-                                <section className="chat-view-workspace" id="chat-view-panel">
-                                  <ChatTabs
-                                    tabs={chatViewTabs.tabs}
-                                    activeTabId={chatViewTabs.activeTabId}
-                                    onSelect={handleSelectChatViewTab}
-                                    onClose={handleCloseChatViewTab}
-                                  />
-                                  {chatLocalSearchOpen ? (
-                                    <ChatLocalSearch
-                                      models={chatSemanticModels}
-                                      onClose={closeChatLocalSearch}
-                                      onSearchStateChange={handleChatLocalSearchStateChange}
-                                    />
-                                  ) : null}
+                                <ChatViewWorkspace
+                                  activeTabId={chatViewTabs.activeTabId}
+                                  localSearch={
+                                    chatLocalSearchOpen ? (
+                                      <ChatLocalSearch
+                                        models={chatSemanticModels}
+                                        onClose={closeChatLocalSearch}
+                                        onSearchStateChange={handleChatLocalSearchStateChange}
+                                      />
+                                    ) : null
+                                  }
+                                  onClose={handleCloseChatViewTab}
+                                  onSelect={handleSelectChatViewTab}
+                                  surfaceId="chat-view-panel"
+                                  tabs={chatViewTabs.tabs}
+                                >
                                   <ChatPage scrollContainerRef={contentPanelRef} />
-                                </section>
+                                </ChatViewWorkspace>
                               )}
                               {vm.navItem === DESKTOP_ROUTES.agents && (
                                 <AgentsPage scrollContainerRef={contentPanelRef} />
