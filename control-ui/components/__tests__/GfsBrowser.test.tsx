@@ -16,7 +16,7 @@ import {
   gfsFetchFileBlob,
   putGfsGrant,
 } from '@lib/api'
-import { createGfsUploadJob, uploadGfsFile } from '@lib/gfsFileUpload'
+import { GfsUploadCapabilityError, createGfsUploadJob, uploadGfsFile } from '@lib/gfsFileUpload'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { GfsBrowser } from '../GfsBrowser'
 import { ToastProvider } from '../Toast'
@@ -399,6 +399,53 @@ describe('GfsBrowser', () => {
     )
   })
 
+  it('keeps a persisted drag-and-drop session when resumable capabilities are unavailable', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const rootRid = '11111111111111111111111111111111'
+    const uploadId = '77777777-7777-4777-8777-777777777777'
+    const lastModified = 1_725_000_000_000
+    window.localStorage.setItem(
+      'evenfire:gfs-upload-v2:pending',
+      JSON.stringify({
+        uploadId,
+        fileName: 'resume.md',
+        fileSize: 11,
+        lastModified,
+        target: { operation: 'create', parentRid: rootRid },
+        name: 'resume.md',
+      })
+    )
+    mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
+    mockCreateGfsUploadJob.mockImplementationOnce(() => ({
+      start: vi.fn().mockRejectedValue(new GfsUploadCapabilityError('writer unavailable')),
+      snapshot: vi.fn(() => ({ state: 'failed' })),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      cancel: vi.fn(),
+    }))
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const file = new File(['resume data'], 'resume.md', {
+      type: 'text/markdown',
+      lastModified,
+    })
+    fireEvent.drop(browser.querySelector('.cu-gfs-card')!, {
+      dataTransfer: { dropEffect: 'none', files: [file], types: ['Files'] },
+    })
+
+    await waitFor(() =>
+      expect(screen.getByText(/persisted resumable session cannot be resumed/i)).toBeTruthy()
+    )
+    expect(mockApiSend).not.toHaveBeenCalled()
+    expect(
+      JSON.parse(window.localStorage.getItem('evenfire:gfs-upload-v2:pending')!)
+    ).toMatchObject({
+      uploadId,
+    })
+  })
+
   it('shows byte progress and exposes pause/resume/cancel through the visible upload modal', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'
@@ -739,6 +786,53 @@ describe('GfsBrowser', () => {
         })
       )
     )
+  })
+
+  it('does not fall back to legacy when replacing a persisted resumable session', async () => {
+    const lastModified = 1_725_000_000_000
+    const uploadId = '66666666-6666-4666-8666-666666666666'
+    window.localStorage.setItem(
+      'evenfire:gfs-upload-v2:pending',
+      JSON.stringify({
+        uploadId,
+        fileName: 'report.md',
+        fileSize: 11,
+        lastModified,
+        target: { operation: 'replace', resourceRid: 'r2', ifMatch: 0 },
+        name: 'report.md',
+      })
+    )
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('report.md', 'file', 2)],
+      nextCursor: null,
+    })
+    const capabilityError = new GfsUploadCapabilityError('writer unavailable')
+    mockCreateGfsUploadJob.mockImplementationOnce(() => ({
+      start: vi.fn().mockRejectedValue(capabilityError),
+      snapshot: vi.fn(() => ({ state: 'failed' })),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      cancel: vi.fn(),
+    }))
+    renderBrowser()
+
+    await openResourceMenu('report.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Replace file' }))
+    fireEvent.change(screen.getByLabelText('Replace report.md'), {
+      target: {
+        files: [new File(['resume data'], 'report.md', { lastModified })],
+      },
+    })
+
+    await waitFor(() =>
+      expect(screen.getByText(/persisted resumable session cannot be resumed/i)).toBeTruthy()
+    )
+    expect(mockApiSend).not.toHaveBeenCalled()
+    expect(
+      JSON.parse(window.localStorage.getItem('evenfire:gfs-upload-v2:pending')!)
+    ).toMatchObject({
+      uploadId,
+    })
   })
 
   it('supports roving keyboard focus and Escape in the resource menu', async () => {

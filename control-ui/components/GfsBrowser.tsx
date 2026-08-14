@@ -103,6 +103,27 @@ function clearPendingGfsUpload(uploadId?: string): void {
     window.localStorage.removeItem(PENDING_GFS_UPLOAD_KEY)
 }
 
+function matchingPendingResumeUploadId(
+  file: File,
+  target: GfsUploadJobInput['target'],
+  name: string
+): string | undefined {
+  const pending = readPendingGfsUpload()
+  if (!pending?.uploadId) return undefined
+  if (
+    pending.fileName !== file.name ||
+    pending.fileSize !== file.size ||
+    pending.lastModified !== file.lastModified ||
+    pending.name !== name ||
+    pending.target.operation !== target.operation ||
+    pending.target.parentRid !== target.parentRid ||
+    pending.target.resourceRid !== target.resourceRid ||
+    pending.target.ifMatch !== target.ifMatch
+  )
+    return undefined
+  return pending.uploadId
+}
+
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
   if (bytes < 1024) return `${bytes} B`
@@ -371,6 +392,12 @@ export function GfsBrowser(): React.JSX.Element {
       return 'completed'
     } catch (error) {
       if (!(error instanceof GfsUploadCapabilityError)) throw error
+      if (input.resumeUploadId) {
+        throw new GfsUploadCapabilityError(
+          'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+          { cause: error }
+        )
+      }
       showToast('Resumable upload is unavailable; using the legacy 16 MiB path.', { tone: 'info' })
       await uploadGfsFileLegacy(input)
       clearPendingGfsUpload()
@@ -417,12 +444,13 @@ export function GfsBrowser(): React.JSX.Element {
     const rid = current?.rid ?? (current?.id ? ridOfResourceId(current.id) : null)
     if (!rid || !file) return
     setUploading(true)
+    let resumeUploadId: string | undefined
     try {
       assertGfsFileUploadSize(file.size)
       const name = await normalizeGfsResourceName(file.name)
       const target = { operation: 'create' as const, parentRid: rid }
       const pending = readPendingGfsUpload()
-      const resumeUploadId =
+      resumeUploadId =
         pending &&
         pending.fileName === file.name &&
         pending.fileSize === file.size &&
@@ -478,6 +506,13 @@ export function GfsBrowser(): React.JSX.Element {
     } catch (err) {
       if (uploadJobRef.current?.snapshot().state === 'aborted') return
       if (err instanceof GfsUploadCapabilityError) {
+        if (resumeUploadId) {
+          showToast(
+            'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+            { tone: 'error' }
+          )
+          return
+        }
         showToast('Resumable upload is unavailable; using the legacy 16 MiB path.', {
           tone: 'info',
         })
@@ -646,10 +681,16 @@ export function GfsBrowser(): React.JSX.Element {
   async function replaceFile(child: GfsChild, file: File | null | undefined): Promise<void> {
     if (!file) return
     try {
+      const target = {
+        operation: 'replace' as const,
+        resourceRid: child.rid,
+        ifMatch: child.version,
+      }
       const state = await uploadWithCompatibility({
         file,
         name: file.name,
-        target: { operation: 'replace', resourceRid: child.rid, ifMatch: child.version },
+        target,
+        resumeUploadId: matchingPendingResumeUploadId(file, target, file.name),
       })
       if (state === 'completed') {
         showToast('File replaced.', { tone: 'success' })
@@ -669,10 +710,12 @@ export function GfsBrowser(): React.JSX.Element {
     if (!file || folder.kind !== 'directory') return
     try {
       const name = await normalizeGfsResourceName(file.name)
+      const target = { operation: 'create' as const, parentRid: folder.rid }
       const state = await uploadWithCompatibility({
         file,
         name,
-        target: { operation: 'create', parentRid: folder.rid },
+        target,
+        resumeUploadId: matchingPendingResumeUploadId(file, target, name),
       })
       if (state === 'completed') showToast('File uploaded.', { tone: 'success' })
       else showToast('Upload paused. Resume it from the upload panel.', { tone: 'info' })

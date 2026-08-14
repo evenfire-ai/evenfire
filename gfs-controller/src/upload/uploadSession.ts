@@ -701,7 +701,7 @@ export class GfsUploadSessionService {
     options?: { cursor?: string; limit?: number }
   ): Promise<UploadStatusPage> {
     requireEnabled(this.deps.config)
-    const session = await this.loadOwned(uploadId, principal)
+    requireUuid(uploadId, 'uploadId')
     const rawCursor = options?.cursor ?? ''
     if (rawCursor && !/^\d+$/.test(rawCursor))
       throw new GfsError('path_invalid', 'status cursor is invalid')
@@ -709,34 +709,52 @@ export class GfsUploadSessionService {
     const requestedLimit = options?.limit ?? 256
     if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 256)
       throw new GfsError('path_invalid', 'status limit is invalid')
-    const result = await this.deps.db.query(
-      `SELECT upload_id, part_number, offset_bytes, length_bytes, sha256, state, staging_path, lease_epoch
-         FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'committed' AND part_number > $2 ORDER BY part_number ASC LIMIT $3`,
-      [uploadId, cursor, requestedLimit + 1]
-    )
-    const active = await this.deps.db.query(
-      `SELECT part_number FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'reserved' ORDER BY part_number ASC`,
-      [uploadId]
-    )
-    const hasMore = result.rows.length > requestedLimit
-    const rows = hasMore ? result.rows.slice(0, requestedLimit) : result.rows
-    const lastPart = rows.at(-1)
-    return {
-      session: {
-        ...toReceipt(session),
-        activePartNumbers: active.rows.map(row => Number(row.part_number)),
-      },
-      parts: rows.map(row => {
-        const part = rowToPart(row)
-        return {
-          partNumber: part.partNumber,
-          offsetBytes: part.offsetBytes,
-          lengthBytes: part.lengthBytes,
-          sha256: part.sha256,
-        }
-      }),
-      nextCursor: hasMore && lastPart ? String(Number(lastPart.part_number)) : null,
-    }
+    return this.deps.tx.transaction(async client => {
+      // A status response is consumed as one reconciliation snapshot. Keep
+      // session state, committed parts, and durable active leases on the same
+      // MVCC snapshot so a sibling reservation/commit cannot produce a stale
+      // count paired with a newer part-number set.
+      await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+      const sessionResult = await client.query(
+        `SELECT * FROM gfs_upload_sessions WHERE upload_id = $1 AND drive = $2 AND owner_subject = $3`,
+        [uploadId, principal.drive, principal.ownerSubject]
+      )
+      const sessionRow = sessionResult.rows[0]
+      if (!sessionRow) throw new GfsError('not_found', 'upload session not found')
+      const session = rowToSession(sessionRow)
+      assertNotExpired(session, this.now())
+
+      const result = await client.query(
+        `SELECT upload_id, part_number, offset_bytes, length_bytes, sha256, state, staging_path, lease_epoch
+           FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'committed' AND part_number > $2 ORDER BY part_number ASC LIMIT $3`,
+        [uploadId, cursor, requestedLimit + 1]
+      )
+      const active = await client.query(
+        `SELECT part_number FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'reserved' ORDER BY part_number ASC`,
+        [uploadId]
+      )
+      const activePartNumbers = active.rows.map(row => Number(row.part_number))
+      const hasMore = result.rows.length > requestedLimit
+      const rows = hasMore ? result.rows.slice(0, requestedLimit) : result.rows
+      const lastPart = rows.at(-1)
+      return {
+        session: {
+          ...toReceipt(session),
+          activePartCount: activePartNumbers.length,
+          activePartNumbers,
+        },
+        parts: rows.map(row => {
+          const part = rowToPart(row)
+          return {
+            partNumber: part.partNumber,
+            offsetBytes: part.offsetBytes,
+            lengthBytes: part.lengthBytes,
+            sha256: part.sha256,
+          }
+        }),
+        nextCursor: hasMore && lastPart ? String(Number(lastPart.part_number)) : null,
+      }
+    })
   }
 
   async putPart(

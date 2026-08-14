@@ -260,7 +260,7 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
       idempotencyKey: randomUUID(),
     })
     await pool.query(
-      `UPDATE gfs_upload_sessions SET state = 'uploading', active_part_count = 2 WHERE upload_id = $1`,
+      `UPDATE gfs_upload_sessions SET state = 'uploading', active_part_count = 99 WHERE upload_id = $1`,
       [created.session.uploadId]
     )
     await pool.query(

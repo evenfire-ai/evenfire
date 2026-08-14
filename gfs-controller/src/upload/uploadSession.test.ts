@@ -23,6 +23,7 @@ class MemoryDb {
 
   async query(text: string, values: unknown[] = []): Promise<{ rows: Row[] }> {
     const sql = text.replace(/\s+/g, ' ').trim()
+    if (sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ') return { rows: [] }
     if (sql.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
     if (sql.startsWith('SELECT * FROM gfs_upload_sessions WHERE owner_subject')) {
       const [owner, drive, key] = values.map(String)
