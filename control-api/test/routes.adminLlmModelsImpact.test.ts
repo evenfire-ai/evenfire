@@ -228,6 +228,70 @@ describe('admin llm-models ?force impact gate', () => {
       .expect(200)
   })
 
+  // ── R1-H1: a PUT that RENAMES an enabled pair pulls the OLD pair out of the
+  // runtime ConfigMap on re-materialize exactly like a disable, silently
+  // stranding any Host/grant that referenced it. The gate must fire on the OLD
+  // pair. These assert the OBSERVABLE 409 + impact body (T4).
+  it('R1-H1: PUT that RENAMES an enabled referenced pair (model changes) → 409 with impact on the OLD pair', async () => {
+    installPool({ modelRow: makeModelRow({ enabled: true }) })
+    const gateway = new MockGateway('mcp-host')
+    await seedHost(gateway, 'agent-a', primarySpec) // references the OLD (claude, claude-haiku-4-5)
+
+    // The admin UI form resubmits provider+model on every PUT; here `model`
+    // actually changes → identity rename while staying enabled.
+    const res = await authed('put', `/api/v1/admin/llm-models/${MODEL_ID}`, gateway)
+      .send({ provider: PROVIDER, model: 'claude-opus-4-8', enabled: true })
+      .expect(409)
+    expect(res.body.error).toBe('model_in_use')
+    // Impact is over the OLD pair — that is what would be stranded.
+    expect(res.body.impact.provider).toBe(PROVIDER)
+    expect(res.body.impact.model).toBe(MODEL)
+    expect(res.body.impact.hostsAffected).toEqual([
+      { namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] },
+    ])
+  })
+
+  it('R1-H1: PUT that RENAMES the provider of an enabled referenced pair → 409 (identity is the tuple)', async () => {
+    installPool({ modelRow: makeModelRow({ enabled: true }) })
+    const gateway = new MockGateway('mcp-host')
+    await seedHost(gateway, 'agent-a', primarySpec)
+
+    await authed('put', `/api/v1/admin/llm-models/${MODEL_ID}`, gateway)
+      .send({ provider: 'anthropic', model: MODEL, enabled: true })
+      .expect(409)
+  })
+
+  it('R1-H1: PUT rename + ?force=true → proceeds (200), the escape works', async () => {
+    installPool({ modelRow: makeModelRow({ enabled: true }) })
+    const gateway = new MockGateway('mcp-host')
+    await seedHost(gateway, 'agent-a', primarySpec)
+
+    await authed('put', `/api/v1/admin/llm-models/${MODEL_ID}?force=true`, gateway)
+      .send({ provider: PROVIDER, model: 'claude-opus-4-8', enabled: true })
+      .expect(200)
+  })
+
+  it('R1-H1 regression guard: PUT resubmits the SAME provider+model (form no-op) with references → 200, no false positive', async () => {
+    installPool({ modelRow: makeModelRow({ enabled: true }) })
+    const gateway = new MockGateway('mcp-host')
+    await seedHost(gateway, 'agent-a', primarySpec)
+
+    // Identity unchanged (same values) — the gate compares VALUES, not presence.
+    await authed('put', `/api/v1/admin/llm-models/${MODEL_ID}`, gateway)
+      .send({ provider: PROVIDER, model: MODEL, enabled: true, display_name: 'Claude Haiku' })
+      .expect(200)
+  })
+
+  it('R1-H1: renaming an ALREADY-DISABLED referenced pair → 200 (old pair was not in the ConfigMap)', async () => {
+    installPool({ modelRow: makeModelRow({ enabled: false }) })
+    const gateway = new MockGateway('mcp-host')
+    await seedHost(gateway, 'agent-a', primarySpec)
+
+    await authed('put', `/api/v1/admin/llm-models/${MODEL_ID}`, gateway)
+      .send({ provider: PROVIDER, model: 'claude-opus-4-8', enabled: false })
+      .expect(200)
+  })
+
   it('PUT enabled false→false (already disabled) → never 409', async () => {
     installPool({ modelRow: makeModelRow({ enabled: false }) })
     const gateway = new MockGateway('mcp-host')

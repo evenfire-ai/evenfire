@@ -7,10 +7,14 @@
  * non-destructive default is only safe if the operator is told to act. This
  * module produces that persistent alert: the set of ACTIONABLE attention items.
  *
- * TODAY there is exactly one item kind — a `stale` model that is STILL
- * referenced by some Host/grant, so the operator must decide to disable it
- * (through the Fase 3 impact-gated PUT). A `stale` model that nobody references
- * is NOT actionable and produces NO item.
+ * TODAY there is exactly one item kind — a `stale` AND `enabled` model that is
+ * STILL referenced by some Host/grant, so the operator must decide to disable it
+ * (through the Fase 3 impact-gated PUT). Two cases produce NO item: a `stale`
+ * model that nobody references (nothing to act on), and a `stale` model that is
+ * ALREADY disabled (its suggested action is already done — the enabled filter
+ * lives in `listStaleAllowedModels`, so those rows never reach this module). A
+ * disabled-but-still-referenced model is a distinct diagnostic concern (a future
+ * `dangling_reference` kind), not an actionable attention item.
  *
  * The `kind` discriminator is an OPEN string union on purpose: future phases add
  * item kinds (e.g. a re-appeared model, a pricing gap) without breaking the
@@ -49,10 +53,12 @@ import {
 export const ATTENTION_KIND_STALE_MODEL_REFERENCED = 'stale_model_referenced'
 
 /**
- * A `stale` catalog model that is still referenced by a live Host/grant — the
- * operator must disable it (impact-gated PUT) to converge. Carries the same
- * `hostsAffected`/`grantsAffected` shape the Fase 3 impact body uses, so the
- * frontend renders both surfaces identically.
+ * A `stale` AND `enabled` catalog model that is still referenced by a live
+ * Host/grant — the operator must disable it (impact-gated PUT) to converge. An
+ * already-disabled stale model is filtered out upstream (`listStaleAllowedModels`)
+ * and never produces this item. Carries the same `hostsAffected`/`grantsAffected`
+ * shape the Fase 3 impact body uses, so the frontend renders both surfaces
+ * identically.
  */
 export interface StaleModelReferencedItem {
   kind: typeof ATTENTION_KIND_STALE_MODEL_REFERENCED

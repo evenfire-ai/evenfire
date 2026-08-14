@@ -1199,7 +1199,13 @@ body.cu-body {
   margin-bottom: 1rem;
 }
 
-.cu-field label {
+/* `.cu-field__label` captions a block that is not a form control -- a Request URL
+   or a generated manifest sitting in a <pre>. A <label> would be the wrong element
+   there because it labels nothing, so the class carries the same treatment as a
+   real field label instead. Without it the caption falls back to body type and
+   renders larger than the inputs it sits above. */
+.cu-field label,
+.cu-field__label {
   font-size: 0.75rem;
   font-weight: 500;
   color: var(--cu-text-muted);
@@ -9704,6 +9710,14 @@ textarea.cu-input {
 .cu-channel-provider-panel,
 .cu-channel-access {
   display: grid;
+  /* minmax(0, 1fr), not the default `auto` track. An auto track is max-content
+     sized and its items keep `min-width: auto`, so the widest unbreakable line
+     in the panel sets the track width and the content paints outside the panel
+     box, which does not clip it. The Slack app manifest triggers this: its
+     `request_url` line runs ~140 monospace characters, measured here at 1088px
+     inside a 670px panel. With a 0 floor the track shrinks to the panel and the
+     manifest's own `overflow-x: auto` scrolls it instead. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--cu-space-4);
   padding: var(--cu-space-4);
   border: 1px solid var(--cu-border-subtle);

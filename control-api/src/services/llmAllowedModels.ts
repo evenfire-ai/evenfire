@@ -216,16 +216,28 @@ export async function listAllowedModels(db: DbClient = pool): Promise<LlmAllowed
 }
 
 /**
- * Stale rows only — models the Fase 4 sync flagged as vanished from the external
- * catalog (`stale=true`) but left `enabled` intact. The operator-attention feed
- * (Fase 5) enumerates these and reports the ones still referenced. Deterministic
- * ordering keeps the feed stable across calls.
+ * Stale AND enabled rows — models the Fase 4 sync flagged as vanished from the
+ * external catalog (`stale=true`) while leaving `enabled` intact, so they still
+ * ship in the runtime allowlist ConfigMap and keep working. The operator-
+ * attention feed (Fase 5) is the sole consumer: it enumerates these and reports
+ * the ones still referenced as `stale_model_referenced` — an ACTIONABLE item
+ * whose remedy is the impact-gated PUT that disables the model.
+ *
+ * The `AND enabled` filter is load-bearing for that contract. A `stale` model
+ * that is ALREADY disabled but still referenced (a dangling reference left after
+ * a force-disable) is NOT actionable through this feed — its suggested action
+ * ("disable it") is already done — so surfacing it would make the feed never
+ * converge to zero after the very action it asked for. That "disabled + still
+ * referenced" state is a distinct, diagnostic-only concern (a future
+ * `dangling_reference` kind, designed separately); it is not lost here — it stays
+ * derivable via `computeModelImpact`. Deterministic ordering keeps the feed
+ * stable across calls.
  */
 export async function listStaleAllowedModels(db: DbClient = pool): Promise<LlmAllowedModel[]> {
   const result = await db.query(
     `SELECT ${MODEL_COLUMNS}
        FROM llm_allowed_models
-      WHERE stale
+      WHERE stale AND enabled
       ORDER BY provider ASC, model ASC`
   )
   return (result.rows as Record<string, unknown>[]).map(rowToModel)

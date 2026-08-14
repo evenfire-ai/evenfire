@@ -49,12 +49,20 @@
  * (`routes/admin/llmModels.ts`) and, later, `GET /admin/attention` (Fase 5).
  * Neither reconstructs the impact — both call `computeModelImpact`.
  */
+import {
+  type HostModelRole,
+  enumerateHostModelReferences,
+} from '../routes/admin/hostModelReferences.js'
 import { offeredKey } from '../routes/admin/modelAllowlistTolerance.js'
 import { isPlainObject } from '../utils/isPlainObject.js'
 import { type PluginWorkloadSdkGrant, listGrantsReferencingModel } from './pluginWorkloadSdkDb.js'
 
-/** Which Host spec source referenced the pair. A Host may match in several. */
-export type HostModelRole = 'primary' | 'allowedModels' | 'fallback'
+/**
+ * Which Host spec source referenced the pair. A Host may match in several.
+ * Re-exported from the shared enumeration module (regla D4) so existing importers
+ * of this symbol from `llmModelImpact` keep working.
+ */
+export type { HostModelRole }
 
 /** A Host CR that references the pair, with the roles it matched in. */
 export interface HostModelReference {
@@ -119,52 +127,25 @@ export function modelImpactSourcesFromGateway(
 }
 
 /**
- * The roles in which a Host spec references the target `(provider, model)` pair
- * (keyed via `offeredKey`, the same NUL-separated key the write-gate uses so a
- * model id containing spaces can never collide with a distinct pair). Empty when
- * the Host does not reference it. Purely structural and defensive: any
- * malformed/partial entry is skipped, never throws.
+ * The roles in which a Host spec references the TARGET `(provider, model)` pair.
+ * Provider-aware match: keeps only the shared enumeration entries whose key
+ * equals `targetKey` (the same NUL-separated `offeredKey` the write-gate uses, so
+ * a model id containing spaces can never collide with a distinct pair), deduped
+ * so each role appears at most once, in spec order (primary, allowedModels,
+ * fallback). Empty when the Host does not reference the target.
+ *
+ * The location enumeration itself lives in `enumerateHostModelReferences` (regla
+ * D4), shared verbatim with the tolerance seam's `storedRoleSets`. This caller's
+ * own concern — layered on top — is target-filtering + role dedup.
  */
 function hostRolesReferencing(spec: unknown, targetKey: string): HostModelRole[] {
-  if (!isPlainObject(spec)) return []
   const roles: HostModelRole[] = []
-
-  // 1. primary — spec.model
-  const model = spec.model
-  if (isPlainObject(model)) {
-    const name = typeof model.name === 'string' ? model.name.trim() : ''
-    const provider = typeof model.provider === 'string' ? model.provider.trim() : ''
-    if (name && provider && offeredKey(provider, name) === targetKey) roles.push('primary')
+  const seen = new Set<HostModelRole>()
+  for (const ref of enumerateHostModelReferences(spec)) {
+    if (ref.key !== targetKey || seen.has(ref.role)) continue
+    seen.add(ref.role)
+    roles.push(ref.role)
   }
-
-  // 2. allowedModels — spec.allowedModels[]
-  const allowedModels = spec.allowedModels
-  if (Array.isArray(allowedModels)) {
-    for (const entry of allowedModels) {
-      if (!isPlainObject(entry)) continue
-      const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
-      const m = typeof entry.model === 'string' ? entry.model.trim() : ''
-      if (provider && m && offeredKey(provider, m) === targetKey) {
-        roles.push('allowedModels')
-        break
-      }
-    }
-  }
-
-  // 3. fallback — spec.llmPolicy.fallbacks[]
-  const llmPolicy = spec.llmPolicy
-  if (isPlainObject(llmPolicy) && Array.isArray(llmPolicy.fallbacks)) {
-    for (const entry of llmPolicy.fallbacks) {
-      if (!isPlainObject(entry)) continue
-      const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
-      const m = typeof entry.model === 'string' ? entry.model.trim() : ''
-      if (provider && m && offeredKey(provider, m) === targetKey) {
-        roles.push('fallback')
-        break
-      }
-    }
-  }
-
   return roles
 }
 

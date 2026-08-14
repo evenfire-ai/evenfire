@@ -276,6 +276,37 @@ describe('SandboxUiPage', () => {
     })
   })
 
+  it('keeps a long conversation return label available to assistive technology and hover text', async () => {
+    const title =
+      'A deliberately long conversation title that must remain available to assistive technology'
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(
+      <SandboxUiPage
+        conversationOrigin={{ agentName: 'sales-agent', chatId: 'chat-123', title }}
+        onBackToConversation={vi.fn()}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    const button = await screen.findByRole('button', { name: `Back to ${title}` })
+
+    expect(button.getAttribute('title')).toBe(`Back to ${title}`)
+    expect(button.querySelector('span')?.textContent).toBe(`Back to ${title}`)
+  })
+
   it('keeps the app mounted when returning to the conversation fails', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [

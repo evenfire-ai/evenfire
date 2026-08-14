@@ -95,6 +95,50 @@ describe('Host stale soft-quarantine warnings (Fase 6)', () => {
     expect(res.body.warnings).toBeUndefined()
   })
 
+  // R1-B1: the stale-warning lookup (getModelAllowlistState) is an EXTRA query,
+  // separate from the isModelAllowed gate. It ONLY feeds the additive warning, so
+  // a failure on it must NEVER block a valid write — the PR invariant is "additive,
+  // never blocks (never 422/409/500)". Before the fix the rejection propagated
+  // through validateHostSpec → asyncHandler → HTTP 500, ahead of createResource /
+  // updateResource. Assert the OBSERVABLE result (T4): the Host still persists.
+  it('CREATE persists (201) when the stale-warning lookup rejects (best-effort, no 500)', async () => {
+    llm.getModelAllowlistState.mockRejectedValue(new Error('db connection reset'))
+    const gateway = new MockGateway(HOSTS_NS)
+
+    const res = await request(buildApp(gateway))
+      .post('/admin/hosts')
+      .send({ metadata: { name: 'h1' }, spec: staleSpec })
+
+    expect(res.status).toBe(201)
+    // The CR actually landed with the requested spec — not just a non-500 status.
+    expect((res.body as { metadata: { name: string } }).metadata.name).toBe('h1')
+    expect((res.body as { spec: typeof staleSpec }).spec.model.name).toBe('M')
+    const stored = (await gateway.getResource('hosts', 'h1', HOSTS_NS)) as {
+      spec: typeof staleSpec
+    }
+    expect(stored.spec.model.name).toBe('M')
+    // Best-effort degrade: no warning surfaced, but the write is not blocked.
+    expect(res.body.warnings).toBeUndefined()
+  })
+
+  it('EDIT persists (200) when the stale-warning lookup rejects (best-effort, no 500)', async () => {
+    llm.getModelAllowlistState.mockRejectedValue(new Error('db connection reset'))
+    const gateway = new MockGateway(HOSTS_NS)
+    // Stored default is a fresh model; the edit switches it to a new pair, which
+    // is exactly the path that triggers the (now-guarded) warning lookup.
+    await gateway.createResource('hosts', { metadata: { name: 'h1' }, spec: freshSpec }, HOSTS_NS)
+
+    const res = await request(buildApp(gateway)).put('/admin/hosts/h1').send({ spec: staleSpec })
+
+    expect(res.status).toBe(200)
+    expect((res.body as { spec: typeof staleSpec }).spec.model.name).toBe('M')
+    const stored = (await gateway.getResource('hosts', 'h1', HOSTS_NS)) as {
+      spec: typeof staleSpec
+    }
+    expect(stored.spec.model.name).toBe('M')
+    expect(res.body.warnings).toBeUndefined()
+  })
+
   it('does NOT surface a warning when the write fails to persist (updateResource throws)', async () => {
     class ThrowingGateway extends MockGateway {
       override async updateResource(): Promise<unknown> {

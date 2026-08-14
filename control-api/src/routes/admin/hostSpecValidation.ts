@@ -9,6 +9,7 @@ import {
   isModelAllowed as isModelAllowedDefault,
 } from '../../services/llmAllowedModels.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
+import { enumerateHostModelReferences } from './hostModelReferences.js'
 import {
   type HostSpecIncoherenceToleratedEvent,
   type IncoherenceToleranceGate,
@@ -306,38 +307,14 @@ interface StoredRoleSets {
 function storedRoleSets(stored: Record<string, unknown> | undefined): StoredRoleSets {
   const primary = new Set<string>()
   const any = new Set<string>()
-  if (!isPlainObject(stored)) return { primary, any }
-  const model = stored.model
-  if (
-    isPlainObject(model) &&
-    typeof model.name === 'string' &&
-    typeof model.provider === 'string'
-  ) {
-    const name = model.name.trim()
-    const provider = model.provider.trim()
-    if (name && provider) {
-      const key = offeredKey(provider, name)
-      primary.add(key)
-      any.add(key)
-    }
-  }
-  const llmPolicy = stored.llmPolicy
-  if (isPlainObject(llmPolicy) && Array.isArray(llmPolicy.fallbacks)) {
-    for (const entry of llmPolicy.fallbacks) {
-      if (!isPlainObject(entry)) continue
-      const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
-      const fbModel = typeof entry.model === 'string' ? entry.model.trim() : ''
-      if (provider && fbModel) any.add(offeredKey(provider, fbModel))
-    }
-  }
-  const allowedModels = stored.allowedModels
-  if (Array.isArray(allowedModels)) {
-    for (const entry of allowedModels) {
-      if (!isPlainObject(entry)) continue
-      const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
-      const model2 = typeof entry.model === 'string' ? entry.model.trim() : ''
-      if (provider && model2) any.add(offeredKey(provider, model2))
-    }
+  // Location enumeration is shared verbatim with the live impact gate
+  // (`enumerateHostModelReferences`, regla D4). This caller's own concern —
+  // layered on top — is bucketing every referenced key into `any` and only the
+  // `primary`-role keys into `primary`, so the active default slot stays strict
+  // while non-active roles (fallback/subset) tolerate demotion.
+  for (const ref of enumerateHostModelReferences(stored)) {
+    any.add(ref.key)
+    if (ref.role === 'primary') primary.add(ref.key)
   }
   return { primary, any }
 }
@@ -412,7 +389,24 @@ async function maybeWarnStale(
   if (tol.storedRoles.any.has(key)) return
   if (tol.warnedKeys.has(key)) return
   const getState = tol.deps.getModelAllowlistState ?? getModelAllowlistStateDefault
-  const state = await getState(provider, model)
+  // Best-effort: this is an EXTRA lookup (separate from the isModelAllowed gate
+  // query) that ONLY feeds the additive stale warning. The PR invariant is that
+  // the soft quarantine is additive and NEVER blocks a write (never 422/409/500).
+  // A blip on this query (connection reset) must not turn a valid Host
+  // create/update into an HTTP 500 — swallow it, proceed WITHOUT a warning, and
+  // let the write persist. The correctness gate (isModelAllowed) is untouched: it
+  // still propagates its failures and still hard-rejects a disallowed model.
+  let state: { enabled: boolean; stale: boolean } | null
+  try {
+    state = await getState(provider, model)
+  } catch (err) {
+    console.warn(
+      `[Admin] stale-model warning lookup failed for "${provider}/${model}"; proceeding without a warning: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+    return
+  }
   if (state?.enabled && state.stale) {
     tol.warnedKeys.add(key)
     tol.warnings.push({ code: STALE_MODEL_ASSIGNED, provider, model, field })
