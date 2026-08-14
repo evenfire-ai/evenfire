@@ -277,6 +277,10 @@ describe('delete impact gate (409 model_in_use → force)', () => {
 
     // The stale item is visible in the banner before any mutation.
     expect(await screen.findByText('GPT-5 Mini')).toBeInTheDocument()
+    // Exactly one feed fetch on mount — the banner re-fetches on demand only, so
+    // no polling and no double-fetch (a mount-effect regression the observable
+    // assertion below would not catch on its own).
+    expect(vi.mocked(getAdminAttention)).toHaveBeenCalledTimes(1)
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
@@ -286,5 +290,8 @@ describe('delete impact gate (409 model_in_use → force)', () => {
     await waitFor(() => {
       expect(screen.queryByText('GPT-5 Mini')).not.toBeInTheDocument()
     })
+    // Exactly one additional fetch for the post-mutation refresh — one bump per
+    // mutation, not a polling loop.
+    expect(vi.mocked(getAdminAttention)).toHaveBeenCalledTimes(2)
   })
 })
