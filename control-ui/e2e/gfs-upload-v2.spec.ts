@@ -323,14 +323,26 @@ test.describe('GFS Upload v2 — Control UI large-upload project', () => {
         response =>
           response.request().method() === 'GET' &&
           response.url().includes('/gfs/proxy/v1/uploads/') &&
-          response.url().includes('/status') &&
-          isSuccessfulResponse(response)
+          response.url().includes('/status'),
+        { timeout: 60_000 }
       )
       await dropFileIntoUploadDialog(dialog, source.filePath)
       await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
       const resumedStatus = await statusResponse
       expect(resumedStatus.status()).toBe(200)
       expect(uploadIdFromEnvelope(await resumedStatus.json())).toBe(uploadId)
+      await expect(dialog.getByRole('button', { name: 'Resume', exact: true })).toBeVisible({
+        timeout: 60_000,
+      })
+      const resumeResponse = page.waitForResponse(
+        response =>
+          response.request().method() === 'POST' &&
+          response.url().endsWith(`/uploads/${uploadId}/resume`),
+        { timeout: 60_000 }
+      )
+      await dialog.getByRole('button', { name: 'Resume', exact: true }).click()
+      const resumed = await resumeResponse
+      expect(isSuccessfulResponse(resumed), `${resumed.url()} ${await resumed.text()}`).toBe(true)
       await expect(page.getByText('File uploaded.', { exact: true })).toBeVisible({
         timeout: 600_000,
       })
