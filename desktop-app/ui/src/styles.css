@@ -14980,12 +14980,20 @@ pre {
 }
 
 .chat-search-match {
-  background: rgba(var(--warning-rgb), 0.3);
+  background: var(--search-match-bg);
   border-radius: 2px;
-  color: inherit;
+  color: var(--search-match-text);
 }
 
 .chat-search-match--active {
-  background: rgba(var(--warning-rgb), 0.62);
-  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.9);
+  background: var(--search-match-current-bg);
+}
+
+@media (forced-colors: active) {
+  .chat-search-match,
+  .chat-search-match--active {
+    background: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
 }
