@@ -1620,6 +1620,31 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
+   * Trigger a reconcile for any cached image `LlmHook` whose `envSecret` matches
+   * the changed Secret (spec §8.2). A rotation (same name, new contents) leaves
+   * the pod key unchanged but re-stamps the credentials-revision on the pod
+   * template → rolling restart onto the new credential — mirroring
+   * `reconcileByEnvSecret` for McpServer. Driven by the llm-hooks SecretInformer.
+   */
+  async reconcileLlmHookByEnvSecret(secretName: string, secretNamespace: string): Promise<void> {
+    if (secretNamespace !== config.llmHooksNamespace) return
+    for (const hook of this.llmHooks.values()) {
+      if (hook.spec.target?.image?.envSecret !== secretName) continue
+      try {
+        console.log(
+          `[K8s] Re-reconciling LlmHook "${hook.name}" after Secret "${secretName}" change`
+        )
+        // Pod key is unchanged by a contents-only rotation, so pass it as the
+        // previous key (no stale-workload teardown) — the reconcile re-stamps the
+        // credentials-revision and rolls the shared pod.
+        await this.llmHookReconciler.reconcile(hook, computePodKey(hook))
+      } catch (err) {
+        console.error(`[K8s] Secret-triggered LlmHook reconcile failed for "${hook.name}":`, err)
+      }
+    }
+  }
+
+  /**
    * Get all cached servers.
    */
   getAllServers(): McpServerCRD[] {

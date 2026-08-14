@@ -29,6 +29,7 @@ let provider: McpServerProvider | null = null
 let server: ContextMapperServer | null = null
 let secretInformer: SecretInformer | null = null
 let channelSecretInformer: SecretInformer | null = null
+let llmHooksSecretInformer: SecretInformer | null = null
 let lifecycleTracker: StatelessLifecycleTracker | null = null
 let heartbeatPoller: HeartbeatPoller | null = null
 let isShuttingDown = false
@@ -47,6 +48,7 @@ async function shutdown(signal: string): Promise<void> {
 
   secretInformer?.stop()
   channelSecretInformer?.stop()
+  llmHooksSecretInformer?.stop()
   heartbeatPoller?.stop()
   lifecycleTracker?.stop()
   await provider?.stop()
@@ -215,6 +217,29 @@ async function main(): Promise<void> {
         )
       } catch (err) {
         console.error('[Main] channels SecretInformer failed to start:', err)
+      }
+    }
+  }
+
+  // Third SecretInformer: hook credential Secrets in the llm-hooks namespace.
+  // A rotation re-stamps the credentials-revision and rolls the hook pod
+  // (§8.2, mirroring the McpServer envSecret informer above).
+  if (!config.devMode && provider instanceof McpServerWatcher) {
+    const kc = getKubeConfig()
+    if (kc) {
+      const watcher = provider
+      llmHooksSecretInformer = new SecretInformer(kc, config.llmHooksNamespace, evt => {
+        watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
+          console.error('[Main] reconcileLlmHookByEnvSecret failed:', err)
+        })
+      })
+      try {
+        await llmHooksSecretInformer.start()
+        console.log(
+          `[Main] llm-hooks SecretInformer started on namespace ${config.llmHooksNamespace}`
+        )
+      } catch (err) {
+        console.error('[Main] llm-hooks SecretInformer failed to start:', err)
       }
     }
   }
