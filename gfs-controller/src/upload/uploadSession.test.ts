@@ -56,7 +56,7 @@ class MemoryDb {
     }
     if (
       sql.startsWith(
-        "SELECT upload_id FROM gfs_upload_sessions WHERE state IN ('initiated','uploading','paused','finalizing') AND expires_at <= now()"
+        "SELECT upload_id FROM gfs_upload_sessions WHERE state IN ('initiated','uploading','paused') AND expires_at <= now()"
       )
     ) {
       return { rows: [] }
@@ -369,6 +369,16 @@ class MemoryDb {
     }
     if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'failed'")) {
       const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      if (sql.includes("state = 'finalizing' AND session_epoch = $3")) {
+        if (row.state !== 'finalizing' || Number(row.session_epoch) !== Number(values[2])) {
+          return { rows: [] }
+        }
+        row.state = 'failed'
+        row.failure_code = values[1]
+        row.active_part_count = 0
+        row.finalizing_started_at = null
+        return { rows: [{ upload_id: row.upload_id }] }
+      }
       row.state = 'failed'
       row.failure_code = values[1]
       row.active_part_count = 0

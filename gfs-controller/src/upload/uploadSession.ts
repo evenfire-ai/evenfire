@@ -1349,14 +1349,19 @@ export class GfsUploadSessionService {
         await client.query(
           `UPDATE gfs_upload_sessions
               SET state = 'uploading', session_epoch = session_epoch + 1,
-                  finalizing_started_at = NULL, updated_at = now()
+                  finalizing_started_at = NULL,
+                  expires_at = GREATEST(
+                    expires_at,
+                    now() + ($2::bigint * interval '1 second')
+                  ),
+                  updated_at = now()
             WHERE upload_id = $1 AND state = 'finalizing'`,
-          [uploadId]
+          [uploadId, this.deps.config.sessionTtlSeconds]
         )
       }
       const expired = await client.query(
         `SELECT upload_id FROM gfs_upload_sessions
-          WHERE state IN ('initiated','uploading','paused','finalizing') AND expires_at <= now()
+          WHERE state IN ('initiated','uploading','paused') AND expires_at <= now()
           LIMIT 100
           FOR UPDATE SKIP LOCKED`,
         []
@@ -1628,16 +1633,19 @@ export class GfsUploadSessionService {
       )
     } catch (error) {
       const failureCode = error instanceof GfsError ? error.code : 'finalization_failed'
+      let ownsFailureCleanup = false
       await this.deps.tx.transaction(async client => {
         const locked = await this.lockSession(client, uploadId, principal)
         if (locked.state === 'finalizing' && locked.sessionEpoch === started.sessionEpoch) {
-          await client.query(
+          const transitioned = await client.query(
             `UPDATE gfs_upload_sessions
                 SET state = 'failed', failure_code = $2, active_part_count = 0,
                     finalizing_started_at = NULL, updated_at = now()
-              WHERE upload_id = $1`,
-            [uploadId, failureCode]
+              WHERE upload_id = $1 AND state = 'finalizing' AND session_epoch = $3
+              RETURNING upload_id`,
+            [uploadId, failureCode, started.sessionEpoch]
           )
+          ownsFailureCleanup = transitioned.rows.length === 1
         }
       })
       // `deps.finalize` has already settled, so this controller no longer
@@ -1646,6 +1654,10 @@ export class GfsUploadSessionService {
       // until the part timeout, preventing the direct failure cleanup below.
       const current = this.inFlightFinalizers.get(uploadId)
       if (current?.controller === finalizationAbort) this.inFlightFinalizers.delete(uploadId)
+      // A reclaimed epoch belongs to a newer attempt. The old finalizer may
+      // report its own failure, but it must never delete shared parts or the
+      // staging directory owned by the reclaimed session.
+      if (!ownsFailureCleanup) throw error
       await this.waitForQuiescence(uploadId)
       if (
         !this.hasInFlight(uploadId) &&
@@ -1653,10 +1665,19 @@ export class GfsUploadSessionService {
       ) {
         await this.deps.tx
           .transaction(async client => {
-            await client.query(`DELETE FROM gfs_upload_parts WHERE upload_id = $1`, [uploadId])
             await client.query(
-              `UPDATE gfs_upload_sessions SET cleanup_at = now(), updated_at = now() WHERE upload_id = $1 AND state = 'failed'`,
-              [uploadId]
+              `DELETE FROM gfs_upload_parts
+                WHERE upload_id = $1
+                  AND EXISTS (
+                    SELECT 1 FROM gfs_upload_sessions
+                     WHERE upload_id = $1 AND state = 'failed' AND session_epoch = $2
+                  )`,
+              [uploadId, started.sessionEpoch]
+            )
+            await client.query(
+              `UPDATE gfs_upload_sessions SET cleanup_at = now(), updated_at = now()
+                WHERE upload_id = $1 AND state = 'failed' AND session_epoch = $2`,
+              [uploadId, started.sessionEpoch]
             )
           })
           .catch(() => undefined)

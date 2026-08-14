@@ -411,16 +411,29 @@ describe('AppService GFS upload security scope', () => {
     }
   })
 
-  it('maps a persisted active record to the renderer uploading state after restart', async () => {
+  it('maps a live persisted active record to the renderer uploading state', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-snapshot-state-'))
     try {
       const statePath = join(root, 'gfs-upload-sessions.json')
       const record = scopedUploadRecord('93939393-9393-4393-8393-939393939393')
       await writeFile(statePath, JSON.stringify({ version: 2, records: [record], quarantined: [] }))
       const service = authenticatedUploadService(statePath)
+      const job = {
+        snapshot: vi.fn(() => ({
+          state: 'uploading',
+          session: record.session,
+          uploadedBytes: record.session.committedBytes,
+          totalBytes: record.fileSize,
+        })),
+      }
+      service.gfsUploadJobs.set(record.uploadId, {
+        job,
+        promise: Promise.resolve(record.session),
+        scope: record.scope,
+      })
 
       await expect(service.getGfsUploadSnapshot(record.uploadId, 'main')).resolves.toMatchObject({
-        state: 'suspended_auth',
+        state: 'uploading',
         uploadedBytes: 0,
         totalBytes: 4,
       })

@@ -131,7 +131,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(2)
   })
 
-  it('delegates missing and create-body-mismatched drive validation to control-api', async () => {
+  it('keeps capabilities drive-independent while control-api rejects mismatched creates', async () => {
     clientMock.controlApiStreamRequest.mockImplementation(
       async (
         method: string,
@@ -140,13 +140,13 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       ) => {
         const drive = options.query?.drive
         const body = typeof options.body === 'string' ? JSON.parse(options.body) : undefined
-        if (!drive) {
-          throw new ControlApiError('drive required', 400, { error: 'drive_required' })
-        }
         if (method === 'POST' && path === '/external/gfs/uploads' && body?.drive !== drive) {
           throw new ControlApiError('drive mismatch', 400, { error: 'drive_mismatch' })
         }
-        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
       }
     )
     const missing = await request(buildApp())
@@ -156,8 +156,8 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       .post('/me/gfs/uploads?drive=archive')
       .set('authorization', 'Bearer sess-xyz')
       .send({ drive: 'main', operation: 'create' })
-    expect(missing.status).toBe(400)
-    expect(missing.body).toEqual({ error: 'drive_required' })
+    expect(missing.status).toBe(200)
+    expect(missing.body).toEqual({ upload: { resumableV2: { enabled: true } } })
     expect(mismatched.status).toBe(400)
     expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
     expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(2)

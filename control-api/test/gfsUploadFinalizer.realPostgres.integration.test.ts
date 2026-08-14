@@ -221,6 +221,45 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
     expect(manifests.rows[0]?.count).toBe(0)
   }, 30_000)
 
+  it('fences an old finalizer after reclaim so it cannot publish a resource or receipt', async () => {
+    const { upload, uploadPart } = await seedUpload()
+    await pool.query(
+      `UPDATE gfs_upload_sessions
+          SET session_epoch = session_epoch + 1,
+              finalizing_started_at = now() - interval '1 hour'
+        WHERE upload_id = $1`,
+      [upload.uploadId]
+    )
+
+    await expect(finalizer(() => true)(upload, [uploadPart])).rejects.toMatchObject({
+      code: 'upload_aborted',
+    })
+
+    const sessionRow = await pool.query(
+      `SELECT state, session_epoch, result_resource_id, result_version, result_sha256
+         FROM gfs_upload_sessions WHERE upload_id = $1`,
+      [upload.uploadId]
+    )
+    expect(sessionRow.rows[0]).toMatchObject({
+      state: 'finalizing',
+      session_epoch: '1',
+      result_resource_id: null,
+      result_version: null,
+      result_sha256: null,
+    })
+
+    const resource = await pool.query(
+      `SELECT count(*)::int AS count FROM gfs_resources WHERE resource_id = $1`,
+      [upload.uploadId]
+    )
+    expect(resource.rows[0]?.count).toBe(0)
+    const manifests = await pool.query(
+      `SELECT count(*)::int AS count FROM gfs_blob_manifests WHERE resource_id = $1`,
+      [upload.uploadId]
+    )
+    expect(manifests.rows[0]?.count).toBe(0)
+  }, 30_000)
+
   it('rolls back the real resource and receipt when authorization is denied', async () => {
     const { upload, uploadPart } = await seedUpload()
     await expect(finalizer(() => false)(upload, [uploadPart])).rejects.toMatchObject({

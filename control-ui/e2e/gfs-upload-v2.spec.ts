@@ -51,6 +51,44 @@ async function openWritableFolder(
   return current
 }
 
+/**
+ * Exercise the actual drop target while retaining Playwright's file-backed
+ * File object. The capture listener runs before the React change handler clears
+ * the native input, then the same file is delivered through a real DragEvent
+ * sequence to the visible drop zone. This keeps the journey user-facing while
+ * avoiding a synthetic upload request or direct storage mutation.
+ */
+async function dropFileIntoUploadDialog(
+  dialog: import('@playwright/test').Locator,
+  filePath: string
+): Promise<void> {
+  const input = dialog.getByLabel('Choose file to upload')
+  const initialDropzone = dialog.locator('label').filter({ hasText: 'Drag and drop' })
+  const labelFor = await initialDropzone.getAttribute('for')
+  if (!labelFor) throw new Error('upload drop zone has no associated file input')
+  await input.evaluate(element => {
+    element.addEventListener(
+      'change',
+      event => {
+        const file = (event.currentTarget as HTMLInputElement).files?.[0]
+        if (file) (window as Window & { __gfsDropFile?: File }).__gfsDropFile = file
+      },
+      { capture: true, once: true }
+    )
+  })
+  await input.setInputFiles(filePath)
+  await dialog.locator(`label[for="${labelFor}"]`).evaluate(element => {
+    const file = (window as Window & { __gfsDropFile?: File }).__gfsDropFile
+    if (!file) throw new Error('file capture failed before drag-and-drop')
+    const dataTransfer = new DataTransfer()
+    dataTransfer.items.add(file)
+    for (const type of ['dragenter', 'dragover', 'drop']) {
+      element.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer }))
+    }
+    delete (window as Window & { __gfsDropFile?: File }).__gfsDropFile
+  })
+}
+
 async function observeTwoProgressValues(
   progress: import('@playwright/test').Locator,
   timeout = 600_000
@@ -216,6 +254,64 @@ test.describe('GFS Upload v2 — Control UI large-upload project', () => {
       await exerciseReplace(page, byteLength)
     })
   }
+
+  test('resumes the same persisted session after a visible drag-and-drop pause and reload', async ({
+    page,
+  }) => {
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-drag-resume')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    const source = await createDiskUploadFixture(32 * 1024 * 1024, '.bin', fixtureName)
+    try {
+      await openWritableFolder(page, fixture.name)
+      await page.getByRole('button', { name: 'Upload file', exact: true }).click()
+      let dialog = page.getByRole('dialog', { name: 'Upload file' })
+      await dropFileIntoUploadDialog(dialog, source.filePath)
+      await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+
+      const progress = page.getByRole('progressbar', {
+        name: `Upload progress for ${source.fileName}`,
+      })
+      await expect(progress).toBeVisible({ timeout: 60_000 })
+      await dialog.getByRole('button', { name: 'Pause', exact: true }).click()
+      await expect(dialog.getByRole('button', { name: 'Resume', exact: true })).toBeVisible({
+        timeout: 60_000,
+      })
+
+      await page.reload()
+      const resumedCurrent = await openWritableFolder(page, fixture.name)
+      await page.getByRole('button', { name: 'Upload file', exact: true }).click()
+      dialog = page.getByRole('dialog', { name: 'Upload file' })
+      const statusResponse = page.waitForResponse(
+        response =>
+          response.request().method() === 'GET' &&
+          response.url().includes('/gfs/proxy/v1/uploads/') &&
+          response.url().includes('/status')
+      )
+      await dropFileIntoUploadDialog(dialog, source.filePath)
+      await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+      expect((await statusResponse).status()).toBe(200)
+      await expect(page.getByText('File uploaded.', { exact: true })).toBeVisible({
+        timeout: 600_000,
+      })
+      await expect
+        .poll(
+          () =>
+            getGfsChildResourceSummary({
+              parentResourceId: fixture.resourceId,
+              name: source.fileName,
+            }),
+          { timeout: 60_000, intervals: [250, 1_000] }
+        )
+        .toMatchObject({ kind: 'file', bytes: source.byteLength, deleted: false })
+      await expect(
+        resumedCurrent.getByRole('listitem').filter({ hasText: source.fileName })
+      ).toHaveCount(1)
+    } finally {
+      await removeDiskUploadFixture(source)
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
+    }
+  })
 })
 
 test.describe('GFS Upload v2 — approved negative Control UI journeys', () => {

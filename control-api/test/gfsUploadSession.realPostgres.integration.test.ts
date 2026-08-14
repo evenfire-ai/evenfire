@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { Pool } from 'pg'
+import { GfsError } from '../../gfs-controller/src/api/errors.js'
 import type { GfsUploadConfig } from '../../gfs-controller/src/config.js'
 import { CommitOutcomeUnknownError, PgTransactor } from '../../gfs-controller/src/db/writeStore.js'
 import type {
@@ -513,6 +514,78 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
     })
   })
 
+  it('does not let a reclaimed finalizer clean the newer attempt parts', async () => {
+    const bytes = Buffer.alloc(CONFIG.preferredPartBytes, 0x85)
+    const base = new GfsUploadSessionService({
+      db: pool,
+      tx: new PgTransactor(pool),
+      blobs: { availableBytes: async () => 10n ** 12n } as never,
+      storageMountPath: tempRoot,
+      config: CONFIG,
+    })
+    const created = await base.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: '4'.repeat(32),
+      name: 'reclaimed-finalizer.bin',
+      sizeBytes: bytes.length,
+      idempotencyKey: randomUUID(),
+    })
+    const principal = { drive, ownerSubject: owner, primarySubject: owner }
+    await base.putPart(
+      created.session.uploadId,
+      partGeometry({ expectedBytes: bytes.length, partBytes: CONFIG.preferredPartBytes }, 0),
+      checksum(bytes),
+      Readable.from([bytes]) as never,
+      principal
+    )
+    const partRow = await pool.query<{ staging_path: string }>(
+      `SELECT staging_path FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'committed'`,
+      [created.session.uploadId]
+    )
+    const stagedPath = String(partRow.rows[0]?.staging_path)
+
+    const staleFinalizer = new GfsUploadSessionService({
+      db: pool,
+      tx: new PgTransactor(pool),
+      blobs: { availableBytes: async () => 10n ** 12n } as never,
+      storageMountPath: tempRoot,
+      config: CONFIG,
+      finalize: async session => {
+        await pool.query(
+          `UPDATE gfs_upload_sessions
+              SET state = 'uploading', session_epoch = session_epoch + 1,
+                  finalizing_started_at = NULL, expires_at = now() + interval '1 day'
+            WHERE upload_id = $1 AND state = 'finalizing'`,
+          [session.uploadId]
+        )
+        throw new GfsError('finalization_failed', 'synthetic reclaimed finalizer failure')
+      },
+    })
+
+    await expect(
+      staleFinalizer.complete(created.session.uploadId, principal)
+    ).rejects.toMatchObject({ code: 'finalization_failed' })
+
+    const sessionRow = await pool.query(
+      `SELECT state, session_epoch, cleanup_at FROM gfs_upload_sessions WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    expect(sessionRow.rows[0]).toMatchObject({ state: 'uploading', session_epoch: '1' })
+    expect(sessionRow.rows[0]?.cleanup_at).toBeNull()
+    expect(
+      (
+        await pool.query(
+          `SELECT state FROM gfs_upload_parts WHERE upload_id = $1 AND part_number = 0`,
+          [created.session.uploadId]
+        )
+      ).rows[0]
+    ).toEqual({ state: 'committed' })
+    await expect(stat(stagedPath)).resolves.toBeDefined()
+  }, 30_000)
+
   it('fences and cleans a stale reserved lease while its row lock is held', async () => {
     const created = await uploads.create({
       drive,
@@ -743,13 +816,16 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
     )
     await pool.query(
       `UPDATE gfs_upload_sessions
-          SET state = 'finalizing', finalizing_started_at = now() - interval '1 hour'
+          SET state = 'finalizing',
+              finalizing_started_at = now() - interval '1 hour',
+              expires_at = now() - interval '1 second'
         WHERE upload_id = $1`,
       [created.session.uploadId]
     )
     await uploads.reconcile()
     const row = await pool.query(
-      `SELECT state, session_epoch, finalizing_started_at FROM gfs_upload_sessions WHERE upload_id = $1`,
+      `SELECT state, session_epoch, finalizing_started_at, expires_at
+         FROM gfs_upload_sessions WHERE upload_id = $1`,
       [created.session.uploadId]
     )
     expect(row.rows[0]).toMatchObject({
@@ -757,6 +833,7 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
       finalizing_started_at: null,
     })
     expect(Number(row.rows[0]?.session_epoch)).toBe(Number(before.rows[0]?.session_epoch) + 1)
+    expect(new Date(String(row.rows[0]?.expires_at)).getTime()).toBeGreaterThan(Date.now())
   })
 
   it('rejects cancel during finalization and leaves one completed receipt', async () => {
