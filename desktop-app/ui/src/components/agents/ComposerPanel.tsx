@@ -4,6 +4,7 @@ import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { Button, IconButton, MenuItem } from '@components/Common'
+import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
   IconAttachFile,
   IconClose,
@@ -54,10 +55,10 @@ function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
   return `Uploaded File - ${Math.max(1, Math.round(attachment.sizeBytes / 1024))} KB`
 }
 
-function getComposerReferenceIcon(type: ComposerReferenceAttachment['type']) {
-  if (type === 'plugin') return <IconWorkflows />
-  if (type === 'connector') return <IconConnectors />
-  if (type === 'global_file') return <IconAttachFile />
+function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
+  if (attachment.type === 'plugin') return <IconWorkflows />
+  if (attachment.type === 'connector') return <IconConnectors />
+  if (attachment.type === 'global_file') return <GfsFileIcon name={attachment.label} />
   return <IconContexts />
 }
 
@@ -793,7 +794,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           className={`composer-reference-icon composer-reference-icon--${attachment.type}`}
                           aria-hidden="true"
                         >
-                          {getComposerReferenceIcon(attachment.type)}
+                          {getComposerReferenceIcon(attachment)}
                         </span>
                         <span className="composer-attachment-chip-body">
                           <strong>{attachment.label}</strong>

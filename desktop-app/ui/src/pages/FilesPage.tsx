@@ -1,6 +1,7 @@
 import { type DragEvent as ReactDragEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
+import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
@@ -12,7 +13,6 @@ import {
   IconContexts,
   IconDownload,
   IconEye,
-  IconImage,
 } from '@components/SidebarNav/icons'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
@@ -587,11 +587,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           ) : currentIsFile ? (
             <div className="da-gfs-current-file">
               <span className="da-gfs-current-file__icon" aria-hidden="true">
-                {currentIsFile && gfsImagePreviewMimeType(current.name) ? (
-                  <IconImage />
-                ) : (
-                  <IconAttachFile />
-                )}
+                {currentIsFile ? <GfsFileIcon name={current.name} /> : <IconAttachFile />}
               </span>
               <div className="da-gfs-current-file__copy">
                 <div className="da-gfs-current-file__title-row">
@@ -663,10 +659,8 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                     <span className="da-gfs-list__icon da-grid__cell" aria-hidden="true">
                       {resource.kind === 'directory' ? (
                         <IconContexts />
-                      ) : gfsImagePreviewMimeType(resource.name) ? (
-                        <IconImage />
                       ) : (
-                        <IconAttachFile />
+                        <GfsFileIcon name={resource.name} />
                       )}
                     </span>
                     <span className="da-gfs-list__identity da-grid__cell">
@@ -807,13 +801,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 className={`da-gfs-manage-dialog__icon${currentIsFolder ? ' da-gfs-manage-dialog__icon--folder' : ''}`}
                 aria-hidden="true"
               >
-                {currentIsFolder ? (
-                  <IconContexts />
-                ) : currentIsFile && gfsImagePreviewMimeType(current.name) ? (
-                  <IconImage />
-                ) : (
-                  <IconAttachFile />
-                )}
+                {currentIsFolder ? <IconContexts /> : <GfsFileIcon name={current.name} />}
               </span>
               <span className="da-gfs-manage-dialog__heading">
                 {renameOpen ? (

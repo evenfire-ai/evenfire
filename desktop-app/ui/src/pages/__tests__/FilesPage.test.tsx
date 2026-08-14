@@ -1134,6 +1134,53 @@ describe('FilesPage', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-download')
   })
 
+  it('shows the document icon for txt, md, pdf, doc and docx files instead of the clip', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        'notes.txt',
+        'readme.md',
+        'report.pdf',
+        'memo.doc',
+        'brief.docx',
+        'archive.zip',
+      ].map((name, index) => ({
+        resourceId: `file-${index}`,
+        rid: `file-${index}`,
+        gfsUri: `gfs://main/file-${index}`,
+        drive: 'main',
+        parentResourceId: null,
+        name,
+        kind: 'file',
+        path: `/${name}`,
+        version: 0,
+        bytes: 3,
+        sources: ['grant'],
+        permissions: ['read'],
+        coversDescendants: false,
+      })),
+    })
+
+    const { container } = renderFilesPage()
+
+    const documentRows = ['notes.txt', 'readme.md', 'report.pdf', 'memo.doc', 'brief.docx'].map(
+      name => screen.getByRole('button', { name }).closest('.da-grid__row')
+    )
+    for (const row of documentRows) {
+      const iconSvg = row?.querySelector('.da-gfs-list__icon svg')
+      expect(iconSvg?.getAttribute('viewBox')).toBe('0 0 512 512')
+    }
+
+    const clipRow = screen.getByRole('button', { name: 'archive.zip' }).closest('.da-grid__row')
+    const clipIcon = clipRow?.querySelector('.da-gfs-list__icon svg')
+    expect(clipIcon?.getAttribute('viewBox')).toBe('0 0 24 24')
+
+    const listIconSvg = container.querySelectorAll('.da-gfs-list__icon svg')
+    expect(
+      [...listIconSvg].filter(svg => svg.getAttribute('viewBox') === '0 0 512 512')
+    ).toHaveLength(5)
+  })
+
   it('previews an image file in a closable modal without downloading it to disk', async () => {
     const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
     const createObjectURL = vi.fn(() => 'blob:gfs-image-preview')

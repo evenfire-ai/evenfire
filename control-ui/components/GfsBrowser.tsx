@@ -4,11 +4,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
-import { IconFolder, IconImage, IconServer } from '@components/Sidebar/icons'
+import { IconDocumentText, IconFolder, IconImage, IconServer } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
 import { Button, TextInput } from '@components/ui'
 import { GFS_UPLOAD_TIMEOUT_MS, apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
+import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
@@ -607,6 +608,8 @@ export function GfsBrowser(): React.JSX.Element {
                           <IconFolder />
                         ) : gfsImagePreviewMimeType(child.name) ? (
                           <IconImage />
+                        ) : isGfsDocumentFile(child.name) ? (
+                          <IconDocumentText />
                         ) : (
                           <IconServer />
                         )}
@@ -729,6 +732,8 @@ export function GfsBrowser(): React.JSX.Element {
                   <IconFolder />
                 ) : gfsImagePreviewMimeType(selected.name) ? (
                   <IconImage />
+                ) : isGfsDocumentFile(selected.name) ? (
+                  <IconDocumentText />
                 ) : (
                   <IconPaperclip />
                 )}
