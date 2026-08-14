@@ -172,8 +172,10 @@ async function walkToAccessStepNewSecret(opts?: { agentName?: string; contextNam
   fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: ctx } })
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-  // Step 2: New credential → make the OpenAI primary usable; secret name auto-derives.
-  fireEvent.click(screen.getByLabelText(/New credential/i))
+  // Step 2: New secret → make the OpenAI primary usable; secret name auto-derives.
+  // (dev's wizard renamed the "New credential" toggle to the "New secret"
+  // secretMode radio — the create-only seam it drives is unchanged.)
+  fireEvent.click(screen.getByLabelText(/New secret/i))
   fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
   await waitFor(() => {
     expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
