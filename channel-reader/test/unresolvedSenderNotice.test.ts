@@ -96,6 +96,7 @@ interface BuildReaderOptions {
   reason?: 'unresolved' | 'error'
   medium?: 'slack' | 'telegram' | 'teams' | 'email'
   ephemeralThrows?: boolean
+  sendMessageThrows?: boolean
   profileUiUrl?: string
 }
 
@@ -108,6 +109,7 @@ interface BuildReaderOptions {
 function buildReader(options: BuildReaderOptions = {}) {
   const medium = options.medium ?? 'slack'
   const ephemeralThrows = options.ephemeralThrows ?? false
+  const sendMessageThrows = options.sendMessageThrows ?? false
   // `{ reason: undefined }` has to survive as "no reason", so the default is
   // applied only when the caller omits the key. A `?? 'unresolved'` default
   // would silently turn the absent-reason case into the unresolved case.
@@ -120,7 +122,9 @@ function buildReader(options: BuildReaderOptions = {}) {
   const sendEphemeral = vi.fn(async (_channelId: string, _userId: string, _content: string) => {
     if (ephemeralThrows) throw new Error('user_not_in_channel')
   })
-  const sendMessage = vi.fn(async () => undefined)
+  const sendMessage = vi.fn(async () => {
+    if (sendMessageThrows) throw new Error('telegram_send_failed')
+  })
 
   const adapter: ChannelAdapter = {
     channelType: medium,
@@ -413,7 +417,10 @@ describe('unresolved sender notice on Telegram', () => {
 
     expect(sendMessage).toHaveBeenCalledTimes(1)
     // Teams threads under the triggering message via a third argument; Telegram
-    // must not, since Telegram has no channel-wide audience to protect against.
+    // must not. Group and supergroup chats do have a channel-wide audience (see
+    // telegramOperationalMessage.ts), so this is not a threading-is-pointless
+    // argument; the copy itself is deliberately terse so a top-level post leaks
+    // nothing meaningful, and threading here is a possible follow-up.
     expect(sendMessage.mock.calls[0]).toEqual(['C1', expect.any(String)])
   })
 
@@ -428,6 +435,31 @@ describe('unresolved sender notice on Telegram', () => {
     await deliver('C1', 'U1', '')
 
     expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('records the key even when sendMessage throws, so one failure is not retried forever', async () => {
+    const { deliver, sendMessage } = buildReader({ medium: 'telegram', sendMessageThrows: true })
+    // Nothing catches for us: an uncontained throw rejects this and fails the test.
+    await expect(deliver('C1', 'U1')).resolves.toBeUndefined()
+    await deliver('C1', 'U1')
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  // The notice is best-effort; the batch is not. TelegramAdapter.sendMessage
+  // rethrows on failure (unlike SlackAdapter, which swallows its own errors), and
+  // this runs inside the per-message loop in handleMessages.
+  it('keeps processing the rest of the batch when sendMessage throws', async () => {
+    const { buildMessage, deliverBatch, sendMessage, authorizeProviderMessage } = buildReader({
+      medium: 'telegram',
+      sendMessageThrows: true,
+    })
+    await expect(
+      deliverBatch([buildMessage('C1', 'U1'), buildMessage('C2', 'U2')])
+    ).resolves.toBeUndefined()
+    // Both messages reached authorization, and both got their own notice attempt:
+    // a throw escaping the first would have aborted the loop at one apiece.
+    expect(authorizeProviderMessage).toHaveBeenCalledTimes(2)
+    expect(sendMessage).toHaveBeenCalledTimes(2)
   })
 })
 
