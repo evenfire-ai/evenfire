@@ -4035,6 +4035,11 @@ export class WorkflowRecipeReconciler {
       )
     }
     const parsed = parseProviderNetblocks(cm.data)
+    // PR335-M2: a malformed catalog otherwise surfaces downstream only as a bare
+    // "category not present" — carry the parse errors into the failure message so
+    // the failed phase reports the actual catalog defect.
+    const catalogNote =
+      parsed.errors.length > 0 ? ` (catalog malformed: ${parsed.errors.join('; ')})` : ''
     const failures: Array<{ fqdn: string; error: string; retryable: boolean }> = []
     for (const { d, i } of wanting) {
       const resolved = resolveProviderRanges({
@@ -4052,7 +4057,7 @@ export class WorkflowRecipeReconciler {
       }
     }
     if (failures.length > 0) {
-      throw egressResolutionError(`${label} provider declaration invalid`, failures)
+      throw egressResolutionError(`${label} provider declaration invalid${catalogNote}`, failures)
     }
     return out
   }
@@ -4115,6 +4120,11 @@ export class WorkflowRecipeReconciler {
 
     // Permanent failures (no-records / blocked range) never author a partial
     // policy — fail exactly as the single-snapshot resolver did.
+    // PR335 known-limitation: this throw fires BEFORE provider resolution, so a
+    // permanently blocked/absent A record on a provider binding still fail-closes
+    // the whole policy even though the port-scoped catalog CIDRs could be served.
+    // Hoisting provider resolution above this guard is a larger restructure —
+    // documented here rather than papered over.
     const permanentFailures = failures.filter(f => !f.retryable)
     if (permanentFailures.length > 0) {
       throw egressResolutionError(
@@ -4163,8 +4173,13 @@ export class WorkflowRecipeReconciler {
         },
       })
       // Bootstrap fail-closed: a transient resolver failure with NOTHING to
-      // freeze (no rehydratable prior set) must not author an empty policy.
-      if (acc.entries.length === 0 && failures.length > 0) {
+      // serve must not author an empty policy. PR335 Fix 2: key on acc.resolved
+      // (catalog range rules + residual /32 window), NOT acc.entries — provider
+      // catalog CIDRs are partitioned OUT of the /32 window and live only in
+      // acc.resolved, so a transient DNS failure with catalog CIDRs in hand must
+      // still render them. With no provider declared, resolved mirrors entries
+      // (no rangeRules), so Phase-1 behavior is unchanged.
+      if (acc.resolved.length === 0 && failures.length > 0) {
         throw egressResolutionError(
           `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
           failures
@@ -4602,6 +4617,9 @@ export class WorkflowRecipeReconciler {
       this.recordExternalEgressTtl(resolvedExternal)
 
       // Permanent failures never author a partial policy — fail as before.
+      // PR335 known-limitation: fires BEFORE provider resolution — a permanently
+      // blocked/absent A record on a provider binding fail-closes even though the
+      // catalog CIDRs could be served (see the UI-path note above).
       const permanentFailures = failures.filter(f => !f.retryable)
       if (permanentFailures.length > 0) {
         throw egressResolutionError(
@@ -4641,8 +4659,12 @@ export class WorkflowRecipeReconciler {
             maxEntries: this.config.externalEgressMaxEntries,
           },
         })
-        // Bootstrap fail-closed: transient failure with nothing to freeze.
-        if (acc.entries.length === 0 && failures.length > 0) {
+        // Bootstrap fail-closed: transient failure with nothing to serve.
+        // PR335 Fix 2: key on acc.resolved (catalog range rules + residual /32
+        // window), NOT acc.entries — provider catalog CIDRs are partitioned OUT
+        // of the /32 window and live only in acc.resolved. With no provider
+        // declared, resolved mirrors entries, so Phase-1 behavior is unchanged.
+        if (acc.resolved.length === 0 && failures.length > 0) {
           throw egressResolutionError(
             `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
             failures

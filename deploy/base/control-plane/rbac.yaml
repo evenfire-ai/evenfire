@@ -49,11 +49,6 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
     resourceNames: ["clerum-wrc-public-key"]
-  # issue #299 Phase 2: read-only access to the provider netblocks catalog.
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get"]
-    resourceNames: ["clerum-provider-netblocks"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -128,6 +123,37 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: control-api-provider-netblocks-writer
+---
+# WRC reads the catalog on its existing resync. This is a NEW sibling Role
+# (create-only for CD) rather than a rule appended to the pre-existing
+# workflow-recipes-control-plane Role above: the CD service account lacks
+# roles.patch (see deploy/scripts/bootstrap-rbac.sh), so mutating an existing
+# Role would fail the first CD apply until an operator re-runs the bootstrap.
+# Creating a fresh Role/RoleBinding needs no patch. Mirrors the HCC reader below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-recipes-provider-netblocks-reader
+  namespace: control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+    resourceNames: ["clerum-provider-netblocks"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-recipes-provider-netblocks-reader
+  namespace: control-plane
+subjects:
+  - kind: ServiceAccount
+    name: workflow-recipes
+    namespace: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-recipes-provider-netblocks-reader
 ---
 # HCC reads the catalog on its existing resync (no HCC ConfigMap Role exists in
 # control-plane today).

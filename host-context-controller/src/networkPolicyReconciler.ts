@@ -899,13 +899,19 @@ export class NetworkPolicyReconciler {
     // non-provider bindings are unaffected.
     let netblocksCm: { categories: Record<string, string[]> } | null = null
     let netblocksCmError: string | null = null
+    // M2: parse errors from a malformed catalog are folded into provider-binding
+    // rejections below, so operators see "catalog malformed: …" instead of a
+    // misleading "category not present".
+    let netblocksCmParseErrors: string[] = []
     if (bindings.some(b => b.egressClass === 'provider')) {
       try {
         const cm = await this.coreApi.readNamespacedConfigMap({
           name: 'clerum-provider-netblocks',
           namespace: config.controlPlaneNamespace,
         })
-        netblocksCm = parseProviderNetblocks(cm.data)
+        const parsed = parseProviderNetblocks(cm.data)
+        netblocksCm = parsed
+        netblocksCmParseErrors = parsed.errors
       } catch (err) {
         netblocksCmError = `failed to read ConfigMap "clerum-provider-netblocks": ${this.errorMessage(err)}`
       }
@@ -1075,7 +1081,15 @@ export class NetworkPolicyReconciler {
           bounds: providerBounds(binding.provider?.name ?? ''),
         })
         if (resolved.kind === 'invalid') {
-          failures.push(`provider egress for "${binding.dns}": ${resolved.reasons.join('; ')}`)
+          // M2: when the catalog itself was malformed, say so — a bad key/format
+          // otherwise surfaces only as "category not present".
+          const catalogNote =
+            netblocksCmParseErrors.length > 0
+              ? ` (catalog malformed: ${netblocksCmParseErrors.join('; ')})`
+              : ''
+          failures.push(
+            `provider egress for "${binding.dns}": ${resolved.reasons.join('; ')}${catalogNote}`
+          )
           if (existingPolicy) desiredPolicyNames.add(name)
           continue
         }
@@ -1116,6 +1130,13 @@ export class NetworkPolicyReconciler {
           const uniqueIps = [...new Set(records.map(r => r.address))].sort()
           if (uniqueIps.length === 0) {
             failures.push(`hostname "${binding.dns}" resolved to no IPv4 addresses`)
+            // H3: a DNS answer that is empty/blocked/invalid must RETAIN the
+            // live NP (LKG) — without this, the stale-policy GC below deletes
+            // the already-validated policy BEFORE the failure throw, turning a
+            // poisoned/broken resolver answer into egress loss. Retention keeps
+            // the live NP; the binding still surfaces ExternalEgressRejected.
+            // NEVER egress loss.
+            if (existingPolicy) desiredPolicyNames.add(name)
             continue
           }
           const invalidIps = uniqueIps.filter(ip => isIP(ip) !== 4)
@@ -1123,6 +1144,8 @@ export class NetworkPolicyReconciler {
             failures.push(
               `hostname "${binding.dns}" resolved invalid IPv4 answer(s): ${invalidIps.join(', ')}`
             )
+            // H3: RETAIN the live NP (LKG) on an invalid answer — see above.
+            if (existingPolicy) desiredPolicyNames.add(name)
             continue
           }
           const freshCidrs = uniqueIps.map(ip => `${ip}/32`)
@@ -1131,6 +1154,10 @@ export class NetworkPolicyReconciler {
             failures.push(
               `hostname "${binding.dns}" resolved disallowed address(es): ${disallowedCidrs.join(', ')}`
             )
+            // H3: RETAIN the live NP (LKG) on a blocked/sinkholed answer — see
+            // above. The CIDR gate is NOT weakened: nothing new is rendered;
+            // only the already-validated live policy is kept.
+            if (existingPolicy) desiredPolicyNames.add(name)
             continue
           }
           // Security gates above ran on the FRESH snapshot; only validated IPs

@@ -122,6 +122,7 @@ jobs:
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
+              - 'packages/network-policy-core/**'
             control-ui:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'

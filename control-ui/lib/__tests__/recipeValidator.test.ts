@@ -743,6 +743,41 @@ describe('Phase 2 – Schema', () => {
       )
     ).toBe(true)
   })
+
+  it('emits a security warning for provider egressBindings (catalog CIDRs, not a /32)', () => {
+    const r = validateRecipe(
+      makeValid({
+        spec: {
+          workloads: [
+            {
+              id: 'netblock-sync',
+              type: 'deployment',
+              image: 'sync:1',
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  protocol: 'TCP',
+                  provider: { name: 'github', categories: ['all'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+    )
+
+    expect(r.issues.filter(i => i.severity === 'error')).toHaveLength(0)
+    expect(r.issues).toContainEqual(
+      expect.objectContaining({
+        phase: 'security',
+        severity: 'warning',
+        path: 'spec.workloads[0].egressBindings[0].egressClass',
+        message: expect.stringMatching(/provider-netblocks catalog/),
+      })
+    )
+  })
 })
 
 describe('WorkflowRecipe egress limits', () => {

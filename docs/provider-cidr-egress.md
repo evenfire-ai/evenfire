@@ -29,6 +29,10 @@ travel only through the catalog. Provider names live only in the registry/fetche
   regenerate with `make vendor-provider-netblocks`) covers cold start; worst case degrades
   to Phase-1 `/32` behavior, never below.
 
+This milestone (M1) ships a fetcher and seed for **GitHub only**; bindings declaring the
+other registry providers (aws, google, cloudfront, microsoft) fail closed with an explicit
+reason until their fetchers land.
+
 ## Kill switch
 
 `PROVIDER_NETBLOCKS_FETCHER_ENABLED=false` disables the control-api fetcher entirely (the
@@ -80,7 +84,7 @@ reads enforcement state, so the degradation floor is always Phase-1 behavior.
 
 | Env / CNI | NP egress enforced? | Verdict |
 |---|---|---|
-| minikube · Calico | yes | works (proven) |
+| minikube · Calico | yes | expected — GATE 2/3 pending |
 | GKE · Calico addon | yes | works |
 | GKE · Dataplane-V2 (Cilium) | yes | works (Cilium `ipBlock` matches *world* dsts; pin `except` conformance) |
 | EKS · **default VPC CNI** | **no — policies inert** | **no-op-safe**: detect + document, never certify as enforcing |

@@ -22,7 +22,8 @@
         "control-api/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-recipe-capability-policy/**",
-        "packages/image-policy/**"
+        "packages/image-policy/**",
+        "packages/network-policy-core/**"
       ],
       "published": true,
       "deployed_to_minikube": true

@@ -1,7 +1,13 @@
 export const MAX_EGRESS_BINDINGS = 20
 export const PUBLIC_WEB_PORTS = [80, 443] as const
 
-export type EgressMode = 'none' | 'exact-host' | 'exact-cidr' | 'public-web' | 'advanced'
+export type EgressMode =
+  | 'none'
+  | 'exact-host'
+  | 'exact-cidr'
+  | 'public-web'
+  | 'provider'
+  | 'advanced'
 
 export type EgressBinding = {
   egressClass?: 'exact-host' | 'public-web' | 'provider'
@@ -68,6 +74,8 @@ export type WorkflowEgressFinding = {
   message: string
   targets?: string[]
   ports?: number[]
+  /** issue #299 Phase 2 — provider-mode findings: "name (category, …)" per provider. */
+  providers?: string[]
 }
 
 function splitList(input: string): string[] {
@@ -435,14 +443,23 @@ export function registryEntryToEgressBindings(
   return registrySummaryToEgressBindings(entry.mcp_server_meta?.egressSummary)
 }
 
+function formatProviderIntent(provider: EgressBinding['provider']): string[] {
+  if (!provider || typeof provider.name !== 'string' || provider.name.length === 0) return []
+  const categories = Array.isArray(provider.categories)
+    ? provider.categories.filter(category => typeof category === 'string' && category.length > 0)
+    : []
+  return [categories.length > 0 ? `${provider.name} (${categories.join(', ')})` : provider.name]
+}
+
 function summarizeBindings(bindings: unknown): {
   mode: EgressMode
   bindingCount: number
   targets: string[]
   ports: number[]
+  providers: string[]
 } {
   if (!Array.isArray(bindings) || bindings.length === 0) {
-    return { mode: 'none', bindingCount: 0, targets: [], ports: [] }
+    return { mode: 'none', bindingCount: 0, targets: [], ports: [], providers: [] }
   }
   if (bindings.some(binding => (binding as EgressBinding)?.egressClass === 'public-web')) {
     return {
@@ -450,18 +467,36 @@ function summarizeBindings(bindings: unknown): {
       bindingCount: bindings.length,
       targets: [],
       ports: [...PUBLIC_WEB_PORTS],
+      providers: [],
     }
   }
   const typed = bindings as EgressBinding[]
+  const targets = unique(
+    typed.flatMap(binding => (binding.dns ? [binding.dns] : binding.cidr ? [binding.cidr] : []))
+  )
+  const ports = unique(
+    typed.flatMap(binding => (typeof binding.port === 'number' ? [binding.port] : []))
+  )
+  // issue #299 Phase 2 — provider bindings render catalog CIDR ranges, not a
+  // single-host /32, so they must never be summarized as exact-host.
+  const providerBindings = typed.filter(binding => binding?.egressClass === 'provider')
+  if (providerBindings.length > 0) {
+    return {
+      mode: 'provider',
+      bindingCount: typed.length,
+      targets,
+      ports,
+      providers: unique(
+        providerBindings.flatMap(binding => formatProviderIntent(binding.provider))
+      ),
+    }
+  }
   return {
     mode: 'exact-host',
     bindingCount: typed.length,
-    targets: unique(
-      typed.flatMap(binding => (binding.dns ? [binding.dns] : binding.cidr ? [binding.cidr] : []))
-    ),
-    ports: unique(
-      typed.flatMap(binding => (typeof binding.port === 'number' ? [binding.port] : []))
-    ),
+    targets,
+    ports,
+    providers: [],
   }
 }
 
@@ -516,15 +551,55 @@ export function analyzeWorkflowRecipeEgress(
       label,
       mode: summary.mode,
       bindingCount: summary.bindingCount,
-      severity: summary.mode === 'public-web' ? 'warning' : 'info',
+      severity: summary.mode === 'public-web' || summary.mode === 'provider' ? 'warning' : 'info',
       message:
         summary.mode === 'public-web'
           ? 'Public web egress is explicitly enabled for TCP 80/443; private, metadata, cluster-internal, link-local, multicast, and reserved ranges remain blocked.'
-          : `Exact-host egress declares ${summary.bindingCount} binding(s).`,
+          : summary.mode === 'provider'
+            ? `Provider-netblock egress declares ${summary.bindingCount} binding(s)${summary.providers.length > 0 ? ` for ${summary.providers.join(', ')}` : ''}. Rendered CIDRs come from the cluster provider-netblocks catalog and can span wide ranges — not a single-host /32. FQDNs missing from the catalog fall back to their explicitly declared categories; review those especially.`
+            : `Exact-host egress declares ${summary.bindingCount} binding(s).`,
       targets: summary.targets,
       ports: summary.ports,
+      ...(summary.mode === 'provider' ? { providers: summary.providers } : {}),
     })
   })
+
+  // issue #299 Phase 2 — the sandbox UI pod can also declare provider-netblock
+  // egress (spec.ui.egress.external[].provider); surface it so reviewers see the
+  // catalog-rendered CIDR surface, not just workload egressBindings.
+  const ui = spec.ui as Record<string, unknown> | undefined
+  const uiEgress = ui?.egress as Record<string, unknown> | undefined
+  const uiExternal = Array.isArray(uiEgress?.external)
+    ? (uiEgress.external as Array<Record<string, unknown> | null | undefined>)
+    : []
+  const uiProviderEntries = uiExternal.filter(
+    (entry): entry is Record<string, unknown> =>
+      !!entry && typeof entry === 'object' && !!entry.provider
+  )
+  if (uiProviderEntries.length > 0) {
+    const uiTargets = unique(
+      uiProviderEntries.flatMap(entry => (typeof entry.fqdn === 'string' ? [entry.fqdn] : []))
+    )
+    const uiPorts = unique(
+      uiProviderEntries.flatMap(entry => (typeof entry.port === 'number' ? [entry.port] : []))
+    )
+    const uiProviders = unique(
+      uiProviderEntries.flatMap(entry =>
+        formatProviderIntent(entry.provider as EgressBinding['provider'])
+      )
+    )
+    findings.push({
+      key: 'ui-egress-provider',
+      label: 'Sandbox UI egress',
+      mode: 'provider',
+      bindingCount: uiProviderEntries.length,
+      severity: 'warning',
+      message: `Sandbox UI declares ${uiProviderEntries.length} provider-netblock egress entr${uiProviderEntries.length === 1 ? 'y' : 'ies'}${uiProviders.length > 0 ? ` for ${uiProviders.join(', ')}` : ''}. Rendered CIDRs come from the cluster provider-netblocks catalog and can span wide ranges — not a single-host /32. FQDNs missing from the catalog fall back to their explicitly declared categories; review those especially.`,
+      targets: uiTargets,
+      ports: uiPorts,
+      providers: uiProviders,
+    })
+  }
 
   const runtimeHttp = (spec.runtimeEgress as Record<string, unknown> | undefined)?.http as
     | Record<string, unknown>

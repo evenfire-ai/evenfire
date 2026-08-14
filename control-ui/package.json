@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-ui",
-  "version": "0.1.422",
+  "version": "0.1.423",
   "private": true,
   "scripts": {
     "dev": "NEXT_IGNORE_INCORRECT_LOCKFILE=1 next dev",

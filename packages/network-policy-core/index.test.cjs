@@ -735,3 +735,37 @@ test('CORE-18 (security): declared categories do NOT override an EXPLICIT unmapp
   assert.equal(r.kind, 'invalid')
   assert.ok(r.reasons[0].includes('registry-unmapped'), `expected registry-unmapped, got ${r.reasons[0]}`)
 })
+
+test('CORE-19 (F1) declared categories must be a SUBSET of a mapped registry row', () => {
+  const lookup = registry.lookupFqdnProvider('api.github.com') // curated row: ['api']
+  const base = {
+    fqdn: 'api.github.com',
+    declaredName: 'github',
+    registryLookup: lookup,
+    cmCategories: { 'github.api': API_24, 'github.web': API_24 },
+    bounds: registry.providerBounds('github'),
+  }
+  // Widening the curated row (['api'] → ['api','web']) must be invalid.
+  const widened = core.resolveProviderRanges({ ...base, declaredCategories: ['api', 'web'] })
+  assert.equal(widened.kind, 'invalid')
+  assert.ok(
+    widened.reasons[0].includes('exceed registry row categories'),
+    `expected a subset violation, got ${widened.reasons?.[0]}`
+  )
+  // An equal (or narrower) declaration stays valid.
+  const exact = core.resolveProviderRanges({ ...base, declaredCategories: ['api'] })
+  assert.equal(exact.kind, 'ok')
+  assert.deepEqual(exact.categories, ['api'])
+  // The unknown-FQDN escape hatch (NO registry row + explicit declaration) is
+  // documented, load-bearing design — it must remain valid.
+  const hatch = core.resolveProviderRanges({
+    fqdn: 'ghe.internal.example-corp.com',
+    declaredName: 'github',
+    declaredCategories: ['api'],
+    registryLookup: undefined,
+    cmCategories: { 'github.api': API_24 },
+    bounds: registry.providerBounds('github'),
+  })
+  assert.equal(hatch.kind, 'ok')
+  assert.deepEqual(hatch.categories, ['api'])
+})

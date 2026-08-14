@@ -12,6 +12,15 @@ resources:
   - trace-maintenance-worker.yaml
   - trace-postgres-runtime-secrets.yaml
   - configmaps.yaml
+  # TRADEOFF (issue #299 Phase 2): keeping the vendored seed in `resources:`
+  # means every `kubectl apply -k` snaps the live clerum-provider-netblocks
+  # catalog back to the seed, discarding CIDRs the control-api fetcher wrote
+  # since the last deploy. This is accepted for now: availability degrades at
+  # worst to the Phase-1 /32 window, and the fetcher re-converges the catalog
+  # within one refresh interval (default 6h). A create-if-absent bootstrap
+  # (like control-api-public-key below, created by deploy/scripts/gen-jwt-keys.sh)
+  # would avoid the snap-back but requires wiring seed creation into every
+  # fresh-cluster path (minikube + GKE) — tracked as a follow-up.
   - provider-netblocks-configmap.yaml
   # Empty-by-design Secrets. Populated out-of-band by
   # `deploy/scripts/apply-inter-service-tokens.sh` (kubectl patch) BEFORE

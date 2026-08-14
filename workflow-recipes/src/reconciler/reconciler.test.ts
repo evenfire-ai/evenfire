@@ -9989,6 +9989,11 @@ describe('WorkflowRecipeReconciler', () => {
       // default implementation so later tests never see the netblocks catalog.
       mockCoreApi.readNamespacedConfigMap.mockReset()
       mockCoreApi.readNamespacedConfigMap.mockResolvedValue({ metadata: { resourceVersion: '1' } })
+      // The two-phase retain test overrides the NP read to serve the live policy.
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockReset()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        metadata: { resourceVersion: '1' },
+      })
     })
 
     function makeProviderReconciler() {
@@ -10238,6 +10243,162 @@ describe('WorkflowRecipeReconciler', () => {
         expect(pairs).toContainEqual({ cidr: GITHUB_WEB_CIDR, port: 8443 })
         expect(pairs).not.toContainEqual({ cidr: GITHUB_API_CIDR, port: 8443 })
       }
+    })
+
+    it('FIX2-WL (PR335): a transient controller-DNS failure with catalog CIDRs in hand still renders the workload provider ranges instead of failing closed', async () => {
+      // The residual /32 window (acc.entries) is empty — DNS never resolved and
+      // there is no prior policy to rehydrate — but the catalog CIDRs live in
+      // acc.resolved. The fail-close guard must key on acc.resolved, or a DNS
+      // blip on a provider binding wrongly fail-closes egress the catalog can
+      // already serve (PR335 Fix 2).
+      mockProviderNetblocksCm()
+      const reconciler = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: async () => ({
+          kind: 'error',
+          error: 'queryA SERVFAIL (controller resolver unavailable)',
+          retryable: true,
+        }),
+      })
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(result.phase).toBe('active')
+      const body = createdPolicyByName('wl-egress-test-recipe-worker')
+      const pairs = collectIpBlockPairs(body)
+      expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+      // No /32 window entries — DNS failed this round; the catalog carries egress.
+      expect(pairs.filter(p => p.cidr.endsWith('/32'))).toHaveLength(0)
+    })
+
+    it('FIX2-UI (PR335): a transient controller-DNS failure with catalog CIDRs in hand still renders the UI provider ranges instead of failing closed', async () => {
+      mockProviderNetblocksCm()
+      const reconciler = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: async () => ({
+          kind: 'error',
+          error: 'queryA SERVFAIL (controller resolver unavailable)',
+          retryable: true,
+        }),
+      })
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+          ui: {
+            workloadRef: 'frontend',
+            port: 8080,
+            egress: {
+              external: [
+                {
+                  fqdn: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          },
+        },
+      })
+
+      await reconciler.reconcile(recipe)
+
+      const body = createdPolicyByName('ui-egress-test-recipe')
+      const pairs = collectIpBlockPairs(body)
+      expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+      // No /32 window entries — DNS failed this round; the catalog carries egress.
+      expect(pairs.filter(p => p.cidr.endsWith('/32'))).toHaveLength(0)
+    })
+
+    it('T2 (PR335, mirrors HCC-9): a catalog read failure AFTER a successful reconcile retains the live workload NetworkPolicy (LKG) and does not go active', async () => {
+      mockProviderNetblocksCm()
+      const reconciler = makeProviderReconciler()
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      // Phase 1: healthy reconcile authors the workload NP with catalog CIDRs.
+      const first = await reconciler.reconcile(recipe)
+      expect(first.phase).toBe('active')
+      const liveBody = createdPolicyByName('wl-egress-test-recipe-worker')
+      expect(collectIpBlockPairs(liveBody)).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+
+      // Phase 2: the netblocks catalog read now fails; the phase-1 NP is live.
+      mockCoreApi.readNamespacedConfigMap.mockImplementation(({ name }: { name?: string }) =>
+        name === 'clerum-provider-netblocks'
+          ? Promise.reject(Object.assign(new Error('etcdserver: request timed out'), { code: 500 }))
+          : Promise.resolve({ metadata: { resourceVersion: '1' } })
+      )
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name?: string }) =>
+          name === 'wl-egress-test-recipe-worker'
+            ? Promise.resolve({
+                ...liveBody,
+                metadata: { ...liveBody.metadata, resourceVersion: '2' },
+              })
+            : Promise.resolve({ metadata: { resourceVersion: '1' } })
+      )
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+
+      const second = await reconciler.reconcile(recipe)
+
+      // The recipe must NOT report healthy while the catalog is unreachable…
+      expect(second.phase).not.toBe('active')
+      expect(second.message).toContain('provider netblocks catalog unavailable')
+      // …and the live workload NP is retained untouched (H3 LKG): no delete, no
+      // replace, no re-create of the workload policy during the failed pass.
+      const wlName = 'wl-egress-test-recipe-worker'
+      const wlDeletes = mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        c => (c[0] as { name?: string }).name === wlName
+      )
+      const wlReplaces = mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.filter(
+        c => (c[0] as { name?: string }).name === wlName
+      )
+      const wlCreates = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.filter(
+        c => (c[0] as { body: k8s.V1NetworkPolicy }).body?.metadata?.name === wlName
+      )
+      expect(wlDeletes).toHaveLength(0)
+      expect(wlReplaces).toHaveLength(0)
+      expect(wlCreates).toHaveLength(0)
     })
   })
 })

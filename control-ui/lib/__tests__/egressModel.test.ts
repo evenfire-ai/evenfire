@@ -262,6 +262,74 @@ describe('egressModel', () => {
     )
   })
 
+  it('summarizes provider bindings as provider-mode warnings, not exact-host info', () => {
+    const findings = analyzeWorkflowRecipeEgress({
+      spec: {
+        workloads: [
+          {
+            id: 'netblock-sync',
+            type: 'cronjob',
+            egressBindings: [
+              {
+                egressClass: 'provider',
+                dns: 'api.github.com',
+                port: 443,
+                protocol: 'TCP',
+                provider: { name: 'github', categories: ['all'] },
+              },
+            ],
+          },
+        ],
+      },
+    })
+
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({
+      label: 'Workload "netblock-sync"',
+      mode: 'provider',
+      severity: 'warning',
+      bindingCount: 1,
+    })
+    expect(findings[0].targets).toEqual(['api.github.com'])
+    expect(findings[0].providers).toEqual(['github (all)'])
+    expect(findings[0].message).toMatch(/catalog/)
+    expect(findings[0].message).not.toMatch(/Exact-host/)
+  })
+
+  it('reports provider entries declared on spec.ui.egress.external', () => {
+    const findings = analyzeWorkflowRecipeEgress({
+      spec: {
+        workloads: [{ id: 'dashboard', type: 'deployment', image: 'dash:1' }],
+        ui: {
+          workloadRef: 'dashboard',
+          port: 3000,
+          egress: {
+            external: [
+              {
+                fqdn: 'objects.githubusercontent.com',
+                port: 443,
+                provider: { name: 'github', categories: ['artifacts'] },
+              },
+              { fqdn: 'plain.example.com', port: 443 },
+            ],
+          },
+        },
+      },
+    })
+
+    expect(findings).toContainEqual(
+      expect.objectContaining({
+        key: 'ui-egress-provider',
+        label: 'Sandbox UI egress',
+        mode: 'provider',
+        severity: 'warning',
+        bindingCount: 1,
+        targets: ['objects.githubusercontent.com'],
+        providers: ['github (artifacts)'],
+      })
+    )
+  })
+
   it('reports invalid public-web HTTP shapes before the backend rejects them', () => {
     const findings = analyzeWorkflowRecipeEgress({
       spec: {

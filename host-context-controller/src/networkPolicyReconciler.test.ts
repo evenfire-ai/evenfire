@@ -720,9 +720,21 @@ describe('NetworkPolicyReconciler', () => {
       for (const rule of body.spec.egress) {
         expect(rule.ports).toEqual([{ port: 443, protocol: 'TCP' }])
       }
+      // T1 mutation-proofing: assert the ACTUAL rendered CIDRs set-equal the
+      // catalog — a mutant that swaps/drops/substitutes ranges while keeping
+      // length 24 must fail here.
+      const expectedCidrs = PROVIDER_API_24.split('\n')
+      const renderedCidrs = (
+        body.spec.egress as Array<{ to: Array<{ ipBlock: { cidr: string } }> }>
+      ).flatMap(rule => rule.to.map(t => t.ipBlock.cidr))
+      expect([...renderedCidrs].sort()).toEqual([...expectedCidrs].sort())
       expect(body.metadata.labels['clerum.io/egress-class']).toBe('provider')
-      expect(body.metadata.annotations['clerum.io/egress-provider-ranges']).toContain(
-        'api.github.com='
+      // T1 mutation-proofing: the provenance annotation must carry the FULL
+      // "api.github.com=<cidrs>" value, not just the prefix.
+      const provenance = body.metadata.annotations['clerum.io/egress-provider-ranges'] as string
+      expect(provenance.startsWith('api.github.com=')).toBe(true)
+      expect(provenance.slice('api.github.com='.length).split(',').sort()).toEqual(
+        [...expectedCidrs].sort()
       )
     })
 
@@ -735,10 +747,15 @@ describe('NetworkPolicyReconciler', () => {
       const r = makeReconciler(mockApi, undefined, custom, mockCore)
       resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }])
 
-      // Phase 1: a successful reconcile creates the policy; capture its name.
+      // Phase 1: a successful reconcile creates the policy; capture its full
+      // body so the phase-2 live fixture carries a REAL spec.egress — retention
+      // must be content-meaningful, not a metadata-only shell.
       await r.reconcileExternalEgress(providerServer())
-      const name = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0].body.metadata
-        .name as string
+      const createdBody = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+      const name = createdBody.metadata?.name as string
+      expect(createdBody.spec?.egress?.length).toBeGreaterThan(0)
 
       // Phase 2: the policy is now live and the catalog read fails.
       vi.clearAllMocks()
@@ -752,6 +769,7 @@ describe('NetworkPolicyReconciler', () => {
                 'clerum.io/mcpserver': 'gh-mcp',
               },
             },
+            spec: createdBody.spec,
           },
         ],
       })
@@ -764,10 +782,91 @@ describe('NetworkPolicyReconciler', () => {
       // H3: the live NetworkPolicy is RETAINED — neither deleted nor rewritten.
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
       // Ready=False was surfaced with the rejection reason.
       expect(JSON.stringify(custom.patchNamespacedCustomObjectStatus.mock.calls)).toContain(
         'ExternalEgressRejected'
       )
+    })
+
+    it('H3 (BLOCKER): a blocked/empty/invalid DNS answer RETAINS the live provider policy (LKG, never egress loss)', async () => {
+      const mockCore = makeMockCoreApi()
+      mockCore.readNamespacedConfigMap.mockResolvedValue({
+        data: { 'github.api.ipv4': PROVIDER_API_24 },
+      })
+      const custom = makeMockCustomApi()
+      const r = makeReconciler(mockApi, undefined, custom, mockCore)
+      resolve4Mock.mockResolvedValue(rec('140.82.121.5'))
+
+      // Phase 1: a successful reconcile creates the live provider policy;
+      // capture its full body so retention is content-meaningful.
+      await r.reconcileExternalEgress(providerServer())
+      const liveNp = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+      expect(liveNp.spec?.egress?.length).toBeGreaterThan(0)
+
+      // Phase 2: DNS now answers with a sinkholed/private, mixed, invalid, or
+      // empty A-set. Each DNS-success-but-blocked fail-close branch must RETAIN
+      // the live NP (LKG) while the binding surfaces ExternalEgressRejected —
+      // deleting it here is the H3 invariant failing (egress loss on a
+      // poisoned/broken resolver answer).
+      const scenarios: Array<{ label: string; answer: RecordWithTtl[] }> = [
+        { label: 'private-only answer', answer: rec('10.0.0.5') },
+        { label: 'mixed public+private answer', answer: rec('140.82.121.5', '10.0.0.5') },
+        { label: 'invalid IPv4 answer', answer: rec('not-an-ip') },
+        { label: 'empty answer', answer: [] },
+      ]
+      for (const scenario of scenarios) {
+        vi.clearAllMocks()
+        mockCore.readNamespacedConfigMap.mockResolvedValue({
+          data: { 'github.api.ipv4': PROVIDER_API_24 },
+        })
+        mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [liveNp] })
+        resolve4Mock.mockResolvedValue(scenario.answer)
+
+        await expect(
+          r.reconcileExternalEgress(providerServer()),
+          `${scenario.label}: reconcile must fail loud`
+        ).rejects.toThrow()
+
+        expect(
+          mockApi.deleteNamespacedNetworkPolicy,
+          `${scenario.label}: the live provider NP must be RETAINED (H3), never deleted`
+        ).not.toHaveBeenCalled()
+        expect(
+          mockApi.createNamespacedNetworkPolicy,
+          `${scenario.label}: no new/partial policy may be written`
+        ).not.toHaveBeenCalled()
+        expect(
+          mockApi.replaceNamespacedNetworkPolicy,
+          `${scenario.label}: the retained NP must not be rewritten`
+        ).not.toHaveBeenCalled()
+        expect(
+          JSON.stringify(custom.patchNamespacedCustomObjectStatus.mock.calls),
+          `${scenario.label}: the rejection must surface as ExternalEgressRejected`
+        ).toContain('ExternalEgressRejected')
+      }
+    })
+
+    it('M2: catalog parse errors are surfaced on provider rejection (not a misleading "category not present")', async () => {
+      const mockCore = makeMockCoreApi()
+      // Malformed catalog: an unrecognized data key yields a parse error AND
+      // leaves no usable category for the binding.
+      mockCore.readNamespacedConfigMap.mockResolvedValue({
+        data: { 'github/api/ipv4': PROVIDER_API_24 },
+      })
+      const custom = makeMockCustomApi()
+      const r = makeReconciler(mockApi, undefined, custom, mockCore)
+      resolve4Mock.mockResolvedValue(rec('140.82.121.5'))
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+
+      await expect(r.reconcileExternalEgress(providerServer())).rejects.toThrow(/catalog malformed/)
+
+      const statusJson = JSON.stringify(custom.patchNamespacedCustomObjectStatus.mock.calls)
+      expect(statusJson).toContain('ExternalEgressRejected')
+      expect(statusJson).toContain('catalog malformed')
+      expect(statusJson).toContain('unrecognized data key')
     })
 
     it('HCC-COLDSTART: a provider binding on a FRESH cluster (no catalog CM, no prior policy) fails loud (Ready=False), never crashes or ships a partial policy', async () => {

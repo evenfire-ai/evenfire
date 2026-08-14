@@ -630,6 +630,23 @@ function resolveProviderRanges(input) {
     if (registryLookup && registryLookup.kind === 'unmapped') {
       return { kind: 'invalid', reasons: [`"${fqdn}" is registry-unmapped for provider mode (${registryLookup.note})`] }
     }
+    // F1: a MAPPED registry row also BOUNDS the declaration — declared categories
+    // must be a subset of the curated row's, or a narrow row (e.g. api.github.com
+    // → ['api']) could be silently widened to the whole pool. The unknown-fqdn
+    // escape hatch (no registry row at all) is deliberately untouched: an explicit
+    // declaration there remains valid, load-bearing design.
+    if (registryLookup && registryLookup.kind === 'mapped') {
+      const rowCategories = registryLookup.row.categories
+      const excess = declaredCategories.filter(c => !rowCategories.includes(c))
+      if (excess.length > 0) {
+        return {
+          kind: 'invalid',
+          reasons: [
+            `declared categories [${declaredCategories.join(', ')}] exceed registry row categories [${rowCategories.join(', ')}] for provider "${declaredName}"`,
+          ],
+        }
+      }
+    }
     categories = declaredCategories
   } else if (!registryLookup) {
     return { kind: 'invalid', reasons: [`provider mapping for "${fqdn}" is unknown — declare provider.categories explicitly or add a registry row`] }

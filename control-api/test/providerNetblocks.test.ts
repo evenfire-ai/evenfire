@@ -296,6 +296,59 @@ describe('runProviderNetblocksTick', () => {
     expect(data['_meta']).toContain('contentHash')
   })
 
+  it('CA-10 (M1): the unchanged steady-state exit bumps per-source lastSuccess', async () => {
+    const cm = fakeCmStore()
+    const deps = (metrics: TickMetrics, now: number) => ({
+      fetchers: [syntheticFetcher(okResult({ api: API_24 }))],
+      cmStore: cm.store,
+      pool: fakePool(),
+      http,
+      now,
+      metrics,
+    })
+    expect(await runProviderNetblocksTick(deps(noopMetrics(), 1000))).toBe('written')
+    // Second run: identical content hash → 'unchanged' — a perfectly healthy
+    // steady state. The freshness gauge MUST still advance for the source, or
+    // clerum_provider_netblocks_last_success_timestamp_seconds goes stale and
+    // the staleness alert fires falsely.
+    const metrics = noopMetrics()
+    expect(await runProviderNetblocksTick(deps(metrics, 2000))).toBe('unchanged')
+    expect(metrics.lastSuccess).toHaveBeenCalledWith('github', 2000)
+  })
+
+  it('CA-11 (M1): a 304 nothing_staged exit bumps the 304 source but NEVER failed/rejected sources', async () => {
+    const cm = fakeCmStore()
+    const notModified: ProviderFetcher = {
+      source: 'github',
+      fetch: async () => ({ kind: 'unchanged' as const }),
+    }
+    const failing: ProviderFetcher = {
+      source: 'flaky',
+      fetch: async () => {
+        throw new Error('timeout')
+      },
+    }
+    const rejected: ProviderFetcher = {
+      source: 'rogue',
+      fetch: async () => okResult({ api: ['10.1.0.0/16'] }), // overlaps blocked 10.0.0.0/8 → rejected
+    }
+    const metrics = noopMetrics()
+    const result = await runProviderNetblocksTick({
+      fetchers: [notModified, failing, rejected],
+      cmStore: cm.store,
+      pool: fakePool(),
+      http,
+      now: 3000,
+      metrics,
+    })
+    // nothing_staged is a MIXED bucket: all-304 (healthy) AND all-failed land
+    // here. The bump must be PER-SOURCE — exactly the 304 source, nothing else.
+    expect(result).toBe('nothing_staged')
+    expect(cm.write).not.toHaveBeenCalled()
+    expect(metrics.lastSuccess).toHaveBeenCalledTimes(1)
+    expect(metrics.lastSuccess).toHaveBeenCalledWith('github', 3000)
+  })
+
   it('OPS-9a: an advisory-unlock failure DESTROYS the pooled session — release(err), never release()', async () => {
     // pg-pool only destroys a connection on release(err) with a truthy arg. A
     // session whose pg_advisory_unlock failed still HOLDS the session-scoped lock;

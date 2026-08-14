@@ -962,6 +962,16 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
           // (name/categories are open strings, catalog-checked at reconcile). A
           // provider object on a non-provider binding is an error.
           if (egressClass === 'provider') {
+            // Security surface parity with public-web: provider bindings render
+            // catalog CIDR ranges (potentially wide), not a single-host /32, so
+            // approvers must see a warning, never a silent exact-host pass.
+            issues.push({
+              phase: 'security',
+              severity: 'warning',
+              path: `${bindingPath}.egressClass`,
+              message:
+                'provider egress renders CIDR ranges from the cluster provider-netblocks catalog — potentially wide ranges, not a single-host /32. FQDNs missing from the catalog fall back to their explicitly declared categories; review provider name and categories.',
+            })
             const provider = binding.provider
             if (provider === null || typeof provider !== 'object' || Array.isArray(provider)) {
               issues.push({

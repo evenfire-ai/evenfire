@@ -115,6 +115,13 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
     const staged: Record<string, string> = {}
     const stagedSources: string[] = []
     const newSourcesMeta: Record<string, SourceMeta> = {}
+    // M1 (freshness gauge): sources whose fetch outcome THIS tick was healthy —
+    // `ok`-and-accepted or a 304 not-modified. Per-source `last_success` bumps
+    // come from exactly this set on every healthy exit ('written', 'unchanged',
+    // 'nothing_staged'), so a steady-state pipeline never looks stale. Failed
+    // and rejected sources never enter it — their gauge stays put and the
+    // staleness alert remains truthful.
+    const healthySources = new Set<string>()
 
     for (const fetcher of fetchers) {
       const lkgMeta = prevMeta.sources?.[fetcher.source]
@@ -136,6 +143,7 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
 
       if (result.kind === 'unchanged') {
         metrics.fetchOutcome(fetcher.source, 'not_modified')
+        healthySources.add(fetcher.source) // M1: a 304 is a per-source success
         continue // §6: zero CM writes
       }
       if (result.kind === 'error') {
@@ -209,6 +217,7 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
 
       Object.assign(staged, sourceStaged)
       stagedSources.push(fetcher.source)
+      healthySources.add(fetcher.source)
       newSourcesMeta[fetcher.source] = {
         fetchedAt: new Date(now).toISOString(),
         etag: result.meta.etag ?? null,
@@ -221,6 +230,10 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
     }
 
     if (stagedSources.length === 0) {
+      // M1: nothing_staged is a MIXED bucket — an all-304 tick (healthy steady
+      // state) and an all-failed tick both land here. Bump exactly the 304
+      // sources; failed/rejected ones stay un-bumped.
+      for (const src of healthySources) metrics.lastSuccess(src, now)
       metrics.tick('ok')
       return 'nothing_staged'
     }
@@ -239,6 +252,10 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
     // §6 no-op-on-unchanged: identical ranges ⇒ zero CM writes (not even a
     // `_meta.fetchedAt` touch), so unchanged pools cause no downstream reconciles.
     if (current?.annotations?.[CONTENT_HASH_ANNOTATION] === contentHash) {
+      // M1: identical content is a per-source SUCCESS — the fetch worked and
+      // validated; only the write is skipped. Bump the freshness gauge or the
+      // staleness alert fires on a perfectly healthy pipeline.
+      for (const src of healthySources) metrics.lastSuccess(src, now)
       metrics.tick('ok')
       return 'unchanged'
     }
@@ -259,7 +276,9 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
     }
 
     await cmStore.write(newData, contentHash)
-    for (const src of stagedSources) metrics.lastSuccess(src, now)
+    // M1: healthySources ⊇ stagedSources — a 304 source on a mixed tick is
+    // equally fresh and gets bumped alongside the written ones.
+    for (const src of healthySources) metrics.lastSuccess(src, now)
     metrics.tick('ok')
     log(`[provider-netblocks] wrote catalog (sources: ${stagedSources.join(', ')})`)
     return 'written'
