@@ -179,25 +179,39 @@ export function findChatSemanticMatches(
   const needle = foldWithOffsets(query.trim()).folded
   if (!needle) return []
   const matches: ChatSemanticMatch[] = []
+  const fragmentsByFlow = new Map<number, ChatSemanticFragment[]>()
+  for (const fragment of model.fragments) {
+    const fragments = fragmentsByFlow.get(fragment.flowId) ?? []
+    fragments.push(fragment)
+    fragmentsByFlow.set(fragment.flowId, fragments)
+  }
   let occurrence = 0
   for (const flow of model.flows) {
     const folded = foldWithOffsets(flow.text)
+    const flowFragments = fragmentsByFlow.get(flow.id) ?? []
+    let fragmentCursor = 0
     let offset = 0
     while (offset <= folded.folded.length - needle.length) {
       const index = folded.folded.indexOf(needle, offset)
       if (index < 0) break
       const start = folded.starts[index]!
       const end = folded.ends[index + needle.length - 1]!
-      const ranges = model.fragments
-        .filter(
-          fragment => fragment.flowId === flow.id && fragment.start < end && fragment.end > start
-        )
-        .map(fragment => ({
+      while (flowFragments[fragmentCursor]?.end <= start) fragmentCursor += 1
+      const ranges: Array<{ fragmentId: string; start: number; end: number }> = []
+      for (
+        let fragmentIndex = fragmentCursor;
+        fragmentIndex < flowFragments.length;
+        fragmentIndex += 1
+      ) {
+        const fragment = flowFragments[fragmentIndex]!
+        if (fragment.start >= end) break
+        const range = {
           fragmentId: fragment.id,
           start: Math.max(0, start - fragment.start),
           end: Math.min(fragment.text.length, end - fragment.start),
-        }))
-        .filter(range => range.end > range.start)
+        }
+        if (range.end > range.start) ranges.push(range)
+      }
       if (ranges.length) {
         matches.push(
           Object.freeze({
