@@ -1,0 +1,28 @@
+# Baseline default-deny-INGRESS for the llm-hooks namespace (guardrails §8.2).
+#
+# Without this, a hook pod that no NetworkPolicy selects is default-ALLOW ingress
+# — which is the case for `service`-target hooks (host-context-controller only
+# emits per-podKey ingress policies for `image` targets). With this baseline in
+# place, an un-covered hook pod is fail-CLOSED: it accepts traffic only from what
+# an explicit allow-policy admits.
+#
+# This composes additively with the controller-managed allow-policies:
+#   - image targets: `llmhook-<podKey>` admits the referencing mcp-hosts.
+#   - service targets: `llmhook-svc-<crName>` admits the referencing mcp-hosts.
+# Kubelet health/readiness probes originate from the node and are not affected
+# (the existing per-podKey policies already coexist with pod probes).
+#
+# INGRESS only — hook egress (DNS, image-target egressBindings) is governed
+# separately and is not constrained here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: llm-hooks
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress

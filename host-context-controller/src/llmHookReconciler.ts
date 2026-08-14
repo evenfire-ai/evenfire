@@ -27,7 +27,14 @@ import * as dns from 'node:dns/promises'
 import { isIP } from 'node:net'
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
-import { HOOK_PODKEY_LABEL, HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
+import {
+  HOOK_PODKEY_LABEL,
+  HOST_LABEL,
+  LLMHOOK_LABEL,
+  MANAGED_BY_LABEL,
+  MANAGED_BY_VALUE,
+  POLICY_TYPE_LABEL,
+} from './constants'
 import { isAllowedExternalEgressCidr, isPublicDnsHostname } from './networkPolicyReconciler'
 import { HostCRD, LlmHookCRD, LlmHookCondition, LlmHookImageTarget, LlmHookStatus } from './types'
 import {
@@ -126,6 +133,11 @@ export function podKeyResourceName(podKey: string): string {
   return `llmhook-${podKey}`
 }
 
+/** NetworkPolicy name for a service-target hook's per-CR ingress policy (§8.2). */
+export function serviceTargetNpName(crName: string): string {
+  return `llmhook-svc-${crName}`
+}
+
 type TargetKind = 'image' | 'service' | 'remote' | 'invalid'
 
 function classifyTarget(hook: LlmHookCRD): TargetKind {
@@ -198,6 +210,8 @@ export class LlmHookReconciler {
       await this.runSerialized(`name:${hook.name}`, () => this.reconcileNonImage(hook, kind))
       return
     }
+    // Clean any stale service-target ingress NP left by a prior service→image flip.
+    await this.deleteServiceTargetNetworkPolicy(hook.name)
     const podKey = computePodKey(hook)!
     if (previousPodKey && previousPodKey !== podKey) {
       // The image target changed pod keys: tear down the stale one (if it now
@@ -215,8 +229,9 @@ export class LlmHookReconciler {
    */
   async reconcileDelete(name: string, formerPodKey?: string | null): Promise<void> {
     if (!formerPodKey) {
-      // service/remote (or unknown) — nothing was deployed.
-      await this.runSerialized(`name:${name}`, async () => {})
+      // service/remote (or unknown) — no workload was deployed, but a service
+      // target may have left an ingress NP; remove it.
+      await this.runSerialized(`name:${name}`, () => this.deleteServiceTargetNetworkPolicy(name))
       return
     }
     await this.runSerialized(formerPodKey, () => this.reconcilePodKey(formerPodKey))
@@ -232,6 +247,12 @@ export class LlmHookReconciler {
     for (const name of hookNames) {
       const hook = this.hooks.get(name)
       if (!hook) continue
+      // Service targets: refresh the per-CR ingress NP so the admitted-host set
+      // tracks the Host reference change (image targets handled by pod key below).
+      if (classifyTarget(hook) === 'service') {
+        await this.runSerialized(`name:${name}`, () => this.ensureServiceTargetNetworkPolicy(hook))
+        continue
+      }
       const key = computePodKey(hook)
       if (key) podKeys.add(key)
     }
@@ -385,6 +406,14 @@ export class LlmHookReconciler {
         condition('False', 'ReconcileError', 'target must be exactly one of image, service, remote')
       )
       return
+    }
+    // A service target gets an ingress NP admitting only referencing hosts; a
+    // remote target has no in-cluster pod, so clear any stale NP (e.g. after a
+    // service→remote target flip).
+    if (kind === 'service') {
+      await this.ensureServiceTargetNetworkPolicy(hook)
+    } else {
+      await this.deleteServiceTargetNetworkPolicy(hook.name)
     }
     await this.writeStatus(
       hook,
@@ -735,7 +764,11 @@ export class LlmHookReconciler {
     members: LlmHookCRD[],
     egressRules: k8s.V1NetworkPolicyEgressRule[]
   ): Promise<void> {
-    const policy = this.buildNetworkPolicy(podKey, members, egressRules)
+    await this.applyNetworkPolicy(this.buildNetworkPolicy(podKey, members, egressRules))
+  }
+
+  /** Idempotent create-then-409-replace of a NetworkPolicy in the llm-hooks namespace. */
+  private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy): Promise<void> {
     const name = policy.metadata!.name!
     try {
       await this.networkingApi.createNamespacedNetworkPolicy({
@@ -764,6 +797,107 @@ export class LlmHookReconciler {
           body,
         }),
     })
+  }
+
+  /**
+   * Per-service-target ingress NP (§8.2). A `service` target deploys no workload,
+   * so it never gets a per-podKey policy — with the namespace default-deny that
+   * leaves its pods fail-closed. This admits EXACTLY the referencing mcp-hosts to
+   * the target Service's pods (empty `ingress` ⇒ deny-all), the service-target
+   * analog of the image reverse-index (`buildNetworkPolicy`). Scoped to Services
+   * in the llm-hooks namespace, where HCC has RBAC + the default-deny baseline; a
+   * Service elsewhere is left to that namespace's own policy (warned), and a
+   * missing/selector-less Service is left fail-closed under the default-deny.
+   */
+  private async ensureServiceTargetNetworkPolicy(hook: LlmHookCRD): Promise<void> {
+    const svc = hook.spec.target?.service
+    if (!svc?.name || !svc.namespace || !svc.port) return
+    if (svc.namespace !== config.llmHooksNamespace) {
+      console.warn(
+        `${LOG} service-target hook "${hook.name}" → Service ${svc.namespace}/${svc.name} outside ${config.llmHooksNamespace}; ingress not enforced by HCC`
+      )
+      return
+    }
+
+    let selector: Record<string, string> | undefined
+    try {
+      const service = await this.coreApi.readNamespacedService({
+        name: svc.name,
+        namespace: svc.namespace,
+      })
+      selector = service.spec?.selector
+    } catch (error) {
+      if (getErrorCode(error) === 404) {
+        console.warn(
+          `${LOG} service-target hook "${hook.name}": Service ${svc.namespace}/${svc.name} not found; leaving fail-closed under default-deny`
+        )
+        return
+      }
+      throw error
+    }
+    if (!selector || Object.keys(selector).length === 0) {
+      // An empty podSelector would select ALL pods in the namespace — refuse to
+      // create such an over-broad allow; leave the pods fail-closed instead.
+      console.warn(
+        `${LOG} service-target hook "${hook.name}": Service ${svc.namespace}/${svc.name} has no selector; cannot scope ingress (fail-closed under default-deny)`
+      )
+      return
+    }
+
+    const hosts = this.referencingHosts([hook])
+    const labels: Record<string, string> = {
+      [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+      [POLICY_TYPE_LABEL]: 'service-hook-ingress',
+    }
+    // Per-CR traceability label — omit if the CR name is not a valid label value.
+    if (hook.name.length <= 63) labels[LLMHOOK_LABEL] = hook.name
+
+    const ingress: k8s.V1NetworkPolicyIngressRule[] =
+      hosts.length > 0
+        ? [
+            {
+              _from: hosts.map(h => ({
+                namespaceSelector: {
+                  matchLabels: { 'kubernetes.io/metadata.name': config.hostNamespace },
+                },
+                podSelector: { matchLabels: { [HOST_LABEL]: h.name } },
+              })),
+              ports: [{ port: svc.port, protocol: 'TCP' as const }],
+            },
+          ]
+        : []
+
+    await this.applyNetworkPolicy({
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: serviceTargetNpName(hook.name),
+        namespace: config.llmHooksNamespace,
+        labels,
+      },
+      spec: {
+        podSelector: { matchLabels: selector },
+        policyTypes: ['Ingress'],
+        ingress,
+      },
+    })
+  }
+
+  /** Delete a service-target hook's ingress NP (CR delete / target-kind change). */
+  private async deleteServiceTargetNetworkPolicy(crName: string): Promise<void> {
+    const name = serviceTargetNpName(crName)
+    const ns = config.llmHooksNamespace
+    try {
+      const np = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace: ns })
+      if (np.metadata?.labels?.[MANAGED_BY_LABEL] === MANAGED_BY_VALUE) {
+        await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
+        console.log(`${LOG} Deleted NetworkPolicy "${name}"`)
+      } else {
+        console.warn(`${LOG} Skipping NetworkPolicy "${name}" delete — not HCC-owned`)
+      }
+    } catch (error) {
+      if (getErrorCode(error) !== 404) throw error
+    }
   }
 
   // ─── Reference-counted, label-owned GC (§3) ─────────────────────────

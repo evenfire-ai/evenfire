@@ -568,6 +568,104 @@ describe('LlmHookReconciler', () => {
     expect(peers.map(p => p.podSelector?.matchLabels?.[HOST_LABEL])).toContain('host-1')
   })
 
+  // ─── Service-target ingress reverse-index (§8.2) ────────────────────
+
+  describe('service-target NetworkPolicy', () => {
+    function makeServiceHook(name: string, svcName = 'ref-hook'): LlmHookCRD {
+      return makeHook({
+        name,
+        spec: {
+          target: { service: { name: svcName, namespace: 'llm-hooks', port: 8080 } },
+          lifecyclePoints: ['preCall'],
+        },
+      })
+    }
+
+    function withSelector(selector: Record<string, string>) {
+      coreApi.readNamespacedService.mockResolvedValue({
+        metadata: { resourceVersion: '1' },
+        spec: { selector },
+      } as never)
+    }
+
+    it('creates an ingress NP selecting the Service pods and admitting only referencing hosts', async () => {
+      withSelector({ app: 'ref-hook' })
+      const s = makeServiceHook('s1')
+      hooks.set('s1', s)
+      hosts.set('host-1', makeHostRef('host-1', ['s1']))
+      hosts.set('host-2', makeHostRef('host-2', ['other']))
+
+      await reconciler.reconcile(s)
+
+      const npCall = networkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
+        body: k8s.V1NetworkPolicy
+      }
+      expect(npCall.body.metadata?.name).toBe('llmhook-svc-s1')
+      expect(npCall.body.metadata?.labels?.[MANAGED_BY_LABEL]).toBe(MANAGED_BY_VALUE)
+      expect(npCall.body.metadata?.labels?.['clerum.io/policy-type']).toBe('service-hook-ingress')
+      expect(npCall.body.spec?.podSelector?.matchLabels).toEqual({ app: 'ref-hook' })
+      const peers = (npCall.body.spec?.ingress?.[0]?._from ?? []) as Array<{
+        podSelector?: { matchLabels?: Record<string, string> }
+      }>
+      const hostNames = peers.map(p => p.podSelector?.matchLabels?.[HOST_LABEL])
+      expect(hostNames).toContain('host-1')
+      expect(hostNames).not.toContain('host-2')
+      expect(npCall.body.spec?.ingress?.[0]?.ports?.[0]?.port).toBe(8080)
+    })
+
+    it('creates a deny-all (empty ingress) NP when no Host references the hook', async () => {
+      withSelector({ app: 'ref-hook' })
+      const s = makeServiceHook('s1')
+      hooks.set('s1', s)
+
+      await reconciler.reconcile(s)
+
+      const npCall = networkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
+        body: k8s.V1NetworkPolicy
+      }
+      expect(npCall.body.spec?.ingress ?? []).toEqual([])
+    })
+
+    it('does NOT create an NP when the Service has no selector (fail-closed under default-deny)', async () => {
+      coreApi.readNamespacedService.mockResolvedValue({
+        metadata: {},
+        spec: {},
+      } as never)
+      const s = makeServiceHook('s1')
+      hooks.set('s1', s)
+      hosts.set('host-1', makeHostRef('host-1', ['s1']))
+
+      await reconciler.reconcile(s)
+
+      expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('refreshes the admitted hosts on a Host reference change (fan-out)', async () => {
+      withSelector({ app: 'ref-hook' })
+      const s = makeServiceHook('s1')
+      hooks.set('s1', s)
+      hosts.set('host-9', makeHostRef('host-9', ['s1']))
+
+      await reconciler.reconcileNetworkPoliciesForHooks(['s1'])
+
+      const npCall = networkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
+        body: k8s.V1NetworkPolicy
+      }
+      expect(npCall.body.metadata?.name).toBe('llmhook-svc-s1')
+      const peers = (npCall.body.spec?.ingress?.[0]?._from ?? []) as Array<{
+        podSelector?: { matchLabels?: Record<string, string> }
+      }>
+      expect(peers.map(p => p.podSelector?.matchLabels?.[HOST_LABEL])).toContain('host-9')
+    })
+
+    it('deletes the service-target NP on hook delete', async () => {
+      await reconciler.reconcileDelete('s1', null)
+      expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'llmhook-svc-s1' })
+      )
+    })
+  })
+
   it('rejects an invalid (private-range) egress binding without exposing the workload', async () => {
     const a = makeHook({
       name: 'a',
