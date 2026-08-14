@@ -1,3 +1,8 @@
+import type {
+  PluginAuditEntryView,
+  PluginConsentRequest,
+  PluginGrantView,
+} from './pluginSdkProtocol.js'
 import {
   AccessCatalog,
   AgentWithMcpServers,
@@ -18,18 +23,20 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
-  MessageToolStep,
   PasswordLoginResult,
-  PendingApprovalLite,
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
+  ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
   SandboxUiApp,
   SandboxUiDeepLinkEnvelope,
   SessionLifecycleState,
+  SessionMessagesQuery,
+  SessionMessagesResult,
   SessionState,
-  SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -399,41 +406,16 @@ declare global {
         ) => Promise<Buffer>
         listSessions: (
           hostRef: string,
-          hostRefs?: string[]
-        ) => Promise<{
-          items: Array<{
-            agent: string
-            chatId: string
-            turnCount: number
-            lastActivityAt: string
-            state?: SessionLifecycleState
-            activeTaskId?: string
-            pendingApproval?: PendingApprovalLite
-            tokens?: SessionTokensLite
-          }>
-        }>
+          hostRefs?: string[],
+          query?: SessionsListQuery
+        ) => Promise<SessionsListResult>
         loadSessionMessages: (
           hostRef: string,
           agent: string,
           chatId: string,
-          hostRefs?: string[]
-        ) => Promise<{
-          agent: string
-          chatId: string
-          state?: SessionLifecycleState
-          activeTaskId?: string
-          pendingApproval?: PendingApprovalLite
-          tokens?: SessionTokensLite
-          turns: Array<{
-            number: number
-            user_input: string
-            response?: string
-            started_at: string
-            completed_at?: string
-            tokens?: SessionTokensLite
-            tool_steps?: MessageToolStep[]
-          }>
-        }>
+          hostRefs?: string[],
+          query?: SessionMessagesQuery
+        ) => Promise<SessionMessagesResult>
         getContextBreakdown: (
           hostRef: string,
           agent: string,
@@ -467,8 +449,10 @@ declare global {
         rendererReady: () => Promise<void>
       }
       window: {
-        getVisibility: () => Promise<{ visible: boolean }>
-        onVisibilityChange: (callback: (state: { visible: boolean }) => void) => () => void
+        getVisibility: () => Promise<{ visible: boolean; focused: boolean }>
+        onVisibilityChange: (
+          callback: (state: { visible: boolean; focused: boolean }) => void
+        ) => () => void
       }
       system: {
         /** GAP-D1 (§4.5-4): OS resume / screen unlock tick — reconcile in-flight chats. */
@@ -520,6 +504,12 @@ declare global {
         replaceMessages: (
           agentRef: string,
           chatId: string,
+          messages: ChatMessage[],
+          options?: ReplaceChatMessagesOptions
+        ) => Promise<void>
+        backfillCounters?: (
+          agentRef: string,
+          chatId: string,
           messages: ChatMessage[]
         ) => Promise<void>
         getLastActive: (agentRef: string) => Promise<string | null>
@@ -565,6 +555,27 @@ declare global {
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void
         ) => () => void
+      }
+      pluginSdk: {
+        onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void
+        onConsentCancelled: (callback: (args: { promptId: string }) => void) => () => void
+        onOpenGfsResource: (
+          callback: (args: {
+            gfsUri: string
+            name: string
+            kind: string
+            bytes: number | null
+          }) => void
+        ) => () => void
+        onNotificationClicked: (
+          callback: (args: { pluginId: string; ref: string | null }) => void
+        ) => () => void
+        resolveConsent: (promptId: string, allowed: string[]) => Promise<boolean>
+        listGrants: () => Promise<PluginGrantView[]>
+        revoke: (pluginId: string, capability?: string) => Promise<void>
+        activity: (limit?: number, includeAmbient?: boolean) => Promise<PluginAuditEntryView[]>
+        clearActivity: () => Promise<void>
+        setTheme: (theme: string) => Promise<void>
       }
     }
   }

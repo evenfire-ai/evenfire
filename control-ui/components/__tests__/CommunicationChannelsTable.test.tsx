@@ -29,6 +29,30 @@ function renderTable({
 }
 
 describe('CommunicationChannelsTable', () => {
+  it('shows configured provider types in one column', () => {
+    renderTable({
+      items: [
+        {
+          metadata: { name: 'multi-provider-channel', namespace: 'channels' },
+          spec: {
+            hostRef: 'agent-a',
+            telegramSettings: { botHandle: '@evenfire_bot' },
+            slack: [{ channelId: 'C123' }],
+            teamsSettings: { appId: 'app-123' },
+          },
+        },
+      ],
+    })
+
+    expect(screen.getByRole('columnheader', { name: 'Type' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('cell', { name: 'Telegram, Slack, Microsoft Teams' })
+    ).toBeInTheDocument()
+    for (const removedHeading of ['Telegram', 'Slack', 'Teams']) {
+      expect(screen.queryByRole('columnheader', { name: removedHeading })).not.toBeInTheDocument()
+    }
+  })
+
   it('offers copy targets for providers not already configured on the channel', () => {
     const onCopyChannel = vi.fn()
     renderTable({

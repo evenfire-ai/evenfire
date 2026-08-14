@@ -27,3 +27,19 @@ export function toK8sName(raw: string): string {
     .slice(0, 63)
     .replace(/-+$/g, '') // re-trim if the 63-cap left a trailing hyphen
 }
+
+/**
+ * Validate an agent name (RFC 1123 DNS label plus a 3-char minimum). Returns
+ * an empty string when the name is acceptable, or a human-readable error
+ * otherwise. Used by the create-agent wizard to surface inline validation.
+ */
+export function getAgentNameError(name: string): string {
+  if (!name.trim()) return 'Agent name is required.'
+  if (!/^[a-z0-9-]+$/.test(name))
+    return 'Agent name may only use lowercase letters, numbers, and hyphens.'
+  if (!/^[a-z]/.test(name)) return 'Agent name must start with a letter.'
+  if (!/[a-z0-9]$/.test(name)) return 'Agent name must end with a letter or number.'
+  if (name.length > 63) return 'Agent name must be 63 characters or fewer.'
+  if (name.length < 3) return 'Agent name must be at least 3 characters long.'
+  return ''
+}

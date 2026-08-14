@@ -67,9 +67,14 @@ export function EgressEditor({
     <FormSection description={description} title={title}>
       <Field
         description="Default is closed. Choose exact-host for known APIs or public-web only when hosts are not deterministic."
+        htmlFor="egress-mode"
         label="Egress mode"
       >
-        <SelectInput onChange={event => setMode(event.target.value as EgressMode)} value={mode}>
+        <SelectInput
+          id="egress-mode"
+          onChange={event => setMode(event.target.value as EgressMode)}
+          value={mode}
+        >
           <option value="none">No external egress (closed by default)</option>
           <option value="exact-host">Exact-host egress</option>
           {allowCidr ? <option value="exact-cidr">Exact-CIDR/IP egress</option> : null}

@@ -122,6 +122,19 @@ describe('sandbox UI deep links', () => {
     ).toBe('/tasks/task-42')
   })
 
+  it('extracts canonical logical routes from browser-encoded app URLs', () => {
+    expect(
+      extractSandboxUiViewRoute({
+        currentUrl:
+          'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/' +
+          'agentic-task-board/view/caf%C3%A9%20menu/literal%25percent',
+        rpcProxyOrigin: 'https://rpc.example/',
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'agentic-task-board',
+      })
+    ).toBe('/café menu/literal%percent')
+  })
+
   it('accepts the deep-link host case-insensitively', () => {
     expect(parseSandboxUiDeepLink('evenfire://APP/sandbox-recipes/agentic-task-board')).toEqual({
       appRef: 'sandbox-recipes/agentic-task-board',

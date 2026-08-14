@@ -16,6 +16,7 @@ export function MarkdownEditor({
   className,
   invalid = false,
   onChange,
+  placeholder,
   value,
 }: MarkdownEditorProps) {
   return (
@@ -31,6 +32,7 @@ export function MarkdownEditor({
         textareaProps={{
           'aria-label': ariaLabel,
           className: invalid ? 'cu-input--invalid' : undefined,
+          placeholder,
         }}
         value={value}
         visibleDragbar={false}

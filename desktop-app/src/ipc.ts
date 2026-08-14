@@ -13,6 +13,13 @@ import path from 'node:path'
 import { AppService } from './appService.js'
 import { requireChatStore } from './chatStoreBinding.js'
 import {
+  PLUGIN_SDK_CAPABILITIES_CHANNEL,
+  PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,
+  PLUGIN_SDK_PERMISSIONS_CHANNEL,
+  PLUGIN_SDK_PERMISSION_STATE_CHANNEL,
+  PLUGIN_SDK_REQUEST_CHANNEL,
+} from './pluginSdkProtocol.js'
+import {
   DesktopRuntimeConfig,
   HostActivityStreamEvent,
   HostMessageRequest,
@@ -39,9 +46,73 @@ function sanitizeSubjectKeys(input: unknown): string[] {
 
 function sanitizeOptionalInteger(input: unknown): number | undefined {
   if (input === undefined || input === null || input === '') return undefined
-  const value = Number(input)
-  if (!Number.isInteger(value)) throw new Error('Invalid integer')
-  return value
+  if (typeof input !== 'number' || !Number.isSafeInteger(input)) {
+    throw new Error('Invalid integer')
+  }
+  return input
+}
+
+function sanitizeOptionalPositiveInteger(input: unknown, label: string): number | undefined {
+  if (input === undefined || input === null || input === '') return undefined
+  if (typeof input !== 'number' || !Number.isSafeInteger(input) || input < 1) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return input
+}
+
+export function sanitizeChatLoadWindow(
+  limitInput: unknown,
+  offsetInput: unknown
+): { limit?: number; offset?: number } {
+  const limit = sanitizeOptionalInteger(limitInput)
+  const offset = sanitizeOptionalInteger(offsetInput)
+  if (limit !== undefined && (limit < 1 || limit > 1000)) {
+    throw new Error('Invalid chat message limit')
+  }
+  if (offset !== undefined && offset < 0) {
+    throw new Error('Invalid chat message offset')
+  }
+  return {
+    ...(limit !== undefined ? { limit } : {}),
+    ...(offset !== undefined ? { offset } : {}),
+  }
+}
+
+function sanitizeSessionsListQuery(
+  input: import('./types.js').SessionsListQuery | undefined
+): import('./types.js').SessionsListQuery {
+  const agent = sanitizeString(input?.agent)
+  const cursor = sanitizeString(input?.cursor)
+  if (agent && (agent.length > 200 || agent.includes(':'))) {
+    throw new Error('Invalid session agent')
+  }
+  if (cursor.length > 2048) throw new Error('Invalid sessions cursor')
+  const rawLimit = sanitizeOptionalInteger(input?.limit)
+  if (rawLimit !== undefined && rawLimit < 1) throw new Error('Invalid sessions limit')
+  return {
+    ...(agent ? { agent } : {}),
+    ...(rawLimit !== undefined ? { limit: Math.min(rawLimit, 100) } : {}),
+    ...(cursor ? { cursor } : {}),
+  }
+}
+
+function sanitizeSessionMessagesQuery(
+  input: import('./types.js').SessionMessagesQuery | undefined
+): import('./types.js').SessionMessagesQuery {
+  const rawLimit = sanitizeOptionalInteger(input?.limit)
+  const beforeTurn = sanitizeOptionalInteger(input?.beforeTurn)
+  const afterTurn = sanitizeOptionalInteger(input?.afterTurn)
+  if (rawLimit !== undefined && rawLimit < 1) throw new Error('Invalid messages limit')
+  if (beforeTurn !== undefined && beforeTurn < 1) throw new Error('Invalid beforeTurn')
+  if (afterTurn !== undefined && afterTurn < 0) throw new Error('Invalid afterTurn')
+  if (beforeTurn !== undefined && afterTurn !== undefined) {
+    throw new Error('beforeTurn and afterTurn are mutually exclusive')
+  }
+  return {
+    ...(rawLimit !== undefined ? { limit: Math.min(rawLimit, 200) } : {}),
+    ...(beforeTurn !== undefined ? { beforeTurn } : {}),
+    ...(afterTurn !== undefined ? { afterTurn } : {}),
+  }
 }
 
 function runScopedArtifactDownloadName(runId: string, artifactName: string): string {
@@ -466,9 +537,8 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('approvals:listPending', async (event, payload?: { limit?: number }) => {
     assertTrustedSender(event)
-    return service.listPendingWorkflowApprovals(
-      typeof payload?.limit === 'number' ? payload.limit : 20
-    )
+    const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'pending approvals limit')
+    return service.listPendingWorkflowApprovals(limit ?? 20)
   })
   ipcMain.handle(
     'approvals:decide',
@@ -704,8 +774,9 @@ export function registerIpcHandlers(service: AppService): void {
       const hostRefs = Array.isArray(payload?.hostRefs)
         ? payload.hostRefs.map(v => String(v).trim()).filter(Boolean)
         : undefined
+      const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'host activity limit')
       return service.getHostActivity(hostRef, {
-        limit: typeof payload?.limit === 'number' ? payload.limit : undefined,
+        limit,
         sinceEventId: sanitizeString(payload?.sinceEventId) || undefined,
         hostRefs,
       })
@@ -926,11 +997,22 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'rpc:listSessions',
-    async (event, payload: { hostRef: string; hostRefs?: string[] }) => {
+    async (
+      event,
+      payload: {
+        hostRef: string
+        hostRefs?: string[]
+        query?: import('./types.js').SessionsListQuery
+      }
+    ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
       if (!hostRef) throw new Error('hostRef is required')
-      return service.listSessions(hostRef, payload?.hostRefs)
+      return service.listSessions(
+        hostRef,
+        payload?.hostRefs,
+        sanitizeSessionsListQuery(payload?.query)
+      )
     }
   )
 
@@ -938,7 +1020,13 @@ export function registerIpcHandlers(service: AppService): void {
     'rpc:loadSessionMessages',
     async (
       event,
-      payload: { hostRef: string; agent: string; chatId: string; hostRefs?: string[] }
+      payload: {
+        hostRef: string
+        agent: string
+        chatId: string
+        hostRefs?: string[]
+        query?: import('./types.js').SessionMessagesQuery
+      }
     ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
@@ -947,7 +1035,13 @@ export function registerIpcHandlers(service: AppService): void {
       if (!hostRef || !agent || !chatId) {
         throw new Error('hostRef, agent, and chatId are required')
       }
-      return service.loadSessionMessages(hostRef, agent, chatId, payload?.hostRefs)
+      return service.loadSessionMessages(
+        hostRef,
+        agent,
+        chatId,
+        payload?.hostRefs,
+        sanitizeSessionMessagesQuery(payload?.query)
+      )
     }
   )
 
@@ -1053,7 +1147,8 @@ export function registerIpcHandlers(service: AppService): void {
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
-      return requireChatStore().loadMessages(agentRef, chatId, payload?.limit, payload?.offset)
+      const { limit, offset } = sanitizeChatLoadWindow(payload?.limit, payload?.offset)
+      return requireChatStore().loadMessages(agentRef, chatId, limit, offset)
     }
   )
 
@@ -1075,13 +1170,45 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'chat:replaceMessages',
+    async (
+      event,
+      payload: {
+        agentRef: string
+        chatId: string
+        messages: unknown[]
+        options?: import('./types.js').ReplaceChatMessagesOptions
+      }
+    ) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      const messages = Array.isArray(payload?.messages) ? payload.messages : []
+      const activeTaskIds = Array.isArray(payload?.options?.activeTaskIds)
+        ? payload.options.activeTaskIds
+            .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
+            .slice(0, 32)
+        : undefined
+      await requireChatStore().replaceMessages(
+        agentRef,
+        chatId,
+        messages as import('./types.js').ChatMessage[],
+        {
+          activeTaskIds,
+        }
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'chat:backfillCounters',
     async (event, payload: { agentRef: string; chatId: string; messages: unknown[] }) => {
       assertTrustedSender(event)
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
       const messages = Array.isArray(payload?.messages) ? payload.messages : []
-      await requireChatStore().replaceMessages(
+      await requireChatStore().backfillChatCounters(
         agentRef,
         chatId,
         messages as import('./types.js').ChatMessage[]
@@ -1218,7 +1345,8 @@ export function registerIpcHandlers(service: AppService): void {
       const ns = sanitizeString(payload?.ns)
       const name = sanitizeString(payload?.name)
       if (!ns || !name) throw new Error('ns and name are required')
-      return service.listWorkflowRuns(ns, name, payload?.limit)
+      const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'workflow runs limit')
+      return service.listWorkflowRuns(ns, name, limit)
     }
   )
 
@@ -1359,6 +1487,10 @@ export function registerIpcHandlers(service: AppService): void {
       await service.openSandboxUi({
         recipeNs,
         recipeName,
+        // Human title from the installed recipe, used verbatim in consent
+        // prompts and notification attribution. Comes from the trusted renderer's
+        // app list — NEVER from anything the plugin itself can set.
+        title: sanitizeString((payload as { title?: unknown })?.title) || undefined,
         defaultPath: typeof payload?.defaultPath === 'string' ? payload.defaultPath : undefined,
         routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
@@ -1420,5 +1552,95 @@ export function registerIpcHandlers(service: AppService): void {
   // map is dropped with an error.
   ipcMain.handle('clerum:sandbox-ui:request-refresh', async event => {
     await service.requestSandboxUiRefresh(event.sender.id)
+  })
+
+  // ── Plugin UI SDK ────────────────────────────────────────────────────
+  //
+  // Same trust model as the refresh IPC above and for the same reason: these
+  // four channels are reachable by untrusted plugin JS, so `assertTrustedSender`
+  // cannot be the gate (the embed's origin is rpc-proxy). Identity comes from
+  // the surface pinning map, and every other check — consent, rate limits,
+  // response minimization, audit — happens inside the broker. Nothing is
+  // enforced here; this layer only routes.
+
+  // Lazily imported: `pluginSdkRuntime` pulls in `config`, whose module-level
+  // profile load needs a real Electron `app`. Importing it at the top of this
+  // file would make merely registering IPC handlers depend on an initialized
+  // Electron runtime. Mirrors how `appService` defers `sandboxUiDriver`.
+  const pluginSdk = async () => (await import('./pluginSdkRuntime.js')).getPluginSdkRuntime()
+
+  ipcMain.handle(PLUGIN_SDK_CAPABILITIES_CHANNEL, async event =>
+    (await pluginSdk()).broker.listCapabilities(event.sender.id)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_PERMISSION_STATE_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.permissionState(event.sender.id, payload)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_PERMISSIONS_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.requestPermissions(event.sender.id, payload)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_REQUEST_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.request(event.sender.id, payload)
+  )
+
+  // ── Plugin SDK, trusted-renderer half ────────────────────────────────
+  //
+  // The consent resolve channel IS trusted-sender guarded. That is what stops
+  // an embed from answering its own permission prompt, and it pairs with the
+  // main-generated `promptId` nonce: a resolve for an unknown or already-
+  // answered prompt is dropped inside the gate (spec §9.4).
+
+  ipcMain.handle(
+    PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,
+    async (event, payload: { promptId?: unknown; allowed?: unknown }) => {
+      assertTrustedSender(event)
+      const promptId = sanitizeString(payload?.promptId)
+      if (!promptId) throw new Error('promptId is required')
+      const allowed = Array.isArray(payload?.allowed)
+        ? payload.allowed.filter((entry): entry is string => typeof entry === 'string')
+        : []
+      return (await pluginSdk()).resolveConsentPrompt(promptId, allowed)
+    }
+  )
+
+  ipcMain.handle('pluginSdk:listGrants', async event => {
+    assertTrustedSender(event)
+    return (await pluginSdk()).listGrants()
+  })
+
+  ipcMain.handle(
+    'pluginSdk:revoke',
+    async (event, payload: { pluginId?: unknown; capability?: unknown }) => {
+      assertTrustedSender(event)
+      const pluginId = sanitizeString(payload?.pluginId)
+      const capability = sanitizeString(payload?.capability)
+      if (!pluginId) throw new Error('pluginId is required')
+      const runtime = await pluginSdk()
+      if (capability) await runtime.revokeGrant(pluginId, capability)
+      else await runtime.revokeAllForPlugin(pluginId)
+    }
+  )
+
+  ipcMain.handle(
+    'pluginSdk:activity',
+    async (event, payload: { limit?: unknown; includeAmbient?: unknown }) => {
+      assertTrustedSender(event)
+      return (await pluginSdk()).readAudit({
+        limit: sanitizeOptionalInteger(payload?.limit),
+        includeAmbient: payload?.includeAmbient === true,
+      })
+    }
+  )
+
+  ipcMain.handle('pluginSdk:clearActivity', async event => {
+    assertTrustedSender(event)
+    await (await pluginSdk()).clearAudit()
+  })
+
+  ipcMain.handle('pluginSdk:setTheme', async (event, payload: { theme?: unknown }) => {
+    assertTrustedSender(event)
+    ;(await pluginSdk()).setTheme(payload?.theme)
   })
 }

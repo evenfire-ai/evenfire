@@ -18,15 +18,30 @@ const validBody = {
 }
 
 function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
+  const target = {
+    targetRef: 'primary-zai',
+    provider: 'zai',
+    model: 'glm-4.7',
+    credentialSlot: 'zai-api-key',
+  }
   const controlApiClient = {
+    ensurePromptBridgeCapabilities: vi.fn().mockResolvedValue(undefined),
     authorizePromptBridge: vi.fn().mockResolvedValue({
+      contractVersion: 2,
       invocationId: 'inv-1',
       replay: false,
+      providerCallRequired: true,
       status: 'in_progress',
       model: 'glm-4.7',
       modelPolicy: null,
+      selectedTarget: target,
+      authorizedTargets: [target],
+      attemptGeneration: 1,
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
       maxOutputTokens: null,
     }),
+    reportProviderAttemptStatus: vi.fn().mockResolvedValue(undefined),
     reportInvocationStatus: vi.fn().mockResolvedValue(undefined),
   } as unknown as PluginWorkloadSdkControlApiClient
   const llmBridge = {
@@ -34,6 +49,9 @@ function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
       complete ??
       vi.fn().mockResolvedValue({
         model: 'glm-4.7',
+        servedTarget: target,
+        fallbackUsed: false,
+        llmSecretName: 'zai-secret',
         content: 'ok',
         usage: { inputTokens: 7, outputTokens: 3 },
         finishReason: 'complete',

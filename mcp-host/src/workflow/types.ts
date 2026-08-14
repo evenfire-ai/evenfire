@@ -103,9 +103,36 @@ export interface ConfigureRequest {
 
 export interface ConfigureResponse {
   configured: boolean
+  capabilityFamily?: 'promptBridge' | 'clientNotifications'
   provider?: string
   model?: string
+  /**
+   * Version of the identity-only Plugin Workload SDK bootstrap contract. This
+   * is intentionally present only on the SDK bootstrap response; workflow
+   * `/configure` remains on its legacy response shape.
+   */
+  contractVersion?: 2
+  ready?: boolean
+  /** Pod/protocol identity is ready even while operator policy is pending. */
+  policyReady?: boolean
+  policyState?: string
+  policyReason?: string
+  policyRevision?: number
+  policyHash?: string
+  defaultTargetRef?: string
+  defaultProvider?: string
+  defaultModel?: string
+  clientNotificationsPolicyReady?: boolean
+  clientNotificationsPolicyState?: string
+  clientNotificationsPolicyReason?: string
   message?: string
+}
+
+/** Public identity handshake for a stepless Plugin Workload SDK host. */
+export interface PluginWorkloadSdkBootstrapRequest {
+  capabilityFamily?: 'promptBridge' | 'clientNotifications'
+  provider?: LlmProvider
+  model?: string
 }
 
 // ─── Internal Tools (clerum__*) ──────────────────────────────────────

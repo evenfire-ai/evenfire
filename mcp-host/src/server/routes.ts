@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express'
+import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
 import { getRuntimeCallerContext } from './edgeRuntimeAuth'
@@ -35,6 +36,7 @@ import type {
   WorkflowApprovalNotificationTerminalHandler,
 } from './types'
 import type { RuntimeCallerContext } from './types'
+import { decodeSessionsCursor, sessionsCursorScope } from './wireProjections'
 
 export type RouteHandlers = {
   messageHandler: MessageHandler | null
@@ -61,6 +63,52 @@ export type RouteHandlers = {
   compactionHandler?: CompactionHandler | null
   modelsListHandler?: ModelsListHandler | null
   setModelHandler?: SetModelHandler | null
+}
+
+function isSessionOwnershipError(error: unknown): boolean {
+  return (
+    error instanceof ConversationError && error.code === ConversationErrorCode.OwnershipMismatch
+  )
+}
+
+function parseSessionsCursorParam(
+  cursor: unknown,
+  expectedScope: string
+): string | undefined | null {
+  if (cursor === undefined) return undefined
+  if (typeof cursor !== 'string' || cursor.length > 2048) return null
+  return decodeSessionsCursor(cursor, expectedScope) ? cursor : null
+}
+
+function parseUnsignedIntegerParam(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
+}
+
+function hasBracketedQueryVariant(query: Request['query'], names: string[]): boolean {
+  return Object.keys(query).some(key => names.some(name => key.startsWith(`${name}[`)))
+}
+
+// Server-side hard caps on client-supplied page sizes. The proxy applies its
+// own caps at the edge; these are the host's independent enforcement (the two
+// services share no package, so each names its own constants).
+const SESSIONS_LIMIT_CAP = 100
+const MESSAGES_LIMIT_CAP = 200
+
+function isSafeRouteSegment(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value !== '.' &&
+    value !== '..' &&
+    value.length <= 500 &&
+    !/[/\\\u0000-\u001f\u007f]/.test(value)
+  )
+}
+
+function isSafeAgentRouteSegment(value: string): boolean {
+  return isSafeRouteSegment(value) && value.length <= 200 && !value.includes(':')
 }
 
 function channelRuntimeSourceMismatch(
@@ -304,6 +352,10 @@ export async function handleMessageRoute(
     json(res, 200, response)
   } catch (error) {
     console.error('[Server] Error processing message:', error)
+    if (isSessionOwnershipError(error)) {
+      json(res, 403, { success: false, error: 'session access denied' })
+      return
+    }
     json(res, 500, {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -1086,11 +1138,39 @@ export async function handleSessionsListRoute(
       json(res, 401, { error: 'Missing rpc edge caller context' })
       return
     }
+    if (hasBracketedQueryVariant(req.query, ['agent', 'cursor', 'limit'])) {
+      badRequest(res, 'Invalid session pagination query')
+      return
+    }
+    if (req.query.agent !== undefined && typeof req.query.agent !== 'string') {
+      badRequest(res, 'Invalid session agent')
+      return
+    }
+    const agent = typeof req.query.agent === 'string' ? req.query.agent.trim() : undefined
+    if (agent !== undefined && !isSafeAgentRouteSegment(agent)) {
+      badRequest(res, 'Invalid session agent')
+      return
+    }
+    const cursor = parseSessionsCursorParam(
+      req.query.cursor,
+      sessionsCursorScope(caller.userId, agent)
+    )
+    if (cursor === null) {
+      badRequest(res, 'Invalid sessions cursor')
+      return
+    }
+    const rawLimit = parseUnsignedIntegerParam(req.query.limit)
+    if (rawLimit === null || (rawLimit !== undefined && rawLimit < 1)) {
+      badRequest(res, 'limit must be a positive integer')
+      return
+    }
     if (!handlers.sessionsListHandler) {
       json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
-    const result = await handlers.sessionsListHandler(caller.userId)
+    const limit =
+      rawLimit === undefined ? (cursor ? 50 : undefined) : Math.min(rawLimit, SESSIONS_LIMIT_CAP)
+    const result = await handlers.sessionsListHandler(caller.userId, { agent, limit, cursor })
     json(res, 200, result)
   } catch (error) {
     console.error('[Server] Error listing sessions:', error)
@@ -1168,15 +1248,56 @@ export async function handleSessionMessagesRoute(
     }
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
-    if (!agent || !chatId) {
-      badRequest(res, 'agent and chatId are required')
+    if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
+      badRequest(res, 'Invalid agent or chatId')
+      return
+    }
+    const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
+      key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
+    )
+    if (
+      invalidQueryShape ||
+      hasBracketedQueryVariant(req.query, ['limit', 'beforeTurn', 'afterTurn'])
+    ) {
+      badRequest(res, 'pagination parameters must be specified once')
+      return
+    }
+    const rawLimit = parseUnsignedIntegerParam(req.query.limit)
+    const rawBeforeTurn = parseUnsignedIntegerParam(req.query.beforeTurn)
+    const rawAfterTurn = parseUnsignedIntegerParam(req.query.afterTurn)
+    if (rawBeforeTurn === null || (rawBeforeTurn !== undefined && rawBeforeTurn < 1)) {
+      badRequest(res, 'beforeTurn must be a positive integer')
+      return
+    }
+    if (rawAfterTurn === null || (rawAfterTurn !== undefined && rawAfterTurn < 0)) {
+      badRequest(res, 'afterTurn must be a non-negative integer')
+      return
+    }
+    if (rawBeforeTurn !== undefined && rawAfterTurn !== undefined) {
+      badRequest(res, 'beforeTurn and afterTurn are mutually exclusive')
+      return
+    }
+    if (rawLimit === null || (rawLimit !== undefined && rawLimit < 1)) {
+      badRequest(res, 'limit must be a positive integer')
       return
     }
     if (!handlers.sessionMessagesHandler) {
       json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
-    const result = await handlers.sessionMessagesHandler(caller.userId, agent, chatId)
+    const limit =
+      rawLimit === undefined
+        ? rawBeforeTurn !== undefined || rawAfterTurn !== undefined
+          ? 80
+          : undefined
+        : Math.min(rawLimit, MESSAGES_LIMIT_CAP)
+    const beforeTurn = rawBeforeTurn
+    const afterTurn = rawAfterTurn
+    const result = await handlers.sessionMessagesHandler(caller.userId, agent, chatId, {
+      limit,
+      beforeTurn,
+      afterTurn,
+    })
     if (result === null) {
       // Same body regardless of "never existed" vs "belongs to someone else" — enumeration-defense.
       json(res, 404, { error: 'session not found' })
@@ -1206,8 +1327,8 @@ export async function handleContextBreakdownRoute(
     }
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
-    if (!agent || !chatId) {
-      badRequest(res, 'agent and chatId are required')
+    if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
+      badRequest(res, 'Invalid agent or chatId')
       return
     }
     if (!handlers.contextBreakdownHandler) {
@@ -1302,6 +1423,10 @@ export async function handleSetModelRoute(
     json(res, 200, { effective: 'next-task', provider: result.provider, model: result.model })
   } catch (error) {
     console.error('[Server] Error setting model:', error)
+    if (isSessionOwnershipError(error)) {
+      json(res, 403, { error: 'session access denied' })
+      return
+    }
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }

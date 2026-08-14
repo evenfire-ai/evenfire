@@ -1,5 +1,7 @@
 **
 !packages/
+!packages/network-policy-core/
+!packages/network-policy-core/**
 !packages/workflow-runtime-core/
 !packages/workflow-runtime-core/package.json
 !packages/workflow-runtime-core/package-lock.json

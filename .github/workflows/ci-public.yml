@@ -67,6 +67,7 @@ jobs:
           - packages/desktop-app-links
           - packages/workflow-runtime-core
           - packages/workflow-sdk
+          - packages/network-policy-core
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -100,6 +101,11 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm run build
 
+      - name: Install Playwright Chromium
+        if: matrix.service == 'desktop-app'
+        working-directory: desktop-app
+        run: npx playwright install --with-deps chromium
+
       - name: Test
         working-directory: ${{ matrix.service }}
         run: npm test
@@ -112,8 +118,11 @@ jobs:
       # project and just prints its help text. Adding a strict root tsconfig surfaces
       # ~10 pre-existing type errors in its __tests__ — worth fixing, but as its own
       # change rather than smuggled into a CI-coverage PR.
+      # network-policy-core is a hand-authored .cjs + .d.ts with no tsconfig, so
+      # `tsc --noEmit` resolves no project (like mcp-servers). Its .d.ts is kept
+      # aligned with the runtime by the "runtime exports stay aligned" node:test.
       - name: Typecheck (tsc --noEmit)
-        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links'
+        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/network-policy-core'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
@@ -187,12 +196,13 @@ jobs:
         # gfs-controller matrix entry skips it.
         run: npm test -- --run realPostgres
 
-  # ─── control-ui build check ──────────────────────────────────────────────
-  # control-ui is intentionally NOT in the build/test matrix: its vitest suite
-  # has known pre-existing failures and its tsconfig spans test files, so the
-  # matrix's `npm test` + bare `tsc --noEmit` would be red. A clean install +
-  # production `next build` runs the TypeScript typecheck and ESLint over the
-  # app and fails on any compile error.
+  # ─── control-ui build + test check ───────────────────────────────────────
+  # control-ui stays out of the SHARED build/test matrix because its tsconfig
+  # spans test files and a bare `tsc --noEmit` there hits a pre-existing error in
+  # a *.test.tsx that `next build` does not typecheck. But its vitest suite IS
+  # green, so it runs here as a dedicated step — otherwise the GFS proxy body-cap,
+  # Expect-strip and timeout-knob tests this repo relies on would guard nothing in
+  # CI. A production `next build` still runs the app TypeScript typecheck + ESLint.
   control-ui-build:
     name: Build (control-ui)
     runs-on: ubuntu-latest
@@ -206,6 +216,9 @@ jobs:
       - name: Install dependencies
         working-directory: control-ui
         run: npm ci
+      - name: Test (vitest)
+        working-directory: control-ui
+        run: npm test
       - name: Build (next build — typecheck + lint + compile)
         working-directory: control-ui
         run: npm run build
@@ -312,6 +325,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - name: Run bash -n on all .sh files
         run: |
@@ -339,6 +354,76 @@ jobs:
 
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
+
+      - name: Test release coordinates (writer, checker, floor decoupling)
+        run: bash scripts/tests/test-release-coordinates.sh
+
+      - name: Test precommit release-manifest exemption
+        run: bash scripts/tests/test-precommit-release-manifest-ignore.sh
+
+      - name: Validate release manifest matches package versions
+        run: node scripts/release/update-desktop-release-manifest.mjs --validate-only
+
+      - name: Validate service version bumps
+        run: node scripts/release/validate-release-version-bumps.mjs --previous "${{ github.event.pull_request.base.sha || github.event.before }}"
+
+      - name: Test the image manifest
+        run: bash scripts/tests/test-images-manifest.sh
+
+      - name: Test the ghcr-images kustomize component
+        run: bash scripts/tests/test-ghcr-component.sh
+
+      - name: Test the ghcr render guard
+        run: bash scripts/tests/test-ghcr-render-guard.sh
+
+      - name: Test the minikube image puller
+        run: bash scripts/tests/test-minikube-pull-images.sh
+
+      - name: Test the minikube image verifier (recorded mode, E2E fixtures)
+        run: bash scripts/tests/test-minikube-verify-images.sh
+
+      # The ghcr path calls build-images.sh as --public-only, which builds
+      # nothing. This proves it no longer narrates builds it never performs,
+      # and that the local build path still announces every phase.
+      - name: Test the build-images section banners
+        run: bash scripts/tests/test-minikube-build-section-headers.sh
+
+      - name: Test minikube Makefile targets
+        run: bash scripts/tests/test-minikube-makefile.sh
+
+      # The NetworkPolicy probe runs on an E2E-only fixture that the default
+      # (pulled) setup never acquires. This proves the target says so up front
+      # instead of timing out on ErrImageNeverPull, and that it still builds
+      # nothing itself.
+      - name: Test the NetworkPolicy probe-image preflight
+        run: bash scripts/tests/test-minikube-verify-network-policy.sh
+
+      # Runs the real pre-gate scripts against PATH stubs for
+      # docker/minikube/kubectl/make in a throwaway repo copy. No cluster, no
+      # network. It proves a ghcr pre-gate retags its local build onto the ref
+      # the Deployment runs, which is the only thing standing between a green
+      # gate and a green gate about undeployed code.
+      - name: Test pre-gate shadow builds and image-mode resolution
+        run: bash scripts/tests/test-minikube-pre-gate-shadow.sh
+
+      - name: Test pre-gate sync state contract
+        run: bash scripts/tests/test-minikube-pre-gate-sync-state.sh
+
+      # ADMIN_PASSWORD is a required precondition of full-setup.sh Step 1 on the
+      # default (minimal) seed profile. Two cases in this harness execute the
+      # script against stubbed docker/minikube/kubectl, so without it they abort
+      # at Step 1. Developers get it from .env; CI has none, so supply a
+      # throwaway value. It never leaves the stubbed run.
+      - name: Test full-setup image source, tag override and banner
+        env:
+          ADMIN_PASSWORD: ci-stubbed-run-not-a-real-password
+        run: bash scripts/tests/test-minikube-full-setup.sh
+
+      - name: Test release image resolution
+        run: bash scripts/tests/test-resolve-release-images.sh
+
+      - name: Test release image promotion
+        run: bash scripts/tests/test-promote-release-images.sh
 
   # ─── Platform NGINX image guard (CVE baseline) ────────────────────────────
   nginx-image-guard:

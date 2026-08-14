@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
-import { getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
+import { getMcpServer, getMcpServers, getRegistryCredentialSchema, updateMcpSecret } from '@lib/api'
 import type { McpServerCondition } from '@lib/api'
 import type { RotationPhase, UpdateConnectorCredentialsProps } from './types'
 
@@ -82,6 +82,7 @@ function findFreshDeploymentReady(
 export function UpdateConnectorCredentials({
   serverName,
   envSecret,
+  registryCredentialSource,
 }: UpdateConnectorCredentialsProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -99,6 +100,7 @@ export function UpdateConnectorCredentials({
   const [phaseMessage, setPhaseMessage] = useState('')
   const [rotationCutoff, setRotationCutoff] = useState<string | null>(null)
   const [rotationAffected, setRotationAffected] = useState<string[]>([])
+  const [credentialLabels, setCredentialLabels] = useState<Record<string, string>>({})
   // The HCC's most recent RolloutIncomplete diagnostic, kept across polls (a
   // ref, not state: it only matters at the timeout boundary, so it must not
   // re-render or re-fire the poll effect). Seeing RolloutIncomplete never
@@ -134,6 +136,32 @@ export function UpdateConnectorCredentials({
       cancelled = true
     }
   }, [envSecret])
+
+  useEffect(() => {
+    if (!registryCredentialSource) {
+      setCredentialLabels({})
+      return
+    }
+
+    let cancelled = false
+    void getRegistryCredentialSchema(
+      registryCredentialSource.name,
+      registryCredentialSource.version
+    )
+      .then(schema => {
+        if (cancelled) return
+        setCredentialLabels(
+          Object.fromEntries(schema.keys.map(key => [key.name, key.label || key.name]))
+        )
+      })
+      .catch(() => {
+        if (!cancelled) setCredentialLabels({})
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [registryCredentialSource])
 
   // Poll THIS connector's own McpServer CRD until DeploymentReady resolves,
   // fails, or the bounded timeout expires. Success is NEVER declared from the
@@ -329,75 +357,81 @@ export function UpdateConnectorCredentials({
     >
       {confirmDialog}
 
-      <div className="cu-table-wrap">
-        <table className="cu-table">
-          <thead>
-            <tr>
-              <th>Secret key</th>
-              <th>Env var</th>
-            </tr>
-          </thead>
-          <tbody>
-            {envSecret.keys.map(k => (
-              <tr key={k.secretKey}>
-                <td>
-                  <code>{k.secretKey}</code>
-                </td>
-                <td>
-                  <code>{k.envVar}</code>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <form className="cu-form-stack" onSubmit={handleSubmit}>
-        {envSecret.keys.map(k => (
-          <Field key={k.secretKey} htmlFor={`mcp-cred-${k.secretKey}`} label={k.secretKey}>
-            <TextInput
-              id={`mcp-cred-${k.secretKey}`}
-              type="password"
-              autoComplete="new-password"
-              placeholder="Leave blank to keep current value"
-              value={draft[k.secretKey] || ''}
-              onChange={e => updateField(k.secretKey, e.target.value)}
-              disabled={busy}
-            />
-          </Field>
-        ))}
-
-        {validationError ? (
-          <div className="cu-banner cu-banner--error" role="alert">
-            {validationError}
+      <form className="cu-connector-credentials-form" onSubmit={handleSubmit}>
+        <div className="cu-form-stack">
+          <div className="cu-table-wrap">
+            <table className="cu-table">
+              <thead>
+                <tr>
+                  <th>Secret key</th>
+                  <th>Env var</th>
+                </tr>
+              </thead>
+              <tbody>
+                {envSecret.keys.map(k => (
+                  <tr key={k.secretKey}>
+                    <td>
+                      <code>{k.secretKey}</code>
+                    </td>
+                    <td>
+                      <code>{k.envVar}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        ) : null}
 
-        {phase === 'rotating' ? (
-          <div className="cu-banner cu-banner--info" role="status">
-            Rotating credentials — waiting for {serverName} to restart with the new value.
-            {phaseMessage ? ` ${phaseMessage}` : ''}
-          </div>
-        ) : null}
+          {envSecret.keys.map(k => (
+            <Field
+              key={k.secretKey}
+              htmlFor={`mcp-cred-${k.secretKey}`}
+              label={credentialLabels[k.secretKey] || k.secretKey}
+            >
+              <TextInput
+                id={`mcp-cred-${k.secretKey}`}
+                type="password"
+                autoComplete="new-password"
+                placeholder="Leave blank to keep current value"
+                value={draft[k.secretKey] || ''}
+                onChange={e => updateField(k.secretKey, e.target.value)}
+                disabled={busy}
+              />
+            </Field>
+          ))}
 
-        {phase === 'success' ? (
-          <div className="cu-banner cu-banner--ok" role="status">
-            Credentials rotated. {serverName} restarted and is serving the new credential.
-            {otherAffectedNote}
-          </div>
-        ) : null}
+          {validationError ? (
+            <div className="cu-banner cu-banner--error" role="alert">
+              {validationError}
+            </div>
+          ) : null}
 
-        {phase === 'failed' ? (
-          <div className="cu-banner cu-banner--error" role="alert">
-            Rotation failed: {phaseMessage}
-          </div>
-        ) : null}
+          {phase === 'rotating' ? (
+            <div className="cu-banner cu-banner--info" role="status">
+              Rotating credentials — waiting for {serverName} to restart with the new value.
+              {phaseMessage ? ` ${phaseMessage}` : ''}
+            </div>
+          ) : null}
 
-        {phase === 'timeout' ? (
-          <div className="cu-banner cu-banner--warning" role="alert">
-            {phaseMessage}
-          </div>
-        ) : null}
+          {phase === 'success' ? (
+            <div className="cu-banner cu-banner--ok" role="status">
+              Credentials rotated. {serverName} restarted and is serving the new credential.
+              {otherAffectedNote}
+            </div>
+          ) : null}
+
+          {phase === 'failed' ? (
+            <div className="cu-banner cu-banner--error" role="alert">
+              Rotation failed: {phaseMessage}
+            </div>
+          ) : null}
+
+          {phase === 'timeout' ? (
+            <div className="cu-banner cu-banner--warning" role="alert">
+              {phaseMessage}
+            </div>
+          ) : null}
+        </div>
 
         <div className="cu-create-actions">
           {phase === 'success' || phase === 'failed' || phase === 'timeout' ? (

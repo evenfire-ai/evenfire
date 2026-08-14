@@ -1973,6 +1973,43 @@ describe('buildUiEgressNetworkPolicy', () => {
     const policy = buildUiEgressNetworkPolicy(recipe, SBX_UI, SBX_RECIPES, [])!
     expect(policy.metadata?.annotations).toBeUndefined()
   })
+
+  // issue #299: when the reconciler supplies the accumulated sliding-window
+  // state annotations, the builder stamps THOSE (state + targets + resolved-at)
+  // instead of the single-snapshot provenance, and renders ipBlocks from the
+  // effective (accumulated) entries it was handed.
+  it('stamps supplied accumulated state annotations and renders effective ipBlocks', () => {
+    const recipe = makeRecipe()
+    recipe.spec.ui = { workloadRef: 'web', port: 8080 }
+    const effective = [
+      {
+        cidr: '140.82.112.3/32',
+        port: 443,
+        source: { kind: 'fqdn' as const, fqdn: 'api.github.com' },
+      },
+      {
+        cidr: '140.82.112.4/32',
+        port: 443,
+        source: { kind: 'fqdn' as const, fqdn: 'api.github.com' },
+      },
+    ]
+    const stateAnnotations = {
+      'clerum.io/egress-fqdn-state': '[{"ip":"140.82.112.3"}]',
+      'clerum.io/egress-fqdn-targets':
+        'api.github.com=140.82.112.3/32,api.github.com=140.82.112.4/32',
+      'clerum.io/egress-fqdn-resolved-at': '2026-08-08T00:00:00.000Z',
+    }
+    const policy = buildUiEgressNetworkPolicy(
+      recipe,
+      SBX_UI,
+      SBX_RECIPES,
+      effective,
+      stateAnnotations
+    )!
+    expect(policy.metadata?.annotations).toEqual(stateAnnotations)
+    const cidrs = policy.spec!.egress!.flatMap(r => r.to?.map(t => t.ipBlock?.cidr) ?? [])
+    expect(cidrs).toEqual(['140.82.112.3/32', '140.82.112.4/32'])
+  })
 })
 
 // ─── OAuth broker token (Path B) ────────────────────────────────────

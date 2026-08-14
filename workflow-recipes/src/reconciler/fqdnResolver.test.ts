@@ -32,6 +32,7 @@ describe('resolveExternalEgress', () => {
         kind: 'ok',
         ipv4: ['93.184.216.10', '93.184.216.11'],
         ipv6: [],
+        ttlSeconds: 300,
       },
     })
     const result = await resolveExternalEgress(
@@ -44,12 +45,14 @@ describe('resolveExternalEgress', () => {
         port: 443,
         reason: 'Charge cards',
         source: { kind: 'fqdn', fqdn: 'api.stripe.com' },
+        ttlSeconds: 300,
       },
       {
         cidr: '93.184.216.11/32',
         port: 443,
         reason: 'Charge cards',
         source: { kind: 'fqdn', fqdn: 'api.stripe.com' },
+        ttlSeconds: 300,
       },
     ])
   })
@@ -63,6 +66,7 @@ describe('resolveExternalEgress', () => {
         kind: 'ok',
         ipv4: ['160.79.104.10'],
         ipv6: ['2607:6bc0::10'],
+        ttlSeconds: 300,
       },
     })
     const result = await resolveExternalEgress([{ fqdn: 'api.anthropic.com', port: 443 }], lookup)
@@ -72,6 +76,7 @@ describe('resolveExternalEgress', () => {
         port: 443,
         reason: undefined,
         source: { kind: 'fqdn', fqdn: 'api.anthropic.com' },
+        ttlSeconds: 300,
       },
     ])
     expect(result.failures).toEqual([])
@@ -79,8 +84,8 @@ describe('resolveExternalEgress', () => {
 
   it('preserves fqdn ordering across multiple entries', async () => {
     const lookup = fakeLookup({
-      'api.stripe.com': { kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [] },
-      'ingest.sentry.io': { kind: 'ok', ipv4: ['93.184.216.20'], ipv6: [] },
+      'api.stripe.com': { kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 },
+      'ingest.sentry.io': { kind: 'ok', ipv4: ['93.184.216.20'], ipv6: [], ttlSeconds: 300 },
     })
     const result = await resolveExternalEgress(
       [
@@ -94,7 +99,7 @@ describe('resolveExternalEgress', () => {
 
   it('records a failure when fqdn resolution errors and continues with the rest', async () => {
     const lookup = fakeLookup({
-      'good.example.com': { kind: 'ok', ipv4: ['93.184.216.5'], ipv6: [] },
+      'good.example.com': { kind: 'ok', ipv4: ['93.184.216.5'], ipv6: [], ttlSeconds: 300 },
       'bad.example.com': { kind: 'error', error: 'NXDOMAIN' },
     })
     const result = await resolveExternalEgress(
@@ -112,7 +117,7 @@ describe('resolveExternalEgress', () => {
 
   it('treats an empty A-record set as no expansion (no entries, no failure)', async () => {
     const lookup = fakeLookup({
-      'empty.example.com': { kind: 'ok', ipv4: [], ipv6: [] },
+      'empty.example.com': { kind: 'ok', ipv4: [], ipv6: [], ttlSeconds: 0 },
     })
     const result = await resolveExternalEgress([{ fqdn: 'empty.example.com', port: 443 }], lookup)
     expect(result.resolved).toEqual([])
@@ -125,6 +130,7 @@ describe('resolveExternalEgress', () => {
         kind: 'ok',
         ipv4: ['93.184.216.34', '169.254.169.254'],
         ipv6: [],
+        ttlSeconds: 300,
       },
     })
     const result = await resolveExternalEgress([{ fqdn: 'mixed.example.com', port: 443 }], lookup)
@@ -163,10 +169,10 @@ describe('defaultFqdnLookup classification', () => {
   })
 
   it('returns ok with A records even when AAAA has none', async () => {
-    resolve4Mock.mockResolvedValue(['160.79.104.10'])
+    resolve4Mock.mockResolvedValue([{ address: '160.79.104.10', ttl: 300 }])
     resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
     const result = await defaultFqdnLookup('api.anthropic.com')
-    expect(result).toEqual({ kind: 'ok', ipv4: ['160.79.104.10'], ipv6: [] })
+    expect(result).toEqual({ kind: 'ok', ipv4: ['160.79.104.10'], ipv6: [], ttlSeconds: 300 })
   })
 
   it('classifies SERVFAIL as a retryable error and surfaces the code', async () => {
@@ -219,5 +225,65 @@ describe('defaultFqdnLookup classification', () => {
     resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
     const result = await defaultFqdnLookup('partial.example.com')
     expect(result).toMatchObject({ kind: 'error', retryable: true })
+  })
+})
+
+// ─── issue #299: TTL propagation (feeds the sliding-window accumulator) ─────
+describe('defaultFqdnLookup TTL propagation (issue #299)', () => {
+  afterEach(() => {
+    resolve4Mock.mockReset()
+    resolve6Mock.mockReset()
+  })
+
+  it('requests per-record TTLs via resolve4({ ttl: true })', async () => {
+    resolve4Mock.mockResolvedValue([{ address: '140.82.112.3', ttl: 18 }])
+    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
+    await defaultFqdnLookup('api.github.com')
+    expect(resolve4Mock).toHaveBeenCalledWith('api.github.com', { ttl: true })
+  })
+
+  it('reports the MINIMUM TTL across A records (the whole fqdn window)', async () => {
+    resolve4Mock.mockResolvedValue([
+      { address: '140.82.112.3', ttl: 18 },
+      { address: '140.82.112.4', ttl: 12 },
+    ])
+    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
+    const result = await defaultFqdnLookup('api.github.com')
+    expect(result).toEqual({
+      kind: 'ok',
+      ipv4: ['140.82.112.3', '140.82.112.4'],
+      ipv6: [],
+      ttlSeconds: 12,
+    })
+  })
+})
+
+describe('resolveExternalEgress TTL propagation (issue #299)', () => {
+  it('stamps the fqdn TTL onto every resolved /32 entry', async () => {
+    const lookup = fakeLookup({
+      'api.github.com': {
+        kind: 'ok',
+        ipv4: ['140.82.112.3', '140.82.112.4'],
+        ipv6: [],
+        ttlSeconds: 15,
+      },
+    })
+    const result = await resolveExternalEgress([{ fqdn: 'api.github.com', port: 443 }], lookup)
+    expect(result.resolved).toEqual([
+      {
+        cidr: '140.82.112.3/32',
+        port: 443,
+        reason: undefined,
+        source: { kind: 'fqdn', fqdn: 'api.github.com' },
+        ttlSeconds: 15,
+      },
+      {
+        cidr: '140.82.112.4/32',
+        port: 443,
+        reason: undefined,
+        source: { kind: 'fqdn', fqdn: 'api.github.com' },
+        ttlSeconds: 15,
+      },
+    ])
   })
 })

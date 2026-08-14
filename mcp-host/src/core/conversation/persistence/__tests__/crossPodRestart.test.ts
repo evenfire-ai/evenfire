@@ -4,7 +4,7 @@
  * worker terminates, "Pod B" rehydrates the store and finds the same
  * approval — the user retry no longer races a phantom in-memory state.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -150,6 +150,58 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       expect(rehydrated).toHaveLength(0)
     } finally {
       await podB.shutdown()
+    }
+  })
+
+  it('skips an unauthorized pending approval without rejecting agent bootstrap', async () => {
+    const pod = makeSqliteStore({ dbPath, cacheSize: 4 })
+    const manager = new ConversationManager(pod.store)
+    const sessionKey = 'user-1:rpc:agent:default'
+    const conv = await manager.getOrCreate(sessionKey, {
+      userId: 'user-1',
+      channelType: 'rpc',
+      channelId: 'agent',
+      source: 'rpc',
+    })
+    await manager.startTurn(conv, 'needs approval', 'task-unsafe-owner')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-unsafe-owner',
+      tool_name: 'shell_exec',
+      tool_call_id: 'tc-unsafe-owner',
+      parameters: {},
+      description: 'unsafe owner fixture',
+      context_snapshot: [],
+    })
+    pod.worker.db
+      .prepare('UPDATE sessions SET user_id = ? WHERE id = ?')
+      .run('different-owner', conv.id)
+    pod.store['cache'].clear()
+    pod.store['ordinals'].clear()
+    pod.store['sessionKeyById'].clear()
+
+    const agent = new AgentStateMachine(new MessageQueue(), new TaskLifecycle(), {
+      autoStart: false,
+    })
+    agent.setLLMProvider({
+      completeSingleTurn: async () => ({ content: 'done' }),
+      completeSingleTurnWithTools: async () => ({ type: 'response', content: 'done' }),
+      getProviderType: () => 'openai',
+    } as never)
+    agent.setMcpManager({ getAllTools: () => [], callTool: async () => ({}) } as never)
+    agent.setConversationStore(pod.store)
+    agent.setColdStartLoader(new SqliteColdStartLoader(pod.store))
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    try {
+      await expect(agent.bootstrap()).resolves.toBeUndefined()
+      expect(agent.getPendingApprovals()).toEqual([])
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('CONV_OWNERSHIP_MISMATCH'))
+      await expect(manager.getOrCreate(sessionKey, { userId: 'user-1' })).rejects.toMatchObject({
+        code: 'CONV_OWNERSHIP_MISMATCH',
+      })
+    } finally {
+      log.mockRestore()
+      await pod.shutdown()
     }
   })
 

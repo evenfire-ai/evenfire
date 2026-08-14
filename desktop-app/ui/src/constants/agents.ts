@@ -1,5 +1,10 @@
 export const MAX_VISIBLE_SESSIONS = 6
 export const SESSION_PREVIEW_LIMIT = 9
+/**
+ * Distance (px) from the bottom within which a reader still follows the chat.
+ * Beyond it, appended content must not pull them away from older history.
+ */
+export const CHAT_NEAR_BOTTOM_THRESHOLD_PX = 120
 
 export const AGENT_ERROR_CODE_LABELS: Record<string, string> = {
   LLM_INSUFFICIENT_QUOTA: 'Out of Credits',

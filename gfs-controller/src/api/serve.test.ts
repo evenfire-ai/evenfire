@@ -476,6 +476,27 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     expect((calls[0].input as { content: Buffer }).content.toString("utf8")).toBe("new");
   });
 
+  it("200 replace accepts a large (>4.47MB) base64 body without a regex stack overflow", async () => {
+    // 5MiB raw -> ~6.99MB base64, well past the ~4.47MB-char threshold where the
+    // previous grouped-quantifier regex /(?:[A-Za-z0-9+/]{4})*.../ overflowed V8's
+    // regexp backtrack stack (RangeError -> bogus 500 `internal` on any large upload).
+    const rawBytes = 5 * 1024 * 1024;
+    const largeBase64 = Buffer.alloc(rawBytes, 0x41).toString("base64");
+    const res = new FakeRes();
+    const { d, calls } = writeDeps();
+    await run(
+      d,
+      reqBody(`/v1/resources/${RID}/content`, {
+        method: "PUT",
+        auth: "Bearer t",
+        body: { contentBase64: largeBase64, ifMatch: 2 },
+      }),
+      res
+    );
+    expect(res.statusCode).toBe(200);
+    expect((calls[0].input as { content: Buffer }).content.length).toBe(rawBytes);
+  });
+
   it("400 path_invalid for invalid encoded file content", async () => {
     const res = new FakeRes();
     const { d, calls, authzOps } = writeDeps();
@@ -492,6 +513,46 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
     expect(authzOps).toEqual([]);
     expect(calls).toHaveLength(0);
+  });
+
+  it("413 payload_too_large advertises Connection: close (request body not fully received)", async () => {
+    // When readJsonBody aborts mid-stream (body over MAX_WRITE_BODY_BYTES), the
+    // client is still sending: the socket cannot be reused and Node will reset
+    // it. Without `Connection: close`, a pooling client (undici in control-api's
+    // gfs proxy) queues its NEXT request onto the poisoned socket and gets
+    // ECONNRESET -> 502 gfsc_unreachable (reproduced live: 413 then-immediate
+    // request failed deterministically). Real IncomingMessage semantics:
+    // `complete` is false while the body has not been fully received.
+    const res = new FakeRes();
+    const { d, calls } = writeDeps();
+    const oversized = "A".repeat(16 * 1024 * 1024 + 4);
+    const request = reqBody(`/v1/resources/${RID}/content`, {
+      method: "PUT",
+      auth: "Bearer t",
+      rawBody: `{"contentBase64":"${oversized}","ifMatch":2}`,
+    });
+    (request as unknown as { complete: boolean }).complete = false;
+    await run(d, request, res);
+    expect(res.statusCode).toBe(413);
+    expect((res.json as { error: { code: string } }).error.code).toBe("payload_too_large");
+    expect(res.headers["Connection"]).toBe("close");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does NOT close the connection on an error whose request body WAS fully received", async () => {
+    // A fully-consumed body (here: valid JSON, invalid base64) leaves the socket
+    // clean — keep-alive must survive, only the mid-stream abort case may close.
+    const res = new FakeRes();
+    const { d } = writeDeps();
+    const request = reqBody(`/v1/resources/${RID}/content`, {
+      method: "PUT",
+      auth: "Bearer t",
+      body: { contentBase64: "@@@not-base64@@@", ifMatch: 2 },
+    });
+    (request as unknown as { complete: boolean }).complete = true;
+    await run(d, request, res);
+    expect(res.statusCode).toBe(400);
+    expect(res.headers["Connection"]).toBeUndefined();
   });
 
   it("412 precondition_failed: an AGENT replace WITHOUT If-Match is rejected before the store", async () => {

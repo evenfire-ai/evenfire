@@ -536,11 +536,22 @@ export interface PluginWorkloadSdkSnippetConfig {
  * actually has active (vs merely declared in spec).
  */
 export interface PluginWorkloadSdkCapabilityStatus {
-  state: 'validated' | 'disabled'
+  state: 'validated' | 'disabled' | 'degraded' | 'awaiting_policy'
   promptBridge: boolean
   clientNotifications: boolean
   message?: string
-  validatedAt?: string
+  // These fields are merge-patch clearable. A non-validated projection must
+  // explicitly send null so a previous validated record cannot survive a
+  // later degraded/awaiting-policy transition.
+  validatedAt?: string | null
+  bootstrapContractVersion?: 2 | null
+  bootstrapPodUid?: string | null
+  bootstrapProvider?: string | null
+  bootstrapModel?: string | null
+  policyRevision?: number | null
+  policyHash?: string | null
+  defaultTargetRef?: string | null
+  verifiedAt?: string | null
 }
 
 // ─── WorkflowRecipe CRD ─────────────────────────────────────────────────

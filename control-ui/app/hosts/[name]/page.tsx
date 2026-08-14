@@ -4,12 +4,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
-import { SelectionDropdown } from '@components/SelectionDropdown'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { HostApprovalSection } from '../../../components/HostApprovalSection'
-import { HostEnvTable } from '../../../components/HostEnvTable'
+import { HostAccessTab } from '../../../components/HostAccessTab'
+import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
@@ -51,22 +50,18 @@ import type { ChannelResource, HostTab } from './types'
 const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
   model: 'Models & creds',
-  approvals: 'Per-tool approval',
+  advanced: 'Advanced',
   contexts: 'Context',
-  env: 'Env vars',
-  users: 'Member access',
-  teams: 'Team access',
+  access: 'Access',
   identity: 'Identity',
 }
 
 const TAB_SLUGS: Record<HostTab, string> = {
   details: 'overview',
   model: 'model',
-  approvals: 'approvals',
+  advanced: 'advanced',
   contexts: 'contexts',
-  env: 'env-vars',
-  users: 'member-access',
-  teams: 'team-access',
+  access: 'access',
   identity: 'identity',
 }
 
@@ -106,8 +101,6 @@ export default function HostDetailsPage() {
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
 
-  const [showAddUser, setShowAddUser] = useState(false)
-  const [showAddTeam, setShowAddTeam] = useState(false)
   const [editingOverview, setEditingOverview] = useState(false)
   const [editingModel, setEditingModel] = useState(false)
   const [editingContext, setEditingContext] = useState(false)
@@ -157,49 +150,7 @@ export default function HostDetailsPage() {
 
   const [availableContexts, setAvailableContexts] = useState<string[]>([])
   const [availableSecrets, setAvailableSecrets] = useState<string[]>([])
-  const [allUsers, setAllUsers] = useState<
-    Array<{ id: string; email: string; name: string | null; displayName: string | null }>
-  >([])
-  const [allTeams, setAllTeams] = useState<
-    Array<{ id: string; name: string; memberCount: number }>
-  >([])
-  const [usersWithAccess, setUsersWithAccess] = useState<
-    Array<{ id: string; email: string; name: string | null; displayName: string | null }>
-  >([])
-  const [teamsWithAccess, setTeamsWithAccess] = useState<Array<{ id: string; name: string }>>([])
-  const [selectedUserIdsToGrant, setSelectedUserIdsToGrant] = useState<string[]>([])
-  const [selectedTeamIdsToGrant, setSelectedTeamIdsToGrant] = useState<string[]>([])
 
-  const userIdsWithAccess = useMemo(
-    () => new Set(usersWithAccess.map(u => u.id)),
-    [usersWithAccess]
-  )
-  const teamIdsWithAccess = useMemo(
-    () => new Set(teamsWithAccess.map(t => t.id)),
-    [teamsWithAccess]
-  )
-  const memberGrantOptions = useMemo(
-    () =>
-      allUsers
-        .filter(user => !userIdsWithAccess.has(user.id))
-        .map(user => ({
-          value: user.id,
-          label: user.displayName || user.name || user.email || user.id,
-          description: user.email || user.id,
-        })),
-    [allUsers, userIdsWithAccess]
-  )
-  const teamGrantOptions = useMemo(
-    () =>
-      allTeams
-        .filter(team => !teamIdsWithAccess.has(team.id))
-        .map(team => ({
-          value: team.id,
-          label: team.name,
-          badge: team.memberCount === 1 ? '1 member' : `${team.memberCount} members`,
-        })),
-    [allTeams, teamIdsWithAccess]
-  )
   const hasPendingRename = hostNameDraft.trim() && hostNameDraft.trim() !== routeName
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, providerDraft),
@@ -270,15 +221,7 @@ export default function HostDetailsPage() {
     setError('')
     try {
       const detail = await getHostDetailBundle(routeName)
-      const {
-        host,
-        contexts: contextsList,
-        secrets: secretsList,
-        users,
-        teams,
-        agentUsers,
-        agentTeams,
-      } = detail
+      const { host, contexts: contextsList, secrets: secretsList } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
       // AP-6: remember the version of THIS read — the edit drafts below are
@@ -351,10 +294,6 @@ export default function HostDetailsPage() {
         if (name) keysMap[name] = Array.isArray(item.keys) ? item.keys : []
       }
       setSecretKeysByName(keysMap)
-      setAllUsers(Array.isArray(users) ? users : [])
-      setAllTeams(Array.isArray(teams) ? teams : [])
-      setUsersWithAccess(Array.isArray(agentUsers) ? agentUsers : [])
-      setTeamsWithAccess(Array.isArray(agentTeams) ? agentTeams : [])
     } catch (e) {
       if (!mountedRef.current) return
       setError(e instanceof Error ? e.message : 'Failed to load agent details')
@@ -458,7 +397,20 @@ export default function HostDetailsPage() {
             updatedChannels.push({ name: channelName, previousSpec: channel.spec })
           }
 
-          for (const user of usersWithAccess) {
+          // Fetch the freshest user/team access lists so a grant/revoke done
+          // in the Access tab right before this rename still applies here.
+          const [usersAccessSnapshot, teamsAccessSnapshot] = await Promise.all([
+            getAgentUsers(routeName),
+            getAgentTeams(routeName),
+          ])
+          const renameUsersWithAccess = Array.isArray(usersAccessSnapshot.items)
+            ? usersAccessSnapshot.items
+            : []
+          const renameTeamsWithAccess = Array.isArray(teamsAccessSnapshot.items)
+            ? teamsAccessSnapshot.items
+            : []
+
+          for (const user of renameUsersWithAccess) {
             const userAccess = await getAdminUserAgents(user.id)
             const previousAgentNames = (userAccess.agentNames || [])
               .map(String)
@@ -474,7 +426,7 @@ export default function HostDetailsPage() {
             ])
           }
 
-          for (const team of teamsWithAccess) {
+          for (const team of renameTeamsWithAccess) {
             const teamAccess = await getAdminTeamAgents(team.id)
             const previousAgentNames = (teamAccess.agentNames || [])
               .map(String)
@@ -775,137 +727,6 @@ export default function HostDetailsPage() {
     [routeName]
   )
 
-  async function grantUserAccess() {
-    if (selectedUserIdsToGrant.length === 0 || hasPendingRename) return
-    setBusy(true)
-    setError('')
-    try {
-      await Promise.all(
-        selectedUserIdsToGrant.map(async userId => {
-          const current = await getAdminUserAgents(userId)
-          const next = Array.from(new Set([...(current.agentNames || []), routeName]))
-          await updateAdminUserAgents(userId, next, [
-            ...(current.agentNames || []),
-            ...(current.deletedAgentNames || []),
-          ])
-        })
-      )
-      const grantedUserIds = selectedUserIdsToGrant
-      const grantedUser = allUsers.find(u => u.id === grantedUserIds[0])
-      setSelectedUserIdsToGrant([])
-      const refreshed = await getAgentUsers(routeName)
-      setUsersWithAccess(Array.isArray(refreshed.items) ? refreshed.items : [])
-      showToast(
-        grantedUserIds.length === 1
-          ? `${grantedUser?.displayName || grantedUser?.name || grantedUserIds[0]} can now use this agent.`
-          : `${grantedUserIds.length} members can now use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to grant member access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function revokeUserAccess(userId: string) {
-    if (hasPendingRename) return
-    const user = usersWithAccess.find(item => item.id === userId)
-    const shouldRevoke = await confirm({
-      title: 'Revoke Member Access',
-      message: `Revoke ${user?.displayName || user?.name || user?.email || 'this member'}'s access to ${routeName}?`,
-      confirmLabel: 'Revoke',
-      tone: 'danger',
-    })
-    if (!shouldRevoke) return
-
-    setBusy(true)
-    setError('')
-    try {
-      const current = await getAdminUserAgents(userId)
-      const next = (current.agentNames || []).filter(name => name !== routeName)
-      await updateAdminUserAgents(userId, next, [
-        ...(current.agentNames || []),
-        ...(current.deletedAgentNames || []),
-      ])
-      const removedUser = usersWithAccess.find(u => u.id === userId)
-      setUsersWithAccess(prev => prev.filter(u => u.id !== userId))
-      showToast(
-        `${removedUser?.displayName || removedUser?.name || userId} can no longer use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to revoke member access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function grantTeamAccess() {
-    if (selectedTeamIdsToGrant.length === 0 || hasPendingRename) return
-    setBusy(true)
-    setError('')
-    try {
-      await Promise.all(
-        selectedTeamIdsToGrant.map(async teamId => {
-          const current = await getAdminTeamAgents(teamId)
-          const next = Array.from(new Set([...(current.agentNames || []), routeName]))
-          await updateAdminTeamAgents(teamId, next, [
-            ...(current.agentNames || []),
-            ...(current.deletedAgentNames || []),
-          ])
-        })
-      )
-      const grantedTeamIds = selectedTeamIdsToGrant
-      const grantedTeam = allTeams.find(t => t.id === grantedTeamIds[0])
-      setSelectedTeamIdsToGrant([])
-      const refreshed = await getAgentTeams(routeName)
-      setTeamsWithAccess(Array.isArray(refreshed.items) ? refreshed.items : [])
-      showToast(
-        grantedTeamIds.length === 1
-          ? `${grantedTeam?.name || grantedTeamIds[0]} can now use this agent.`
-          : `${grantedTeamIds.length} teams can now use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to grant team access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function revokeTeamAccess(teamId: string) {
-    if (hasPendingRename) return
-    const team = teamsWithAccess.find(item => item.id === teamId)
-    const shouldRevoke = await confirm({
-      title: 'Revoke Team Access',
-      message: `Revoke ${team?.name || 'this team'}'s access to ${routeName}?`,
-      confirmLabel: 'Revoke',
-      tone: 'danger',
-    })
-    if (!shouldRevoke) return
-
-    setBusy(true)
-    setError('')
-    try {
-      const current = await getAdminTeamAgents(teamId)
-      const next = (current.agentNames || []).filter(name => name !== routeName)
-      await updateAdminTeamAgents(teamId, next, [
-        ...(current.agentNames || []),
-        ...(current.deletedAgentNames || []),
-      ])
-      const removedTeam = teamsWithAccess.find(t => t.id === teamId)
-      setTeamsWithAccess(prev => prev.filter(team => team.id !== teamId))
-      showToast(`${removedTeam?.name || teamId} can no longer use this agent.`, {
-        tone: 'success',
-      })
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to revoke team access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   async function deleteAgentPermanently() {
     setDeletingAgent(true)
     setDeleteAgentDialogError('')
@@ -941,7 +762,7 @@ export default function HostDetailsPage() {
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
       contentClassName={
-        activeTab === 'approvals' || (activeTab === 'model' && editingModel)
+        activeTab === 'advanced' || (activeTab === 'model' && editingModel)
           ? 'cu-agent-detail-card'
           : undefined
       }
@@ -1248,13 +1069,13 @@ export default function HostDetailsPage() {
           </>
         )}
 
-        {activeTab === 'approvals' && !initialLoading && (
-          <HostApprovalSection
-            initialTools={approvalToolsData}
-            onSave={persistApprovalTools}
+        {activeTab === 'advanced' && (
+          <HostAdvancedTab
             busy={busy}
-            canWrite={true /* TODO: wire to actual host:write check if/when per-field RBAC lands */}
-            defaultEditing
+            hostName={routeName}
+            initialLoading={initialLoading}
+            initialTools={approvalToolsData}
+            onSaveApprovalTools={persistApprovalTools}
           />
         )}
 
@@ -1352,340 +1173,12 @@ export default function HostDetailsPage() {
           </>
         )}
 
-        {activeTab === 'env' && <HostEnvTable hostRef={routeName} />}
-
         {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
 
-        {activeTab === 'users' && (
-          <>
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: '0.5rem',
-                marginBottom: '1rem',
-              }}
-            >
-              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                Grant or revoke which members can use this agent.
-              </p>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => setShowAddUser(true)}
-                disabled={busy || hasPendingRename}
-              >
-                Add member
-              </button>
-            </div>
-            <div className="cu-table-wrap">
-              <table className="cu-table cu-table--header-band">
-                <thead>
-                  <tr>
-                    <th>Member</th>
-                    <th className="cu-table__col-actions">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {initialLoading ? (
-                    [1, 2, 3].map(i => (
-                      <tr key={i}>
-                        <td>
-                          <div
-                            className="cu-skeleton cu-skeleton--cell"
-                            style={{ width: '10rem' }}
-                          ></div>
-                        </td>
-                        <td></td>
-                      </tr>
-                    ))
-                  ) : usersWithAccess.length === 0 ? (
-                    <tr>
-                      <td colSpan={2} className="cu-empty">
-                        No members have access yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    usersWithAccess.map(user => (
-                      <tr key={user.id}>
-                        <td>
-                          <button
-                            type="button"
-                            className="cu-link"
-                            onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.user(user.id))}
-                          >
-                            {user.displayName || user.name || user.email}
-                          </button>
-                        </td>
-                        <td className="cu-table__cell-actions">
-                          <div className="cu-row-actions">
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void revokeUserAccess(user.id)}
-                              disabled={busy || hasPendingRename}
-                              title="Revoke"
-                              aria-label="Revoke member access"
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-
-        {activeTab === 'teams' && (
-          <>
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: '0.5rem',
-                marginBottom: '1rem',
-              }}
-            >
-              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                Grant or revoke team-level access to this agent.
-              </p>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => setShowAddTeam(true)}
-                disabled={busy || hasPendingRename}
-              >
-                Add team
-              </button>
-            </div>
-            <div className="cu-table-wrap">
-              <table className="cu-table cu-table--header-band">
-                <thead>
-                  <tr>
-                    <th>Team</th>
-                    <th className="cu-table__col-actions">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {initialLoading ? (
-                    [1, 2, 3].map(i => (
-                      <tr key={i}>
-                        <td>
-                          <div
-                            className="cu-skeleton cu-skeleton--cell"
-                            style={{ width: '10rem' }}
-                          ></div>
-                        </td>
-                        <td></td>
-                      </tr>
-                    ))
-                  ) : teamsWithAccess.length === 0 ? (
-                    <tr>
-                      <td colSpan={2} className="cu-empty">
-                        No teams have access yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    teamsWithAccess.map(team => (
-                      <tr key={team.id}>
-                        <td>
-                          <button
-                            type="button"
-                            className="cu-link"
-                            onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.team(team.id))}
-                          >
-                            {team.name}
-                          </button>
-                        </td>
-                        <td className="cu-table__cell-actions">
-                          <div className="cu-row-actions">
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void revokeTeamAccess(team.id)}
-                              disabled={busy || hasPendingRename}
-                              title="Revoke"
-                              aria-label="Revoke team access"
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </>
+        {activeTab === 'access' && (
+          <HostAccessTab hasPendingRename={hasPendingRename} hostName={routeName} />
         )}
       </div>
-      {showAddUser && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddUser(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-user-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-user-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add member
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddUser(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="agent-member-picker">Members</label>
-              <SelectionDropdown
-                id="agent-member-picker"
-                inline
-                value={selectedUserIdsToGrant}
-                onChange={setSelectedUserIdsToGrant}
-                options={memberGrantOptions}
-                placeholder="Select members"
-                searchPlaceholder="Search members..."
-                selectionLabel="Selected members"
-                emptyLabel="No available members."
-                disabled={busy || hasPendingRename}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddUser(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  await grantUserAccess()
-                  setShowAddUser(false)
-                }}
-                disabled={busy || selectedUserIdsToGrant.length === 0 || hasPendingRename}
-              >
-                {selectedUserIdsToGrant.length > 1 ? 'Add members' : 'Add member'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showAddTeam && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddTeam(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-team-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-team-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add team
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="agent-team-picker">Teams</label>
-              <SelectionDropdown
-                id="agent-team-picker"
-                inline
-                value={selectedTeamIdsToGrant}
-                onChange={setSelectedTeamIdsToGrant}
-                options={teamGrantOptions}
-                placeholder="Select teams"
-                searchPlaceholder="Search teams..."
-                selectionLabel="Selected teams"
-                emptyLabel="No available teams."
-                disabled={busy || hasPendingRename}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  await grantTeamAccess()
-                  setShowAddTeam(false)
-                }}
-                disabled={busy || selectedTeamIdsToGrant.length === 0 || hasPendingRename}
-              >
-                {selectedTeamIdsToGrant.length > 1 ? 'Add teams' : 'Add team'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {showDeleteAgentConfirm && (
         <div
           style={{

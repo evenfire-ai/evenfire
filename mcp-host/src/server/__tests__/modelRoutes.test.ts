@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
+import { ConversationError, ConversationErrorCode } from '../../core/errors'
 import { handleModelsListRoute, handleSetModelRoute } from '../routes'
 import type { ModelsListHandler, SetModelHandler } from '../types'
 import { makeHandlers } from './testHelpers'
@@ -185,5 +186,25 @@ describe('handleSetModelRoute (POST /v1/runtime/model)', () => {
     const captured = makeRes()
     await handleSetModelRoute(req, captured.res, makeHandlers({ setModelHandler: vi.fn() }))
     expect(captured.statusCode).toBe(401)
+  })
+
+  it('maps persisted ownership mismatches to a generic 403', async () => {
+    const setModelHandler: SetModelHandler = vi
+      .fn()
+      .mockRejectedValue(
+        new ConversationError('sensitive ownership detail', ConversationErrorCode.OwnershipMismatch)
+      )
+    const req = makeReq({
+      caller: 'rpc-proxy',
+      userId: 'u-1',
+      hostRef: 'chatllm',
+      body: { chatId: 'c-9', model: 'claude-haiku-4-5' },
+    })
+    const captured = makeRes()
+
+    await handleSetModelRoute(req, captured.res, makeHandlers({ setModelHandler }))
+
+    expect(captured.statusCode).toBe(403)
+    expect(captured.jsonBody).toEqual({ error: 'session access denied' })
   })
 })

@@ -19,7 +19,6 @@ import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
-import { GfsAgentAccessSection } from '@/gfs/GfsAgentAccessSection'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import {
   type GfsAgentSubjectOption,
@@ -110,7 +109,17 @@ function resourceSource(resource: GfsDriveResource, currentFolderName?: string):
   return resource.sources?.length ? resource.sources.join(' + ') : 'Shared'
 }
 
-export function FilesPage({ pushToast }: FilesPageProps) {
+function pickErrorMessage(error: unknown): string | null {
+  if (!error) return null
+  return error instanceof Error ? error.message : String(error)
+}
+
+function mergeErrorMessages(...errors: unknown[]): string | null {
+  const messages = errors.map(pickErrorMessage).filter((value): value is string => Boolean(value))
+  return messages.length > 0 ? messages.join(' · ') : null
+}
+
+export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
@@ -159,6 +168,22 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     enabled: manageOpen,
   })
   const agentSubjects = useMemo(() => agentSubjectOptions(myAgentsQuery.data), [myAgentsQuery.data])
+  // Unified grant-subject list: people + teams (team directory) and the caller's
+  // own agents (canonical host subjects). Agents are badge-labelled and capped to
+  // read/write inside GfsDelegationPanel when present in the selection.
+  const grantSubjectOptions = useMemo<GfsDelegationSubjectOption[]>(
+    () => [
+      ...delegationSubjects,
+      ...agentSubjects.map(agent => ({
+        type: 'host' as const,
+        id: agent.id,
+        label: agent.name,
+        description: 'Agent',
+        badge: 'Agent',
+      })),
+    ],
+    [agentSubjects, delegationSubjects]
+  )
   const grantsError = useMemo(
     () => (ctrl.grantsError ? describeGfsGrantError(ctrl.grantsError) : null),
     [ctrl.grantsError]
@@ -231,25 +256,16 @@ export function FilesPage({ pushToast }: FilesPageProps) {
 
   // One atomic bulk grant for every selected subject — the server grants all or
   // none (a `subjects_invalid` rejects the whole request), so there is no
-  // partial-success outcome. A failure propagates to the panel's catch, which
-  // maps the server verdict via describeGfsGrantError. No inherit argument here:
-  // the user/team panel keeps inherit:false.
-  const handleGrant = async (subjectKeys: string[], bits: string[]) => {
-    await ctrl.grant(subjectKeys, bits)
+  // partial-success outcome. People, teams, and agents share a single picker;
+  // agents are capped to read/write inside the panel. Inherit is honored for
+  // directories (default ON) and forced false for files.
+  const handleGrant = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
+    await ctrl.grant(subjectKeys, bits, inherit)
     pushToast?.(
       `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
       'success'
     )
     // The grant PUT returns no ids — list-after-write is the revoke-id source.
-    await ctrl.refreshGrants()
-  }
-
-  const handleGrantAgents = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
-    await ctrl.grant(subjectKeys, bits, inherit)
-    pushToast?.(
-      `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'agent' : 'agents'}`,
-      'success'
-    )
     await ctrl.refreshGrants()
   }
 
@@ -303,6 +319,18 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     if (typeof opened === 'object' && opened.kind === 'file') openFilePreview(opened)
     return true
   }
+
+  /**
+   * Open a link handed over from the app level (a plugin's `gfs://` click that
+   * this page handles better than the overlay). Cleared immediately so a
+   * re-render cannot reopen it, and failures surface the browser's own error.
+   */
+  useEffect(() => {
+    if (!pendingGfsUri) return
+    onPendingGfsUriHandled?.()
+    void handleOpenGfsLink(pendingGfsUri)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGfsUri])
 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
@@ -969,33 +997,18 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                   <>
                     <GfsDelegationPanel
                       affordances={affordances}
-                      subjectOptions={delegationSubjects}
-                      subjectOptionsLoading={teamDirectoryQuery.isFetching}
-                      subjectOptionsError={
-                        teamDirectoryQuery.error instanceof Error
-                          ? teamDirectoryQuery.error.message
-                          : teamDirectoryQuery.error
-                            ? String(teamDirectoryQuery.error)
-                            : null
+                      subjectOptions={grantSubjectOptions}
+                      subjectOptionsLoading={
+                        teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
                       }
+                      subjectOptionsError={mergeErrorMessages(
+                        teamDirectoryQuery.error,
+                        myAgentsQuery.error
+                      )}
+                      isDirectory={currentIsFolder}
                       onGrant={handleGrant}
                       onCreateShare={affordances.canCreateShare ? handleCreateShare : undefined}
                     />
-                    {affordances.canDelegate ? (
-                      <GfsAgentAccessSection
-                        agents={agentSubjects}
-                        agentsLoading={myAgentsQuery.isFetching}
-                        agentsError={
-                          myAgentsQuery.error instanceof Error
-                            ? myAgentsQuery.error.message
-                            : myAgentsQuery.error
-                              ? String(myAgentsQuery.error)
-                              : null
-                        }
-                        isDirectory={Boolean(currentIsFolder)}
-                        onGrantAgents={handleGrantAgents}
-                      />
-                    ) : null}
                   </>
                 ) : (
                   <p className="muted">Loading permissions…</p>

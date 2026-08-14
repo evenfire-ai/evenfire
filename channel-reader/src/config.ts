@@ -23,6 +23,9 @@ export interface Config {
   // channel-reader must not carry control-api service credentials.
   notificationDeliveryPollLimit: number
 
+  /** Optional. When set, the unresolved-sender notice links here. */
+  profileUiUrl?: string
+
   // Telegram Bot API root. Defaults to Telegram's public API; E2E may point
   // this at a provider-boundary mock without adding an HTTP ingress to
   // channel-reader.
@@ -135,6 +138,9 @@ export const config: Config = {
   )!,
 
   notificationDeliveryPollLimit: getEnvInt('CLERUM_NOTIFICATION_DELIVERY_POLL_LIMIT', 10),
+
+  /** Optional. When set, the unresolved-sender notice links here. */
+  profileUiUrl: getEnv('CLERUM_PROFILE_UI_URL'),
 
   telegramApiRoot: getEnv('CLERUM_TELEGRAM_API_ROOT'),
   telegramStartupStabilityMs: getEnvInt('CLERUM_TELEGRAM_STARTUP_STABILITY_MS', 1000),

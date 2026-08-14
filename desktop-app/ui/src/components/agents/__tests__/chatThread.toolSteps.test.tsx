@@ -10,7 +10,8 @@
  */
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import type { MessageToolStep } from '../../../../../src/types'
 import type { AgentChatMessage, TaskProgress } from '../../../uiTypes'
 // vi.mock calls are hoisted above this import, so ChatThread binds the mocks.
@@ -34,6 +35,9 @@ let threadStateValue: {
   activeChatId: string | null
   activityByMessageId: Record<string, unknown>
   progressByMessageId: Record<string, TaskProgress>
+  hasOlderMessages: boolean
+  olderMessagesLoading: boolean
+  handleLoadOlderMessages: ReturnType<typeof vi.fn>
 }
 
 vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => navValue }))
@@ -85,7 +89,8 @@ const toolSteps: MessageToolStep[] = [
 
 function setThreadState(
   groupedMessages: typeof threadStateValue.groupedMessages,
-  progressByMessageId: Record<string, TaskProgress> = {}
+  progressByMessageId: Record<string, TaskProgress> = {},
+  options: { hasOlderMessages?: boolean; olderMessagesLoading?: boolean } = {}
 ) {
   const activeMessages = groupedMessages.flatMap(g => g.items)
   threadStateValue = {
@@ -95,6 +100,9 @@ function setThreadState(
     activeChatId: 'c1',
     activityByMessageId: {},
     progressByMessageId,
+    hasOlderMessages: options.hasOlderMessages ?? false,
+    olderMessagesLoading: options.olderMessagesLoading ?? false,
+    handleLoadOlderMessages: vi.fn().mockResolvedValue(undefined),
   }
 }
 
@@ -166,6 +174,24 @@ describe('ChatThread tool-steps fallback (#582)', () => {
     expect(screen.queryByTestId('progress-stepper')).toBeNull()
   })
 
+  it('ignores a malformed persisted toolSteps value instead of crashing the transcript', () => {
+    const assistant: AgentChatMessage = {
+      id: 'turn-1-assistant',
+      role: 'assistant',
+      content: 'still visible',
+      timestamp: 2,
+      toolSteps: 'PWNED' as never,
+    }
+    setThreadState([
+      { role: 'user', items: [userMsg] },
+      { role: 'assistant', items: [assistant] },
+    ])
+
+    expect(() => render(<ChatThread />)).not.toThrow()
+    expect(screen.getByText('still visible')).toBeTruthy()
+    expect(screen.queryByTestId('progress-stepper')).toBeNull()
+  })
+
   it('prefers live progress and does NOT double-render when both live progress and toolSteps exist', () => {
     const assistant: AgentChatMessage = {
       id: 'turn-1-assistant',
@@ -208,5 +234,116 @@ describe('ChatThread tool-steps fallback (#582)', () => {
     // Live progress has 1 step → "1 tool"; the hydrated fallback (2 steps) must NOT render.
     expect(screen.getByText(/More details · 1 tool\b/i)).toBeTruthy()
     expect(screen.queryByText(/More details · 2 tools/i)).toBeNull()
+  })
+
+  it('renders and invokes the older-history page control', async () => {
+    const user = userEvent.setup()
+    setThreadState([{ role: 'user', items: [userMsg] }], {}, { hasOlderMessages: true })
+
+    render(<ChatThread />)
+
+    await user.click(screen.getByRole('button', { name: 'Load older messages' }))
+    expect(threadStateValue.handleLoadOlderMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports when the reader is away from the bottom of the conversation', () => {
+    const onScrollPositionChange = vi.fn()
+    setThreadState([{ role: 'user', items: [userMsg] }])
+
+    render(<ChatThread onScrollPositionChange={onScrollPositionChange} />)
+
+    const chatThread = screen.getByTestId('message-list')
+    Object.defineProperties(chatThread, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 800 },
+      scrollTop: { configurable: true, value: 0, writable: true },
+    })
+
+    fireEvent.scroll(chatThread)
+    expect(onScrollPositionChange).toHaveBeenLastCalledWith(true)
+
+    Object.defineProperty(chatThread, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    })
+    fireEvent.scroll(chatThread)
+
+    expect(onScrollPositionChange).toHaveBeenLastCalledWith(false)
+  })
+
+  it('wraps long histories in virtualized message chunks', () => {
+    const groups = Array.from({ length: 10 }, (_, index) => {
+      const role = index % 2 === 0 ? ('user' as const) : ('assistant' as const)
+      const turn = Math.floor(index / 2) + 1
+      return {
+        role,
+        items: [
+          {
+            id: `turn-${turn}-${role}`,
+            role,
+            content: `${role} ${turn}`,
+            timestamp: index,
+            serverTurnNumber: turn,
+          },
+        ],
+      }
+    })
+    setThreadState(groups)
+
+    const { container } = render(<ChatThread />)
+
+    expect(container.querySelectorAll('.virtualized-message-chunk').length).toBeGreaterThan(1)
+  })
+
+  it('preserves mounted chunks and message nodes across prepend and streaming updates', () => {
+    const groups = Array.from({ length: 16 }, (_, index) => {
+      const role = index % 2 === 0 ? ('user' as const) : ('assistant' as const)
+      const turn = Math.floor(index / 2) + 5
+      return {
+        role,
+        items: [
+          {
+            id: `turn-${turn}-${role}`,
+            role,
+            content: `${role} ${turn}`,
+            timestamp: index,
+            serverTurnNumber: turn,
+          },
+        ],
+      }
+    })
+    setThreadState(groups)
+    const { rerender } = render(<ChatThread />)
+    const stableMessage = screen.getByText('user 5').closest('article')
+    const stableChunk = stableMessage?.closest('.virtualized-message-chunk')
+
+    const prepended = [
+      {
+        role: 'user' as const,
+        items: [
+          {
+            id: 'turn-1-user',
+            role: 'user' as const,
+            content: 'user 1',
+            timestamp: -1,
+            serverTurnNumber: 1,
+          },
+        ],
+      },
+      ...groups.map(group => ({
+        ...group,
+        items: group.items.map(message =>
+          message.id === 'turn-5-user' ? { ...message, content: 'user 5 streaming' } : message
+        ),
+      })),
+    ]
+    setThreadState(prepended)
+    rerender(<ChatThread />)
+
+    const updatedMessage = screen.getByText('user 5 streaming').closest('article')
+    expect(updatedMessage).toBe(stableMessage)
+    expect(updatedMessage?.closest('.virtualized-message-chunk')).toBe(stableChunk)
+    expect(screen.getByText('user 1')).toBeTruthy()
   })
 })

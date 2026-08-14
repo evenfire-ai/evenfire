@@ -27,7 +27,7 @@ import type { SidebarItem, SidebarTab } from './types'
 export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   hosts: { label: 'Agents', href: CONTROL_ROUTES.agents.root, icon: <IconRobot /> },
   'mcp-servers': {
-    label: 'Connectors',
+    label: 'Installed connectors',
     href: CONTROL_ROUTES.connectors.root,
     icon: <IconCable />,
   },
@@ -55,20 +55,20 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     ],
   },
   directories: {
-    label: 'Directories',
+    label: 'Files',
     href: CONTROL_ROUTES.agentFiles.root,
     icon: <IconFolder />,
     children: [
+      {
+        label: 'Global File System',
+        href: CONTROL_ROUTES.globalFileSystem,
+        icon: <IconPaperclip />,
+      },
       {
         label: 'Agent Outputs',
         href: CONTROL_ROUTES.agentOutputs.root,
         icon: <IconOutputs />,
         matchPath: CONTROL_ROUTES.agentOutputs.base,
-      },
-      {
-        label: 'Global File System',
-        href: CONTROL_ROUTES.globalFileSystem,
-        icon: <IconPaperclip />,
       },
     ],
   },
@@ -128,3 +128,19 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   },
   settings: { label: 'Settings', href: CONTROL_ROUTES.settings.ui, icon: <IconSettings /> },
 }
+
+export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
+  'profile-admin',
+  'hosts',
+  'contexts',
+  'registry-catalog',
+  'mcp-servers',
+  'workflow-recipes',
+  'directories',
+  'communication-channels',
+  'llm-models',
+  'llm-secrets',
+  'cost',
+  'traces',
+  'settings',
+]

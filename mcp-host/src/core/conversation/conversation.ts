@@ -1,3 +1,4 @@
+import { parseSessionKey } from '../../session/types'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
@@ -12,10 +13,14 @@ import {
 } from '../types'
 import type { SessionTokenUsage } from './conversationStore'
 import {
+  ConversationSessionSummary,
   ConversationStore,
   GetOrCreateOptions,
   InMemoryConversationStore,
+  SessionListQuery,
+  SessionMessagesQuery,
 } from './conversationStore'
+import { userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
  * Manages conversation state and turn tracking.
@@ -75,15 +80,23 @@ export class ConversationManager {
    */
   async getOrCreate(sessionKey: string, opts?: GetOrCreateOptions): Promise<Conversation> {
     const cached = this.store.get(sessionKey)
-    if (cached) return cached
+    if (cached) {
+      this.assertSessionOwner(cached, opts?.userId)
+      return cached
+    }
 
     const loaded = await this.store.getOrLoad(sessionKey)
-    if (loaded) return loaded
+    if (loaded) {
+      this.assertSessionOwner(loaded, opts?.userId)
+      return loaded
+    }
+
+    const parsed = parseSessionKey(sessionKey)
 
     const conv: Conversation = {
       id: `conv-${sessionKey}-${Date.now()}`,
       session_key: sessionKey,
-      user_id: opts?.userId ?? sessionKey,
+      user_id: opts?.userId ?? parsed?.userId ?? sessionKey,
       state: ConversationState.Idle,
       turns: [],
       auto_approved_tools: new Set(),
@@ -110,6 +123,8 @@ export class ConversationManager {
     agent: string
     chatId: string
   }> {
+    const userId = userIdFromRpcPrefix(keyPrefix)
+    if (!userId) return []
     const out = [] as Array<{
       key: string
       conversation: Conversation
@@ -117,6 +132,7 @@ export class ConversationManager {
       chatId: string
     }>
     for (const { key, conversation } of this.store.listByPrefix(keyPrefix)) {
+      if (conversation.user_id !== userId) continue
       const rest = key.slice(keyPrefix.length)
       const colonIdx = rest.indexOf(':')
       if (colonIdx < 0) continue
@@ -145,6 +161,31 @@ export class ConversationManager {
   }
 
   /**
+   * Summary-only listing for `/v1/runtime/sessions`. Durable stores implement
+   * this without loading transcript rows; full turn hydration stays on
+   * `getSessionByKeyAsync` and the messages endpoint.
+   */
+  async listSessionSummariesForUserAsync(
+    keyPrefix: string,
+    query: SessionListQuery = {}
+  ): Promise<ConversationSessionSummary[]> {
+    return this.store.listSessionSummariesByPrefix(keyPrefix, query)
+  }
+
+  /**
+   * Summary-preserving, bounded transcript window for `/messages`.
+   * Durable stores can fetch only the requested turns instead of hydrating
+   * the whole persisted conversation before slicing.
+   */
+  async getSessionMessagesByKeyAsync(
+    key: string,
+    keyPrefix: string,
+    query: SessionMessagesQuery = {}
+  ) {
+    return this.store.getSessionMessagesByKey(key, keyPrefix, query)
+  }
+
+  /**
    * Look up a single conversation by its exact session key.
    * Used by the transcript endpoint: the full key can be reconstructed from
    * auth.sub + agent + chatId, so iterating the whole map is wasteful.
@@ -161,6 +202,21 @@ export class ConversationManager {
    */
   async getSessionByKeyAsync(key: string): Promise<Conversation | undefined> {
     return this.store.getOrLoad(key)
+  }
+
+  /** Authenticated exact-key lookup that treats persisted ownership as authoritative. */
+  async getSessionByKeyForUserAsync(
+    key: string,
+    userId: string
+  ): Promise<Conversation | undefined> {
+    const conversation = await this.store.getOrLoad(key)
+    return conversation?.user_id === userId ? conversation : undefined
+  }
+
+  private assertSessionOwner(conversation: Conversation, expectedUserId?: string): void {
+    if (expectedUserId !== undefined && conversation.user_id !== expectedUserId) {
+      throw new ConversationError('Session access denied', ConversationErrorCode.OwnershipMismatch)
+    }
   }
 
   /**

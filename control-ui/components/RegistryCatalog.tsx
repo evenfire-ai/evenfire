@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { useRouter } from 'next/navigation'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
 import { type RowAction, RowActionsMenu } from '@components/RowActionsMenu'
@@ -13,47 +13,50 @@ import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
-import { IconChevronRight, IconX } from '@components/icons'
+import { IconChevronRight } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
-import {
-  type RegistryEntry,
-  deleteRegistryEntry,
-  getRegistryCatalog,
-  installRecipeFromRegistry,
-} from '../lib/api'
+import { type RegistryEntry, deleteRegistryEntry, getRegistryCatalog } from '../lib/api'
 import { useRegistryCapability } from '../lib/hooks/useRegistryCapability'
 import { trustBgColor, trustColor } from '../lib/trustLevel'
 
-type MarketplaceTab = 'connectors' | 'plugins'
+type CatalogSortKey = 'name' | 'version'
+type SortDirection = 'asc' | 'desc'
 
 const REGISTRY_COLUMNS: TableHeaderColumn[] = [
   { key: 'expand', ariaLabel: 'Expand Marketplace entry' },
   { key: 'name', label: 'Name' },
   { key: 'version', label: 'Version' },
-  { key: 'visibility', label: 'Visibility' },
-  { key: 'downloads', label: 'Downloads' },
   { key: 'install', align: 'right', ariaLabel: 'Installation' },
   { key: 'actions', align: 'right', ariaLabel: 'Edit or remove' },
 ]
 
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.split('.')
+  const rightParts = right.split('.')
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const leftPart = Number.parseInt(leftParts[index] ?? '0', 10)
+    const rightPart = Number.parseInt(rightParts[index] ?? '0', 10)
+    if (Number.isNaN(leftPart) || Number.isNaN(rightPart)) {
+      return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
+    }
+    if (leftPart !== rightPart) return leftPart - rightPart
+  }
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
+}
+
 export default function RegistryCatalog() {
-  const pathname = usePathname()
   const router = useRouter()
   const { showToast } = useToast()
-  const activeTab: MarketplaceTab =
-    pathname === CONTROL_ROUTES.marketplace.plugins ? 'plugins' : 'connectors'
-  const activeEntryType = activeTab === 'plugins' ? 'recipe' : 'mcp-server'
   const [entries, setEntries] = useState<RegistryEntry[]>([])
   const [categories, setCategories] = useState<string[]>([])
   const [installedCatalogKeys, setInstalledCatalogKeys] = useState<Set<string>>(new Set())
   const [installedServerNames, setInstalledServerNames] = useState<Set<string>>(new Set())
-  const [installedRecipeKeys, setInstalledRecipeKeys] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [installingRecipeKey, setInstallingRecipeKey] = useState('')
-  const [installError, setInstallError] = useState('')
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
+  const [sortKey, setSortKey] = useState<CatalogSortKey | null>(null)
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [removeTarget, setRemoveTarget] = useState<RegistryEntry | null>(null)
   const [removing, setRemoving] = useState(false)
@@ -70,7 +73,14 @@ export default function RegistryCatalog() {
   const connectionState = capability?.connectionState ?? null
   // Curators administer the shared catalog, so they keep inline edit/remove;
   // everyone else manages their own entries from the ownership area (§5.4).
-  const columns = isCurator ? REGISTRY_COLUMNS : REGISTRY_COLUMNS.filter(c => c.key !== 'actions')
+  const columns = (
+    isCurator ? REGISTRY_COLUMNS : REGISTRY_COLUMNS.filter(c => c.key !== 'actions')
+  ).map(column => {
+    if (column.key === 'name' || column.key === 'version') {
+      return { ...column, label: renderSortHeader(column.key, column.label as string) }
+    }
+    return column
+  })
 
   useEffect(() => {
     void loadData()
@@ -79,14 +89,20 @@ export default function RegistryCatalog() {
   async function loadData() {
     setLoading(true)
     setError(null)
-    setInstallError('')
     try {
       const catalog = await getRegistryCatalog({ limit: '200' })
       setEntries(catalog.data)
-      setCategories(catalog.categories)
+      setCategories(
+        Array.from(
+          new Set(
+            catalog.data
+              .filter(entry => entry.entry_type === 'mcp-server')
+              .map(entry => entry.category)
+          )
+        ).sort((left, right) => left.localeCompare(right))
+      )
       setInstalledCatalogKeys(new Set(catalog.installed.catalogKeys))
       setInstalledServerNames(new Set(catalog.installed.serverNames))
-      setInstalledRecipeKeys(new Set(catalog.installed.recipeKeys))
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError))
     } finally {
@@ -115,34 +131,13 @@ export default function RegistryCatalog() {
     }
   }
 
-  async function handleInstallRecipe(entry: RegistryEntry) {
-    if (entry.entry_type !== 'recipe' || !entry.recipe_meta?.recipeYaml) return
-    const key = `${entry.name}@${entry.version}`
-    setInstallingRecipeKey(key)
-    setInstallError('')
-    try {
-      await installRecipeFromRegistry({
-        registryEntryName: entry.name,
-        registryEntryVersion: entry.version,
-        recipeManifest: entry.recipe_meta.recipeYaml,
-      })
-      setInstalledRecipeKeys(current => new Set(current).add(key))
-      showToast(`Installed ${entry.name} v${entry.version}.`, { tone: 'success' })
-    } catch (installFailure) {
-      setInstallError(
-        installFailure instanceof Error ? installFailure.message : 'Failed to install plugin'
-      )
-    } finally {
-      setInstallingRecipeKey('')
-    }
-  }
-
-  const tabEntries = useMemo(
-    () => entries.filter(entry => entry.entry_type === activeEntryType),
-    [activeEntryType, entries]
+  const connectorEntries = useMemo(
+    () => entries.filter(entry => entry.entry_type === 'mcp-server'),
+    [entries]
   )
   const filtered = useMemo(() => {
-    return tabEntries.filter(entry => {
+    const visibleEntries = connectorEntries.filter(entry => {
+      if (entry.visibility === 'private') return false
       if (categoryFilter !== 'all' && entry.category !== categoryFilter) return false
       if (!search) return true
       const query = search.toLowerCase()
@@ -152,59 +147,78 @@ export default function RegistryCatalog() {
         entry.tags.some(tag => tag.toLowerCase().includes(query))
       )
     })
-  }, [categoryFilter, search, tabEntries])
+    if (!sortKey) return visibleEntries
+
+    const direction = sortDirection === 'asc' ? 1 : -1
+    return [...visibleEntries].sort((left, right) => {
+      const comparison =
+        sortKey === 'name'
+          ? left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+          : compareVersions(left.version, right.version)
+      return comparison * direction
+    })
+  }, [categoryFilter, connectorEntries, search, sortDirection, sortKey])
 
   const isInitialLoad = loading && entries.length === 0
 
-  function isEntryInstalled(entry: RegistryEntry): boolean {
-    if (entry.entry_type === 'mcp-server') {
-      return (
-        installedCatalogKeys.has(`${entry.name}@${entry.version}`) ||
-        installedServerNames.has(entry.name)
-      )
+  function toggleSort(key: CatalogSortKey) {
+    if (sortKey === key) {
+      setSortDirection(direction => (direction === 'asc' ? 'desc' : 'asc'))
+      return
     }
-    return installedRecipeKeys.has(`${entry.name}@${entry.version}`)
+    setSortKey(key)
+    setSortDirection(key === 'version' ? 'desc' : 'asc')
+  }
+
+  function renderSortHeader(key: CatalogSortKey, label: string) {
+    const isActive = sortKey === key
+    const indicator = isActive ? (sortDirection === 'asc' ? '↑' : '↓') : ''
+    const nextDirection = isActive
+      ? sortDirection === 'asc'
+        ? 'descending'
+        : 'ascending'
+      : key === 'version'
+        ? 'descending'
+        : 'ascending'
+    return (
+      <button
+        type="button"
+        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
+        onClick={() => toggleSort(key)}
+        aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
+        aria-pressed={isActive}
+      >
+        {label} {indicator}
+      </button>
+    )
+  }
+
+  function isEntryInstalled(entry: RegistryEntry): boolean {
+    return (
+      installedCatalogKeys.has(`${entry.name}@${entry.version}`) ||
+      installedServerNames.has(entry.name)
+    )
   }
 
   function renderInstallButton(entry: RegistryEntry) {
     const installed = isEntryInstalled(entry)
-    const installing = installingRecipeKey === `${entry.name}@${entry.version}`
-    if (entry.entry_type === 'mcp-server') {
-      return installed ? (
-        <button type="button" className="cu-btn cu-btn--sm" disabled>
-          Installed
-        </button>
-      ) : (
-        <button
-          type="button"
-          className="cu-btn cu-btn--sm cu-btn--primary"
-          onClick={() =>
-            router.push(
-              CONTROL_ROUTES.marketplace.install({ entry: entry.name, version: entry.version })
-            )
-          }
-        >
-          Install
-        </button>
-      )
-    }
-    if (entry.recipe_meta?.recipeYaml) {
-      return installed ? (
-        <button type="button" className="cu-btn cu-btn--sm" disabled>
-          Installed
-        </button>
-      ) : (
-        <button
-          type="button"
-          className="cu-btn cu-btn--sm cu-btn--primary"
-          disabled={installing}
-          onClick={() => void handleInstallRecipe(entry)}
-        >
-          {installing ? 'Installing...' : 'Install'}
-        </button>
-      )
-    }
-    return <span className="cu-registry-missing">No plugin data</span>
+    return installed ? (
+      <button type="button" className="cu-btn cu-btn--sm" disabled>
+        Installed
+      </button>
+    ) : (
+      <button
+        type="button"
+        className="cu-btn cu-btn--sm cu-btn--primary"
+        onClick={() =>
+          router.push(
+            CONTROL_ROUTES.marketplace.install({ entry: entry.name, version: entry.version })
+          )
+        }
+      >
+        Install
+      </button>
+    )
   }
 
   // An entry belongs to this deployment's org when its name carries the org
@@ -231,7 +245,7 @@ export default function RegistryCatalog() {
     <div className="cu-banner cu-banner--info" role="status">
       <span>
         This deployment isn&apos;t connected to a registry. Connect it to publish and install
-        connectors and plugins.
+        connectors.
       </span>
       <button
         type="button"
@@ -258,27 +272,13 @@ export default function RegistryCatalog() {
 
   return (
     <div className="cu-registry-layout">
-      {installError ? (
-        <div className="cu-banner cu-banner--error cu-banner--dismissible" role="alert">
-          <span>{installError}</span>
-          <button
-            type="button"
-            className="cu-banner__dismiss"
-            onClick={() => setInstallError('')}
-            aria-label="Dismiss install error"
-          >
-            <IconX width={14} height={14} />
-          </button>
-        </div>
-      ) : null}
       {connectBanner}
       <div className="cu-card cu-card--viewport-fill cu-section-card">
-        <MarketplaceTabs active="connectors" />
         <TablePanelHeader
           title={
             <>
               <IconStore />
-              Connectors
+              Marketplace
             </>
           }
           subtitle="Discover and install connectors from the Marketplace."
@@ -315,15 +315,14 @@ export default function RegistryCatalog() {
                 </button>
               ) : null}
               {/* Publish-to-Marketplace hidden for now under the distribution
-                  strategy narrowing (plugins are org-private only; users cannot
-                  publish to a public catalog). Commented out — restore when
-                  public/org publishing returns to discovery.
+                  strategy narrowing. Commented out — restore when public/org
+                  connector publishing returns to discovery.
               {canManageOrg || isCurator ? (
                 <button
                   type="button"
                   className="cu-btn cu-btn--primary cu-btn--sm"
                   onClick={() =>
-                    router.push(CONTROL_ROUTES.marketplace.publish({ type: activeEntryType }))
+                    router.push(CONTROL_ROUTES.marketplace.publish({ type: 'mcp-server' }))
                   }
                   disabled={isInitialLoad}
                 >
@@ -334,7 +333,7 @@ export default function RegistryCatalog() {
             </>
           }
         />
-
+        <MarketplaceTabs active="connectors" />
         <div className="cu-table-wrap cu-marketplace-table-wrap">
           <table className="cu-table cu-table--header-band cu-expandable-table cu-marketplace-table">
             <thead>
@@ -349,7 +348,7 @@ export default function RegistryCatalog() {
                   const expanded = expandedKeys.has(expandKey)
                   const typeMeta = entry.server_mode
                     ? `${entry.server_mode}${entry.transport ? ` / ${entry.transport}` : ''}`
-                    : entry.recipe_type || '—'
+                    : '—'
                   return (
                     <Fragment key={entry.id}>
                       <tr
@@ -398,18 +397,6 @@ export default function RegistryCatalog() {
                           ) : null}
                         </td>
                         <td className="cu-code-text">{entry.version}</td>
-                        <td>
-                          {entry.visibility ? (
-                            <span
-                              className={`cu-registry-chip cu-registry-chip--visibility-${entry.visibility}`}
-                            >
-                              {entry.visibility === 'public' ? 'Public' : 'Private'}
-                            </span>
-                          ) : (
-                            <span className="cu-muted">—</span>
-                          )}
-                        </td>
-                        <td>{entry.downloads}</td>
                         <td
                           className="cu-table__cell-actions cu-marketplace-action-cell"
                           onClick={event => event.stopPropagation()}
@@ -465,30 +452,39 @@ export default function RegistryCatalog() {
                                   <span className="cu-expandable-field__label">Type</span>
                                   <span className="cu-registry-type-meta">{typeMeta}</span>
                                 </div>
-                                <div className="cu-expandable-field cu-expandable-field--wide">
-                                  <div className="cu-expandable-tags">
-                                    <span
-                                      className="cu-registry-chip"
-                                      style={{
-                                        color: trustColor(entry.trust_level),
-                                        background: trustBgColor(entry.trust_level),
-                                        borderColor: trustColor(entry.trust_level),
-                                      }}
-                                    >
-                                      {entry.trust_level.toUpperCase()}
-                                    </span>
-                                    <span
-                                      className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
-                                    >
-                                      {entry.quality_tier}
-                                    </span>
-                                    {entry.tags.map(tag => (
-                                      <span key={tag} className="cu-registry-tag">
-                                        {tag}
-                                      </span>
-                                    ))}
-                                  </div>
+                                <div className="cu-expandable-field">
+                                  <span className="cu-expandable-field__label">Trust</span>
+                                  <span
+                                    className="cu-registry-chip"
+                                    style={{
+                                      color: trustColor(entry.trust_level),
+                                      background: trustBgColor(entry.trust_level),
+                                      borderColor: trustColor(entry.trust_level),
+                                    }}
+                                  >
+                                    {entry.trust_level.toUpperCase()}
+                                  </span>
                                 </div>
+                                <div className="cu-expandable-field">
+                                  <span className="cu-expandable-field__label">Verification</span>
+                                  <span
+                                    className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
+                                  >
+                                    {entry.quality_tier}
+                                  </span>
+                                </div>
+                                {entry.tags.length > 0 && (
+                                  <div className="cu-expandable-field">
+                                    <span className="cu-expandable-field__label">Tags</span>
+                                    <div className="cu-expandable-tags">
+                                      {entry.tags.map(tag => (
+                                        <span key={tag} className="cu-registry-tag">
+                                          {tag}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </td>
@@ -501,7 +497,7 @@ export default function RegistryCatalog() {
               {!isInitialLoad && filtered.length === 0 ? (
                 <tr>
                   <td colSpan={columns.length} className="cu-empty">
-                    No entries match your filters.
+                    No connectors match your filters.
                   </td>
                 </tr>
               ) : null}

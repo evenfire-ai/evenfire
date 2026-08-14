@@ -6,11 +6,130 @@ import {
   type Turn,
 } from '../../core/types'
 import {
+  decodeSessionsCursor,
+  paginateSessionSummaries,
   projectContextBreakdown,
+  projectMessageWindowBounds,
   projectSessionTokens,
   projectTurnTokens,
   projectTurnToolSteps,
 } from '../wireProjections'
+
+describe('session pagination projections', () => {
+  it('rejects malformed and invalid-date cursors', () => {
+    expect(decodeSessionsCursor('not-base64-json')).toBeNull()
+    const invalidDate = Buffer.from(
+      JSON.stringify({ updatedAt: 'not-a-date', key: 'session-1' })
+    ).toString('base64url')
+    expect(decodeSessionsCursor(invalidDate)).toBeNull()
+    const nonCanonicalDate = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        scope: 'scope-a',
+        updatedAt: '0',
+        key: 'session-1',
+      })
+    ).toString('base64url')
+    expect(decodeSessionsCursor(nonCanonicalDate, 'scope-a')).toBeNull()
+    const emptyKey = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        scope: 'scope-a',
+        updatedAt: '2026-01-03T00:00:00.000Z',
+        key: '',
+      })
+    ).toString('base64url')
+    expect(decodeSessionsCursor(emptyKey, 'scope-a')).toBeNull()
+  })
+
+  it('rejects legacy and cross-scope cursors', () => {
+    const legacy = Buffer.from(
+      JSON.stringify({ updatedAt: '2026-01-03T00:00:00.000Z', key: 'a' })
+    ).toString('base64url')
+    expect(decodeSessionsCursor(legacy)).toBeNull()
+
+    const scoped = paginateSessionSummaries(
+      [
+        { key: 'a', lastActivityAt: new Date('2026-01-03T00:00:00Z') },
+        { key: 'b', lastActivityAt: new Date('2026-01-02T00:00:00Z') },
+      ],
+      1,
+      key => key,
+      'scope-a'
+    ).nextCursor
+    expect(decodeSessionsCursor(scoped, 'scope-a')).not.toBeNull()
+    expect(decodeSessionsCursor(scoped, 'scope-b')).toBeNull()
+  })
+
+  it('returns a cursor only when another summary page exists', () => {
+    const entries = [
+      { key: 'a', lastActivityAt: new Date('2026-01-03T00:00:00Z') },
+      { key: 'b', lastActivityAt: new Date('2026-01-02T00:00:00Z') },
+    ]
+    const result = paginateSessionSummaries(entries, 1)
+    expect(result.page).toEqual([entries[0]])
+    expect(decodeSessionsCursor(result.nextCursor)).toEqual({
+      version: 1,
+      scope: 'unscoped',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+      key: 'a',
+    })
+    expect(paginateSessionSummaries(entries, 2).nextCursor).toBeUndefined()
+    expect(paginateSessionSummaries(entries, undefined)).toEqual({ page: entries })
+  })
+
+  it('projects bounded message-window navigation consistently', () => {
+    expect(
+      projectMessageWindowBounds(
+        [{ number: 3 }, { number: 4 }],
+        { firstTurnNumber: 1, lastTurnNumber: 6 },
+        {}
+      )
+    ).toEqual({
+      oldestTurnNumber: 3,
+      latestTurnNumber: 4,
+      hasMoreBefore: true,
+      hasMoreAfter: true,
+    })
+  })
+
+  it('reports closed boundaries and empty windows without false pagination affordances', () => {
+    expect(
+      projectMessageWindowBounds(
+        [{ number: 1 }, { number: 6 }],
+        { firstTurnNumber: 1, lastTurnNumber: 6 },
+        {}
+      )
+    ).toEqual({
+      oldestTurnNumber: 1,
+      latestTurnNumber: 6,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+    expect(projectMessageWindowBounds([], {}, {})).toEqual({
+      oldestTurnNumber: undefined,
+      latestTurnNumber: undefined,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+    expect(
+      projectMessageWindowBounds([], { firstTurnNumber: 1, lastTurnNumber: 5 }, { afterTurn: 5 })
+    ).toEqual({
+      oldestTurnNumber: undefined,
+      latestTurnNumber: undefined,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+    expect(
+      projectMessageWindowBounds([], { firstTurnNumber: 1, lastTurnNumber: 10 }, { beforeTurn: 1 })
+    ).toEqual({
+      oldestTurnNumber: undefined,
+      latestTurnNumber: undefined,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+  })
+})
 
 function makeConversation(overrides: Partial<Conversation> = {}): Conversation {
   return {

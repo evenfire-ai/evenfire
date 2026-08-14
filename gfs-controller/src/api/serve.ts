@@ -25,6 +25,24 @@ import { normalizeResourceName, ResourceNameError } from "./resourceName";
 import { planWrite, WriteError } from "./write";
 
 /**
+ * Strip control characters (CR/LF/tab, C0 controls, DEL) and bound the length of
+ * a user-controlled value before it is interpolated into a log line. Prevents
+ * log injection / log forging (CWE-117) when values that may carry user input
+ * (request method/target, or an error message/stack that echoes a decoded path)
+ * reach a log sink. CR/LF are removed; other control chars become '?'.
+ */
+export function sanitizeForLog(value: string): string {
+  // Remove CR/LF first (the log-forging vector; empty-string replace that
+  // enumerates \n is the barrier CodeQL's js/log-injection recognizes), then
+  // scrub any remaining C0 controls and DEL to '?', and bound the length to
+  // guard against log flooding.
+  return value
+    .replace(/[\n\r]/g, "")
+    .replace(/[\u0000-\u001f\u007f]/g, "?")
+    .slice(0, 512);
+}
+
+/**
  * gfsc read serving handler (spec community.md §Operator surfaces / §Auth,
  * plan P1-S07/S08 composed). This is the broker's READ data plane — the single
  * place where a request is turned into a served byte or a denial.
@@ -71,8 +89,24 @@ export interface ServingDeps {
   now?: () => number;
 }
 
-/** Largest mutation body gfsc accepts before failing loud with payload_too_large. */
-const MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
+/**
+ * Largest mutation body gfsc accepts before failing loud with payload_too_large.
+ * Configurable via GFS_MAX_WRITE_BODY_BYTES, plumbed to the gfsc pod through the
+ * host-context-controller gfsc template (deploy sets it to 24MiB for the 16MB upload
+ * cap). A non-integer or non-positive value fails loud to stderr and falls back to the
+ * 16MiB default — otherwise a config typo would silently 413 every large upload.
+ */
+const DEFAULT_MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_WRITE_BODY_BYTES = ((): number => {
+  const rawEnv = process.env.GFS_MAX_WRITE_BODY_BYTES;
+  if (rawEnv === undefined) return DEFAULT_MAX_WRITE_BODY_BYTES;
+  const raw = Number(rawEnv);
+  if (Number.isInteger(raw) && raw > 0) return raw;
+  console.error(
+    `[gfsc] ignoring invalid GFS_MAX_WRITE_BODY_BYTES="${rawEnv}" (must be a positive integer); using ${DEFAULT_MAX_WRITE_BODY_BYTES}`
+  );
+  return DEFAULT_MAX_WRITE_BODY_BYTES;
+})();
 const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
 const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
 
@@ -146,9 +180,30 @@ function requireRid(raw: string): string {
   }
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers?: Record<string, string>
+): void {
+  res.writeHead(status, { "Content-Type": "application/json", ...headers });
   res.end(JSON.stringify(body));
+}
+
+/**
+ * When a response is written BEFORE the request body was fully received (e.g.
+ * payload_too_large aborts the read mid-stream), the connection cannot be
+ * reused: unread bytes are still in flight and Node resets the socket after
+ * the response. Without advertising `Connection: close`, a pooling client
+ * (undici in control-api's gfs proxy) queues its next request onto the
+ * about-to-die socket and gets ECONNRESET → a spurious 502 gfsc_unreachable
+ * (reproduced live: 413 → immediately-following proxied request failed
+ * deterministically). `req.complete` is Node's own "entire message received"
+ * flag; `=== false` keeps plain-object test doubles (complete: undefined)
+ * and fully-consumed bodies on normal keep-alive.
+ */
+function abortConnectionHeader(req: IncomingMessage): Record<string, string> | undefined {
+  return req.complete === false ? { Connection: "close" } : undefined;
 }
 
 export class GfsServingHandler {
@@ -181,7 +236,10 @@ export class GfsServingHandler {
     const resourceWrite = isWrite && this.deps.writeService && resourceMatch
       && (method === "DELETE" || Boolean(this.deps.audit));
     if ((copyMatch && !copyWrite) || (method === "PATCH" && !renameWrite) || (method !== "GET" && !resourceWrite && !copyWrite)) {
-      sendJson(res, 404, { ok: false, error: { code: "not_found", message: "not found" } });
+      // This 404 can be written before a request body was consumed (e.g. a
+      // POST with a body to an unsupported verb/route) — same socket-poisoning
+      // risk as the catch path below, so it carries the same close semantics.
+      sendJson(res, 404, { ok: false, error: { code: "not_found", message: "not found" } }, abortConnectionHeader(req));
       return true;
     }
 
@@ -210,7 +268,20 @@ export class GfsServingHandler {
       }
     } catch (err) {
       const { status, body } = toResponse(err);
-      if (!res.headersSent) sendJson(res, status, body);
+      if (status >= 500) {
+        // A 5xx must never be invisible: an unknown throw (e.g. the base64
+        // RangeError that produced a bogus `internal` 500) previously left no
+        // trace anywhere in the system. Log code + stack (never the body/content).
+        // The stack/message is sanitized too: an underlying error (e.g. a driver
+        // error echoing a decoded path) can carry user input with real newlines,
+        // so it is a log-injection source just like method/url.
+        console.error(
+          `[gfsc] ${sanitizeForLog(method)} ${sanitizeForLog(req.url ?? "?")} -> ${status} ${body.error.code}: ${sanitizeForLog(
+            err instanceof Error ? (err.stack ?? err.message ?? "") : String(err)
+          )}`
+        );
+      }
+      if (!res.headersSent) sendJson(res, status, body, abortConnectionHeader(req));
       else res.end(); // a content stream already started; just terminate
     } finally {
       cancelCopyTimer?.();
@@ -592,8 +663,13 @@ function readContentBuffer(body: Record<string, unknown>): Buffer {
 
 function decodeBase64Content(encoded: string): Buffer {
   if (encoded.length === 0) return Buffer.alloc(0);
-  const standardBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-  if (!standardBase64.test(encoded)) {
+  // Canonical base64: length is a multiple of 4, only base64 chars, and padding
+  // ('=' x0-2) only at the very end. This uses a single character-class star,
+  // which V8 compiles to a linear loop. The previous `/(?:[A-Za-z0-9+/]{4})*.../`
+  // used a GROUPED quantifier that pushes an Irregexp backtrack frame per 4-char
+  // group and threw `RangeError: Maximum call stack size exceeded` above ~4.47M
+  // chars (~3.2MB raw) — surfacing as a bogus 500 `internal` on any large upload.
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
     throw new GfsError("path_invalid", "'contentBase64' must be valid base64");
   }
   return Buffer.from(encoded, "base64");

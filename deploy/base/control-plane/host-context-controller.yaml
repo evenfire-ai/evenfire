@@ -66,6 +66,17 @@ spec:
           value: clerum/mcp-host:0.9.5
         - name: CONTEXT_MAPPER_EGRESS_PROXY_IMAGE
           value: clerum/nginx-egress-proxy:0.1.0
+        # GFS upload ceiling: gfsc write-body cap (bytes), passed through to the gfsc
+        # pod. Raised from the 16MiB default to 24MiB so a 16MB raw file (base64 body
+        # ≈ 22.4MB) is accepted with margin. Keep in step with the client cap
+        # (GFS_FILE_UPLOAD_MAX_BYTES in control-ui) and gfsc memory below.
+        - name: GFS_MAX_WRITE_BODY_BYTES
+          value: "25165824"
+        # gfsc memory limit: a 24MiB-cap upload holds ~4.3× the body (~103MiB) over a
+        # ~40MiB baseline; 512Mi absorbs concurrent uploads without OOM (256Mi default
+        # was tight at the 24MiB cap).
+        - name: CONTEXT_MAPPER_GFSC_LIMIT_MEMORY
+          value: 512Mi
         - name: STDIO_BRIDGE_IMAGE
           value: clerum/stdio-bridge:0.9.5
         - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
@@ -74,8 +85,14 @@ spec:
         # API or the HCC discovery API, so they get only deny-all + DNS.
         - name: CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES
           value: sandbox-ui
+        # issue #299: the external-egress resync interval MUST stay <= half the
+        # overlap window (HCC_EXTERNAL_EGRESS_OVERLAP_SEC, default 300s) so the
+        # persisted sliding window of resolved /32s never lapses between
+        # refreshes. The legacy 300 (== the overlap) let the accumulated set
+        # expire before the next refresh, which is the #299 drift itself; HCC
+        # now fails closed at startup on any interval > overlap/2.
         - name: HCC_EXTERNAL_EGRESS_RESYNC_SEC
-          value: "300"
+          value: "60"
         - name: HCC_HOST_K8S_REQUEST_TIMEOUT_MS
           value: "30000"
         # Bounded cross-Host concurrency for a full/lifecycle Host fleet pass.

@@ -70,7 +70,7 @@ describe('0061_governed_run_trace_schema_foundation migration', () => {
     expect(migrationSql).toContain('ADD COLUMN IF NOT EXISTS run_id UUID NULL')
     expect(migrationSql).toContain('governed_trace_safe_agent_run_metadata')
     expect(migrationSql).toContain(
-      "value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')"
+      "value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')"
     )
     expect(migrationSql).toContain("(value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'")
     expect(migrationSql).toContain(

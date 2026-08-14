@@ -1,5 +1,5 @@
 import { parseTaskKey } from '@contexts/AgentTaskTrackerContext'
-import type { SessionMessagesResult } from '../../../../src/types'
+import type { SessionMessagesQuery, SessionMessagesResult } from '../../../../src/types'
 import type { SessionFsmStore } from './sessionFsm'
 
 /**
@@ -38,7 +38,12 @@ export type ReconcileOutcome =
 export interface ReconcileChatDeps {
   fsm: SessionFsmStore
   /** Fetch the durable server session state (turns + recovery fields). */
-  loadSessionMessages: (agentRef: string, chatId: string) => Promise<SessionMessagesResult>
+  loadSessionMessages: (
+    agentRef: string,
+    chatId: string,
+    query?: SessionMessagesQuery,
+    stillRelevant?: () => boolean
+  ) => Promise<SessionMessagesResult | undefined>
   /**
    * Server reports a live (`processing`/`awaiting_approval`) task: seed the
    * snapshot and attach a stream via the coordinator. Returns the outcome
@@ -87,6 +92,8 @@ export interface ReconcileChatArgs {
   reason: string
   /** The task this reconcile is settling — drives the idle durable fallback. */
   taskIdHint?: string
+  /** Bounded page or delta request used by the authoritative transcript fetch. */
+  messagesQuery?: SessionMessagesQuery
   /**
    * Per-call relevance guard (in addition to the dep-level `isStillRelevant` and
    * the `reset()` generation). A `switchToChat`-initiated reconcile passes the
@@ -110,6 +117,8 @@ export interface ReconcileChat {
   (chatKey: string, args: ReconcileChatArgs): Promise<ReconcileOutcome>
   /** Whether a reconcile is currently in flight for the chat (single-flight). */
   isInFlight: (chatKey: string) => boolean
+  /** Invalidate and detach the current run for one chat while leaving others alone. */
+  supersede: (chatKey: string) => void
   /**
    * Abort every in-flight reconcile (logout / team-switch / renderer teardown):
    * bumps a generation so any run past its next relevance check bails BEFORE its
@@ -138,6 +147,7 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
   // at `settleIdle` time, so a hint that arrives before the fetch resolves is
   // still honoured (M6).
   const inFlightHint = new Map<string, string | undefined>()
+  const chatGenerations = new Map<string, number>()
   const attempts = deps.networkRetryAttempts ?? DEFAULT_RETRY_ATTEMPTS
   const backoff = deps.networkRetryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS
   // Bumped by `reset()`; a run started under an older generation is no longer
@@ -147,13 +157,15 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
   async function fetchWithRetry(
     agentRef: string,
     chatId: string,
-    stillRelevant: () => boolean
+    stillRelevant: () => boolean,
+    query?: SessionMessagesQuery
   ): Promise<SessionMessagesResult | undefined> {
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (!stillRelevant()) return undefined
       try {
-        return await deps.loadSessionMessages(agentRef, chatId)
+        return await deps.loadSessionMessages(agentRef, chatId, query, stillRelevant)
       } catch (err) {
+        if (!stillRelevant()) return undefined
         // Non-network (404, etc.) rethrows to the branch handler; a network blip
         // is retried with backoff up to the cap (mirrors switchToChat P2-A).
         if (!deps.isNetworkError(err) || attempt === attempts - 1) throw err
@@ -166,11 +178,13 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
 
   async function run(chatKey: string, args: ReconcileChatArgs): Promise<ReconcileOutcome> {
     const startGeneration = generation
+    const startChatGeneration = chatGenerations.get(chatKey) ?? 0
     const { agentRef, chatId } = parseTaskKey(chatKey)
     // Relevant only while (a) no `reset()` happened since this run began AND (b)
     // the injected chat-level guard still holds.
     const stillRelevant = () =>
       generation === startGeneration &&
+      (chatGenerations.get(chatKey) ?? 0) === startChatGeneration &&
       (deps.isStillRelevant?.(chatKey) ?? true) &&
       (args.isRelevant?.() ?? true)
     // R2 anchor: the epoch at the START of the fetch, so a snapshot that a newer
@@ -179,7 +193,7 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     deps.fsm.dispatch(chatKey, { type: 'RECONCILE_STARTED' })
     let outcome: ReconcileOutcome = 'noop'
     try {
-      const resp = await fetchWithRetry(agentRef, chatId, stillRelevant)
+      const resp = await fetchWithRetry(agentRef, chatId, stillRelevant, args.messagesQuery)
       if (!resp) {
         outcome = 'noop'
         return outcome
@@ -202,6 +216,10 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
           )
       return outcome
     } catch (err) {
+      if (!stillRelevant()) {
+        outcome = 'stale_drop'
+        return outcome
+      }
       if (deps.isHttp404(err)) {
         await deps.evictChat(chatKey)
         deps.fsm.dispatch(chatKey, { type: 'RESET' })
@@ -223,7 +241,13 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     } finally {
       // RESET already tore the entry down on 404; re-dispatching FINISHED would
       // resurrect an empty entry, so skip the finalizer in that case.
-      if (outcome !== '404') deps.fsm.dispatch(chatKey, { type: 'RECONCILE_FINISHED' })
+      if (
+        outcome !== '404' &&
+        generation === startGeneration &&
+        (chatGenerations.get(chatKey) ?? 0) === startChatGeneration
+      ) {
+        deps.fsm.dispatch(chatKey, { type: 'RECONCILE_FINISHED' })
+      }
       deps.telemetry('stream_recovery', { reason: args.reason, outcome })
     }
   }
@@ -242,17 +266,30 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     }
     inFlightHint.set(chatKey, args.taskIdHint)
     const promise = run(chatKey, args).finally(() => {
-      inFlight.delete(chatKey)
-      inFlightHint.delete(chatKey)
+      // reset() permits a fresh reconcile for the same key while this older
+      // promise is still settling. Only clear the entry we actually own.
+      if (inFlight.get(chatKey) === promise) {
+        inFlight.delete(chatKey)
+        inFlightHint.delete(chatKey)
+      }
     })
     inFlight.set(chatKey, promise)
     return promise
   }) as ReconcileChat
   reconcile.isInFlight = (chatKey: string) => inFlight.has(chatKey)
+  reconcile.supersede = (chatKey: string) => {
+    if (inFlight.has(chatKey)) {
+      deps.fsm.dispatch(chatKey, { type: 'RECONCILE_FINISHED' })
+    }
+    chatGenerations.set(chatKey, (chatGenerations.get(chatKey) ?? 0) + 1)
+    inFlight.delete(chatKey)
+    inFlightHint.delete(chatKey)
+  }
   reconcile.reset = () => {
     generation += 1
     inFlight.clear()
     inFlightHint.clear()
+    chatGenerations.clear()
   }
   return reconcile
 }
