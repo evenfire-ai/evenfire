@@ -740,6 +740,26 @@ describe('LlmHookReconciler', () => {
     })
   })
 
+  it('hardens the hook pod: non-root, read-only root fs, dropped caps, no SA token (N8)', async () => {
+    const a = makeHook({ name: 'a' })
+    hooks.set('a', a)
+    await reconciler.reconcile(a)
+
+    const dep = (
+      appsApi.createNamespacedDeployment.mock.calls.at(-1)![0] as { body: k8s.V1Deployment }
+    ).body
+    const podSpec = dep.spec!.template.spec!
+    expect(podSpec.automountServiceAccountToken).toBe(false)
+    const c = podSpec.containers[0]!
+    expect(c.securityContext?.runAsNonRoot).toBe(true)
+    expect(c.securityContext?.readOnlyRootFilesystem).toBe(true)
+    expect(c.securityContext?.allowPrivilegeEscalation).toBe(false)
+    expect(c.securityContext?.capabilities?.drop).toContain('ALL')
+    // Writable /tmp scratch under the read-only root fs.
+    expect(c.volumeMounts).toEqual([{ name: 'tmp', mountPath: '/tmp' }])
+    expect(podSpec.volumes).toEqual([{ name: 'tmp', emptyDir: {} }])
+  })
+
   it('rejects an invalid (private-range) egress binding without exposing the workload', async () => {
     const a = makeHook({
       name: 'a',

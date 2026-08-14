@@ -593,6 +593,9 @@ export class LlmHookReconciler {
         ...(addCapabilities.length ? { add: addCapabilities } : {}),
       },
       seccompProfile: { type: 'RuntimeDefault' },
+      // N8: the image filesystem is immutable to the running hook. Scratch space
+      // is the ephemeral `/tmp` emptyDir mounted below — never the image layers.
+      readOnlyRootFilesystem: true,
     }
 
     return {
@@ -632,6 +635,8 @@ export class LlmHookReconciler {
                 // envSecret injects the hook's OWN credentials (whole Secret).
                 ...(img.envSecret ? { envFrom: [{ secretRef: { name: img.envSecret } }] } : {}),
                 securityContext: hardenedContainerSecurityContext,
+                // Writable scratch under a read-only root fs (N8).
+                volumeMounts: [{ name: 'tmp', mountPath: '/tmp' }],
                 livenessProbe: {
                   tcpSocket: { port: 'http' as unknown as IntOrString },
                   initialDelaySeconds: 10,
@@ -648,6 +653,7 @@ export class LlmHookReconciler {
                 },
               },
             ],
+            volumes: [{ name: 'tmp', emptyDir: {} }],
           },
         },
       },
