@@ -20,6 +20,7 @@ class MemoryDb {
   sessions: Row[] = []
   parts: Row[] = []
   failReconciliationReads = false
+  failSessionReconciliationReads = false
 
   async query(text: string, values: unknown[] = []): Promise<{ rows: Row[] }> {
     const sql = text.replace(/\s+/g, ' ').trim()
@@ -34,6 +35,9 @@ class MemoryDb {
       }
     }
     if (sql.startsWith('SELECT * FROM gfs_upload_sessions WHERE upload_id')) {
+      if (this.failSessionReconciliationReads) {
+        throw new CommitOutcomeUnknownError(new Error('synthetic session reconciliation read failure'))
+      }
       const [id, drive, owner] = values.map(String)
       return {
         rows: this.sessions.filter(
@@ -490,6 +494,29 @@ class ThrowBeforePartCommitTransactor implements Transactor {
   }
 }
 
+class ThrowOnCommitTransactor implements Transactor {
+  private transactionCount = 0
+
+  constructor(
+    private readonly delegate: Transactor,
+    private readonly failOnTransaction: number,
+    private readonly afterCommit: () => void
+  ) {}
+
+  async transaction<T>(
+    fn: (client: TxClient) => Promise<T>,
+    options?: TransactionOptions
+  ): Promise<T> {
+    this.transactionCount += 1
+    const result = await this.delegate.transaction(fn, options)
+    if (this.transactionCount === this.failOnTransaction) {
+      this.afterCommit()
+      throw new CommitOutcomeUnknownError(new Error('synthetic completion response loss'))
+    }
+    return result
+  }
+}
+
 async function settleWithin<T>(
   promise: Promise<T>,
   timeoutMs = 500
@@ -728,6 +755,53 @@ describe('GfsUploadSessionService', () => {
     })
     expect(finalizerExpiry).toBeGreaterThan(originalExpiry)
     expect(Date.parse(db.sessions[0]!.expires_at as string)).toBeGreaterThan(originalExpiry)
+  })
+
+  it('preserves a published final path until reconciliation resolves an ambiguous completion commit', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-final-path-reconcile-'))
+    const db = new MemoryDb()
+    const created = await service(db).create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'ambiguous-completion.bin',
+      sizeBytes: 0,
+      idempotencyKey: '70707070-7070-4070-8070-707070707070',
+    })
+    let publishedPath = ''
+    const tx = new ThrowOnCommitTransactor(
+      { transaction: async fn => fn(db) },
+      2,
+      () => {
+        db.failSessionReconciliationReads = true
+      }
+    )
+    const uploads = service(db, TEST_CONFIG, {
+      tx,
+      finalize: async session => {
+        publishedPath = join(
+          tempRoot,
+          '.uploads',
+          session.uploadId,
+          'parts',
+          'published.part'
+        )
+        await mkdir(join(tempRoot, '.uploads', session.uploadId, 'parts'), { recursive: true })
+        await writeFile(publishedPath, 'published before completion response was lost')
+        return { resourceId: 'resource-ambiguous', version: 1, sha256: 'b'.repeat(64) }
+      },
+    })
+
+    await expect(uploads.complete(created.session.uploadId, principal)).rejects.toBeInstanceOf(
+      CommitOutcomeUnknownError
+    )
+    expect(db.sessions[0]).toMatchObject({ state: 'completed', cleanup_at: null })
+    await expect(stat(publishedPath)).resolves.toBeDefined()
+
+    db.failSessionReconciliationReads = false
+    await expect(uploads.reconcile()).resolves.toEqual({ staleParts: 0, expiredSessions: 0 })
+    await expect(stat(publishedPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(db.sessions[0]?.cleanup_at).toEqual(expect.any(String))
   })
 
   it('removes a rename-before-commit orphan while the reserved lease is still locked', async () => {
