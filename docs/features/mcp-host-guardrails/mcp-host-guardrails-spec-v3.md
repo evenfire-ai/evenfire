@@ -1458,7 +1458,10 @@ which a guardrail `allow` never bypasses.
   LONG`); (3) `RemoteLlmHook` races every dial against a **hard per-hook deadline** so a never-settling
   transport still yields `unavailable` → `failMode`; and (4) `main.ts` installs `uncaughtException`/
   `unhandledRejection` guards so a stray listener throw is logged, not a silent exit. A fully-silent peer,
-  connection-refused/DNS/5xx/malformed-JSON, and the SSRF pinning were already handled.
+  connection-refused/DNS/5xx/malformed-JSON, and the SSRF pinning were already handled. The native
+  `http_request` tool shares `requestPinned` and had the same latent weakness — it now passes an absolute
+  deadline (`AbortSignal`) and a byte ceiling (10 MiB, above its 50 KB display-truncation) so the same
+  trickle/flood bounds apply there too.
 - **Content projection & content/egress gate — RESOLVED (§8.4/§8.7).** Earlier the install gate classified
   only `moderate`/`postCallSuccess` as content-bearing while the runtime handed the full
   `ToolCompletionRequest` (messages) to `pre_call`/`on_error` with no projection, so a low/mid-trust

@@ -8,6 +8,14 @@ import { ToolOutput } from '../types'
 // hook fetcher.
 export { isPrivateIp } from '../net/ssrf'
 
+// Transport bounds (shared requestPinned, §8.1). The timeout is enforced as an
+// ABSOLUTE deadline via AbortSignal — Node's socket `timeout` alone is an idle
+// timer a trickling server resets forever. The byte ceiling is a safety cap far
+// above the 50 KB display-truncation below, so normal responses are unaffected;
+// only a multi-MB flood is rejected (destroyed mid-stream, never fully buffered).
+const HTTP_REQUEST_TIMEOUT_MS = 30000
+const HTTP_REQUEST_MAX_BYTES = 10 * 1024 * 1024 // 10 MiB
+
 export class HttpRequestTool implements Tool {
   constructor(private readonly allowlist: string[]) {}
 
@@ -103,7 +111,9 @@ export class HttpRequestTool implements Tool {
         headers,
         body,
         pinnedIp,
-        timeoutMs: 30000,
+        timeoutMs: HTTP_REQUEST_TIMEOUT_MS,
+        signal: AbortSignal.timeout(HTTP_REQUEST_TIMEOUT_MS),
+        maxBytes: HTTP_REQUEST_MAX_BYTES,
       })
       const truncated =
         responseBody.length > 50000
