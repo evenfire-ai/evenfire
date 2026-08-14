@@ -133,6 +133,13 @@ link, and writes `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`. On a
 teams-managed bot the Teams App ID, Bot ID and `CLIENT_ID` are the same UUID;
 do not go hunting for three different values.
 
+**Short and long description need to differ.** `teams app create` sets both to
+the app name. The Developer Portal requires them to be different, so before
+installing, open the [Developer Portal](https://dev.teams.microsoft.com/apps),
+select the app, and under **Basic information** give the long description its
+own value. Do this regardless: it may be part of why the install link below
+fails (see Troubleshooting), though that has not been confirmed.
+
 Open the install link, add the app, and optionally add it to a channel.
 
 Then paste `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET` into the Control UI and
@@ -264,6 +271,21 @@ endpoint changed with it. Update the bot's messaging endpoint in the portal.
 **The app will not install.** The sideloading policy has not propagated, or the
 signed-in user is not the one it was assigned to. Check `teams status` rather
 than guessing.
+
+**The install link says "This app cannot be found."** Clicking the
+**Install in Teams** link `teams app create` prints, right after creation, can
+return this even though the app exists and is visible in the Developer Portal.
+It reads like the create failed. It did not: re-running `teams app create` in
+response leaves you with two bots.
+
+Two workarounds. Use **Preview in Teams** from the
+[Developer Portal](https://dev.teams.microsoft.com/apps) instead of the
+printed link; it bypasses the catalog lookup that is failing. Or wait a short
+while and regenerate the link:
+
+```shell
+teams app get <appId> --install-link
+```
 
 **The bot cannot get a token.** An `AADSTS` error means the app is multi-tenant.
 `channel-reader` needs single-tenant; `teams app doctor` should report

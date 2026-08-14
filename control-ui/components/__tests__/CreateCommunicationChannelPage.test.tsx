@@ -722,3 +722,61 @@ describe('CreateCommunicationChannelPage — Teams CLI instruction', () => {
     ).toBeInTheDocument()
   })
 })
+
+/**
+ * An operator without an authenticated Teams CLI, or without a tenant that
+ * permits sideloading, used to hit both assumptions unannounced, only after
+ * copying the `teams app create` command. The prerequisites block exists to
+ * surface both before that command, and to point at the full guide.
+ */
+describe('CreateCommunicationChannelPage — Teams prerequisites', () => {
+  const TEAMS_GUIDE_URL =
+    'https://github.com/evenfire-ai/evenfire/blob/main/docs/how-to/connect-teams.md'
+
+  it('shows CLI install/login and the sideloading check before the Teams provider is selected', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+
+    expect(screen.getByText(/npm install -g @microsoft\/teams\.cli/)).toBeInTheDocument()
+    expect(screen.getByText('teams login')).toBeInTheDocument()
+    expect(screen.getByText('Sideloading: enabled')).toBeInTheDocument()
+    // The point of running `teams status` at all: it proves both prerequisites
+    // in one shot, and a disabled result means propagation, not breakage.
+    expect(screen.getByText(/proves both prerequisites/i)).toBeInTheDocument()
+    expect(screen.getByText(/not that anything is broken/i)).toBeInTheDocument()
+  })
+
+  it('links to the Teams setup guide', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+
+    const link = screen.getByRole('link', { name: /Teams setup guide/i })
+    expect(link).toHaveAttribute('href', TEAMS_GUIDE_URL)
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+
+  it('does not show the Teams prerequisites on the Telegram provider', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+
+    expect(screen.queryByText('Sideloading: enabled')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Teams setup guide/i })).not.toBeInTheDocument()
+  })
+})

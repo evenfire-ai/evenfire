@@ -13,6 +13,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { SegmentedControl } from '@components/SegmentedControl'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconBroadcast } from '@components/Sidebar/icons'
+import { TeamsSetupPrerequisites } from '@components/TeamsSetupPrerequisites'
 import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
@@ -719,6 +720,8 @@ export default function CreateCommunicationChannelPage() {
                         }))
                       }
                     >
+                      <TeamsSetupPrerequisites />
+
                       <section className="cu-teams-setup">
                         <div>
                           <p className="cu-section-title">Create the Teams bot</p>
