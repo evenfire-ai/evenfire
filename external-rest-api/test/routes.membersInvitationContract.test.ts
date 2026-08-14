@@ -168,4 +168,28 @@ describe('member invitation cross-service error contract', () => {
       expect(directoryMock.createManagedInvitationForUser).toHaveBeenCalledTimes(directoryCalls)
     }
   )
+
+  it('preserves padded-name normalization through the real Control API route', async () => {
+    directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
+      invitation: { id: 'inv-padded' },
+    })
+    stubControlApiFetch(makeControlApp())
+
+    await request(makeExternalApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: 'invitee@example.com',
+        name: `${' '.repeat(121)}Alice`,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(201, { id: 'inv-padded' })
+
+    expect(directoryMock.createManagedInvitationForUser).toHaveBeenCalledWith(
+      'manager-1',
+      'invitee@example.com',
+      [{ teamId: 'team-1', role: 'member' }],
+      'Alice'
+    )
+  })
 })

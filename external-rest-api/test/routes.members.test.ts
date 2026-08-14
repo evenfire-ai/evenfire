@@ -251,6 +251,49 @@ describe('routes/members', () => {
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledOnce()
   })
 
+  it('preserves a short name after trimming an overlong raw padded value', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockResolvedValueOnce({ id: 'inv-padded' })
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: 'invitee@example.com',
+        name: `${' '.repeat(121)}Alice`,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(201, { id: 'inv-padded' })
+
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
+      'invitee@example.com',
+      'Alice',
+      [{ teamId: 'team-1', role: 'member' }],
+      'good-token'
+    )
+  })
+
+  it('uses a stable overlength projection after trimming the complete name', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockRejectedValueOnce(
+      new ControlApiError('invalid invitation name', 400, { error: 'invalid_name' })
+    )
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: 'invitee@example.com',
+        name: `${' '.repeat(10)}${'a'.repeat(121)}`,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'Name is too long' })
+
+    const [, forwardedName] = memberManagementMock.inviteManagedMember.mock.calls[0]
+    expect(forwardedName).toHaveLength(121)
+    expect(forwardedName).not.toMatch(/\s/)
+  })
+
   it('preserves the public team-count error after authoritative validation', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     memberManagementMock.inviteManagedMember.mockRejectedValueOnce(

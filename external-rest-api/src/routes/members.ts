@@ -73,11 +73,11 @@ export function createMembersRouter(): Router {
         return
       }
       const email = rawEmail.trim().toLowerCase()
-      const rawName = String(req.body?.name || '')
+      const normalizedName = String(req.body?.name || '').trim()
       const name =
-        rawName.length > MAX_INVITEE_NAME_LENGTH
-          ? rawName.slice(0, MAX_INVITEE_NAME_LENGTH + 1)
-          : rawName.trim()
+        normalizedName.length > MAX_INVITEE_NAME_LENGTH
+          ? 'x'.repeat(MAX_INVITEE_NAME_LENGTH + 1)
+          : normalizedName
       const rawTeams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
       const teams =
         rawTeams.length > MAX_INVITATION_TEAM_ASSIGNMENTS
