@@ -123,9 +123,11 @@ jobs:
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
+              - 'packages/display-field/**'
             control-ui:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
+              - 'packages/display-field/**'
             external-rest-api:
               - 'external-rest-api/**'
             host-context-controller:

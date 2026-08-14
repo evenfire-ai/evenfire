@@ -12,6 +12,10 @@ COPY packages/llm-providers ./packages/llm-providers
 # the provider registry (issue #299 Phase 2), so its file: dependency must resolve
 # at `npm ci` below.
 COPY packages/network-policy-core ./packages/network-policy-core
+# Shared prebuilt display-field validation package (no build step). Copied
+# before control-api's npm ci so its file: dependency resolves; resourceFieldValidation
+# imports validateDisplayField from it.
+COPY packages/display-field ./packages/display-field
 
 # Build the shared @clerum/workflow-runtime-core package (TS → dist) BEFORE
 # control-api's npm ci, so its file: dependency on it resolves with the compiled

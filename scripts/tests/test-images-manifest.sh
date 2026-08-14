@@ -550,6 +550,111 @@ assert_network_policy_core_change_rebuilds_all_consumers() {
   fi
 }
 
+# packages/display-field is consumed by EXACTLY the control-api and control-ui
+# images (only those two package.json declare it, and only their Dockerfiles
+# COPY it), so a change confined to it changes both image outputs and must
+# rebuild both. Like the network-policy-core case above, this is deliberately
+# more specific than the generic source_paths/filter parity guard: a
+# synchronized omission from BOTH hand-maintained copies (the exact gap that
+# left display-field untracked) stays green under the parity guard while a
+# package-only change selects no image at all. This case fails until the
+# package appears in the control-api and control-ui filters AND source_paths.
+#
+# Scoped to display-field on purpose. packages/llm-providers has FIVE consumers
+# (control-api, control-ui, mcp-host, host-context-controller, workflow-recipes)
+# and none of them track it yet -- a broader, pre-existing change-detection gap
+# tracked in work-tracker/issues, not asserted here so this test never bakes a
+# partial (2-of-5) consumer set as golden.
+assert_display_field_change_rebuilds_both_consumers() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+      const sourcePaths = ["packages/display-field/**"]
+      const expectedConsumers = ["control-api", "control-ui"]
+
+      const filtersMatch = wf.match(/filters: \|\n([\s\S]*?)\n\n {2}build-push:/)
+      if (!filtersMatch) {
+        console.log(`PARSE_ERROR: could not find the paths-filter filters block in ${wfPath}`)
+        process.exit(1)
+      }
+      const filters = {}
+      let currentKey = null
+      for (const line of filtersMatch[1].split("\n")) {
+        if (!line.trim()) continue
+        const keyMatch = line.match(/^\s*([\w.-]+):\s*$/)
+        const pathMatch = line.match(/^\s*-\s*\x27([^\x27]+)\x27\s*$/)
+        if (keyMatch) {
+          currentKey = keyMatch[1]
+          filters[currentKey] = []
+        } else if (pathMatch && currentKey) {
+          filters[currentKey].push(pathMatch[1])
+        } else {
+          console.log(`PARSE_ERROR: unrecognized line in the filters block: ${JSON.stringify(line)}`)
+          process.exit(1)
+        }
+      }
+
+      const sectionMatch = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!sectionMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section in ${wfPath}`)
+        process.exit(1)
+      }
+      const imageFilterKeys = {}
+      for (const block of sectionMatch[1].split(/\n(?=\s*- image:)/)) {
+        const image = block.match(/- image:\s*(\S+)/)?.[1]
+        if (!image) continue
+        const changedKey = block.match(/\n\s*changed:\s*\$\{\{\s*needs\.detect\.outputs\.([\w.-]+)\s*\}\}/)?.[1]
+        if (!changedKey) {
+          console.log(`PARSE_ERROR: matrix entry ${image} has no detect output mapping`)
+          process.exit(1)
+        }
+        imageFilterKeys[image] = changedKey
+      }
+
+      const manifestByName = new Map(m.IMAGES.map(image => [image.name, image]))
+      const problems = []
+      for (const sourcePath of sourcePaths) {
+        const filterKeys = Object.entries(filters)
+          .filter(([, paths]) => paths.includes(sourcePath))
+          .map(([key]) => key)
+          .sort()
+        if (filterKeys.join(",") !== expectedConsumers.join(",")) {
+          problems.push(`filters for ${sourcePath} are ${filterKeys.join(",") || "<none>"}, expected ${expectedConsumers.join(",")}`)
+        }
+        const selectedImages = Object.entries(imageFilterKeys)
+          .filter(([, filterKey]) => filterKeys.includes(filterKey))
+          .map(([image]) => image)
+          .sort()
+        if (selectedImages.join(",") !== expectedConsumers.join(",")) {
+          problems.push(`${sourcePath} selects ${selectedImages.join(",") || "<none>"}, expected ${expectedConsumers.join(",")}`)
+        }
+        for (const consumer of expectedConsumers) {
+          const image = manifestByName.get(consumer)
+          if (!image) {
+            problems.push(`${consumer} has no deploy/images.json row`)
+          } else if (!image.source_paths?.includes(sourcePath)) {
+            problems.push(`${consumer} does not mirror ${sourcePath} in source_paths`)
+          }
+        }
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "display-field changed-path contract parse failed: $output"
+  elif [ -z "$output" ]; then
+    pass "a display-field-only change rebuilds control-api and control-ui"
+  else
+    fail "display-field changed-path contract failed: $output"
+  fi
+}
+
 # THREE copies of the 28-image list exist in build-publish.yml, not two:
 # build-push's `image:` matrix dimension (the array that, crossed with
 # `arch`, produces the 56 base combinations), build-push's `include:` list
@@ -1039,6 +1144,7 @@ assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters
 assert_network_policy_core_change_rebuilds_all_consumers
+assert_display_field_change_rebuilds_both_consumers
 assert_all_three_image_lists_agree
 assert_the_verify_set_splits_on_published_not_on_mode
 assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures
