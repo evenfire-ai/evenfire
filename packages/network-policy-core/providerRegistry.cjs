@@ -56,7 +56,13 @@ const PROVIDER_BOUNDS = Object.freeze({
 function lookupFqdnProvider(fqdn) {
   if (typeof fqdn !== 'string' || !fqdn) return undefined
   const host = fqdn.trim().toLowerCase()
-  if (EXACT[host]) return EXACT[host] // 1. exact (incl. explicit off-pool + unmapped rows)
+  // hasOwnProperty guard: EXACT is a plain object, so a host equal to a
+  // prototype key ("__proto__", "constructor", "hasOwnProperty", …) would
+  // otherwise resolve up the chain to a truthy non-row value and be treated as a
+  // curated mapping, bypassing the REG-6 unknown-host and F1 subset checks
+  // downstream. Consistent with the Object.create(null)/hasOwnProperty defenses
+  // in parseProviderNetblocks and resolveProviderRanges (issue #299 review).
+  if (Object.prototype.hasOwnProperty.call(EXACT, host)) return EXACT[host] // 1. exact (incl. explicit off-pool + unmapped rows)
   let best
   for (const w of WILDCARD) {
     // 2. wildcard suffix — LONGEST suffix wins

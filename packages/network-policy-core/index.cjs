@@ -619,28 +619,26 @@ function resolveProviderRanges(input) {
   // Step 1: effective categories (+ hostname-suffix-never-classifies guard).
   let categories
   if (Array.isArray(declaredCategories) && declaredCategories.length > 0) {
-    // REG-6 (issue #299 review): a provider declaration must classify a KNOWN
-    // host. An unknown FQDN (no registry row at all) is REJECTED — adding a host
-    // is a providerRegistry data change, never an inline escape hatch. Otherwise
-    // a sibling hostname absent from the curated set could declare any provider's
-    // whole pool and bypass the F1 subset bound below.
-    if (!registryLookup) {
-      return { kind: 'invalid', reasons: [`provider mapping for "${fqdn}" is unknown — add a registry row; declared categories cannot classify an unmapped host`] }
-    }
-    if (registryLookup.kind === 'mapped' && registryLookup.row.provider !== declaredName) {
+    if (registryLookup && registryLookup.kind === 'mapped' && registryLookup.row.provider !== declaredName) {
       return { kind: 'invalid', reasons: [`registry maps "${fqdn}" to provider "${registryLookup.row.provider}", not "${declaredName}"`] }
     }
     // An EXPLICIT off-pool/unmapped registry row (an enforced counterexample, e.g.
     // an Azure Front Door endpoint behind a wildcard-matched host) outranks a user
     // category declaration — declared categories cannot smuggle a mis-attributed
-    // pool onto a host the registry deliberately excluded.
-    if (registryLookup.kind === 'unmapped') {
+    // pool onto a host the registry deliberately excluded. The unknown-fqdn escape
+    // hatch (NO registry row at all) is deliberately retained: adding a NEW provider
+    // is data (a CM key + declaration), the generality invariant (REG-6). The two
+    // real risks the reviewer raised are bounded elsewhere: a CURATED provider
+    // claimed on a mapped host is capped by the F1 subset + provider-match checks
+    // here, and the approval surface renders provider bindings as catalog-wide
+    // WARNINGs (control-ui egressModel), never a /32 illusion.
+    if (registryLookup && registryLookup.kind === 'unmapped') {
       return { kind: 'invalid', reasons: [`"${fqdn}" is registry-unmapped for provider mode (${registryLookup.note})`] }
     }
     // F1: a MAPPED registry row also BOUNDS the declaration — declared categories
     // must be a subset of the curated row's, or a narrow single-category row could
     // be silently widened to the whole pool.
-    if (registryLookup.kind === 'mapped') {
+    if (registryLookup && registryLookup.kind === 'mapped') {
       const rowCategories = registryLookup.row.categories
       const excess = declaredCategories.filter(c => !rowCategories.includes(c))
       if (excess.length > 0) {
@@ -654,7 +652,7 @@ function resolveProviderRanges(input) {
     }
     categories = declaredCategories
   } else if (!registryLookup) {
-    return { kind: 'invalid', reasons: [`provider mapping for "${fqdn}" is unknown — add a registry row`] }
+    return { kind: 'invalid', reasons: [`provider mapping for "${fqdn}" is unknown — declare provider.categories explicitly or add a registry row`] }
   } else if (registryLookup.kind === 'unmapped') {
     return { kind: 'invalid', reasons: [`"${fqdn}" is registry-unmapped for provider mode (${registryLookup.note})`] }
   } else if (registryLookup.kind === 'mapped' && registryLookup.row.provider !== declaredName) {

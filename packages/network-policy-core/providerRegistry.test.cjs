@@ -56,6 +56,15 @@ test('REG-3 off-pool exact beats wildcard; unmapped beats suffix', () => {
 // REG-4: unknown host → undefined; case-insensitive; bare-suffix host is not a hit.
 test('REG-4 unknown / case / bare-suffix', () => {
   assert.equal(registry.lookupFqdnProvider('example.com'), undefined)
+  // Security (issue #299 review): a host equal to an Object.prototype key must be
+  // treated as unknown, never resolve up the prototype chain to a truthy non-row.
+  for (const protoKey of ['__proto__', 'constructor', 'hasOwnProperty', 'toString', 'valueOf']) {
+    assert.equal(
+      registry.lookupFqdnProvider(protoKey),
+      undefined,
+      `prototype key "${protoKey}" must not resolve to a registry row`
+    )
+  }
   assert.deepEqual(registry.lookupFqdnProvider('GITHUB.COM'), {
     kind: 'mapped',
     row: { provider: 'github', categories: ['web', 'api'] },

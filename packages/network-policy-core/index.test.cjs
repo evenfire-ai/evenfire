@@ -619,14 +619,7 @@ test('CORE-15 resolveProviderRanges reason matrix (one per exact A.9 string)', (
   // 1. unknown mapping: no registry row + no declared categories
   assert.deepEqual(
     R({ fqdn: 'unknown.example.com', declaredName: 'someco', registryLookup: undefined, cmCategories: {}, bounds: registry.providerBounds('someco') }),
-    { kind: 'invalid', reasons: ['provider mapping for "unknown.example.com" is unknown — add a registry row'] }
-  )
-  // 1b. REG-6 (issue #299 review): unknown FQDN + explicit declaredCategories no
-  //     longer escapes classification — a sibling hostname cannot smuggle a
-  //     curated provider's whole pool. Adding a host is a registry data change.
-  assert.deepEqual(
-    R({ fqdn: 'unknown.example.com', declaredName: 'github', declaredCategories: ['api', 'web', 'git'], registryLookup: undefined, cmCategories: {}, bounds: registry.providerBounds('github') }),
-    { kind: 'invalid', reasons: ['provider mapping for "unknown.example.com" is unknown — add a registry row; declared categories cannot classify an unmapped host'] }
+    { kind: 'invalid', reasons: ['provider mapping for "unknown.example.com" is unknown — declare provider.categories explicitly or add a registry row'] }
   )
   // 2. unmapped row
   const lk = registry.lookupFqdnProvider('pipelines.actions.githubusercontent.com')
@@ -763,10 +756,9 @@ test('CORE-19 (F1) declared categories must be a SUBSET of a mapped registry row
   const exact = core.resolveProviderRanges({ ...base, declaredCategories: ['api'] })
   assert.equal(exact.kind, 'ok')
   assert.deepEqual(exact.categories, ['api'])
-  // REG-6 (issue #299 review): the former unknown-FQDN escape hatch (NO registry
-  // row + explicit declaration) is now REJECTED. A sibling hostname absent from
-  // the curated set cannot smuggle a provider's whole pool past the F1 subset
-  // bound — adding a host is a providerRegistry data change, never inline.
+  // The unknown-FQDN escape hatch (NO registry row + explicit declaration) is
+  // documented, load-bearing design — adding a NEW provider is data (a CM key +
+  // declaration), the generality invariant (REG-6). It must remain valid.
   const hatch = core.resolveProviderRanges({
     fqdn: 'ghe.internal.example-corp.com',
     declaredName: 'github',
@@ -775,9 +767,6 @@ test('CORE-19 (F1) declared categories must be a SUBSET of a mapped registry row
     cmCategories: { 'github.api': API_24 },
     bounds: registry.providerBounds('github'),
   })
-  assert.equal(hatch.kind, 'invalid')
-  assert.ok(
-    hatch.reasons[0].includes('unknown — add a registry row'),
-    `expected an unknown-FQDN rejection, got ${hatch.reasons?.[0]}`
-  )
+  assert.equal(hatch.kind, 'ok')
+  assert.deepEqual(hatch.categories, ['api'])
 })

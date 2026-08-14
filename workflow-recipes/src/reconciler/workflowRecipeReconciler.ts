@@ -4118,53 +4118,26 @@ export class WorkflowRecipeReconciler {
     const { resolved, failures } = await resolveExternalEgress(externals, this.fqdnLookup)
     this.recordExternalEgressTtl(resolved)
 
-    // R1-M2: read the live policy for ALL cases, not only external egress, so an
-    // internal-only sibling policy (ui.egress.internal[] with no external[]) can
-    // hit the no-op gate below instead of being rewritten on every reconcile —
-    // which the 60s external-egress refresh loop amplifies for mixed recipes. For
-    // external egress it also seeds the accumulator's rehydration (H5).
-    const existing = await this.readNetworkPolicyOrNull(policyName, ns)
-
-    // issue #299 Phase 2 / PR335 Fix 3: resolve provider ranges from the catalog
-    // BEFORE the permanent-failure gate (H3-by-throw: a CM/spec problem throws,
-    // retaining the live policy). A permanently blocked/absent A record on a
-    // provider binding must NOT fail-close when the port-scoped catalog CIDRs are
-    // already in hand — catalog coverage does not depend on the controller's own
-    // DNS.
-    const providerRanges =
-      externals.length > 0
-        ? await this.resolveProviderRangesPerDeclaration(
-            externals.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
-            `WorkflowRecipe "${recipe.metadata.name}" ui external egress`
-          )
-        : []
-    const catalogCoveredFqdns = new Set(
-      externals.filter((_, i) => (providerRanges[i]?.length ?? 0) > 0).map(e => e.fqdn)
-    )
-
     // Permanent failures (no-records / blocked range) never author a partial
-    // policy — fail exactly as the single-snapshot resolver did. EXCEPTION: a
-    // provider binding whose catalog CIDRs are already resolved is not a permanent
-    // failure — its blocked /32 is dropped from the window (never rendered) while
-    // the catalog ranges still serve, preserving the "never egress loss" invariant.
-    const permanentFailures = failures.filter(f => !f.retryable && !catalogCoveredFqdns.has(f.fqdn))
+    // policy — fail exactly as the single-snapshot resolver did.
+    // PR335 known-limitation (symmetric with HCC by design): this throw fires
+    // before a fresh provider render, so a permanently blocked/absent A record on
+    // a provider binding fail-closes at cold start even though the catalog CIDRs
+    // could be served. That is deliberate: a deterministic NXDOMAIN/blocked answer
+    // for a curated host is the maximally-suspicious slice (sinkhole/poisoning/
+    // misconfig) where loud failure is correct; H3 protects egress you already
+    // have (a live NP is retained on failure), and cold start has none to lose.
+    const permanentFailures = failures.filter(f => !f.retryable)
     if (permanentFailures.length > 0) {
       throw egressResolutionError(
         `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
         permanentFailures
       )
     }
-    const exemptedPermanent = failures.filter(f => !f.retryable && catalogCoveredFqdns.has(f.fqdn))
-    if (exemptedPermanent.length > 0) {
-      console.warn(
-        `[WR-Reconciler] ${policyName}: permanent DNS failure on catalog-covered provider ` +
-          `binding(s) ${exemptedPermanent.map(f => f.fqdn).join(', ')} — serving the provider ` +
-          `catalog CIDRs, dropping the blocked residual /32 (issue #299)`
-      )
-    }
 
     let effectiveResolved: rb.ResolvedExternalEgressInput[] = resolved
     let stateAnnotations: Record<string, string> | undefined
+    let existing: k8s.V1NetworkPolicy | null = null
     let egressRenewalDue = false
     // H-E: the write gate compares rendered spec.egress (ipBlock cidr+port, no
     // fqdn), so a rename old.example.com→new.example.com onto the SAME ip/port is
@@ -4172,7 +4145,19 @@ export class WorkflowRecipeReconciler {
     // annotation and losing the overlap grace when the new name later rotates.
     // acc.changed is over (fqdn,ip,port,protocol), so it catches the rename.
     let egressStateChanged = false
+    // R1-M2: read the live policy for ALL cases, not only external egress, so an
+    // internal-only sibling policy (ui.egress.internal[] with no external[]) can
+    // hit the no-op gate below instead of being rewritten on every reconcile —
+    // which the 60s external-egress refresh loop amplifies for mixed recipes. For
+    // external egress it also seeds the accumulator's rehydration (H5).
+    existing = await this.readNetworkPolicyOrNull(policyName, ns)
     if (externals.length > 0) {
+      // issue #299 Phase 2 — resolve provider ranges from the catalog first
+      // (H3-by-throw: a CM/spec problem throws, retaining the live policy).
+      const providerRanges = await this.resolveProviderRangesPerDeclaration(
+        externals.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
+        `WorkflowRecipe "${recipe.metadata.name}" ui external egress`
+      )
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
       const acc = accumulateExternalEgress({
@@ -4633,55 +4618,36 @@ export class WorkflowRecipeReconciler {
       )
       this.recordExternalEgressTtl(resolvedExternal)
 
-      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
-      // R1-M2: read the live policy for ALL cases so an internal-only (cluster-
-      // local) workload egress policy hits the no-op gate instead of churning
-      // every reconcile; for external egress it also seeds rehydration (H5).
-      const existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
-
-      // issue #299 Phase 2 / PR335 Fix 3: resolve provider ranges from the catalog
-      // BEFORE the permanent-failure gate (H3-by-throw retains the live NP). A
-      // permanently blocked/absent A record on a provider binding must NOT fail-
-      // close when the port-scoped catalog CIDRs are already in hand.
-      const providerRanges =
-        externalDeclared.length > 0
-          ? await this.resolveProviderRangesPerDeclaration(
-              externalDeclared.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
-              `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress`
-            )
-          : []
-      const catalogCoveredFqdns = new Set(
-        externalDeclared.filter((_, i) => (providerRanges[i]?.length ?? 0) > 0).map(e => e.fqdn)
-      )
-
-      // Permanent failures never author a partial policy — fail as before. EXCEPTION:
-      // a provider binding whose catalog CIDRs are already resolved is not permanent —
-      // its blocked /32 is dropped (never rendered) while the catalog ranges serve.
-      const permanentFailures = failures.filter(
-        f => !f.retryable && !catalogCoveredFqdns.has(f.fqdn)
-      )
+      // Permanent failures never author a partial policy — fail as before.
+      // PR335 known-limitation (symmetric with HCC + the UI path): fires before a
+      // fresh provider render, so a permanently blocked/absent A record on a
+      // provider binding fail-closes at cold start even though the catalog CIDRs
+      // could be served — deliberate; loud failure is correct for a deterministic
+      // NXDOMAIN/blocked answer, and H3 still retains any live NP on failure.
+      const permanentFailures = failures.filter(f => !f.retryable)
       if (permanentFailures.length > 0) {
         throw egressResolutionError(
           `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
           permanentFailures
         )
       }
-      const exemptedPermanent = failures.filter(
-        f => !f.retryable && catalogCoveredFqdns.has(f.fqdn)
-      )
-      if (exemptedPermanent.length > 0) {
-        console.warn(
-          `[WR-Reconciler] ${wlPolicyName}: permanent DNS failure on catalog-covered provider ` +
-            `binding(s) ${exemptedPermanent.map(f => f.fqdn).join(', ')} — serving the provider ` +
-            `catalog CIDRs, dropping the blocked residual /32 (issue #299)`
-        )
-      }
 
       let effectiveExternal: rb.ResolvedExternalEgressInput[] = resolvedExternal
       let wlStateAnnotations: Record<string, string> | undefined
+      let existingWlPolicy: k8s.V1NetworkPolicy | null = null
       let wlEgressRenewalDue = false
       let wlEgressStateChanged = false // H-E: catch fqdn-attribution-only changes
+      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
+      // R1-M2: read the live policy for ALL cases so an internal-only (cluster-
+      // local) workload egress policy hits the no-op gate instead of churning
+      // every reconcile; for external egress it also seeds rehydration (H5).
+      existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
       if (externalDeclared.length > 0) {
+        // issue #299 Phase 2 — resolve provider ranges (H3-by-throw retains the NP).
+        const providerRanges = await this.resolveProviderRangesPerDeclaration(
+          externalDeclared.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
+          `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress`
+        )
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
         const acc = accumulateExternalEgress({
           externals: externalDeclared.map((e, i) => ({
