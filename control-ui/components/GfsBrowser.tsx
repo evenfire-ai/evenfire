@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
-import { IconFolder, IconServer } from '@components/Sidebar/icons'
+import { IconFolder, IconImage, IconServer } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
 import { Button, TextInput } from '@components/ui'
@@ -87,6 +87,17 @@ function hasDraggedFiles(event: React.DragEvent<HTMLElement>): boolean {
 
 function isGfsPreviewFile(fileName: string): boolean {
   return gfsImagePreviewMimeType(fileName) !== null || isGfsMarkdownPreviewFile(fileName)
+}
+
+function isEventFromNestedInteractive(
+  event: React.MouseEvent<HTMLLIElement> | React.KeyboardEvent<HTMLLIElement>
+): boolean {
+  const target = event.target
+  if (!(target instanceof Element)) return false
+  return (
+    target.closest('button, a, input, select, textarea, [role="button"], [role="menuitem"]') !==
+    null
+  )
 }
 
 export function GfsBrowser(): React.JSX.Element {
@@ -559,82 +570,119 @@ export function GfsBrowser(): React.JSX.Element {
                 <span className="cu-gfs-list__head-actions">Actions</span>
               </div>
               <ul className="cu-gfs-list" aria-label="Current folder resources">
-                {items.map(child => (
-                  <li className="cu-gfs-list__row" key={child.resourceId}>
-                    <span className="cu-gfs-list__icon" aria-hidden="true">
-                      {child.kind === 'directory' ? <IconFolder /> : <IconServer />}
-                    </span>
-                    <span className="cu-gfs-list__identity">
-                      <span className="cu-gfs-list__name">
+                {items.map(child => {
+                  const rowOpenable = child.kind === 'directory' || isGfsPreviewFile(child.name)
+                  const openRow = () => {
+                    if (child.kind === 'directory') openDirectory(child)
+                    else openFilePreview(child)
+                  }
+                  return (
+                    <li
+                      className={`cu-gfs-list__row${rowOpenable ? ' cu-gfs-list__row--clickable' : ''}`}
+                      key={child.resourceId}
+                      role={rowOpenable ? 'button' : undefined}
+                      tabIndex={rowOpenable ? 0 : undefined}
+                      aria-label={rowOpenable ? `Open ${child.name}` : undefined}
+                      onClick={
+                        rowOpenable
+                          ? event => {
+                              if (isEventFromNestedInteractive(event)) return
+                              openRow()
+                            }
+                          : undefined
+                      }
+                      onKeyDown={
+                        rowOpenable
+                          ? event => {
+                              if (event.key !== 'Enter' && event.key !== ' ') return
+                              if (isEventFromNestedInteractive(event)) return
+                              event.preventDefault()
+                              openRow()
+                            }
+                          : undefined
+                      }
+                    >
+                      <span className="cu-gfs-list__icon" aria-hidden="true">
                         {child.kind === 'directory' ? (
-                          <button
-                            className="cu-gfs-list__name-button"
-                            type="button"
-                            onClick={() => openDirectory(child)}
-                          >
-                            {child.name}
-                          </button>
+                          <IconFolder />
+                        ) : gfsImagePreviewMimeType(child.name) ? (
+                          <IconImage />
                         ) : (
-                          <>
-                            {isGfsPreviewFile(child.name) ? (
-                              <button
-                                className="cu-gfs-list__name-button"
-                                type="button"
-                                onClick={() => openFilePreview(child)}
-                              >
-                                {child.name}
-                              </button>
-                            ) : (
-                              <span>{child.name}</span>
-                            )}
-                          </>
+                          <IconServer />
                         )}
                       </span>
-                      <span className="cu-gfs-list__meta">Version {child.version}</span>
-                    </span>
-                    <span className="cu-gfs-list__value">
-                      {child.kind === 'directory' ? 'Folder' : 'File'}
-                    </span>
-                    <span className="cu-gfs-list__value">
-                      {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}
-                    </span>
-                    <span className="cu-gfs-list__actions">
-                      {child.kind !== 'directory' ? (
-                        <Button
-                          className="cu-gfs-list__download"
-                          size="sm"
-                          variant="ghost"
-                          title={`Download ${child.name}`}
-                          aria-label={`Download ${child.name}`}
-                          disabled={downloadingIds.has(child.resourceId)}
-                          onClick={() => void downloadFile(child)}
-                        >
-                          <IconDownload width={18} height={18} />
-                        </Button>
-                      ) : null}
-                      <GfsResourceMenu
-                        resourceName={child.name}
-                        resourceUri={child.gfsUri}
-                        downloading={downloadingIds.has(child.resourceId)}
-                        onManage={() => openManage(child)}
-                        onPreview={
-                          isGfsPreviewFile(child.name) ? () => openFilePreview(child) : undefined
-                        }
-                        onDownload={
-                          child.kind !== 'directory' ? () => void downloadFile(child) : undefined
-                        }
-                        onReplace={
-                          child.kind !== 'directory'
-                            ? file => void replaceFile(child, file)
-                            : undefined
-                        }
-                        onCopyLink={() => void copyGfsUri(child.gfsUri)}
-                        onRename={() => openManage(child, 'rename')}
-                        onDelete={() => openManage(child, 'delete')}
-                      />
-                    </span>
-                  </li>
-                ))}
+                      <span className="cu-gfs-list__identity">
+                        <span className="cu-gfs-list__name">
+                          {child.kind === 'directory' ? (
+                            <button
+                              className="cu-gfs-list__name-button"
+                              type="button"
+                              onClick={() => openDirectory(child)}
+                            >
+                              {child.name}
+                            </button>
+                          ) : (
+                            <>
+                              {isGfsPreviewFile(child.name) ? (
+                                <button
+                                  className="cu-gfs-list__name-button"
+                                  type="button"
+                                  onClick={() => openFilePreview(child)}
+                                >
+                                  {child.name}
+                                </button>
+                              ) : (
+                                <span>{child.name}</span>
+                              )}
+                            </>
+                          )}
+                        </span>
+                        <span className="cu-gfs-list__meta">Version {child.version}</span>
+                      </span>
+                      <span className="cu-gfs-list__value">
+                        {child.kind === 'directory' ? 'Folder' : 'File'}
+                      </span>
+                      <span className="cu-gfs-list__value">
+                        {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}
+                      </span>
+                      <span className="cu-gfs-list__actions">
+                        {child.kind !== 'directory' ? (
+                          <Button
+                            className="cu-gfs-list__download"
+                            size="sm"
+                            variant="ghost"
+                            title={`Download ${child.name}`}
+                            aria-label={`Download ${child.name}`}
+                            disabled={downloadingIds.has(child.resourceId)}
+                            onClick={() => void downloadFile(child)}
+                          >
+                            <IconDownload width={18} height={18} />
+                          </Button>
+                        ) : null}
+                        <GfsResourceMenu
+                          resourceName={child.name}
+                          resourceUri={child.gfsUri}
+                          downloading={downloadingIds.has(child.resourceId)}
+                          onManage={() => openManage(child)}
+                          onPreview={
+                            isGfsPreviewFile(child.name) ? () => openFilePreview(child) : undefined
+                          }
+                          onDownload={
+                            child.kind !== 'directory' ? () => void downloadFile(child) : undefined
+                          }
+                          onReplace={
+                            child.kind !== 'directory'
+                              ? file => void replaceFile(child, file)
+                              : undefined
+                          }
+                          onCopyLink={() => void copyGfsUri(child.gfsUri)}
+                          onRename={() => openManage(child, 'rename')}
+                          onDelete={() => openManage(child, 'delete')}
+                        />
+                      </span>
+                    </li>
+                  )
+                })}
                 {items.length === 0 && !loading ? (
                   <li className="cu-gfs-list__empty">No resources are visible in this folder.</li>
                 ) : null}
@@ -677,7 +725,13 @@ export function GfsBrowser(): React.JSX.Element {
                 }`}
                 aria-hidden="true"
               >
-                {selected.kind === 'directory' ? <IconFolder /> : <IconPaperclip />}
+                {selected.kind === 'directory' ? (
+                  <IconFolder />
+                ) : gfsImagePreviewMimeType(selected.name) ? (
+                  <IconImage />
+                ) : (
+                  <IconPaperclip />
+                )}
               </span>
               <span className="cu-gfs-manage-dialog__heading">
                 {renameOpen ? (

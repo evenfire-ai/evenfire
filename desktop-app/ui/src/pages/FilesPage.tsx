@@ -12,9 +12,11 @@ import {
   IconContexts,
   IconDownload,
   IconEye,
+  IconImage,
 } from '@components/SidebarNav/icons'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
@@ -501,44 +503,35 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           onDrop={event => void handleGfsDrop(event)}
         >
           <div className="page-card__header da-gfs-drive__header">
-            <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
-              <Button
-                className="da-gfs-drive__breadcrumb"
-                color="neutral"
-                disabled={!current}
-                onClick={() => {
-                  setManageOpen(false)
-                  ctrl.reset()
-                }}
-                variant="text"
-              >
-                Shared with me
-              </Button>
-              {crumbs.map((crumb, index) => (
-                <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
-                  <IconChevronRight aria-hidden="true" />
-                  <Button
-                    className="da-gfs-drive__breadcrumb"
-                    color="neutral"
-                    disabled={index === crumbs.length - 1}
-                    onClick={() => ctrl.goToCrumb(index)}
-                    variant="text"
-                  >
-                    {crumb.name}
-                  </Button>
-                </span>
-              ))}
-            </nav>
-            <div className="da-gfs-drive__header-actions">
-              <Button
-                color="neutral"
-                onClick={() => setOpenLinkOpen(true)}
-                size="sm"
-                variant="outline"
-              >
-                <IconEye width={16} height={16} />
-                Open GFS link
-              </Button>
+            <div className="da-gfs-drive__title-row">
+              <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
+                <Button
+                  className="da-gfs-drive__breadcrumb"
+                  color="neutral"
+                  disabled={!current}
+                  onClick={() => {
+                    setManageOpen(false)
+                    ctrl.reset()
+                  }}
+                  variant="text"
+                >
+                  Shared with me
+                </Button>
+                {crumbs.map((crumb, index) => (
+                  <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
+                    <IconChevronRight aria-hidden="true" />
+                    <Button
+                      className="da-gfs-drive__breadcrumb"
+                      color="neutral"
+                      disabled={index === crumbs.length - 1}
+                      onClick={() => ctrl.goToCrumb(index)}
+                      variant="text"
+                    >
+                      {crumb.name}
+                    </Button>
+                  </span>
+                ))}
+              </nav>
               {current && !currentIsFile ? (
                 <GfsResourceMenu
                   resourceName={current.name}
@@ -549,13 +542,19 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                     setManageOpen(true)
                   }}
                   onCopyLink={() => void handleCopyLink(current.gfsUri)}
-                  onDownload={
-                    currentIsFile
-                      ? () => void handleDownload(current.gfsUri, current.name)
-                      : undefined
-                  }
                 />
               ) : null}
+            </div>
+            <div className="da-gfs-drive__header-actions">
+              <Button
+                color="neutral"
+                onClick={() => setOpenLinkOpen(true)}
+                size="sm"
+                variant="outline"
+              >
+                <IconEye width={16} height={16} />
+                Open GFS link
+              </Button>
             </div>
           </div>
 
@@ -588,7 +587,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           ) : currentIsFile ? (
             <div className="da-gfs-current-file">
               <span className="da-gfs-current-file__icon" aria-hidden="true">
-                <IconAttachFile />
+                {currentIsFile && gfsImagePreviewMimeType(current.name) ? (
+                  <IconImage />
+                ) : (
+                  <IconAttachFile />
+                )}
               </span>
               <div className="da-gfs-current-file__copy">
                 <div className="da-gfs-current-file__title-row">
@@ -640,9 +643,31 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               </div>
               <div className="da-grid__body">
                 {visibleResources.map(resource => (
-                  <div className="da-grid__row da-grid__row--compact" key={resource.resourceId}>
+                  <div
+                    className="da-grid__row da-grid__row--clickable da-grid__row--compact"
+                    key={resource.resourceId}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open ${resource.name || resource.drive}`}
+                    onClick={event => {
+                      if (isEventFromNestedInteractive(event)) return
+                      openResource(resource)
+                    }}
+                    onKeyDown={event => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return
+                      if (isEventFromNestedInteractive(event)) return
+                      event.preventDefault()
+                      openResource(resource)
+                    }}
+                  >
                     <span className="da-gfs-list__icon da-grid__cell" aria-hidden="true">
-                      {resource.kind === 'directory' ? <IconContexts /> : <IconAttachFile />}
+                      {resource.kind === 'directory' ? (
+                        <IconContexts />
+                      ) : gfsImagePreviewMimeType(resource.name) ? (
+                        <IconImage />
+                      ) : (
+                        <IconAttachFile />
+                      )}
                     </span>
                     <span className="da-gfs-list__identity da-grid__cell">
                       <span className="da-gfs-list__name">
@@ -782,7 +807,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 className={`da-gfs-manage-dialog__icon${currentIsFolder ? ' da-gfs-manage-dialog__icon--folder' : ''}`}
                 aria-hidden="true"
               >
-                {currentIsFolder ? <IconContexts /> : <IconAttachFile />}
+                {currentIsFolder ? (
+                  <IconContexts />
+                ) : currentIsFile && gfsImagePreviewMimeType(current.name) ? (
+                  <IconImage />
+                ) : (
+                  <IconAttachFile />
+                )}
               </span>
               <span className="da-gfs-manage-dialog__heading">
                 {renameOpen ? (
