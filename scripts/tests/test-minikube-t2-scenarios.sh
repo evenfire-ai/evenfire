@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Executable negative and transition scenarios for the local T0/T1/T2 contract.
+# shellcheck disable=SC2016
+set -euo pipefail
+set +x
+set +u
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+COMMON="$ROOT/scripts/minikube/t2-common.sh"
+TMP_ROOT="$TMPDIR"
+if [ -z "$TMP_ROOT" ]; then TMP_ROOT=/tmp; fi
+set -u
+
+tmp="$(mktemp -d "$TMP_ROOT/evenfire-t2-scenarios.XXXXXX")"
+cleanup() { rm -rf "$tmp"; }
+trap cleanup EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+expect_code() {
+  local expected="$1" label="$2" output="$tmp/$3"
+  shift 3
+  if "$@" >"$output" 2>&1; then
+    fail "$label unexpectedly passed"
+  fi
+  grep -Fq "$expected" "$output" || {
+    printf '%s\n' "$(sed -n '1,20p' "$output")" >&2
+    fail "$label did not report $expected"
+  }
+}
+
+repo="$tmp/evenfire"
+mkdir -p "$repo"
+git init -q -b dev "$repo"
+git -C "$repo" config user.email test@example.invalid
+git -C "$repo" config user.name scenario-test
+git -C "$repo" remote add origin https://github.com/evenfire-ai/evenfire.git
+printf 'base\n' >"$repo/README.md"
+git -C "$repo" add README.md
+git -C "$repo" commit -q -m base
+base_sha="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" update-ref refs/remotes/origin/dev "$base_sha"
+git -C "$repo" switch -q -c feat/scenario
+mkdir -p "$repo/control-api"
+printf 'service\n' >"$repo/control-api/source.ts"
+git -C "$repo" add control-api/source.ts
+git -C "$repo" commit -q -m service
+feature_sha="$(git -C "$repo" rev-parse HEAD)"
+profile="clerum-feat-scenario-$(git -C "$repo" rev-parse --short=8 HEAD)"
+profile_root="$tmp/profiles/$profile"
+mkdir -p "$profile_root"
+printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
+  "$profile" "$(git -C "$repo" rev-parse --short=8 HEAD)" "$repo" >"$profile_root/profile.env"
+printf 'PORT_BASE=23117\nCONTROL_API_URL=profile-owned-url\n' >"$profile_root/ports.env"
+
+repo_env=(
+  T2_PROJECT_DIR="$repo"
+  MINIKUBE_PROFILE="$profile"
+  CONTROL_API_REAL_PG_CONTEXT="$profile"
+  T2_PROFILE_ROOT="$tmp/profiles"
+  T2_PROFILE_ENV="$profile_root/profile.env"
+  T2_PORTS_ENV="$profile_root/ports.env"
+  T2_LOCK_ROOT="$tmp/locks"
+  T2_EVIDENCE_ROOT="$tmp/evidence"
+)
+
+expect_code DEVELOPMENT_SCOPE_REQUIRED wrong-repository wrong-repository \
+  env "${repo_env[@]}" bash -c 'git -C "$T2_PROJECT_DIR" remote set-url origin https://example.invalid/not-evenfire.git; source "$1"; t2_repo_metadata' bash "$COMMON"
+git -C "$repo" remote set-url origin https://github.com/evenfire-ai/evenfire.git
+
+git -C "$repo" branch main "$base_sha"
+expect_code DEVELOPMENT_SCOPE_REQUIRED protected-branch protected-branch \
+  env "${repo_env[@]}" bash -c 'git -C "$T2_PROJECT_DIR" switch -q main; source "$1"; t2_repo_metadata' bash "$COMMON"
+git -C "$repo" switch -q feat/scenario
+
+missing_profile_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/missing-profile.env")
+expect_code DEVELOPMENT_SCOPE_REQUIRED missing-profile missing-profile \
+  env "${missing_profile_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+
+expect_code DEVELOPMENT_SCOPE_REQUIRED shared-profile shared-profile \
+  env "${repo_env[@]}" MINIKUBE_PROFILE=default CONTROL_API_REAL_PG_CONTEXT=default \
+  bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+
+expect_code DEVELOPMENT_SCOPE_REQUIRED context-mismatch context-mismatch \
+  env "${repo_env[@]}" CONTROL_API_REAL_PG_CONTEXT=another-context \
+  bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+
+missing_profile_state="$(env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_profile_status; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
+[ "$missing_profile_state" = full-bootstrap ] || fail "missing profile selected $missing_profile_state instead of full-bootstrap"
+
+ownership_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/ownership.env")
+printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
+  "$profile" "$(git -C "$repo" rev-parse --short=8 HEAD)" "$tmp/other" >"$tmp/ownership.env"
+expect_code PROFILE_OWNERSHIP_MISMATCH profile-ownership profile-ownership \
+  env "${ownership_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+
+marker_env=("${repo_env[@]}" T2_HEAD="$feature_sha" T2_WORKTREE_ID=worktree-a)
+expect_code HEAD_MARKER_MISMATCH stale-marker stale-marker \
+  env "${marker_env[@]}" FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"old","worktreeId":"worktree-a","imageSource":"local","imageTag":"test"}}' \
+  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check' bash "$COMMON"
+
+expect_code PROFILE_OWNERSHIP_MISMATCH marker-ownership marker-ownership \
+  env "${marker_env[@]}" FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"feature","worktreeId":"worktree-b","imageSource":"local","imageTag":"test"}}' \
+  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check' bash "$COMMON"
+
+manifest="$tmp/image-manifest.json"
+printf '{"imageSource":"local","imageTag":"new"}\n' >"$manifest"
+expect_code IMAGE_MANIFEST_MISMATCH stale-image stale-image \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG=old \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=old; t2_image_check' bash "$COMMON"
+
+expect_code SECRET_MISSING missing-secret missing-secret \
+  env "${repo_env[@]}" T2_BOOTSTRAP_REQUIRED=false T2_REQUIRED_NAMESPACES=control-plane \
+  T2_REQUIRED_SERVICES=control-plane/control-api T2_REQUIRED_SECRETS=control-plane/absent \
+  T2_REQUIRED_CONFIGMAPS=control-plane/control-api-config \
+  bash -c 'source "$1"; t2_kc(){ case "$*" in *"get secret"*) return 1;; *) return 0;; esac; }; t2_resource_checks' bash "$COMMON"
+
+expect_code CONFIGMAP_MISSING missing-configmap missing-configmap \
+  env "${repo_env[@]}" T2_BOOTSTRAP_REQUIRED=false T2_REQUIRED_NAMESPACES=control-plane \
+  T2_REQUIRED_SERVICES=control-plane/control-api T2_REQUIRED_SECRETS=control-plane/present \
+  T2_REQUIRED_CONFIGMAPS=control-plane/absent \
+  bash -c 'source "$1"; t2_kc(){ case "$*" in *"get configmap"*) return 1;; *) return 0;; esac; }; t2_resource_checks' bash "$COMMON"
+
+expect_code POSTGRES_NOT_READY postgres-not-ready postgres-not-ready \
+  env "${repo_env[@]}" T2_BOOTSTRAP_REQUIRED=false T2_REQUIRED_PVC=control-plane/data \
+  bash -c 'source "$1"; t2_kc(){ case "$*" in *"get pvc"*) printf %s "{\"status\":{\"phase\":\"Pending\"}}";; *) return 0;; esac; }; t2_postgres_check' bash "$COMMON"
+
+targeted_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIRED=false \
+  T2_ORIGIN_DEV="$base_sha" T2_HEAD="$feature_sha" \
+  bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$feature_sha")"
+[ "$targeted_state" = targeted-sync ] || fail "service change selected $targeted_state instead of targeted-sync"
+
+mkdir -p "$repo/deploy"
+printf 'infrastructure\n' >"$repo/deploy/change.txt"
+git -C "$repo" add deploy/change.txt
+git -C "$repo" commit -q -m infrastructure
+infra_sha="$(git -C "$repo" rev-parse HEAD)"
+full_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIRED=false \
+  T2_ORIGIN_DEV="$base_sha" T2_HEAD="$infra_sha" \
+  bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$infra_sha")"
+[ "$full_state" = full-reconcile ] || fail "infrastructure change selected $full_state instead of full-reconcile"
+
+evidence="$tmp/evidence.json"
+detail_value="$(printf '%s://%s:%s@%s' postgresql user marker local-db)"
+env "${repo_env[@]}" T2_EVIDENCE_FILE="$evidence" T2_EVIDENCE_DIR="$tmp/evidence-dir" \
+  T2_BRANCH=feat/scenario T2_HEAD="$infra_sha" T2_ORIGIN_DEV="$base_sha" T2_MERGE_BASE="$base_sha" \
+  T2_CLUSTER_FINGERPRINT=fp T2_IMAGE_MANIFEST=manifest T2_IMAGE_SOURCE=local T2_IMAGE_TAG=test \
+  DETAIL_VALUE="$detail_value" bash -c 'source "$1"; T2_EVIDENCE_FILE="$2"; T2_EVIDENCE_DIR="$3"; T2_BRANCH=feat/scenario; T2_HEAD="$4"; T2_ORIGIN_DEV="$5"; T2_MERGE_BASE="$5"; T2_CLUSTER_FINGERPRINT=fp; T2_IMAGE_MANIFEST=manifest; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=test; t2_evidence_write T1 PASS "$6"' bash "$COMMON" "$evidence" "$tmp/evidence-dir" "$infra_sha" "$base_sha" "$detail_value"
+grep -Fq '<postgres-dsn-redacted>' "$evidence" || fail 'evidence did not redact a DSN-shaped detail'
+grep -Fq 'marker@local-db' "$evidence" && fail 'evidence retained the DSN payload'
+
+grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
+grep -Fq 'ZERO_TESTS_EXECUTED' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
+grep -Fq 'T2_LOCK_ROOT' "$COMMON"
+grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
+grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
+grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
+grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
+
+printf 'PASS: local Minikube T0/T1/T2 scenario checks\n'

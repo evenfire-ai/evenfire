@@ -55,3 +55,41 @@ Expect a full reconcile when deployment manifests, CRDs, charts, network
 policy, or other infrastructure inputs changed; do not replace that safe path
 with partial image updates. Every `kubectl` invocation must use the verified
 context explicitly.
+
+## Local Minikube T0/T1/T2 validation contract
+
+The T0/T1/T2 validation tooling is development-only. It must run only from a
+clean development branch descended from the current `origin/dev`, against the
+branch-owned Minikube profile and its explicit Kubernetes context. It is not a
+production, GKE, Cloudflare, staging, shared-cluster, or customer-data
+runbook.
+
+Use these canonical entry points:
+
+```text
+make minikube-t2-preflight
+make minikube-t2
+```
+
+A fresh or uninitialized profile must complete the supported bootstrap before
+`pre-gate-sync` is invoked. The preflight refuses to call that sync on an
+incomplete profile. Real PostgreSQL suites are opt-in in the ordinary test
+matrix, but a T1 run that requires them must fail when the database/DSN is
+unavailable or when zero tests execute; a green run must never be produced by
+silently skipping the suites.
+
+T0 (static/unit/contract checks), T1 (real PostgreSQL), T2 (validated runtime),
+CI, and Control UI/Desktop Playwright are separate evidence lanes. One lane
+does not stand in for another. Private operational state, generated ports,
+profile metadata, logs, and evidence belong under the ignored
+`.local-notes/infra/runs/` path and must never be committed.
+
+## Branch naming
+
+Do not create new branches with agent/vendor prefixes such as `codex/*`,
+`claude/*`, `openai/*`, `anthropic/*`, `antrophic/*`, or any other Frontier
+Labs reference. Use repository-standard conventional prefixes instead:
+`feat/*`, `fix/*`, `hotfix/*`, `chore/*`, `docs/*`, `test/*`, `refactor/*`,
+`ci/*`, `build/*`, `perf/*`, or `revert/*`, choosing the one that describes
+the change. This rule applies to new branches; it does not retroactively
+rewrite branches that already exist outside the task's scope.
