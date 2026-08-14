@@ -71,7 +71,11 @@ async function clickSectionEdit(page: Page) {
 
 /** Navigate to the host detail page and wait for the Per-tool approval section to load. */
 async function gotoHostDetails(page: Page) {
-  await page.goto(`${BASE_UI}/hosts/${encodeURIComponent(HOST_NAME)}/approvals`)
+  // The Per-tool approval editor now lives under the consolidated Advanced
+  // tab. The old `/approvals` slug is still served via a 308 redirect, but
+  // navigating to the canonical URL directly keeps this E2E independent of
+  // that compatibility shim.
+  await page.goto(`${BASE_UI}/hosts/${encodeURIComponent(HOST_NAME)}/advanced`)
   await page.waitForSelector('.cu-host-approval-section', { timeout: 20_000 })
 }
 
