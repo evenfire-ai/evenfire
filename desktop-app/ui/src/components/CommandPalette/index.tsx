@@ -69,17 +69,25 @@ export function CommandPalette({
   }
 
   return (
-    <div className="command-palette-backdrop" role="presentation">
+    <div
+      className="command-palette-backdrop"
+      onKeyDown={event => {
+        if (event.key !== 'Escape') return
+        event.preventDefault()
+        onClose()
+      }}
+      onMouseDown={event => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+      role="presentation"
+    >
       <div
         ref={dialogRef}
         aria-label="Command palette"
         aria-modal="true"
         className="command-palette"
         onKeyDown={event => {
-          if (event.key === 'Escape') {
-            event.preventDefault()
-            onClose()
-          } else if (event.key === 'ArrowDown') {
+          if (event.key === 'ArrowDown') {
             event.preventDefault()
             moveSelection(1)
           } else if (event.key === 'ArrowUp') {
