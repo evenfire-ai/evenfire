@@ -253,13 +253,19 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     expect(
       screen.getByText(/The command writes CLIENT_ID, TENANT_ID and CLIENT_SECRET into/i)
     ).toBeInTheDocument()
-    expect(screen.getByText('Upload and download files')).toBeInTheDocument()
+    // supportsFiles is a manifest property, not a Developer Portal toggle. The
+    // panel used to point at a checkbox the current portal does not present.
+    expect(screen.getByText(/bots\[0\]\.supportsFiles=true/)).toBeInTheDocument()
+    expect(screen.getByText(/direct chat only, not in a channel/i)).toBeInTheDocument()
 
     const command = screen.getByText(/teams app create/).closest('pre')
     expect(command).toHaveTextContent('teams app create')
     // Quoted, so a display name with a space stays one argument.
     expect(command).toHaveTextContent('--name "Evenfire Bot"')
     expect(command).toHaveTextContent('--endpoint "https://webhook.example.com/webhooks/teams/')
+    // channel-reader uses a tenant-scoped token URL, so a multi-tenant app fails
+    // with AADSTS. The CLI does not document its default, so the flag is pinned.
+    expect(command).toHaveTextContent('--sign-in-audience myOrg')
     expect(command).toHaveTextContent('--env .env')
     expect(screen.getByLabelText(/^CLIENT_ID/)).toBeInTheDocument()
     expect(screen.getByLabelText(/^TENANT_ID/)).toBeInTheDocument()

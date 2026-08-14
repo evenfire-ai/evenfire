@@ -72,12 +72,30 @@ export function teamsPlaceholderEndpoint(endpoint: string): string {
  * canGenerateTeamsCommand and render a warning instead of calling this with a
  * relative path.
  */
+/**
+ * `--sign-in-audience myOrg` is not optional in practice. channel-reader fetches
+ * its bot token from `login.microsoftonline.com/{tenantId}/oauth2/v2.0/token`,
+ * which only works for a single-tenant app; a multi-tenant registration needs the
+ * botframework.com authority and fails with an AADSTS error. The CLI documents
+ * `myOrg` and `multipleOrgs` as the accepted values but does not document which
+ * one it defaults to, so it is pinned here rather than assumed.
+ */
 export function buildTeamsAppCreateCommand(params: { botName: string; endpoint: string }): string {
   const botName = params.botName.trim() || '<bot-name>'
   return [
     'teams app create \\',
     `  --name "${botName}" \\`,
     `  --endpoint "${params.endpoint}" \\`,
+    '  --sign-in-audience myOrg \\',
     '  --env .env',
   ].join('\n')
+}
+
+/**
+ * Enabling file delivery is a manifest property, not a Developer Portal toggle.
+ * Older guidance points at App features > Bot > "Upload and download files",
+ * which the current portal does not present.
+ */
+export function buildTeamsSupportsFilesCommand(appId?: string): string {
+  return `teams app manifest update ${appId?.trim() || '<appId>'} --set-json 'bots[0].supportsFiles=true' --yes`
 }

@@ -3,6 +3,7 @@ import {
   LOCAL_TEAMS_ENDPOINT_ORIGIN,
   TEAMS_APP_NAME_MAX_LENGTH,
   buildTeamsAppCreateCommand,
+  buildTeamsSupportsFilesCommand,
   canGenerateTeamsCommand,
   teamsAppNameError,
   teamsPlaceholderEndpoint,
@@ -90,5 +91,27 @@ describe('buildTeamsAppCreateCommand', () => {
       endpoint: 'https://webhook.dev.example.com/webhooks/teams/x',
     })
     expect(cmd).toContain('--name "My Bot"')
+  })
+})
+
+describe('buildTeamsAppCreateCommand sign-in audience', () => {
+  it('pins the single-tenant audience, because channel-reader uses a tenant-scoped token URL', () => {
+    const cmd = buildTeamsAppCreateCommand({
+      botName: 'Evenfire Bot',
+      endpoint: 'https://webhook.example.com/webhooks/teams/x',
+    })
+    expect(cmd).toContain('--sign-in-audience myOrg')
+  })
+})
+
+describe('buildTeamsSupportsFilesCommand', () => {
+  it('includes --yes, without which the update silently does nothing', () => {
+    expect(buildTeamsSupportsFilesCommand('abc-123')).toBe(
+      "teams app manifest update abc-123 --set-json 'bots[0].supportsFiles=true' --yes"
+    )
+  })
+
+  it('falls back to a placeholder app id', () => {
+    expect(buildTeamsSupportsFilesCommand()).toContain('<appId>')
   })
 })

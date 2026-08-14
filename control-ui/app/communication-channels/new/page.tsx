@@ -40,6 +40,7 @@ import {
   LOCAL_TEAMS_ENDPOINT_ORIGIN,
   TEAMS_APP_NAME_MAX_LENGTH,
   buildTeamsAppCreateCommand,
+  buildTeamsSupportsFilesCommand,
   canGenerateTeamsCommand,
   teamsAppNameError,
   teamsPlaceholderEndpoint,
@@ -756,11 +757,13 @@ export default function CreateCommunicationChannelPage() {
                             Run this from any directory. The command writes CLIENT_ID, TENANT_ID and
                             CLIENT_SECRET into .env in whichever directory you run it from.
                           </li>
-                          <li>
-                            In Teams Developer Portal, enable{' '}
-                            <strong>Upload and download files</strong> for the Bot feature.
-                          </li>
                           <li>Paste CLIENT_ID, TENANT_ID, and CLIENT_SECRET below.</li>
+                          <li>
+                            To deliver workflow files, enable them on the manifest with{' '}
+                            <code>{buildTeamsSupportsFilesCommand()}</code>. The <code>--yes</code>{' '}
+                            is required; without it the command changes nothing and still looks like
+                            it worked. File delivery works in a direct chat only, not in a channel.
+                          </li>
                         </ol>
                         {teamsAppCreateCommand ? (
                           <div className="cu-command-block">
