@@ -178,12 +178,13 @@ jobs:
         working-directory: control-api
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
+          CONTROL_API_REAL_PG_REQUIRED: '1'
           FORCE_COLOR: '0'
           NO_COLOR: '1'
-        # The `realPostgres` filter matches all 8 *.realPostgres.integration
-        # suites: the DB migration plus the 7 GFS suites (reader role, blob
-        # migration, blob reconciler, audit evidence, copy, readiness, structural
-        # integrity). The matrix `npm test` skips them for lack of the admin URL.
+        # The `realPostgres` filter matches every control-api
+        # *.realPostgres.integration suite. The ordinary matrix may omit these
+        # suites when no admin DSN is supplied; this job requires the DSN and
+        # therefore fails before test collection if the lane is misconfigured.
         run: |
           set -euo pipefail
           log_file="$(mktemp)"
@@ -200,6 +201,10 @@ jobs:
             echo 'real-Postgres control-api lane executed zero passing tests' >&2
             exit 1
           }
+          if grep -Eq '(Test Files|Tests).*([1-9][0-9]*) skipped' "$normalized_log"; then
+            echo 'real-Postgres control-api lane reported skipped tests' >&2
+            exit 1
+          fi
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
@@ -209,6 +214,7 @@ jobs:
         working-directory: gfs-controller
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
+          CONTROL_API_REAL_PG_REQUIRED: '1'
           FORCE_COLOR: '0'
           NO_COLOR: '1'
         # rename-publication concurrency suite — also admin-URL-gated, so the
@@ -229,6 +235,10 @@ jobs:
             echo 'real-Postgres gfs-controller lane executed zero passing tests' >&2
             exit 1
           }
+          if grep -Eq '(Test Files|Tests).*([1-9][0-9]*) skipped' "$normalized_log"; then
+            echo 'real-Postgres gfs-controller lane reported skipped tests' >&2
+            exit 1
+          fi
 
   # ─── control-ui build + test check ───────────────────────────────────────
   # control-ui stays out of the SHARED build/test matrix because its tsconfig
@@ -430,6 +440,9 @@ jobs:
 
       - name: Test GFS Upload v2 cross-client geometry contract
         run: bash scripts/tests/test-gfs-upload-v2-geometry-contract.sh
+
+      - name: Test GFS real-Postgres Minikube runner contract
+        run: bash scripts/tests/test-gfs-real-pg-minikube-gate.sh
 
       # The NetworkPolicy probe runs on an E2E-only fixture that the default
       # (pulled) setup never acquires. This proves the target says so up front

@@ -420,6 +420,10 @@ minikube-pf-all-bg: ## Refresh background port-forwards for gate automation
 minikube-pre-gate-sync: ## Enforce minikube sync before a gate (use GATE=<name>)
 	@scripts/minikube/pre-gate-sync.sh --gate "$${GATE:-manual}" $(ARGS)
 
+.PHONY: test-gfs-real-postgres-minikube
+test-gfs-real-postgres-minikube: ## Run GFS T1 real-Postgres suites against a validated branch-owned Minikube profile
+	@CONTEXT="$(MINIKUBE_PROFILE)" bash scripts/e2e/gfs-real-pg-minikube-gate.sh
+
 .PHONY: minikube-verify-network-policy
 minikube-verify-network-policy: ## Prove NetworkPolicy enforcement in clerum-test/minikube before custom-image gates
 	@CONTEXT="$(MINIKUBE_PROFILE)" scripts/minikube/verify-network-policy-enforcement.sh
