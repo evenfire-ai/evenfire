@@ -21,6 +21,34 @@ export type DesktopShortcutRoute = {
   isCurrentSource?: () => boolean
 }
 
+/**
+ * Editing chords belong to Chromium/the active app, even if a future command
+ * definition accidentally reuses one. Keep this guard independent of DOM
+ * focus because before-input-event intentionally does not inspect renderer DOM.
+ */
+export function isStandardEditingShortcut(
+  input: DesktopShortcutInput,
+  platform: DesktopShortcutPlatform
+): boolean {
+  if (input.type !== 'keyDown' || input.isComposing || input.alt) return false
+  const key = input.key.toLowerCase()
+  const mod = platform === 'darwin' ? input.meta && !input.control : input.control && !input.meta
+  if (mod && ['a', 'c', 'v', 'x', 'z'].includes(key)) return true
+  if (platform !== 'darwin' && mod && key === 'y') return true
+  if (
+    platform === 'darwin' &&
+    mod &&
+    ['arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'backspace'].includes(key)
+  ) {
+    return true
+  }
+  return (
+    platform !== 'darwin' &&
+    ((input.control && !input.meta && !input.shift && key === 'insert') ||
+      (!input.control && !input.meta && input.shift && ['delete', 'insert'].includes(key)))
+  )
+}
+
 export function routeDesktopShortcut(
   route: DesktopShortcutRoute,
   event: ShortcutEvent,
@@ -34,11 +62,9 @@ export function routeDesktopShortcut(
   ) {
     return false
   }
-  const command = matchDesktopCommand(
-    input,
-    route.platform ?? platformFromNode(process.platform),
-    route.source
-  )
+  const platform = route.platform ?? platformFromNode(process.platform)
+  if (isStandardEditingShortcut(input, platform)) return false
+  const command = matchDesktopCommand(input, platform, route.source)
   if (!command) return false
   event.preventDefault()
   if (route.source === 'sandbox' && !route.trustedRenderer.isFocused()) {

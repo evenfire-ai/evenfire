@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { DesktopShortcutInput } from '../desktopCommands.js'
-import { type DesktopShortcutRoute, routeDesktopShortcut } from '../shortcutRouter.js'
+import {
+  type DesktopShortcutRoute,
+  isStandardEditingShortcut,
+  routeDesktopShortcut,
+} from '../shortcutRouter.js'
 
 function input(overrides: Partial<DesktopShortcutInput> = {}): DesktopShortcutInput {
   return {
@@ -90,6 +94,32 @@ describe('main-process Desktop shortcut routing', () => {
     ]) {
       expect(routeDesktopShortcut(current, { preventDefault }, candidate)).toBe(false)
     }
+    expect(preventDefault).not.toHaveBeenCalled()
+    expect(current.trustedRenderer.send).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['darwin', input({ key: 'a' })],
+    ['darwin', input({ key: 'c' })],
+    ['darwin', input({ key: 'x' })],
+    ['darwin', input({ key: 'v' })],
+    ['darwin', input({ key: 'z' })],
+    ['darwin', input({ key: 'z', shift: true })],
+    ['darwin', input({ key: 'ArrowLeft' })],
+    ['win32', input({ key: 'a', meta: false, control: true })],
+    ['win32', input({ key: 'c', meta: false, control: true })],
+    ['win32', input({ key: 'x', meta: false, control: true })],
+    ['win32', input({ key: 'v', meta: false, control: true })],
+    ['win32', input({ key: 'y', meta: false, control: true })],
+    ['win32', input({ key: 'Insert', meta: false, control: true })],
+    ['win32', input({ key: 'Insert', meta: false, shift: true })],
+    ['win32', input({ key: 'Delete', meta: false, shift: true })],
+  ] as const)('leaves standard %s editing input to Chromium', (platform, candidate) => {
+    expect(isStandardEditingShortcut(candidate, platform)).toBe(true)
+    const current = route('host')
+    current.platform = platform
+    const preventDefault = vi.fn()
+    expect(routeDesktopShortcut(current, { preventDefault }, candidate)).toBe(false)
     expect(preventDefault).not.toHaveBeenCalled()
     expect(current.trustedRenderer.send).not.toHaveBeenCalled()
   })
