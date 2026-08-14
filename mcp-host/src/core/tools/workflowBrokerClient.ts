@@ -2,6 +2,18 @@ import type { EnvGetter } from './workflowShared'
 import { trimTrailingSlash } from './workflowShared'
 import type { WorkflowControlTokenProvider } from './workflowTokenProvider'
 
+export class WorkflowBrokerRequestError extends Error {
+  readonly status: number
+  readonly code: string | null
+
+  constructor(status: number, code: string | null, message: string) {
+    super(message)
+    this.name = 'WorkflowBrokerRequestError'
+    this.status = status
+    this.code = code
+  }
+}
+
 export class WorkflowBrokerClient {
   private readonly tokenProvider: WorkflowControlTokenProvider
 
@@ -47,7 +59,11 @@ export class WorkflowBrokerClient {
 
     if (!response.ok) {
       const body = await response.text().catch(() => '')
-      throw new Error(formatBrokerError(response.status, body))
+      throw new WorkflowBrokerRequestError(
+        response.status,
+        safeErrorCodeFromBody(body),
+        formatBrokerError(response.status, body)
+      )
     }
 
     return response.json()
@@ -65,7 +81,11 @@ export class WorkflowBrokerClient {
 
     if (!response.ok) {
       const body = await response.text().catch(() => '')
-      throw new Error(formatBrokerError(response.status, body))
+      throw new WorkflowBrokerRequestError(
+        response.status,
+        safeErrorCodeFromBody(body),
+        formatBrokerError(response.status, body)
+      )
     }
 
     const contentLength = response.headers.get('content-length')?.trim() || ''

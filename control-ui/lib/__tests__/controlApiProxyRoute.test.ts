@@ -68,6 +68,37 @@ describe('control-ui control-api proxy route', () => {
     await expect(res.json()).resolves.toEqual({ items: [] })
   })
 
+  it('preserves encoded slashes in scoped Marketplace entry names', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify({ name: '@evenfire-dev/airtable' })))
+
+    const req = new NextRequest(
+      'http://localhost:3000/control-api/api/v1/admin/registry/entries/%40evenfire-dev%2Fairtable/versions/1.0.0',
+      { method: 'GET' }
+    )
+
+    await GET(req, {
+      params: {
+        path: [
+          'api',
+          'v1',
+          'admin',
+          'registry',
+          'entries',
+          '@evenfire-dev/airtable',
+          'versions',
+          '1.0.0',
+        ],
+      },
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8090/api/v1/admin/registry/entries/%40evenfire-dev%2Fairtable/versions/1.0.0',
+      expect.any(Object)
+    )
+  })
+
   it('forwards the HttpOnly admin session cookie for GFS tree requests', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

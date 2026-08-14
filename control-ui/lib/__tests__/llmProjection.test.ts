@@ -1,5 +1,41 @@
 import { describe, expect, it } from 'vitest'
-import { getActiveCredentialKeys, projectCredentialDraft, validateLlmSecretData } from '../llm'
+import {
+  getActiveCredentialKeys,
+  getProvidersWithCompleteCredentials,
+  projectCredentialDraft,
+  validateLlmSecretData,
+} from '../llm'
+
+describe('getProvidersWithCompleteCredentials', () => {
+  it('identifies every provider whose complete credential group is in the Secret', () => {
+    expect(
+      getProvidersWithCompleteCredentials([
+        'openai-api-key',
+        'aws-access-key-id',
+        'aws-secret-access-key',
+      ])
+    ).toEqual(['openai', 'bedrock'])
+  })
+
+  it('does not identify a provider with only part of its credential group', () => {
+    expect(getProvidersWithCompleteCredentials(['aws-access-key-id'])).toEqual([])
+  })
+
+  it('is unique and stable under duplicate, unknown, and permuted key input', () => {
+    const keys = [
+      'aws-secret-access-key',
+      'unknown-key',
+      'openai-api-key',
+      'aws-access-key-id',
+      'openai-api-key',
+    ]
+    const expected = getProvidersWithCompleteCredentials(keys)
+
+    expect(expected).toEqual(['openai', 'bedrock'])
+    expect(new Set(expected).size).toBe(expected.length)
+    expect(getProvidersWithCompleteCredentials([...keys].reverse())).toEqual(expected)
+  })
+})
 
 describe('getActiveCredentialKeys (spec Topic 1b — provider-domain projection)', () => {
   it('is just the primary provider slots when there is no policy', () => {

@@ -19,16 +19,13 @@ vi.mock('../../lib/api', () => ({
   getRegistryConnection: vi.fn(),
   getPublishScope: vi.fn(),
   deleteRegistryEntry: vi.fn(),
-  installRecipeFromRegistry: vi.fn(),
 }))
 
 const navigation = vi.hoisted(() => ({
-  pathname: '/marketplace/connectors',
   push: vi.fn(),
 }))
 
 vi.mock('next/navigation', () => ({
-  usePathname: () => navigation.pathname,
   useRouter: () => ({ push: navigation.push }),
 }))
 
@@ -73,7 +70,7 @@ const MOCK_RECIPE_ENTRY: RegistryEntry = {
   tags: ['analytics', 'reporting'],
   trust_level: 'mid',
   quality_tier: 'unverified',
-  visibility: 'private',
+  visibility: 'public',
   status: 'published',
   server_mode: null,
   transport: null,
@@ -126,7 +123,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  navigation.pathname = '/marketplace/connectors'
 })
 
 describe('RegistryCatalog tabs and columns', () => {
@@ -137,49 +133,72 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(await screen.findByText('brave-search')).toBeInTheDocument()
     expect(screen.queryByText('market-report')).not.toBeInTheDocument()
     expect(screen.getByText('Brave web search')).toBeInTheDocument()
-    // Panel title is "Connectors" (the "Marketplace" tab labels the section); no count.
-    expect(screen.getByText('Connectors', { selector: '.cu-panel-title' })).toBeInTheDocument()
+    // Panel title is "Marketplace" (the "Connectors" tab selects its catalog); no count.
+    expect(screen.getByText('Marketplace')).toBeInTheDocument()
     expect(screen.queryByText(/Marketplace \(/)).not.toBeInTheDocument()
   })
 
-  it('shows only plugin entries on the plugins route', async () => {
-    navigation.pathname = '/marketplace/plugins'
+  it('keeps the catalog connector-only when recipe entries are returned', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
 
-    expect(await screen.findByText('market-report')).toBeInTheDocument()
-    expect(screen.queryByText('brave-search')).not.toBeInTheDocument()
+    expect(await screen.findByText('brave-search')).toBeInTheDocument()
+    expect(screen.queryByText('market-report')).not.toBeInTheDocument()
   })
 
-  it('uses the same compact columns for both tabs', async () => {
+  it('uses compact connector columns', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    for (const heading of ['Name', 'Version', 'Visibility', 'Downloads']) {
+    for (const heading of ['Name', 'Version']) {
       expect(screen.getByRole('columnheader', { name: heading })).toBeInTheDocument()
     }
     for (const actionHeading of ['Installation', 'Edit or remove']) {
       expect(screen.getByRole('columnheader', { name: actionHeading })).toBeInTheDocument()
     }
     expect(screen.queryByRole('columnheader', { name: 'View details' })).not.toBeInTheDocument()
-    for (const removed of ['Type', 'Category', 'Trust', 'Quality']) {
+    for (const removed of ['Type', 'Category', 'Trust', 'Quality', 'Downloads', 'Visibility']) {
       expect(screen.queryByRole('columnheader', { name: removed })).not.toBeInTheDocument()
     }
   })
 
-  it('provides canonical tabs for connectors and plugins', async () => {
+  it('excludes private entries from the Marketplace', async () => {
+    mockApiSuccess([
+      MOCK_MCP_ENTRY,
+      { ...MOCK_MCP_ENTRY, id: '3', name: 'private-search', visibility: 'private' },
+    ])
+    render(<RegistryCatalog />)
+
+    expect(await screen.findByText('brave-search')).toBeInTheDocument()
+    expect(screen.queryByText('private-search')).not.toBeInTheDocument()
+  })
+
+  it('shows a single Connectors tab and hides the Plugins tab', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    expect(screen.getByRole('tab', { name: 'Marketplace' })).toHaveAttribute(
+    expect(screen.getAllByRole('tab', { name: 'Connectors' })).toHaveLength(1)
+    expect(screen.getByRole('tab', { name: 'Connectors' })).toHaveAttribute(
       'href',
       '/marketplace/connectors'
     )
-    expect(screen.getByRole('tab', { name: 'Plugins' })).toHaveAttribute(
-      'href',
-      '/marketplace/plugins'
+    expect(screen.queryByRole('tab', { name: 'Plugins' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('tablist', { name: 'Marketplace entry types' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('places Marketplace navigation below the panel header', async () => {
+    mockApiSuccess()
+    render(<RegistryCatalog />)
+    await screen.findByText('brave-search')
+
+    const header = screen.getByText('Marketplace')
+    const connectorsTab = screen.getByRole('tab', { name: 'Connectors' })
+    expect(header.compareDocumentPosition(connectorsTab) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
     )
   })
 
@@ -191,6 +210,30 @@ describe('RegistryCatalog tabs and columns', () => {
       'href',
       '/marketplace/entries/brave-search/1.0.0'
     )
+  })
+
+  it('sorts connectors by name and version from their headers', async () => {
+    mockApiSuccess([
+      MOCK_MCP_ENTRY,
+      { ...MOCK_MCP_ENTRY, id: '3', name: 'zebra-search', version: '1.2.0' },
+      { ...MOCK_MCP_ENTRY, id: '4', name: 'alpha-search', version: '2.0.0' },
+    ])
+    render(<RegistryCatalog />)
+    await screen.findByText('brave-search')
+
+    const listedNames = () =>
+      Array.from(document.querySelectorAll('.cu-marketplace-table .cu-registry-name')).map(
+        element => element.textContent
+      )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by name ascending' }))
+    expect(listedNames()).toEqual(['alpha-search', 'brave-search', 'zebra-search'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by version descending' }))
+    expect(listedNames()).toEqual(['alpha-search', 'zebra-search', 'brave-search'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by version ascending' }))
+    expect(listedNames()).toEqual(['brave-search', 'zebra-search', 'alpha-search'])
   })
 })
 
@@ -219,6 +262,9 @@ describe('RegistryCatalog expansion and actions', () => {
     expect(screen.getByText('Type')).toBeInTheDocument()
     const detailRow = screen.getByText('Type').closest('tr')!
     expect(within(detailRow).getAllByText('search')).toHaveLength(1)
+    expect(screen.getByText('Trust')).toBeInTheDocument()
+    expect(screen.getByText('Verification')).toBeInTheDocument()
+    expect(screen.getByText('Tags')).toBeInTheDocument()
     expect(screen.getByText('HIGH')).toBeInTheDocument()
     expect(screen.getByText('verified')).toBeInTheDocument()
     expect(screen.getByText('web')).toBeInTheDocument()
@@ -236,24 +282,6 @@ describe('RegistryCatalog expansion and actions', () => {
     expect(navigation.push).toHaveBeenCalledWith(
       '/marketplace/install?entry=brave-search&version=1.0.0'
     )
-    expect(row).toHaveAttribute('aria-expanded', 'false')
-  })
-
-  it('installs a plugin from the plugins tab', async () => {
-    navigation.pathname = '/marketplace/plugins'
-    mockApiSuccess()
-    vi.mocked(api.installRecipeFromRegistry).mockResolvedValue({
-      recipeName: 'market-report',
-      registryEntry: 'market-report',
-      registryVersion: '1.0.0',
-      correlationId: 'test-correlation',
-    })
-    render(<RegistryCatalog />)
-    const row = (await screen.findByText('market-report')).closest('tr')!
-
-    fireEvent.click(within(row).getByRole('button', { name: 'Install' }))
-
-    await waitFor(() => expect(api.installRecipeFromRegistry).toHaveBeenCalledOnce())
     expect(row).toHaveAttribute('aria-expanded', 'false')
   })
 
@@ -321,12 +349,12 @@ describe('RegistryCatalog state handling', () => {
   it('renders a skeleton across the compact columns while capability is resolving', () => {
     vi.mocked(api.getRegistryCatalog).mockReturnValue(new Promise(() => {}))
     // Role is unknown while capability resolves, so the curator-only actions
-    // column is absent and the six visible columns render 30 skeleton cells
+    // column is absent and the four visible columns render 20 skeleton cells
     // across five rows.
     vi.mocked(api.getPublishScope).mockReturnValue(new Promise(() => {}))
     const { container } = render(<RegistryCatalog />)
 
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(30)
+    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(20)
   })
 
   it('shows an API error', async () => {
@@ -339,7 +367,7 @@ describe('RegistryCatalog state handling', () => {
   it('shows the empty state when no entries match', async () => {
     mockApiSuccess([MOCK_RECIPE_ENTRY])
     render(<RegistryCatalog />)
-    expect(await screen.findByText('No entries match your filters.')).toBeInTheDocument()
+    expect(await screen.findByText('No connectors match your filters.')).toBeInTheDocument()
   })
 })
 
