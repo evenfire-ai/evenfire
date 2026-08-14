@@ -131,33 +131,61 @@ path.write_text(text)
 PY
 }
 
-run_suite() {
-  local package="$1" expected_files log_file json_file
-  local passed_files passed_tests pending_files pending_tests success
-  expected_files="$(find "${PROJECT_DIR}/${package}" -name '*realPostgres*.test.ts' ! -name 'realPostgres.requirement.ts' -print | wc -l | tr -d ' ')"
-  [[ "${expected_files}" =~ ^[1-9][0-9]*$ ]] || die "no real-Postgres suites found under ${package}"
-  log_file="${TMP_DIR}/${package//\//_}.log"
-  json_file="${TMP_DIR}/${package//\//_}.json"
+real_postgres_suite_files() {
+  local package="$1"
+  case "${package}" in
+    control-api)
+      find "${PROJECT_DIR}/${package}/test" -type f \
+        \( -name 'gfs*.realPostgres.integration.test.ts' \
+        -o -name 'services.rateLimiter.realPostgres.integration.test.ts' \) -print | sort
+      ;;
+    gfs-controller)
+      find "${PROJECT_DIR}/${package}" -type f \
+        -name '*realPostgres.integration.test.ts' -print | sort
+      ;;
+    *)
+      die "unsupported real-Postgres package: ${package}"
+      ;;
+  esac
+}
 
-  printf '[gfs-real-pg-minikube] running %s real-Postgres suites\n' "${package}"
-  if ! (
-    cd "${PROJECT_DIR}/${package}"
-    CONTROL_API_REAL_PG_ADMIN_URL="${ADMIN_DSN}" \
-      CONTROL_API_REAL_PG_REQUIRED=1 \
-      FORCE_COLOR=0 NO_COLOR=1 \
-      npm test -- --run realPostgres --reporter=json --outputFile="${json_file}"
-  ) >"${log_file}" 2>&1; then
+run_suite() {
+  local package="$1" suite_file relative_suite log_file json_file
+  local passed_files passed_tests pending_files pending_tests success
+  local suite_index=0 suite_count=0
+  local suite_files=()
+  while IFS= read -r suite_file; do
+    [[ -n "${suite_file}" ]] || continue
+    suite_files+=("${suite_file}")
+  done < <(real_postgres_suite_files "${package}")
+  suite_count="${#suite_files[@]}"
+  (( suite_count > 0 )) || die "no GFS real-Postgres suites found under ${package}"
+
+  printf '[gfs-real-pg-minikube] running %s GFS real-Postgres suites (%s isolated processes)\n' \
+    "${package}" "${suite_count}"
+  for suite_file in "${suite_files[@]}"; do
+    suite_index=$((suite_index + 1))
+    relative_suite="${suite_file#"${PROJECT_DIR}/${package}/"}"
+    log_file="${TMP_DIR}/${package//\//_}-${suite_index}.log"
+    json_file="${TMP_DIR}/${package//\//_}-${suite_index}.json"
+    if ! (
+      cd "${PROJECT_DIR}/${package}"
+      CONTROL_API_REAL_PG_ADMIN_URL="${ADMIN_DSN}" \
+        CONTROL_API_REAL_PG_REQUIRED=1 \
+        FORCE_COLOR=0 NO_COLOR=1 \
+        npm test -- --run "${relative_suite}" --reporter=json --outputFile="${json_file}"
+    ) >"${log_file}" 2>&1; then
+      sanitize_file "${log_file}"
+      sanitize_file "${json_file}"
+      cat "${log_file}" >&2 || true
+      cat "${json_file}" >&2 || true
+      die "${package}/${relative_suite} real-Postgres gate failed"
+    fi
+
     sanitize_file "${log_file}"
     sanitize_file "${json_file}"
-    cat "${log_file}" >&2 || true
-    cat "${json_file}" >&2 || true
-    die "${package} real-Postgres gate failed"
-  fi
-
-  sanitize_file "${log_file}"
-  sanitize_file "${json_file}"
-  [[ -s "${json_file}" ]] || die "${package} real-Postgres reporter produced no JSON result"
-  read -r passed_files passed_tests pending_files pending_tests success < <(python3 - "${json_file}" <<'PY'
+    [[ -s "${json_file}" ]] || die "${package}/${relative_suite} reporter produced no JSON result"
+    read -r passed_files passed_tests pending_files pending_tests success < <(python3 - "${json_file}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -172,11 +200,15 @@ print(
     str(bool(result.get("success"))).lower(),
 )
 PY
-  )
-  [[ "${success}" == 'true' && "${passed_files}" -eq "${expected_files}" ]] || die "${package} real-Postgres reporter did not pass every suite"
-  [[ "${passed_tests}" -gt 0 && "${pending_files}" -eq 0 && "${pending_tests}" -eq 0 ]] || die "${package} real-Postgres lane reported zero tests or skips"
-  printf '[gfs-real-pg-minikube] PASS %s (%s files, %s tests, 0 skipped)\n' \
-    "${package}" "${passed_files}" "${passed_tests}"
+    )
+    [[ "${success}" == 'true' && "${passed_files}" -eq 1 ]] || \
+      die "${package}/${relative_suite} reporter did not pass"
+    [[ "${passed_tests}" -gt 0 && "${pending_files}" -eq 0 && "${pending_tests}" -eq 0 ]] || \
+      die "${package}/${relative_suite} reported zero tests or skips"
+    printf '[gfs-real-pg-minikube] PASS %s (%s tests, 0 skipped)\n' \
+      "${relative_suite}" "${passed_tests}"
+  done
+  printf '[gfs-real-pg-minikube] PASS %s (%s suites, no skips)\n' "${package}" "${suite_count}"
 }
 
 require_command git kubectl npm python3 shasum
