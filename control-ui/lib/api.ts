@@ -1828,11 +1828,17 @@ export function getModelInUseImpact(err: unknown): ModelInUseImpact | null {
   const impact = body.impact
   if (!impact || typeof impact !== 'object') return null
   const rec = impact as Record<string, unknown>
+  const hostsAffected = coerceModelHostReferences(rec.hostsAffected)
+  const grantsAffected = coerceModelGrantReferences(rec.grantsAffected)
+  // A matched code with an empty/malformed impact would open the "still in use"
+  // confirm with no references to show — fall through to the generic error
+  // banner instead, matching getBudgetsUsingPrice/getUnpricedModelsError.
+  if (hostsAffected.length === 0 && grantsAffected.length === 0) return null
   return {
     provider: typeof rec.provider === 'string' ? rec.provider : '',
     model: typeof rec.model === 'string' ? rec.model : '',
-    hostsAffected: coerceModelHostReferences(rec.hostsAffected),
-    grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+    hostsAffected,
+    grantsAffected,
   }
 }
 

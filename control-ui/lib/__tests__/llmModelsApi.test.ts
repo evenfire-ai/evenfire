@@ -206,6 +206,33 @@ describe('disable/delete impact gate (?force)', () => {
       expect(getModelInUseImpact(err)).toBeNull()
     }
   })
+
+  it('getModelInUseImpact returns null when the impact carries no references', async () => {
+    // A model_in_use 409 whose impact resolves to zero Host/grant references
+    // must fall through to the generic error banner, not open a "still in use"
+    // confirm with an empty reference list (parity with the sibling helpers).
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse(
+        {
+          error: 'model_in_use',
+          message: 'still referenced',
+          impact: {
+            provider: 'claude',
+            model: 'claude-haiku-4-5',
+            hostsAffected: [],
+            grantsAffected: [],
+          },
+        },
+        409
+      )
+    )
+    try {
+      await deleteLlmModel(SAMPLE.id)
+      expect.unreachable('deleteLlmModel should reject on 409')
+    } catch (err) {
+      expect(getModelInUseImpact(err)).toBeNull()
+    }
+  })
 })
 
 describe('getAdminAttention', () => {
