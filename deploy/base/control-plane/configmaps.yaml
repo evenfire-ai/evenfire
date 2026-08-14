@@ -58,9 +58,10 @@ data:
   APPROVAL_RL_REQUEST_PER_MIN: "120"
   # Plugin Workload SDK platform rate limits (issue #348). Per-run SDK quotas
   # (maxRequestsPerRun / maxNotificationsPerRun) are deprecated and ignored;
-  # these per-minute windows reset every 60s, so stepless recipes are never
-  # permanently trapped. Values MUST equal the code defaults in
-  # control-api/src/config.ts (150/120/600/600) — the config deploy-mirror
+  # limits are enforced over a trailing 60s window (no fixed reset); once
+  # traffic slows below the limit the window drains within ~60s — stepless
+  # recipes are never permanently trapped. Values MUST equal the code defaults
+  # in control-api/src/config.ts (150/120/600/600) — the config deploy-mirror
   # test fails on drift.
   CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "150"
   CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "120"

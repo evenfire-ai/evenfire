@@ -17,10 +17,10 @@ import { readFileSync } from 'node:fs'
  *   2. Each ENV override honored.
  *   3. Invalid values fail loudly at import (positiveIntegerFromEnv).
  *   4. Empty string falls back to the code default.
- *   5. Deploy mirror: the base ConfigMap AND the full-copy minikube overlay
- *      both register every key at the code default (plan D1/R1 — omitting a
- *      key in the minikube full-copy overlay silently falls back to code
- *      defaults, so drift must fail HERE in CI).
+ *   5. Deploy mirror: the base ConfigMap AND the minikube strategic-merge
+ *      patch overlay both register every key at the code default (plan D1/R1 —
+ *      the overlay is a strategic-merge patch, so an omitted key inherits the
+ *      BASE value; all four keys are pinned so drift must fail HERE in CI).
  */
 
 const RATE_LIMIT_KEYS = [
@@ -146,7 +146,7 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     }
   })
 
-  it('registers every key at the code default in the minikube full-copy overlay', async () => {
+  it('registers every key at the code default in the minikube strategic-merge patch overlay', async () => {
     const config = await loadConfigWith({})
     const source = read('../../deploy/overlays/minikube/configmaps/control-api-config.yaml')
 
@@ -158,5 +158,25 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
       )
       expect(Number(value), env).toBe(config[field])
     }
+  })
+
+  it('documents the platform per-minute defaults and ENV keys in the WorkflowRecipe CRD', () => {
+    const source = read('../../charts/clerum-crds/crds/workflowrecipe.yaml')
+
+    const invocationsDescription = extractOne(
+      source,
+      /maxInvocationsPerMinute:\s*\n\s*type: integer\s*\n\s*minimum: 1\s*\n\s*description: (.+)/,
+      'maxInvocationsPerMinute description in charts/clerum-crds/crds/workflowrecipe.yaml'
+    )
+    expect(invocationsDescription).toContain('default 120')
+    expect(invocationsDescription).toContain('CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN')
+
+    const notificationsDescription = extractOne(
+      source,
+      /maxNotificationsPerMinute:\s*\n\s*type: integer\s*\n\s*minimum: 1\s*\n\s*description: (.+)/,
+      'maxNotificationsPerMinute description in charts/clerum-crds/crds/workflowrecipe.yaml'
+    )
+    expect(notificationsDescription).toContain('default 150')
+    expect(notificationsDescription).toContain('CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN')
   })
 })

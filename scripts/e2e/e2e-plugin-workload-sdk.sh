@@ -755,7 +755,10 @@ create_grant() {
   if [ "$family" = "promptBridge" ]; then
     payload="$(prompt_grant_payload "$WORKLOAD_ID")"
   else
-    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerRun":10}}'
+    # issue #348: active per-minute override (maxNotificationsPerMinute) drives the
+    # rate-limit gate; the deprecated maxNotificationsPerRun stays on the wire to
+    # exercise the admin validate-but-strip path (it is accepted then stripped).
+    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerMinute":10,"maxNotificationsPerRun":10}}'
   fi
   admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$payload"
 }
@@ -778,7 +781,7 @@ prompt_grant_payload() {
     --arg fallbackTargetRef "$E2E_PROMPT_FALLBACK_TARGET_REF" \
     --arg fallbackCredentialSlot "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" \
     --arg caller "$caller" \
-    '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model,$fallbackModel],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot},{targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:4}}'
+    '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model,$fallbackModel],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot},{targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller],quotaLimits:{maxInvocationsPerMinute:4,maxRequestsPerRun:4}}'
 }
 
 # ─── prerequisites ───────────────────────────────────────────────────────
@@ -1036,6 +1039,16 @@ if create_grant promptBridge >/dev/null; then
   ok "created promptBridge grant"
 else
   fail "promptBridge grant creation failed"
+  exit 1
+fi
+# issue #348: prove the admin API accepted the deprecated per-run key on the wire
+# (grant creation returned 200 above) but STRIPPED it, persisting only the active
+# per-minute override. This is the deprecate-and-ignore contract exercised end-to-end.
+persisted_pb_quota="$(psql_query "SELECT quota_limits::text FROM plugin_workload_sdk_grants WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}' AND capability_family='promptBridge';")"
+if printf '%s' "$persisted_pb_quota" | jq -e '(.maxInvocationsPerMinute == 4) and (has("maxRequestsPerRun") | not)' >/dev/null 2>&1; then
+  ok "deprecate-and-strip verified: maxInvocationsPerMinute=4 persisted, deprecated maxRequestsPerRun stripped"
+else
+  fail "persisted promptBridge quota_limits violate deprecate-and-strip (got: ${persisted_pb_quota})"
   exit 1
 fi
 if create_grant clientNotifications >/dev/null; then
@@ -1362,11 +1375,13 @@ else
   exit 1
 fi
 
-# Quota enforcement: N+1 call is rejected after quota exhausted.
+# Per-minute rate limit (issue #348): the 5th call is rejected once the grant's
+# maxInvocationsPerMinute=4 window is exhausted. The wire error code stays
+# `quota_exceeded` (HTTP 429), so the fixture marker names are unchanged.
 if printf "%s" "$logs" | grep -q E2E_SDK_QUOTA_EXCEEDED_OK; then
-  ok "quota enforcement correctly rejected call after 4/4 requests consumed"
+  ok "per-minute rate limit rejected the 5th call after 4/4 invocations in the window"
 else
-  fail "quota enforcement did not reject the excess call (fixture marker missing; caller logs redacted)"
+  fail "per-minute rate limit did not reject the 5th call (fixture marker missing; caller logs redacted)"
   exit 1
 fi
 

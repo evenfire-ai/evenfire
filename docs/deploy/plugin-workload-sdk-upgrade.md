@@ -53,9 +53,13 @@ The SDK enforces platform-level per-minute rate limits configured through the
 `control-api-config` ConfigMap. The per-run grant quotas `maxRequestsPerRun`
 and `maxNotificationsPerRun` are deprecated: they are still accepted in grant
 payloads for backward compatibility but are ignored by the authorizer. Each
-per-minute window resets every 60 seconds, so a stepless recipe that exhausts
-a window is throttled for at most one minute and is never permanently trapped
-(the failure mode the per-run counters had).
+per-minute limit is enforced over a **trailing (rolling) 60-second window**
+computed from the invocation audit trail — there is no fixed reset tick.
+Denied attempts are recorded and count toward the window, so traffic that
+stays above the limit remains throttled while it keeps arriving; once the
+caller slows below the limit the trailing window drains within ~60 seconds.
+Unlike the deprecated per-run counters, a stepless recipe is never
+permanently trapped.
 
 | ENV variable | Default | Limits |
 |---|---|---|
@@ -66,7 +70,8 @@ a window is throttled for at most one minute and is never permanently trapped
 
 The defaults above equal the code defaults in `control-api/src/config.ts` and
 are registered in both `deploy/base/control-plane/configmaps.yaml` and the
-full-copy minikube overlay
+minikube overlay patch (strategic-merge over the base ConfigMap; omitted keys
+inherit base values)
 `deploy/overlays/minikube/configmaps/control-api-config.yaml`; a drift between
 code and manifests fails the config deploy-mirror test.
 
@@ -77,7 +82,10 @@ Limits are tunable without a code deploy. Edit the key in the
 Control API so the new environment is picked up:
 
 ```bash
-kubectl rollout restart deployment/control-api -n control-plane
+# Preflight: confirm you are pointed at the intended cluster before mutating it.
+kubectl config current-context   # must print the target environment's context ("$K8S_CONTEXT")
+kubectl --context "$K8S_CONTEXT" -n control-plane rollout restart deployment/control-api
+kubectl --context "$K8S_CONTEXT" -n control-plane rollout status deployment/control-api --timeout=240s
 ```
 
 Values must be positive integers; the Control API fails loudly at startup on

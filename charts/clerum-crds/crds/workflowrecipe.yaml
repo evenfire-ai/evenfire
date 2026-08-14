@@ -1723,7 +1723,7 @@ spec:
                         maxInvocationsPerMinute:
                           type: integer
                           minimum: 1
-                          description: Rate limit per workload; default 60.
+                          description: Rate limit per workload; platform default 120 when unset (ENV CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN, issue #348).
                         resultRetentionHours:
                           type: integer
                           minimum: 1
@@ -1770,7 +1770,7 @@ spec:
                         maxNotificationsPerMinute:
                           type: integer
                           minimum: 1
-                          description: Rate limit per workload; default 120.
+                          description: Rate limit per workload; platform default 150 when unset (ENV CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN, issue #348).
                         maxTitleBytes:
                           type: integer
                           minimum: 1

@@ -165,7 +165,7 @@ export function GrantsView({
                       <span className="cu-field__hint"> · users: {userRefsDisplay}</span>
                     ) : null}
                   </td>
-                  {/* No grant-level overrides: the platform per-minute ENV rate limits apply. */}
+                  {/* Per-run caps removed (issue #348). Shows API-set per-minute grant overrides when present (they take precedence over the platform ENV defaults); 'platform defaults' otherwise. The edit form does not manage these overrides. */}
                   <td>{quotaParts.length === 0 ? 'platform defaults' : quotaParts.join(', ')}</td>
                   <td className="cu-cell--right">
                     <Button type="button" variant="ghost" size="sm" onClick={() => onEdit(grant)}>
