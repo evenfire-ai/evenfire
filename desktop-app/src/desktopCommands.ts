@@ -16,6 +16,7 @@ export type DesktopCommandEligibility =
   | 'composer-available'
   | 'app-mounted'
   | 'conversation-origin'
+  | 'not-busy'
 
 export type SemanticShortcutBinding = {
   key: string
@@ -46,6 +47,7 @@ export type DesktopCommandRuntimeContext = {
   composerAvailable: boolean
   appMounted: boolean
   conversationOriginAvailable: boolean
+  applicationBusy: boolean
 }
 
 function tabSelectCommand<const Id extends `tabs.select${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8}`>(
@@ -257,7 +259,7 @@ const definitions = [
     order: 130,
     defaultBinding: null,
     sources: ['host', 'sandbox'],
-    eligibility: 'always',
+    eligibility: 'not-busy',
     editingPolicy: 'suppress',
     modalPolicy: 'block',
     actionOwner: 'renderer',
@@ -499,6 +501,7 @@ export function isDesktopCommandEligible(
   if (command.eligibility === 'searchable-content') return context.searchableContent
   if (command.eligibility === 'app-mounted') return context.appMounted
   if (command.eligibility === 'conversation-origin') return context.conversationOriginAvailable
+  if (command.eligibility === 'not-busy') return !context.applicationBusy
   return context.composerAvailable
 }
 

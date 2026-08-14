@@ -130,6 +130,7 @@ describe('Desktop command registry', () => {
       composerAvailable: false,
       appMounted: false,
       conversationOriginAvailable: false,
+      applicationBusy: false,
     }
     expect(isDesktopCommandEligible(getDesktopCommand('tabs.select1'), context)).toBe(true)
     expect(isDesktopCommandEligible(getDesktopCommand('tabs.select2'), context)).toBe(false)
@@ -137,6 +138,13 @@ describe('Desktop command registry', () => {
     expect(isDesktopCommandEligible(getDesktopCommand('search.current'), context)).toBe(false)
     expect(isDesktopCommandEligible(getDesktopCommand('composer.focus'), context)).toBe(false)
     expect(isDesktopCommandEligible(getDesktopCommand('search.open'), context)).toBe(true)
+    expect(isDesktopCommandEligible(getDesktopCommand('auth.logout'), context)).toBe(true)
+    expect(
+      isDesktopCommandEligible(getDesktopCommand('auth.logout'), {
+        ...context,
+        applicationBusy: true,
+      })
+    ).toBe(false)
     expect(isDesktopCommandEligible(getDesktopCommand('app.refresh'), context)).toBe(false)
     expect(
       isDesktopCommandEligible(getDesktopCommand('app.refresh'), { ...context, appMounted: true })

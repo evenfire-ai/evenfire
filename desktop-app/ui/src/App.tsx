@@ -1112,6 +1112,7 @@ export function App() {
         Boolean(activeSandboxUiApp) &&
         sandboxUiMounted &&
         Boolean(sandboxUiConversationOrigin),
+      applicationBusy: vm.busy,
     }),
     [
       activeSandboxUiApp,
@@ -1119,6 +1120,7 @@ export function App() {
       sandboxUiConversationOrigin,
       sandboxUiMounted,
       vm.activeChatId,
+      vm.busy,
       vm.hostRuntimeStatus,
       vm.navItem,
     ]
