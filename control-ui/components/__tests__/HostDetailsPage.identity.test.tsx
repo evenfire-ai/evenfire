@@ -31,6 +31,12 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
+vi.mock('../HostAccessTab', () => ({
+  HostAccessTab: ({ hostName }: { hostName: string }) => (
+    <div data-testid="access-tab">Access editor for {hostName}</div>
+  ),
+}))
+
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
@@ -113,10 +119,8 @@ describe('HostDetailsPage identity integration', () => {
       'Identity',
       'Models & creds',
       'Context',
-      'Member access',
-      'Team access',
-      'Per-tool approval',
-      'Env vars',
+      'Access',
+      'Advanced',
     ])
   })
 
@@ -145,7 +149,7 @@ describe('HostDetailsPage identity integration', () => {
   })
 
   it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {
-    mockParams = { name: 'foo', tab: 'approvals' }
+    mockParams = { name: 'foo', tab: 'advanced' }
     const { container } = render(<HostDetailsPage />)
 
     expect(await screen.findByLabelText('http_request')).toBeInTheDocument()

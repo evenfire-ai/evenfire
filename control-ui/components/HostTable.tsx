@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import { LlmProviderIcon } from './LlmProviderIcon'
 import { getProviderLabel } from '../lib/llm'
 import type { HostItem, HostLifecycleInfo, HostRef } from './HostTable.types'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -14,9 +15,8 @@ import { IconRefresh, IconX } from './icons'
 const HOST_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
   { key: 'lifecycle', label: 'Lifecycle', width: '10rem' },
-  { key: 'namespace', label: 'Namespace', width: '18%' },
   { key: 'context', label: 'Context', width: '20%' },
-  { key: 'model', label: 'Model', minWidth: '8rem' },
+  { key: 'providers', label: 'Providers', minWidth: '8rem' },
   { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
 ]
 
@@ -47,6 +47,31 @@ function getHostLifecycleInfo(host: HostItem): HostLifecycleInfo {
     reason,
     title: details ? `${label}: ${details}` : `${label} agent`,
   }
+}
+
+export function collectProviderIds(spec: Record<string, unknown>): string[] {
+  const primary = String(
+    (spec.model as { provider?: string } | undefined)?.provider || ''
+  ).trim()
+  const fallbacks = Array.isArray(
+    (spec.llmPolicy as { fallbacks?: Array<{ provider?: string }> } | undefined)?.fallbacks
+  )
+    ? (
+        spec.llmPolicy as { fallbacks: Array<{ provider?: string }> }
+      ).fallbacks
+        .map(f => String(f.provider || '').trim())
+        .filter(Boolean)
+    : []
+  // Primary first, then fallbacks in declared order; dedup so the same provider
+  // doesn't render twice if it appears in both the model and the fallback list.
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of [primary, ...fallbacks]) {
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
 }
 
 function HostLifecycleBadge({ lifecycle }: { lifecycle: HostLifecycleInfo }) {
@@ -102,11 +127,8 @@ export function HostTable({
       const spec = item.spec || {}
       const lifecycle = getHostLifecycleInfo(item)
       const contextRef = String(spec.contextRef || '').trim()
-      const modelProvider = String(
-        (spec.model as { provider?: string } | undefined)?.provider || ''
-      )
-      const modelName = String((spec.model as { name?: string } | undefined)?.name || '')
-      const modelProviderLabel = modelProvider ? getProviderLabel(modelProvider) : ''
+      const providers = collectProviderIds(spec)
+      const providerLabels = providers.map(id => getProviderLabel(id)).join(' ')
       return [
         name,
         namespace,
@@ -114,8 +136,7 @@ export function HostTable({
         lifecycle.state,
         lifecycle.reason,
         contextRef,
-        modelProviderLabel,
-        modelName,
+        providerLabels,
       ]
         .join(' ')
         .toLowerCase()
@@ -171,7 +192,7 @@ export function HostTable({
               <TableHeaderRow columns={HOST_COLUMNS} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={6} rows={4} />
+              <SkeletonTableRows columns={5} rows={4} />
             </tbody>
           </table>
         </div>
@@ -190,17 +211,7 @@ export function HostTable({
                 const rawContext = String(item.spec?.contextRef || '').trim()
                 const contextRef = rawContext || '-'
                 const contextClickable = Boolean(rawContext)
-                const modelProvider = String(
-                  (item.spec?.model as { provider?: string } | undefined)?.provider || ''
-                )
-                const modelName = String(
-                  (item.spec?.model as { name?: string } | undefined)?.name || ''
-                )
-                const modelProviderLabel = modelProvider ? getProviderLabel(modelProvider) : ''
-                const model =
-                  modelProviderLabel || modelName
-                    ? `${modelProviderLabel}${modelProviderLabel && modelName ? '/' : ''}${modelName}`
-                    : '-'
+                const providers = collectProviderIds(item.spec || {})
                 const lifecycle = getHostLifecycleInfo(item)
                 const openAgent = () => onOpen({ namespace, name })
                 return (
@@ -218,22 +229,11 @@ export function HostTable({
                     aria-label={`Open agent ${name}`}
                   >
                     <td>
-                      <button
-                        type="button"
-                        className="cu-link"
-                        onClick={e => {
-                          e.stopPropagation()
-                          openAgent()
-                        }}
-                        onKeyDown={e => e.stopPropagation()}
-                      >
-                        {name}
-                      </button>
+                      <span className="cu-expandable-row__name">{name}</span>
                     </td>
                     <td>
                       <HostLifecycleBadge lifecycle={lifecycle} />
                     </td>
-                    <td className="cu-table__cell-soft">{namespace}</td>
                     <td>
                       {contextClickable ? (
                         <button
@@ -251,7 +251,31 @@ export function HostTable({
                         <span className="cu-table__cell-muted">{contextRef}</span>
                       )}
                     </td>
-                    <td className="cu-table__cell-soft">{model}</td>
+                    <td className="cu-table__cell-soft">
+                      {providers.length === 0 ? (
+                        <span className="cu-table__cell-muted">-</span>
+                      ) : (
+                        <span
+                          className="cu-host-providers"
+                          aria-label={`Providers: ${providers
+                            .map(id => getProviderLabel(id))
+                            .join(', ')}`}
+                        >
+                          {providers.map(providerId => {
+                            const label = getProviderLabel(providerId)
+                            return (
+                              <span
+                                key={providerId}
+                                className="cu-host-providers__chip"
+                                title={label}
+                              >
+                                <LlmProviderIcon provider={providerId} label={label} />
+                              </span>
+                            )
+                          })}
+                        </span>
+                      )}
+                    </td>
                     <td className="cu-table__cell-actions" onClick={e => e.stopPropagation()}>
                       <button
                         type="button"

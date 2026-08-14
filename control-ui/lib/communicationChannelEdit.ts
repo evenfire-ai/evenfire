@@ -20,6 +20,13 @@ export type CommunicationChannelDraftState = {
   slackWorkspaceId: string
   teams: CommunicationChannelGroup[]
   teamsAppName: string
+  /**
+   * True when `teamsAppName` was seeded from the `clerum.io/teams-app-name`
+   * annotation rather than from `spec.teamsSettings` or from typing. Absent
+   * means "not from the annotation": a hand-built draft has no annotation
+   * history, and anything the operator types clears the flag.
+   */
+  teamsAppNameFromAnnotation?: boolean
   teamsAppId: string
   teamsTenantId: string
   teamsReplyOnlyWhenMentioned: boolean
@@ -108,12 +115,45 @@ export function hasTeamsConfig(
   )
 }
 
+/**
+ * Gate for the Teams Request URL, and for nothing else.
+ *
+ * `hasTeamsConfig` counts a `teamsAppName` seeded from the
+ * `clerum.io/teams-app-name` annotation, which is how a Telegram-only channel
+ * carrying a stale label rendered a copyable Request URL for a Teams bot that
+ * does not exist. An annotation is a leftover label, not a declaration that this
+ * channel has a Teams provider.
+ *
+ * Everything else keeps reading `hasTeamsConfig`: the annotation still fills the
+ * visible App Name field, still decides which tab the edit page opens on, and
+ * still reaches the saved spec. Only the copyable URL waits for a real Teams
+ * provider, whether persisted or typed into the open draft.
+ */
+export function hasTeamsConfigForRequestUrl(
+  draft: Pick<
+    CommunicationChannelDraftState,
+    | 'teams'
+    | 'teamsAppName'
+    | 'teamsAppNameFromAnnotation'
+    | 'teamsAppId'
+    | 'teamsTenantId'
+    | 'teamsReplyOnlyWhenMentioned'
+  >
+): boolean {
+  return hasTeamsConfig({
+    ...draft,
+    teamsAppName: draft.teamsAppNameFromAnnotation ? '' : draft.teamsAppName,
+  })
+}
+
 export function createCommunicationChannelDraft(
   item: CommunicationChannelItem
 ): CommunicationChannelDraftState {
   const spec = item.spec || {}
   const slackBotHandleFromSpec = spec.slackSettings?.botHandle || ''
   const slackBotHandleFromLabel = annotationValue(item, ['clerum.io/slack-bot-label'])
+  const teamsAppNameFromSpec = spec.teamsSettings?.appName || ''
+  const teamsAppNameFromAnnotation = annotationValue(item, ['clerum.io/teams-app-name'])
   return {
     accessTeamIds: spec.access?.teams || [],
     accessUserIds: spec.access?.users || [],
@@ -128,8 +168,8 @@ export function createCommunicationChannelDraft(
     slackReplyInThreads: spec.slackSettings?.replyInThreads === true,
     slackWorkspaceId: spec.slackSettings?.workspaceId || '',
     teams: spec.teams || [],
-    teamsAppName:
-      spec.teamsSettings?.appName || annotationValue(item, ['clerum.io/teams-app-name']),
+    teamsAppName: teamsAppNameFromSpec || teamsAppNameFromAnnotation,
+    teamsAppNameFromAnnotation: !teamsAppNameFromSpec && Boolean(teamsAppNameFromAnnotation),
     teamsAppId: spec.teamsSettings?.appId || '',
     teamsTenantId: spec.teamsSettings?.tenantId || '',
     teamsReplyOnlyWhenMentioned: spec.teamsSettings?.replyOnlyWhenMentioned === true,

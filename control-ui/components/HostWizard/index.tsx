@@ -1,12 +1,13 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
+import { LlmProviderIcon } from '@/components/LlmProviderIcon'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
-import { IconAlertTriangle, IconCheck, IconInfoCircle, IconX } from '@/components/icons'
+import { IconAlertTriangle, IconCheck, IconX } from '@/components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@/components/ui'
 import {
   apiGet,
@@ -18,6 +19,7 @@ import {
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
+import { getAgentNameError } from '@/lib/k8sValidation'
 import {
   type HostAllowedModel,
   type LlmPolicy,
@@ -84,7 +86,20 @@ function WizardSelect({
       >
         <span className="cu-agent-select__button-copy">
           <span>{selectedOption?.label || placeholder}</span>
-          {selectedOption?.meta ? (
+          {selectedOption?.providers && selectedOption.providers.length > 0 ? (
+            <span className="cu-agent-select__providers">
+              <span className="cu-agent-select__providers-label">Providers: </span>
+              {selectedOption.providers.map((provider, index) => (
+                <Fragment key={provider.id}>
+                  {index > 0 ? ', ' : null}
+                  <span className="cu-agent-select__provider">
+                    <LlmProviderIcon provider={provider.id} label={provider.label} />
+                    <span>{provider.label}</span>
+                  </span>
+                </Fragment>
+              ))}
+            </span>
+          ) : selectedOption?.meta ? (
             <span className="cu-agent-select__button-meta">{selectedOption.meta}</span>
           ) : null}
         </span>
@@ -110,7 +125,20 @@ function WizardSelect({
               >
                 <span className="cu-agent-select__option-copy">
                   <span className="cu-agent-select__option-name">{option.label}</span>
-                  {option.meta ? (
+                  {option.providers && option.providers.length > 0 ? (
+                    <span className="cu-agent-select__providers">
+                      <span className="cu-agent-select__providers-label">Providers: </span>
+                      {option.providers.map((provider, index) => (
+                        <Fragment key={provider.id}>
+                          {index > 0 ? ', ' : null}
+                          <span className="cu-agent-select__provider">
+                            <LlmProviderIcon provider={provider.id} label={provider.label} />
+                            <span>{provider.label}</span>
+                          </span>
+                        </Fragment>
+                      ))}
+                    </span>
+                  ) : option.meta ? (
                     <span className="cu-agent-select__option-meta">{option.meta}</span>
                   ) : null}
                 </span>
@@ -143,7 +171,8 @@ function isStepValid(
     directoryLoadFailed: boolean
   }
 ): boolean {
-  if (stepIndex === 0) return state.hostName.trim().length > 0
+  if (stepIndex === 0)
+    return state.hostName.trim().length > 0 && getAgentNameError(state.hostName) === ''
   if (stepIndex === 1) {
     if (state.contextMode === 'existing') return state.selectedExistingContext.trim().length > 0
     return state.contextName.trim().length > 0
@@ -197,14 +226,13 @@ export function HostWizard({
 
   const [hostName, setHostName] = useState('')
   const hostNamespace = HOST_NAMESPACE
+  const agentNameError = getAgentNameError(hostName)
 
   const [contextName, setContextName] = useState('')
   const [contextMode, setContextMode] = useState<'existing' | 'new'>('existing')
   const [selectedExistingContext, setSelectedExistingContext] = useState('')
-  const [contextSelectOpen, setContextSelectOpen] = useState(false)
   const [selectedMcp, setSelectedMcp] = useState<string[]>([])
   const [existingContexts, setExistingContexts] = useState<ContextOption[]>([])
-  const contextSelectRef = useRef<HTMLDivElement | null>(null)
 
   // Reuse an existing shared Secret by default. Creating an agent-specific Secret
   // remains available when the operator explicitly chooses New credential.
@@ -264,7 +292,11 @@ export function HostWizard({
           return {
             value: name,
             label: name,
-            meta: `${secret.metadata?.namespace || HOST_NAMESPACE} · ${providerSummary}`,
+            meta: providerSummary,
+            providers:
+              providers && providers.length > 0
+                ? providers.map(id => ({ id, label: getProviderLabel(id) }))
+                : undefined,
           }
         })
         .filter(option => option !== null)
@@ -277,7 +309,6 @@ export function HostWizard({
       null,
     [existingContexts, selectedExistingContext]
   )
-  const selectedContextLabel = selectedContextOption?.contextId || 'Select context...'
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, provider),
     [allowedCatalog, provider]
@@ -486,7 +517,10 @@ export function HostWizard({
   )
 
   const validationMessage = useMemo(() => {
-    if (step === 0 && !hostName.trim()) return 'Agent name is required.'
+    if (step === 0) {
+      const agentNameError = getAgentNameError(hostName)
+      if (agentNameError) return agentNameError
+    }
     if (step === 1 && contextMode === 'existing' && !selectedExistingContext.trim())
       return 'Select an existing context.'
     if (step === 1 && contextMode === 'new' && !contextName.trim())
@@ -548,7 +582,6 @@ export function HostWizard({
     setContextName('')
     setContextMode('existing')
     setSelectedExistingContext('')
-    setContextSelectOpen(false)
     setSelectedMcp([])
     setSecretMode('existing')
     setExistingSecret('')
@@ -580,7 +613,6 @@ export function HostWizard({
 
   function selectExistingContext(context: ContextOption) {
     setSelectedExistingContext(`${context.namespace}/${context.name}`)
-    setContextSelectOpen(false)
   }
 
   async function submitAll() {
@@ -750,9 +782,18 @@ export function HostWizard({
                   autoFocus
                 />
                 {hostName.trim() ? (
-                  <span className="cu-agent-input-shell__status" aria-label="Valid agent name">
-                    <IconCheck width={16} height={16} />
-                  </span>
+                  agentNameError ? (
+                    <span
+                      className="cu-agent-input-shell__status cu-agent-input-shell__status--invalid"
+                      aria-label={agentNameError}
+                    >
+                      <IconAlertTriangle width={16} height={16} />
+                    </span>
+                  ) : (
+                    <span className="cu-agent-input-shell__status" aria-label="Valid agent name">
+                      <IconCheck width={16} height={16} />
+                    </span>
+                  )
                 ) : null}
               </span>
             </Field>
@@ -801,16 +842,6 @@ export function HostWizard({
                 </div>
               </div>
             ) : null}
-            <div className="cu-agent-info-card">
-              <IconInfoCircle width={16} height={16} />
-              <div>
-                <strong>Naming conventions</strong>
-                <p>
-                  Use lowercase letters, numbers, and hyphens only. Must start with a letter and be
-                  3-63 characters long.
-                </p>
-              </div>
-            </div>
           </div>
         )}
 
@@ -848,50 +879,26 @@ export function HostWizard({
               <>
                 <div className="cu-agent-access-section">
                   <strong>Select Context</strong>
-                  <div
-                    className="cu-agent-select"
-                    ref={contextSelectRef}
-                    onBlur={event => {
-                      if (!event.currentTarget.contains(event.relatedTarget)) {
-                        setContextSelectOpen(false)
-                      }
+                  <SelectionDropdown
+                    multiple={false}
+                    value={selectedExistingContext ? [selectedExistingContext] : []}
+                    onChange={values => {
+                      const next = values[0] || ''
+                      const context = existingContexts.find(
+                        ctx => `${ctx.namespace}/${ctx.name}` === next
+                      )
+                      if (context) selectExistingContext(context)
+                      else setSelectedExistingContext('')
                     }}
-                  >
-                    <button
-                      type="button"
-                      className="cu-agent-select__button"
-                      aria-expanded={contextSelectOpen}
-                      aria-haspopup="listbox"
-                      onClick={() => setContextSelectOpen(open => !open)}
-                    >
-                      <span>{selectedContextLabel}</span>
-                      <span className="cu-agent-select__chevron" aria-hidden="true" />
-                    </button>
-                    {contextSelectOpen ? (
-                      <div className="cu-agent-select__menu" role="listbox">
-                        {existingContexts.length === 0 ? (
-                          <span className="cu-agent-select__empty">No contexts available.</span>
-                        ) : (
-                          existingContexts.map(ctx => {
-                            const value = `${ctx.namespace}/${ctx.name}`
-                            return (
-                              <button
-                                key={value}
-                                type="button"
-                                className="cu-agent-select__option"
-                                data-active={selectedExistingContext === value ? 'true' : 'false'}
-                                role="option"
-                                aria-selected={selectedExistingContext === value}
-                                onClick={() => selectExistingContext(ctx)}
-                              >
-                                {ctx.contextId}
-                              </button>
-                            )
-                          })
-                        )}
-                      </div>
-                    ) : null}
-                  </div>
+                    options={existingContexts.map(ctx => ({
+                      value: `${ctx.namespace}/${ctx.name}`,
+                      label: ctx.contextId,
+                    }))}
+                    placeholder="Select context..."
+                    searchPlaceholder="Search contexts..."
+                    selectionLabel="Selected context"
+                    emptyLabel="No contexts available."
+                  />
                 </div>
                 {selectedContextOption && (
                   <section
@@ -958,7 +965,7 @@ export function HostWizard({
             <div className="cu-agent-access-section">
               <strong>Credentials</strong>
               <span className="cu-muted cu-agent-access-hint">
-                Store this agent&apos;s own LLM credentials, or use a shared Kubernetes Secret.
+                Store this agent&apos;s own LLM credentials, or use a shared secret.
               </span>
               <div className="cu-agent-radio-group">
                 <label className="cu-agent-radio cu-agent-radio--card">
@@ -968,9 +975,9 @@ export function HostWizard({
                     onChange={() => setSecretMode('existing')}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">Use an existing Secret</span>
+                    <span className="cu-agent-radio__title">Use an existing secret</span>
                     <span className="cu-agent-radio__description">
-                      Select a saved Kubernetes Secret that already contains LLM API keys.
+                      Select a saved secret that already contains LLM API keys.
                     </span>
                   </span>
                 </label>
@@ -981,9 +988,9 @@ export function HostWizard({
                     onChange={() => setSecretMode('new')}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">New credential</span>
+                    <span className="cu-agent-radio__title">New secret</span>
                     <span className="cu-agent-radio__description">
-                      Create a new Secret for this agent. Its name is derived from the agent name.
+                      Create a new secret for this agent. Its name is derived from the agent name.
                     </span>
                   </span>
                 </label>
