@@ -61,17 +61,6 @@ export type ExternalGfsEdgeLimits = {
  * Control API PG buckets still enforce the 10/min token and 30/min
  * session/actor product budgets across replicas.
  */
-export function deriveExternalGfsEdgeLimits(expectedUsers: number): ExternalGfsEdgeLimits {
-  if (!Number.isSafeInteger(expectedUsers) || expectedUsers < 1 || expectedUsers > 1_000) {
-    throw new Error('external GFS expected users must be an integer between 1 and 1000')
-  }
-  return {
-    aggregatePerMin: expectedUsers * 120,
-    authenticatedIpPerMin: expectedUsers * 60,
-    tokenIpPerMin: expectedUsers * 12,
-  }
-}
-
 const DEFAULT_EXTERNAL_GFS_EDGE_LIMITS: ExternalGfsEdgeLimits = {
   aggregatePerMin: config.externalGfsEdgeAggregateRlPerMin,
   authenticatedIpPerMin: config.externalGfsEdgeAuthenticatedIpRlPerMin,

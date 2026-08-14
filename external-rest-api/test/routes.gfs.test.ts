@@ -1,11 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import {
-  type ExternalGfsEdgeLimits,
-  createGfsRouter,
-  deriveExternalGfsEdgeLimits,
-} from '../src/routes/gfs.js'
+import { type ExternalGfsEdgeLimits, createGfsRouter } from '../src/routes/gfs.js'
 
 const { ControlApiError, clientMock } = vi.hoisted(() => {
   class ControlApiError extends Error {
@@ -184,19 +180,6 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       ?.extraHeaders?.['x-forwarded-for']
     expect(forwarded).toBeDefined()
     expect(forwarded).not.toBe('203.0.113.99')
-  })
-
-  it('derives edge capacity for the approved 20- and 50-user NAT cases', () => {
-    expect(deriveExternalGfsEdgeLimits(20)).toEqual({
-      aggregatePerMin: 2_400,
-      authenticatedIpPerMin: 1_200,
-      tokenIpPerMin: 240,
-    })
-    expect(deriveExternalGfsEdgeLimits(50)).toEqual({
-      aggregatePerMin: 6_000,
-      authenticatedIpPerMin: 3_000,
-      tokenIpPerMin: 600,
-    })
   })
 
   it('enforces the aggregate edge backstop before auth and emits recovery headers', async () => {
