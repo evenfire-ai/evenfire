@@ -37,11 +37,6 @@ export type ManagedPendingInvitation = {
   canResend: boolean
 }
 
-export type MemberInvitationAssignment = {
-  teamId: string
-  role: TeamRole
-}
-
 export async function listManageableTeams(sessionToken: string) {
   return controlApiRequest<{ items: ManageableTeam[] }>(
     'GET',
@@ -76,8 +71,8 @@ export async function listManagedInvitations(sessionToken: string) {
 
 export async function inviteManagedMember(
   email: string,
-  name: string,
-  teams: MemberInvitationAssignment[],
+  name: unknown,
+  teams: unknown,
   sessionToken: string
 ) {
   return controlApiRequest<unknown>('POST', '/external/members/invitations', {
