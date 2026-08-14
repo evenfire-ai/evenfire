@@ -112,6 +112,11 @@ describe('buildTeamsSupportsFilesCommand', () => {
   })
 
   it('falls back to a placeholder app id', () => {
-    expect(buildTeamsSupportsFilesCommand()).toContain('<appId>')
+    // Never an angle-bracket placeholder: `<appId>` is a redirect in sh and zsh,
+    // so pasting the command unedited fails with "no such file or directory".
+    const cmd = buildTeamsSupportsFilesCommand()
+    expect(cmd).toContain('YOUR_CLIENT_ID')
+    expect(cmd).not.toContain('<')
+    expect(cmd).not.toContain('>')
   })
 })

@@ -155,6 +155,10 @@ or a screenshot.
 Workflow results are delivered as files, which the bot cannot send unless the
 manifest allows it.
 
+`YOUR_CLIENT_ID` below is the `CLIENT_ID` from your `.env`. On a teams-managed
+bot the Teams App ID, the Bot ID and `CLIENT_ID` are the same UUID, so any of
+the three works and there is nothing extra to look up.
+
 > **Files only work in a one to one chat.** Microsoft's file consent APIs, which
 > this uses, are documented as working in the `personal` context only and not in
 > `channel` or `groupchat`. A workflow that produces a file will deliver it in a
@@ -163,7 +167,7 @@ manifest allows it.
 > you will conclude it is broken when it is behaving as designed.
 
 ```shell
-teams app manifest update <appId> --set-json 'bots[0].supportsFiles=true' --yes
+teams app manifest update YOUR_CLIENT_ID --set-json 'bots[0].supportsFiles=true' --yes
 ```
 
 **`--yes` is load-bearing.** Without it the command prints "Manifest update
@@ -172,7 +176,7 @@ it worked. The global `-y` you passed to `teams app create` does not carry over.
 Confirm against the server rather than trusting the exit code:
 
 ```shell
-teams app manifest download <appId> ./verify.json
+teams app manifest download YOUR_CLIENT_ID ./verify.json
 ```
 
 Expect `bots[0].supportsFiles` to be `true` and the manifest version to have
@@ -184,7 +188,7 @@ and older guidance pointing at App features > Bot > "Upload and download files"
 describes a UI that the portal no longer presents. If you would rather not use
 the CLI, edit the manifest directly under Configure > **App package editor**.
 
-`teams app doctor <appId>` is a useful checkpoint. It reports whether the
+`teams app doctor YOUR_CLIENT_ID` is a useful checkpoint. It reports whether the
 endpoint is reachable and shows `Sign-in audience: AzureADMyOrg` for a correctly
 registered single-tenant bot.
 
@@ -270,7 +274,7 @@ flow when it is not.
 
 **Nothing arrives, but the channel saved.** Almost always the endpoint. Confirm
 the registered endpoint matches the channel's current name, and that the origin
-is publicly reachable. `teams app doctor <appId>` reports reachability.
+is publicly reachable. `teams app doctor YOUR_CLIENT_ID` reports reachability.
 
 A wrong endpoint is not fatal. The messaging endpoint stays editable in the
 [Teams Developer Portal](https://dev.teams.microsoft.com/apps). Only
@@ -296,7 +300,7 @@ printed link; it bypasses the catalog lookup that is failing. Or wait a short
 while and regenerate the link:
 
 ```shell
-teams app get <appId> --install-link
+teams app get YOUR_CLIENT_ID --install-link
 ```
 
 **The bot cannot get a token.** An `AADSTS` error means the app is multi-tenant.

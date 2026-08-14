@@ -95,7 +95,17 @@ export function buildTeamsAppCreateCommand(params: { botName: string; endpoint: 
  * Enabling file delivery is a manifest property, not a Developer Portal toggle.
  * Older guidance points at App features > Bot > "Upload and download files",
  * which the current portal does not present.
+ *
+ * The app id is CLIENT_ID: on a teams-managed bot the Teams App ID, the Bot ID
+ * and CLIENT_ID are all the same UUID. So once the operator has pasted
+ * CLIENT_ID into this form, the command is complete and needs no editing.
+ *
+ * The fallback is deliberately NOT an angle-bracket placeholder. `<appId>` is a
+ * redirect in sh and zsh, so pasting it unedited fails with
+ * "no such file or directory: appId" rather than anything that points at the
+ * real problem.
  */
 export function buildTeamsSupportsFilesCommand(appId?: string): string {
-  return `teams app manifest update ${appId?.trim() || '<appId>'} --set-json 'bots[0].supportsFiles=true' --yes`
+  const id = appId?.trim() || 'YOUR_CLIENT_ID'
+  return `teams app manifest update ${id} --set-json 'bots[0].supportsFiles=true' --yes`
 }

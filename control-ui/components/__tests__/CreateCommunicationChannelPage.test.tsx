@@ -294,8 +294,10 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
 
     expect(items[0].querySelector('pre')).toHaveTextContent('teams app create')
     expect(items[1].querySelector('pre')).toBeNull()
+    // Named placeholder, never `<appId>`: angle brackets are a redirect in sh and
+    // zsh, so pasting the command unedited fails with "no such file or directory".
     expect(items[2].querySelector('pre')).toHaveTextContent(
-      "teams app manifest update <appId> --set-json 'bots[0].supportsFiles=true' --yes"
+      "teams app manifest update YOUR_CLIENT_ID --set-json 'bots[0].supportsFiles=true' --yes"
     )
   })
 

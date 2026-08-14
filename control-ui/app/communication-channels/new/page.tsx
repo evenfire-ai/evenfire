@@ -222,7 +222,8 @@ export default function CreateCommunicationChannelPage() {
   }, [draft.teamsAppName, teamsWebhookUrl])
   // Substituted with CLIENT_ID once it is pasted, which on a teams-managed bot IS
   // the app id (the Teams App ID, Bot ID and CLIENT_ID are one UUID). Before that
-  // it renders the <appId> placeholder, so the command is readable either way.
+  // it renders a named placeholder rather than an angle-bracket one, which sh and
+  // zsh would treat as a redirect and fail on confusingly.
   const teamsSupportsFilesCommand = useMemo(
     () => buildTeamsSupportsFilesCommand(draft.teamsAppId),
     [draft.teamsAppId]
@@ -809,10 +810,12 @@ export default function CreateCommunicationChannelPage() {
                           </li>
                           <li>Paste CLIENT_ID, TENANT_ID, and CLIENT_SECRET below.</li>
                           <li>
-                            To deliver workflow files, enable them on the manifest. The{' '}
-                            <code>--yes</code> is required; without it the command changes nothing
-                            and still looks like it worked. File delivery works in a direct chat
-                            only, not in a channel.
+                            To deliver workflow files, enable them on the manifest. Paste CLIENT_ID
+                            above first and this command fills itself in: the Teams App ID, the Bot
+                            ID and CLIENT_ID are all the same value, written to <code>.env</code> by
+                            the command above. The <code>--yes</code> is required; without it the
+                            command changes nothing and still looks like it worked. File delivery
+                            works in a direct chat only, not in a channel.
                             <CommandBlock
                               command={teamsSupportsFilesCommand}
                               onCopy={copyTeamsSupportsFilesCommand}
