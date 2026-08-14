@@ -4,6 +4,8 @@
 !packages/workflow-recipe-capability-policy/**
 !packages/display-field/
 !packages/display-field/**
+!packages/llm-providers/
+!packages/llm-providers/**
 !scripts/
 !scripts/qa-recorder/
 !scripts/qa-recorder/loadEnv.ts
