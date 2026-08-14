@@ -1,6 +1,14 @@
 'use client'
 
-import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import type { ToastContextValue, ToastOptions, ToastRecord } from './types'
 
 const DEFAULT_DURATION_MS = 3500
@@ -9,6 +17,18 @@ const ToastContext = createContext<ToastContextValue | undefined>(undefined)
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<ToastRecord[]>([])
   const timersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
+  // Clear any pending auto-dismiss timers when the provider unmounts, so a
+  // scheduled setTimeout can never fire setItems after teardown (leaks a
+  // "window is not defined" / setState-after-unmount error under test).
+  useEffect(() => {
+    const timers = timersRef.current
+    return () => {
+      for (const timer of Object.values(timers)) {
+        clearTimeout(timer)
+      }
+    }
+  }, [])
 
   const dismissToast = useCallback((id: string) => {
     setItems(prev => prev.filter(item => item.id !== id))

@@ -6,6 +6,7 @@ import { desktopQueryKeys } from './queryKeys'
 const EMPTY_STRING_LIST: string[] = []
 const EMPTY_AGENT_CONTEXT_BY_NAME: Record<string, string | null> = {}
 const EMPTY_AGENT_PROVIDER_BY_NAME: Record<string, string | null> = {}
+const EMPTY_AGENT_DISPLAY_BY_NAME: Record<string, string> = {}
 const EMPTY_MCP_SERVERS_BY_AGENT: Record<string, string[]> = {}
 
 function toErrorMessage(error: unknown): string {
@@ -64,6 +65,7 @@ export function useAgentsDataController() {
       mcpServersByAgent: catalogQuery.data?.mcpServersByAgent ?? EMPTY_MCP_SERVERS_BY_AGENT,
       agentContextByName: catalogQuery.data?.agentContextByName ?? EMPTY_AGENT_CONTEXT_BY_NAME,
       agentProviderByName: catalogQuery.data?.agentProviderByName ?? EMPTY_AGENT_PROVIDER_BY_NAME,
+      agentDisplayByName: catalogQuery.data?.agentDisplayByName ?? EMPTY_AGENT_DISPLAY_BY_NAME,
       refresh,
       refreshWithCatalog,
       reset,

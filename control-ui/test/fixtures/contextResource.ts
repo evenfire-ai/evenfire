@@ -8,6 +8,8 @@ export type ProducerContextResource = {
   }
   spec: {
     contextId: string
+    /** Optional visible name (spec.displayName); the producer omits it when unset. */
+    displayName?: string
     description: string
     mcpServers: string[]
     sharedFileSystems: ContextSharedFileSystemRef[]
@@ -35,6 +37,9 @@ export function buildContextResource(
     },
     spec: {
       contextId: overrides.spec?.contextId ?? name,
+      ...(overrides.spec?.displayName !== undefined
+        ? { displayName: overrides.spec.displayName }
+        : {}),
       description: overrides.spec?.description ?? '',
       mcpServers: [...(overrides.spec?.mcpServers ?? [])],
       sharedFileSystems: [...(overrides.spec?.sharedFileSystems ?? [])],

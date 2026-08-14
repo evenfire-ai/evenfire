@@ -181,7 +181,12 @@ export default function ContextDetailsPage() {
   const [contextResourceVersion, setContextResourceVersion] = useState<string | undefined>()
 
   const [contextNameDraft, setContextNameDraft] = useState(isNew ? '' : routeName)
+  const [displayNameDraft, setDisplayNameDraft] = useState('')
   const [descriptionDraft, setDescriptionDraft] = useState('')
+  // The raw spec exactly as it arrived from the server. A context PUT is a
+  // full-replace: spreading this on save preserves any additive spec field the
+  // form doesn't model yet (e.g. spec.gfs) instead of dropping it on a rename.
+  const [loadedSpec, setLoadedSpec] = useState<Record<string, unknown>>({})
   const [mcpServersDraft, setMcpServersDraft] = useState<string[]>([])
   const [sharedFileSystemsDraft, setSharedFileSystemsDraft] = useState<
     ContextSharedFileSystemRef[]
@@ -193,6 +198,7 @@ export default function ContextDetailsPage() {
   const [editing, setEditing] = useState(isNew)
   const [savedDescription, setSavedDescription] = useState('')
   const [savedContextName, setSavedContextName] = useState('')
+  const [savedDisplayName, setSavedDisplayName] = useState('')
 
   const [activeTab, setActiveTab] = useState<ContextTab>(() => parseContextTab(params.tab))
 
@@ -267,6 +273,7 @@ export default function ContextDetailsPage() {
       try {
         const context = await getContext(routeName)
         const spec = (context.spec || {}) as Partial<ContextSpec>
+        setLoadedSpec((context.spec || {}) as Record<string, unknown>)
         const metadata = (context.metadata || {}) as ContextResource['metadata']
         const resolvedName = metadata?.name || spec.contextId || routeName
         const resolvedContext = spec.contextId || resolvedName
@@ -274,6 +281,8 @@ export default function ContextDetailsPage() {
         setContextNameDraft(resolvedName)
         setSavedContextName(resolvedName)
         setResolvedContextId(resolvedContext)
+        setDisplayNameDraft(spec.displayName || '')
+        setSavedDisplayName(spec.displayName || '')
         setDescriptionDraft(spec.description || '')
         setSavedDescription(spec.description || '')
         const servers = Array.isArray(spec.mcpServers)
@@ -369,7 +378,7 @@ export default function ContextDetailsPage() {
         .map(host => ({
           name: String(host.metadata?.name || '').trim(),
           contextRef: String(host.spec?.contextRef || '').trim(),
-          displayName: getAgentDisplayName(String(host.metadata?.name || '')),
+          displayName: getAgentDisplayName(String(host.metadata?.name || ''), allHosts),
         }))
         .filter(agent => agent.name && agent.contextRef !== resolvedContextId)
         .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.name.localeCompare(b.name)),
@@ -390,46 +399,67 @@ export default function ContextDetailsPage() {
   function startEditing() {
     setSavedDescription(descriptionDraft)
     setSavedContextName(contextNameDraft)
+    setSavedDisplayName(displayNameDraft)
     setEditing(true)
   }
 
   function cancelEditing() {
     setDescriptionDraft(savedDescription)
     setContextNameDraft(savedContextName)
+    setDisplayNameDraft(savedDisplayName)
     setEditing(false)
     setError('')
   }
 
   async function save() {
     if (!canSave) return
-    const payload = {
-      spec: {
-        contextId: contextNameDraft.trim(),
-        description: descriptionDraft.trim(),
-        mcpServers: mcpServersDraft,
-        sharedFileSystems: sharedFileSystemsDraft,
-      },
-    }
+    const trimmedDisplay = displayNameDraft.trim()
+    const contextId = contextNameDraft.trim()
 
     setBusy(true)
     setError('')
     try {
       if (isNew) {
-        await createContext({
-          metadata: { name: contextNameDraft.trim() },
-          spec: payload.spec,
-        })
-        const nextName = encodeURIComponent(contextNameDraft.trim())
+        // Create: no prior server spec to preserve — build a fresh spec.
+        // The visible name lives in spec.displayName; omit it when empty so an
+        // unset display stays absent, not "".
+        const createSpec: ContextSpec = {
+          contextId,
+          ...(trimmedDisplay ? { displayName: trimmedDisplay } : {}),
+          description: descriptionDraft.trim(),
+          mcpServers: mcpServersDraft,
+          sharedFileSystems: sharedFileSystemsDraft,
+        }
+        await createContext({ metadata: { name: contextId }, spec: createSpec })
+        const nextName = encodeURIComponent(contextId)
         router.replace(CONTROL_ROUTES.contexts.detail(nextName))
       } else {
+        // Full-replace PUT: spread the spec exactly as it was loaded so additive
+        // fields the form doesn't model (e.g. spec.gfs) survive a rename, then
+        // overwrite only the fields the form owns.
+        const nextSpec: Record<string, unknown> = {
+          ...loadedSpec,
+          contextId,
+          description: descriptionDraft.trim(),
+          mcpServers: mcpServersDraft,
+          sharedFileSystems: sharedFileSystemsDraft,
+        }
+        // Clearing the display name must REMOVE it, not leave the spread's stale
+        // value — so a delete is required, the empty-omit ternary no longer suffices.
+        if (trimmedDisplay) nextSpec.displayName = trimmedDisplay
+        else delete nextSpec.displayName
+        // Optimistic concurrency: carry the loaded resourceVersion so a stale
+        // edit 409s instead of clobbering a concurrent write, and track the
+        // version the server echoes back for the next save.
         const updated = await updateContext(
           routeName,
-          buildContextUpdatePayload(contextResourceVersion, payload.spec)
+          buildContextUpdatePayload(contextResourceVersion, nextSpec as unknown as ContextSpec)
         )
         setContextResourceVersion(updated.metadata?.resourceVersion ?? contextResourceVersion)
-        setResolvedContextId(payload.spec.contextId)
+        setResolvedContextId(contextId)
         setSavedDescription(descriptionDraft)
         setSavedContextName(contextNameDraft)
+        setSavedDisplayName(trimmedDisplay)
         setEditing(false)
       }
       showToast('Context saved.', { tone: 'success' })
@@ -444,14 +474,23 @@ export default function ContextDetailsPage() {
     setBusy(true)
     setError('')
     try {
+      // Full-replace PUT: spread the loaded spec so additive fields the form
+      // doesn't model (e.g. spec.gfs) survive a connector edit, then overwrite
+      // only the fields this handler owns (all re-echoed from current state).
+      const nextSpec: Record<string, unknown> = {
+        ...loadedSpec,
+        contextId: resolvedContextId,
+        description: descriptionDraft.trim(),
+        mcpServers: nextServers,
+        sharedFileSystems: sharedFileSystemsDraft,
+      }
+      // Echo the persisted display name; a cleared name must REMOVE it, not leave
+      // the spread's stale value — so a delete is required (mirrors save()).
+      if (savedDisplayName.trim()) nextSpec.displayName = savedDisplayName.trim()
+      else delete nextSpec.displayName
       const updated = await updateContext(
         routeName,
-        buildContextUpdatePayload(contextResourceVersion, {
-          contextId: resolvedContextId,
-          description: descriptionDraft.trim(),
-          mcpServers: nextServers,
-          sharedFileSystems: sharedFileSystemsDraft,
-        })
+        buildContextUpdatePayload(contextResourceVersion, nextSpec as unknown as ContextSpec)
       )
       setContextResourceVersion(updated.metadata?.resourceVersion ?? contextResourceVersion)
       setMcpServersDraft(nextServers)
@@ -467,14 +506,23 @@ export default function ContextDetailsPage() {
     setBusy(true)
     setError('')
     try {
+      // Full-replace PUT: spread the loaded spec so additive fields the form
+      // doesn't model (e.g. spec.gfs) survive an SFS edit, then overwrite only
+      // the fields this handler owns (all re-echoed from current state).
+      const nextSpec: Record<string, unknown> = {
+        ...loadedSpec,
+        contextId: resolvedContextId,
+        description: descriptionDraft.trim(),
+        mcpServers: mcpServersDraft,
+        sharedFileSystems: nextRefs,
+      }
+      // Echo the persisted display name; a cleared name must REMOVE it, not leave
+      // the spread's stale value — so a delete is required (mirrors save()).
+      if (savedDisplayName.trim()) nextSpec.displayName = savedDisplayName.trim()
+      else delete nextSpec.displayName
       const updated = await updateContext(
         routeName,
-        buildContextUpdatePayload(contextResourceVersion, {
-          contextId: resolvedContextId,
-          description: descriptionDraft.trim(),
-          mcpServers: mcpServersDraft,
-          sharedFileSystems: nextRefs,
-        })
+        buildContextUpdatePayload(contextResourceVersion, nextSpec as unknown as ContextSpec)
       )
       setContextResourceVersion(updated.metadata?.resourceVersion ?? contextResourceVersion)
       setSharedFileSystemsDraft(nextRefs)
@@ -800,7 +848,7 @@ export default function ContextDetailsPage() {
         header={
           <CreatePageHeader
             icon={<IconGroupWork />}
-            title={routeName}
+            title={savedDisplayName.trim() || routeName}
             subtitle="Review details, manage connectors, agents, teams, and members."
             backLabel="Back to contexts"
             onBack={() => router.push(CONTROL_ROUTES.contexts.root)}
@@ -1252,12 +1300,21 @@ export default function ContextDetailsPage() {
             <div className="cu-modal-panel__body">
               <div className="cu-field" style={{ marginBottom: 0 }}>
                 <label htmlFor="ctx-name">Name</label>
+                <input id="ctx-name" className="cu-input" value={contextNameDraft} readOnly />
+                <span className="cu-field__hint">
+                  This is the context identifier, not editable.
+                </span>
+              </div>
+              <div className="cu-field" style={{ marginBottom: 0 }}>
+                <label htmlFor="ctx-display">Display name</label>
                 <input
-                  id="ctx-name"
+                  id="ctx-display"
                   className="cu-input"
-                  value={contextNameDraft}
-                  disabled
-                  style={{ opacity: 0.6 }}
+                  value={displayNameDraft}
+                  onChange={event => setDisplayNameDraft(event.target.value)}
+                  disabled={busy}
+                  placeholder="Human-readable name"
+                  autoFocus
                 />
               </div>
               <div className="cu-field" style={{ marginBottom: 0 }}>
@@ -1270,7 +1327,6 @@ export default function ContextDetailsPage() {
                   disabled={busy}
                   rows={3}
                   placeholder="Human-readable context description"
-                  autoFocus
                 />
               </div>
             </div>
