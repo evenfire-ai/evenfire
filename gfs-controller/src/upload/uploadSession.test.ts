@@ -60,10 +60,22 @@ class MemoryDb {
     }
     if (
       sql.startsWith(
-        "SELECT upload_id FROM gfs_upload_sessions WHERE state IN ('initiated','uploading','paused') AND expires_at <= now()"
+        "SELECT upload_id FROM gfs_upload_sessions WHERE expires_at <= now() AND ( state IN ('initiated','uploading','paused') OR (state = 'finalizing' AND finalizing_started_at IS NULL) )"
       )
     ) {
-      return { rows: [] }
+      return {
+        rows: this.sessions
+          .filter(row => {
+            const expired = Date.parse(String(row.expires_at)) <= Date.now()
+            const state = String(row.state)
+            return (
+              expired &&
+              (['initiated', 'uploading', 'paused'].includes(state) ||
+                (state === 'finalizing' && row.finalizing_started_at == null))
+            )
+          })
+          .map(row => ({ upload_id: row.upload_id })),
+      }
     }
     if (sql.startsWith('SELECT p.upload_id, p.part_number, p.offset_bytes, p.length_bytes')) {
       return { rows: [] }
@@ -348,6 +360,13 @@ class MemoryDb {
       const row = this.sessions.find(session => session.upload_id === String(values[0]))!
       row.state = 'aborted'
       row.session_epoch = Number(row.session_epoch) + 1
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'expired'")) {
+      const row = this.sessions.find(session => session.upload_id === String(values[0]))!
+      row.state = 'expired'
+      row.session_epoch = Number(row.session_epoch) + 1
+      row.active_part_count = 0
       return { rows: [] }
     }
     if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'finalizing'")) {
@@ -755,6 +774,27 @@ describe('GfsUploadSessionService', () => {
     })
     expect(finalizerExpiry).toBeGreaterThan(originalExpiry)
     expect(Date.parse(db.sessions[0]!.expires_at as string)).toBeGreaterThan(originalExpiry)
+  })
+
+  it('expires a finalizing session whose durable start timestamp is missing', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-finalizing-null-start-'))
+    const db = new MemoryDb()
+    const uploads = service(db)
+    const created = await uploads.create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'finalizing-null-start.bin',
+      sizeBytes: 0,
+      idempotencyKey: '6a6a6a6a-6a6a-4a6a-8a6a-6a6a6a6a6a6a',
+    })
+    const row = db.sessions.find(session => session.upload_id === created.session.uploadId)!
+    row.state = 'finalizing'
+    row.finalizing_started_at = null
+    row.expires_at = new Date(Date.now() - 1_000).toISOString()
+
+    await expect(uploads.reconcile()).resolves.toMatchObject({ expiredSessions: 1 })
+    expect(row).toMatchObject({ state: 'expired', active_part_count: 0 })
   })
 
   it('preserves a published final path until reconciliation resolves an ambiguous completion commit', async () => {

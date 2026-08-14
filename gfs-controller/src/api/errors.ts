@@ -68,12 +68,13 @@ export class GfsError extends Error {
   readonly reason?: string;
   readonly retryAfterSeconds?: number;
   readonly limit?: string;
+  readonly rateLimitLimit?: number;
 
   constructor(
     code: GfsErrorCode,
     message: string,
     reason?: string,
-    details?: { retryAfterSeconds?: number; limit?: string },
+    details?: { retryAfterSeconds?: number; limit?: string; rateLimitLimit?: number },
   ) {
     super(message);
     this.name = "GfsError";
@@ -81,6 +82,7 @@ export class GfsError extends Error {
     this.reason = reason;
     this.retryAfterSeconds = details?.retryAfterSeconds;
     this.limit = details?.limit;
+    this.rateLimitLimit = details?.rateLimitLimit;
   }
 
   get status(): number {

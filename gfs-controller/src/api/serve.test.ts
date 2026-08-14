@@ -279,7 +279,7 @@ describe("GFS Upload v2 route contract", () => {
       "quota_exceeded",
       "global upload stream concurrency limit reached",
       undefined,
-      { retryAfterSeconds: 1, limit: "active_part_streams_global" },
+      { retryAfterSeconds: 1, limit: "active_part_streams_global", rateLimitLimit: 4 },
     );
     await run(
       uploadDeps({
@@ -295,7 +295,8 @@ describe("GFS Upload v2 route contract", () => {
     );
     expect(res.statusCode).toBe(429);
     expect(res.headers["Retry-After"]).toBe("1");
-    expect(res.headers["X-RateLimit-Limit"]).toBe("active_part_streams_global");
+    expect(res.headers["X-RateLimit-Limit"]).toBe("4");
+    expect(res.headers["X-GFS-RateLimit-Scope"]).toBe("active_part_streams_global");
     expect(res.json).toMatchObject({
       ok: false,
       error: { code: "quota_exceeded", retryAfterSeconds: 1, limit: "active_part_streams_global" },

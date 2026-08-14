@@ -43,9 +43,13 @@ export function fail(error: GfsError): ErrEnvelope {
  * declared code/status; anything else is an `internal` (500) — failures are
  * surfaced, never swallowed into a misleading success.
  */
-export function toResponse(error: unknown): { status: number; body: ErrEnvelope } {
+export function toResponse(error: unknown): {
+  status: number;
+  body: ErrEnvelope;
+  rateLimitLimit?: number;
+} {
   if (error instanceof GfsError) {
-    return { status: error.status, body: fail(error) };
+    return { status: error.status, body: fail(error), rateLimitLimit: error.rateLimitLimit };
   }
   // Some lower layers throw typed errors carrying a `.code` that matches the
   // envelope vocabulary (auth, blob store). Honor it when present; otherwise

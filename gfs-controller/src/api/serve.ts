@@ -296,7 +296,7 @@ export class GfsServingHandler {
         this.deps.metrics?.recordWrite(this.clock() - started);
       }
     } catch (err) {
-      const { status, body } = toResponse(err);
+      const { status, body, rateLimitLimit } = toResponse(err);
       if (status >= 500) {
         // A 5xx must never be invisible: an unknown throw (e.g. the base64
         // RangeError that produced a bogus `internal` 500) previously left no
@@ -313,7 +313,10 @@ export class GfsServingHandler {
       if (!res.headersSent) {
         const retryAfter = body.error.retryAfterSeconds;
         if (retryAfter !== undefined) res.setHeader("Retry-After", String(retryAfter));
-        if (body.error.limit !== undefined) res.setHeader("X-RateLimit-Limit", body.error.limit);
+        if (rateLimitLimit !== undefined)
+          res.setHeader("X-RateLimit-Limit", String(rateLimitLimit));
+        if (body.error.limit !== undefined)
+          res.setHeader("X-GFS-RateLimit-Scope", body.error.limit);
         sendJson(res, status, body, abortConnectionHeader(req));
       }
       else res.end(); // a content stream already started; just terminate

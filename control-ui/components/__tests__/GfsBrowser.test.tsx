@@ -316,6 +316,46 @@ describe('GfsBrowser', () => {
     )
   })
 
+  it('reuses a matching persisted session from the button upload path', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const rootRid = '11111111111111111111111111111111'
+    const uploadId = '88888888-8888-4888-8888-888888888888'
+    const lastModified = 1_725_000_000_000
+    const fileName = 'button-resume.md'
+    window.localStorage.setItem(
+      'evenfire:gfs-upload-v2:pending',
+      JSON.stringify({
+        uploadId,
+        fileName,
+        fileSize: 11,
+        lastModified,
+        target: { operation: 'create', parentRid: rootRid },
+        name: fileName,
+      })
+    )
+    mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    fireEvent.click(screen.getByRole('button', { name: /upload file/i }))
+    const dialog = await screen.findByRole('dialog', { name: 'Upload file' })
+    fireEvent.change(within(dialog).getByLabelText('Choose file to upload'), {
+      target: { files: [new File(['button data'], fileName, { lastModified })] },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Upload' }))
+
+    await waitFor(() =>
+      expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          file: expect.any(File),
+          name: fileName,
+          resumeUploadId: uploadId,
+          target: { operation: 'create', parentRid: rootRid },
+        })
+      )
+    )
+  })
+
   it('uploads dropped images and Markdown files into the current folder', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'

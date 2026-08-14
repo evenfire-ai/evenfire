@@ -836,6 +836,40 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
     expect(new Date(String(row.rows[0]?.expires_at)).getTime()).toBeGreaterThan(Date.now())
   })
 
+  it('expires a finalizing session with a missing durable start timestamp after its TTL', async () => {
+    const created = await uploads.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: 'b'.repeat(32),
+      name: 'finalizing-null-start.bin',
+      sizeBytes: 0,
+      idempotencyKey: randomUUID(),
+    })
+    await pool.query(
+      `UPDATE gfs_upload_sessions
+          SET state = 'finalizing',
+              finalizing_started_at = NULL,
+              expires_at = now() - interval '1 second'
+        WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+
+    const result = await uploads.reconcile()
+    expect(result.expiredSessions).toBeGreaterThanOrEqual(1)
+    const row = await pool.query(
+      `SELECT state, finalizing_started_at, active_part_count
+         FROM gfs_upload_sessions WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    expect(row.rows[0]).toEqual({
+      state: 'expired',
+      finalizing_started_at: null,
+      active_part_count: 0,
+    })
+  })
+
   it('rejects cancel during finalization and leaves one completed receipt', async () => {
     let finalizerStarted!: () => void
     let releaseFinalizer!: () => void

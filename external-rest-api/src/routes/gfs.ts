@@ -48,6 +48,7 @@ const STREAM_HEADERS = [
   'retry-after',
   'x-ratelimit-limit',
   'x-ratelimit-remaining',
+  'x-gfs-ratelimit-scope',
 ]
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
@@ -97,6 +98,7 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
       const retryAfterSeconds = Math.max(1, Math.ceil((resetAt - Date.now()) / 1000))
       res.setHeader('Retry-After', String(retryAfterSeconds))
       res.setHeader('X-RateLimit-Limit', String(info?.limit ?? edgeRequestLimit))
+      res.setHeader('X-GFS-RateLimit-Scope', 'public_edge_requests')
       res.setHeader('X-RateLimit-Remaining', '0')
       res.status(429).json({
         error: 'gfs_upload_rate_limited',

@@ -30,6 +30,7 @@ const PASSTHROUGH_RESPONSE_HEADERS = [
   'retry-after',
   'x-ratelimit-limit',
   'x-ratelimit-remaining',
+  'x-gfs-ratelimit-scope',
 ]
 const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 const UPLOAD_PART_PATH = new RegExp(`^/v1/uploads/${UUID_PATH}/parts/[0-9]+(?:\\?|$)`, 'i')

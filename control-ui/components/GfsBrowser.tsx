@@ -449,17 +449,7 @@ export function GfsBrowser(): React.JSX.Element {
       assertGfsFileUploadSize(file.size)
       const name = await normalizeGfsResourceName(file.name)
       const target = { operation: 'create' as const, parentRid: rid }
-      const pending = readPendingGfsUpload()
-      resumeUploadId =
-        pending &&
-        pending.fileName === file.name &&
-        pending.fileSize === file.size &&
-        pending.lastModified === file.lastModified &&
-        pending.target.operation === target.operation &&
-        pending.target.parentRid === target.parentRid &&
-        pending.name === name
-          ? pending.uploadId
-          : undefined
+      resumeUploadId = matchingPendingResumeUploadId(file, target, name)
       const job = createGfsUploadJob({
         file,
         name,

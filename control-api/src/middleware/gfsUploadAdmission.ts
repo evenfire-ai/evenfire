@@ -112,6 +112,7 @@ function sendBackendUnavailable(res: Response): void {
 function sendRateLimited(res: Response, limit: string, retryAfter: number, max: number): void {
   res.setHeader('Retry-After', String(retryAfter))
   res.setHeader('X-RateLimit-Limit', String(max))
+  res.setHeader('X-GFS-RateLimit-Scope', limit)
   res.setHeader('X-RateLimit-Remaining', '0')
   res.status(429).json({
     error: 'gfs_upload_rate_limited',

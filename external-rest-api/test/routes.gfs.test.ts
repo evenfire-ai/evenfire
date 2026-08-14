@@ -70,6 +70,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(second.status).toBe(429)
     expect(second.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
     expect(second.headers['x-ratelimit-limit']).toBe('1')
+    expect(second.headers['x-gfs-ratelimit-scope']).toBe('public_edge_requests')
     expect(second.headers['x-ratelimit-remaining']).toBe('0')
     expect(second.body).toEqual({
       error: 'gfs_upload_rate_limited',
@@ -261,7 +262,11 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         'rate limited',
         429,
         { error: 'gfs_upload_rate_limited', limit: 'principal_bytes', retryAfterSeconds: 7 },
-        new Headers({ 'retry-after': '7' })
+        new Headers({
+          'retry-after': '7',
+          'x-ratelimit-limit': '512',
+          'x-gfs-ratelimit-scope': 'principal_bytes',
+        })
       )
     )
     const response = await request(buildApp())
@@ -269,6 +274,8 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       .set('authorization', 'Bearer sess-xyz')
     expect(response.status).toBe(429)
     expect(response.headers['retry-after']).toBe('7')
+    expect(response.headers['x-ratelimit-limit']).toBe('512')
+    expect(response.headers['x-gfs-ratelimit-scope']).toBe('principal_bytes')
     expect(response.body).toEqual({
       error: 'gfs_upload_rate_limited',
       limit: 'principal_bytes',

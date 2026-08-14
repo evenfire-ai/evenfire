@@ -266,10 +266,11 @@ function requireEnabled(config: GfsUploadConfig): void {
   if (!config.enabled) throw new GfsError('forbidden', 'resumable GFS uploads are disabled')
 }
 
-function quotaExceeded(message: string, limit: string): GfsError {
+function quotaExceeded(message: string, limit: string, limitValue: number): GfsError {
   return new GfsError('quota_exceeded', message, undefined, {
     retryAfterSeconds: 1,
     limit,
+    rateLimitLimit: limitValue,
   })
 }
 
@@ -592,7 +593,8 @@ export class GfsUploadSessionService {
         if (Number(subjectActive.rows[0]?.count ?? 0) >= this.deps.config.maxActivePerSubject) {
           throw quotaExceeded(
             'active upload session subject quota reached',
-            'active_sessions_subject'
+            'active_sessions_subject',
+            this.deps.config.maxActivePerSubject
           )
         }
         const globalActive = await client.query(
@@ -603,7 +605,8 @@ export class GfsUploadSessionService {
         if (Number(globalActive.rows[0]?.count ?? 0) >= this.deps.config.maxActiveGlobal) {
           throw quotaExceeded(
             'active upload session global quota reached',
-            'active_sessions_global'
+            'active_sessions_global',
+            this.deps.config.maxActiveGlobal
           )
         }
         if (available !== null) {
@@ -840,7 +843,8 @@ export class GfsUploadSessionService {
         ) {
           throw quotaExceeded(
             'global upload stream concurrency limit reached',
-            'active_part_streams_global'
+            'active_part_streams_global',
+            this.deps.config.maxConcurrentPartStreamsGlobal
           )
         }
         // The scalar on the session is a receipt/cache field. Admission must
@@ -856,7 +860,8 @@ export class GfsUploadSessionService {
         if (activeSessionCount >= this.deps.config.maxConcurrentPartsPerSession)
           throw quotaExceeded(
             'per-session part concurrency limit reached',
-            'active_part_streams_session'
+            'active_part_streams_session',
+            this.deps.config.maxConcurrentPartsPerSession
           )
         const stagingPath = sessionPath(
           this.deps.storageMountPath,
@@ -1361,13 +1366,22 @@ export class GfsUploadSessionService {
       }
       const expired = await client.query(
         `SELECT upload_id FROM gfs_upload_sessions
-          WHERE state IN ('initiated','uploading','paused') AND expires_at <= now()
+          WHERE expires_at <= now()
+            AND (
+              state IN ('initiated','uploading','paused')
+              OR (state = 'finalizing' AND finalizing_started_at IS NULL)
+            )
           LIMIT 100
           FOR UPDATE SKIP LOCKED`,
         []
       )
       for (const row of expired.rows) {
         const uploadId = String(row.upload_id)
+        // A local finalizer may belong to an older rolling-deploy process that
+        // did not persist its start timestamp. Let that process settle before
+        // expiring the row; the next reconciliation fences it if it remains
+        // expired, while avoiding a local self-cancel during the same cycle.
+        if (this.inFlightFinalizers.has(uploadId)) continue
         uploadDirs.set(uploadId, { purgeReceipt: false })
         this.canceledUploads.add(uploadId)
         await client.query(
@@ -1570,7 +1584,8 @@ export class GfsUploadSessionService {
         if (Number(finalizing.rows[0]?.count ?? 0) >= this.deps.config.maxConcurrentFinalizations) {
           throw quotaExceeded(
             'upload finalization concurrency limit reached',
-            'active_finalizations'
+            'active_finalizations',
+            this.deps.config.maxConcurrentFinalizations
           )
         }
         if (!locked.wholeSha256 && expectedWhole) {

@@ -163,6 +163,8 @@ describe('GFS upload admission', () => {
 
     expect(response.status).toBe(429)
     expect(response.headers['retry-after']).toMatch(/^\d+$/)
+    expect(response.headers['x-ratelimit-limit']).toBe('120')
+    expect(response.headers['x-gfs-ratelimit-scope']).toBe('principal_requests')
     expect(response.body).toMatchObject({
       error: 'gfs_upload_rate_limited',
       limit: 'principal_requests',

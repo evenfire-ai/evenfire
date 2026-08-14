@@ -208,7 +208,8 @@ describe('/api/v1/gfs/proxy', () => {
           headers: {
             'content-type': 'application/json',
             'retry-after': '3',
-            'x-ratelimit-limit': 'active_part_streams_global',
+            'x-ratelimit-limit': '4',
+            'x-gfs-ratelimit-scope': 'active_part_streams_global',
             'x-ratelimit-remaining': '0',
             'upload-length': '209715200',
           },
@@ -221,7 +222,8 @@ describe('/api/v1/gfs/proxy', () => {
 
     expect(res.status).toBe(429)
     expect(res.headers['retry-after']).toBe('3')
-    expect(res.headers['x-ratelimit-limit']).toBe('active_part_streams_global')
+    expect(res.headers['x-ratelimit-limit']).toBe('4')
+    expect(res.headers['x-gfs-ratelimit-scope']).toBe('active_part_streams_global')
     expect(res.headers['x-ratelimit-remaining']).toBe('0')
     expect(res.headers['upload-length']).toBe('209715200')
   })
