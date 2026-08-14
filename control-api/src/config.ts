@@ -789,10 +789,10 @@ export const config: Config = {
   approvalRlRefreshPerMin: Number(process.env.APPROVAL_RL_REFRESH_PER_MIN || 20),
   approvalRlExternalPerMin: externalRateLimitConfig.operation,
   approvalRlExternalEdgePerMin: externalRateLimitConfig.session,
-  // The source-IP backstop is intentionally wider than the per-session edge
-  // bucket. A shared NAT must not turn a 120/min fairness budget into a
-  // platform-wide ceiling; token/session fairness remains independently
-  // bounded by approvalRlExternalEdgePerMin.
+  // By default the source-IP backstop is wider than the per-session edge bucket
+  // so a shared NAT does not turn the 120/min fairness budget into a
+  // platform-wide ceiling. Operators may override these independent scopes;
+  // crossed values are preserved after the boot advisory above.
   approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
