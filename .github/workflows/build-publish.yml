@@ -186,9 +186,11 @@ jobs:
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
+              - 'packages/display-field/**'
             control-ui:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
+              - 'packages/display-field/**'
             external-rest-api:
               - 'external-rest-api/**'
             host-context-controller:

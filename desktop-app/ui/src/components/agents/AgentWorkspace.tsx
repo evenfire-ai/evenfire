@@ -72,10 +72,16 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     handleOpenContextDetails,
   } = useNavigationContext()
   const { agentNames } = useAgentsDataController()
-  const { contextIds, loading: contextsLoading, error: contextsError } = useContextsDataController()
-  const { agentContextByName, selectedAgentMcpServers } = useMcpServersDataController({
-    selectedAgent,
-  })
+  const {
+    contextIds,
+    contextDisplayById,
+    loading: contextsLoading,
+    error: contextsError,
+  } = useContextsDataController()
+  const { agentContextByName, agentDisplayByName, selectedAgentMcpServers } =
+    useMcpServersDataController({
+      selectedAgent,
+    })
   const { sessionStateByChatId, activeChatId } = useChatListContext()
   const activeSessionState = activeChatId ? sessionStateByChatId[activeChatId] : undefined
   const { hostRuntimeStatus } = useMcpRuntimeContext()
@@ -126,6 +132,13 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const selectedAgentContext = selectedAgent
     ? String(agentContextByName[selectedAgent] || '').trim()
     : ''
+  // Visible agent name (spec.host) for the workspace hero title. `selectedAgent`
+  // is always a catalog agent, so `agentDisplayByName` is total over it — the
+  // single sanctioned fallback (Decision #6) keeps the id if a display is
+  // missing. Display-only: lookups/actions keep using `selectedAgent`.
+  const selectedAgentDisplay = selectedAgent
+    ? (agentDisplayByName[selectedAgent] ?? selectedAgent)
+    : null
   const visibleContextIds = useMemo(
     () =>
       selectedAgentContext
@@ -159,8 +172,14 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
             : 'Workspace status and queue details for this agent.'
 
   const agentOptions = useMemo(
-    () => agentNames.map(agentName => ({ id: agentName, label: agentName })),
-    [agentNames]
+    // id stays the identifier (drives selection/matching); label shows the
+    // display name (spec.host) with the single sanctioned fallback (Decision #6).
+    () =>
+      agentNames.map(agentName => ({
+        id: agentName,
+        label: agentDisplayByName[agentName] ?? agentName,
+      })),
+    [agentNames, agentDisplayByName]
   )
   const routeOptions = useMemo(
     () => AGENT_ROUTE_OPTIONS.map(route => ({ id: route, label: AGENT_ROUTE_LABELS[route] })),
@@ -178,7 +197,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
       emptyLabel="No agents"
       options={agentOptions}
       selectedId={selectedAgent ?? ''}
-      selectedLabel={selectedAgent ?? ''}
+      selectedLabel={selectedAgentDisplay ?? ''}
       onSelectAgent={agentName => {
         if (isChatMode) {
           onSelectChatAgent(agentName, { selectLatest: false })
@@ -251,11 +270,11 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   // row, so the breadcrumb there shows only the root "Chat" item.
   const agentBreadcrumbLabel = isChatMode ? (
     <span className="agent-workspace-agent-breadcrumb-actions">
-      {selectedAgent || 'Agent'}
+      {selectedAgentDisplay || 'Agent'}
       {isChatMode && activeChatId ? chatAgentRouteMenu : null}
     </span>
   ) : (
-    selectedAgent || 'Agent'
+    selectedAgentDisplay || 'Agent'
   )
   const agentBreadcrumbItem: PageBreadcrumbItem =
     mode === 'agents' && selectedAgent
@@ -364,7 +383,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
         >
           {!isChatMode && selectedAgentRoute === 'mcp-servers' && (
             <section className="agent-mcp-panel" aria-label="Agent connectors">
-              <AgentHero agentName={selectedAgent} subtitle={routeSubtitle} />
+              <AgentHero agentName={selectedAgentDisplay} subtitle={routeSubtitle} />
 
               <McpServerHealthTable
                 hostRef={selectedAgent ?? ''}
@@ -378,7 +397,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
 
           {!isChatMode && selectedAgentRoute === 'contexts' && (
             <section className="agent-workspace-panel" aria-label="Agent contexts">
-              <AgentHero agentName={selectedAgent} subtitle={routeSubtitle} />
+              <AgentHero agentName={selectedAgentDisplay} subtitle={routeSubtitle} />
 
               {contextsLoading && !visibleContextIds.length ? (
                 <EmptyState title="Loading" body="Fetching authorized contexts..." />
@@ -408,7 +427,11 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                             title={contextId}
                             aria-label={`Open context ${contextId}`}
                           >
-                            {contextId}
+                            {/* Visible context name (spec.displayName); fall back
+                                to the id (Decision #6) when no display exists OR
+                                the display is blank/whitespace-only (an out-of-band
+                                write must never render an empty context label). */}
+                            {(contextDisplayById[contextId] ?? '').trim() || contextId}
                           </ReferenceTag>
                         </td>
                         <td className="da-table__cell">
@@ -433,7 +456,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
 
           {!isChatMode && selectedAgentRoute === 'shared-files' && (
             <section className="agent-workspace-panel" aria-label="Agent files">
-              <AgentHero agentName={selectedAgent} subtitle={routeSubtitle} />
+              <AgentHero agentName={selectedAgentDisplay} subtitle={routeSubtitle} />
 
               {selectedAgentContext ? (
                 <SharedFilesTab contextId={selectedAgentContext} />
@@ -452,7 +475,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
               aria-label="Agent details"
             >
               <AgentHero
-                agentName={selectedAgent}
+                agentName={selectedAgentDisplay}
                 subtitle="Agent details"
                 subtitleTone="eyebrow"
               />
@@ -515,7 +538,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
 
           {!isChatMode && selectedAgentRoute === 'activity' && (
             <section className="agent-workspace-panel" aria-label="Agent activity">
-              <AgentHero agentName={selectedAgent} subtitle={routeSubtitle} />
+              <AgentHero agentName={selectedAgentDisplay} subtitle={routeSubtitle} />
 
               <ActivityDashboard />
             </section>
