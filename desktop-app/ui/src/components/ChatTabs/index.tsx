@@ -10,6 +10,7 @@ export function ChatTabs({ tabs, activeTabId, onSelect, onClose }: ChatTabsProps
           return (
             <div className={`chat-view-tab${active ? ' is-active' : ''}`} key={tab.id}>
               <Button
+                align="start"
                 aria-pressed={active}
                 className="chat-view-tab__select"
                 color="neutral"
@@ -17,7 +18,7 @@ export function ChatTabs({ tabs, activeTabId, onSelect, onClose }: ChatTabsProps
                 size="sm"
                 variant="ghost"
               >
-                {tab.title}
+                <span className="chat-view-tab__label">{tab.title}</span>
               </Button>
               <Button
                 aria-label={`Close ${tab.title}`}

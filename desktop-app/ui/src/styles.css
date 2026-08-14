@@ -14890,7 +14890,8 @@ pre {
 .chat-view-tabs {
   display: flex;
   min-width: 0;
-  padding: var(--space-2) var(--space-3) 0;
+  padding: var(--space-2) 0 0;
+  width: 100%;
 }
 
 .chat-view-tabs__list {
@@ -14898,6 +14899,7 @@ pre {
   gap: var(--space-1);
   min-width: 0;
   overflow-x: auto;
+  width: 100%;
 }
 
 .chat-view-tab {
@@ -14908,6 +14910,7 @@ pre {
   display: flex;
   flex: 0 0 auto;
   max-width: 220px;
+  min-width: 0;
 }
 
 .chat-view-tab.is-active {
@@ -14916,9 +14919,17 @@ pre {
 }
 
 .chat-view-tab__select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-view-tab__label {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: left;
   white-space: nowrap;
 }
 
