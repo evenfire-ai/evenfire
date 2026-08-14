@@ -21,6 +21,13 @@ function appThrowing(err: unknown) {
   return app
 }
 
+function externalAppThrowing(err: unknown) {
+  const app = express()
+  app.get('/api/v1/external/boom', (_req, _res, next) => next(err))
+  app.use(clerumErrorHandler)
+  return app
+}
+
 /**
  * Like `appThrowing` but injects a spy logger on `req.log` so a test can assert
  * on what the handler writes to the INTERNAL log (not just the client body).
@@ -60,6 +67,22 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
   it('preserves the legacy `.status` path (404)', async () => {
     const res = await request(appThrowing({ status: 404, message: 'not found' })).get('/boom')
     expect(res.status).toBe(404)
+  })
+
+  it('preserves the external public 4xx error contract after handler extraction', async () => {
+    const res = await request(externalAppThrowing({ status: 401, message: 'upstream detail' })).get(
+      '/api/v1/external/boom'
+    )
+
+    expect(res.status).toBe(401)
+    expect(res.body).toMatchObject({
+      error: {
+        code: 'invalid_session',
+        message: 'The request could not be completed.',
+        retryable: false,
+      },
+    })
+    expect(JSON.stringify(res.body)).not.toContain('upstream detail')
   })
 
   /**
