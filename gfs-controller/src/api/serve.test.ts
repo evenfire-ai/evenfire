@@ -21,6 +21,10 @@ class FakeRes extends Writable {
     if (headers) Object.assign(this.headers, headers);
     return this;
   }
+  setHeader(name: string, value: string): this {
+    this.headers[name] = value;
+    return this;
+  }
   _write(chunk: Buffer | string, _enc: BufferEncoding, cb: (e?: Error | null) => void): void {
     this.chunks.push(Buffer.from(chunk));
     cb();
@@ -267,6 +271,35 @@ describe("GFS Upload v2 route contract", () => {
     expect(res.statusCode).toBe(204);
     expect(res.headers["Upload-Part-Number"]).toBe("0");
     expect(res.headers["Upload-Checksum"]).toMatch(/^sha256 [A-Za-z0-9+/]{43}={1}$/);
+  });
+
+  it("exposes a bounded Retry-After and limit for writer quota responses", async () => {
+    const res = new FakeRes();
+    const quota = new GfsError(
+      "quota_exceeded",
+      "global upload stream concurrency limit reached",
+      undefined,
+      { retryAfterSeconds: 1, limit: "active_part_streams_global" },
+    );
+    await run(
+      uploadDeps({
+        uploadService: {
+          ...uploadDeps().uploadService,
+          get: async () => {
+            throw quota;
+          },
+        } as ServingDeps["uploadService"],
+      }),
+      req(`/v1/uploads/${UPLOAD_ID}`, { method: "HEAD", auth: "Bearer t" }),
+      res,
+    );
+    expect(res.statusCode).toBe(429);
+    expect(res.headers["Retry-After"]).toBe("1");
+    expect(res.headers["X-RateLimit-Limit"]).toBe("active_part_streams_global");
+    expect(res.json).toMatchObject({
+      ok: false,
+      error: { code: "quota_exceeded", retryAfterSeconds: 1, limit: "active_part_streams_global" },
+    });
   });
 });
 

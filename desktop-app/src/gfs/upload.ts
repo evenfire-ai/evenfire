@@ -11,6 +11,9 @@ const GFS_UPLOAD_V2_FALLBACK_CONCURRENCY = 2
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 5 * 60 * 1000
 const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60 * 1000
 const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
+// Retry only transient transport/edge failures. 507 (storage exhausted) and
+// other permanent 5xx responses are deliberately terminal: retrying them would
+// amplify a capacity incident instead of giving the operator a durable error.
 export const GFS_UPLOAD_RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
 const GFS_UPLOAD_AMBIGUOUS_STATUS = new Set([408, 500, 502, 503, 504])
 export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
@@ -35,6 +38,7 @@ export interface DesktopUploadSession {
   committedBytes: number
   committedPartCount: number
   activePartCount: number
+  activePartNumbers?: number[]
   expiresAt: string
   resultResourceId?: string
   resultVersion?: number
@@ -678,12 +682,21 @@ async function reconcileAmbiguousPart(
     if (['aborted', 'canceling', 'failed', 'expired'].includes(status.session.state)) {
       throw new Error(`cannot reconcile upload part in ${status.session.state}`)
     }
-    // activePartCount is the writer's durable lease fence.  Zero plus an absent
-    // committed row proves this part is safe to retry; a positive count cannot
-    // identify which concurrent part owns the lease, so poll status rather than
-    // risking an overlapping replay.
-    if (status.session.activePartCount === 0) return 'missing'
-    lastError = new Error(`writer still reports ${status.session.activePartCount} active parts`)
+    const activePartNumbers = status.session.activePartNumbers
+    if (status.session.activePartCount === 0 && activePartNumbers === undefined) return 'missing'
+    if (
+      !Array.isArray(activePartNumbers) ||
+      activePartNumbers.some(active => !Number.isSafeInteger(active) || active < 0) ||
+      new Set(activePartNumbers).size !== activePartNumbers.length ||
+      activePartNumbers.length !== status.session.activePartCount
+    ) {
+      throw partOutcomeUnknown(
+        partNumber,
+        new Error('writer returned an invalid active part lease set during reconciliation')
+      )
+    }
+    if (!activePartNumbers.includes(partNumber)) return 'missing'
+    lastError = new Error(`writer still reports part ${partNumber} active`)
     if (attempt + 1 < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS) await sleep(250 * 2 ** attempt)
   }
   throw partOutcomeUnknown(partNumber, lastError)

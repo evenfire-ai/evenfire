@@ -9,6 +9,9 @@ import { apiSend } from './api'
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
 const GFS_UPLOAD_DRIVE = 'main'
+// Retry only transient transport/edge failures. 507 (storage exhausted) and
+// other permanent 5xx responses are deliberately terminal: retrying them would
+// amplify a capacity incident instead of giving the operator a durable error.
 export const GFS_UPLOAD_RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
 const GFS_UPLOAD_AMBIGUOUS_STATUS = new Set([408, 500, 502, 503, 504])
 export const GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD = 3
@@ -60,6 +63,7 @@ export interface UploadReceipt {
   committedBytes?: number
   committedPartCount?: number
   activePartCount: number
+  activePartNumbers?: number[]
   expiresAt?: string
   resultResourceId?: string
   resultVersion?: number
@@ -592,8 +596,21 @@ async function reconcileAmbiguousPart(
         part.partNumber,
         new Error('writer returned an invalid activePartCount during reconciliation')
       )
-    if (activePartCount === 0) return 'missing'
-    lastError = new Error(`writer still reports ${activePartCount} active parts`)
+    const activePartNumbers = status.session.activePartNumbers
+    if (activePartCount === 0 && activePartNumbers === undefined) return 'missing'
+    if (
+      !Array.isArray(activePartNumbers) ||
+      activePartNumbers.some(partNumber => !Number.isSafeInteger(partNumber) || partNumber < 0) ||
+      new Set(activePartNumbers).size !== activePartNumbers.length ||
+      activePartNumbers.length !== activePartCount
+    ) {
+      throw partOutcomeUnknown(
+        part.partNumber,
+        new Error('writer returned an invalid active part lease set during reconciliation')
+      )
+    }
+    if (!activePartNumbers.includes(part.partNumber)) return 'missing'
+    lastError = new Error(`writer still reports part ${part.partNumber} active`)
     if (attempt + 1 < GFS_UPLOAD_V2_RECONCILE_ATTEMPTS) await delay(250 * 2 ** attempt, signal)
   }
   throw partOutcomeUnknown(part.partNumber, lastError)

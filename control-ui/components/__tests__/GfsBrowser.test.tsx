@@ -135,6 +135,7 @@ describe('GfsBrowser', () => {
     mockGfsFetchFileBlob.mockReset()
     mockCreateGfsUploadJob.mockClear()
     mockUploadGfsFile.mockReset()
+    window.localStorage.clear()
     mockUploadGfsFile.mockImplementation(async ({ file }: { file: File }) => {
       if (file.size > GFS_FILE_UPLOAD_MAX_BYTES) {
         throw new Error('GFS uploads are limited to 200 MB per file.')
@@ -352,6 +353,49 @@ describe('GfsBrowser', () => {
         name: 'notes.md',
         target: { operation: 'create', parentRid: rootRid },
       })
+    )
+  })
+
+  it('reuses the matching persisted session when a file is resumed through drag-and-drop', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const rootRid = '11111111111111111111111111111111'
+    const uploadId = '55555555-5555-4555-8555-555555555555'
+    const lastModified = 1_725_000_000_000
+    window.localStorage.setItem(
+      'evenfire:gfs-upload-v2:pending',
+      JSON.stringify({
+        uploadId,
+        fileName: 'resume.md',
+        fileSize: 11,
+        lastModified,
+        target: { operation: 'create', parentRid: rootRid },
+        name: 'resume.md',
+      })
+    )
+    mockApiGet.mockResolvedValue({
+      rootResourceId: rootId,
+      items: [],
+      nextCursor: null,
+    })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const file = new File(['resume data'], 'resume.md', {
+      type: 'text/markdown',
+      lastModified,
+    })
+    const dataTransfer = { dropEffect: 'none', files: [file], types: ['Files'] }
+    fireEvent.drop(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
+
+    await waitFor(() =>
+      expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          file,
+          resumeUploadId: uploadId,
+          target: { operation: 'create', parentRid: rootRid },
+        })
+      )
     )
   })
 

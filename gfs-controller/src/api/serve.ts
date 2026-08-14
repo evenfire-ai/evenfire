@@ -310,7 +310,12 @@ export class GfsServingHandler {
           )}`
         );
       }
-      if (!res.headersSent) sendJson(res, status, body, abortConnectionHeader(req));
+      if (!res.headersSent) {
+        const retryAfter = body.error.retryAfterSeconds;
+        if (retryAfter !== undefined) res.setHeader("Retry-After", String(retryAfter));
+        if (body.error.limit !== undefined) res.setHeader("X-RateLimit-Limit", body.error.limit);
+        sendJson(res, status, body, abortConnectionHeader(req));
+      }
       else res.end(); // a content stream already started; just terminate
     } finally {
       cancelCopyTimer?.();

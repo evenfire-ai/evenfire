@@ -279,10 +279,24 @@ export function createExternalGfsRouter(): Router {
   // writer-scoped token and never fall back to the legacy JSON/base64 path.
   router.get(
     '/external/gfs/capabilities',
-    requireCanonicalUploadDrive,
     gfsUploadAdmission,
     asyncHandler(async (req: ExternalGfsUploadRequest, res) => {
-      await proxyUploadToGfsc(req, res, canonicalUploadDrive(req), 'GET', '/v1/capabilities')
+      // Capabilities describe the protocol, not a drive-scoped session. Keep
+      // an optional drive for token routing when supplied, but a global probe
+      // must remain valid without query parameters.
+      const rawQueryDrive = req.query.drive
+      if (rawQueryDrive !== undefined) {
+        if (
+          typeof rawQueryDrive !== 'string' ||
+          rawQueryDrive.length === 0 ||
+          rawQueryDrive !== rawQueryDrive.trim()
+        ) {
+          res.status(400).json({ error: 'drive_invalid' })
+          return
+        }
+      }
+      const drive = rawQueryDrive === undefined ? GFS_DEFAULT_DRIVE : rawQueryDrive
+      await proxyUploadToGfsc(req, res, drive, 'GET', '/v1/capabilities')
     })
   )
   router.post(

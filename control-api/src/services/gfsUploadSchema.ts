@@ -44,6 +44,7 @@ export async function applyGfsUploadSessionSchema(db: DbClient): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       expires_at TIMESTAMPTZ NOT NULL,
       completed_at TIMESTAMPTZ NULL,
+      finalizing_started_at TIMESTAMPTZ NULL,
       cleanup_at TIMESTAMPTZ NULL,
       CONSTRAINT gfs_upload_sessions_owner_idempotency_unique
         UNIQUE (owner_subject, drive, idempotency_key)
@@ -85,5 +86,12 @@ export async function applyGfsUploadSessionSchema(db: DbClient): Promise<void> {
 export async function applyGfsUploadCleanupSchema(db: DbClient): Promise<void> {
   await db.query(
     `ALTER TABLE IF EXISTS gfs_upload_sessions ADD COLUMN IF NOT EXISTS cleanup_at TIMESTAMPTZ NULL`
+  )
+}
+
+/** Additive follow-up for crash recovery of a session fenced in finalization. */
+export async function applyGfsUploadFinalizingSchema(db: DbClient): Promise<void> {
+  await db.query(
+    `ALTER TABLE IF EXISTS gfs_upload_sessions ADD COLUMN IF NOT EXISTS finalizing_started_at TIMESTAMPTZ NULL`
   )
 }

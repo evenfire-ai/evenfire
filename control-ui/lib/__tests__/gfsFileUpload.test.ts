@@ -153,9 +153,14 @@ describe('GfsUploadJob', () => {
         const method = init?.method ?? 'GET'
         const url = String(_input)
         if (method === 'GET' && url.endsWith('/capabilities'))
-          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
-            status: 200,
-          })
+          return new Response(
+            JSON.stringify({
+              upload: { resumableV2: { enabled: true } },
+            }),
+            {
+              status: 200,
+            }
+          )
         if (method === 'POST' && url.endsWith('/uploads'))
           return new Response(
             JSON.stringify({
@@ -197,9 +202,12 @@ describe('GfsUploadJob', () => {
         const method = init?.method ?? 'GET'
         const url = String(_input)
         if (method === 'GET' && url.endsWith('/capabilities'))
-          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
-            status: 200,
-          })
+          return new Response(
+            JSON.stringify({
+              upload: { resumableV2: { enabled: true } },
+            }),
+            { status: 200 }
+          )
         if (method === 'POST' && url.endsWith('/uploads'))
           return new Response(
             JSON.stringify({
@@ -688,6 +696,78 @@ describe('GfsUploadJob', () => {
     expect(FakeXhr.requests).toHaveLength(1)
     expect(statusCalls).toBe(1)
     expect(completeCalls).toBe(1)
+  })
+
+  it('retries a missing target even when a sibling part still holds a lease', async () => {
+    const file = new File([new Uint8Array([5, 6])], 'active-sibling.bin')
+    const session = {
+      uploadId: '18181818-1818-4181-8181-181818181818',
+      drive: 'main',
+      expectedBytes: 2,
+      partBytes: 1,
+      partCount: 2,
+      state: 'initiated',
+      contiguousBytes: 0,
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    let statusCalls = 0
+    FakeXhr.responseLosses = 1
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(
+            JSON.stringify({
+              upload: { resumableV2: { enabled: true, maxConcurrentPartsPerSession: 1 } },
+            }),
+            { status: 200 }
+          )
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+        if (method === 'HEAD') return new Response(null, { status: 204 })
+        if (method === 'GET' && url.includes('/status')) {
+          statusCalls += 1
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                session: {
+                  ...session,
+                  state: 'uploading',
+                  activePartCount: 1,
+                  activePartNumbers: [1],
+                },
+                parts: [],
+              },
+            }),
+            { status: 200 }
+          )
+        }
+        if (method === 'POST' && url.endsWith('/complete'))
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: { ...session, state: 'completed', committedBytes: 2, committedPartCount: 2 },
+            }),
+            { status: 200 }
+          )
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-active-sibling' },
+      }).start()
+    ).resolves.toMatchObject({ state: 'completed' })
+    expect(statusCalls).toBe(1)
+    expect(FakeXhr.requests).toHaveLength(3)
   })
 
   it('persists an unresolved response-loss session without replaying its part', async () => {

@@ -800,6 +800,93 @@ describe('desktop GFS indexed uploader', () => {
     }
   })
 
+  it('retries a missing target while status identifies a live sibling lease', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-active-sibling-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.from([5, 6]))
+      const session = {
+        uploadId: '30303030-3030-4030-8030-303030303030',
+        drive: 'main',
+        operation: 'create' as const,
+        expectedBytes: 2,
+        partBytes: 1,
+        partCount: 2,
+        state: 'initiated',
+        contiguousBytes: 0,
+        committedBytes: 0,
+        committedPartCount: 0,
+        activePartCount: 0,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }
+      let statusCalls = 0
+      let partCalls = 0
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'POST' | 'HEAD', url: string): Promise<T> {
+          if (method === 'GET' && requestPath(url).endsWith('/capabilities'))
+            return enabledCapabilities({ maxConcurrentPartsPerSession: 1 }) as T
+          if (method === 'POST' && requestPath(url).endsWith('/uploads'))
+            return { ok: true, data: session } as T
+          if (method === 'HEAD') return {} as T
+          if (method === 'GET' && requestPath(url).endsWith('/status')) {
+            statusCalls += 1
+            return {
+              ok: true,
+              data: {
+                session: {
+                  ...session,
+                  state: 'uploading',
+                  activePartCount: 1,
+                  activePartNumbers: [1],
+                },
+                parts: [],
+              },
+            } as T
+          }
+          if (method === 'POST' && requestPath(url).endsWith('/complete'))
+            return {
+              ok: true,
+              data: { ...session, state: 'completed', committedBytes: 2, committedPartCount: 2 },
+            } as T
+          throw new Error(`unexpected ${method} ${url}`)
+        },
+        async requestPart(
+          _url: string,
+          _token: string,
+          _headers: Record<string, string>,
+          body: NodeJS.ReadableStream
+        ) {
+          partCalls += 1
+          for await (const _chunk of body as AsyncIterable<Buffer>) {
+            /* drain */
+          }
+          if (partCalls === 1) {
+            const timeout = new Error('response body did not reach EOF')
+            timeout.name = 'TimeoutError'
+            throw timeout
+          }
+          return { status: 204, text: '' }
+        },
+      }
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-active-sibling',
+          transport,
+        }).start()
+      ).resolves.toMatchObject({ state: 'completed' })
+      expect(statusCalls).toBe(1)
+      expect(partCalls).toBe(3)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('never adopts or replays a response-loss part whose status identity differs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-part-response-drift-'))
     try {

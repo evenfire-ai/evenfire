@@ -139,6 +139,12 @@ class MemoryDb {
         ],
       }
     }
+    if (
+      sql.startsWith('SELECT upload_id FROM gfs_upload_sessions') &&
+      sql.includes("state = 'finalizing'")
+    ) {
+      return { rows: [] }
+    }
     if (sql.startsWith('INSERT INTO gfs_upload_sessions')) {
       const [
         uploadId,
@@ -186,6 +192,7 @@ class MemoryDb {
         failure_code: null,
         expires_at: expiresAt,
         completed_at: null,
+        finalizing_started_at: null,
         cleanup_at: null,
       }
       this.sessions.push(row)
@@ -252,6 +259,11 @@ class MemoryDb {
     if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'uploading'")) {
       const row = this.sessions.find(session => session.upload_id === String(values[0]))!
       row.state = 'uploading'
+      if (sql.includes('session_epoch = session_epoch + 1')) {
+        row.session_epoch = Number(row.session_epoch) + 1
+        row.finalizing_started_at = null
+        return { rows: [] }
+      }
       row.active_part_count = Number(row.active_part_count) + 1
       return { rows: [] }
     }
@@ -269,7 +281,9 @@ class MemoryDb {
       const row = this.sessions.find(session => session.upload_id === String(uploadId))!
       row.committed_bytes = Number(row.committed_bytes) + Number(length)
       row.committed_part_count = Number(row.committed_part_count) + 1
-      row.active_part_count = Math.max(0, Number(row.active_part_count) - 1)
+      row.active_part_count = this.parts.filter(
+        part => part.upload_id === row.upload_id && part.state === 'reserved'
+      ).length
       let contiguous = 0
       for (let number = 0; number < Number(row.part_count); number += 1) {
         const part = this.parts.find(
@@ -298,7 +312,9 @@ class MemoryDb {
     }
     if (sql.startsWith('UPDATE gfs_upload_sessions SET active_part_count')) {
       const row = this.sessions.find(session => session.upload_id === String(values[0]))!
-      row.active_part_count = Math.max(0, Number(row.active_part_count) - 1)
+      row.active_part_count = this.parts.filter(
+        part => part.upload_id === row.upload_id && part.state === 'reserved'
+      ).length
       return { rows: [] }
     }
     if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'paused'")) {
@@ -320,6 +336,7 @@ class MemoryDb {
     if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'finalizing'")) {
       const row = this.sessions.find(session => session.upload_id === String(values[0]))!
       row.state = 'finalizing'
+      row.finalizing_started_at = new Date().toISOString()
       return { rows: [] }
     }
     if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'failed'")) {
@@ -327,6 +344,7 @@ class MemoryDb {
       row.state = 'failed'
       row.failure_code = values[1]
       row.active_part_count = 0
+      row.finalizing_started_at = null
       return { rows: [] }
     }
     if (sql.startsWith('UPDATE gfs_upload_sessions SET cleanup_at')) {

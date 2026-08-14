@@ -265,9 +265,15 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
 })
 
 describe('indexed upload relay canonical drive', () => {
-  it('rejects a missing or create-body-mismatched drive before minting a writer token', async () => {
+  it('allows a drive-independent capability probe while still rejecting mismatched creates', async () => {
     auth()
-    const fetchMock = vi.fn()
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
     vi.stubGlobal('fetch', fetchMock)
     const app = await buildApp()
 
@@ -279,12 +285,16 @@ describe('indexed upload relay canonical drive', () => {
       .set('x-user-session-token', 'sess')
       .send({ drive: 'main', operation: 'create' })
 
-    expect(missing.status).toBe(400)
-    expect(missing.body).toEqual({ error: 'drive_required' })
+    expect(missing.status).toBe(200)
+    expect(missing.body).toMatchObject({ upload: { resumableV2: { enabled: true } } })
     expect(mismatched.status).toBe(400)
     expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
-    expect(mockSignGfsToken).not.toHaveBeenCalled()
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(mockSignGfsToken).toHaveBeenCalledWith({
+      subject: U1,
+      drive: 'main',
+      scopes: ['gfs.write'],
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('rejects malformed canonical drive values before admission or token minting', async () => {
@@ -299,16 +309,14 @@ describe('indexed upload relay canonical drive', () => {
         .get(`/external/gfs/capabilities?drive=${encodeURIComponent(drive)}`)
         .set('x-user-session-token', 'sess')
       expect(response.status).toBe(400)
-      expect(response.body).toEqual({ error: 'drive_required' })
+      expect(response.body).toEqual({ error: 'drive_invalid' })
     }
 
     const arrayValue = await request(await buildApp())
       .get('/external/gfs/capabilities?drive=archive&drive=main')
       .set('x-user-session-token', 'sess')
     expect(arrayValue.status).toBe(400)
-    expect(arrayValue.body).toEqual({ error: 'drive_required' })
-    expect(mockSignGfsToken).not.toHaveBeenCalled()
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(arrayValue.body).toEqual({ error: 'drive_invalid' })
   })
 
   it('signs and forwards every lifecycle request from one non-main canonical drive', async () => {

@@ -240,6 +240,7 @@ type UploadScopeTestService = {
     operation: (token: string, signal: AbortSignal) => Promise<T>
   ) => Promise<T>
   startGfsFileUpload: AppService['startGfsFileUpload']
+  startGfsFileReplace: AppService['startGfsFileReplace']
 }
 
 function authenticatedUploadService(statePath: string): UploadScopeTestService {
@@ -343,6 +344,29 @@ describe('AppService GFS upload security scope', () => {
         service.startGfsFileUpload('parent-rid', 'resume.bin', filePath, 'main', 'resume-upload-id')
       ).rejects.toBeInstanceOf(DesktopUploadCapabilityError)
       expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+      expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('never falls back to a legacy replace for an explicit resume', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-explicit-replace-resume-no-fallback-'))
+    try {
+      const filePath = join(root, 'replace.bin')
+      await writeFile(filePath, Buffer.from('replace payload'))
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      service.startDesktopGfsUpload.mockRejectedValue(
+        new DesktopUploadCapabilityError('resumable uploads are disabled')
+      )
+      service.gfsClient = {
+        createResource: vi.fn(),
+        replaceFile: vi.fn(),
+      }
+
+      await expect(
+        service.startGfsFileReplace(RESOURCE_ID, filePath, 'main', 3, 'replace-resume-upload-id')
+      ).rejects.toBeInstanceOf(DesktopUploadCapabilityError)
       expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
     } finally {
       await rm(root, { recursive: true, force: true })

@@ -7,6 +7,7 @@ import {
 import { config } from './config.js'
 import {
   applyGfsUploadCleanupSchema,
+  applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
@@ -5474,6 +5475,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0092_gfs_upload_cleanup_receipt',
     apply: applyGfsUploadCleanupSchema,
+  },
+  {
+    version: '0093_gfs_upload_finalizing_recovery',
+    apply: applyGfsUploadFinalizingSchema,
   },
 ]
 

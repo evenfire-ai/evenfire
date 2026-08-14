@@ -61,4 +61,14 @@ describe('0091_gfs_upload_sessions', () => {
       ['gfs_upload_sessions', 'none'],
     ])
   })
+
+  it('registers the additive finalizing recovery migration', () => {
+    const source = readFileSync(new URL('../src/db.ts', import.meta.url), 'utf8')
+    const schema = readFileSync(
+      new URL('../src/services/gfsUploadSchema.ts', import.meta.url),
+      'utf8'
+    )
+    expect(source).toContain("version: '0093_gfs_upload_finalizing_recovery'")
+    expect(schema).toContain('finalizing_started_at TIMESTAMPTZ')
+  })
 })

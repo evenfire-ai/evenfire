@@ -66,12 +66,21 @@ export type GoneReason = "resource_deleted" | "artifact_expired";
 export class GfsError extends Error {
   readonly code: GfsErrorCode;
   readonly reason?: string;
+  readonly retryAfterSeconds?: number;
+  readonly limit?: string;
 
-  constructor(code: GfsErrorCode, message: string, reason?: string) {
+  constructor(
+    code: GfsErrorCode,
+    message: string,
+    reason?: string,
+    details?: { retryAfterSeconds?: number; limit?: string },
+  ) {
     super(message);
     this.name = "GfsError";
     this.code = code;
     this.reason = reason;
+    this.retryAfterSeconds = details?.retryAfterSeconds;
+    this.limit = details?.limit;
   }
 
   get status(): number {

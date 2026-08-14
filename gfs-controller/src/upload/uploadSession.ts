@@ -59,6 +59,8 @@ export interface UploadSessionReceipt {
   committedBytes: number
   committedPartCount: number
   activePartCount: number
+  /** Reserved part numbers currently holding a durable lease. Status-only. */
+  activePartNumbers?: number[]
   expiresAt: string
   resultResourceId?: string
   resultVersion?: number
@@ -119,6 +121,7 @@ export interface UploadSessionRow {
   contiguousBytes: number
   committedPartCount: number
   activePartCount: number
+  finalizingStartedAt: string | null
   sessionEpoch: number
   state: string
   resultResourceId: string | null
@@ -181,6 +184,10 @@ function rowToSession(row: Record<string, unknown>): UploadSessionRow {
     contiguousBytes: Number(row.contiguous_bytes),
     committedPartCount: Number(row.committed_part_count),
     activePartCount: Number(row.active_part_count),
+    finalizingStartedAt:
+      row.finalizing_started_at == null
+        ? null
+        : new Date(String(row.finalizing_started_at)).toISOString(),
     sessionEpoch: Number(row.session_epoch),
     state: String(row.state),
     resultResourceId: row.result_resource_id == null ? null : String(row.result_resource_id),
@@ -257,6 +264,13 @@ function requireChecksum(value: string | undefined, field: string): string {
 
 function requireEnabled(config: GfsUploadConfig): void {
   if (!config.enabled) throw new GfsError('forbidden', 'resumable GFS uploads are disabled')
+}
+
+function quotaExceeded(message: string, limit: string): GfsError {
+  return new GfsError('quota_exceeded', message, undefined, {
+    retryAfterSeconds: 1,
+    limit,
+  })
 }
 
 function toReceipt(session: UploadSessionRow): UploadSessionReceipt {
@@ -576,7 +590,10 @@ export class GfsUploadSessionService {
           [input.drive, input.ownerSubject]
         )
         if (Number(subjectActive.rows[0]?.count ?? 0) >= this.deps.config.maxActivePerSubject) {
-          throw new GfsError('quota_exceeded', 'active upload session subject quota reached')
+          throw quotaExceeded(
+            'active upload session subject quota reached',
+            'active_sessions_subject'
+          )
         }
         const globalActive = await client.query(
           `SELECT COUNT(*)::bigint AS count FROM gfs_upload_sessions
@@ -584,7 +601,10 @@ export class GfsUploadSessionService {
           []
         )
         if (Number(globalActive.rows[0]?.count ?? 0) >= this.deps.config.maxActiveGlobal) {
-          throw new GfsError('quota_exceeded', 'active upload session global quota reached')
+          throw quotaExceeded(
+            'active upload session global quota reached',
+            'active_sessions_global'
+          )
         }
         if (available !== null) {
           const reserved = await client.query(
@@ -660,6 +680,7 @@ export class GfsUploadSessionService {
     )
     const row = result.rows[0] ? rowToSession(result.rows[0]) : null
     if (!row) throw new GfsError('not_found', 'upload session not found')
+    assertNotExpired(row, this.now())
     if (row.state === 'expired') throw new GfsError('upload_expired', 'upload session has expired')
     if (row.state === 'aborted') throw new GfsError('upload_aborted', 'upload session was canceled')
     return toReceipt(row)
@@ -693,11 +714,18 @@ export class GfsUploadSessionService {
          FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'committed' AND part_number > $2 ORDER BY part_number ASC LIMIT $3`,
       [uploadId, cursor, requestedLimit + 1]
     )
+    const active = await this.deps.db.query(
+      `SELECT part_number FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'reserved' ORDER BY part_number ASC`,
+      [uploadId]
+    )
     const hasMore = result.rows.length > requestedLimit
     const rows = hasMore ? result.rows.slice(0, requestedLimit) : result.rows
     const lastPart = rows.at(-1)
     return {
-      session: toReceipt(session),
+      session: {
+        ...toReceipt(session),
+        activePartNumbers: active.rows.map(row => Number(row.part_number)),
+      },
       parts: rows.map(row => {
         const part = rowToPart(row)
         return {
@@ -792,10 +820,16 @@ export class GfsUploadSessionService {
           Number(activeGlobal.rows[0]?.count ?? 0) >=
           this.deps.config.maxConcurrentPartStreamsGlobal
         ) {
-          throw new GfsError('quota_exceeded', 'global upload stream concurrency limit reached')
+          throw quotaExceeded(
+            'global upload stream concurrency limit reached',
+            'active_part_streams_global'
+          )
         }
         if (locked.activePartCount >= this.deps.config.maxConcurrentPartsPerSession)
-          throw new GfsError('quota_exceeded', 'per-session part concurrency limit reached')
+          throw quotaExceeded(
+            'per-session part concurrency limit reached',
+            'active_part_streams_session'
+          )
         const stagingPath = sessionPath(
           this.deps.storageMountPath,
           uploadId,
@@ -839,7 +873,9 @@ export class GfsUploadSessionService {
           )
         }
         await client.query(
-          `UPDATE gfs_upload_sessions SET state = 'uploading', active_part_count = active_part_count + 1, updated_at = now()
+          `UPDATE gfs_upload_sessions SET state = 'uploading', active_part_count = (
+             SELECT COUNT(*) FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'reserved'
+           ), updated_at = now()
           WHERE upload_id = $1`,
           [uploadId]
         )
@@ -968,7 +1004,9 @@ export class GfsUploadSessionService {
           `UPDATE gfs_upload_sessions
               SET committed_bytes = committed_bytes + $2,
                   committed_part_count = committed_part_count + 1,
-                  active_part_count = GREATEST(active_part_count - 1, 0),
+                  active_part_count = (
+                    SELECT COUNT(*) FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'reserved'
+                  ),
                   contiguous_bytes = COALESCE((
                     SELECT SUM(p.length_bytes) FROM gfs_upload_parts p
                      WHERE p.upload_id = $1 AND p.state = 'committed'
@@ -1047,7 +1085,9 @@ export class GfsUploadSessionService {
           // reconciliation would undercount other concurrent parts.
           if (failedPart.rows.length > 0) {
             await client.query(
-              `UPDATE gfs_upload_sessions SET active_part_count = GREATEST(active_part_count - 1, 0), updated_at = now()
+              `UPDATE gfs_upload_sessions SET active_part_count = (
+                SELECT COUNT(*) FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'reserved'
+              ), updated_at = now()
               WHERE upload_id = $1`,
               [uploadId]
             )
@@ -1252,12 +1292,38 @@ export class GfsUploadSessionService {
         )
         if (failed.rows.length === 1) {
           await client.query(
-            `UPDATE gfs_upload_sessions SET active_part_count = GREATEST(active_part_count - 1, 0), updated_at = now()
-              WHERE upload_id = $1`,
+            `UPDATE gfs_upload_sessions SET active_part_count = (
+              SELECT COUNT(*) FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'reserved'
+            ), updated_at = now()
+            WHERE upload_id = $1`,
             [row.upload_id]
           )
         }
         if (failed.rows.length === 1) staleParts += 1
+      }
+      const staleFinalizers = await client.query(
+        `SELECT upload_id
+           FROM gfs_upload_sessions
+          WHERE state = 'finalizing'
+            AND finalizing_started_at IS NOT NULL
+            AND finalizing_started_at < now() - ($1::bigint * interval '1 millisecond')
+          LIMIT 100
+          FOR UPDATE SKIP LOCKED`,
+        [this.deps.config.finalizeTimeoutMs]
+      )
+      for (const row of staleFinalizers.rows) {
+        const uploadId = String(row.upload_id)
+        // A live finalizer owns the in-process fence. A different writer may
+        // still finish against the same row, so the session epoch update below
+        // is the durable fence that makes any late publication fail closed.
+        if (this.inFlightFinalizers.has(uploadId)) continue
+        await client.query(
+          `UPDATE gfs_upload_sessions
+              SET state = 'uploading', session_epoch = session_epoch + 1,
+                  finalizing_started_at = NULL, updated_at = now()
+            WHERE upload_id = $1 AND state = 'finalizing'`,
+          [uploadId]
+        )
       }
       const expired = await client.query(
         `SELECT upload_id FROM gfs_upload_sessions
@@ -1468,7 +1534,10 @@ export class GfsUploadSessionService {
           []
         )
         if (Number(finalizing.rows[0]?.count ?? 0) >= this.deps.config.maxConcurrentFinalizations) {
-          throw new GfsError('quota_exceeded', 'upload finalization concurrency limit reached')
+          throw quotaExceeded(
+            'upload finalization concurrency limit reached',
+            'active_finalizations'
+          )
         }
         if (!locked.wholeSha256 && expectedWhole) {
           await client.query(
@@ -1477,7 +1546,7 @@ export class GfsUploadSessionService {
           )
         }
         await client.query(
-          `UPDATE gfs_upload_sessions SET state = 'finalizing', updated_at = now() WHERE upload_id = $1 AND session_epoch = $2`,
+          `UPDATE gfs_upload_sessions SET state = 'finalizing', finalizing_started_at = now(), updated_at = now() WHERE upload_id = $1 AND session_epoch = $2`,
           [uploadId, locked.sessionEpoch]
         )
         return {
@@ -1523,7 +1592,8 @@ export class GfsUploadSessionService {
         if (locked.state === 'finalizing' && locked.sessionEpoch === started.sessionEpoch) {
           await client.query(
             `UPDATE gfs_upload_sessions
-                SET state = 'failed', failure_code = $2, active_part_count = 0, updated_at = now()
+                SET state = 'failed', failure_code = $2, active_part_count = 0,
+                    finalizing_started_at = NULL, updated_at = now()
               WHERE upload_id = $1`,
             [uploadId, failureCode]
           )
@@ -1564,7 +1634,7 @@ export class GfsUploadSessionService {
         if (locked.state !== 'finalizing' || locked.sessionEpoch !== started.sessionEpoch)
           throw new GfsError('upload_aborted', 'upload session changed during finalization')
         await client.query(
-          `UPDATE gfs_upload_sessions SET state = 'completed', result_resource_id = $2, result_version = $3, result_sha256 = $4, completed_at = now(), updated_at = now() WHERE upload_id = $1`,
+          `UPDATE gfs_upload_sessions SET state = 'completed', result_resource_id = $2, result_version = $3, result_sha256 = $4, completed_at = now(), finalizing_started_at = NULL, updated_at = now() WHERE upload_id = $1`,
           [uploadId, receipt.resourceId, receipt.version, receipt.sha256]
         )
         return {

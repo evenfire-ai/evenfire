@@ -248,6 +248,44 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
     expect(rows.rows).toEqual(expect.arrayContaining([{ state: 'committed', count: 2 }]))
   })
 
+  it('reports the exact reserved part set while sibling streams are active', async () => {
+    const created = await uploads.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: 'c'.repeat(32),
+      name: 'active-part-set.bin',
+      sizeBytes: 2 * CONFIG.preferredPartBytes,
+      idempotencyKey: randomUUID(),
+    })
+    await pool.query(
+      `UPDATE gfs_upload_sessions SET state = 'uploading', active_part_count = 2 WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    await pool.query(
+      `INSERT INTO gfs_upload_parts
+        (upload_id, part_number, offset_bytes, length_bytes, sha256, state, staging_path, lease_epoch, lease_started_at)
+       VALUES
+        ($1, 0, 0, $2, $3, 'reserved', $4, 1, now()),
+        ($1, 1, $2, $2, $3, 'reserved', $5, 1, now())`,
+      [
+        created.session.uploadId,
+        CONFIG.preferredPartBytes,
+        'a'.repeat(64),
+        join(tempRoot, '.uploads', created.session.uploadId, 'parts', '0.part.tmp-test'),
+        join(tempRoot, '.uploads', created.session.uploadId, 'parts', '1.part.tmp-test'),
+      ]
+    )
+    const status = await uploads.status(created.session.uploadId, {
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+    })
+    expect(status.session.activePartCount).toBe(2)
+    expect(status.session.activePartNumbers).toEqual([0, 1])
+  })
+
   it('serializes concurrent indexed part reservations without losing either commit', async () => {
     const bytes = [
       Buffer.alloc(CONFIG.preferredPartBytes, 0x31),
@@ -639,6 +677,39 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
       [committed.session.uploadId]
     )
     expect(corruptRow.rows[0]).toEqual({ state: 'failed', failure_code: 'corrupt_part_missing' })
+  })
+
+  it('reopens an orphaned finalizing session after the durable finalizer lease expires', async () => {
+    const created = await uploads.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: 'a'.repeat(32),
+      name: 'orphan-finalizer.bin',
+      sizeBytes: 0,
+      idempotencyKey: randomUUID(),
+    })
+    const before = await pool.query(
+      `SELECT session_epoch FROM gfs_upload_sessions WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    await pool.query(
+      `UPDATE gfs_upload_sessions
+          SET state = 'finalizing', finalizing_started_at = now() - interval '1 hour'
+        WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    await uploads.reconcile()
+    const row = await pool.query(
+      `SELECT state, session_epoch, finalizing_started_at FROM gfs_upload_sessions WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    expect(row.rows[0]).toEqual({
+      state: 'uploading',
+      session_epoch: Number(before.rows[0]?.session_epoch) + 1,
+      finalizing_started_at: null,
+    })
   })
 
   it('rejects cancel during finalization and leaves one completed receipt', async () => {

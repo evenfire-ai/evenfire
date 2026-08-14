@@ -15,6 +15,8 @@ export interface ErrorBody {
   code: string;
   message: string;
   reason?: string;
+  retryAfterSeconds?: number;
+  limit?: string;
 }
 
 export interface ErrEnvelope {
@@ -31,6 +33,8 @@ export function ok<T>(data: T): OkEnvelope<T> {
 export function fail(error: GfsError): ErrEnvelope {
   const body: ErrorBody = { code: error.code, message: error.message };
   if (error.reason !== undefined) body.reason = error.reason;
+  if (error.retryAfterSeconds !== undefined) body.retryAfterSeconds = error.retryAfterSeconds;
+  if (error.limit !== undefined) body.limit = error.limit;
   return { ok: false, error: body };
 }
 
