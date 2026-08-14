@@ -11,6 +11,7 @@ import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
+import { syncHookRefsInHosts } from '../../services/hostGuardrailRefs.js'
 import { createKey, listImages, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
 import type { RegistryEntry } from '../../services/registryClient.js'
 import {
@@ -2011,6 +2012,130 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 ]
               : [],
         })
+      })
+    )
+
+    // ── POST /admin/registry/upgrade-hook — coordinated hook image upgrade (§8.2) ──
+    // Bumps the LlmHook CR image AND every referencing Host's pinned digest in
+    // lock-step, so the digest pin doesn't trip and quarantine the hook.
+    router.post(
+      '/admin/registry/upgrade-hook',
+      asyncHandler(async (req, res) => {
+        const body = req.body as {
+          hookName?: string
+          registryEntryName?: string
+          registryEntryVersion?: string
+        }
+        if (!body.hookName || typeof body.hookName !== 'string' || !isValidK8sName(body.hookName)) {
+          res.status(400).json({ error: 'hookName is required (the installed LlmHook CR name)' })
+          return
+        }
+        if (!body.registryEntryName || !body.registryEntryVersion) {
+          res.status(400).json({ error: 'registryEntryName and registryEntryVersion are required' })
+          return
+        }
+
+        // New version's hook_meta.
+        const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
+        if (entry.entry_type !== 'llm-hook') {
+          res.status(400).json({ error: `Entry "${body.registryEntryName}" is not an llm-hook` })
+          return
+        }
+        const hookMeta = entry.hook_meta as HookMetaShape | null
+        if (
+          !hookMeta?.target ||
+          !Array.isArray(hookMeta.lifecyclePoints) ||
+          hookMeta.lifecyclePoints.length === 0
+        ) {
+          res.status(422).json({ error: 'Registry entry has no hook_meta target/lifecyclePoints' })
+          return
+        }
+
+        const llmHooksNs = config.llmHooksNamespace
+        let current: { spec?: Record<string, unknown> }
+        try {
+          current = (await gateway.getResource('llmhooks', body.hookName, llmHooksNs)) as {
+            spec?: Record<string, unknown>
+          }
+        } catch (err) {
+          res.status(404).json({
+            error: `LlmHook "${body.hookName}" not found: ${err instanceof Error ? err.message : 'not found'}`,
+          })
+          return
+        }
+
+        // Preflight the new image (digest-pin + allowlist), mirroring install.
+        const newImage = hookMeta.target.image
+        let newDigest: string | undefined
+        if (newImage) {
+          if (!/@sha256:[0-9a-f]{64}$/.test(newImage.ref ?? '')) {
+            res.status(422).json({ error: 'image_ref_not_digest_pinned' })
+            return
+          }
+          if (
+            config.enforcePluginImageAllowlist &&
+            !config.allowedPluginImagePrefixes.some(p => (newImage.ref ?? '').startsWith(p))
+          ) {
+            res.status(422).json({ error: 'image_not_allowlisted', reason: newImage.ref })
+            return
+          }
+          newDigest = newImage.ref?.includes('@') ? newImage.ref.split('@')[1] : undefined
+        }
+
+        // Build the upgraded spec: bump the version-shaped fields (image ref,
+        // port, path, lifecyclePoints) from the new hook_meta; PRESERVE the
+        // install-time credential/security wiring (envSecret, imagePullSecrets,
+        // security, egressBindings) and admin-set fields (capabilities/order/
+        // failMode/config) already on the CR.
+        const curSpec = (current.spec ?? {}) as Record<string, unknown>
+        const curTarget = (curSpec.target ?? {}) as Record<string, unknown>
+        const curImage = (curTarget.image ?? {}) as Record<string, unknown>
+        const target: Record<string, unknown> = newImage
+          ? { image: { ...curImage, ref: newImage.ref, port: newImage.port } }
+          : hookMeta.target.service
+            ? { service: hookMeta.target.service }
+            : { remote: hookMeta.target.remote }
+        const upgradedSpec: Record<string, unknown> = {
+          ...curSpec,
+          target,
+          path: hookMeta.path ?? curSpec.path ?? '/',
+          lifecyclePoints: hookMeta.lifecyclePoints,
+        }
+
+        // 1) Update the CR. 2) Move every referencing Host's ref (phases + pinned
+        //    digest) in lock-step. If the Host sync fails after the CR update, the
+        //    un-synced Hosts still pin the OLD digest → mcp-host quarantines the
+        //    hook there (fail-CLOSED, safe) until retried — surface a 207, not a
+        //    false success.
+        await updateResourceWithConflictRetry(
+          gateway,
+          'llmhooks',
+          body.hookName,
+          { spec: upgradedSpec },
+          llmHooksNs
+        )
+        let syncedHosts: string[]
+        try {
+          syncedHosts = await syncHookRefsInHosts(
+            gateway,
+            body.hookName,
+            hookMeta.lifecyclePoints,
+            newDigest,
+            config.hostsNamespace
+          )
+        } catch (err) {
+          console.error(`[Admin] upgrade-hook "${body.hookName}": Host ref sync failed:`, err)
+          res.status(207).json({
+            hookName: body.hookName,
+            digest: newDigest,
+            warning:
+              'CR upgraded but Host reference sync failed; referencing agents fail-closed until retried',
+          })
+          return
+        }
+
+        auditLog('upgrade-hook', { hookName: body.hookName, digest: newDigest, syncedHosts })
+        res.status(200).json({ hookName: body.hookName, digest: newDigest, syncedHosts })
       })
     )
   }
