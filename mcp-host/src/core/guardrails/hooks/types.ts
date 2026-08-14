@@ -27,6 +27,14 @@ export interface HookDescriptor {
   /** API path on the endpoint; calls go to `{endpoint}{path}/v1/{point}` (spec §8.1/§8.2). */
   path: string
   lifecyclePoints: readonly LifecyclePoint[]
+  /**
+   * Content projection this hook receives (spec §8.4/§8.7). `content` = the
+   * projected non-system message/response bodies; `metadata` = model+params+tool
+   * schemas only, no bodies. `moderate`/`post_call`/`on_error` are inherently
+   * content-bearing; only a `pre_call`-only hook is `metadata`. Absent ⇒ inferred
+   * (a `pre_call` hook receives messages unless it explicitly declared `metadata`).
+   */
+  contentAccess?: 'metadata' | 'content'
   /** Admin-granted capabilities (spec §4.3/§5); enforced on the RESPONSE (§8.1). */
   capabilities: readonly Capability[]
   /** Fail-posture when the hook is unavailable (spec §8.6). */

@@ -38,6 +38,7 @@ export interface LlmHookCR {
     }
     path?: string
     lifecyclePoints?: string[]
+    contentAccess?: 'metadata' | 'content'
     order?: number
     failMode?: 'open' | 'closed'
     onUnavailable?: {

@@ -154,6 +154,14 @@ export async function resolveGuardrailHookDescriptors(
     )
     const path = cr.spec?.path ?? '/'
     const failMode: 'open' | 'closed' = cr.spec?.failMode === 'open' ? 'open' : 'closed'
+    // Content projection selector (§8.4/§8.7). Only an explicit `metadata` makes a
+    // pre_call hook content-free; anything else (incl. absent) receives content.
+    const contentAccess: 'metadata' | 'content' | undefined =
+      cr.spec?.contentAccess === 'metadata'
+        ? 'metadata'
+        : cr.spec?.contentAccess === 'content'
+          ? 'content'
+          : undefined
     const order = typeof cr.spec?.order === 'number' ? cr.spec.order : 100
 
     // §8.6 circuit-breaker policy (CRD defaults: strict / 5 / 30000). `strict`
@@ -201,6 +209,7 @@ export async function resolveGuardrailHookDescriptors(
       onUnavailable,
       order,
       external,
+      ...(contentAccess ? { contentAccess } : {}),
       ...(quarantined ? { quarantined: true } : {}),
     })
     console.log(

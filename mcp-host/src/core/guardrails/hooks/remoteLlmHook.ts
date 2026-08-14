@@ -27,6 +27,7 @@ import type {
 } from '../../types'
 import type { Capability, Contributor } from '../types'
 import { type HookBreakerRegistry, defaultBreakerRegistry } from './hookBreaker'
+import { projectForHook } from './hookProjection'
 import type { HookDescriptor, HookFetcher, HookHttpResult, LifecyclePoint } from './types'
 
 type LlmContributor = Contributor<ToolCompletionRequest, ToolCompletionResponse>
@@ -175,7 +176,7 @@ export class RemoteLlmHook {
     const res = await this.fetchGuarded({
       point: 'pre_call',
       descriptor: this.descriptor,
-      body: request,
+      body: projectForHook(this.descriptor, 'pre_call', { request }),
     })
     // §8.1: non-200 or unavailable → fail-mode (never a silent allow).
     if (res.unavailable || res.status !== 200) return this.onUnavailable()
@@ -229,7 +230,7 @@ export class RemoteLlmHook {
     const res = await this.fetchGuarded({
       point: 'moderate',
       descriptor: this.descriptor,
-      body: request,
+      body: projectForHook(this.descriptor, 'moderate', { request }),
     })
     if (res.unavailable) return this.onUnavailable()
     if (res.status >= 200 && res.status < 300) return null // pass
@@ -256,14 +257,7 @@ export class RemoteLlmHook {
     const res = await this.fetchGuarded({
       point: 'post_call',
       descriptor: this.descriptor,
-      body: {
-        response: {
-          content: response.content,
-          tool_calls: response.tool_calls,
-          finish_reason: response.finish_reason,
-        },
-        usage: response.usage,
-      },
+      body: projectForHook(this.descriptor, 'post_call', { response }),
     })
     // §8.6: a fail-closed redactor that can't run must NOT leak the un-redacted body.
     if (res.unavailable || res.status !== 200) {
@@ -310,7 +304,7 @@ export class RemoteLlmHook {
     const res = await this.fetchGuarded({
       point: 'on_error',
       descriptor: this.descriptor,
-      body: { request, error },
+      body: projectForHook(this.descriptor, 'on_error', { request, error }),
     })
     // Recovery only on a proper 200 `recover`; anything else = no recovery (error surfaces).
     if (res.unavailable || res.status !== 200) return null
