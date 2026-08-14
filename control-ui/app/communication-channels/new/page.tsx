@@ -220,6 +220,13 @@ export default function CreateCommunicationChannelPage() {
       endpoint: teamsPlaceholderEndpoint(teamsWebhookUrl),
     })
   }, [draft.teamsAppName, teamsWebhookUrl])
+  // Substituted with CLIENT_ID once it is pasted, which on a teams-managed bot IS
+  // the app id (the Teams App ID, Bot ID and CLIENT_ID are one UUID). Before that
+  // it renders the <appId> placeholder, so the command is readable either way.
+  const teamsSupportsFilesCommand = useMemo(
+    () => buildTeamsSupportsFilesCommand(draft.teamsAppId),
+    [draft.teamsAppId]
+  )
   // Slack's order is manifest first, credentials second: the bot token only exists
   // after the app is installed, so a manifest offered only once the channel is saved
   // arrives after the step it describes. The Request URL encodes namespace and name
@@ -368,6 +375,16 @@ export default function CreateCommunicationChannelPage() {
     showToast(
       copied
         ? 'Teams bot command copied.'
+        : 'Could not copy to clipboard. Select the command and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copyTeamsSupportsFilesCommand() {
+    const copied = await copyTextToClipboard(teamsSupportsFilesCommand)
+    showToast(
+      copied
+        ? 'Teams file support command copied.'
         : 'Could not copy to clipboard. Select the command and copy it manually.',
       { tone: copied ? 'success' : 'error' }
     )
@@ -752,73 +769,58 @@ export default function CreateCommunicationChannelPage() {
                             invalid={Boolean(draft.teamsAppName) && Boolean(teamsBotNameError)}
                           />
                         </Field>
+                        {/*
+                          Each step that has a command carries it directly, rather than
+                          the list narrating three steps and the commands landing after
+                          it: "run this" has to sit next to the thing it means, and step
+                          3's command is a different one from step 1's.
+                        */}
                         <ol className="cu-teams-setup__instructions">
                           <li>
                             Run this from any directory. The command writes CLIENT_ID, TENANT_ID and
                             CLIENT_SECRET into .env in whichever directory you run it from.
+                            {teamsAppCreateCommand ? (
+                              <CommandBlock
+                                command={teamsAppCreateCommand}
+                                onCopy={copyTeamsAppCreateCommand}
+                                copyDisabled={saving || Boolean(teamsBotNameError)}
+                                copyLabel="Copy Teams bot create command"
+                              />
+                            ) : (
+                              <>
+                                <div className="cu-banner cu-banner--warning">
+                                  This deployment has no public webhook origin. The command below
+                                  uses the placeholder origin{' '}
+                                  <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code>, which must be replaced
+                                  before running it, or set{' '}
+                                  <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code> to have
+                                  it filled in automatically.
+                                </div>
+                                {teamsAppCreatePlaceholderCommand && (
+                                  <CommandBlock
+                                    command={teamsAppCreatePlaceholderCommand}
+                                    onCopy={copyTeamsAppCreatePlaceholderCommand}
+                                    copyDisabled={saving || Boolean(teamsBotNameError)}
+                                    copyLabel="Copy Teams bot create command"
+                                  />
+                                )}
+                              </>
+                            )}
                           </li>
                           <li>Paste CLIENT_ID, TENANT_ID, and CLIENT_SECRET below.</li>
                           <li>
-                            To deliver workflow files, enable them on the manifest with{' '}
-                            <code>{buildTeamsSupportsFilesCommand()}</code>. The <code>--yes</code>{' '}
-                            is required; without it the command changes nothing and still looks like
-                            it worked. File delivery works in a direct chat only, not in a channel.
+                            To deliver workflow files, enable them on the manifest. The{' '}
+                            <code>--yes</code> is required; without it the command changes nothing
+                            and still looks like it worked. File delivery works in a direct chat
+                            only, not in a channel.
+                            <CommandBlock
+                              command={teamsSupportsFilesCommand}
+                              onCopy={copyTeamsSupportsFilesCommand}
+                              copyDisabled={saving}
+                              copyLabel="Copy Teams file support command"
+                            />
                           </li>
                         </ol>
-                        {teamsAppCreateCommand ? (
-                          <div className="cu-command-block">
-                            <div className="cu-command-block__toolbar">
-                              <span>Bash</span>
-                              <Button
-                                type="button"
-                                variant="secondary"
-                                size="sm"
-                                className="cu-command-block__copy"
-                                onClick={copyTeamsAppCreateCommand}
-                                disabled={saving || Boolean(teamsBotNameError)}
-                                aria-label="Copy Teams bot create command"
-                              >
-                                <IconCopy width={15} height={15} />
-                                Copy
-                              </Button>
-                            </div>
-                            <pre className="cu-command-block__pre">
-                              <code>{teamsAppCreateCommand}</code>
-                            </pre>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="cu-banner cu-banner--warning">
-                              This deployment has no public webhook origin. The command below uses
-                              the placeholder origin <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code>,
-                              which must be replaced before running it, or set{' '}
-                              <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code> to have it
-                              filled in automatically.
-                            </div>
-                            {teamsAppCreatePlaceholderCommand && (
-                              <div className="cu-command-block">
-                                <div className="cu-command-block__toolbar">
-                                  <span>Bash</span>
-                                  <Button
-                                    type="button"
-                                    variant="secondary"
-                                    size="sm"
-                                    className="cu-command-block__copy"
-                                    onClick={copyTeamsAppCreatePlaceholderCommand}
-                                    disabled={saving || Boolean(teamsBotNameError)}
-                                    aria-label="Copy Teams bot create command"
-                                  >
-                                    <IconCopy width={15} height={15} />
-                                    Copy
-                                  </Button>
-                                </div>
-                                <pre className="cu-command-block__pre">
-                                  <code>{teamsAppCreatePlaceholderCommand}</code>
-                                </pre>
-                              </div>
-                            )}
-                          </>
-                        )}
                       </section>
                       <Field
                         description="CLIENT_ID from the generated .env file."
@@ -909,6 +911,44 @@ export default function CreateCommunicationChannelPage() {
         </CreateFlowPanel>
       </DashboardLayout>
     </AuthGate>
+  )
+}
+
+// One shape for every copyable command on this page. Local on purpose: the same
+// markup also appears on the edit page, and lifting it into components/ is a
+// wider change than the ordering fix this belongs to.
+function CommandBlock({
+  command,
+  copyDisabled,
+  copyLabel,
+  onCopy,
+}: {
+  command: string
+  copyDisabled?: boolean
+  copyLabel: string
+  onCopy: () => void
+}) {
+  return (
+    <div className="cu-command-block">
+      <div className="cu-command-block__toolbar">
+        <span>Bash</span>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="cu-command-block__copy"
+          onClick={onCopy}
+          disabled={copyDisabled}
+          aria-label={copyLabel}
+        >
+          <IconCopy width={15} height={15} />
+          Copy
+        </Button>
+      </div>
+      <pre className="cu-command-block__pre">
+        <code>{command}</code>
+      </pre>
+    </div>
   )
 }
 

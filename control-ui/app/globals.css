@@ -9750,11 +9750,25 @@ textarea.cu-input {
 
 .cu-teams-setup__instructions {
   display: grid;
+  /* minmax(0, 1fr) rather than the implicit 1fr: a grid column's default minimum
+     is its content, and these steps carry command blocks whose single-line
+     commands are far wider than the card. Without this the column grows to the
+     longest command and takes the card and its prose with it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--cu-space-1);
   margin: 0;
   padding-left: var(--cu-space-5);
   color: var(--cu-text-soft);
   font-size: 0.8125rem;
+}
+
+/* Same reason, one level down. A command block sitting directly in .cu-teams-setup
+   is a grid item whose overflow:hidden already zeroes its automatic minimum size;
+   nested in a list item, the li is the grid item and its overflow is visible, so
+   the minimum has to be set here for the block's own overflow-x to do the
+   scrolling. */
+.cu-teams-setup__instructions > li {
+  min-width: 0;
 }
 
 .cu-teams-setup__instructions code {
@@ -9764,6 +9778,23 @@ textarea.cu-input {
   background: var(--cu-bg);
   color: var(--cu-text);
   font-size: 0.78rem;
+}
+
+/* A step owns its command block, so the block needs to read as part of that step
+   rather than as a sibling of the list. */
+.cu-teams-setup__instructions .cu-command-block {
+  margin: var(--cu-space-2) 0;
+}
+
+/* The inline-code rule above is for prose chips. Inside a command block the code
+   already sits on the block's own surface, so re-applying the chip border,
+   background and smaller size would double-frame it. */
+.cu-teams-setup__instructions .cu-command-block__pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: inherit;
 }
 
 .cu-command-block {

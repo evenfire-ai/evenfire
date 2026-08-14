@@ -273,6 +273,60 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
   })
 
+  // The list used to narrate three steps and then drop both commands after it, so
+  // "run this" in step 1 pointed past step 3 at a block that was not even the
+  // command step 3 talked about. Each command now sits in the step that means it.
+  it('puts each Teams command inside the step that tells you to run it', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+
+    const steps = screen.getByText(/Run this from any directory/i).closest('ol')
+    const items = Array.from(steps?.querySelectorAll(':scope > li') ?? [])
+    expect(items).toHaveLength(3)
+
+    expect(items[0].querySelector('pre')).toHaveTextContent('teams app create')
+    expect(items[1].querySelector('pre')).toBeNull()
+    expect(items[2].querySelector('pre')).toHaveTextContent(
+      "teams app manifest update <appId> --set-json 'bots[0].supportsFiles=true' --yes"
+    )
+  })
+
+  // Inline <code> is not copyable, and this command is the one with the trap in it.
+  it('makes the file support command copyable and fills in CLIENT_ID once pasted', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+
+    expect(
+      screen.getByRole('button', { name: 'Copy Teams file support command' })
+    ).toBeInTheDocument()
+
+    // On a teams-managed bot the app id IS CLIENT_ID, so the placeholder resolves
+    // to a command that can be run as copied.
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '11111111-2222-3333-4444-555555555555' },
+    })
+    expect(
+      screen.getByText(
+        "teams app manifest update 11111111-2222-3333-4444-555555555555 --set-json 'bots[0].supportsFiles=true' --yes"
+      )
+    ).toBeInTheDocument()
+  })
+
   it('warns and still renders a placeholder-origin command when the deployment has no public webhook origin', async () => {
     // No NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL and jsdom's hostname is
     // localhost (not app.*), which is the minikube case. The endpoint the CLI
