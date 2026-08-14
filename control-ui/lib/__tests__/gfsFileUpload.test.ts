@@ -62,6 +62,7 @@ describe('isRetryableUploadStatus', () => {
 class FakeXhr {
   static requests: FakeXhr[] = []
   static statuses: number[] = []
+  static statusesByPart: Record<number, number[]> = {}
   static responseLosses = 0
   upload: { onprogress: ((event: { lengthComputable: boolean; loaded: number }) => void) | null } =
     { onprogress: null }
@@ -72,8 +73,11 @@ class FakeXhr {
   onabort: (() => void) | null = null
   headers = new Map<string, string>()
   body: Blob | null = null
+  url = ''
 
-  open(): void {}
+  open(_method: string, url: string): void {
+    this.url = url
+  }
   setRequestHeader(name: string, value: string): void {
     this.headers.set(name, value)
   }
@@ -82,7 +86,10 @@ class FakeXhr {
   }
   send(body: Blob): void {
     this.body = body
-    this.status = FakeXhr.statuses.shift() ?? 204
+    const partNumber = /\/parts\/(\d+)(?:\?|$)/.exec(this.url)?.[1]
+    const partStatuses =
+      partNumber === undefined ? undefined : FakeXhr.statusesByPart[Number(partNumber)]
+    this.status = partStatuses?.shift() ?? FakeXhr.statuses.shift() ?? 204
     if (this.status === 429) this.headers.set('retry-after', '0')
     FakeXhr.requests.push(this)
     void body.arrayBuffer().then(() => {
@@ -108,6 +115,7 @@ describe('GfsUploadJob', () => {
   beforeEach(() => {
     FakeXhr.requests = []
     FakeXhr.statuses = []
+    FakeXhr.statusesByPart = {}
     FakeXhr.responseLosses = 0
     vi.stubGlobal('XMLHttpRequest', FakeXhr)
   })
@@ -768,6 +776,113 @@ describe('GfsUploadJob', () => {
     ).resolves.toMatchObject({ state: 'completed' })
     expect(statusCalls).toBe(1)
     expect(FakeXhr.requests).toHaveLength(3)
+  })
+
+  it('reconciles one ambiguous part against the live sibling lease set under four-way concurrency', async () => {
+    const file = new File([new Uint8Array([11, 12, 13, 14, 15, 16, 17, 18])], 'four-way.bin')
+    FakeXhr.statusesByPart = { 3: [500, 204] }
+    let statusCalls = 0
+    let completeCalls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(
+            JSON.stringify({
+              upload: {
+                resumableV2: {
+                  enabled: true,
+                  preferredChunkBytes: 2,
+                  maxChunkBytes: 2,
+                  maxConcurrentPartsPerSession: 4,
+                  fallbackConcurrency: 2,
+                  instabilityFailureThreshold: 3,
+                },
+              },
+            }),
+            { status: 200 }
+          )
+        if (method === 'POST' && url.endsWith('/uploads'))
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                uploadId: '35353535-3535-4353-8353-353535353535',
+                drive: 'main',
+                expectedBytes: 8,
+                partBytes: 2,
+                partCount: 4,
+                state: 'initiated',
+                contiguousBytes: 0,
+                committedBytes: 0,
+                committedPartCount: 0,
+                activePartCount: 0,
+              },
+            }),
+            { status: 201 }
+          )
+        if (method === 'HEAD') return new Response(null, { status: 204 })
+        if (method === 'GET' && url.includes('/status')) {
+          statusCalls += 1
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                session: {
+                  uploadId: '35353535-3535-4353-8353-353535353535',
+                  drive: 'main',
+                  expectedBytes: 8,
+                  partBytes: 2,
+                  partCount: 4,
+                  state: 'uploading',
+                  contiguousBytes: 0,
+                  committedBytes: 0,
+                  committedPartCount: 0,
+                  activePartCount: 3,
+                  activePartNumbers: [0, 1, 2],
+                },
+                parts: [],
+              },
+            }),
+            { status: 200 }
+          )
+        }
+        if (method === 'POST' && url.endsWith('/complete')) {
+          completeCalls += 1
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              data: {
+                uploadId: '35353535-3535-4353-8353-353535353535',
+                drive: 'main',
+                expectedBytes: 8,
+                partBytes: 2,
+                partCount: 4,
+                state: 'completed',
+                committedBytes: 8,
+                committedPartCount: 4,
+                activePartCount: 0,
+              },
+            }),
+            { status: 200 }
+          )
+        }
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-four-way' },
+      }).start()
+    ).resolves.toMatchObject({ state: 'completed' })
+    expect(statusCalls).toBe(1)
+    expect(completeCalls).toBe(1)
+    expect(FakeXhr.requests).toHaveLength(5)
   })
 
   it('persists an unresolved response-loss session without replaying its part', async () => {

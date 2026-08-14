@@ -286,6 +286,41 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
     expect(status.session.activePartNumbers).toEqual([0, 1])
   })
 
+  it('admits a part from durable reserved rows when the scalar counter is stale', async () => {
+    const created = await uploads.create({
+      drive,
+      ownerSubject: owner,
+      primarySubject: owner,
+      operation: 'create',
+      parentRid: 'd'.repeat(32),
+      name: 'counter-drift-admission.bin',
+      sizeBytes: CONFIG.preferredPartBytes,
+      idempotencyKey: randomUUID(),
+    })
+    const principal = { drive, ownerSubject: owner, primarySubject: owner }
+    await pool.query(
+      `UPDATE gfs_upload_sessions SET state = 'uploading', active_part_count = 99 WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    const bytes = Buffer.alloc(CONFIG.preferredPartBytes, 0x44)
+    const result = await uploads.putPart(
+      created.session.uploadId,
+      partGeometry({ expectedBytes: bytes.length, partBytes: CONFIG.preferredPartBytes }, 0),
+      checksum(bytes),
+      Readable.from([bytes]) as never,
+      principal
+    )
+    expect(result.part.state).toBe('committed')
+    expect(result.session.activePartCount).toBe(0)
+    expect(
+      (
+        await pool.query(`SELECT active_part_count FROM gfs_upload_sessions WHERE upload_id = $1`, [
+          created.session.uploadId,
+        ])
+      ).rows[0]?.active_part_count
+    ).toBe(0)
+  })
+
   it('serializes concurrent indexed part reservations without losing either commit', async () => {
     const bytes = [
       Buffer.alloc(CONFIG.preferredPartBytes, 0x31),

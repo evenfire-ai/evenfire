@@ -320,6 +320,11 @@ function uploadConfig(): GfsUploadConfig {
   const partTimeoutMs = uploadDurationMs('GFS_UPLOAD_PART_TIMEOUT_MS', GFS_UPLOAD_V2_PART_TIMEOUT_MS, 24 * 60 * 60 * 1000)
   const finalizeTimeoutMs = uploadDurationMs('GFS_UPLOAD_FINALIZE_TIMEOUT_MS', GFS_UPLOAD_V2_FINALIZE_TIMEOUT_MS, 24 * 60 * 60 * 1000)
   const stalePartLeaseMs = uploadDurationMs('GFS_UPLOAD_STALE_PART_LEASE_MS', GFS_UPLOAD_V2_STALE_PART_LEASE_MS, 24 * 60 * 60 * 1000)
+  if (stalePartLeaseMs <= partTimeoutMs) {
+    throw new Error(
+      '[gfsc] GFS_UPLOAD_STALE_PART_LEASE_MS must be greater than GFS_UPLOAD_PART_TIMEOUT_MS'
+    )
+  }
   const receiptRetentionMs = uploadDurationMsWithAlias(
     'GFS_UPLOAD_COMPLETED_RECEIPT_TTL_MS',
     'GFS_UPLOAD_RECEIPT_RETENTION_SECONDS',

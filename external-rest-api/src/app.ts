@@ -21,8 +21,11 @@ import { createExternalWorkflowsRouter } from './routes/workflows.js'
 
 // Upload v2 part bodies are streamed octets and must not pass through the
 // global JSON parser (which would buffer/reject the binary payload).
-const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-const GFS_UPLOAD_PART_PATH = new RegExp(`^/api/v1/me/gfs/uploads/${UUID_PATH}/parts/[0-9]+$`, 'i')
+// Match the route shape, not only a valid UUID. Control API owns the UUID
+// validation and must receive malformed IDs as upload requests; otherwise a
+// binary body can be consumed by the global JSON parser and produce a parser
+// error before the canonical 4xx path is reached.
+const GFS_UPLOAD_PART_PATH = /^\/api\/v1\/me\/gfs\/uploads\/[^/]+\/parts\/[0-9]+$/i
 
 export function createApp() {
   const app = express()

@@ -123,6 +123,16 @@ class MemoryDb {
       return { rows: [{ count: String(active) }] }
     }
     if (sql.startsWith('SELECT COUNT(*)::bigint')) {
+      if (sql.includes('FROM gfs_upload_parts WHERE upload_id = $1 AND state = \'reserved\'')) {
+        const uploadId = String(values[0])
+        return {
+          rows: [{
+            count: String(
+              this.parts.filter(part => part.upload_id === uploadId && part.state === 'reserved').length
+            ),
+          }],
+        }
+      }
       const drive = String(values[0])
       return {
         rows: [
@@ -265,7 +275,9 @@ class MemoryDb {
         row.finalizing_started_at = null
         return { rows: [] }
       }
-      row.active_part_count = Number(row.active_part_count) + 1
+      row.active_part_count = sql.includes('active_part_count = (')
+        ? this.parts.filter(part => part.upload_id === row.upload_id && part.state === 'reserved').length
+        : Number(row.active_part_count) + 1
       return { rows: [] }
     }
     if (sql.startsWith("UPDATE gfs_upload_parts SET state = 'committed'")) {
@@ -338,6 +350,21 @@ class MemoryDb {
       const row = this.sessions.find(session => session.upload_id === String(values[0]))!
       row.state = 'finalizing'
       row.finalizing_started_at = new Date().toISOString()
+      const extensionMs = Number(values[2] ?? 0)
+      const currentExpiry = Date.parse(String(row.expires_at))
+      const finalizerExpiry = Date.now() + extensionMs
+      row.expires_at = new Date(Math.max(currentExpiry, finalizerExpiry)).toISOString()
+      return { rows: [] }
+    }
+    if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'completed'")) {
+      const [uploadId, resourceId, version, sha256] = values
+      const row = this.sessions.find(session => session.upload_id === String(uploadId))!
+      row.state = 'completed'
+      row.result_resource_id = resourceId
+      row.result_version = version
+      row.result_sha256 = sha256
+      row.completed_at = new Date().toISOString()
+      row.finalizing_started_at = null
       return { rows: [] }
     }
     if (sql.startsWith("UPDATE gfs_upload_sessions SET state = 'failed'")) {
@@ -586,6 +613,69 @@ describe('GfsUploadSessionService', () => {
     expect(session.active_part_count).toBe(1)
     expect(db.parts.find(part => Number(part.part_number) === 0)?.state).toBe('committed')
     expect(db.parts.find(part => Number(part.part_number) === 1)?.state).toBe('reserved')
+  })
+
+  it('admits a new part from durable reserved rows when the session counter is stale', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-counter-drift-'))
+    const db = new MemoryDb()
+    const config = { ...TEST_CONFIG, maxConcurrentPartsPerSession: 1 }
+    const uploads = service(db, config)
+    const created = await uploads.create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'counter-drift.bin',
+      sizeBytes: TEST_CONFIG.preferredPartBytes,
+      idempotencyKey: '68686868-6868-4686-8686-686868686868',
+    })
+
+    // A stale scalar must not deny admission when no durable reserved row
+    // exists. This is the inverse of the double-decrement regression: rows,
+    // not a receipt field, own the concurrency contract.
+    db.sessions[0]!.active_part_count = 99
+    const payload = Buffer.alloc(TEST_CONFIG.preferredPartBytes, 0x52)
+    const committed = await uploads.putPart(
+      created.session.uploadId,
+      partGeometry(
+        { expectedBytes: TEST_CONFIG.preferredPartBytes, partBytes: TEST_CONFIG.preferredPartBytes },
+        0
+      ),
+      createSha(payload),
+      Readable.from([payload]) as never,
+      principal
+    )
+
+    expect(committed.part.state).toBe('committed')
+    expect(committed.session.activePartCount).toBe(0)
+    expect(db.sessions[0]).toMatchObject({ active_part_count: 0 })
+  })
+
+  it('extends the durable expiry window before entering finalization', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-finalizing-ttl-'))
+    const db = new MemoryDb()
+    const config = { ...TEST_CONFIG, sessionTtlSeconds: 1, finalizeTimeoutMs: 600_000 }
+    let finalizerExpiry: number | undefined
+    const uploads = service(db, config, {
+      finalize: async session => {
+        finalizerExpiry = Date.parse(session.expiresAt)
+        return { resourceId: 'resource-finalizing-ttl', version: 1, sha256: 'a'.repeat(64) }
+      },
+    })
+    const created = await uploads.create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'finalizing-ttl.bin',
+      sizeBytes: 0,
+      idempotencyKey: '69696969-6969-4696-8696-696969696969',
+    })
+    const originalExpiry = Date.parse(created.session.expiresAt)
+
+    await expect(uploads.complete(created.session.uploadId, principal)).resolves.toMatchObject({
+      state: 'completed',
+    })
+    expect(finalizerExpiry).toBeGreaterThan(originalExpiry)
+    expect(Date.parse(db.sessions[0]!.expires_at as string)).toBeGreaterThan(originalExpiry)
   })
 
   it('removes a rename-before-commit orphan while the reserved lease is still locked', async () => {

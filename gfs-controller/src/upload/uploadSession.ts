@@ -843,7 +843,17 @@ export class GfsUploadSessionService {
             'active_part_streams_global'
           )
         }
-        if (locked.activePartCount >= this.deps.config.maxConcurrentPartsPerSession)
+        // The scalar on the session is a receipt/cache field. Admission must
+        // use the locked part rows as the authority so an outcome-unknown
+        // commit or a stale response can never resurrect a false slot.
+        const activeSession = await client.query(
+          `SELECT COUNT(*)::bigint AS count
+             FROM gfs_upload_parts
+            WHERE upload_id = $1 AND state = 'reserved'`,
+          [uploadId]
+        )
+        const activeSessionCount = Number(activeSession.rows[0]?.count ?? 0)
+        if (activeSessionCount >= this.deps.config.maxConcurrentPartsPerSession)
           throw quotaExceeded(
             'per-session part concurrency limit reached',
             'active_part_streams_session'
@@ -897,8 +907,9 @@ export class GfsUploadSessionService {
           WHERE upload_id = $1`,
           [uploadId]
         )
+        const refreshed = await this.lockSession(client, uploadId, principal)
         return {
-          session: { ...locked, state: 'uploading', activePartCount: locked.activePartCount + 1 },
+          session: refreshed,
           existing: null as UploadPartRow | null,
           stagingPath,
           leaseEpoch,
@@ -1564,11 +1575,23 @@ export class GfsUploadSessionService {
           )
         }
         await client.query(
-          `UPDATE gfs_upload_sessions SET state = 'finalizing', finalizing_started_at = now(), updated_at = now() WHERE upload_id = $1 AND session_epoch = $2`,
-          [uploadId, locked.sessionEpoch]
+          `UPDATE gfs_upload_sessions
+              SET state = 'finalizing',
+                  finalizing_started_at = now(),
+                  expires_at = GREATEST(
+                    expires_at,
+                    now() + ($3::bigint * interval '1 millisecond')
+                  ),
+                  updated_at = now()
+            WHERE upload_id = $1 AND session_epoch = $2`,
+          [uploadId, locked.sessionEpoch, this.deps.config.finalizeTimeoutMs]
         )
+        // Re-read the row while the transaction lock is held. The finalizer
+        // and any receipt now carry the durable deadline, not the pre-
+        // finalization session TTL that could expire during publication.
+        const refreshed = await this.lockSession(client, uploadId, principal)
         return {
-          ...locked,
+          ...refreshed,
           wholeSha256: expectedWhole ?? locked.wholeSha256,
           state: 'finalizing' as const,
           parts: committedParts,

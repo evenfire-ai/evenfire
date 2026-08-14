@@ -170,4 +170,16 @@ describe('GFS_UPLOAD_V2 strict disabled contract', () => {
       )
     }
   })
+
+  it('fails closed when stale lease cleanup could race an active part timeout', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PART_TIMEOUT_MS', '600000')
+    vi.stubEnv('GFS_UPLOAD_STALE_PART_LEASE_MS', '600000')
+    expect(() => loadConfig()).toThrow(
+      /GFS_UPLOAD_STALE_PART_LEASE_MS must be greater than GFS_UPLOAD_PART_TIMEOUT_MS/
+    )
+
+    vi.stubEnv('GFS_UPLOAD_STALE_PART_LEASE_MS', '600001')
+    expect(loadConfig().uploadV2.stalePartLeaseMs).toBe(600001)
+  })
 })
