@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { MessageToolStep } from '../../../../../src/types'
+import { findLoadedChatMessageMatches } from '../../../lib/chatLocalSearch'
 import type { AgentChatMessage, TaskProgress } from '../../../uiTypes'
 // vi.mock calls are hoisted above this import, so ChatThread binds the mocks.
 import { ChatThread } from '../ChatThread'
@@ -107,21 +108,23 @@ function setThreadState(
 
 describe('ChatThread local-search highlighting', () => {
   it('renders every plain and Markdown match and distinguishes the selected occurrence', () => {
+    const messages: AgentChatMessage[] = [
+      { ...userMsg, content: 'Needle then needle' },
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant',
+        content: 'A **needle** in a [needle link](https://needle.example/needle).',
+        timestamp: 2,
+      },
+    ]
     setThreadState([
       {
         role: 'user',
-        items: [{ ...userMsg, content: 'Needle then needle' }],
+        items: [messages[0]!],
       },
       {
         role: 'assistant',
-        items: [
-          {
-            id: 'turn-1-assistant',
-            role: 'assistant',
-            content: 'A **needle** in a [needle link](https://example.com).',
-            timestamp: 2,
-          },
-        ],
+        items: [messages[1]!],
       },
     ])
     threadStateValue.localSearchQuery = 'needle'
@@ -132,10 +135,12 @@ describe('ChatThread local-search highlighting', () => {
 
     const { rerender } = render(<ChatThread />)
 
-    expect(document.querySelectorAll('.chat-search-match')).toHaveLength(4)
+    const renderedMatches = document.querySelectorAll('.chat-search-match')
+    expect(renderedMatches).toHaveLength(4)
+    expect(findLoadedChatMessageMatches(messages, 'needle')).toHaveLength(renderedMatches.length)
     const active = screen.getByTestId('chat-search-current-match')
     expect(active.textContent).toBe('needle')
-    expect(active.closest('a')?.getAttribute('href')).toBe('https://example.com')
+    expect(active.closest('a')?.getAttribute('href')).toBe('https://needle.example/needle')
 
     threadStateValue.localSearchCurrentMatch = { messageId: 'turn-1-user', occurrence: 1 }
     rerender(<ChatThread />)

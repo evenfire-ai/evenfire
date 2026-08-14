@@ -11,6 +11,35 @@ export function chatMessageDomId(messageId: string): string {
   return `chat-message-${encodeURIComponent(messageId)}`
 }
 
+/**
+ * Project Markdown source to the text ReactMarkdown makes searchable. This
+ * intentionally keeps labels and code contents while masking metadata that is
+ * not rendered as message text (destinations, reference definitions, tags,
+ * and fenced-code language identifiers).
+ */
+export function markdownSearchableText(source: string): string {
+  let fence: '`' | '~' | null = null
+  return source
+    .split(/(\r?\n)/)
+    .map(part => {
+      if (part === '\n' || part === '\r\n') return part
+      const fenceMatch = part.match(/^\s{0,3}(`{3,}|~{3,})/)
+      if (fenceMatch) {
+        const marker = fenceMatch[1]?.[0] as '`' | '~'
+        if (fence === null) fence = marker
+        else if (fence === marker) fence = null
+        return ' '.repeat(part.length)
+      }
+      if (fence !== null) return part
+      if (/^\s{0,3}\[[^\]]+\]:\s*/.test(part)) return ' '.repeat(part.length)
+      return part
+        .replace(/\]\((?:\\.|[^)])*\)/g, match => `]${' '.repeat(match.length - 1)}`)
+        .replace(/\]\[[^\]]+\]/g, match => `]${' '.repeat(match.length - 1)}`)
+        .replace(/<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^>]*)?\/?>/g, match => ' '.repeat(match.length))
+    })
+    .join('')
+}
+
 export function findLoadedChatMessageMatches(
   messages: AgentChatMessage[],
   query: string
@@ -22,7 +51,7 @@ export function findLoadedChatMessageMatches(
     const displayed =
       message.role === 'user'
         ? (parseChatMessageDisplay(message.content)?.content ?? message.content)
-        : message.content
+        : markdownSearchableText(message.content)
     const haystack = displayed.toLocaleLowerCase()
     let offset = 0
     let occurrence = 0

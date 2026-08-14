@@ -14971,7 +14971,6 @@ pre {
   background: rgba(var(--warning-rgb), 0.3);
   border-radius: 2px;
   color: inherit;
-  padding: 0 1px;
 }
 
 .chat-search-match--active {

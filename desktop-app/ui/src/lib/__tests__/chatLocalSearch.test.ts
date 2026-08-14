@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentChatMessage } from '../../uiTypes'
-import { findLoadedChatMessageMatches, wrapMatchIndex } from '../chatLocalSearch'
+import {
+  findLoadedChatMessageMatches,
+  markdownSearchableText,
+  wrapMatchIndex,
+} from '../chatLocalSearch'
 
 function message(id: string, content: string, role: AgentChatMessage['role'] = 'assistant') {
   return { id, content, role, timestamp: 1 } satisfies AgentChatMessage
@@ -29,6 +33,24 @@ describe('loaded chat local search', () => {
     expect(
       findLoadedChatMessageMatches([message('user', content, 'user')], 'hidden-search')
     ).toEqual([])
+  })
+
+  it('counts visible Markdown text without hidden destinations or syntax metadata', () => {
+    const content = [
+      '# Needle heading',
+      '[needle link](https://needle.example/path "needle title")',
+      '```needle-language',
+      'needle in code',
+      '```',
+      '[hidden-ref]: https://example.test/needle "needle title"',
+    ].join('\n')
+
+    expect(markdownSearchableText(content)).not.toContain('needle.example')
+    expect(findLoadedChatMessageMatches([message('assistant', content)], 'needle')).toEqual([
+      { messageId: 'assistant', occurrence: 0 },
+      { messageId: 'assistant', occurrence: 1 },
+      { messageId: 'assistant', occurrence: 2 },
+    ])
   })
 
   it('wraps forward and backward through loaded matches', () => {
