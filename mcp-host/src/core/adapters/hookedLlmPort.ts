@@ -23,7 +23,7 @@
  * Response-capability enforcement (F4), system-prompt immutability (N4), and
  * subtractive actions (N5) are enforced inside `RemoteLlmHook`.
  */
-import { aggregateDecision, pickPresentationReason } from '../guardrails'
+import { aggregateDecision, guardrailDecisionsTotal, pickPresentationReason } from '../guardrails'
 import type { Contributor, GuardrailsConfig } from '../guardrails'
 import { type RequestShaper, buildLlmBuiltinChain } from '../guardrails/llm/builtinChain'
 import {
@@ -57,6 +57,25 @@ const REFUSAL_BY_REASON: Record<string, string> = {
     "I can't complete that request right now — a required safety check is unavailable. Please try again shortly.",
 }
 const DEFAULT_REFUSAL = "I can't help with that request."
+
+/** Bounded set for the metric `reason_code` label — the hook's `body.code` is
+ * attacker-influenced, so unknown codes collapse to `hook_deny` to keep the
+ * label a fixed enum (no cardinality blow-up / label injection, spec §9). */
+const KNOWN_REASON_CODES = new Set([
+  'moderation_blocked',
+  'jailbreak_blocked',
+  'content_filtered',
+  'hook_unavailable',
+])
+function boundedReason(reason?: string): string {
+  return reason && KNOWN_REASON_CODES.has(reason) ? reason : 'hook_deny'
+}
+/** Sanitize an untrusted reason for a single-line log (strip CR/LF/TAB, cap length). */
+function logSafeReason(reason?: string): string {
+  return String(reason ?? 'unknown')
+    .replace(/[\r\n\t]+/g, ' ')
+    .slice(0, 80)
+}
 
 /**
  * A denied model call renders as a GRACEFUL assistant refusal — `finish_reason:
@@ -98,6 +117,30 @@ export class HookedLlmPort implements LlmPort {
     return this.inner.complete(request)
   }
 
+  /**
+   * A guardrail deny → graceful refusal. Records the block on
+   * `guardrailDecisionsTotal` (the LLM lane bypasses the boundary's own
+   * recordDecision, so without this a deny would be invisible to telemetry) and
+   * logs it, then returns the first-party refusal completion.
+   */
+  private denyRefusal(
+    contribs: ReadonlyArray<Contributor<ToolCompletionRequest, ToolCompletionResponse>>,
+    point: 'pre_call' | 'moderate'
+  ): ToolCompletionResponse {
+    const reason = pickPresentationReason(contribs, 'deny')
+    guardrailDecisionsTotal.inc({
+      lane: 'llm',
+      decision: 'deny',
+      source: 'hook',
+      execution_mode: point === 'moderate' ? 'concurrent' : 'blocking',
+      phase: 'pre',
+      outcome: 'denied',
+      reason_code: boundedReason(reason),
+    })
+    console.warn(`[HookedLlmPort] ${point} deny — refusing turn (reason=${logSafeReason(reason)})`)
+    return refusalResponse(reason)
+  }
+
   /** Main lane (spec §7): built-ins → pre_call → dispatch (moderation concurrent with the call). */
   async completeWithTools(request: ToolCompletionRequest): Promise<ToolCompletionResponse> {
     let req = this.shapeMainLane(request)
@@ -112,11 +155,7 @@ export class HookedLlmPort implements LlmPort {
         if (c.rewrite) req = c.rewrite // already system-role-stripped + capability-gated (N4/F4)
       }
     }
-    if (aggregateDecision(preContribs) === 'deny') {
-      const reason = pickPresentationReason(preContribs, 'deny')
-      console.warn(`[HookedLlmPort] pre_call deny — refusing turn (reason=${reason ?? 'unknown'})`)
-      return refusalResponse(reason)
-    }
+    if (aggregateDecision(preContribs) === 'deny') return this.denyRefusal(preContribs, 'pre_call')
 
     return this.hooks.moderate.length === 0
       ? this.dispatch(req)
@@ -163,11 +202,7 @@ export class HookedLlmPort implements LlmPort {
     const contribs = await moderationContribs
     if (aggregateDecision(contribs) === 'deny') {
       controller.abort() // cancel the in-flight call (§7.1)
-      const reason = pickPresentationReason(contribs, 'deny')
-      console.warn(
-        `[HookedLlmPort] moderation deny — refusing turn (reason=${reason ?? 'unknown'})`
-      )
-      return refusalResponse(reason)
+      return this.denyRefusal(contribs, 'moderate')
     }
 
     const outcome = await modelOutcome

@@ -99,9 +99,12 @@ metadata:
   name: mcp-host-hook-reader
   namespace: llm-hooks
 rules:
+  # `get` only — mcp-host resolves each referenced hook by name (getLlmHook); it
+  # never lists/watches. Withholding list/watch prevents a host SA from
+  # enumerating other tenants' hooks (it must already know the name).
   - apiGroups: ["clerum.io"]
     resources: ["llmhooks"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get"]
   - apiGroups: ["clerum.io"]
     resources: ["llmhooks/status"]
     verbs: ["get"]

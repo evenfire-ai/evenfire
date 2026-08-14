@@ -141,6 +141,19 @@ export async function resolveGuardrailHookDescriptors(
       continue
     }
 
+    // SSRF posture (§8.3): the hook fetcher has no private-range/metadata-IP
+    // guard yet and the base mcp-host egress permits 0.0.0.0/0:443, so dialing an
+    // admin-authored external URL would ship the full conversation to an arbitrary
+    // host (incl. 169.254.169.254). Remote targets are therefore NOT resolved
+    // until the SSRF-guarded transport lands — fail-closed (the hook does not run)
+    // rather than enabling an unvalidated external dial.
+    if (ep.kind === 'remote') {
+      console.warn(
+        `[Guardrails] LlmHook ${id} is a remote target — disabled pending SSRF-guarded transport (§8.3); skipping`
+      )
+      continue
+    }
+
     const points = (cr.spec?.lifecyclePoints ?? [])
       .map(p => PHASE_TO_POINT[p])
       .filter((p): p is LifecyclePoint => !!p)
@@ -150,7 +163,10 @@ export async function resolveGuardrailHookDescriptors(
     }
 
     // Digest binding (§8.2): an image hook whose reconciled digest no longer
-    // matches the admin-pinned reference is not trusted — skip (fail-closed).
+    // matches the admin-pinned reference is not the reviewed image — skip it.
+    // NOTE: skipping drops the hook from the lane, which is fail-OPEN for that
+    // phase; turning a mismatch into an authoritative deny for fail-closed hooks
+    // is a tracked follow-up (resolution fail-posture).
     if (
       ep.kind === 'image' &&
       refDigest &&
