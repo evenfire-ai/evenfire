@@ -136,6 +136,46 @@ describe('routes/members', () => {
     )
   })
 
+  it('preserves invalid-email precedence when no valid team assignment is provided', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockRejectedValueOnce(
+      new ControlApiError('invalid invitation email', 400, { error: 'invalid_email' })
+    )
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({ email: 'not-an-email', teams: [] })
+      .expect(400, { error: 'Valid email is required' })
+
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
+      'not-an-email',
+      '',
+      [],
+      'good-token'
+    )
+  })
+
+  it('preserves the public assignment error after authoritative validation', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockRejectedValueOnce(
+      new ControlApiError('invalid invitation payload', 400, { error: 'invalid_payload' })
+    )
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({ email: 'invitee@example.com', teams: [] })
+      .expect(400, { error: 'Email and at least one team are required' })
+
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
+      'invitee@example.com',
+      '',
+      [],
+      'good-token'
+    )
+  })
+
   it('rejects overlong invitee names', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
 

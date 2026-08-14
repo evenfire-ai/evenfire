@@ -19,10 +19,10 @@ const MAX_INVITATION_EMAIL_LENGTH = 320
 const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
 const MAX_INVITEE_NAME_LENGTH = 120
 
-function isInvalidInvitationEmailError(error: unknown): boolean {
+function isControlApiBadRequest(error: unknown, code: string): boolean {
   if (!(error instanceof ControlApiError) || error.status !== 400) return false
   if (!error.body || typeof error.body !== 'object') return false
-  return (error.body as { error?: unknown }).error === 'invalid_email'
+  return (error.body as { error?: unknown }).error === code
 }
 
 export function createMembersRouter(): Router {
@@ -91,16 +91,16 @@ export function createMembersRouter(): Router {
           return teamId && TEAM_ROLES.includes(role) ? { teamId, role } : null
         })
         .filter((item): item is { teamId: string; role: TeamRole } => Boolean(item))
-      if (assignments.length === 0) {
-        res.status(400).json({ error: 'Email and at least one team are required' })
-        return
-      }
       res
         .status(201)
         .json(await inviteManagedMember(email, name, assignments, extractAuthToken(req)))
     } catch (error) {
-      if (isInvalidInvitationEmailError(error)) {
+      if (isControlApiBadRequest(error, 'invalid_email')) {
         res.status(400).json({ error: 'Valid email is required' })
+        return
+      }
+      if (isControlApiBadRequest(error, 'invalid_payload')) {
+        res.status(400).json({ error: 'Email and at least one team are required' })
         return
       }
       const message = error instanceof Error ? error.message : ''
