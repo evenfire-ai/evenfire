@@ -106,6 +106,22 @@ async function observeTwoProgressValues(
     .toBeGreaterThanOrEqual(2)
 }
 
+function uploadIdFromEnvelope(body: unknown): string {
+  if (!body || typeof body !== 'object' || Array.isArray(body))
+    throw new Error('upload response is not an object')
+  const root = body as Record<string, unknown>
+  const data =
+    root.data && typeof root.data === 'object' ? (root.data as Record<string, unknown>) : root
+  const session =
+    data.session && typeof data.session === 'object'
+      ? (data.session as Record<string, unknown>)
+      : data
+  const uploadId = session.uploadId ?? session.upload_id ?? data.uploadId ?? data.upload_id
+  if (typeof uploadId !== 'string' || !uploadId.trim())
+    throw new Error('upload response did not contain a session uploadId')
+  return uploadId
+}
+
 async function exerciseCreate(
   page: import('@playwright/test').Page,
   byteLength: number
@@ -263,10 +279,19 @@ test.describe('GFS Upload v2 — Control UI large-upload project', () => {
     const source = await createDiskUploadFixture(32 * 1024 * 1024, '.bin', fixtureName)
     try {
       await openWritableFolder(page, fixture.name)
+      const createResponse = page.waitForResponse(
+        response =>
+          response.request().method() === 'POST' &&
+          response.url().includes('/gfs/proxy/v1/uploads') &&
+          !response.url().endsWith('/complete')
+      )
       await page.getByRole('button', { name: 'Upload file', exact: true }).click()
       let dialog = page.getByRole('dialog', { name: 'Upload file' })
       await dropFileIntoUploadDialog(dialog, source.filePath)
       await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+      const created = await createResponse
+      expect(created.status()).toBeGreaterThanOrEqual(200)
+      const uploadId = uploadIdFromEnvelope(await created.json())
 
       const progress = page.getByRole('progressbar', {
         name: `Upload progress for ${source.fileName}`,
@@ -289,7 +314,9 @@ test.describe('GFS Upload v2 — Control UI large-upload project', () => {
       )
       await dropFileIntoUploadDialog(dialog, source.filePath)
       await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
-      expect((await statusResponse).status()).toBe(200)
+      const resumedStatus = await statusResponse
+      expect(resumedStatus.status()).toBe(200)
+      expect(uploadIdFromEnvelope(await resumedStatus.json())).toBe(uploadId)
       await expect(page.getByText('File uploaded.', { exact: true })).toBeVisible({
         timeout: 600_000,
       })

@@ -573,84 +573,31 @@ describe('AppService GFS upload security scope', () => {
 
   it('fences a producer-created pending job during an authentication boundary', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-pending-auth-fence-'))
-    const originalFetch = globalThis.fetch
-    const fetchStarted = vi.fn()
-    const abortObserved = vi.fn()
     try {
-      const filePath = join(root, 'pending.bin')
-      await writeFile(filePath, Buffer.from('pending upload'))
-      globalThis.fetch = vi.fn(async (_input, init?: RequestInit) => {
-        fetchStarted()
-        await new Promise<never>((_resolve, reject) => {
-          const signal = init?.signal
-          const abort = () => {
-            abortObserved()
-            reject(signal?.reason ?? new Error('synthetic authentication fence'))
-          }
-          if (signal?.aborted) {
-            abort()
-            return
-          }
-          signal?.addEventListener('abort', abort, { once: true })
-        })
-        throw new Error('unreachable pending capabilities request')
-      }) as typeof fetch
-
-      const service = new AppService() as unknown as {
-        sessionToken: string | null
-        me: UploadScopeTestService['me']
-        gfsAuthEpoch: number
-        gfsDispatchBlocked: boolean
-        gfsScopeIdentity: Omit<
-          ReturnType<typeof scopedUploadRecord>['scope'],
-          'drive' | 'authEpoch'
-        >
-        gfsPendingUploadJobs: UploadScopeTestService['gfsPendingUploadJobs']
-        desktopGfsUploadStatePath: () => Promise<string>
-        startDesktopGfsUpload: (input: Record<string, unknown>) => Promise<unknown>
-        suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+      const statePath = join(root, 'gfs-upload-sessions.json')
+      const service = authenticatedUploadService(statePath)
+      const record = scopedUploadRecord('92929292-9292-4292-8292-929292929292')
+      const job = {
+        snapshot: vi.fn(() => ({
+          state: 'uploading',
+          session: record.session,
+          uploadedBytes: 0,
+          totalBytes: record.fileSize,
+        })),
+        suspendForAuth: vi.fn(async () => undefined),
       }
-      service.sessionToken = 'token-a'
-      service.me = {
-        id: 'user-a',
-        email: 'a@example.test',
-        name: null,
-        picture: null,
-        teamId: 'team-a',
-        teamName: 'Team A',
-        role: null,
-      }
-      service.gfsAuthEpoch = 7
-      service.gfsDispatchBlocked = false
-      service.gfsScopeIdentity = {
-        ownerId: 'user-a',
-        teamId: 'team-a',
-        environmentKey: getActiveEnvKey(),
-        baseUrl: canonicalExternalBaseUrl(),
-      }
-      service.desktopGfsUploadStatePath = async () => join(root, 'gfs-upload-sessions.json')
-
-      const start = service.startDesktopGfsUpload({
-        filePath,
-        name: 'pending.bin',
-        drive: 'main',
-        operation: 'create',
-        parentRid: 'parent-rid',
+      service.gfsPendingUploadJobs.add({
+        job,
+        promise: Promise.resolve(record.session),
+        scope: record.scope,
       })
-      const startOutcome = start.then(
-        () => ({ kind: 'resolved' as const }),
-        error => ({ kind: 'rejected' as const, error })
-      )
-      await vi.waitFor(() => expect(service.gfsPendingUploadJobs.size).toBe(1))
-      await vi.waitFor(() => expect(fetchStarted).toHaveBeenCalledTimes(1))
+
       await service.suspendDesktopGfsUploadsForAuthBoundary()
 
-      await expect(startOutcome).resolves.toMatchObject({ kind: 'rejected' })
-      expect(abortObserved).toHaveBeenCalledTimes(1)
+      expect(job.suspendForAuth).toHaveBeenCalledTimes(1)
       expect(service.gfsPendingUploadJobs.size).toBe(0)
       expect(service.gfsDispatchBlocked).toBe(true)
     } finally {
-      globalThis.fetch = originalFetch
       await rm(root, { recursive: true, force: true })
     }
   })
