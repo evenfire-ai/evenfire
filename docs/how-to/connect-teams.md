@@ -28,10 +28,9 @@ the endpoint is settled.
 
 ## Enable custom app upload
 
-In the [Teams admin center](https://admin.teams.microsoft.com), open Teams apps
-
-> **Setup policies**, click the name **Global (Org-wide default)**, turn on
-> **Upload custom apps**, and save.
+In the [Teams admin center](https://admin.teams.microsoft.com), open
+**Teams apps → Setup policies**, click the name **Global (Org-wide default)**,
+turn on **Upload custom apps**, and save.
 
 That enables sideloading for everyone in the tenant, which is what you want on a
 test tenant. Check it first, since it is often already on. In a production org,
