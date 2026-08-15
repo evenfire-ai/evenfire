@@ -9,7 +9,6 @@ ENV NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES=${NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/display-field ./packages/display-field
 COPY packages/llm-providers ./packages/llm-providers
-COPY packages/display-field ./packages/display-field
 COPY control-ui/package*.json ./control-ui/
 WORKDIR /app/control-ui
 # Next's bundler does not follow file: symlinks reliably, so materialize the
