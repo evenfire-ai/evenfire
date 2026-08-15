@@ -383,7 +383,14 @@ export class GfsServingHandler {
   ): Promise<void> {
     const service = this.deps.uploadService;
     if (!service) throw new GfsError("not_mounted", "upload session service is unavailable");
-    const principal: UploadPrincipal = { drive: claims.drive, ownerSubject: claims.sub, primarySubject: ctx.primarySubject };
+    const principal: UploadPrincipal = {
+      drive: claims.drive,
+      ownerSubject: claims.sub,
+      primarySubject: ctx.primarySubject,
+      ...(claims.authGeneration === undefined ? {} : { authGeneration: claims.authGeneration }),
+      ...(claims.principalType ? { principalType: claims.principalType } : {}),
+      ...(claims.brokeredAuthority ? { brokeredAuthority: claims.brokeredAuthority } : {}),
+    };
     // Session DELETE is a cancel action, not deletion of the GFS resource; the
     // session's original write authority governs it just like pause/resume.
     const sessionPermission: GfsPermission = "write";

@@ -243,6 +243,13 @@ async function main(): Promise<void> {
             const targetContext = await resolveAuthzContext(pool, {
               sub: principal.ownerSubject,
               drive: principal.drive,
+              ...(principal.authGeneration === undefined
+                ? {}
+                : { authGeneration: principal.authGeneration }),
+              ...(principal.principalType ? { principalType: principal.principalType } : {}),
+              ...(principal.brokeredAuthority
+                ? { brokeredAuthority: principal.brokeredAuthority }
+                : {}),
             });
             const decision = await permissions.authorize(targetContext, targetRid, "write");
             if (!decision.allowed) throw new GfsError("forbidden", `not authorized to ${operation} upload`);

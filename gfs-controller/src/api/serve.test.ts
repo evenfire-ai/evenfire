@@ -213,6 +213,70 @@ function uploadDeps(over: Partial<ServingDeps> = {}): ServingDeps {
 }
 
 describe("GFS Upload v2 route contract", () => {
+  it("preserves signed authority metadata for the upload service reauthorization", async () => {
+    const desktopUserId = "11111111-1111-4111-8111-111111111111";
+    const controlAdminId = "22222222-2222-4222-8222-222222222222";
+    const brokeredAuthority = {
+      desktopUserId,
+      controlAdminId,
+      authoritySource: "linked-admin" as const,
+      linkLineageId: "33333333-3333-4333-8333-333333333333",
+      linkGeneration: 2,
+      desktopUserGeneration: 4,
+    };
+    const claims: GfsVerifiedClaims = {
+      ...USER_WRITE_CLAIMS,
+      sub: controlAdminId,
+      authGeneration: 7,
+      principalType: "control-admin",
+      brokeredAuthority,
+    };
+    const context: AuthzContext = {
+      ...CTX,
+      primarySubject: controlAdminId,
+      effectiveControlAdminId: controlAdminId,
+      desktopUserId,
+      authoritySource: "linked-admin",
+    };
+    let received: Record<string, unknown> | undefined;
+    const service = {
+      ...uploadDeps().uploadService,
+      create: async (input: Record<string, unknown>) => {
+        received = input;
+        return { created: true, session: UPLOAD_SESSION };
+      },
+    } as ServingDeps["uploadService"];
+    const res = new FakeRes();
+    await run(
+      uploadDeps({
+        verifyToken: () => claims,
+        resolveContext: async () => context,
+        uploadService: service,
+      }),
+      reqBody("/v1/uploads", {
+        method: "POST",
+        auth: "Bearer t",
+        body: {
+          operation: "create",
+          parentRid: RID,
+          name: "payload.bin",
+          sizeBytes: 4,
+          idempotencyKey: UPLOAD_ID,
+        },
+      }),
+      res,
+    );
+    expect(res.statusCode).toBe(201);
+    expect(received).toMatchObject({
+      drive: "main",
+      ownerSubject: controlAdminId,
+      primarySubject: controlAdminId,
+      authGeneration: 7,
+      principalType: "control-admin",
+      brokeredAuthority,
+    });
+  });
+
   it("creates a session with a Location and writer authorization", async () => {
     const res = new FakeRes();
     const authorize = async () => ({ allowed: true });

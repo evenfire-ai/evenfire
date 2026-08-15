@@ -739,7 +739,6 @@ describe('indexed upload relay canonical drive', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
     const app = await buildApp()
-    const nested = (app as any)._router?.stack?.find((layer: any) => layer.name === 'router')
 
     const missing = await request(app)
       .get('/external/gfs/capabilities')
@@ -748,7 +747,6 @@ describe('indexed upload relay canonical drive', () => {
       .post('/external/gfs/uploads?drive=archive')
       .set('x-user-session-token', 'sess')
       .send({ drive: 'main', operation: 'create' })
-
 
     expect(missing.status).toBe(200)
     expect(missing.body).toMatchObject({ upload: { resumableV2: { enabled: true } } })

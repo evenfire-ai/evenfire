@@ -9,7 +9,7 @@ import type { GfsResource } from '../api/read'
 import type { DbAuditSink, PermissionClient } from '../authz/permissionClient'
 import { resolveAuthzContext } from '../authz/subjectResolver'
 import { GfsWriteService, type TxClient } from '../db/writeStore'
-import type { UploadPartRow, UploadSessionRow } from './uploadSession'
+import type { UploadPartRow, UploadPrincipal, UploadSessionRow } from './uploadSession'
 
 function orderedUploadStream(
   storageMountPath: string,
@@ -82,9 +82,10 @@ export function createGfsUploadFinalizer(
   session: UploadSessionRow,
   parts: UploadPartRow[],
   signal?: AbortSignal,
-  deadlineAtMs?: number
+  deadlineAtMs?: number,
+  principal?: UploadPrincipal
 ) => Promise<{ resourceId: string; version: number; sha256: string }> {
-  return async (session, parts, signal, deadlineAtMs) => {
+  return async (session, parts, signal, deadlineAtMs, principal) => {
     const capturedPermissionEpoch = deps.permissions.permissionEpoch()
     const source = {
       stream: orderedUploadStream(deps.storageMountPath, parts, signal),
@@ -118,9 +119,23 @@ export function createGfsUploadFinalizer(
       }
       const targetRid = session.operation === 'create' ? session.parentRid : session.resourceRid
       if (!targetRid) throw new GfsError('path_invalid', 'upload target is required')
-      const targetContext = await resolveAuthzContext(deps.pool, {
-        sub: session.ownerSubject,
+      const reauthorizationPrincipal = principal ?? {
         drive: session.drive,
+        ownerSubject: session.ownerSubject,
+        primarySubject: session.primarySubject,
+      }
+      const targetContext = await resolveAuthzContext(deps.pool, {
+        sub: reauthorizationPrincipal.ownerSubject,
+        drive: reauthorizationPrincipal.drive,
+        ...(reauthorizationPrincipal.authGeneration === undefined
+          ? {}
+          : { authGeneration: reauthorizationPrincipal.authGeneration }),
+        ...(reauthorizationPrincipal.principalType
+          ? { principalType: reauthorizationPrincipal.principalType }
+          : {}),
+        ...(reauthorizationPrincipal.brokeredAuthority
+          ? { brokeredAuthority: reauthorizationPrincipal.brokeredAuthority }
+          : {}),
       })
       const decision = await deps.permissions.authorize(targetContext, targetRid, 'write')
       publicationSignal?.throwIfAborted()

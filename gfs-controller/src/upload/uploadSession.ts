@@ -11,6 +11,7 @@ import type { GfsUploadConfig } from '../config'
 import { CommitOutcomeUnknownError, RollbackOutcomeUnknownError } from '../db/writeStore'
 import type { BlobWriter, Transactor, TxClient } from '../db/writeStore'
 import { PathError, normalizeResourceId } from '../storage/paths'
+import type { GfsBrokeredAuthority } from '../auth/verify'
 import {
   GFS_UPLOAD_V2_COMPLETE_BODY_MAX_BYTES,
   GFS_UPLOAD_V2_METADATA_BODY_MAX_BYTES,
@@ -33,6 +34,10 @@ export interface UploadPrincipal {
   drive: string
   ownerSubject: string
   primarySubject: string
+  /** Signed authority metadata must survive every check-time reauthorization. */
+  authGeneration?: number
+  principalType?: 'user' | 'control-admin'
+  brokeredAuthority?: GfsBrokeredAuthority
 }
 
 export interface CreateUploadSessionInput extends UploadPrincipal {
@@ -97,7 +102,8 @@ export interface UploadSessionServiceDeps {
     session: UploadSessionRow,
     parts: UploadPartRow[],
     signal?: AbortSignal,
-    deadlineAtMs?: number
+    deadlineAtMs?: number,
+    principal?: UploadPrincipal
   ) => Promise<{ resourceId: string; version: number; sha256: string }>
 }
 
@@ -1644,7 +1650,8 @@ export class GfsUploadSessionService {
         started,
         started.parts,
         finalizationAbort.signal,
-        finalizationDeadlineAtMs
+        finalizationDeadlineAtMs,
+        principal
       )
     } catch (error) {
       const failureCode = error instanceof GfsError ? error.code : 'finalization_failed'
