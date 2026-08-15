@@ -64,6 +64,7 @@ jobs:
           languages: javascript-typescript
           build-mode: none
           config-file: ./.github/codeql/codeql-config.yml
+          db-location: ${{ runner.temp }}/codeql-databases
 
       - name: Test repository CodeQL queries
         env:
@@ -81,3 +82,31 @@ jobs:
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
         with:
           category: '/language:javascript-typescript'
+
+      - name: Verify production CodeQL source scope
+        env:
+          CODEQL_DATABASE_ROOT: ${{ runner.temp }}/codeql-databases
+        run: |
+          source_archive="$(find "$CODEQL_DATABASE_ROOT" -type f -name src.zip -print -quit)"
+          if [[ -z "$source_archive" ]]; then
+            echo '::error::CodeQL source archive was not found'
+            exit 1
+          fi
+
+          source_listing="$RUNNER_TEMP/codeql-production-sources.txt"
+          unzip -Z1 "$source_archive" > "$source_listing"
+          if grep -Fq '/.github/codeql/queries/test/' "$source_listing"; then
+            echo '::error::Synthetic CodeQL query fixtures entered production analysis'
+            exit 1
+          fi
+
+          for expected_source in \
+            '/control-api/src/main.ts' \
+            '/external-rest-api/src/main.ts' \
+            '/desktop-app/src/main.ts'
+          do
+            if ! grep -Fq "$expected_source" "$source_listing"; then
+              echo "::error::Expected application source is missing: $expected_source"
+              exit 1
+            fi
+          done
