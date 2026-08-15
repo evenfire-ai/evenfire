@@ -6,6 +6,7 @@ import {
   buildTeamsSupportsFilesCommand,
   canGenerateTeamsCommand,
   teamsAppNameError,
+  teamsInstallUrl,
   teamsPlaceholderEndpoint,
 } from '../teamsSetup'
 
@@ -118,5 +119,27 @@ describe('buildTeamsSupportsFilesCommand', () => {
     expect(cmd).toContain('YOUR_CLIENT_ID')
     expect(cmd).not.toContain('<')
     expect(cmd).not.toContain('>')
+  })
+})
+
+describe('teamsInstallUrl', () => {
+  const APP = '0cd0e1e6-adf7-40f4-952f-79006d320a05'
+  const TENANT = '18517e81-9d09-4c73-88f3-e84a6c90c3d9'
+
+  it('builds the deep link from the two ids already on the form', () => {
+    expect(teamsInstallUrl(APP, TENANT)).toBe(
+      `https://teams.microsoft.com/l/app/${APP}?installAppPackage=true&appTenantId=${TENANT}`
+    )
+  })
+
+  it('returns null until both ids are real UUIDs, so no half-built link is offered', () => {
+    expect(teamsInstallUrl('', TENANT)).toBeNull()
+    expect(teamsInstallUrl(APP, '')).toBeNull()
+    expect(teamsInstallUrl('not-a-uuid', TENANT)).toBeNull()
+    expect(teamsInstallUrl(APP, 'not-a-uuid')).toBeNull()
+  })
+
+  it('trims, since pasted ids often carry whitespace', () => {
+    expect(teamsInstallUrl(`  ${APP} `, ` ${TENANT}  `)).toContain(APP)
   })
 })

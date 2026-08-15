@@ -40,9 +40,11 @@ import {
   LOCAL_TEAMS_ENDPOINT_ORIGIN,
   TEAMS_APP_NAME_MAX_LENGTH,
   buildTeamsAppCreateCommand,
+  buildTeamsPackageDownloadCommand,
   buildTeamsSupportsFilesCommand,
   canGenerateTeamsCommand,
   teamsAppNameError,
+  teamsInstallUrl,
   teamsPlaceholderEndpoint,
 } from '@lib/teamsSetup'
 
@@ -228,6 +230,16 @@ export default function CreateCommunicationChannelPage() {
     () => buildTeamsSupportsFilesCommand(draft.teamsAppId),
     [draft.teamsAppId]
   )
+  // Built from the two ids the operator has already pasted, so the deep link is
+  // handed over without a CLI round trip. Null until both are real UUIDs.
+  const teamsInstallLink = useMemo(
+    () => teamsInstallUrl(draft.teamsAppId, draft.teamsTenantId),
+    [draft.teamsAppId, draft.teamsTenantId]
+  )
+  const teamsPackageDownloadCommand = useMemo(
+    () => buildTeamsPackageDownloadCommand(draft.teamsAppId),
+    [draft.teamsAppId]
+  )
   // Slack's order is manifest first, credentials second: the bot token only exists
   // after the app is installed, so a manifest offered only once the channel is saved
   // arrives after the step it describes. The Request URL encodes namespace and name
@@ -386,6 +398,16 @@ export default function CreateCommunicationChannelPage() {
     showToast(
       copied
         ? 'Teams file support command copied.'
+        : 'Could not copy to clipboard. Select the command and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copyTeamsPackageDownloadCommand() {
+    const copied = await copyTextToClipboard(teamsPackageDownloadCommand)
+    showToast(
+      copied
+        ? 'Teams package download command copied.'
         : 'Could not copy to clipboard. Select the command and copy it manually.',
       { tone: copied ? 'success' : 'error' }
     )
@@ -808,20 +830,51 @@ export default function CreateCommunicationChannelPage() {
                               </>
                             )}
                           </li>
-                          <li>Paste CLIENT_ID, TENANT_ID, and CLIENT_SECRET below.</li>
                           <li>
-                            To deliver workflow files, enable them on the manifest. Paste CLIENT_ID
-                            above first and this command fills itself in: the Teams App ID, the Bot
-                            ID and CLIENT_ID are all the same value, written to <code>.env</code> by
-                            the command above. The <code>--yes</code> is required; without it the
-                            command changes nothing and still looks like it worked. File delivery
-                            works in a direct chat only, not in a channel.
+                            To deliver workflow files, enable them on the manifest{' '}
+                            <strong>before you install the app in Teams</strong>. An installed app
+                            keeps the manifest it was installed with, so doing this afterwards means
+                            reinstalling. The <code>--yes</code> is required; without it the command
+                            changes nothing and still looks like it worked. File delivery works in a
+                            direct chat only, not in a channel. The app id is the CLIENT_ID from{' '}
+                            <code>.env</code>, so pasting it below fills this command in.
                             <CommandBlock
                               command={teamsSupportsFilesCommand}
                               onCopy={copyTeamsSupportsFilesCommand}
                               copyDisabled={saving}
                               copyLabel="Copy Teams file support command"
                             />
+                          </li>
+                          <li>Paste CLIENT_ID, TENANT_ID, and CLIENT_SECRET below.</li>
+                          <li>
+                            Install the app in Teams. The link below appears once CLIENT_ID and
+                            TENANT_ID are filled in, because it is built from exactly those two
+                            values.
+                            {teamsInstallLink ? (
+                              <>
+                                <a
+                                  className="cu-btn cu-btn--secondary cu-btn--sm cu-teams-setup__install"
+                                  href={teamsInstallLink}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  Install in Teams
+                                </a>
+                                <span className="cu-muted">
+                                  Pick the channel during install rather than adding it afterwards.
+                                  If it says the app cannot be found, the Teams app catalog has not
+                                  caught up yet: wait a few minutes and retry, or upload the package
+                                  by hand with the command below and Apps &gt; Manage your apps &gt;
+                                  Upload an app.
+                                </span>
+                                <CommandBlock
+                                  command={teamsPackageDownloadCommand}
+                                  onCopy={copyTeamsPackageDownloadCommand}
+                                  copyDisabled={saving}
+                                  copyLabel="Copy Teams package download command"
+                                />
+                              </>
+                            ) : null}
                           </li>
                         </ol>
                       </section>

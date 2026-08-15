@@ -290,15 +290,21 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
 
     const steps = screen.getByText(/Run this from any directory/i).closest('ol')
     const items = Array.from(steps?.querySelectorAll(':scope > li') ?? [])
-    expect(items).toHaveLength(3)
+    expect(items).toHaveLength(4)
 
     expect(items[0].querySelector('pre')).toHaveTextContent('teams app create')
-    expect(items[1].querySelector('pre')).toBeNull()
+    // File support comes BEFORE install: an installed app keeps the manifest it
+    // was installed with, so enabling it afterwards means reinstalling.
     // Named placeholder, never `<appId>`: angle brackets are a redirect in sh and
     // zsh, so pasting the command unedited fails with "no such file or directory".
-    expect(items[2].querySelector('pre')).toHaveTextContent(
+    expect(items[1].querySelector('pre')).toHaveTextContent(
       "teams app manifest update YOUR_CLIENT_ID --set-json 'bots[0].supportsFiles=true' --yes"
     )
+    expect(items[2].querySelector('pre')).toBeNull()
+    // The install step carries no command until both ids are filled in, at which
+    // point it renders a link rather than something to paste into a terminal.
+    expect(items[3].textContent ?? '').toMatch(/install the app in Teams/i)
+    expect(items[3].querySelector('a')).toBeNull()
   })
 
   // Inline <code> is not copyable, and this command is the one with the trap in it.
@@ -840,5 +846,43 @@ describe('CreateCommunicationChannelPage — Teams prerequisites', () => {
 
     expect(screen.queryByText('Sideloading: enabled')).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /Teams setup guide/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('CreateCommunicationChannelPage — Teams install link', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('offers no install link until both ids are present, then builds it from them', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+
+    // A link built from half the values fails as "app cannot be found", which is
+    // indistinguishable from catalog lag, so none is offered until both are real.
+    expect(screen.queryByRole('link', { name: 'Install in Teams' })).not.toBeInTheDocument()
+
+    const appId = '0cd0e1e6-adf7-40f4-952f-79006d320a05'
+    const tenantId = '18517e81-9d09-4c73-88f3-e84a6c90c3d9'
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), { target: { value: appId } })
+    expect(screen.queryByRole('link', { name: 'Install in Teams' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), { target: { value: tenantId } })
+
+    const link = screen.getByRole('link', { name: 'Install in Teams' })
+    expect(link).toHaveAttribute(
+      'href',
+      `https://teams.microsoft.com/l/app/${appId}?installAppPackage=true&appTenantId=${tenantId}`
+    )
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'))
   })
 })

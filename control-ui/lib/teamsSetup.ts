@@ -109,3 +109,28 @@ export function buildTeamsSupportsFilesCommand(appId?: string): string {
   const id = appId?.trim() || 'YOUR_CLIENT_ID'
   return `teams app manifest update ${id} --set-json 'bots[0].supportsFiles=true' --yes`
 }
+
+const TEAMS_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * The Teams install deep link, which is fully determined by the app id and the
+ * tenant id. Both are already on this form, so the operator never needs to run
+ * `teams app get --install-link` to be handed the same string.
+ *
+ * Returns null unless both ids are real UUIDs. A half-built link looks clickable
+ * and fails as "This app cannot be found", which is indistinguishable from the
+ * catalog-propagation failure below and would send someone debugging the wrong
+ * thing.
+ */
+export function teamsInstallUrl(appId: string, tenantId: string): string | null {
+  const app = appId.trim()
+  const tenant = tenantId.trim()
+  if (!TEAMS_UUID_RE.test(app) || !TEAMS_UUID_RE.test(tenant)) return null
+  return `https://teams.microsoft.com/l/app/${app}?installAppPackage=true&appTenantId=${tenant}`
+}
+
+/** Fallback when the deep link 404s because the Teams app catalog has not caught
+ *  up with the Developer Portal yet. Produces a package to upload by hand. */
+export function buildTeamsPackageDownloadCommand(appId?: string): string {
+  return `teams app package download ${appId?.trim() || 'YOUR_CLIENT_ID'}`
+}
