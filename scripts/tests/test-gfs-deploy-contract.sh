@@ -32,7 +32,7 @@ role_migration="$(sed -n "/version: '0074_gfs_runtime_role_exact_contract'/,/^  
 [[ "$role_migration" != *'NOLOGIN'* && "$role_migration" != *'LOGIN'* && "$role_migration" != *'PASSWORD'* && "$role_migration" != *'DROP ROLE'* ]] || fail 'role-contract migration changes credentials or replaces a role'
 [[ "$role_migration" == *"ARRAY['gfs_controller', 'gfs_controller_reader']"* && "$role_migration" == *"EXECUTE format('REVOKE %I FROM %I'"* ]] || fail 'role-contract migration leaves inherited memberships'
 provision_contract="$(sed -n '/verify_role_contract()/,/^}/p' deploy/scripts/provision-gfs-db.sh)"
-[[ "$provision_contract" == *"has_column_privilege(:'role_name', 'control_admin_users', 'id', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'team_members', 'status', 'SELECT')"* && "$provision_contract" == *"column_name NOT IN ('id', 'status')"* && "$provision_contract" == *"column_name NOT IN ('team_id', 'user_id', 'status')"* ]] || fail 'provisioner does not verify the exact subject-column contract'
+[[ "$provision_contract" == *"has_column_privilege(:'role_name', 'control_admin_users', 'id', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'control_admin_users', 'session_version', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'users', 'lifecycle_version', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'lineage_id', 'SELECT')"* && "$provision_contract" == *"column_name NOT IN ('id', 'status', 'session_version')"* && "$provision_contract" == *"column_name NOT IN ('team_id', 'user_id', 'status')"* ]] || fail 'provisioner does not verify the exact subject-column contract'
 writer_case="$(sed -n '/rotate-writer)/,/;;/p' deploy/scripts/provision-gfs-db.sh)"
 [[ "$writer_case" == *'reconcile_credential gfs_controller writer "$WRITER_SECRET" gfsc-writer true'* && "$writer_case" != *'gfsc-reader'* ]] || fail 'writer rollout scope'
 runtime_script="$(sed '/^[[:space:]]*#/d' deploy/scripts/provision-gfs-runtime.sh)"
@@ -112,13 +112,30 @@ assert_minikube_upgrade_classifier() {
      "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
     || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
 }
+assert_pre_gate_defers_gfs_reconcile() {
+  local block="$({ awk -v start="$1" -v end="$2" '
+    index($0, start) { active=1 }
+    active { print }
+    active && index($0, end) { exit }
+  ' "$3"; })"
+  local dsn defer reconcile migration serving
+  dsn="$(grep -n 'writer_dsn=.*get secret gfs-controller-db' <<<"$block" | head -1 | cut -d: -f1)"
+  defer="$(grep -ni 'deferring GFS credential reconciliation until after schema migration' <<<"$block" | head -1 | cut -d: -f1)"
+  reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' <<<"$block" | head -1 | cut -d: -f1 || true)"
+  migration="$(grep -n 'run-control-api-db-migration.sh' "$3" | head -1 | cut -d: -f1)"
+  serving="$(grep -n 'provision_gfs_serving' "$3" | tail -1 | cut -d: -f1)"
+  [[ -n "$dsn" && -n "$defer" && -z "$reconcile" ]] \
+    || fail "$3 must defer GFS credential reconciliation before migration"
+  [[ -n "$migration" && -n "$serving" && "$migration" -lt "$serving" ]] \
+    || fail "$3 must provision GFS serving only after schema migration"
+}
 # The block ends where the overlay apply begins. That apply no longer names a
 # fixed overlay: it resolves one from the mode the cluster's images were
 # acquired in (scripts/minikube/image-mode.sh), so the resolver call is the
 # anchor.
 assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'image-mode.sh --render-dir'
 assert_minikube_upgrade_classifier scripts/minikube/full-setup.sh '# Upgrade path: stage the additive reader' 'Applying kustomize overlay'
-assert_minikube_upgrade_classifier scripts/minikube/pre-gate-sync.sh 'apply-gfs-writer-secret.sh' 'incremental_build_images'
+assert_pre_gate_defers_gfs_reconcile 'apply-gfs-writer-secret.sh' 'incremental_build_images' scripts/minikube/pre-gate-sync.sh
 full_setup_classifier="$(sed -n '/# Upgrade path: stage the additive reader/,/Applying kustomize overlay/p' scripts/minikube/full-setup.sh)"
 reset_classifier="$(grep -n 'if \[ "$RESET_DB" = true \]; then' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
 reset_classifier_defer="$(grep -n 'HCC cutover deferred until post-convergence verification' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"

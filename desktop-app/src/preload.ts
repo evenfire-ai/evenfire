@@ -144,6 +144,9 @@ const clerum = Object.freeze({
     listGrants: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:listGrants', { resourceId, drive }),
     revokeGrant: (grantId: string) => ipcRenderer.invoke('gfs:revokeGrant', { grantId }),
+    listShares: (resourceId: string, drive?: string) =>
+      ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
+    revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
     // A desktop share grants READ access only (the minimal shared capability) —
     // unlike `grant`, it takes no permission bits by design. The server still
     // enforces the caller holds read + share (no-escalation).

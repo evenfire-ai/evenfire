@@ -466,6 +466,54 @@ assert_image_source_local_is_honoured() {
   fi
 }
 
+assert_bootstrap_seed_deferral_is_opt_in() {
+  local got
+  got="$(full_setup_resolves DEFER_BOOTSTRAP_SEED)"
+  if [ "$got" = "false" ]; then
+    pass "bootstrap seed deferral defaults to false"
+  else
+    fail "bootstrap seed deferral defaulted to '${got}', expected 'false'"
+  fi
+}
+
+assert_bootstrap_seed_deferral_flag_resolves_for_local_minimal() {
+  local d got
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d"
+  got="$(full_setup_copy_resolves "$d" DEFER_BOOTSTRAP_SEED --defer-bootstrap-seed IMAGE_SOURCE=local)"
+  if [ "$got" = "true" ]; then
+    pass "--defer-bootstrap-seed resolves true for the local minimal browser flow"
+  else
+    fail "--defer-bootstrap-seed resolved to '${got}', expected 'true'"
+  fi
+  rm -rf "$d"
+}
+
+assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes() {
+  local d out rc problems=""
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d"
+
+  out="$(full_setup_copy_output "$d" --defer-bootstrap-seed IMAGE_SOURCE=ghcr 2>&1)" || rc=$?
+  rc="${rc:-0}"
+  if [ "$rc" -eq 0 ] || ! grep -q "IMAGE_SOURCE=local" <<< "$out"; then
+    problems+="ghcr mode was not rejected; "
+  fi
+
+  rc=0
+  out="$(full_setup_copy_output "$d" "--defer-bootstrap-seed --seed-profile=e2e" IMAGE_SOURCE=local 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ] || ! grep -q "requires --seed-profile=minimal" <<< "$out"; then
+    problems+="e2e seed profile was not rejected; "
+  fi
+
+  if [ -z "$problems" ]; then
+    pass "bootstrap seed deferral rejects GHCR and e2e fixture modes"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
 assert_an_unknown_image_source_is_a_hard_error() {
   local out rc
   out="$(env PATH="$FULL_SETUP_STUB_DIR:$PATH" IMAGE_SOURCE=gchr \
@@ -1055,6 +1103,9 @@ assert_skip_build_staleness_find_is_sigpipe_guarded
 assert_pipefail_head_guard_prevents_abort
 assert_ghcr_is_the_default_image_source
 assert_image_source_local_is_honoured
+assert_bootstrap_seed_deferral_is_opt_in
+assert_bootstrap_seed_deferral_flag_resolves_for_local_minimal
+assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes
 assert_an_unknown_image_source_is_a_hard_error
 assert_ghcr_mode_moves_only_the_render_dir
 assert_ghcr_mode_with_skip_uis_renders_the_no_uis_ghcr_overlay

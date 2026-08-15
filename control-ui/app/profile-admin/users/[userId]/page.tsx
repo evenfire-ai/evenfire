@@ -19,9 +19,11 @@ import { UserApprovalMediumsPanel } from '../../../../components/UserApprovalMed
 import { IconPencil, IconX } from '../../../../components/icons'
 import {
   AdminUserChannels,
+  DeleteAdminUserRequest,
   HostResource,
   addAdminTeamMember,
   apiGet,
+  createDeleteAdminUserRequest,
   deleteAdminMember,
   deleteAdminTeam,
   deleteAdminUser,
@@ -82,6 +84,7 @@ export default function UserDetailsPage() {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const deleteUserTeamCheckIdRef = useRef(0)
+  const deleteUserRequestRef = useRef<DeleteAdminUserRequest | null>(null)
 
   const [activeTab, setActiveTab] = useState<UserTab>(() => parseUserTab(params.tab))
   const [busy, setBusy] = useState(false)
@@ -477,6 +480,7 @@ export default function UserDetailsPage() {
     setDeleteUserSoloTeams([])
     setDeleteEmptyTeamsWithUser(false)
     setDeleteUserTeamCheckLoading(false)
+    deleteUserRequestRef.current = createDeleteAdminUserRequest()
     setShowDeleteUserConfirm(true)
     if (userTeams.length === 0) return
 
@@ -511,7 +515,11 @@ export default function UserDetailsPage() {
     const teamsToDelete = deleteEmptyTeamsWithUser ? deleteUserSoloTeams : []
     setError('')
     try {
-      await deleteAdminUser(userId)
+      await deleteAdminUser(
+        userId,
+        deleteUserRequestRef.current ??
+          (deleteUserRequestRef.current = createDeleteAdminUserRequest())
+      )
       const teamDeleteResults = await Promise.allSettled(
         teamsToDelete.map(team => deleteAdminTeam(team.id))
       )
@@ -520,6 +528,7 @@ export default function UserDetailsPage() {
         return result?.status === 'rejected'
       })
       setShowDeleteUserConfirm(false)
+      deleteUserRequestRef.current = null
       if (failedTeams.length > 0) {
         showToast(
           `Member deleted, but ${failedTeams.length === 1 ? 'team' : 'teams'} could not be deleted: ${formatTeamNames(failedTeams)}.`,

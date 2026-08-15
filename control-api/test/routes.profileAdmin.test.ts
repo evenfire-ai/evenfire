@@ -26,6 +26,7 @@ const svc = vi.hoisted(() => ({
   listPendingInvitationsForTeam: vi.fn(),
   listTeams: vi.fn(),
   renameTeam: vi.fn(),
+  retireDesktopUser: vi.fn(),
   resendInvitation: vi.fn(),
   revokePendingInvitation: vi.fn(),
   setTeamAgents: vi.fn(),
@@ -39,11 +40,17 @@ const svc = vi.hoisted(() => ({
 
 const serviceErrors = vi.hoisted(() => ({
   AgentGrantPreconditionError: class AgentGrantPreconditionError extends Error {},
+  DesktopUserRetirementError: class DesktopUserRetirementError extends Error {
+    constructor(readonly code: string) {
+      super(code)
+    }
+  },
 }))
 
 vi.mock('../src/services/directory/index.js', () => ({
   ...svc,
   AgentGrantPreconditionError: serviceErrors.AgentGrantPreconditionError,
+  DesktopUserRetirementError: serviceErrors.DesktopUserRetirementError,
 }))
 
 const TEST_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
@@ -393,16 +400,68 @@ describe('routes/profileAdmin', () => {
     }
   })
 
-  it('DELETE /admin/users/:userId returns 200 or 404', async () => {
+  it('DELETE /admin/users/:userId forwards the authenticated actor, reason, idempotency key, and correlation id', async () => {
+    const unauthenticated = express()
+    unauthenticated.use(express.json())
+    unauthenticated.use(createAuthenticatedAdminRouter(gatewayStub as unknown as K8sGateway))
+    await request(unauthenticated)
+      .delete('/admin/users/u1')
+      .set('Idempotency-Key', 'admin-delete-unauthenticated')
+      .send({ reason: 'policy retirement' })
+      .expect(401, { error: 'Unauthorized' })
+    expect(svc.retireDesktopUser).not.toHaveBeenCalled()
+
     const app = express()
     app.use(express.json())
-    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+    app.use((req, _res, next) => {
+      ;(req as unknown as { adminAuth: { sub: string }; correlationId: string }).adminAuth = {
+        sub: TEST_ADMIN_SUB,
+      }
+      ;(req as unknown as { correlationId: string }).correlationId = 'request-admin-route'
+      next()
+    })
+    app.use(createAuthenticatedAdminRouter(gatewayStub as unknown as K8sGateway))
 
-    svc.adminDeleteUser.mockResolvedValueOnce({ ok: true, id: 'u1' })
-    const ok = await request(app).delete('/admin/users/u1').expect(200)
+    svc.retireDesktopUser.mockResolvedValueOnce({ id: 'u1', outcome: 'retired' })
+    const ok = await request(app)
+      .delete('/admin/users/u1')
+      .set('Idempotency-Key', 'admin-delete-1')
+      .send({ reason: 'policy retirement' })
+      .expect(200)
     expect(ok.body).toEqual({ deleted: true, id: 'u1' })
+    expect(svc.retireDesktopUser).toHaveBeenCalledWith(
+      { kind: 'control_admin', controlAdminId: TEST_ADMIN_SUB },
+      'u1',
+      'policy retirement',
+      'admin-delete-1',
+      'request-admin-route'
+    )
 
-    svc.adminDeleteUser.mockResolvedValueOnce({ error: 'not_found' })
-    await request(app).delete('/admin/users/missing').expect(404)
+    const missingReason = await request(app).delete('/admin/users/u1').expect(400)
+    expect(missingReason.body).toEqual({ error: 'reason_required' })
+
+    const missingKey = await request(app)
+      .delete('/admin/users/u1')
+      .send({ reason: 'policy retirement' })
+      .expect(400)
+    expect(missingKey.body).toEqual({ error: 'idempotency_key_required' })
+
+    svc.retireDesktopUser.mockRejectedValueOnce(
+      new serviceErrors.DesktopUserRetirementError('not_found')
+    )
+    await request(app)
+      .delete('/admin/users/missing')
+      .set('Idempotency-Key', 'admin-delete-not-found')
+      .send({ reason: 'policy retirement' })
+      .expect(404, { error: 'not_found' })
+
+    svc.retireDesktopUser.mockRejectedValueOnce(
+      new serviceErrors.DesktopUserRetirementError('idempotency_conflict')
+    )
+    await request(app)
+      .delete('/admin/users/u1')
+      .set('Idempotency-Key', 'admin-delete-conflict')
+      .send({ reason: 'policy retirement' })
+      .expect(409, { error: 'idempotency_conflict' })
   })
 })

@@ -61,6 +61,7 @@ export function GfsMarkdownPreview({
   fileName,
   gfsUri,
   onClose,
+  onDownloadError,
 }: GfsMarkdownPreviewProps) {
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -89,6 +90,7 @@ export function GfsMarkdownPreview({
         if (active) setSource(markdown)
       } catch (error) {
         if (!active) return
+        onDownloadError?.(error)
         setPreviewError(
           error instanceof Error ? error.message : 'Could not load the Markdown preview'
         )
@@ -99,7 +101,7 @@ export function GfsMarkdownPreview({
     return () => {
       active = false
     }
-  }, [byteLength, gfsUri])
+  }, [byteLength, gfsUri, onDownloadError])
 
   return createPortal(
     <div

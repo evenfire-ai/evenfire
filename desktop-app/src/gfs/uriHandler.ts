@@ -114,15 +114,23 @@ export interface GfsChildrenPage {
   nextCursor: string | null
 }
 
-export interface GfsAccessibleResource extends GfsResourceView {
-  sources: string[]
-  permissions: string[]
-  coversDescendants: boolean
+export type GfsAccessibleResource = Omit<GfsResourceView, 'drive' | 'parentResourceId'> & {
+  /** Operator-root children omit these ordinary/proxy response fields. */
+  drive?: string
+  parentResourceId?: string | null
+  /** Present on the ordinary Shared-with-me view; root children do not need provenance. */
+  sources?: string[]
+  permissions?: string[]
+  coversDescendants?: boolean
 }
 
 export interface GfsAccessibleResourcesPage {
   items: GfsAccessibleResource[]
   nextCursor: string | null
+  /** Present only when the server resolved this Desktop session as a linked GFS operator. */
+  rootResourceId?: string
+  /** Non-secret renderer mode marker. Absence preserves the ordinary shared-resource view. */
+  view?: 'operator'
 }
 
 /** Grant/share subject grammar (control-api routes/gfs/grants.ts parseSubject). */
@@ -170,6 +178,16 @@ export interface GfsGrantListItem {
   inherit: boolean
 }
 
+/** One direct URI-share row as GET /me/gfs/shares returns it. */
+export interface GfsShareListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  includeDescendants: boolean
+}
+
 /** Bits the caller holds on a resource, as the affordances route reports them. */
 export interface GfsHeldAffordances {
   held: string[]
@@ -207,8 +225,8 @@ export interface GfsDeleteInput {
 const DEFAULT_DRIVE = 'main'
 const TRANSPORT_TOKEN_FIELD = ['tok', 'en'].join('') as 'token'
 
-/** Grant ids name gfs_grants rows (control-api routes/gfs/grants.ts UUID_RE). */
-const GRANT_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+/** Grant/share ids name ACL rows (control-api routes/gfs UUID_RE). */
+const ACL_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 /**
  * Shape of a managed host subject id: `<party>:<namespace>/<name>` with k8s
@@ -488,7 +506,7 @@ export class GfsClient {
    * built so a malformed value can never become a path segment.
    */
   async revokeGrant(grantId: string, token: string): Promise<void> {
-    if (!GRANT_ID_RE.test(grantId)) {
+    if (!ACL_ID_RE.test(grantId)) {
       throw new GfsUriError(`grant id must be a UUID: ${JSON.stringify(grantId)}`)
     }
     await this.transport.requestJson(
@@ -519,6 +537,42 @@ export class GfsClient {
       throw surfaceGfsGrantError(error)
     }
   }
+  /** List direct URI shares on one resource. This route is never inferred from grants. */
+  async listShares(
+    input: { resourceId: string; drive?: string },
+    token: string
+  ): Promise<GfsShareListItem[]> {
+    const q = new URLSearchParams()
+    q.set('drive', input.drive ?? DEFAULT_DRIVE)
+    q.set('resourceId', input.resourceId)
+    let payload: { items: GfsShareListItem[] }
+    try {
+      payload = await this.transport.requestJson<{ items: GfsShareListItem[] }>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/shares?' + q.toString()),
+        { token }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
+      throw new GfsUriError('unexpected gfs shares response: missing items array')
+    }
+    return payload.items
+  }
+
+  /** Revoke a direct URI share by the UUID learned from listShares. */
+  async revokeShare(shareId: string, token: string): Promise<void> {
+    if (!ACL_ID_RE.test(shareId)) {
+      throw new GfsUriError(`share id must be a UUID: ${JSON.stringify(shareId)}`)
+    }
+    await this.transport.requestJson(
+      'DELETE',
+      joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/shares/${encodeURIComponent(shareId)}`),
+      { token }
+    )
+  }
+
   async createResource(
     input: GfsCreateInput,
     session: string,

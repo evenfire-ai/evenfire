@@ -14,7 +14,7 @@ function runtimeAccessProfile(): Map<string, string> {
   )
 }
 
-describe('0091_gfs_upload_sessions', () => {
+describe('0097_gfs_upload_sessions', () => {
   it('is additive and keeps the protocol ceiling separate from the product policy', () => {
     const schema = readFileSync(
       new URL('../src/services/gfsUploadSchema.ts', import.meta.url),
@@ -22,7 +22,7 @@ describe('0091_gfs_upload_sessions', () => {
     )
     const source = readFileSync(new URL('../src/db.ts', import.meta.url), 'utf8')
 
-    expect(source).toContain("version: '0091_gfs_upload_sessions'")
+    expect(source).toContain("version: '0097_gfs_upload_sessions'")
     expect(schema).toContain('CREATE TABLE IF NOT EXISTS gfs_upload_sessions')
     expect(schema).toContain('CREATE TABLE IF NOT EXISTS gfs_upload_parts')
     expect(schema).toContain('expected_bytes BETWEEN 0 AND 1073741824')
@@ -68,7 +68,7 @@ describe('0091_gfs_upload_sessions', () => {
       new URL('../src/services/gfsUploadSchema.ts', import.meta.url),
       'utf8'
     )
-    expect(source).toContain("version: '0093_gfs_upload_finalizing_recovery'")
+    expect(source).toContain("version: '0099_gfs_upload_finalizing_recovery'")
     expect(schema).toContain('finalizing_started_at TIMESTAMPTZ')
   })
 })

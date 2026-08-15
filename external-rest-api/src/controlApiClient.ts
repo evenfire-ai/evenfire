@@ -1,18 +1,51 @@
 import { config } from './config.js'
+import { currentExternalClientIp } from './requestContext.js'
 
 type RequestMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+
+function addExternalClientIdentity(headers: Record<string, string>): void {
+  const clientIp = currentExternalClientIp()
+  if (clientIp) headers['x-external-client-ip'] = clientIp
+}
+
+// Response headers are an API contract only where a caller can safely act on
+// them. In particular, never relay Set-Cookie, server identity, CORS, or
+// arbitrary proxy headers from the internal control-api boundary.
+const FORWARDABLE_RESPONSE_HEADERS = [
+  'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'x-request-id',
+] as const
 
 export class ControlApiError extends Error {
   status: number
   body: unknown
-  headers?: Headers
-  constructor(message: string, status: number, body: unknown, headers?: Headers) {
+  headers: Record<string, string>
+  constructor(
+    message: string,
+    status: number,
+    body: unknown,
+    headers: Record<string, string> = {}
+  ) {
     super(message)
     this.name = 'ControlApiError'
     this.status = status
     this.body = body
     this.headers = headers
   }
+}
+
+function forwardableResponseHeaders(response: Response): Record<string, string> {
+  const headers: Record<string, string> = {}
+  for (const name of FORWARDABLE_RESPONSE_HEADERS) {
+    const value = response.headers.get(name)
+    if (value) headers[name] = value
+  }
+  return headers
 }
 
 function buildUrl(path: string, query?: Record<string, string | undefined>): string {
@@ -59,6 +92,7 @@ export async function controlApiRequestWithStatus<T>(
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
   }
+  addExternalClientIdentity(headers)
   if (options?.userSessionToken) {
     headers['x-user-session-token'] = options.userSessionToken
   }
@@ -92,7 +126,8 @@ export async function controlApiRequestWithStatus<T>(
     throw new ControlApiError(
       `Control API ${method} ${path} returned non-JSON body (status=${response.status})`,
       502,
-      { error: 'Upstream returned non-JSON body', status: response.status }
+      { error: 'Upstream returned non-JSON body', status: response.status },
+      forwardableResponseHeaders(response)
     )
   }
 
@@ -105,7 +140,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} failed (${response.status}): ${errorMessage}`,
       response.status,
       parsed,
-      response.headers
+      forwardableResponseHeaders(response)
     )
   }
 
@@ -139,6 +174,7 @@ export async function controlApiBinaryRequestWithStatus(
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
   }
+  addExternalClientIdentity(headers)
   if (options?.userSessionToken) {
     headers['x-user-session-token'] = options.userSessionToken
   }
@@ -159,7 +195,7 @@ export async function controlApiBinaryRequestWithStatus(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      response.headers
+      forwardableResponseHeaders(response)
     )
   }
 
@@ -187,12 +223,14 @@ export async function controlApiStreamRequest(
     extraHeaders?: Record<string, string>
     signal?: AbortSignal
     body?: unknown
+    throwOnHttpError?: boolean
   }
 ): Promise<Response> {
   const headers: Record<string, string> = {
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
   }
+  addExternalClientIdentity(headers)
   if (options?.userSessionToken) {
     headers['x-user-session-token'] = options.userSessionToken
   }
@@ -210,7 +248,7 @@ export async function controlApiStreamRequest(
     fetchInit.duplex = 'half'
   }
   const response = await fetch(buildUrl(path, options?.query), fetchInit)
-  if (!response.ok) {
+  if (!response.ok && options?.throwOnHttpError !== false) {
     let parsed: unknown = null
     const raw = await readResponseText(response)
     try {
@@ -222,7 +260,7 @@ export async function controlApiStreamRequest(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      response.headers
+      forwardableResponseHeaders(response)
     )
   }
   return response
@@ -248,6 +286,7 @@ export async function controlApiPassthroughGet(
     headers: {
       authorization: `Bearer ${config.controlApiServiceToken}`,
       'x-service-token': config.controlApiServiceName,
+      ...(currentExternalClientIp() ? { 'x-external-client-ip': currentExternalClientIp()! } : {}),
     },
   })
   return {

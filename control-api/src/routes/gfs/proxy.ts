@@ -69,6 +69,15 @@ export function registerGfsProxyRoute(router: Router): void {
         res.status(401).json({ error: 'unauthorized' })
         return
       }
+      const authGeneration = req.adminAuth?.sessionVersion
+      if (
+        typeof authGeneration !== 'number' ||
+        !Number.isSafeInteger(authGeneration) ||
+        authGeneration < 1
+      ) {
+        res.status(401).json({ error: 'unauthorized' })
+        return
+      }
 
       const scope = UPLOAD_PATH.test(req.url || '')
         ? GFS_WRITE_SCOPE
@@ -87,7 +96,13 @@ export function registerGfsProxyRoute(router: Router): void {
 
       const subPath = req.url === '/' ? '' : req.url
       const target = `${gfscBaseUrlFor(req.method, subPath).replace(/\/+$/, '')}${subPath}`
-      const { token } = signGfsToken({ subject, drive: DEFAULT_DRIVE, scopes: [scope] })
+      const { token } = signGfsToken({
+        subject,
+        drive: DEFAULT_DRIVE,
+        scopes: [scope],
+        authGeneration,
+        principalType: 'control-admin',
+      })
       const headers: Record<string, string> = {}
       headers['author' + 'ization'] = ['Bearer', token].join(' ')
       const isUploadPart = req.method === 'PUT' && UPLOAD_PART_PATH.test(subPath)

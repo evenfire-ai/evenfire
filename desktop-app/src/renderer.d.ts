@@ -133,18 +133,20 @@ declare global {
             resourceId: string
             rid: string
             gfsUri: string
-            drive: string
-            parentResourceId: string | null
+            drive?: string
+            parentResourceId?: string | null
             name: string
             kind: 'file' | 'directory'
             path: string | null
             version: number
             bytes: number
-            sources: string[]
-            permissions: string[]
-            coversDescendants: boolean
+            sources?: string[]
+            permissions?: string[]
+            coversDescendants?: boolean
           }>
           nextCursor: string | null
+          rootResourceId?: string
+          view?: 'operator'
         }>
         listChildren: (
           resourceId: string,
@@ -351,6 +353,20 @@ declare global {
           }>
         >
         revokeGrant: (grantId: string) => Promise<void>
+        listShares: (
+          resourceId: string,
+          drive?: string
+        ) => Promise<
+          Array<{
+            id: string
+            drive: string
+            resourceId: string
+            subject: { type: string; id?: string }
+            permissions: string[]
+            includeDescendants: boolean
+          }>
+        >
+        revokeShare: (shareId: string) => Promise<void>
         createShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
       }
       agents: {

@@ -223,6 +223,9 @@ export interface CopyInput {
   requestId: string;
   subject: string;
   audit: AuditSink;
+  actorOnBehalfOf?: string | null;
+  desktopUserId?: string;
+  authoritySource?: "user-session" | "linked-admin";
   drive: string;
   destinationParentId: string;
   plan: CopyPreflightPlan;

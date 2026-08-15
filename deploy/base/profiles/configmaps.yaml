@@ -5,6 +5,11 @@ metadata:
   namespace: profiles
 data:
   EXTERNAL_REST_API_JSON_BODY_LIMIT: 150mb
+  # Coarse edge backstop capacity for GFS traffic behind one trusted proxy.
+  # Authoritative per-session/actor budgets remain in control-api.
+  EXTERNAL_REST_API_GFS_EDGE_AGGREGATE_RL_PER_MIN: '1800'
+  EXTERNAL_REST_API_GFS_EDGE_AUTHENTICATED_IP_RL_PER_MIN: '1200'
+  EXTERNAL_REST_API_GFS_EDGE_TOKEN_IP_RL_PER_MIN: '600'
 ---
 apiVersion: v1
 kind: ConfigMap

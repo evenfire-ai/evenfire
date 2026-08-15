@@ -1,9 +1,10 @@
+import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable, Writable } from "node:stream";
-import { describe, expect, it } from "vitest";
 import { GfsAuthError, type GfsScope, type GfsVerifiedClaims } from "../auth/verify";
 import type { AuthzContext } from "../authz/permissionClient";
 import type { GfsPermission } from "../authz/resolve";
+import { GfsSubjectResolutionDeniedError } from "../authz/subjectResolver";
 import { GfsError } from "./errors";
 import { GfsResource } from "./read";
 import { GfsServingHandler, ServingDeps } from "./serve";
@@ -49,7 +50,9 @@ function reqBody(
   opts: { method: string; auth?: string; body?: unknown; rawBody?: string }
 ): IncomingMessage {
   const json = opts.rawBody ?? (opts.body === undefined ? "" : JSON.stringify(opts.body));
-  const stream = Readable.from(json ? [Buffer.from(json, "utf8")] : []) as unknown as IncomingMessage;
+  const stream = Readable.from(
+    json ? [Buffer.from(json, "utf8")] : []
+  ) as unknown as IncomingMessage;
   stream.url = url;
   stream.method = opts.method;
   stream.headers = opts.auth !== undefined ? { authorization: opts.auth } : {};
@@ -137,7 +140,8 @@ describe("GfsReadServer.tryHandle — routing", () => {
 
   it("handles a matched read path with the wrong method as a 404", async () => {
     const res = new FakeRes();
-    const handled = await run(deps(),
+    const handled = await run(
+      deps(),
       req(`/v1/resources/${RID}`, { method: "POST", auth: "Bearer t" }),
       res
     );
@@ -335,6 +339,21 @@ describe("GfsReadServer.tryHandle — auth chain (fail-closed)", () => {
     expect((res.json as { error: { code: string } }).error.code).toBe("not_mounted");
   });
 
+  it("403 when the subject is retired or its authority generation is stale", async () => {
+    const res = new FakeRes();
+    const d = deps({
+      resolveContext: async () => {
+        throw new GfsSubjectResolutionDeniedError("user is retired or token generation is stale");
+      },
+    });
+    await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
+    expect(res.statusCode).toBe(403);
+    expect((res.json as { error: { code: string; message: string } }).error).toEqual({
+      code: "forbidden",
+      message: "principal is not authorized for GFS",
+    });
+  });
+
   it("403 when the store denies — and NO resource metadata is leaked", async () => {
     const res = new FakeRes();
     const d = deps({ authorize: async () => ({ allowed: false }) });
@@ -371,10 +390,7 @@ describe("GfsReadServer.tryHandle — auth chain (fail-closed)", () => {
 
   it("400 path_invalid for a malformed rid (never reaches the store as a 503)", async () => {
     const res = new FakeRes();
-    await run(deps(),
-      req("/v1/resources/not-a-valid-rid!!", { auth: "Bearer t" }),
-      res
-    );
+    await run(deps(), req("/v1/resources/not-a-valid-rid!!", { auth: "Bearer t" }), res);
     expect(res.statusCode).toBe(400);
     expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
   });
@@ -403,10 +419,7 @@ describe("GfsReadServer.tryHandle — served reads", () => {
 
   it("200 content streams the raw bytes with length + uri headers", async () => {
     const res = new FakeRes();
-    await run(deps(),
-      req(`/v1/resources/${RID}/content`, { auth: "Bearer t" }),
-      res
-    );
+    await run(deps(), req(`/v1/resources/${RID}/content`, { auth: "Bearer t" }), res);
     expect(res.statusCode).toBe(200);
     expect(res.headers["Content-Length"]).toBe("11");
     expect(res.headers["X-Gfs-Uri"]).toBe(`gfs://main/${RID}`);
@@ -421,7 +434,7 @@ describe("GfsReadServer.tryHandle — served reads", () => {
     source.push("partial");
     const d = deps({ blobs: { read: async () => source } });
     const handled = run(d, req(`/v1/resources/${RID}/content`, { auth: "Bearer t" }), res);
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     res.emit("close");
     await handled;
     expect(source.destroyed).toBe(true);
@@ -429,7 +442,8 @@ describe("GfsReadServer.tryHandle — served reads", () => {
 
   it("200 resolve maps a gfs:// uri (same drive) to its view", async () => {
     const res = new FakeRes();
-    await run(deps(),
+    await run(
+      deps(),
       req(`/v1/resolve?uri=${encodeURIComponent(`gfs://main/${RID}`)}`, { auth: "Bearer t" }),
       res
     );
@@ -439,7 +453,8 @@ describe("GfsReadServer.tryHandle — served reads", () => {
 
   it("403 resolve across a DIFFERENT drive than the token (no cross-drive existence probe)", async () => {
     const res = new FakeRes();
-    await run(deps(),
+    await run(
+      deps(),
       req(`/v1/resolve?uri=${encodeURIComponent(`gfs://other/${RID}`)}`, { auth: "Bearer t" }),
       res
     );
@@ -470,7 +485,8 @@ describe("GfsReadServer.tryHandle — served reads", () => {
     });
     await run(deps({ listAccessible }), req("/v1/accessible?limit=20", { auth: "Bearer t" }), res);
     expect(res.statusCode).toBe(200);
-    const data = (res.json as { data: { items: Array<{ gfsUri: string; permissions: string[] }> } }).data;
+    const data = (res.json as { data: { items: Array<{ gfsUri: string; permissions: string[] }> } })
+      .data;
     expect(data.items[0]?.gfsUri).toBe(`gfs://main/${RID}`);
     expect(data.items[0]?.permissions).toContain("write");
   });
@@ -503,11 +519,14 @@ describe("GfsReadServer.tryHandle — served reads", () => {
     );
     expect(res.statusCode).toBe(403);
   });
-
 });
 
 const WRITE_SCOPES: GfsScope[] = ["gfs.read", "gfs.write", "gfs.delete"];
-const AGENT_CLAIMS: GfsVerifiedClaims = { ...CLAIMS, sub: "host:1st:mcp-host/standalone", scopes: WRITE_SCOPES };
+const AGENT_CLAIMS: GfsVerifiedClaims = {
+  ...CLAIMS,
+  sub: "host:1st:mcp-host/standalone",
+  scopes: WRITE_SCOPES,
+};
 const USER_WRITE_CLAIMS: GfsVerifiedClaims = { ...CLAIMS, scopes: WRITE_SCOPES };
 
 /** A recording write service; each method records its input and returns a row. */
@@ -529,7 +548,11 @@ function recordingWriteService() {
   return { svc: svc as unknown as ServingDeps["writeService"], calls };
 }
 
-function writeDeps(over: Partial<ServingDeps> = {}): { d: ServingDeps; calls: Array<{ op: string; input: unknown }>; authzOps: GfsPermission[] } {
+function writeDeps(over: Partial<ServingDeps> = {}): {
+  d: ServingDeps;
+  calls: Array<{ op: string; input: unknown }>;
+  authzOps: GfsPermission[];
+} {
   const { svc, calls } = recordingWriteService();
   const authzOps: GfsPermission[] = [];
   const d = deps({
@@ -545,6 +568,66 @@ function writeDeps(over: Partial<ServingDeps> = {}): { d: ServingDeps; calls: Ar
 }
 
 describe("GfsServingHandler — write routes (governed mutation)", () => {
+  it("keeps linked actor, effective admin, token subject, and request id distinct through publication", async () => {
+    const desktopUserId = "11111111-1111-4111-8111-111111111111";
+    const controlAdminId = "22222222-2222-4222-8222-222222222222";
+    const requestId = "33333333-3333-4333-8333-333333333333";
+    const brokeredAuthority = {
+      desktopUserId,
+      controlAdminId,
+      authoritySource: "linked-admin" as const,
+    };
+    const linkedClaims: GfsVerifiedClaims = {
+      ...USER_WRITE_CLAIMS,
+      sub: controlAdminId,
+      principalType: "control-admin",
+      brokeredAuthority,
+    };
+    const linkedContext: AuthzContext = {
+      drive: "main",
+      subjects: ["operator:"],
+      isOperator: true,
+      primarySubject: controlAdminId,
+      effectiveControlAdminId: controlAdminId,
+      desktopUserId,
+      authoritySource: "linked-admin",
+      requestId,
+    };
+    const { d, calls } = writeDeps({
+      verifyToken: () => linkedClaims,
+      resolveContext: async (claims, resolvedRequestId) => {
+        expect(claims).toEqual({
+          sub: controlAdminId,
+          drive: "main",
+          principalType: "control-admin",
+          brokeredAuthority,
+        });
+        expect(resolvedRequestId).toBe(requestId);
+        return linkedContext;
+      },
+    });
+    const request = reqBody(`/v1/resources/${RID}/children`, {
+      method: "POST",
+      auth: "Bearer t",
+      body: { name: "linked.txt", content: "hi" },
+    });
+    request.headers["x-request-id"] = requestId;
+
+    const res = new FakeRes();
+    await run(d, request, res);
+
+    expect(res.statusCode).toBe(201);
+    expect(calls[0].input).toMatchObject({
+      mutation: {
+        subject: controlAdminId,
+        requestId,
+        actorOnBehalfOf: controlAdminId,
+        desktopUserId,
+        authoritySource: "linked-admin",
+      },
+    });
+  });
+
   it("does not expose internal blob keys or physical paths in a failure response", async () => {
     const res = new FakeRes();
     const { d } = writeDeps({
@@ -579,7 +662,11 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     const { d, calls, authzOps } = writeDeps();
     await run(
       d,
-      reqBody(`/v1/resources/${RID}/children`, { method: "POST", auth: "Bearer t", body: { name: "n.txt", content: "hi" } }),
+      reqBody(`/v1/resources/${RID}/children`, {
+        method: "POST",
+        auth: "Bearer t",
+        body: { name: "n.txt", content: "hi" },
+      }),
       res
     );
     expect(res.statusCode).toBe(201);
@@ -594,7 +681,11 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     const { d, calls, authzOps } = writeDeps();
     await run(
       d,
-      reqBody(`/v1/resources/${RID}/children`, { method: "POST", auth: "Bearer t", body: { name: "docs", kind: "directory" } }),
+      reqBody(`/v1/resources/${RID}/children`, {
+        method: "POST",
+        auth: "Bearer t",
+        body: { name: "docs", kind: "directory" },
+      }),
       res
     );
     expect(res.statusCode).toBe(201);
@@ -631,7 +722,11 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     const { d, calls, authzOps } = writeDeps();
     await run(
       d,
-      reqBody(`/v1/resources/${RID}/content`, { method: "PUT", auth: "Bearer t", body: { content: "new", ifMatch: 2 } }),
+      reqBody(`/v1/resources/${RID}/content`, {
+        method: "PUT",
+        auth: "Bearer t",
+        body: { content: "new", ifMatch: 2 },
+      }),
       res
     );
     expect(res.statusCode).toBe(200);
@@ -644,7 +739,11 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     const { d, calls } = writeDeps();
     await run(
       d,
-      reqBody(`/v1/resources/${RID}/content`, { method: "PUT", auth: "Bearer t", body: { contentBase64: "bmV3", ifMatch: 2 } }),
+      reqBody(`/v1/resources/${RID}/content`, {
+        method: "PUT",
+        auth: "Bearer t",
+        body: { contentBase64: "bmV3", ifMatch: 2 },
+      }),
       res
     );
     expect(res.statusCode).toBe(200);
@@ -735,7 +834,11 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     const { d, calls } = writeDeps();
     await run(
       d,
-      reqBody(`/v1/resources/${RID}/content`, { method: "PUT", auth: "Bearer t", body: { content: "new" } }),
+      reqBody(`/v1/resources/${RID}/content`, {
+        method: "PUT",
+        auth: "Bearer t",
+        body: { content: "new" },
+      }),
       res
     );
     expect(res.statusCode).toBe(412);
@@ -768,7 +871,11 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     const { d, calls } = writeDeps({ verifyToken: () => USER_WRITE_CLAIMS });
     await run(
       d,
-      reqBody(`/v1/resources/${RID}/content`, { method: "PUT", auth: "Bearer t", body: { content: "new" } }),
+      reqBody(`/v1/resources/${RID}/content`, {
+        method: "PUT",
+        auth: "Bearer t",
+        body: { content: "new" },
+      }),
       res
     );
     expect(res.statusCode).toBe(200);
@@ -790,10 +897,18 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
   it("403 when the store denies the write — the write service is never called", async () => {
     const res = new FakeRes();
     const { svc, calls } = recordingWriteService();
-    const d = deps({ verifyToken: () => AGENT_CLAIMS, authorize: async () => ({ allowed: false }), writeService: svc });
+    const d = deps({
+      verifyToken: () => AGENT_CLAIMS,
+      authorize: async () => ({ allowed: false }),
+      writeService: svc,
+    });
     await run(
       d,
-      reqBody(`/v1/resources/${RID}/children`, { method: "POST", auth: "Bearer t", body: { name: "x", content: "y" } }),
+      reqBody(`/v1/resources/${RID}/children`, {
+        method: "POST",
+        auth: "Bearer t",
+        body: { name: "x", content: "y" },
+      }),
       res
     );
     expect(res.statusCode).toBe(403);
@@ -805,7 +920,11 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     // default deps() has no writeService
     await run(
       deps({ verifyToken: () => AGENT_CLAIMS }),
-      reqBody(`/v1/resources/${RID}/children`, { method: "POST", auth: "Bearer t", body: { name: "x", content: "y" } }),
+      reqBody(`/v1/resources/${RID}/children`, {
+        method: "POST",
+        auth: "Bearer t",
+        body: { name: "x", content: "y" },
+      }),
       res
     );
     expect(res.statusCode).toBe(404);
@@ -816,7 +935,11 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     const { d } = writeDeps();
     await run(
       d,
-      reqBody(`/v1/resources/${RID}/children`, { method: "POST", auth: "Bearer t", body: { content: "no name" } }),
+      reqBody(`/v1/resources/${RID}/children`, {
+        method: "POST",
+        auth: "Bearer t",
+        body: { content: "no name" },
+      }),
       res
     );
     expect(res.statusCode).toBe(400);

@@ -115,7 +115,11 @@ describe('deploy/scripts/provision-gfs-db.sh', () => {
     expect(script).toContain(
       "has_column_privilege(:'role_name', 'team_members', 'status', 'SELECT')"
     )
-    expect(script).toContain("column_name NOT IN ('id', 'status')")
+    expect(script).toContain("column_name NOT IN ('id', 'status', 'session_version')")
+    expect(script).toContain("column_name NOT IN ('id', 'lifecycle_state', 'lifecycle_version')")
+    expect(script).toContain(
+      "column_name NOT IN ('id', 'lineage_id', 'generation', 'user_id', 'control_admin_id', 'state', 'source')"
+    )
     expect(script).toContain("column_name NOT IN ('team_id', 'user_id', 'status')")
     expect(script).toContain("'INSERT,UPDATE,REFERENCES'")
     expect(script).toContain("'DELETE,TRUNCATE,TRIGGER'")

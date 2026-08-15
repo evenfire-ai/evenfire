@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
+import { withExternalRequestContext } from './requestContext.js'
 import { createAuthRouter } from './routes/auth.js'
 import { createContextSharedFilesystemsRouter } from './routes/contextSharedFilesystems.js'
 import { createDesktopRouter } from './routes/desktop.js'
@@ -36,6 +37,11 @@ export function createApp() {
   // and must be rejected by deployment policy rather than by accepting a
   // caller-controlled X-Forwarded-For chain here.
   app.set('trust proxy', 1)
+  // Capture the proxy-attested client once at the external boundary. The
+  // control-api receives it through the authenticated service channel so its
+  // non-GFS edge buckets do not collapse every Desktop client onto the funnel
+  // pod address.
+  app.use(withExternalRequestContext)
   app.use(
     cors({
       origin: config.corsOrigin === '*' ? true : config.corsOrigin,
