@@ -58,11 +58,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Initialize CodeQL
+        id: codeql-init
         uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
         with:
           languages: javascript-typescript
           build-mode: none
-          queries: security-and-quality
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Test repository CodeQL queries
+        env:
+          CODEQL: ${{ steps.codeql-init.outputs.codeql-path }}
+        run: |
+          "$CODEQL" pack install .github/codeql/queries
+          "$CODEQL" pack install \
+            --additional-packs=.github/codeql/queries \
+            .github/codeql/queries/test
+          "$CODEQL" test run \
+            --additional-packs=.github/codeql/queries \
+            .github/codeql/queries/test
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
