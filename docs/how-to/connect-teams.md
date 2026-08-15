@@ -142,6 +142,13 @@ fails (see Troubleshooting), though that has not been confirmed.
 
 Open the install link, add the app, and optionally add it to a channel.
 
+**Expect to wait about five minutes.** Teams publishes the app to its catalog on
+its own schedule, and the install link fails with "This app cannot be found"
+until that finishes. That is the normal wait, not a broken setup, and it is not
+a reason to re-run `teams app create`, which would leave you with two bots. Give
+it a couple of minutes and click the link again. Only if it still fails after
+several minutes is something actually wrong: see Troubleshooting.
+
 Then paste `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET` into the Control UI and
 create the channel. The secret is stored as `teams-app-password` in a Secret
 named `cc-<channel-name>-credentials` in the `channels` namespace, and is
@@ -289,15 +296,19 @@ signed-in user is not the one it was assigned to. Check `teams status` rather
 than guessing.
 
 **The install link says "This app cannot be found."** Clicking the
-**Install in Teams** link `teams app create` prints, right after creation, can
-return this even though the app exists and is visible in the Developer Portal.
+**Install in Teams** link `teams app create` prints, right after creation,
+returns this even though the app exists and is visible in the Developer Portal.
 It reads like the create failed. It did not: re-running `teams app create` in
 response leaves you with two bots.
 
+For roughly the first five minutes this is just the catalog catching up, and the
+fix is to wait and click the link again. Everything below is for a link that is
+still failing after several minutes.
+
 Two workarounds. Use **Preview in Teams** from the
 [Developer Portal](https://dev.teams.microsoft.com/apps) instead of the
-printed link; it bypasses the catalog lookup that is failing. Or wait a short
-while and regenerate the link:
+printed link; it bypasses the catalog lookup that is failing. Or regenerate the
+link:
 
 ```shell
 teams app get YOUR_CLIENT_ID --install-link

@@ -912,7 +912,34 @@ describe('CreateCommunicationChannelPage — Teams install link', () => {
     expect(disclosure).not.toBeNull()
     expect(disclosure).not.toHaveAttribute('open')
     expect(
-      within(disclosure as HTMLElement).getByText('If the link says the app cannot be found')
+      within(disclosure as HTMLElement).getByText('If it still fails after several minutes')
     ).toBeInTheDocument()
+  })
+
+  it('warns about the catalog wait up front, outside the collapsed fallback', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '0cd0e1e6-adf7-40f4-952f-79006d320a05' },
+    })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '18517e81-9d09-4c73-88f3-e84a6c90c3d9' },
+    })
+
+    // Teams publishes to its catalog on its own schedule, so the link routinely
+    // 404s for the first few minutes. Stated only inside the collapsed fallback,
+    // this reaches the operator AFTER they have read "app cannot be found" as a
+    // broken setup and started debugging the wrong thing. It has to be visible
+    // before the click, so it must not sit inside the disclosure.
+    const note = screen.getByText(/five minutes to publish the app to its catalog/)
+    expect(note.closest('details')).toBeNull()
   })
 })

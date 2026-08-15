@@ -859,13 +859,18 @@ export default function CreateCommunicationChannelPage() {
                                 >
                                   Install in Teams
                                 </a>
+                                <p className="cu-teams-setup__install-note">
+                                  Teams can take around five minutes to publish the app to its
+                                  catalog, so the link may say the app cannot be found at first.
+                                  That is the expected wait, not a broken setup: give it a couple of
+                                  minutes and click it again.
+                                </p>
                                 <details className="cu-advanced-details cu-teams-setup__fallback">
-                                  <summary>If the link says the app cannot be found</summary>
+                                  <summary>If it still fails after several minutes</summary>
                                   <p className="cu-advanced-details__hint">
-                                    The Teams app catalog has not caught up with the Developer
-                                    Portal yet. Wait a few minutes and retry the link first. If it
-                                    still fails, build the package and upload it by hand from Apps
-                                    &gt; Manage your apps &gt; Upload an app.
+                                    Build the package and upload it by hand from Apps &gt; Manage
+                                    your apps &gt; Upload an app. This skips the catalog lookup that
+                                    the link depends on.
                                   </p>
                                   <CommandBlock
                                     command={teamsPackageDownloadCommand}

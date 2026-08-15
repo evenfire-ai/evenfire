@@ -9811,6 +9811,14 @@ textarea.cu-input {
 /* The package fallback recovers from Teams' catalog lag, which usually resolves
    on a retry of the link above. Collapsed, it stays available without reading as
    a fifth step that everyone has to perform. */
+/* The catalog wait is the single most likely thing to happen right after the
+   link is clicked, so it is stated before the click rather than hidden in the
+   fallback below: a first-time operator who is not told to expect it reads
+   "app cannot be found" as a broken setup and goes looking for the wrong bug. */
+.cu-teams-setup__instructions .cu-teams-setup__install-note {
+  margin: 0 0 var(--cu-space-2);
+}
+
 .cu-teams-setup__instructions .cu-teams-setup__fallback {
   margin-bottom: var(--cu-space-2);
 }
