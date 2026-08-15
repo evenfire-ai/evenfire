@@ -847,9 +847,8 @@ export default function CreateCommunicationChannelPage() {
                           </li>
                           <li>Paste CLIENT_ID, TENANT_ID, and CLIENT_SECRET below.</li>
                           <li>
-                            Install the app in Teams. The link below appears once CLIENT_ID and
-                            TENANT_ID are filled in, because it is built from exactly those two
-                            values.
+                            Install the app in Teams, picking the channel during install rather than
+                            adding it afterwards.
                             {teamsInstallLink ? (
                               <>
                                 <a
@@ -860,21 +859,28 @@ export default function CreateCommunicationChannelPage() {
                                 >
                                   Install in Teams
                                 </a>
-                                <span className="cu-muted">
-                                  Pick the channel during install rather than adding it afterwards.
-                                  If it says the app cannot be found, the Teams app catalog has not
-                                  caught up yet: wait a few minutes and retry, or upload the package
-                                  by hand with the command below and Apps &gt; Manage your apps &gt;
-                                  Upload an app.
-                                </span>
-                                <CommandBlock
-                                  command={teamsPackageDownloadCommand}
-                                  onCopy={copyTeamsPackageDownloadCommand}
-                                  copyDisabled={saving}
-                                  copyLabel="Copy Teams package download command"
-                                />
+                                <details className="cu-advanced-details cu-teams-setup__fallback">
+                                  <summary>If the link says the app cannot be found</summary>
+                                  <p className="cu-advanced-details__hint">
+                                    The Teams app catalog has not caught up with the Developer
+                                    Portal yet. Wait a few minutes and retry the link first. If it
+                                    still fails, build the package and upload it by hand from Apps
+                                    &gt; Manage your apps &gt; Upload an app.
+                                  </p>
+                                  <CommandBlock
+                                    command={teamsPackageDownloadCommand}
+                                    onCopy={copyTeamsPackageDownloadCommand}
+                                    copyDisabled={saving}
+                                    copyLabel="Copy Teams package download command"
+                                  />
+                                </details>
                               </>
-                            ) : null}
+                            ) : (
+                              <span className="cu-teams-setup__pending">
+                                The install link appears here once CLIENT_ID and TENANT_ID are
+                                filled in, because it is built from exactly those two values.
+                              </span>
+                            )}
                           </li>
                         </ol>
                       </section>

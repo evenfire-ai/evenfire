@@ -13,7 +13,7 @@
  */
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ToastProvider } from '@components/Toast'
 import CreateCommunicationChannelPage from '../../app/communication-channels/new/page'
 import * as api from '../../lib/api'
@@ -884,5 +884,35 @@ describe('CreateCommunicationChannelPage — Teams install link', () => {
     )
     expect(link).toHaveAttribute('target', '_blank')
     expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'))
+  })
+
+  it('keeps the package fallback collapsed, so it does not read as a step of its own', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+    const appId = '0cd0e1e6-adf7-40f4-952f-79006d320a05'
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), { target: { value: appId } })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '18517e81-9d09-4c73-88f3-e84a6c90c3d9' },
+    })
+
+    // Downloading a package is a recovery path for Teams' catalog lag, not
+    // something every operator does. Rendered as a sibling of the install link it
+    // reads as a required step and sends people to hand-upload an app the link
+    // would have installed. It stays inside a closed disclosure.
+    const command = screen.getByText(`teams app package download ${appId}`)
+    const disclosure = command.closest('details')
+    expect(disclosure).not.toBeNull()
+    expect(disclosure).not.toHaveAttribute('open')
+    expect(
+      within(disclosure as HTMLElement).getByText('If the link says the app cannot be found')
+    ).toBeInTheDocument()
   })
 })

@@ -313,7 +313,7 @@ the manifest update with `--yes` and verify by downloading the manifest.
 **You lost the install link.**
 
 ```shell
-teams app get <teamsAppId> --install-link
+teams app get YOUR_CLIENT_ID --install-link
 teams app list                              # every app with its id
 ```
 

@@ -9797,6 +9797,55 @@ textarea.cu-input {
   font-size: inherit;
 }
 
+/* The install link is the step's control, not a phrase in the sentence above it.
+   A bare .cu-btn is inline-flex, so it lands mid-paragraph in button weight and
+   chrome and reads as a typographic accident. Block-level with a fitted width
+   puts it on its own line at its own size without stretching to the card. */
+.cu-teams-setup__instructions .cu-teams-setup__install {
+  display: flex;
+  width: fit-content;
+  margin: var(--cu-space-2) 0;
+  text-decoration: none;
+}
+
+/* The package fallback recovers from Teams' catalog lag, which usually resolves
+   on a retry of the link above. Collapsed, it stays available without reading as
+   a fifth step that everyone has to perform. */
+.cu-teams-setup__instructions .cu-teams-setup__fallback {
+  margin-bottom: var(--cu-space-2);
+}
+
+/* .cu-advanced-details blanks the native ::marker and supplies nothing in its
+   place. A label like "Advanced options" survives that, but this summary is a
+   sentence: with no chevron it reads as an assertion that the link HAS failed
+   rather than a control you open if it does. The summary is an inline-flex row
+   with a gap, so the pseudo-element lands as its first item. */
+.cu-teams-setup__fallback summary::before {
+  content: '';
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: none;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--cu-control-transition) ease;
+}
+
+.cu-teams-setup__fallback[open] summary::before {
+  transform: rotate(45deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cu-teams-setup__fallback summary::before {
+    transition: none;
+  }
+}
+
+.cu-teams-setup__instructions .cu-teams-setup__pending {
+  display: block;
+  margin-top: var(--cu-space-1);
+}
+
 .cu-command-block {
   overflow: hidden;
   border: 1px solid var(--cu-border);
