@@ -11,3 +11,20 @@ Labs reference. Use the repository's conventional prefixes instead: `feat/*`,
 The local Minikube T0/T1/T2 contract is development-only. Follow the
 canonical `make minikube-t2-preflight` and `make minikube-t2` entry points and
 the ownership, secret-safety, and evidence rules in `AGENTS.md`.
+
+## Logging standard
+
+For production Node.js/runtime code, use structured logging. Pino is the
+repository reference implementation because `control-api` uses a redacting
+root logger and `workspace-files-controller` uses Pino/Pino HTTP; Winston is
+not a repository dependency. Services with an existing structured wrapper
+(`mcp-host`, HCC, workflow recipes, and the workflow approval reader) should
+continue using that wrapper rather than bypassing it.
+
+When editing a file, replace its direct `console.*` calls with the existing
+service logger, preserve levels/context/redaction, and keep the change scoped
+to that file plus minimal support. Do not start a repository-wide logging
+migration or add a second logger convention. Direct console output is reserved
+for logger adapters, explicit CLI/bootstrap output, tests, E2E/fixtures, and
+intentional development diagnostics; never emit secrets, tokens, credentials,
+DSNs, private URLs, or raw request/response bodies.
