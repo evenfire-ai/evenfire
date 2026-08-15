@@ -119,6 +119,12 @@ describe('FilesPage', () => {
         gfs: {
           getPathForFile: vi.fn((file: File) => file.name),
         },
+        team: {
+          directory: vi.fn(async () => ({ items: [] })),
+        },
+        agents: {
+          listMine: vi.fn(async () => []),
+        },
       },
     })
   })
@@ -248,7 +254,7 @@ describe('FilesPage', () => {
       target: { files: [new File(['root upload'], 'root.md', { type: 'text/markdown' })] },
     })
     await waitFor(() =>
-      expect(createFile).toHaveBeenCalledWith(rootResourceId, 'root.md', 'cm9vdCB1cGxvYWQ=')
+      expect(createFile).toHaveBeenCalledWith(rootResourceId, 'root.md', 'root.md')
     )
   })
 

@@ -938,7 +938,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 </p>
               </div>
             </div>
-          ) : visibleResources.length === 0 ? (
+          ) : !visibleFailure && visibleResources.length === 0 ? (
             <div data-testid={isOperatorRoot ? 'gfs-empty-operator' : 'gfs-empty-shared'}>
               <EmptyState
                 title={
