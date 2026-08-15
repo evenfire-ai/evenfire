@@ -9,6 +9,7 @@ import type { UploadPartRow, UploadSessionRow } from './uploadSession'
 
 const UPLOAD_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PARENT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const FINALIZER_SUBJECT = 'host:1st:mcp-host/gfs-finalizer-test'
 const BODY = Buffer.from('published upload')
 const SHA256 = createHash('sha256').update(BODY).digest('hex')
 
@@ -17,8 +18,8 @@ function session(): UploadSessionRow {
     uploadId: UPLOAD_ID,
     idempotencyKey: 'finalizer-test',
     drive: 'main',
-    ownerSubject: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
-    primarySubject: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    ownerSubject: FINALIZER_SUBJECT,
+    primarySubject: FINALIZER_SUBJECT,
     operation: 'create',
     requestFingerprint: 'fingerprint',
     parentRid: PARENT_ID,
