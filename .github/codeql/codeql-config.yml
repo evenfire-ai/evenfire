@@ -5,3 +5,8 @@ name: Evenfire CodeQL configuration
 disable-default-queries: true
 queries:
   - uses: ./.github/codeql/queries/evenfire-security-and-quality.qls
+
+# Query-test fixtures intentionally contain vulnerable examples. Keep them in
+# the checkout for `codeql test run`, but out of the production JS/TS database.
+paths-ignore:
+  - .github/codeql/queries/test/**
