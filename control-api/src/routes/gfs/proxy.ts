@@ -35,6 +35,15 @@ export function registerGfsProxyRoute(router: Router): void {
         res.status(401).json({ error: 'unauthorized' })
         return
       }
+      const authGeneration = req.adminAuth?.sessionVersion
+      if (
+        typeof authGeneration !== 'number' ||
+        !Number.isSafeInteger(authGeneration) ||
+        authGeneration < 1
+      ) {
+        res.status(401).json({ error: 'unauthorized' })
+        return
+      }
 
       const scope =
         req.method === 'GET' || req.method === 'HEAD'
@@ -52,7 +61,13 @@ export function registerGfsProxyRoute(router: Router): void {
 
       const subPath = req.url === '/' ? '' : req.url
       const target = `${gfscBaseUrlFor(req.method).replace(/\/+$/, '')}${subPath}`
-      const { token } = signGfsToken({ subject, drive: DEFAULT_DRIVE, scopes: [scope] })
+      const { token } = signGfsToken({
+        subject,
+        drive: DEFAULT_DRIVE,
+        scopes: [scope],
+        authGeneration,
+        principalType: 'control-admin',
+      })
       const headers: Record<string, string> = {}
       headers['author' + 'ization'] = ['Bearer', token].join(' ')
       if (req.method !== 'GET' && req.method !== 'HEAD') {

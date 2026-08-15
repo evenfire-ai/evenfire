@@ -1,7 +1,12 @@
 import { Router } from 'express'
 import type { NextFunction, Response } from 'express'
+import type { Request } from 'express'
+import { rateLimit } from 'express-rate-limit'
+import { randomUUID } from 'node:crypto'
+import { isIP } from 'node:net'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { config } from '../config.js'
 import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
@@ -21,9 +26,100 @@ import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware
 // client (a wedged gfsc looks identical to an internal bug).
 const PROPAGATED = new Set([400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504])
 const STREAM_HEADERS = ['content-type', 'content-length', 'content-disposition']
+const CONTROL_API_ERROR_HEADERS = [
+  'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'x-request-id',
+] as const
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const EXTERNAL_GFS_EDGE_WINDOW_MS = 60_000
+
+function retryAfterSecondsFromHeader(value: unknown): number {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) return raw
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  const seconds = Number(text)
+  if (Number.isSafeInteger(seconds) && seconds > 0) return seconds
+  const retryAt = Date.parse(text)
+  if (Number.isFinite(retryAt)) return Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))
+  return 1
+}
+
+export type ExternalGfsEdgeLimits = {
+  aggregatePerMin: number
+  authenticatedIpPerMin: number
+  tokenIpPerMin: number
+}
+
+/**
+ * Derive the coarse edge backstop from the number of users expected to share
+ * one trusted proxy address. The values deliberately scale the edge only:
+ * Control API PG buckets still enforce the 10/min token and 30/min
+ * session/actor product budgets across replicas.
+ */
+const DEFAULT_EXTERNAL_GFS_EDGE_LIMITS: ExternalGfsEdgeLimits = {
+  aggregatePerMin: config.externalGfsEdgeAggregateRlPerMin,
+  authenticatedIpPerMin: config.externalGfsEdgeAuthenticatedIpRlPerMin,
+  tokenIpPerMin: config.externalGfsEdgeTokenIpRlPerMin,
+}
+
+type GfsAuthedRequest = AuthedRequest & { gfsRequestId?: string }
+type GfsRequestOptions = {
+  query?: Record<string, string | undefined>
+  body?: unknown
+  userSessionToken?: string
+  extraHeaders?: Record<string, string>
+}
+
+function attachGfsRequestId(req: Request, res: Response, next: NextFunction): void {
+  const raw = req.header('x-request-id')?.trim()
+  const requestId = raw && UUID_ANY_RE.test(raw) ? raw.toLowerCase() : randomUUID()
+  ;(req as GfsAuthedRequest).gfsRequestId = requestId
+  res.setHeader('x-request-id', requestId)
+  next()
+}
+
+function withGfsRequestId(req: GfsAuthedRequest, options: GfsRequestOptions): GfsRequestOptions {
+  // The control-api is behind profile-control-funnel, which appends its own
+  // peer to X-Forwarded-For. Preserve the external-rest API's proxy-attested
+  // client address as the first value so the control-api's pre-resolution
+  // limiter can enforce its approved per-source-IP bucket. This overwrites
+  // any caller-supplied value; only req.ip (after this service's trust-proxy
+  // policy) is propagated across the authenticated service boundary.
+  const clientIp = req.ip?.trim()
+  const forwardedClientIp = clientIp && isIP(clientIp) !== 0 ? clientIp : undefined
+  return {
+    ...options,
+    extraHeaders: {
+      ...options.extraHeaders,
+      'x-request-id': req.gfsRequestId!,
+      ...(forwardedClientIp ? { 'x-forwarded-for': forwardedClientIp } : {}),
+    },
+  }
+}
+
+function gfsControlApiRequest<T>(
+  req: GfsAuthedRequest,
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  path: string,
+  options: GfsRequestOptions
+): Promise<T> {
+  return controlApiRequest<T>(method, path, withGfsRequestId(req, options))
+}
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof ControlApiError && PROPAGATED.has(error.status)) {
+    // The internal client has already filtered this map. Keep the allowlist at
+    // this last hop too so a hand-constructed/mocked ControlApiError cannot
+    // accidentally turn arbitrary internal response headers into public ones.
+    for (const name of CONTROL_API_ERROR_HEADERS) {
+      const value = error.headers?.[name]
+      if (value) res.setHeader(name, value)
+    }
     const body =
       error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
     res.status(error.status).json(body)
@@ -32,14 +128,59 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
   next(error)
 }
 
-export function createGfsRouter(): Router {
+export function createGfsRouter(options?: { edgeLimits?: ExternalGfsEdgeLimits }): Router {
   const router = Router()
+  const edgeLimits = options?.edgeLimits ?? DEFAULT_EXTERNAL_GFS_EDGE_LIMITS
 
+  const edgeLimiter = (
+    limit: number,
+    bucket: string,
+    options?: { keyGenerator?: (req: Request) => string }
+  ) =>
+    rateLimit({
+      windowMs: EXTERNAL_GFS_EDGE_WINDOW_MS,
+      limit,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      identifier: `gfs-edge-${bucket}`,
+      ...(options?.keyGenerator ? { keyGenerator: options.keyGenerator } : {}),
+      handler: (_req, res) => {
+        const retryAfterSeconds = retryAfterSecondsFromHeader(res.getHeader('Retry-After'))
+        res.status(429).json({
+          error: 'Too Many Requests',
+          rateLimitLayer: 'external-rest-edge',
+          rateLimitBucket: bucket,
+          retryAfterSeconds,
+        })
+      },
+    })
+
+  // Keep direct, recognised edge guards at this service as well as the
+  // cross-replica Control API buckets. They run before JWT work and prevent a
+  // client from using the proxy hop to make auth or downstream requests
+  // unbounded. The aggregate and authenticated class buckets are deliberately
+  // sized for a shared NAT address; the token bucket remains tighter. The
+  // narrower buckets run first so their rejected requests do not consume
+  // broader capacity. The Control API owns the authoritative per-user/session/
+  // actor budgets.
+  router.use('/me/gfs', attachGfsRequestId)
+  router.use('/me/gfs/token', edgeLimiter(edgeLimits.tokenIpPerMin, 'token-ip'))
+  router.use('/me/gfs', edgeLimiter(edgeLimits.authenticatedIpPerMin, 'authenticated-ip'))
+  router.use(
+    '/me/gfs',
+    edgeLimiter(edgeLimits.aggregatePerMin, 'aggregate-ip', {
+      // This is intentionally a process-wide backstop, not another per-IP
+      // bucket. The authenticated-IP limiter above owns client fairness;
+      // keeping a constant key makes distributed source-IP floods observable
+      // at this edge instead of allowing the aggregate budget to be bypassed.
+      keyGenerator: () => 'gfs-edge-aggregate',
+    })
+  )
   router.use('/me/gfs', requireAuth)
 
   router.post('/me/gfs/token', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('POST', '/external/gfs/token', {
+      const data = await gfsControlApiRequest(req, 'POST', '/external/gfs/token', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
       })
@@ -51,7 +192,7 @@ export function createGfsRouter(): Router {
 
   router.get('/me/gfs/resolve', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('GET', '/external/gfs/resolve', {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/resolve', {
         userSessionToken: extractAuthToken(req),
         query: { uri: typeof req.query.uri === 'string' ? req.query.uri : undefined },
       })
@@ -63,7 +204,7 @@ export function createGfsRouter(): Router {
 
   router.get('/me/gfs/resources', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('GET', '/external/gfs/resources', {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/resources', {
         userSessionToken: extractAuthToken(req),
         query: {
           drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
@@ -79,7 +220,8 @@ export function createGfsRouter(): Router {
 
   router.get('/me/gfs/resources/:id/children', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'GET',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}/children`,
         {
@@ -99,7 +241,8 @@ export function createGfsRouter(): Router {
 
   router.get('/me/gfs/resources/:id/affordances', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'GET',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}/affordances`,
         {
@@ -115,7 +258,8 @@ export function createGfsRouter(): Router {
 
   router.patch('/me/gfs/resources/:id', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'PATCH',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}`,
         {
@@ -132,7 +276,8 @@ export function createGfsRouter(): Router {
 
   router.post('/me/gfs/resources/:id/children', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'POST',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}/children`,
         {
@@ -149,7 +294,8 @@ export function createGfsRouter(): Router {
 
   router.put('/me/gfs/resources/:id/content', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'PUT',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}/content`,
         {
@@ -166,7 +312,8 @@ export function createGfsRouter(): Router {
 
   router.delete('/me/gfs/resources/:id', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'DELETE',
         `/external/gfs/resources/${encodeURIComponent(req.params.id)}`,
         {
@@ -186,10 +333,10 @@ export function createGfsRouter(): Router {
       const upstream = await controlApiStreamRequest(
         'GET',
         `/external/gfs/proxy/${encodeURIComponent(req.params.rid)}`,
-        {
+        withGfsRequestId(req, {
           userSessionToken: extractAuthToken(req),
           query: { drive: typeof req.query.drive === 'string' ? req.query.drive : undefined },
-        }
+        })
       )
       res.status(upstream.status)
       for (const header of STREAM_HEADERS) {
@@ -218,7 +365,7 @@ export function createGfsRouter(): Router {
   // powers per-row revoke in the Manage modal.
   router.get('/me/gfs/grants', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('GET', '/external/gfs/grants', {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/grants', {
         userSessionToken: extractAuthToken(req),
         query: {
           drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
@@ -233,7 +380,7 @@ export function createGfsRouter(): Router {
 
   router.put('/me/gfs/grants', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('PUT', '/external/gfs/grants', {
+      const data = await gfsControlApiRequest(req, 'PUT', '/external/gfs/grants', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
       })
@@ -245,7 +392,8 @@ export function createGfsRouter(): Router {
 
   router.delete('/me/gfs/grants/:id', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'DELETE',
         `/external/gfs/grants/${encodeURIComponent(req.params.id)}`,
         { userSessionToken: extractAuthToken(req) }
@@ -258,7 +406,7 @@ export function createGfsRouter(): Router {
 
   router.post('/me/gfs/shares', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest('POST', '/external/gfs/shares', {
+      const data = await gfsControlApiRequest(req, 'POST', '/external/gfs/shares', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
       })
@@ -268,9 +416,25 @@ export function createGfsRouter(): Router {
     }
   })
 
+  router.get('/me/gfs/shares', async (req: AuthedRequest, res, next) => {
+    try {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/shares', {
+        userSessionToken: extractAuthToken(req),
+        query: {
+          drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
+          resourceId: typeof req.query.resourceId === 'string' ? req.query.resourceId : undefined,
+        },
+      })
+      res.status(200).json(data)
+    } catch (error) {
+      forwardControlApiError(error, res, next)
+    }
+  })
+
   router.delete('/me/gfs/shares/:id', async (req: AuthedRequest, res, next) => {
     try {
-      const data = await controlApiRequest(
+      const data = await gfsControlApiRequest(
+        req,
         'DELETE',
         `/external/gfs/shares/${encodeURIComponent(req.params.id)}`,
         { userSessionToken: extractAuthToken(req) }
