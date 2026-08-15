@@ -758,6 +758,8 @@ describe('indexed upload relay canonical drive', () => {
       subject: U1,
       drive: 'main',
       scopes: ['gfs.write'],
+      authGeneration: 1,
+      principalType: 'user',
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
@@ -833,7 +835,13 @@ describe('indexed upload relay canonical drive', () => {
     expect(fetchMock).toHaveBeenCalledTimes(9)
     expect(mockSignGfsToken).toHaveBeenCalledTimes(9)
     for (const [input] of mockSignGfsToken.mock.calls) {
-      expect(input).toEqual({ subject: U1, drive: 'archive', scopes: ['gfs.write'] })
+      expect(input).toEqual({
+        subject: U1,
+        drive: 'archive',
+        scopes: ['gfs.write'],
+        authGeneration: 1,
+        principalType: 'user',
+      })
     }
     expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual([
       'http://gfsc-writer.gfs.svc:8087/v1/capabilities',

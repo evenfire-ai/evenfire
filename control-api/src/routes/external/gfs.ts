@@ -1169,7 +1169,16 @@ async function proxyUploadToGfsc(
   query?: Record<string, string | undefined>
 ): Promise<void> {
   const claims = req.externalAuth!
-  const { token } = signGfsToken({ subject: claims.userId, drive, scopes: [GFS_WRITE_SCOPE] })
+  const { token } = signGfsToken({
+    subject: claims.userId,
+    drive,
+    scopes: [GFS_WRITE_SCOPE],
+    // GFSC resolves user authority against users.lifecycle_version on every
+    // request.  The session generation must cross this relay boundary or a
+    // valid external session is rejected as an un-fenced user token.
+    authGeneration: claims.authGeneration,
+    principalType: 'user',
+  })
   const targetUrl = new URL(`${config.gfscWriteBaseUrl.replace(/\/+$/, '')}${gfscPath}`)
   for (const [key, value] of Object.entries(query ?? {})) {
     if (value !== undefined && value !== '') targetUrl.searchParams.set(key, value)
