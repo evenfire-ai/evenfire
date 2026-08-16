@@ -547,6 +547,15 @@ jobs:
           kubectl kustomize deploy/overlays/minikube > /tmp/clerum-minikube.yaml
           kubectl kustomize deploy/overlays/minikube-no-uis > /tmp/clerum-minikube-no-uis.yaml
 
+      - name: Validate NP-08 caller-bound HCC contract
+        run: |
+          bash scripts/tests/test-np08-render-contract.sh \
+            /tmp/clerum-minikube.yaml \
+            /tmp/clerum-minikube-no-uis.yaml
+
+      - name: Test NP-08 render contract rejection fixtures
+        run: bash scripts/tests/test-np08-render-contract-fixtures.sh /tmp/clerum-minikube.yaml
+
       - name: cloudflared must not render into the minikube overlays
         run: |
           for f in /tmp/clerum-minikube.yaml /tmp/clerum-minikube-no-uis.yaml; do

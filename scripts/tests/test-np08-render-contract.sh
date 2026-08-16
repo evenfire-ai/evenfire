@@ -107,6 +107,14 @@ for rendered in "$@"; do
     policies = documents.select do |document|
       document["kind"] == "NetworkPolicy" && document.dig("metadata", "namespace") == "mcp-host"
     end
+    broad_host_egress = policies.any? do |policy|
+      Array(policy.dig("spec", "egress")).any? do |rule|
+        !rule.key?("to") || Array(rule["to"]).empty? ||
+          !rule.key?("ports") || Array(rule["ports"]).empty?
+      end
+    end
+    abort("mcp-host must not gain broad destination or all-port egress") if broad_host_egress
+
     hcc_lane = policies.any? do |policy|
       Array(policy.dig("spec", "egress")).any? do |rule|
         ports = Array(rule["ports"])
@@ -120,12 +128,61 @@ for rendered in "$@"; do
     end
     abort("mcp-host to HCC TCP 8081 lane is absent") unless hcc_lane
 
+    allows_tcp_port = lambda do |rule, expected_port|
+      ports = rule["ports"]
+      next true if ports.nil? || Array(ports).empty?
+
+      Array(ports).any? do |port|
+        next false unless port.fetch("protocol", "TCP") == "TCP"
+
+        first = port["port"]
+        last = port.fetch("endPort", first)
+        if first.is_a?(Integer) && last.is_a?(Integer)
+          first <= expected_port && expected_port <= last
+        else
+          first.to_s == expected_port.to_s
+        end
+      end
+    end
     host_proxy_lane = policies.any? do |policy|
       Array(policy.dig("spec", "egress")).any? do |rule|
-        Array(rule["ports"]).any? { |port| port["port"] == 8083 }
+        allows_tcp_port.call(rule, 8083)
       end
     end
     abort("mcp-host must not gain an egress lane to mcp-proxy TCP 8083") if host_proxy_lane
+
+    secret_reading_role = lambda do |role|
+      Array(role["rules"]).any? do |rule|
+        api_groups = Array(rule["apiGroups"])
+        resources = Array(rule["resources"])
+        verbs = Array(rule["verbs"])
+        (api_groups.include?("") || api_groups.include?("*")) &&
+          (resources.include?("secrets") || resources.include?("*")) &&
+          !(verbs & %w[get list watch *]).empty?
+      end
+    end
+    roles = documents.each_with_object({}) do |document, index|
+      next unless %w[Role ClusterRole].include?(document["kind"])
+
+      namespace = document["kind"] == "Role" ? document.dig("metadata", "namespace") : nil
+      index[[document["kind"], namespace, document.dig("metadata", "name")]] = document
+    end
+    host_mcp_secret_grant = documents.any? do |binding|
+      next false unless %w[RoleBinding ClusterRoleBinding].include?(binding["kind"])
+
+      binding_namespace = binding.dig("metadata", "namespace")
+      host_subject = Array(binding["subjects"]).any? do |subject|
+        subject["kind"] == "ServiceAccount" && subject["namespace"] == "mcp-host"
+      end
+      next false unless host_subject
+      next false unless binding["kind"] == "ClusterRoleBinding" || binding_namespace == "mcp-server"
+
+      role_kind = binding.dig("roleRef", "kind")
+      role_namespace = role_kind == "Role" ? binding_namespace : nil
+      role = roles[[role_kind, role_namespace, binding.dig("roleRef", "name")]]
+      role && secret_reading_role.call(role)
+    end
+    abort("mcp-host ServiceAccounts must not receive MCP Secret read grants") if host_mcp_secret_grant
   ' "${rendered}"
 
   echo "PASS: NP-08 rendered contract (${rendered##*/})"
