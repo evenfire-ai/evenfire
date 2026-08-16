@@ -23,7 +23,6 @@ const principal: VerifiedMcpHostPrincipal = {
 }
 const principalB: VerifiedMcpHostPrincipal = {
   ...principal,
-  subject: 'mcp-host/standalone-b',
   hostName: 'host-b',
   hostUid: 'host-uid-b',
   jti: 'jti-b',
