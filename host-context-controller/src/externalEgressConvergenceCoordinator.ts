@@ -44,6 +44,10 @@ type ExternalEgressCoordinatorDependencies = {
     server: McpServerCRD,
     retry: ExternalEgressRetryHandle
   ) => Promise<void>
+  // Smallest DNS TTL (ms) observed across external-egress resolutions, or
+  // Infinity if none. startPeriodicResync reads it to advance the next resync to
+  // <= TTL/2 (H2, issue #299).
+  externalEgressRefreshMinTtlMs: () => number
 }
 
 export type ExternalEgressStartupGates = {
@@ -97,6 +101,26 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * External-egress resync delay (ms), H2 (issue #299). The configured interval is
+ * the backstop; a finite observed DNS TTL advances the delay to <= TTL/2 so a
+ * rotating low-TTL host is sampled every rotation. The floor is the hard lower
+ * bound to avoid a hot-loop. Pure and unit-testable; consumed by
+ * {@link ExternalEgressConvergenceCoordinator.startPeriodicResync}.
+ */
+export function externalEgressResyncDelayMs(
+  intervalSec: number,
+  floorSec: number,
+  minObservedTtlMs = Infinity
+): number {
+  const floorMs = floorSec * 1000
+  const configuredMs = intervalSec * 1000
+  const ttlAwareMs = Number.isFinite(minObservedTtlMs)
+    ? Math.min(configuredMs, minObservedTtlMs / 2)
+    : configuredMs
+  return Math.max(ttlAwareMs, floorMs)
+}
+
+/**
  * Owns temporal coordination for external-egress convergence. Kubernetes
  * authority and mutations remain behind callbacks supplied by the watcher.
  */
@@ -109,17 +133,33 @@ export class ExternalEgressConvergenceCoordinator {
   private readonly retrySlots = new Map<string, object>()
   private readonly inFlight = new Map<string, Promise<void>>()
   private resyncInFlight: Promise<void> | null = null
-  private resyncTimer: ReturnType<typeof setInterval> | null = null
+  private resyncTimer: ReturnType<typeof setTimeout> | null = null
   private stopped = false
 
   constructor(private readonly dependencies: ExternalEgressCoordinatorDependencies) {}
 
-  startPeriodicResync(intervalSec: number): void {
+  startPeriodicResync(intervalSec: number, floorSec: number): void {
     if (this.stopped || intervalSec <= 0 || this.resyncTimer) return
-    this.resyncTimer = setInterval(() => {
-      void this.runResync()
-    }, intervalSec * 1000)
-    console.log(`[K8s] External egress periodic DNS resync enabled (every ${intervalSec}s)`)
+    // Self-rescheduling (not a fixed setInterval) so the delay can advance to
+    // <= observed TTL/2 (H2, issue #299), and rescheduling AFTER each pass
+    // completes guarantees no overlapping resyncs. runResync still dedupes any
+    // in-flight pass; the floor is the hard lower bound against a hot-loop.
+    const scheduleNext = (): void => {
+      if (this.stopped) return
+      const delayMs = externalEgressResyncDelayMs(
+        intervalSec,
+        floorSec,
+        this.dependencies.externalEgressRefreshMinTtlMs()
+      )
+      this.resyncTimer = setTimeout(() => {
+        void this.runResync().finally(scheduleNext)
+      }, delayMs)
+      this.resyncTimer.unref?.()
+    }
+    scheduleNext()
+    console.log(
+      `[K8s] External egress periodic DNS resync enabled (every ${intervalSec}s, advancing to <= TTL/2)`
+    )
   }
 
   runResync(): Promise<void> {
@@ -362,7 +402,7 @@ export class ExternalEgressConvergenceCoordinator {
     this.stopped = true
     this.retryLimiter.cancelPending()
     if (this.resyncTimer) {
-      clearInterval(this.resyncTimer)
+      clearTimeout(this.resyncTimer)
       this.resyncTimer = null
     }
     for (const timer of this.retryTimers.values()) {

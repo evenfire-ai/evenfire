@@ -55,6 +55,7 @@ function coordinator(overrides: CoordinatorOverrides = {}) {
     enqueue: async (_selected, work) => work(),
     mutate,
     replay,
+    externalEgressRefreshMinTtlMs: () => Infinity,
     ...overrides,
   })
   return { instance, mutate, replay, servers }
@@ -762,12 +763,82 @@ describe('ExternalEgressConvergenceCoordinator', () => {
     const { instance, mutate, servers } = coordinator()
     servers.set(selected.name, selected)
 
-    instance.startPeriodicResync(1)
+    instance.startPeriodicResync(1, 1)
     await vi.advanceTimersByTimeAsync(1000)
     expect(mutate).toHaveBeenCalledOnce()
 
     instance.stop()
     await vi.advanceTimersByTimeAsync(5000)
     expect(mutate).toHaveBeenCalledOnce()
+  })
+
+  it('arms one resync at a time, rescheduling only after each pass completes (H2)', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const selected = server('web-search')
+    const release: Array<() => void> = []
+    const mutate = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          release.push(resolve)
+        })
+    )
+    const { instance, servers } = coordinator({ mutate })
+    servers.set(selected.name, selected)
+
+    instance.startPeriodicResync(10, 5)
+    // First pass fires at the configured interval (10s) and then blocks.
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(mutate).toHaveBeenCalledOnce()
+
+    // Complete the pass off the fixed grid (at t=17s). The successor is armed
+    // relative to completion (t=27s), NOT on a fixed 20s/30s interval grid.
+    await vi.advanceTimersByTimeAsync(7_000)
+    release[0]()
+    await flushMicrotasks()
+
+    // A fixed setInterval would fire a second pass at t=20s; the self-
+    // rescheduling timer must not, because it only re-armed at completion.
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(mutate).toHaveBeenCalledOnce()
+
+    // The successor fires 10s after completion (t=27s).
+    await vi.advanceTimersByTimeAsync(7_000)
+    expect(mutate).toHaveBeenCalledTimes(2)
+
+    instance.stop()
+    release.forEach(resolve => resolve())
+  })
+
+  it('advances the next periodic resync to <= observed TTL/2 (H2, issue #299)', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const selected = server('web-search')
+    // The mutation observes a low DNS TTL, ratcheting the coordinator's source
+    // down; scheduleNext reads it AFTER the pass and must advance to <= TTL/2.
+    let minObservedTtlMs = Infinity
+    const mutate = vi.fn(async () => {
+      minObservedTtlMs = 20_000
+    })
+    const { instance, servers } = coordinator({
+      mutate,
+      externalEgressRefreshMinTtlMs: () => minObservedTtlMs,
+    })
+    servers.set(selected.name, selected)
+
+    // Interval 60s, floor 5s. No TTL observed yet, so the first pass fires at 60s.
+    instance.startPeriodicResync(60, 5)
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(mutate).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mutate).toHaveBeenCalledOnce()
+
+    // TTL/2 = 10s now governs the next delay, far below the 60s backstop.
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(mutate).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mutate).toHaveBeenCalledTimes(2)
+
+    instance.stop()
   })
 })

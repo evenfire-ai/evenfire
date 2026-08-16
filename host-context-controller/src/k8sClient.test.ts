@@ -152,8 +152,10 @@ const mocks = vi.hoisted(() => {
   }
 })
 
-// Mutable so a test can enable the external-egress resync timer (R1-M4); every
-// other test keeps externalEgressResyncIntervalSec: 0 (reset in afterEach).
+// Kept at externalEgressResyncIntervalSec: 0 in every test (reset in afterEach):
+// the external-egress periodic resync timer now lives in the convergence
+// coordinator and is unit-tested in externalEgressConvergenceCoordinator.test.ts,
+// so the k8sClient integration tests leave it disabled to avoid a stray timer.
 const mockConfig = vi.hoisted(() => ({
   devMode: false,
   namespace: 'mcp-server',

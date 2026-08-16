@@ -19,6 +19,9 @@ import {
   type ExternalEgressRetryHandle,
   type ExternalEgressWatchEventType,
 } from './externalEgressConvergenceCoordinator'
+// Re-exported for the H2 unit tests that import it from this module (the pure
+// delay helper now lives with its sole consumer, the convergence coordinator).
+export { externalEgressResyncDelayMs } from './externalEgressConvergenceCoordinator'
 import { gfsDefaultFactoryConfig } from './gfsConfig'
 import { GfsReconciler } from './gfsReconciler'
 import { ControlApiGfsSeedClient } from './gfsSeedClient'
@@ -111,24 +114,6 @@ const PLURAL_COMMUNICATIONCHANNELS = 'communicationchannels'
 const INITIAL_CONVERGENCE_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
 const INVENTORY_CACHE_RECOVERY_RETRY_MS = 5000
 
-/**
- * External-egress resync delay (ms), H2 (issue #299). The configured interval is
- * the backstop; a finite observed DNS TTL advances the delay to <= TTL/2 so a
- * rotating low-TTL host is sampled every rotation. The floor is the hard lower
- * bound to avoid a hot-loop. Pure and unit-testable.
- */
-export function externalEgressResyncDelayMs(
-  intervalSec: number,
-  floorSec: number,
-  minObservedTtlMs = Infinity
-): number {
-  const floorMs = floorSec * 1000
-  const configuredMs = intervalSec * 1000
-  const ttlAwareMs = Number.isFinite(minObservedTtlMs)
-    ? Math.min(configuredMs, minObservedTtlMs / 2)
-    : configuredMs
-  return Math.max(ttlAwareMs, floorMs)
-}
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
 const HOST_CACHE_RECOVERY_RETRY_MS = 5000
 const HOST_WATCH_RECONCILE_RETRY_DELAYS_MS = [5000, 15000, 30000]
@@ -737,6 +722,7 @@ export class McpServerWatcher implements McpServerProvider {
     mutate: (type, server, options) => this.performExternalEgressMutation(type, server, options),
     replay: (type, server, retry) =>
       this.reconcileMcpServerWatchEvent(type, server, this.mcpWatchGeneration, retry),
+    externalEgressRefreshMinTtlMs: () => this.netPolReconciler.externalEgressRefreshMinTtlMs,
   })
   private readonly initialConvergenceRetryTimers = new Map<
     InitialConvergenceLane,
@@ -2529,8 +2515,13 @@ export class McpServerWatcher implements McpServerProvider {
     // #205 delegates external-egress periodic resync to the convergence
     // coordinator. Its runResyncCore drives reconcileExternalEgress, so the
     // #299 sliding-window accumulation still converges on DNS rotation between
-    // McpServer events (the coordinator, not a standalone timer, owns cadence).
-    this.externalEgressCoordinator.startPeriodicResync(externalEgressResyncSec)
+    // McpServer events. The coordinator owns cadence with a self-rescheduling
+    // timer that advances to <= observed TTL/2 (H2, issue #299), bounded by the
+    // configured floor.
+    this.externalEgressCoordinator.startPeriodicResync(
+      externalEgressResyncSec,
+      config.externalEgressRefreshFloorSec
+    )
 
     // Full convergence is observable and retains each lane's existing retry or
     // periodic-resync contract, but it no longer extends provider.start().
