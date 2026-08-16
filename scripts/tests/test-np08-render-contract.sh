@@ -115,7 +115,7 @@ for rendered in "$@"; do
     end
     abort("mcp-host must not gain broad destination or all-port egress") if broad_host_egress
 
-    broad_internal_peer = lambda do |peer|
+    broad_internal_peer = lambda do |peer, policy|
       abort("mcp-host egress contains an empty or unknown peer") unless peer.is_a?(Hash) && !peer.empty? && (peer.keys - %w[ipBlock namespaceSelector podSelector]).empty?
       next true if peer["ipBlock"].nil? && peer["namespaceSelector"].nil? && peer["podSelector"].nil?
       if peer["ipBlock"]
@@ -123,7 +123,13 @@ for rendered in "$@"; do
         next true unless ip_block.is_a?(Hash) && ip_block["cidr"].is_a?(String) && !ip_block["cidr"].empty?
         cidr = ip_block["cidr"]
         if cidr == "0.0.0.0/0" || cidr == "::/0"
-          next true unless Array(ip_block["except"]).any?
+          next true unless Array(ip_block["except"]).sort == %w[
+            0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8
+            169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24
+            192.31.196.0/24 192.52.193.0/24 192.88.99.0/24 192.168.0.0/16
+            192.175.48.0/24 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24
+            224.0.0.0/4 240.0.0.0/4
+          ].sort
         elsif !cidr.match?(%r{/(32|128)\z})
           next true
         end
@@ -131,7 +137,12 @@ for rendered in "$@"; do
       end
       namespace_selector = peer["namespaceSelector"]
       if namespace_selector.nil?
-        next false if peer["podSelector"].is_a?(Hash) && !peer["podSelector"].empty?
+        pod_selector = peer["podSelector"]
+        pod_labels = pod_selector.is_a?(Hash) ? pod_selector["matchLabels"] : nil
+        pod_expressions = pod_selector.is_a?(Hash) ? pod_selector["matchExpressions"] : nil
+        has_pod_selector = pod_labels.is_a?(Hash) && !pod_labels.empty? ||
+          pod_expressions.is_a?(Array) && !pod_expressions.empty?
+        next false if has_pod_selector
         next true
       end
       next true unless namespace_selector.is_a?(Hash)
@@ -139,11 +150,24 @@ for rendered in "$@"; do
       labels = namespace_selector["matchLabels"]
       namespace_name = labels.is_a?(Hash) ? labels["kubernetes.io/metadata.name"] : nil
       pod_selector = peer["podSelector"]
-      has_pod_selector = pod_selector.is_a?(Hash) && !pod_selector.empty?
+      pod_labels = pod_selector.is_a?(Hash) ? pod_selector["matchLabels"] : nil
+      pod_expressions = pod_selector.is_a?(Hash) ? pod_selector["matchExpressions"] : nil
+      has_pod_selector = pod_labels.is_a?(Hash) && !pod_labels.empty? ||
+        pod_expressions.is_a?(Array) && !pod_expressions.empty?
       if namespace_name == "mcp-server"
-        server_name = pod_selector.dig("matchLabels", "clerum.io/mcpserver") if has_pod_selector
+        server_name = pod_selector.dig("matchLabels", "clerum.io/mcpserver") if pod_selector.is_a?(Hash)
+        policy_labels = policy.dig("metadata", "labels")
+        source_labels = policy.dig("spec", "podSelector", "matchLabels")
+        context_bound_policy = policy_labels.is_a?(Hash) &&
+          policy_labels["clerum.io/policy-type"] == "context-allow" &&
+          policy_labels["clerum.io/context"].is_a?(String) && !policy_labels["clerum.io/context"].empty? &&
+          policy_labels["clerum.io/mcpserver"].is_a?(String) && !policy_labels["clerum.io/mcpserver"].empty? &&
+          source_labels.is_a?(Hash) &&
+          source_labels["clerum.io/managed-by"] == "host-context-controller" &&
+          source_labels["clerum.io/context"] == policy_labels["clerum.io/context"]
         exact_server_selector = server_name.is_a?(String) && !server_name.empty? &&
-          Array(pod_selector["matchExpressions"]).empty?
+          Array(pod_selector["matchExpressions"]).empty? &&
+          context_bound_policy && server_name == policy_labels["clerum.io/mcpserver"]
         next false if exact_server_selector
         next true
       end
@@ -153,7 +177,7 @@ for rendered in "$@"; do
     end
     broad_internal_egress = policies.any? do |policy|
       Array(policy.dig("spec", "egress")).any? do |rule|
-        Array(rule["to"]).any? { |peer| broad_internal_peer.call(peer) }
+        Array(rule["to"]).any? { |peer| broad_internal_peer.call(peer, policy) }
       end
     end
     abort("mcp-host must not gain broad internal or mcp-server egress") if broad_internal_egress

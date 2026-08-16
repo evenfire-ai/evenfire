@@ -63,7 +63,7 @@ wide="$(mutate wide 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host
 assert_result "${wide}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":false}'
 echo "PASS: live policy helper rejects wide internal selectors"
 
-mcp_server="$(mutate mcp-server 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "mcp-server" } }, "podSelector" => { "matchLabels" => { "clerum.io/mcpserver" => "server-a" } } }], "ports" => [{ "port" => 3000, "protocol" => "TCP" }] }')"
+mcp_server="$(mutate mcp-server 'data["items"] << { "apiVersion" => "networking.k8s.io/v1", "kind" => "NetworkPolicy", "metadata" => { "name" => "ctx-a-server-a-egress", "namespace" => "mcp-host", "labels" => { "clerum.io/policy-type" => "context-allow", "clerum.io/context" => "context-a", "clerum.io/mcpserver" => "server-a" } }, "spec" => { "podSelector" => { "matchLabels" => { "clerum.io/managed-by" => "host-context-controller", "clerum.io/context" => "context-a" } }, "policyTypes" => ["Egress"], "egress" => [{ "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "mcp-server" } }, "podSelector" => { "matchLabels" => { "clerum.io/mcpserver" => "server-a" } } }], "ports" => [{ "port" => 3000, "protocol" => "TCP" }] }] } }')"
 assert_result "${mcp_server}" '{"egress_contract_ok":true,"hcc_lane":true,"proxy_8083":false}'
 echo "PASS: live policy helper accepts a context-scoped MCP server peer"
 
