@@ -808,6 +808,46 @@ describe('ExternalEgressConvergenceCoordinator', () => {
     expect(mutate).toHaveBeenCalledOnce()
   })
 
+  it('warns once when periodic resync is disabled (intervalSec <= 0) and arms no timer', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const selected = server('web-search')
+    const { instance, mutate, servers } = coordinator()
+    servers.set(selected.name, selected)
+
+    instance.startPeriodicResync(0, 5)
+    // No timer armed: advancing time never triggers a resync pass.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(mutate).not.toHaveBeenCalled()
+
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('External egress periodic DNS resync disabled')
+    )
+
+    // Called again while still disabled: no duplicate warning (once only).
+    instance.startPeriodicResync(-1, 5)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+
+    instance.stop()
+  })
+
+  it('does not warn about a disabled resync when it is enabled (intervalSec > 0)', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const selected = server('web-search')
+    const { instance, servers } = coordinator()
+    servers.set(selected.name, selected)
+
+    instance.startPeriodicResync(1, 1)
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('External egress periodic DNS resync disabled')
+    )
+
+    instance.stop()
+  })
+
   it('arms one resync at a time, rescheduling only after each pass completes (H2)', async () => {
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)

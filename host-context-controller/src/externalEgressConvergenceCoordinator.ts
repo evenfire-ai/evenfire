@@ -139,12 +139,29 @@ export class ExternalEgressConvergenceCoordinator {
   private readonly inFlight = new Map<string, Promise<void>>()
   private resyncInFlight: Promise<void> | null = null
   private resyncTimer: ReturnType<typeof setTimeout> | null = null
+  private resyncDisabledWarned = false
   private stopped = false
 
   constructor(private readonly dependencies: ExternalEgressCoordinatorDependencies) {}
 
   startPeriodicResync(intervalSec: number, floorSec: number): void {
-    if (this.stopped || intervalSec <= 0 || this.resyncTimer) return
+    if (this.stopped || this.resyncTimer) return
+    if (intervalSec <= 0) {
+      // Disabled. Warn once (mirrors the Host/SFS/GFS resync lanes) so the
+      // operational consequence is visible: without periodic resync the
+      // accumulated external-egress DNS allows are never refreshed, so a
+      // binding whose upstream DNS rotates (issue #299) can drift until an
+      // unrelated McpServer event triggers reconciliation.
+      if (!this.resyncDisabledWarned) {
+        this.resyncDisabledWarned = true
+        console.warn(
+          '[K8s] External egress periodic DNS resync disabled; accumulated DNS allows will not ' +
+            'be refreshed, so a binding whose upstream DNS rotates (issue #299) can drift until ' +
+            'another McpServer event triggers reconciliation.'
+        )
+      }
+      return
+    }
     // Self-rescheduling (not a fixed setInterval) so the delay can advance to
     // <= observed TTL/2 (H2, issue #299), and rescheduling AFTER each pass
     // completes guarantees no overlapping resyncs. runResync still dedupes any
