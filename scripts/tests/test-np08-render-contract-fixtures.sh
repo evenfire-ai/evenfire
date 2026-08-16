@@ -70,6 +70,27 @@ when 'wide-internal-egress'
     ],
     'ports' => [{ 'port' => 443, 'protocol' => 'TCP' }],
   }
+when 'broad-internal-expression'
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host'
+  end
+  abort('fixture source is missing mcp-host NetworkPolicy') unless policy
+  policy.fetch('spec').fetch('egress') << {
+    'to' => [
+      {
+        'namespaceSelector' => {
+          'matchLabels' => { 'kubernetes.io/metadata.name' => 'control-plane' },
+          'matchExpressions' => [{ 'key' => 'app', 'operator' => 'Exists' }],
+        },
+        'podSelector' => {
+          'matchExpressions' => [{ 'key' => 'app', 'operator' => 'Exists' }],
+        },
+      },
+    ],
+    'ports' => [{ 'port' => 443, 'protocol' => 'TCP' }],
+  }
 when 'named-port'
   policy = documents.find do |document|
     document['kind'] == 'NetworkPolicy' &&
@@ -174,6 +195,13 @@ assert_rejected \
   "${wide_internal_egress}" \
   'mcp-host must not gain broad internal or mcp-server egress' \
   'wide internal egress selector'
+
+broad_internal_expression="${tmpdir}/broad-internal-expression.yaml"
+mutate_render broad-internal-expression "${broad_internal_expression}"
+assert_rejected \
+  "${broad_internal_expression}" \
+  'mcp-host must not gain broad internal or mcp-server egress' \
+  'broad internal matchExpression selector'
 
 named_port="${tmpdir}/named-port.yaml"
 mutate_render named-port "${named_port}"

@@ -149,6 +149,9 @@ for rendered in "$@"; do
 
       labels = namespace_selector["matchLabels"]
       namespace_name = labels.is_a?(Hash) ? labels["kubernetes.io/metadata.name"] : nil
+      exact_namespace_selector = namespace_selector.keys.sort == ["matchLabels"] &&
+        labels == { "kubernetes.io/metadata.name" => namespace_name }
+      next true unless exact_namespace_selector
       pod_selector = peer["podSelector"]
       pod_labels = pod_selector.is_a?(Hash) ? pod_selector["matchLabels"] : nil
       pod_expressions = pod_selector.is_a?(Hash) ? pod_selector["matchExpressions"] : nil
@@ -157,12 +160,16 @@ for rendered in "$@"; do
       if namespace_name == "mcp-server"
         server_name = pod_selector.dig("matchLabels", "clerum.io/mcpserver") if pod_selector.is_a?(Hash)
         policy_labels = policy.dig("metadata", "labels")
-        source_labels = policy.dig("spec", "podSelector", "matchLabels")
+        source_selector = policy.dig("spec", "podSelector")
+        source_labels = source_selector.is_a?(Hash) ? source_selector["matchLabels"] : nil
         context_bound_policy = policy_labels.is_a?(Hash) &&
+          policy_labels["clerum.io/managed-by"] == "host-context-controller" &&
           policy_labels["clerum.io/policy-type"] == "context-allow" &&
           policy_labels["clerum.io/context"].is_a?(String) && !policy_labels["clerum.io/context"].empty? &&
           policy_labels["clerum.io/mcpserver"].is_a?(String) && !policy_labels["clerum.io/mcpserver"].empty? &&
+          source_selector.is_a?(Hash) && source_selector.keys.sort == ["matchLabels"] &&
           source_labels.is_a?(Hash) &&
+          source_labels.keys.sort == ["clerum.io/context", "clerum.io/managed-by"] &&
           source_labels["clerum.io/managed-by"] == "host-context-controller" &&
           source_labels["clerum.io/context"] == policy_labels["clerum.io/context"]
         exact_server_selector = server_name.is_a?(String) && !server_name.empty? &&
@@ -171,9 +178,27 @@ for rendered in "$@"; do
         next false if exact_server_selector
         next true
       end
-      next true if !labels.is_a?(Hash) || labels.empty?
+      if namespace_name == "control-plane"
+        exact_gateway = pod_selector.is_a?(Hash) &&
+          pod_selector.keys.sort == ["matchLabels"] &&
+          pod_selector["matchLabels"].is_a?(Hash) &&
+          Array(pod_selector["matchExpressions"]).empty? &&
+          %w[host-context-controller-api-gateway nginx-workflow-approval-gateway].include?(pod_selector.dig("matchLabels", "app")) &&
+          pod_selector["matchLabels"].keys == ["app"]
+        next false if exact_gateway
+        next true
+      end
+      if namespace_name == "kube-system"
+        exact_dns_namespace = pod_selector.nil?
+        exact_dns_pods = pod_selector.is_a?(Hash) &&
+          pod_selector.keys.sort == ["matchLabels"] &&
+          pod_selector["matchLabels"] == { "k8s-app" => "kube-dns" } &&
+          Array(pod_selector["matchExpressions"]).empty?
+        next false if exact_dns_namespace || exact_dns_pods
+        next true
+      end
 
-      !has_pod_selector && namespace_name != "kube-system"
+      next true
     end
     broad_internal_egress = policies.any? do |policy|
       Array(policy.dig("spec", "egress")).any? do |rule|
