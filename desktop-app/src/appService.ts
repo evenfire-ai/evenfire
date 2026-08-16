@@ -1081,6 +1081,16 @@ export class AppService {
     await this.gfsClient.revokeGrant(grantId, this.requireSessionToken())
   }
 
+  /** List direct URI shares on a resource for the combined access-management view. */
+  async listGfsShares(resourceId: string, drive?: string) {
+    return this.gfsClient.listShares({ resourceId, drive }, this.requireSessionToken())
+  }
+
+  /** Revoke a direct URI share by its server-issued row id. */
+  async revokeGfsShare(shareId: string) {
+    await this.gfsClient.revokeShare(shareId, this.requireSessionToken())
+  }
+
   /**
    * The caller's own agents with their canonical GFS host subjects — the grant
    * targets for per-agent delegation. Served fresh from external-rest-api

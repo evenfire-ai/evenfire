@@ -33,6 +33,26 @@ export interface AuthzContext {
   /** The token's `sub`, recorded verbatim in the audit row. */
   primarySubject: string;
   requestId?: string;
+  /** Desktop actor for a user-session or linked-admin broker request. */
+  desktopUserId?: string;
+  /** Effective linked Control Admin. Absent for ordinary users/direct admins. */
+  effectiveControlAdminId?: string;
+  /** Broker authority provenance; separate from permission-store evidence. */
+  authoritySource?: "user-session" | "linked-admin";
+}
+
+export function auditAttribution(ctx: AuthzContext): {
+  actorOnBehalfOf: string | null;
+  desktopUserId?: string;
+  authoritySource?: "user-session" | "linked-admin";
+} {
+  return {
+    actorOnBehalfOf: ctx.authoritySource === "linked-admin"
+      ? (ctx.effectiveControlAdminId ?? null)
+      : null,
+    desktopUserId: ctx.desktopUserId,
+    authoritySource: ctx.authoritySource,
+  };
 }
 
 export interface AuthorizationRequest {
@@ -179,6 +199,7 @@ export class PermissionClient {
         const append = async (queryable?: Queryable) => {
           for (const request of requests) await this.audit.record({
             subject: ctx.primarySubject,
+            ...auditAttribution(ctx),
             op: request.op,
             resourceId: request.resourceId,
             drive: ctx.drive,
@@ -253,6 +274,7 @@ export class PermissionClient {
         };
     await this.audit.record({
       subject: ctx.primarySubject,
+      ...auditAttribution(ctx),
       op,
       resourceId,
       drive: ctx.drive,

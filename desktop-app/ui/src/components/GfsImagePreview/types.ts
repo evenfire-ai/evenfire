@@ -4,4 +4,5 @@ export type GfsImagePreviewProps = {
   gfsUri: string
   mimeType: string
   onClose: () => void
+  onDownloadError?: (error: unknown) => void
 }

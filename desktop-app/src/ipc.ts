@@ -517,6 +517,18 @@ export function registerIpcHandlers(service: AppService): void {
     return service.revokeGfsGrant(sanitizeString(payload?.grantId))
   })
   ipcMain.handle(
+    'gfs:listShares',
+    async (event, payload: { resourceId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.listGfsShares(sanitizeString(payload?.resourceId), drive)
+    }
+  )
+  ipcMain.handle('gfs:revokeShare', async (event, payload: { shareId: string }) => {
+    assertTrustedSender(event)
+    return service.revokeGfsShare(sanitizeString(payload?.shareId))
+  })
+  ipcMain.handle(
     'gfs:createShare',
     async (event, payload: { resourceId: string; subjectKeys: string[]; drive?: string }) => {
       assertTrustedSender(event)

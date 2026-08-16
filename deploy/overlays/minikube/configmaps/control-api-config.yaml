@@ -32,6 +32,9 @@ data:
   CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL: 'http://127.0.0.1:8094'
   CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: 'http://127.0.0.1:3001'
   CONTROL_API_DESKTOP_APP_NAME: 'Evenfire'
+  # Self-hosted-only GFS operator parity. Managed/base deployments remain
+  # fail-closed because this narrow elevation flag is absent there.
+  CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED: 'true'
   CONTROL_API_CONTROL_UI_BASE_URL: 'http://127.0.0.1:3000'
   CONTROL_API_CONTROL_UI_APP_NAME: 'Evenfire'
   CONTROL_API_POLICY_AUTH_AUDIENCE: 'control-api'
