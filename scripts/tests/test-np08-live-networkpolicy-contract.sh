@@ -43,6 +43,18 @@ broad="$(mutate broad 'data["items"].find { |d| d["metadata"]["name"] == "mcp-ho
 assert_result "${broad}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":false}'
 echo "PASS: live policy helper rejects broad/all-port egress"
 
+missing_to="$(mutate missing-to 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "ports" => [{ "port" => 443, "protocol" => "TCP" }] }')"
+assert_result "${missing_to}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":false}'
+echo "PASS: live policy helper rejects missing destinations"
+
+missing_ports="$(mutate missing-ports 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "control-plane" } }, "podSelector" => { "matchLabels" => { "app" => "host-context-controller-api-gateway" } } }] }')"
+assert_result "${missing_ports}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":false}'
+echo "PASS: live policy helper rejects missing ports"
+
+empty_peer="$(mutate empty-peer 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{}], "ports" => [{ "port" => 443, "protocol" => "TCP" }] }')"
+assert_result "${empty_peer}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":false}'
+echo "PASS: live policy helper rejects an empty peer"
+
 named="$(mutate named 'data["items"].find { |d| d["metadata"]["name"] == "allow-dns-egress-mcp-host" }["spec"]["egress"].first["ports"].first["port"] = "mcp"')"
 assert_result "${named}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":false}'
 echo "PASS: live policy helper rejects named ports"
@@ -51,6 +63,14 @@ wide="$(mutate wide 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host
 assert_result "${wide}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":false}'
 echo "PASS: live policy helper rejects wide internal selectors"
 
+mcp_server="$(mutate mcp-server 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "mcp-server" } }, "podSelector" => { "matchLabels" => { "clerum.io/mcpserver" => "server-a" } } }], "ports" => [{ "port" => 3000, "protocol" => "TCP" }] }')"
+assert_result "${mcp_server}" '{"egress_contract_ok":true,"hcc_lane":true,"proxy_8083":false}'
+echo "PASS: live policy helper accepts a context-scoped MCP server peer"
+
 proxy="$(mutate proxy 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "mcp-server" } }, "podSelector" => { "matchLabels" => { "app" => "mcp-proxy" } } }], "ports" => [{ "port" => 8083, "protocol" => "TCP" }] }')"
 assert_result "${proxy}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":true}'
 echo "PASS: live policy helper rejects mcp-proxy TCP 8083"
+
+proxy_range="$(mutate proxy-range 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "control-plane" } }, "podSelector" => { "matchLabels" => { "app" => "host-context-controller-api-gateway" } } }], "ports" => [{ "port" => 8000, "endPort" => 9000, "protocol" => "TCP" }] }')"
+assert_result "${proxy_range}" '{"egress_contract_ok":true,"hcc_lane":true,"proxy_8083":true}'
+echo "PASS: live policy helper rejects a TCP range containing 8083"

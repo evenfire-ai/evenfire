@@ -78,7 +78,7 @@ when 'named-port'
   end
   abort('fixture source is missing mcp-host NetworkPolicy') unless policy
   policy.fetch('spec').fetch('egress') << {
-    'to' => [{ 'ipBlock' => { 'cidr' => '198.51.100.0/24' } }],
+    'to' => [{ 'ipBlock' => { 'cidr' => '198.51.100.1/32' } }],
     'ports' => [{ 'port' => 'mcp-http', 'protocol' => 'TCP' }],
   }
 when 'host-secret-grant'

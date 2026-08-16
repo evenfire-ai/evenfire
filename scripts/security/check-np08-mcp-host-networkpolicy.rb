@@ -33,14 +33,44 @@ allows_tcp_port = lambda do |rule, expected_port|
 end
 
 broad_internal_peer = lambda do |peer|
+  next true unless peer.is_a?(Hash)
+  next true if peer.empty?
+  next true unless (peer.keys - %w[ipBlock namespaceSelector podSelector]).empty?
+  next true if peer["ipBlock"].nil? && peer["namespaceSelector"].nil? && peer["podSelector"].nil?
+
+  if peer["ipBlock"]
+    ip_block = peer["ipBlock"]
+    next true unless ip_block.is_a?(Hash) && ip_block["cidr"].is_a?(String) && !ip_block["cidr"].empty?
+
+    cidr = ip_block["cidr"]
+    if cidr == "0.0.0.0/0" || cidr == "::/0"
+      next true unless Array(ip_block["except"]).any?
+    elsif !(cidr.match?(%r{/(32|128)\z}))
+      next true
+    end
+    next false
+  end
+
   namespace_selector = peer["namespaceSelector"]
-  next false unless namespace_selector.is_a?(Hash)
+  if namespace_selector.nil?
+    next false if peer["podSelector"].is_a?(Hash) && !peer["podSelector"].empty?
+
+    next true
+  end
+  next true unless namespace_selector.is_a?(Hash)
 
   labels = namespace_selector["matchLabels"]
   namespace_name = labels.is_a?(Hash) ? labels["kubernetes.io/metadata.name"] : nil
   pod_selector = peer["podSelector"]
   has_pod_selector = pod_selector.is_a?(Hash) && !pod_selector.empty?
-  next true if !labels.is_a?(Hash) || labels.empty? || namespace_name == "mcp-server"
+  if namespace_name == "mcp-server"
+    server_name = pod_selector.dig("matchLabels", "clerum.io/mcpserver") if has_pod_selector
+    exact_server_selector = server_name.is_a?(String) && !server_name.empty? &&
+      Array(pod_selector["matchExpressions"]).empty?
+    next false if exact_server_selector
+    next true
+  end
+  next true if !labels.is_a?(Hash) || labels.empty?
 
   !has_pod_selector && namespace_name != "kube-system"
 end
