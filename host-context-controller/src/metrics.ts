@@ -225,3 +225,13 @@ export const hostDeleteCleanupTotal = counter({
   help: 'Host deletion cleanup by outcome (queued/confirmed/completed/retried/superseded).',
   labelNames: ['outcome'] as const,
 })
+
+// External-egress DNS retry saturation (#205 audit R3-M4 / R2-L1). A binding
+// whose DNS never resolves is retried forever at the capped (maximum) backoff;
+// without this signal the still-denied binding converges nowhere yet stays
+// invisible. Tracks the COUNT of servers pinned at the cap — never a per-server
+// label — so cardinality stays flat regardless of fleet size.
+export const externalEgressRetriesAtCap = gauge({
+  name: 'clerum_hcc_external_egress_retries_at_cap',
+  help: 'McpServers whose external-egress DNS retry is pinned at the capped (maximum) backoff, i.e. repeatedly failing to converge.',
+})

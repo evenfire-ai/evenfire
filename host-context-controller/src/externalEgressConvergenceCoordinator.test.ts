@@ -4,6 +4,7 @@ import {
   type ExternalEgressRetryHandle,
   type ExternalEgressWatchEventType,
 } from './externalEgressConvergenceCoordinator'
+import { externalEgressRetriesAtCap } from './metrics'
 import type { McpServerCRD } from './types'
 
 function deferred<T = void>() {
@@ -149,6 +150,41 @@ describe('ExternalEgressConvergenceCoordinator', () => {
     await vi.advanceTimersByTimeAsync(30000)
     expect(attempts).toBe(5)
     instance.stop()
+  })
+
+  it('emits the retries-at-cap gauge when a retry reaches the capped backoff and clears it on success (R3-M4/R2-L1)', async () => {
+    vi.useFakeTimers()
+    const setSpy = vi.spyOn(externalEgressRetriesAtCap, 'set')
+    const selected = server('web-search')
+    let instance!: ExternalEgressConvergenceCoordinator
+    let succeed = false
+    instance = coordinator({
+      getCurrentServer: () => selected,
+      replay: async (type, current, retry) => {
+        if (succeed) {
+          retry.complete()
+          return
+        }
+        instance.scheduleRetry(type, current)
+      },
+    }).instance
+
+    instance.scheduleRetry('ADDED', selected)
+    // First fire re-arms attempt 2 (15s) — still below the cap: no gauge write.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(setSpy).not.toHaveBeenCalled()
+
+    // Second fire re-arms attempt 3 (30s), the capped delay: one server at cap.
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(setSpy).toHaveBeenLastCalledWith(1)
+
+    // Once the replay finally succeeds, the capped server is cleared back to 0.
+    succeed = true
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(setSpy).toHaveBeenLastCalledWith(0)
+
+    instance.stop()
+    setSpy.mockRestore()
   })
 
   it('never clears a pending full replay after an egress-only success', async () => {

@@ -1,3 +1,4 @@
+import { externalEgressRetriesAtCap } from './metrics'
 import type { McpServerCRD } from './types'
 
 const EXTERNAL_EGRESS_RETRY_DELAYS_MS = [5000, 15000, 30000] as const
@@ -131,6 +132,10 @@ export class ExternalEgressConvergenceCoordinator {
   private retrySequence = 0
   private readonly retryLimiter = new AsyncConcurrencyLimiter(EXTERNAL_EGRESS_MAX_CONCURRENCY)
   private readonly retrySlots = new Map<string, object>()
+  // Keys whose retry backoff is currently pinned at the capped (maximum) delay.
+  // Its size drives the externalEgressRetriesAtCap gauge (R3-M4/R2-L1) so a
+  // binding stuck retrying forever is observable, not silently denied.
+  private readonly retriesAtCap = new Set<string>()
   private readonly inFlight = new Map<string, Promise<void>>()
   private resyncInFlight: Promise<void> | null = null
   private resyncTimer: ReturnType<typeof setTimeout> | null = null
@@ -298,6 +303,8 @@ export class ExternalEgressConvergenceCoordinator {
     const previousIntent = this.retryIntents.get(key)
     if (previousIntent && !this.sameRetryTarget(previousIntent, retryType, retryServer)) {
       this.retryAttempts.delete(key)
+      // A new target restarts the backoff ladder, so the key is no longer capped.
+      this.clearRetryAtCap(key)
     }
 
     const intent: ExternalEgressRetryIntent = {
@@ -328,6 +335,7 @@ export class ExternalEgressConvergenceCoordinator {
     const delayMs = EXTERNAL_EGRESS_RETRY_DELAYS_MS[attempt - 1]
     this.retryAttempts.set(key, attempt)
     const capped = attempt === EXTERNAL_EGRESS_RETRY_DELAYS_MS.length
+    if (capped) this.markRetryAtCap(key)
     console.warn(
       `[K8s] Scheduling external egress retry ${attempt}/${EXTERNAL_EGRESS_RETRY_DELAYS_MS.length}` +
         `${capped ? ' (capped)' : ''} ` +
@@ -412,6 +420,10 @@ export class ExternalEgressConvergenceCoordinator {
     this.retryAttempts.clear()
     this.retryIntents.clear()
     this.retrySlots.clear()
+    if (this.retriesAtCap.size > 0) {
+      this.retriesAtCap.clear()
+      externalEgressRetriesAtCap.set(0)
+    }
     this.inFlight.clear()
   }
 
@@ -531,6 +543,18 @@ export class ExternalEgressConvergenceCoordinator {
     }
     this.retryAttempts.delete(key)
     this.retryIntents.delete(key)
+    this.clearRetryAtCap(key)
+  }
+
+  private markRetryAtCap(key: string): void {
+    if (this.retriesAtCap.has(key)) return
+    this.retriesAtCap.add(key)
+    externalEgressRetriesAtCap.set(this.retriesAtCap.size)
+  }
+
+  private clearRetryAtCap(key: string): void {
+    if (!this.retriesAtCap.delete(key)) return
+    externalEgressRetriesAtCap.set(this.retriesAtCap.size)
   }
 
   private sameRetryTarget(
