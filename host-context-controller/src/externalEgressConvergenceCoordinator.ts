@@ -157,7 +157,17 @@ export class ExternalEgressConvergenceCoordinator {
         this.dependencies.externalEgressRefreshMinTtlMs()
       )
       this.resyncTimer = setTimeout(() => {
-        void this.runResync().finally(scheduleNext)
+        // Re-arm FIRST (.finally) so a rejected pass still schedules its
+        // successor — the "re-arms after completion" property must survive a
+        // failure. Then .catch logs and absorbs the rejection so a rejecting
+        // pass (or a throwing scheduleNext) never becomes an unhandledRejection,
+        // which crashes the process on modern Node and would silently kill the
+        // periodic resync loop (reopening the #299 DNS-drift window).
+        void this.runResync()
+          .finally(scheduleNext)
+          .catch(error =>
+            console.error('[K8s] External egress periodic resync pass failed:', error)
+          )
       }, delayMs)
       this.resyncTimer.unref?.()
     }

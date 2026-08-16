@@ -877,4 +877,52 @@ describe('ExternalEgressConvergenceCoordinator', () => {
 
     instance.stop()
   })
+
+  it('logs and absorbs a rejected periodic resync pass, then re-arms (no unhandledRejection)', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    // Capture any process-level unhandledRejection: the pre-fix code left the
+    // rejected `void runResync()` promise unhandled, which crashes modern Node.
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+
+    const selected = server('web-search')
+    // Reject OUTSIDE the per-server try/catch in runResyncCore (that catch only
+    // wraps the mutation). A rejecting `enqueue` propagates through the worker to
+    // Promise.all -> runResyncCore -> runResync, so the whole pass rejects.
+    const enqueue = vi.fn(async () => {
+      throw new Error('resync enqueue boom')
+    })
+    const { instance, servers } = coordinator({ enqueue })
+    servers.set(selected.name, selected)
+
+    try {
+      instance.startPeriodicResync(10, 5)
+      // First pass fires at 10s and rejects.
+      await vi.advanceTimersByTimeAsync(10_000)
+      await flushMicrotasks()
+
+      // The rejection is logged by the fix's .catch (RED without it: no such log).
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[K8s] External egress periodic resync pass failed:',
+        expect.any(Error)
+      )
+      expect(enqueue).toHaveBeenCalledTimes(1)
+
+      // The loop RE-ARMS despite the failure: the successor fires 10s later.
+      await vi.advanceTimersByTimeAsync(10_000)
+      await flushMicrotasks()
+      expect(enqueue).toHaveBeenCalledTimes(2)
+
+      // The fix handles the rejection, so nothing escaped as unhandled.
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      instance.stop()
+    }
+  })
 })
