@@ -115,6 +115,34 @@ for rendered in "$@"; do
     end
     abort("mcp-host must not gain broad destination or all-port egress") if broad_host_egress
 
+    broad_internal_peer = lambda do |peer|
+      namespace_selector = peer["namespaceSelector"]
+      next false unless namespace_selector.is_a?(Hash)
+
+      labels = namespace_selector["matchLabels"]
+      namespace_name = labels.is_a?(Hash) ? labels["kubernetes.io/metadata.name"] : nil
+      pod_selector = peer["podSelector"]
+      has_pod_selector = pod_selector.is_a?(Hash) && !pod_selector.empty?
+      next true if labels.nil? || labels.empty? || namespace_name == "mcp-server"
+
+      !has_pod_selector && namespace_name != "kube-system"
+    end
+    broad_internal_egress = policies.any? do |policy|
+      Array(policy.dig("spec", "egress")).any? do |rule|
+        Array(rule["to"]).any? { |peer| broad_internal_peer.call(peer) }
+      end
+    end
+    abort("mcp-host must not gain broad internal or mcp-server egress") if broad_internal_egress
+
+    named_port = policies.any? do |policy|
+      Array(policy.dig("spec", "egress")).any? do |rule|
+        Array(rule["ports"]).any? do |port|
+          port["port"].is_a?(String) || port["endPort"].is_a?(String)
+        end
+      end
+    end
+    abort("mcp-host egress must use numeric ports") if named_port
+
     hcc_lane = policies.any? do |policy|
       Array(policy.dig("spec", "egress")).any? do |rule|
         ports = Array(rule["ports"])
@@ -130,7 +158,7 @@ for rendered in "$@"; do
 
     allows_tcp_port = lambda do |rule, expected_port|
       ports = rule["ports"]
-      next true if ports.nil? || Array(ports).empty?
+      next false if ports.nil? || Array(ports).empty?
 
       Array(ports).any? do |port|
         next false unless port.fetch("protocol", "TCP") == "TCP"
@@ -140,7 +168,7 @@ for rendered in "$@"; do
         if first.is_a?(Integer) && last.is_a?(Integer)
           first <= expected_port && expected_port <= last
         else
-          first.to_s == expected_port.to_s
+          false
         end
       end
     end
@@ -167,13 +195,23 @@ for rendered in "$@"; do
       namespace = document["kind"] == "Role" ? document.dig("metadata", "namespace") : nil
       index[[document["kind"], namespace, document.dig("metadata", "name")]] = document
     end
+    subject_is_mcp_host_identity = lambda do |subject|
+      case subject["kind"]
+      when "ServiceAccount"
+        subject["namespace"] == "mcp-host"
+      when "User"
+        subject["name"].to_s.match?(/\Asystem:serviceaccount:mcp-host:[^:]+\z/)
+      when "Group"
+        %w[system:serviceaccounts system:serviceaccounts:mcp-host].include?(subject["name"])
+      else
+        false
+      end
+    end
     host_mcp_secret_grant = documents.any? do |binding|
       next false unless %w[RoleBinding ClusterRoleBinding].include?(binding["kind"])
 
       binding_namespace = binding.dig("metadata", "namespace")
-      host_subject = Array(binding["subjects"]).any? do |subject|
-        subject["kind"] == "ServiceAccount" && subject["namespace"] == "mcp-host"
-      end
+      host_subject = Array(binding["subjects"]).any? { |subject| subject_is_mcp_host_identity.call(subject) }
       next false unless host_subject
       next false unless binding["kind"] == "ClusterRoleBinding" || binding_namespace == "mcp-server"
 
@@ -182,7 +220,7 @@ for rendered in "$@"; do
       role = roles[[role_kind, role_namespace, binding.dig("roleRef", "name")]]
       role && secret_reading_role.call(role)
     end
-    abort("mcp-host ServiceAccounts must not receive MCP Secret read grants") if host_mcp_secret_grant
+    abort("mcp-host identities must not receive MCP Secret read grants") if host_mcp_secret_grant
   ' "${rendered}"
 
   echo "PASS: NP-08 rendered contract (${rendered##*/})"

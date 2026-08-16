@@ -36,6 +36,51 @@ when 'broad-egress'
       },
     ],
   }
+when 'mcp-server-egress'
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host'
+  end
+  abort('fixture source is missing mcp-host NetworkPolicy') unless policy
+  policy.fetch('spec').fetch('egress') << {
+    'to' => [
+      {
+        'namespaceSelector' => {
+          'matchLabels' => { 'kubernetes.io/metadata.name' => 'mcp-server' },
+        },
+      },
+    ],
+    'ports' => [{ 'port' => 443, 'protocol' => 'TCP' }],
+  }
+when 'wide-internal-egress'
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host'
+  end
+  abort('fixture source is missing mcp-host NetworkPolicy') unless policy
+  policy.fetch('spec').fetch('egress') << {
+    'to' => [
+      {
+        'namespaceSelector' => {
+          'matchLabels' => { 'kubernetes.io/metadata.name' => 'control-plane' },
+        },
+      },
+    ],
+    'ports' => [{ 'port' => 443, 'protocol' => 'TCP' }],
+  }
+when 'named-port'
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host'
+  end
+  abort('fixture source is missing mcp-host NetworkPolicy') unless policy
+  policy.fetch('spec').fetch('egress') << {
+    'to' => [{ 'ipBlock' => { 'cidr' => '198.51.100.0/24' } }],
+    'ports' => [{ 'port' => 'mcp-http', 'protocol' => 'TCP' }],
+  }
 when 'host-secret-grant'
   documents << {
     'apiVersion' => 'rbac.authorization.k8s.io/v1',
@@ -57,6 +102,31 @@ when 'host-secret-grant'
     'subjects' => [
       { 'kind' => 'ServiceAccount', 'name' => 'host-fixture-sa', 'namespace' => 'mcp-host' },
     ],
+  }
+when 'host-secret-user-grant', 'host-secret-group-grant'
+  documents << {
+    'apiVersion' => 'rbac.authorization.k8s.io/v1',
+    'kind' => 'Role',
+    'metadata' => { 'name' => "fixture-#{mutation}", 'namespace' => 'mcp-server' },
+    'rules' => [
+      { 'apiGroups' => [''], 'resources' => ['secrets'], 'verbs' => ['get'] },
+    ],
+  }
+  subject = if mutation == 'host-secret-user-grant'
+    { 'kind' => 'User', 'name' => 'system:serviceaccount:mcp-host:fixture-host-sa' }
+  else
+    { 'kind' => 'Group', 'name' => 'system:serviceaccounts:mcp-host' }
+  end
+  documents << {
+    'apiVersion' => 'rbac.authorization.k8s.io/v1',
+    'kind' => 'RoleBinding',
+    'metadata' => { 'name' => "fixture-#{mutation}", 'namespace' => 'mcp-server' },
+    'roleRef' => {
+      'apiGroup' => 'rbac.authorization.k8s.io',
+      'kind' => 'Role',
+      'name' => "fixture-#{mutation}",
+    },
+    'subjects' => [subject],
   }
 else
   abort("unknown fixture mutation: #{mutation}")
@@ -91,9 +161,39 @@ assert_rejected \
   'mcp-host must not gain broad destination or all-port egress' \
   'broad mcp-host egress'
 
+mcp_server_egress="${tmpdir}/mcp-server-egress.yaml"
+mutate_render mcp-server-egress "${mcp_server_egress}"
+assert_rejected \
+  "${mcp_server_egress}" \
+  'mcp-host must not gain broad internal or mcp-server egress' \
+  'mcp-server egress with explicit port'
+
+wide_internal_egress="${tmpdir}/wide-internal-egress.yaml"
+mutate_render wide-internal-egress "${wide_internal_egress}"
+assert_rejected \
+  "${wide_internal_egress}" \
+  'mcp-host must not gain broad internal or mcp-server egress' \
+  'wide internal egress selector'
+
+named_port="${tmpdir}/named-port.yaml"
+mutate_render named-port "${named_port}"
+assert_rejected \
+  "${named_port}" \
+  'mcp-host egress must use numeric ports' \
+  'named mcp-host egress port'
+
 host_secret_grant="${tmpdir}/host-secret-grant.yaml"
 mutate_render host-secret-grant "${host_secret_grant}"
 assert_rejected \
   "${host_secret_grant}" \
-  'mcp-host ServiceAccounts must not receive MCP Secret read grants' \
+  'mcp-host identities must not receive MCP Secret read grants' \
   'mcp-host MCP Secret grant'
+
+for identity in user group; do
+  host_secret_identity="${tmpdir}/host-secret-${identity}-grant.yaml"
+  mutate_render "host-secret-${identity}-grant" "${host_secret_identity}"
+  assert_rejected \
+    "${host_secret_identity}" \
+    'mcp-host identities must not receive MCP Secret read grants' \
+    "mcp-host MCP Secret ${identity} grant"
+done
