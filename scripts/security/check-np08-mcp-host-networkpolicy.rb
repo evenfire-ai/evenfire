@@ -137,6 +137,14 @@ broad_internal_peer = lambda do |peer, policy|
     next false if exact_dns_namespace || exact_dns_pods
     next true
   end
+  if namespace_name == "gfs"
+    exact_gfs_pods = pod_selector.is_a?(Hash) &&
+      pod_selector.keys.sort == ["matchLabels"] &&
+      pod_selector["matchLabels"] == { "app" => "gfs-controller" } &&
+      Array(pod_selector["matchExpressions"]).empty?
+    next false if exact_gfs_pods
+    next true
+  end
 
   next true
 end
@@ -149,6 +157,22 @@ egress_contract_ok = policy_rules.all? do |policy, rule|
     ports.all? { |port| port_is_numeric.call(port) } &&
     peers.none? { |peer| broad_internal_peer.call(peer, policy) }
 end
+
+gfs_contract_ok = policy_rules.all? do |_policy, rule|
+  gfs_peers = Array(rule["to"]).select do |peer|
+    peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "gfs"
+  end
+  next true if gfs_peers.empty?
+
+  gfs_peers.length == 1 &&
+    gfs_peers.first.dig("podSelector", "matchLabels") == { "app" => "gfs-controller" } &&
+    Array(rule["ports"]).length == 1 &&
+    rule["ports"].first["protocol"].to_s == "TCP" &&
+    rule["ports"].first["port"] == 8087 &&
+    rule["ports"].first["endPort"].nil?
+end
+
+egress_contract_ok &&= gfs_contract_ok
 
 hcc_lane = policy_rules.any? do |_policy, rule|
   allows_tcp_port.call(rule, 8081) &&

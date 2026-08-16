@@ -71,6 +71,14 @@ mcp_server="$(mutate mcp-server 'data["items"] << { "apiVersion" => "networking.
 assert_result "${mcp_server}" '{"egress_contract_ok":true,"hcc_lane":true,"proxy_8083":false}'
 echo "PASS: live policy helper accepts a context-scoped MCP server peer"
 
+gfs="$(mutate gfs 'data["items"] << { "apiVersion" => "networking.k8s.io/v1", "kind" => "NetworkPolicy", "metadata" => { "name" => "mcp-host-gfs-egress", "namespace" => "mcp-host" }, "spec" => { "podSelector" => { "matchLabels" => { "app" => "mcp-host" } }, "policyTypes" => ["Egress"], "egress" => [{ "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "gfs" } }, "podSelector" => { "matchLabels" => { "app" => "gfs-controller" } } }], "ports" => [{ "port" => 8087, "protocol" => "TCP" }] }] } }')"
+assert_result "${gfs}" '{"egress_contract_ok":true,"hcc_lane":true,"proxy_8083":false}'
+echo "PASS: live policy helper accepts the exact GFS 8087 lane"
+
+gfs_bad_port="$(mutate gfs-bad-port 'data["items"] << { "apiVersion" => "networking.k8s.io/v1", "kind" => "NetworkPolicy", "metadata" => { "name" => "mcp-host-gfs-egress", "namespace" => "mcp-host" }, "spec" => { "podSelector" => { "matchLabels" => { "app" => "mcp-host" } }, "policyTypes" => ["Egress"], "egress" => [{ "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "gfs" } }, "podSelector" => { "matchLabels" => { "app" => "gfs-controller" } } }], "ports" => [{ "port" => 443, "protocol" => "TCP" }] }] } }')"
+assert_result "${gfs_bad_port}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":false}'
+echo "PASS: live policy helper rejects a non-GFS port on the GFS lane"
+
 proxy="$(mutate proxy 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "mcp-server" } }, "podSelector" => { "matchLabels" => { "app" => "mcp-proxy" } } }], "ports" => [{ "port" => 8083, "protocol" => "TCP" }] }')"
 assert_result "${proxy}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":true}'
 echo "PASS: live policy helper rejects mcp-proxy TCP 8083"

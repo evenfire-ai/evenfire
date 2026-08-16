@@ -197,6 +197,14 @@ for rendered in "$@"; do
         next false if exact_dns_namespace || exact_dns_pods
         next true
       end
+      if namespace_name == "gfs"
+        exact_gfs_pods = pod_selector.is_a?(Hash) &&
+          pod_selector.keys.sort == ["matchLabels"] &&
+          pod_selector["matchLabels"] == { "app" => "gfs-controller" } &&
+          Array(pod_selector["matchExpressions"]).empty?
+        next false if exact_gfs_pods
+        next true
+      end
 
       next true
     end
@@ -206,6 +214,23 @@ for rendered in "$@"; do
       end
     end
     abort("mcp-host must not gain broad internal or mcp-server egress") if broad_internal_egress
+
+    gfs_contract_ok = policies.all? do |policy|
+      Array(policy.dig("spec", "egress")).all? do |rule|
+        gfs_peers = Array(rule["to"]).select do |peer|
+          peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "gfs"
+        end
+        next true if gfs_peers.empty?
+
+        gfs_peers.length == 1 &&
+          gfs_peers.first.dig("podSelector", "matchLabels") == { "app" => "gfs-controller" } &&
+          Array(rule["ports"]).length == 1 &&
+          rule["ports"].first["protocol"].to_s == "TCP" &&
+          rule["ports"].first["port"] == 8087 &&
+          rule["ports"].first["endPort"].nil?
+      end
+    end
+    abort("mcp-host GFS egress must remain the exact 8087 lane") unless gfs_contract_ok
 
     named_port = policies.any? do |policy|
       Array(policy.dig("spec", "egress")).any? do |rule|
