@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from 'http'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
+import { externalEgressResyncDelayMs } from './externalEgressConvergenceCoordinator'
 import {
   McpServerWatcher,
-  externalEgressResyncDelayMs,
   getContext,
   listAllCommunicationChannels,
   listAllGlobalFileSystems,

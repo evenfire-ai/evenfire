@@ -19,9 +19,6 @@ import {
   type ExternalEgressRetryHandle,
   type ExternalEgressWatchEventType,
 } from './externalEgressConvergenceCoordinator'
-// Re-exported for the H2 unit tests that import it from this module (the pure
-// delay helper now lives with its sole consumer, the convergence coordinator).
-export { externalEgressResyncDelayMs } from './externalEgressConvergenceCoordinator'
 import { gfsDefaultFactoryConfig } from './gfsConfig'
 import { GfsReconciler } from './gfsReconciler'
 import { ControlApiGfsSeedClient } from './gfsSeedClient'
