@@ -1262,24 +1262,25 @@ initial_tcp_policy_line="$(
   grep -nF 'wait_until 180 "HCC to create the real initial TCP external-egress policy"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
-same_intent_retry_line="$(
-  grep -nF 'wait_until 120 "a real same-intent external-egress retry to be scheduled"' \
+# B3 retain-identity-stable contract: a same-intent restart RETAINS the
+# identity-stable DNS-derived allow (no deny window), certifies /ready with it
+# still present, keeps the affected runtime blocked, and converges the additive
+# TCP lane only AFTER the DNS hold releases — the inverse of the pre-B3
+# revoke-before-ready ordering this gate previously asserted.
+same_intent_snapshot_line="$(
+  grep -nF 'SAME_INTENT_EGRESS_SNAPSHOT="$(external_egress_policy_snapshot)"' \
+    "$MCP_READINESS_GATE" | head -1 | cut -d: -f1
+)"
+same_intent_retained_ready_line="$(
+  grep -nF 'wait_until_fast 60 "HCC readiness while the same-intent identity-stable DNS policy is retained"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
-same_intent_ready_line="$(
-  grep -nF 'wait_until_fast 60 "HCC readiness after revoking the same-intent DNS policy"' \
+same_intent_retain_guard_line="$(
+  grep -nF 'the same-intent identity-stable DNS policy was revoked at readiness (retain regression / deny window)' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
-same_intent_incomplete_line="$(
+same_intent_runtime_blocked_line="$(
   grep -nF 'the affected runtime or Ready status escaped the held same-intent DNS boundary' \
-    "$MCP_READINESS_GATE" | cut -d: -f1
-)"
-same_intent_retry_execution_line="$(
-  grep -nF 'wait_until 180 "the scheduled same-intent external-egress retry to execute"' \
-    "$MCP_READINESS_GATE" | cut -d: -f1
-)"
-same_intent_recheck_line="$(
-  grep -nF 'a held same-intent retry recreated the DNS policy without current resolution' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
 same_intent_release_line="$(
@@ -1294,25 +1295,26 @@ divergent_revoke_line="$(
   grep -nF 'wait_until_fast 120 "HCC readiness after revoking the divergent stale policy"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
-if [ -n "$initial_tcp_policy_line" ] && [ -n "$same_intent_retry_line" ] &&
-   [ -n "$same_intent_ready_line" ] && [ -n "$same_intent_incomplete_line" ] &&
-   [ -n "$same_intent_retry_execution_line" ] &&
-   [ -n "$same_intent_recheck_line" ] && [ -n "$same_intent_release_line" ] &&
+if [ -n "$initial_tcp_policy_line" ] && [ -n "$same_intent_snapshot_line" ] &&
+   [ -n "$same_intent_retained_ready_line" ] && [ -n "$same_intent_retain_guard_line" ] &&
+   [ -n "$same_intent_runtime_blocked_line" ] && [ -n "$same_intent_release_line" ] &&
    [ -n "$same_intent_tcp_policy_line" ] && [ -n "$divergent_revoke_line" ] &&
-   [ "$initial_tcp_policy_line" -lt "$same_intent_ready_line" ] &&
-   [ "$same_intent_ready_line" -lt "$same_intent_incomplete_line" ] &&
-   [ "$same_intent_incomplete_line" -lt "$same_intent_retry_line" ] &&
-   [ "$same_intent_retry_line" -lt "$same_intent_retry_execution_line" ] &&
-   [ "$same_intent_retry_execution_line" -lt "$same_intent_recheck_line" ] &&
-   [ "$same_intent_recheck_line" -lt "$same_intent_release_line" ] &&
+   [ "$initial_tcp_policy_line" -lt "$same_intent_snapshot_line" ] &&
+   [ "$same_intent_snapshot_line" -lt "$same_intent_retained_ready_line" ] &&
+   [ "$same_intent_retained_ready_line" -lt "$same_intent_retain_guard_line" ] &&
+   [ "$same_intent_retain_guard_line" -lt "$same_intent_runtime_blocked_line" ] &&
+   [ "$same_intent_runtime_blocked_line" -lt "$same_intent_release_line" ] &&
    [ "$same_intent_release_line" -lt "$same_intent_tcp_policy_line" ] &&
    [ "$same_intent_tcp_policy_line" -lt "$divergent_revoke_line" ] &&
+   grep -Fq 'hcc_ready_with_identity_stable_policy_retained' "$MCP_READINESS_GATE" &&
+   ! grep -Fq 'HCC readiness after revoking the same-intent DNS policy' "$MCP_READINESS_GATE" &&
+   ! grep -Fq 'a real same-intent external-egress retry to be scheduled' "$MCP_READINESS_GATE" &&
    ! grep -Fq 'CERTIFIED_POLICY_IDENTITY' "$MCP_READINESS_GATE" &&
    ! grep -Fq 'external_egress_policy_identity' "$MCP_READINESS_GATE" &&
    ! grep -Fq 'UID/spec' "$MCP_READINESS_GATE"; then
-  pass "same-intent safety revokes before readiness and additive TCP convergence follows DNS release"
+  pass "same-intent safety retains the identity-stable DNS policy at readiness; additive TCP convergence follows DNS release"
 else
-  fail "the MCP readiness gate still preserves a DNS policy or gates readiness on additive convergence"
+  fail "the MCP readiness gate no longer proves B3 retain-identity-stable (or regressed to revoke-same-intent before readiness)"
 fi
 
 printf '%s\n' \
