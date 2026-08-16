@@ -26,6 +26,19 @@ fail() {
   exit 1
 }
 
+# A Deployment id ("namespace/name") is DEFINED in this repo when its namespace
+# has a base manifest tree here (deploy/base/<namespace>/). For such a LOCAL
+# deploy the rendered overlay MUST contain it: a silent disappearance would let
+# the loops below validate the single-writer/database rollout invariant over an
+# absent deploy (a fail-open). Deploys whose base lives only in the sibling
+# evenfire-infra repo (e.g. registry/*) are FOREIGN here and are validated where
+# they are defined, so for them an absence is a NOTICE-and-skip, not a failure.
+deploy_defined_in_this_repo() {
+  local id="$1"
+  local namespace="${id%%/*}"
+  [ -d "${ROOT_DIR}/deploy/base/${namespace}" ]
+}
+
 command -v kubectl >/dev/null 2>&1 || fail "kubectl is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v yq >/dev/null 2>&1 || fail "yq is required"
@@ -57,14 +70,16 @@ for overlay in "${OVERLAYS[@]}"; do
         'first(.[] | select(.kind == "Deployment" and .metadata.namespace == $namespace and .metadata.name == $name))' \
         <<<"${rendered_json}"
     )"; then
-      # This overlay does not render ${id}. The script runs on partial overlay
-      # sets on purpose (gcp-* and the registry Deployment live in the sibling
-      # evenfire-infra repo; this repo ships only the minikube overlay), so an
-      # absent deploy is validated in whatever overlay/repo DEFINES it, not here.
-      # A real Recreate->RollingUpdate regression on a deploy that IS rendered
-      # still fails loudly below; a silent disappearance is surfaced by this
-      # NOTICE rather than a hard fail against an overlay that never had it.
-      echo "NOTICE: ${overlay} does not render Deployment ${id}; skipping (validated where it is defined)" >&2
+      # This overlay does not render ${id}. A deploy this repo DEFINES
+      # (deploy/base/<namespace>/ exists here) MUST be rendered by a local
+      # overlay: a silent disappearance would validate the rollout invariant over
+      # an absent deploy (fail-open), so fail loudly. Foreign deploys (gcp-* and
+      # the registry Deployment live in the sibling evenfire-infra repo) are
+      # validated where they are defined, so for them a NOTICE-and-skip is right.
+      if deploy_defined_in_this_repo "${id}"; then
+        fail "${overlay}: renders no Deployment ${id}, but this repo defines deploy/base/${id%%/*} — a local overlay must not validate the rollout invariant over an absent deploy (did the overlay stop including it?)"
+      fi
+      echo "NOTICE: ${overlay} does not render foreign Deployment ${id}; skipping (validated where it is defined)" >&2
       continue
     fi
 
@@ -94,14 +109,16 @@ for overlay in "${OVERLAYS[@]}"; do
         'first(.[] | select(.kind == "Deployment" and .metadata.namespace == $namespace and .metadata.name == $name))' \
         <<<"${rendered_json}"
     )"; then
-      # This overlay does not render ${id}. The script runs on partial overlay
-      # sets on purpose (gcp-* and the registry Deployment live in the sibling
-      # evenfire-infra repo; this repo ships only the minikube overlay), so an
-      # absent deploy is validated in whatever overlay/repo DEFINES it, not here.
-      # A real Recreate->RollingUpdate regression on a deploy that IS rendered
-      # still fails loudly below; a silent disappearance is surfaced by this
-      # NOTICE rather than a hard fail against an overlay that never had it.
-      echo "NOTICE: ${overlay} does not render Deployment ${id}; skipping (validated where it is defined)" >&2
+      # This overlay does not render ${id}. A deploy this repo DEFINES
+      # (deploy/base/<namespace>/ exists here) MUST be rendered by a local
+      # overlay: a silent disappearance would validate the rollout invariant over
+      # an absent deploy (fail-open), so fail loudly. Foreign deploys (gcp-* and
+      # the registry Deployment live in the sibling evenfire-infra repo) are
+      # validated where they are defined, so for them a NOTICE-and-skip is right.
+      if deploy_defined_in_this_repo "${id}"; then
+        fail "${overlay}: renders no Deployment ${id}, but this repo defines deploy/base/${id%%/*} — a local overlay must not validate the rollout invariant over an absent deploy (did the overlay stop including it?)"
+      fi
+      echo "NOTICE: ${overlay} does not render foreign Deployment ${id}; skipping (validated where it is defined)" >&2
       continue
     fi
 
