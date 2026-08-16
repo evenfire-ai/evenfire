@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:e2e": "vitest run --config test/e2e/vitest.config.ts",
     "test:e2e:playwright": "npm run build && playwright test --config test/e2e-playwright/playwright.config.ts",
+    "test:e2e:gfs-operator": "npm run build && playwright test --config test/e2e-playwright/playwright.gfs-desktop-operator.config.ts",
     "qa:recorder:auth": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-auth.spec.ts",
     "qa:recorder:navigation": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-navigation.spec.ts",
     "qa:recorder:agents": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-agents.spec.ts",
