@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Synthetic NP-08 gate. It performs no Kubernetes writes, never reads a Secret,
-# and only runs the repository-owned authorization unit suite after checking an
-# explicit branch-owned context. The live deployment probe remains Gate F.
+# and only runs the repository-owned two-Context authorization unit suite after
+# checking an explicit branch-owned context. The live deployment probe remains
+# Gate F.
 
 context=''
 test_file='host-context-controller/src/mcpAuthorization.test.ts'
@@ -34,8 +35,8 @@ if [[ -z "${context}" || -z "${summary}" ]]; then
   echo "usage: $0 --context <kube-context> [--test <HCC unit test>] --summary <file>" >&2
   exit 2
 fi
-if [[ "${test_file}" != host-context-controller/src/*.test.ts ]]; then
-  echo "FAIL: synthetic gate accepts only the HCC authorization unit suite" >&2
+if [[ "${test_file}" != "host-context-controller/src/mcpAuthorization.test.ts" ]]; then
+  echo "FAIL: synthetic gate accepts only mcpAuthorization.test.ts" >&2
   exit 2
 fi
 if [[ ! -f "${test_file}" ]]; then

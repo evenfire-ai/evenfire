@@ -21,6 +21,13 @@ const principal: VerifiedMcpHostPrincipal = {
   expiresAt: 4_000_000_000,
   audiences: ['host-context-controller'],
 }
+const principalB: VerifiedMcpHostPrincipal = {
+  ...principal,
+  subject: 'mcp-host/standalone-b',
+  hostName: 'host-b',
+  hostUid: 'host-uid-b',
+  jti: 'jti-b',
+}
 const host: AuthorityHost = {
   name: 'host-a',
   namespace: 'mcp-host',
@@ -33,6 +40,12 @@ const context: AuthorityContext = {
   metadata: meta('context-uid-a', '20'),
   mcpServers: ['server-a'],
 }
+const contextB: AuthorityContext = {
+  name: 'context-b',
+  namespace: 'mcp-server',
+  metadata: meta('context-uid-b', '21'),
+  mcpServers: ['server-b'],
+}
 const server: AuthorityMcpServer = {
   name: 'server-a',
   namespace: 'mcp-server',
@@ -41,6 +54,13 @@ const server: AuthorityMcpServer = {
   auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
   enabled: true,
   status: { deployed: true, ready: true, authoritative: false },
+}
+const serverB: AuthorityMcpServer = {
+  ...server,
+  name: 'server-b',
+  metadata: meta('server-uid-b', '31'),
+  transport: { type: 'streamableHttp', url: 'http://server-b/mcp' },
+  auth: { type: 'bearer', secretRef: 'server-b-auth', secretKey: 'token' },
 }
 const secret: AuthoritySecret = {
   name: 'server-a-auth',
@@ -97,6 +117,53 @@ class FakeStore implements McpAuthorizationStore {
 }
 
 describe('McpAuthorizationService', () => {
+  it('keeps two Host/Context grant sets disjoint in both directions', async () => {
+    const storeA = new FakeStore()
+    const storeB = new FakeStore()
+    storeB.hostObject = {
+      name: 'host-b',
+      namespace: 'mcp-host',
+      metadata: meta('host-uid-b', '11'),
+      contextRef: 'context-b',
+    }
+    storeB.contextObject = contextB
+    storeB.serverObject = serverB
+    storeB.secretMetadataSequence = [
+      {
+        name: 'server-b-auth',
+        namespace: 'mcp-server',
+        metadata: meta('secret-uid-b', '41'),
+      },
+    ]
+    storeB.secretSequence = [
+      {
+        name: 'server-b-auth',
+        namespace: 'mcp-server',
+        metadata: meta('secret-uid-b', '41'),
+        data: { token: Buffer.from('credential-b').toString('base64') },
+      },
+    ]
+
+    const serviceA = new McpAuthorizationService(storeA)
+    const serviceB = new McpAuthorizationService(storeB)
+    await expect(serviceA.listServers(principal)).resolves.toEqual([
+      expect.objectContaining({ name: 'server-a' }),
+    ])
+    await expect(serviceB.listServers(principalB)).resolves.toEqual([
+      expect.objectContaining({ name: 'server-b' }),
+    ])
+    await expect(serviceA.getCredential(principal, 'server-b')).rejects.toMatchObject({
+      code: 'not_found',
+    })
+    await expect(serviceB.getCredential(principalB, 'server-a')).rejects.toMatchObject({
+      code: 'not_found',
+    })
+    expect(storeA.secretMetadataReads).toBe(1)
+    expect(storeA.secretValueReads).toBe(0)
+    expect(storeB.secretMetadataReads).toBe(1)
+    expect(storeB.secretValueReads).toBe(0)
+  })
+
   it('projects only valid TCP ports into the public transport contract', () => {
     expect(toPublicMcpTransport({ type: 'streamableHttp', port: 65_535 })).toEqual({
       type: 'streamableHttp',
