@@ -39,6 +39,8 @@ When an `McpServer` CRD is created, modified, or deleted, the host-context-contr
 - **MODIFIED** — Updates the Deployment and Service to match the CRD spec (env vars, image, ports, resources, etc.).
 - **DELETED** — Removes the Deployment and Service.
 
+Remote egress-proxy McpServers keep the author's `spec.image` as desired-state input; HCC no longer rewrites it to the platform proxy image. The former `canonicalizeRemoteEgressProxyImage` step and its `ImageCanonicalized` status condition were removed (PR #205 readiness-safety cleanup): canonicalization mutated the observed CRD cache object and bumped the resource generation, retiring the in-flight reconcile before it could create the runtime resources. The platform-owned proxy image is instead selected at Deployment build time (`buildDeployment`), leaving the CRD spec untouched.
+
 The reconciler builds Deployments with labels used for pod selection and network policy targeting:
 
 | Label                  | Value                     | Purpose                           |
