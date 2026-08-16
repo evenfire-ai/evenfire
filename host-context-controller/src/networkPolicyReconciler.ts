@@ -414,8 +414,14 @@ export class NetworkPolicyReconciler {
    * nothing but its own label selectors. A delta therefore cannot vouch for a
    * namespace whose classified inventory is still stuck on an unresolved
    * policy, and must not certify readiness on its behalf.
+   *
+   * Initialised fail-closed (true): hasCertifiedSafetyInventory() reports false
+   * until the first authoritative pass actually certifies, so certification
+   * cannot be implied before any pass has run. This does not depend on the
+   * readiness gate's generation-equality check for safety — it removes that
+   * coupling rather than relying on it.
    */
-  private safetyPassLeftUncertified = false
+  private safetyPassLeftUncertified = true
 
   // H2 (issue #299): smallest DNS TTL (ms) observed across external-egress
   // resolutions. The resync loop advances to <= this/2 so a rotating low-TTL host

@@ -5332,9 +5332,13 @@ describe('NetworkPolicyReconciler', () => {
       expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
     })
 
-    it('certifies a scoped delta when no safety pass has failed', async () => {
+    it('does not certify the safety inventory until an authoritative pass has run', async () => {
+      // Fail-closed default: before any authoritative safety pass certifies, the
+      // namespace-wide inventory is NOT certified, even though the scoped delta's
+      // own label-scoped revocation completes (returns true). A delta cannot
+      // vouch for the namespace-wide inventory it never enumerated.
       expect(await reconciler.reconcileContext(deltaContext)).toBe(true)
-      expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
+      expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
     })
   })
 
