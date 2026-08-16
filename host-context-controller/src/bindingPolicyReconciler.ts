@@ -38,7 +38,11 @@ export interface BindingDef {
 }
 
 export interface BindingPolicyReconcileOptions {
-  isCurrent?: () => boolean
+  // Required (fail-closed): every caller must supply the authority predicate so
+  // a retired reconcile pass cannot keep mutating binding NetworkPolicies. There
+  // is no assume-current default — an omitted predicate is a compile error, not
+  // a silent fail-open (the old `?? (() => true)`) nor a silent no-op.
+  isCurrent: () => boolean
 }
 
 export interface BindingPolicyCleanupOptions {
@@ -69,9 +73,9 @@ export class BindingPolicyReconciler {
     bindings: BindingDef[],
     mcpWorkloadName: string,
     mcpServerName = mcpWorkloadName,
-    options: BindingPolicyReconcileOptions = {}
+    options: BindingPolicyReconcileOptions
   ): Promise<void> {
-    const isCurrent = options.isCurrent ?? (() => true)
+    const isCurrent = options.isCurrent
     if (!isCurrent()) return
     console.log(`[BindingNP] Reconciling ${bindings.length} binding(s) for recipe "${recipeName}"`)
 
