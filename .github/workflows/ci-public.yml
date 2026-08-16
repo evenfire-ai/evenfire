@@ -556,6 +556,11 @@ jobs:
       - name: Test NP-08 render contract rejection fixtures
         run: bash scripts/tests/test-np08-render-contract-fixtures.sh /tmp/clerum-minikube.yaml
 
+      - name: Test NP-08 live NetworkPolicy contract parser
+        run: |
+          bash scripts/tests/test-np08-live-networkpolicy-contract.sh \
+            /tmp/clerum-minikube.yaml
+
       - name: cloudflared must not render into the minikube overlays
         run: |
           for f in /tmp/clerum-minikube.yaml /tmp/clerum-minikube-no-uis.yaml; do

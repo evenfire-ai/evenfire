@@ -69,12 +69,13 @@ proxy_ready="$(kubectl --context="${context}" -n mcp-server get deployment mcp-p
 check proxy_singleton_replicas "$([[ "${proxy_replicas}" == '1' ]] && echo 1 || echo 0)"
 check proxy_singleton_ready "$([[ "${proxy_ready}" == '1' ]] && echo 1 || echo 0)"
 
-host_proxy_ports="$(kubectl --context="${context}" -n mcp-host get networkpolicies -o jsonpath='{range .items[*].spec.egress[*].ports[*]}{.port}{"\n"}{end}')"
-if rg -x -q '8083' <<<"${host_proxy_ports}"; then
-  host_proxy_8083_ok=0
-else
-  host_proxy_8083_ok=1
-fi
+host_policy_json="$(kubectl --context="${context}" -n mcp-host get networkpolicies -o json)"
+network_policy_result="$(RUBYOPT=--disable=gems ruby "${BASH_SOURCE[0]%/*}/check-np08-mcp-host-networkpolicy.rb" <<<"${host_policy_json}")"
+network_policy_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["egress_contract_ok"] ? 1 : 0)' <<<"${network_policy_result}")"
+hcc_lane_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["hcc_lane"] ? 1 : 0)' <<<"${network_policy_result}")"
+host_proxy_8083_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["proxy_8083"] ? 0 : 1)' <<<"${network_policy_result}")"
+check mcp_host_egress_contract "${network_policy_ok}"
+check hcc_gateway_egress_lane "${hcc_lane_ok}"
 check no_host_proxy_8083_egress "${host_proxy_8083_ok}"
 
 gateway_config="$(kubectl --context="${context}" -n control-plane get configmap host-context-controller-api-gateway -o jsonpath='{.data.nginx\.conf}')"
