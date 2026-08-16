@@ -1232,6 +1232,15 @@ export class NetworkPolicyReconciler {
           })
           if (accumulated.cidrs.length === 0) {
             failures.push(`failed to resolve hostname "${binding.dns}": ${this.errorMessage(err)}`)
+            // H3: RETAIN the live NP (LKG) — a transient resolver failure with an
+            // empty rehydrated window (no prior state to freeze) must NOT let the
+            // stale-policy GC delete the already-validated live policy. Without
+            // this add(), a single EAI_AGAIN on an exact-host binding whose state
+            // annotations parse to zero entries deletes the live NP → egress loss
+            // on a TRANSIENT hiccup. Mirrors the empty/invalid/blocked branches
+            // above; the binding still surfaces ExternalEgressRejected. NEVER
+            // egress loss.
+            if (existingPolicy) desiredPolicyNames.add(name)
             continue
           }
           // Defense-in-depth (audit M3): rehydrated IPs (from the policy's own

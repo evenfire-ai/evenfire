@@ -1612,7 +1612,7 @@ describe('NetworkPolicyReconciler', () => {
       await expect(reconciler.reconcileExternalEgress(server)).rejects.toThrow('delete denied')
     })
 
-    it('deletes stale policies and fails when DNS resolution for that binding fails', async () => {
+    it('deletes only the STALE policy (retains the failing binding live NP, H3) and fails when DNS resolution for that binding fails', async () => {
       vi.mocked(dns.resolve4).mockRejectedValueOnce(new Error('dns timeout'))
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
         items: [
@@ -1634,13 +1634,17 @@ describe('NetworkPolicyReconciler', () => {
 
       await expect(reconciler.reconcileExternalEgress(server)).rejects.toThrow(/dns timeout/)
 
-      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
-      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
-        name: 'ext-egress-openai-mcp-api.openai.com-443',
-        namespace: 'mcp-server',
-      })
+      // B1 (H3, issue #299): the current binding's OWN live NP must be RETAINED on
+      // a transient DNS failure with an empty rehydration window — deleting it was
+      // the bug (egress loss on a transient hiccup). Only the genuinely-stale
+      // (no-longer-declared) policy is deleted; the reconcile still fails loud.
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
       expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
         name: 'ext-egress-openai-mcp-old-example-com-443',
+        namespace: 'mcp-server',
+      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
+        name: 'ext-egress-openai-mcp-api.openai.com-443',
         namespace: 'mcp-server',
       })
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(

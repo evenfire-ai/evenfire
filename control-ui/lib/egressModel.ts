@@ -556,7 +556,7 @@ export function analyzeWorkflowRecipeEgress(
         summary.mode === 'public-web'
           ? 'Public web egress is explicitly enabled for TCP 80/443; private, metadata, cluster-internal, link-local, multicast, and reserved ranges remain blocked.'
           : summary.mode === 'provider'
-            ? `Provider-netblock egress declares ${summary.bindingCount} binding(s)${summary.providers.length > 0 ? ` for ${summary.providers.join(', ')}` : ''}. Rendered CIDRs come from the cluster provider-netblocks catalog and can span wide ranges — not a single-host /32. FQDNs missing from the catalog fall back to their explicitly declared categories; review those especially.`
+            ? `Provider-netblock egress declares ${summary.bindingCount} binding(s)${summary.providers.length > 0 ? ` for ${summary.providers.join(', ')}` : ''}. Rendered CIDRs come from the cluster provider-netblocks catalog and can span wide ranges — not a single-host /32. FQDNs missing from the registry fall back to their explicitly declared categories; review those especially.`
             : `Exact-host egress declares ${summary.bindingCount} binding(s).`,
       targets: summary.targets,
       ports: summary.ports,
@@ -594,7 +594,7 @@ export function analyzeWorkflowRecipeEgress(
       mode: 'provider',
       bindingCount: uiProviderEntries.length,
       severity: 'warning',
-      message: `Sandbox UI declares ${uiProviderEntries.length} provider-netblock egress entr${uiProviderEntries.length === 1 ? 'y' : 'ies'}${uiProviders.length > 0 ? ` for ${uiProviders.join(', ')}` : ''}. Rendered CIDRs come from the cluster provider-netblocks catalog and can span wide ranges — not a single-host /32. FQDNs missing from the catalog fall back to their explicitly declared categories; review those especially.`,
+      message: `Sandbox UI declares ${uiProviderEntries.length} provider-netblock egress entr${uiProviderEntries.length === 1 ? 'y' : 'ies'}${uiProviders.length > 0 ? ` for ${uiProviders.join(', ')}` : ''}. Rendered CIDRs come from the cluster provider-netblocks catalog and can span wide ranges — not a single-host /32. FQDNs missing from the registry fall back to their explicitly declared categories; review those especially.`,
       targets: uiTargets,
       ports: uiPorts,
       providers: uiProviders,

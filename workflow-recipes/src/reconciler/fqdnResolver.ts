@@ -138,6 +138,20 @@ export const defaultFqdnLookup: FqdnLookup = async host => {
     settleV6(resolve6(host)),
   ])
 
+  // H1 (issue #299): a TRANSIENT A-query failure must FREEZE the IPv4 window,
+  // even when AAAA answered. IPv4 is the only rendered family, so a successful
+  // AAAA must not mask a transient A outage into an ok-empty "name drained"
+  // answer — that would age the /32 sliding window out (silent IPv4 egress loss)
+  // instead of freezing it. A PERMANENT A failure with AAAA present is a genuine
+  // AAAA-only host and stays ok below; the dropped v6 records are inert anyway
+  // (IPv4-only render).
+  if ('err' in v4 && classifyDnsError(v4.err.code) === 'transient') {
+    return {
+      kind: 'error',
+      error: `DNS A-query for "${host}" failed (${v4.err.code}) — resolver or upstream unavailable`,
+      retryable: true,
+    }
+  }
   const v4Records = 'records' in v4 ? v4.records : []
   const ipv4 = v4Records.map(r => r.address)
   const ipv6 = 'addrs' in v6 ? v6.addrs : []

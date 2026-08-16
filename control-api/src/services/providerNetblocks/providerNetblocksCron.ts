@@ -29,12 +29,19 @@ export interface ProviderNetblocksCronOptions {
 
 let timer: NodeJS.Timeout | null = null
 let inFlight = false
+// Guards the re-arm inside schedule()'s .finally: if stop() runs while a tick is
+// in flight, clearing the timer is not enough — the in-flight runOnce would
+// re-schedule afterward. Checked in schedule(), set by stop(), reset by start().
+let stopped = false
 
 function metricsAdapter(): TickMetrics {
   return {
     tick: result => providerNetblocksTicksTotal.inc({ result }),
     // A 304 (not_modified) is a normal, successful conditional GET — not a
-    // failure; it is visible in the tick log, never on the failure counter.
+    // failure. It records an `ok` tick and bumps the per-source lastSuccess gauge
+    // (the `unchanged` branch), never the failure counter; it is intentionally not
+    // logged per-tick to avoid steady-state noise. fetchOutcome is an observation
+    // hook the production adapter does not need (kept for alternate adapters).
     fetchOutcome: () => {},
     fetchFailure: (source, reason) => providerNetblocksFetchFailuresTotal.inc({ source, reason }),
     lastSuccess: (source, epochMs) =>
@@ -104,6 +111,7 @@ function makeBoundedHttp(timeoutMs: number, maxBytes: number): FetchHttp {
 
 export function startProviderNetblocksCron(options: ProviderNetblocksCronOptions): void {
   if (timer) return
+  stopped = false
   const kc = new k8s.KubeConfig()
   kc.loadFromDefault()
   const coreApi = kc.makeApiClient(k8s.CoreV1Api)
@@ -135,6 +143,7 @@ export function startProviderNetblocksCron(options: ProviderNetblocksCronOptions
   }
 
   const schedule = (delayMs: number): void => {
+    if (stopped) return
     timer = setTimeout(() => {
       void runOnce().finally(() => {
         schedule(options.intervalMs * (0.9 + Math.random() * 0.2))
@@ -148,6 +157,7 @@ export function startProviderNetblocksCron(options: ProviderNetblocksCronOptions
 }
 
 export function stopProviderNetblocksCron(): void {
+  stopped = true
   if (timer) {
     clearTimeout(timer)
     timer = null

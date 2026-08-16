@@ -4674,6 +4674,16 @@ export class WorkflowRecipeReconciler {
             failures
           )
         }
+        // Audit L3 (mirrors the ui.egress path): a transient failure of a newly-
+        // added FQDN with resolving siblings does not throw and freezes nothing —
+        // surface it so the missing egress until the next refresh is not silent.
+        if (failures.length > 0) {
+          console.warn(
+            `[WR-Reconciler] ${wlPolicyName}: ${failures.length} external egress FQDN(s) failed to resolve this round; policy written without them until the next refresh converges: ${failures
+              .map(f => `${f.fqdn} (${f.retryable ? 'transient' : 'permanent'})`)
+              .join(', ')}`
+          )
+        }
         this.warnEgressAccumulator(wlPolicyName, acc)
         // Defense-in-depth (audit M3): re-validate rehydrated IPs vs blocked ranges.
         effectiveExternal = acc.resolved.filter(

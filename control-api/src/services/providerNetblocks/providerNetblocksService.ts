@@ -73,7 +73,11 @@ function countsForSource(
   categories: Record<string, string[]>,
   source: string
 ): Record<string, number> {
-  const out: Record<string, number> = {}
+  // Object.create(null): a catalog category literally named "__proto__" (the CM
+  // key regex permits it) must not become a silent no-op setter on a plain {} and
+  // disarm the downstream shrink guard (NaN compare). Consistent with the null-proto
+  // defenses in parseProviderNetblocks and lookupFqdnProvider (issue #299 review).
+  const out: Record<string, number> = Object.create(null)
   for (const [key, list] of Object.entries(categories)) {
     // key is `<source>.<category>` (provider-blind: parseProviderNetblocks strips family)
     if (key.startsWith(`${source}.`)) out[key.slice(source.length + 1)] = list.length
@@ -269,6 +273,10 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
     // §G5 size budget, independent of the HTTP response cap.
     if (Buffer.byteLength(JSON.stringify(newData), 'utf8') > MAX_CM_BYTES) {
       metrics.fetchFailure('*', 'cm-size-budget')
+      // Record the tick like every other exit — a chronically-oversized catalog
+      // must not flatline clerum_provider_netblocks_ticks_total (indistinguishable
+      // from a dead cron); this is a failed write, so it counts as an error tick.
+      metrics.tick('error')
       console.error(
         '[provider-netblocks] rejected write: ConfigMap exceeds the size budget (LKG retained)'
       )

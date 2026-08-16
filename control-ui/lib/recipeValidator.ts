@@ -970,7 +970,7 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
               severity: 'warning',
               path: `${bindingPath}.egressClass`,
               message:
-                'provider egress renders CIDR ranges from the cluster provider-netblocks catalog — potentially wide ranges, not a single-host /32. FQDNs missing from the catalog fall back to their explicitly declared categories; review provider name and categories.',
+                'provider egress renders CIDR ranges from the cluster provider-netblocks catalog — potentially wide ranges, not a single-host /32. FQDNs missing from the registry fall back to their explicitly declared categories; review provider name and categories.',
             })
             const provider = binding.provider
             if (provider === null || typeof provider !== 'object' || Array.isArray(provider)) {

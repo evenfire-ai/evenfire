@@ -175,6 +175,28 @@ describe('defaultFqdnLookup classification', () => {
     expect(result).toEqual({ kind: 'ok', ipv4: ['160.79.104.10'], ipv6: [], ttlSeconds: 300 })
   })
 
+  it('B2 (H1): a TRANSIENT A-query failure with a resolving AAAA is a retryable error, not ok-empty', async () => {
+    // Dual-stack host: the A query rate-limits/times out (transient) while AAAA
+    // answers. IPv4 is the only rendered family, so a successful AAAA must NOT
+    // mask the transient A outage into an ok-empty "name drained" answer — that
+    // would age the /32 window out (silent IPv4 egress loss) instead of freezing
+    // it (issue #299 H1). Pre-fix this returned { kind:'ok', ipv4:[] }.
+    resolve4Mock.mockRejectedValue(dnsError('ETIMEOUT'))
+    resolve6Mock.mockResolvedValue(['2607:6bc0::10'])
+    const result = await defaultFqdnLookup('dual.example.com')
+    expect(result).toMatchObject({ kind: 'error', retryable: true })
+    expect((result as { error: string }).error).toContain('ETIMEOUT')
+  })
+
+  it('a PERMANENT A failure with a resolving AAAA stays ok (genuine AAAA-only host)', async () => {
+    // Contrast with B2: a permanent A failure (NXDOMAIN/ENODATA) + AAAA present is
+    // a real AAAA-only host, not a transient outage — it must stay ok (ipv4 empty).
+    resolve4Mock.mockRejectedValue(dnsError('ENODATA'))
+    resolve6Mock.mockResolvedValue(['2607:6bc0::10'])
+    const result = await defaultFqdnLookup('v6only.example.com')
+    expect(result).toMatchObject({ kind: 'ok', ipv4: [] })
+  })
+
   it('classifies SERVFAIL as a retryable error and surfaces the code', async () => {
     resolve4Mock.mockRejectedValue(dnsError('ESERVFAIL'))
     resolve6Mock.mockRejectedValue(dnsError('ESERVFAIL'))

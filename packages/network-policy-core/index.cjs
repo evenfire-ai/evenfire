@@ -90,7 +90,10 @@ function isValidIpv4(ip) {
   const parts = ip.split('.')
   if (parts.length !== 4) return false
   for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return false
+    // Reject leading-zero octets ("01", "001"): they are non-canonical and some
+    // parsers read them as octal, so a rehydrated "01.2.3.4" must NOT survive the
+    // gate the strict fresh-snapshot parser already rejects (G2 strictening).
+    if (!/^(0|[1-9]\d{0,2})$/.test(part)) return false
     const octet = Number(part)
     if (octet < 0 || octet > 255) return false
   }
@@ -331,7 +334,14 @@ function parseState(annotations, now, config, declarations) {
             })
           }
         }
-        return { entries }
+        // H5: only a NON-EMPTY recovery short-circuits. A STATE that parses to an
+        // array but yields ZERO valid entries (all-malformed/tampered) must NOT
+        // collapse to empty when a legacy TARGETS annotation is still present —
+        // fall through and rehydrate from it (fail-static). A genuinely-drained
+        // set writes STATE=[] AND TARGETS='' together (see stateAnnotations), so
+        // this never resurrects a stale set: an empty TARGETS falls through to the
+        // empty return below.
+        if (entries.length > 0) return { entries }
       }
     } catch (_err) {
       // fall through to legacy / empty
@@ -402,11 +412,13 @@ function parseState(annotations, now, config, declarations) {
 // appears in this file (generality invariant, CI grep-gated).
 // ───────────────────────────────────────────────────────────────────────────
 
-// Blocked external-egress set — promoted byte-identically from HCC's
-// PUBLIC_EGRESS_EXCEPT_CIDRS (networkPolicyReconciler.ts) so HCC/WRC/control-ui/
-// control-api enforce ONE list (G2: verified identical 18/18). RFC1918,
-// link-local, metadata 169.254/16, CGNAT, benchmarking, TEST-NET, multicast,
-// reserved.
+// Blocked external-egress set — the CANONICAL copy, byte-identical to HCC's
+// PUBLIC_EGRESS_EXCEPT_CIDRS (networkPolicyReconciler.ts). NOTE: consumers
+// (HCC/WRC/control-ui/control-api) still hold their OWN verified-identical copies
+// and gate on those — this is value-parity (G2: 18/18), not a shared import;
+// parity is currently guarded by the HCC↔WRC regex test, not by binding every
+// consumer to this constant. RFC1918, link-local, metadata 169.254/16, CGNAT,
+// benchmarking, TEST-NET, multicast, reserved.
 const BLOCKED_EXTERNAL_EGRESS_CIDRS = Object.freeze([
   '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
   '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24',
