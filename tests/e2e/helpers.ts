@@ -204,9 +204,9 @@ export async function waitForTasksProcessed(minCount: number, timeoutMs = 60_000
   throw new Error(`Agent did not process ${minCount} tasks within ${timeoutMs}ms`)
 }
 
-/** Query host-context-controller for MCP servers in a context. */
-export async function getMcpServers(contextRef: string): Promise<any> {
-  const { data } = await fetchJson(`${CTX_MAPPER_URL}/api/v1/mcpservers/context/${contextRef}`)
+/** Query the temporary PR 2 global-inventory compatibility route. */
+export async function getGlobalMcpInventory(): Promise<any> {
+  const { data } = await fetchJson(`${CTX_MAPPER_URL}/api/v1/mcpservers`)
   return data
 }
 

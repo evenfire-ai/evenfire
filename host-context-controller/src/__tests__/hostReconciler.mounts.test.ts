@@ -58,6 +58,7 @@ function makeHost(): HostCRD {
   return {
     name: 'team-mission',
     namespace: 'mcp-host',
+    uid: 'team-mission-uid',
     spec: {
       host: 'team-mission',
       contextRef: 'team-mission-ctx',
@@ -178,10 +179,11 @@ function runtimeSecretAnnotations(host = makeHost(), refreshBefore = '2999-01-01
     'clerum.io/runtime-token-host-binding-hash': helper.runtimeTokenHostBindingHash(host),
     'clerum.io/runtime-token-scope-hash': helper.runtimeTokenScopeHash(host),
     'clerum.io/runtime-token-issuer': 'control-api',
-    'clerum.io/runtime-token-audience': 'workflow-approvals',
-    'clerum.io/runtime-token-schema-version': '2',
+    'clerum.io/runtime-token-audience': 'host-context-controller,workflow-approvals',
+    'clerum.io/runtime-token-schema-version': '3',
     'clerum.io/gfs-token-expected-subject': `host:1st:${host.namespace}/${host.name}`,
     'clerum.io/gfs-token-capability-set-hash': helper.gfsCapabilitySetHash(),
+    'clerum.io/gfs-token-host-uid': host.uid!,
     'clerum.io/runtime-token-refresh-before': refreshBefore,
     'clerum.io/gfs-token-refresh-before': '2999-01-01T00:00:00.000Z',
   }
@@ -348,7 +350,7 @@ describe('HostReconciler runtime credential Secret revision', () => {
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
     expect(result.revision).not.toBe(legacyRevision)
     expect(replacedRuntimeSecret(coreApi).metadata?.annotations).toMatchObject({
-      'clerum.io/runtime-token-schema-version': '2',
+      'clerum.io/runtime-token-schema-version': '3',
       'clerum.io/runtime-token-rollout-required': 'true',
     })
   })
@@ -690,8 +692,8 @@ describe('HostReconciler runtime credential Secret revision', () => {
     const replaceBody = replacedRuntimeSecret(coreApi)
     expect(replaceBody.metadata?.annotations).toMatchObject({
       'clerum.io/runtime-token-issuer': 'control-api',
-      'clerum.io/runtime-token-audience': 'workflow-approvals',
-      'clerum.io/runtime-token-schema-version': '2',
+      'clerum.io/runtime-token-audience': 'host-context-controller,workflow-approvals',
+      'clerum.io/runtime-token-schema-version': '3',
     })
   })
 

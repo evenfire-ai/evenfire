@@ -507,6 +507,11 @@ export interface McpServerStatus {
   deployed: boolean
   /** Whether the Deployment has at least one ready replica. */
   ready: boolean
+  /**
+   * Whether this readiness observation is current and authoritative. Omitted
+   * when the status source cannot make that guarantee.
+   */
+  authoritative?: boolean
   /** Human-readable status message. */
   message?: string
 }

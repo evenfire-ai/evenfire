@@ -131,6 +131,7 @@ export type ApiKeys = Partial<Record<LlmProvider, ProviderCredentials>>
 export interface McpServerTransport {
   type: 'sse' | 'streamableHttp' | 'stdio'
   url?: string
+  port?: number
 }
 
 /**
@@ -167,9 +168,22 @@ export interface McpServerStatus {
 export interface McpServerInfo {
   name: string
   description?: string
-  contextRef: string
+  /**
+   * Present only for development/legacy in-process configuration. The HCC v2
+   * Host inventory deliberately omits Context identity: HCC derives it from
+   * the authenticated Host JWT and never returns it to the caller.
+   */
+  contextRef?: string
   transport: McpServerTransport
+  /** Legacy development shape. HCC v2 returns only authRequired. */
   auth?: McpServerAuth
+  /** Whether the scoped HCC credential route must return a bearer. */
+  authRequired?: boolean
+  /**
+   * Opaque HCC authority revision. It changes when the authorized server,
+   * auth selector, or referenced Secret identity/resourceVersion changes.
+   */
+  credentialRevision?: string
   enabled: boolean
   status: McpServerStatus
 }

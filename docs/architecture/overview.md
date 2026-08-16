@@ -749,12 +749,21 @@ Both support Bearer token authentication via `Authorization` header.
 
 #### Server Discovery (Production)
 
-mcp-host polls host-context-controller REST API to discover MCP servers:
+mcp-host polls the host-context-controller REST API with its existing
+caller-bound access JWT. HCC resolves the live Host and its Context from that
+identity; the caller never supplies a Context selector:
 
 ```
-mcp-host ──GET /api/v1/mcpservers/context/{contextRef}──▶ host-context-controller
-         ◀──── { servers: McpServerInfo[], timestamp }────
+mcp-host ──GET /api/v2/hosts/self/mcpservers + Bearer Host JWT──▶ HCC gateway
+         ◀──── Host-scoped { servers: McpServerInfo[], timestamp }────
 ```
+
+When an authenticated McpServer needs a credential, mcp-host posts the server
+name to `/api/v2/hosts/self/mcpservers/credential` with the same JWT. HCC
+checks the live Host → Context grant before reading the referenced Secret.
+The former caller-selected Context and global `/auth` routes are retired with
+HTTP 410; the remaining global v1 inventory is metadata-only transitional
+surface for the separately reviewed mcp-proxy PR2 and is not used by mcp-host.
 
 Polling interval: 30 seconds (configurable via `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`)
 
@@ -1012,13 +1021,15 @@ One policy per (context, server) pair. Only allows traffic from the mcp-host nam
 
 ### REST API
 
-| Method | Path                                      | Description                          |
-| ------ | ----------------------------------------- | ------------------------------------ |
-| `GET`  | `/`                                       | API information                      |
-| `GET`  | `/health`                                 | Health check                         |
-| `GET`  | `/api/v1/mcpservers`                      | List ALL MCP servers                 |
-| `GET`  | `/api/v1/mcpservers/context/{contextRef}` | List servers filtered by Context CRD |
-| `GET`  | `/api/v1/mcpservers/{name}/auth`          | Get auth token for a server          |
+| Method | Path                                       | Description                                                                        |
+| ------ | ------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `GET`  | `/`                                        | API information                                                                    |
+| `GET`  | `/health`                                  | Health check                                                                       |
+| `GET`  | `/api/v2/hosts/self/mcpservers`            | List MCP servers granted to the authenticated Host                                 |
+| `POST` | `/api/v2/hosts/self/mcpservers/credential` | Return a credential only after the live Host → Context → McpServer check           |
+| `GET`  | `/api/v1/mcpservers`                       | Transitional metadata-only system inventory; no Secret fields; PR2 review required |
+| `GET`  | `/api/v1/mcpservers/context/{contextRef}`  | Retired caller-selected route; HTTP 410                                            |
+| `GET`  | `/api/v1/mcpservers/{name}/auth`           | Retired unbound credential route; HTTP 410                                         |
 
 **Server info response**:
 
@@ -1028,23 +1039,25 @@ One policy per (context, server) pair. Only allows traffic from the mcp-host nam
     {
       "name": "mongodb-server",
       "description": "MongoDB MCP server",
-      "contextRef": "context1",
       "transport": { "type": "streamableHttp", "url": "http://...:3000/mcp" },
-      "auth": { "type": "bearer", "secretRef": "...", "secretKey": "..." },
       "enabled": true,
+      "authRequired": true,
+      "credentialRevision": "opaque-revision",
       "status": {
         "deployed": true,
         "ready": true,
-        "message": "1/1 replicas ready"
+        "message": "ready"
       }
     }
   ],
-  "contextRef": "context1",
   "timestamp": "2024-01-15T10:30:00.000Z"
 }
 ```
 
-**Context-based filtering**: Reads the Context CRD's `mcpServers` allowlist and only returns servers that appear in that list.
+**Host-based authorization**: HCC derives the current Host's Context from the
+verified JWT and live Host object, checks the Context's `mcpServers` allowlist,
+and returns only the sanitized v2 DTO. Context names, auth selectors, and
+Secret references never appear in the Host response.
 
 **Deployment status**: The reconciler checks the actual Deployment status (`readyReplicas`) to populate the `deployed` and `ready` fields.
 

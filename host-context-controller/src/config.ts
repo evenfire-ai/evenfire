@@ -147,6 +147,12 @@ export interface Config {
   // 1st-party mcp-host credentials.
   hccTargetNamespace: string
 
+  // Control API RS256 verifier contract for Host-scoped MCP API routes.
+  mcpHostJwtPublicKey: string
+  mcpHostJwtIssuer: string
+  mcpHostJwtMaxTtlSeconds: number
+  mcpHostApiRateLimitPerMinute: number
+
   // URL of the nginx gateway that mediates mcp-host → control-api traffic.
   // Injected into mcp-host pods as MCP_HOST_GATEWAY_URL. Per the architecture
   // diagram this is the "nginx (only /mcp-host)" allowlist-proxy.
@@ -673,6 +679,14 @@ export const config: Config = {
 
   // HCC provisions the shared 1st-party mcp-host credentials by default.
   hccTargetNamespace: getEnv('HCC_TARGET_NAMESPACE')?.trim() || 'mcp-host',
+
+  mcpHostJwtPublicKey: getEnv('HCC_MCP_HOST_JWT_PUBLIC_KEY', '')!,
+  mcpHostJwtIssuer: getEnv('HCC_MCP_HOST_JWT_ISSUER', 'control-api')!,
+  mcpHostJwtMaxTtlSeconds: Math.max(1, getEnvInt('HCC_MCP_HOST_JWT_MAX_TTL_SECONDS', 600)),
+  mcpHostApiRateLimitPerMinute: Math.max(
+    1,
+    getEnvInt('HCC_MCP_HOST_API_RATE_LIMIT_PER_MINUTE', 120)
+  ),
 
   // URL of the nginx gateway that mediates mcp-host → control-api traffic.
   // Injected into mcp-host pods as MCP_HOST_GATEWAY_URL. Per the architecture

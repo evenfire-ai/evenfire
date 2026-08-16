@@ -117,7 +117,7 @@ else
   fail "pre-gate sync does not use the shared idempotent auth-key sync helper"
 fi
 
-if contains 'nginx.conf is mounted through a subPath' &&
+if contains 'Both nginx gateway configs are mounted through subPath' &&
    contains 'INCREMENTAL_FULL_DEPLOYMENT' &&
    contains 'rollout_restart_with_retry control-plane nginx-workflow-approval-gateway' &&
    contains 'rollout_if_present control-plane nginx-workflow-approval-gateway' &&
@@ -125,6 +125,33 @@ if contains 'nginx.conf is mounted through a subPath' &&
   pass "pre-gate sync refreshes the subPath-mounted workflow gateway after deployment changes"
 else
   fail "pre-gate sync can leave a stale workflow gateway after ConfigMap changes"
+fi
+
+hcc_gateway_restart_line="$(grep -nF 'rollout_restart_with_retry control-plane host-context-controller-api-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+hcc_gateway_wait_line="$(grep -nF 'rollout_if_present control-plane host-context-controller-api-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+hcc_gateway_assert_line="$(grep -nF 'assert_hcc_gateway_np08_routes' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+if [[ -n "$hcc_gateway_restart_line" &&
+      -n "$hcc_gateway_wait_line" &&
+      -n "$hcc_gateway_assert_line" &&
+      "$hcc_gateway_restart_line" -lt "$hcc_gateway_wait_line" &&
+      "$hcc_gateway_wait_line" -lt "$hcc_gateway_assert_line" ]]; then
+  pass "pre-gate restarts and waits for the subPath-mounted HCC gateway before NP-08 inspection"
+else
+  fail "pre-gate can inspect a stale HCC gateway after its ConfigMap changes"
+fi
+
+if runtime_contains 'assert_hcc_gateway_np08_routes()' &&
+   runtime_contains 'location = /api/v2/hosts/self/mcpservers {' &&
+   runtime_contains 'location = /api/v2/hosts/self/mcpservers/credential {' &&
+   runtime_contains 'location ~ ^/api/v1/mcpservers/context/[^/]+$ {' &&
+   runtime_contains 'location ~ ^/api/v1/mcpservers/[^/]+/auth$ {' &&
+   runtime_contains 'proxy_set_header Authorization $http_authorization;' &&
+   runtime_contains 'add_header Pragma "no-cache" always;' &&
+   runtime_contains 'access_log /dev/stdout hcc_gateway_json;' &&
+   runtime_contains 'return 410'; then
+  pass "pre-gate fails closed when the running HCC gateway lacks the NP-08 route contract"
+else
+  fail "pre-gate does not verify the running NP-08 HCC gateway contract"
 fi
 
 if runtime_contains 'assert_workflow_gateway_prompt_bridge_finalization_route()' &&

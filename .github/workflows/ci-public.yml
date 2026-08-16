@@ -468,6 +468,9 @@ jobs:
       - name: Test pre-gate runtime assertions
         run: bash scripts/tests/test-minikube-pre-gate-runtime.sh
 
+      - name: Test NP-08 Host clients have no v1 fallback
+        run: bash scripts/tests/test-np08-v1-reference-inventory.sh
+
       # ADMIN_PASSWORD is a required precondition of full-setup.sh Step 1 on the
       # default (minimal) seed profile. Two cases in this harness execute the
       # script against stubbed docker/minikube/kubectl, so without it they abort

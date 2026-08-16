@@ -534,17 +534,19 @@ if [[ "${cluster_changed}" == "true" ]]; then
   ensure_evenfire_registry
   incremental_restart_targets
 
-  # nginx.conf is mounted through a subPath.  Kubernetes updates the
-  # ConfigMap object but does not refresh that file in an already-running pod,
-  # so a full deployment sync must roll the gateway before any SDK probe uses
-  # the new route set.
+  # Both nginx gateway configs are mounted through subPath. Kubernetes updates
+  # the ConfigMaps but not the files in existing pods, so a deployment sync
+  # must roll both before any SDK or NP-08 runtime assertion.
   if [[ "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ||
         "${FORCE_RESTART}" == "true" ]]; then
     rollout_restart_with_retry control-plane nginx-workflow-approval-gateway
     rollout_if_present control-plane nginx-workflow-approval-gateway
+    rollout_restart_with_retry control-plane host-context-controller-api-gateway
+    rollout_if_present control-plane host-context-controller-api-gateway
   fi
 
   assert_workflow_gateway_prompt_bridge_finalization_route
+  assert_hcc_gateway_np08_routes
 
   rollout_if_present control-plane host-context-controller
   rollout_if_present control-plane workflow-recipes
@@ -578,5 +580,7 @@ else
   ensure_evenfire_registry
   rollout_if_present control-plane nginx-workflow-approval-gateway
   assert_workflow_gateway_prompt_bridge_finalization_route
+  rollout_if_present control-plane host-context-controller-api-gateway
+  assert_hcc_gateway_np08_routes
   ${KC} get deploy -A --no-headers 2>/dev/null | grep -v kube-system || true
 fi

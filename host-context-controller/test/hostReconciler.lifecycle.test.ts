@@ -101,6 +101,7 @@ function makeHost(overrides?: Partial<HostCRD>): HostCRD {
   return {
     name: 'alpha-host',
     namespace: 'mcp-host',
+    uid: 'alpha-host-uid',
     spec: {
       host: 'alpha-host',
       contextRef: 'context-a',
@@ -117,6 +118,7 @@ function makeStatelessHost(
   return {
     name,
     namespace: 'mcp-host',
+    uid: `${name}-uid`,
     spec: {
       host: name,
       contextRef: 'context-a',
@@ -145,6 +147,7 @@ function hostApiObject(host: HostCRD) {
     metadata: {
       name: host.name,
       namespace: host.namespace,
+      uid: host.uid,
       resourceVersion: host.resourceVersion ?? '42',
       annotations: host.annotations,
     },
@@ -827,6 +830,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(mintGfs).toHaveBeenCalledWith({ name: host.name, namespace: host.namespace })
     expect(issueTokens).toHaveBeenCalledWith(
       host.name,
+      host.uid,
       expect.arrayContaining([
         'workflow:list',
         'workflow:read',
@@ -852,8 +856,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const issueTokens = vi.mocked(issueMcpHostRuntimeTokens)
     const defaultIssueTokens = issueTokens.getMockImplementation()
     issueTokens.mockClear()
-    issueTokens.mockImplementationOnce(async (hostName, scopes) => {
-      const tokens = await defaultIssueTokens!(hostName, scopes)
+    issueTokens.mockImplementationOnce(async (hostName, hostUid, scopes) => {
+      const tokens = await defaultIssueTokens!(hostName, hostUid, scopes)
       channelCount = 1
       return tokens
     })
@@ -861,8 +865,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
 
     expect(issueTokens).toHaveBeenCalledTimes(2)
-    expect(issueTokens.mock.calls[0][1]).not.toContain('workflow:trigger')
-    expect(issueTokens.mock.calls[1][1]).toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[0][1]).toBe(host.uid)
+    expect(issueTokens.mock.calls[0][2]).not.toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[1][2]).toContain('workflow:trigger')
     const deployment = hostDeploymentBody(appsApi, host.name)
     expect(deployment.spec?.replicas).toBe(1)
     expect(containerEnv(deployment).map(entry => entry.name)).not.toContain(
@@ -887,8 +892,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const issueTokens = vi.mocked(issueMcpHostRuntimeTokens)
     const defaultIssueTokens = issueTokens.getMockImplementation()
     issueTokens.mockClear()
-    issueTokens.mockImplementationOnce(async (hostName, scopes) => {
-      const tokens = await defaultIssueTokens!(hostName, scopes)
+    issueTokens.mockImplementationOnce(async (hostName, hostUid, scopes) => {
+      const tokens = await defaultIssueTokens!(hostName, hostUid, scopes)
       channelCount = 1
       return tokens
     })
@@ -896,8 +901,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
 
     expect(issueTokens).toHaveBeenCalledTimes(2)
-    expect(issueTokens.mock.calls[0][1]).not.toContain('workflow:trigger')
-    expect(issueTokens.mock.calls[1][1]).toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[0][1]).toBe(host.uid)
+    expect(issueTokens.mock.calls[0][2]).not.toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[1][2]).toContain('workflow:trigger')
     expect(
       containerEnv(hostDeploymentBody(appsApi, host.name)).map(entry => entry.name)
     ).not.toContain('CLERUM_STATELESS_LIFECYCLE')
@@ -979,8 +985,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
 
     expect(issueTokens).toHaveBeenCalledTimes(2)
-    expect(issueTokens.mock.calls[0][1]).not.toContain('workflow:trigger')
-    expect(issueTokens.mock.calls[1][1]).toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[0][1]).toBe(host.uid)
+    expect(issueTokens.mock.calls[0][2]).not.toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[1][2]).toContain('workflow:trigger')
     const hostReplace = appsApi.replaceNamespacedDeployment.mock.calls.find(
       ([request]) => request.name === host.name
     )?.[0].body as k8s.V1Deployment | undefined

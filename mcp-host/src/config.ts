@@ -73,6 +73,10 @@ export interface Config {
   // Context Mapper poll interval in ms (for production mode)
   contextMapperPollInterval: number
 
+  // Maximum time an already-published MCP fleet may survive without a fresh,
+  // authenticated HCC inventory snapshot.
+  hccAuthorityMaxStalenessMs: number
+
   // MCP server health heartbeat interval in ms. mcp-host periodically
   // tools/list's each connected server to keep observedAt fresh and detect
   // silent failures. Must stay well under the desktop's 120s stale threshold.
@@ -551,6 +555,14 @@ export const config: Config = {
 
   // Context Mapper poll interval (default 30 seconds)
   contextMapperPollInterval: parseInt(getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!, 10),
+
+  // Bound transient HCC/Kubernetes authority outages. Identity failures revoke
+  // immediately; 5xx/transport failures may preserve the last good fleet only
+  // within this finite window.
+  hccAuthorityMaxStalenessMs: Math.min(
+    getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 60_000),
+    60_000
+  ),
 
   // MCP status heartbeat. Defaults to 30 seconds so a single missed tick does
   // not trip desktop staleness.

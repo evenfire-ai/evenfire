@@ -1,8 +1,8 @@
 /**
- * E2E: Context Mapper — verify server discovery and filtering.
+ * E2E: Context Mapper — verify the PR 1 route and disclosure boundaries.
  */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { CTX_MAPPER_URL, getMcpServers, healthCheck } from '../helpers.js'
+import { CTX_MAPPER_URL, getGlobalMcpInventory, healthCheck } from '../helpers.js'
 
 let contextMapperUp = false
 
@@ -16,27 +16,37 @@ beforeAll(async () => {
 })
 
 describe('Context Mapper', () => {
-  it('GET /api/v1/mcpservers/context/context1 returns servers', async () => {
+  it('retains only the metadata-only global v1 inventory for the PR 2 proxy migration', async () => {
     if (!contextMapperUp) return
-    const data = await getMcpServers('context1')
+    const data = await getGlobalMcpInventory()
     expect(data.servers).toBeDefined()
     expect(Array.isArray(data.servers)).toBe(true)
-    expect(data.contextRef).toBe('context1')
+    expect(data.contextRef).toBe('*')
+    for (const server of data.servers) {
+      expect(server).not.toHaveProperty('auth')
+      expect(server).not.toHaveProperty('secretRef')
+      expect(server).not.toHaveProperty('secretKey')
+    }
   })
 
-  it('context1 includes at least one ready MCP server with transport metadata', async () => {
+  it.each([
+    '/api/v1/mcpservers/context/context1',
+    '/api/v1/mcpservers/server-from-another-context/auth',
+  ])('tombstones caller-selected legacy Host route %s', async path => {
     if (!contextMapperUp) return
-    const data = await getMcpServers('context1')
-    const readyServer = data.servers.find((s: any) => s.status?.ready === true)
-    expect(readyServer).toBeDefined()
-    expect(readyServer.transport).toBeDefined()
-    expect(readyServer.transport.type).toBeDefined()
+    const response = await fetch(`${CTX_MAPPER_URL}${path}`)
+
+    expect(response.status).toBe(410)
+    expect(response.headers.get('cache-control')).toContain('no-store')
+    await expect(response.json()).resolves.toEqual({ error: 'gone' })
   })
 
-  it('non-existent context returns empty server list', async () => {
+  it('rejects the v2 Host inventory without an authenticated Host JWT', async () => {
     if (!contextMapperUp) return
-    const res = await fetch(`${CTX_MAPPER_URL}/api/v1/mcpservers/context/does-not-exist`)
-    const data = await res.json()
-    expect(data.servers).toEqual([])
+    const response = await fetch(`${CTX_MAPPER_URL}/api/v2/hosts/self/mcpservers`)
+
+    expect(response.status).toBe(401)
+    expect(response.headers.get('cache-control')).toContain('no-store')
+    await expect(response.json()).resolves.toEqual({ error: 'unauthorized' })
   })
 })
