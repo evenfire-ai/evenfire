@@ -4,11 +4,11 @@ import { readFileSync } from 'node:fs'
 /**
  * Plugin Workload SDK platform rate-limit config (issue #348, plan D2).
  *
- * RED-FIRST (plan §6.6): this suite asserts the POST-change target behavior.
- * Against pre-change code the four `pluginSdk*RlPerMin` config fields and the
- * four `CONTROL_API_PLUGIN_SDK_*_PER_MIN` ConfigMap keys do not exist yet, so
- * every test here FAILS until Phase 1 (step 1.1) and Phase 3 (D1) land. Do
- * not weaken these assertions to pass early.
+ * RED-FIRST (plan §6.6): the RED was captured pre-change — against the old
+ * code the four `pluginSdk*RlPerMin` config fields and the four
+ * `CONTROL_API_PLUGIN_SDK_*_PER_MIN` ConfigMap keys did not exist. Phase 1
+ * (step 1.1) and Phase 3 (D1) have LANDED, so the behavior asserted below is
+ * now live and this suite is GREEN. Do not weaken these assertions.
  *
  * Covered:
  *   1. Code defaults 150/120/600/600 (decision Q3: recalibrated from the old
@@ -66,9 +66,9 @@ async function loadConfigWith(overrides: Partial<Record<RateLimitKey, string>>) 
   vi.resetModules()
   try {
     const mod = await import('../src/config.js')
-    // The four fields are added by Phase 1 step 1.1; index access keeps the
-    // TARGET assertion expressible before the Config type gains the fields
-    // (the values are still asserted strictly below — no soft pass).
+    // The four fields exist on Config now; the widening cast is only to allow
+    // dynamic `config[field]` access in the it.each below (the values are
+    // asserted strictly there — no soft pass).
     return mod.config as typeof mod.config & Record<string, unknown>
   } finally {
     for (const key of RATE_LIMIT_KEYS) {
@@ -178,5 +178,30 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     )
     expect(notificationsDescription).toContain('default 150')
     expect(notificationsDescription).toContain('CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN')
+  })
+
+  // Wiring guard: the request-bucket and pre-auth limits are only exercised for
+  // their config VALUE above; their two CONSUMERS must actually read the config
+  // field, not a hardcoded 600. A regression to `maxPerMinute: 600` / `limit:
+  // 600` would otherwise pass every value/default test. extractOne fails loud if
+  // the config reference is replaced by a literal.
+  it('wires the request-bucket limit from config in the SDK request middleware', () => {
+    const source = read('../src/middleware/pluginWorkloadSdkRateLimits.ts')
+    const field = extractOne(
+      source,
+      /maxPerMinute:\s*config\.(pluginSdkRequestBucketRlPerMin)\b/,
+      'maxPerMinute wired from config in src/middleware/pluginWorkloadSdkRateLimits.ts'
+    )
+    expect(field).toBe('pluginSdkRequestBucketRlPerMin')
+  })
+
+  it('wires the pre-auth flood-guard limit from config in the SDK routes', () => {
+    const source = read('../src/routes/mcp-host/plugin-workload-sdk.routes.ts')
+    const field = extractOne(
+      source,
+      /limit:\s*config\.(pluginSdkPreauthRlPerMin)\b/,
+      'limit wired from config in src/routes/mcp-host/plugin-workload-sdk.routes.ts'
+    )
+    expect(field).toBe('pluginSdkPreauthRlPerMin')
   })
 })

@@ -470,9 +470,9 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         capabilityFamily: 'promptBridge',
         provider: 'zai',
         allowedCallers: ['api'],
-        // Issue #348 (plan 2.6, RED until the strip lands): the deprecated
-        // per-run key is tolerated on write but STRIPPED before persistence —
-        // the persisted quotaLimits must be empty, not { maxRequestsPerRun: 10 }.
+        // Issue #348 (plan 2.6, strip has LANDED): the deprecated per-run key
+        // is tolerated on write but STRIPPED before persistence — the persisted
+        // quotaLimits must be empty, not { maxRequestsPerRun: 10 }.
         quotaLimits: {},
       }),
       '11111111-1111-4111-8111-111111111111'

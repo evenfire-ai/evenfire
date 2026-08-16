@@ -12,7 +12,8 @@ import {
 // Owns the three SDK tables:
 //   - plugin_workload_sdk_grants          per-recipe capability grants
 //   - plugin_workload_sdk_invocations     invocation audit trail
-//   - plugin_workload_sdk_quota_counters  per-recipe+period quota tracking
+//   - plugin_workload_sdk_quota_counters  historical-only counters (issue #348);
+//                                         admin read path only, no writers
 
 export const PLUGIN_WORKLOAD_SDK_FAMILIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkFamily = (typeof PLUGIN_WORKLOAD_SDK_FAMILIES)[number]

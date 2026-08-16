@@ -1381,7 +1381,7 @@ fi
 if printf "%s" "$logs" | grep -q E2E_SDK_QUOTA_EXCEEDED_OK; then
   ok "per-minute rate limit rejected the 5th call after 4/4 invocations in the window"
 else
-  fail "per-minute rate limit did not reject the 5th call (fixture marker missing; caller logs redacted)"
+  fail "per-minute rate limit did not reject the 5th call (fixture marker missing; caller logs redacted). If the caller logged E2E_SDK_QUOTA_EXCEEDED_FAIL=*:possible_window_ageout or *:window_overcount, this is the known per-minute 60s-window timing race (issue #348 fixture caveat), not a real enforcement regression — retry on a less loaded cluster or apply the coordinated gate+fixture reset fix."
   exit 1
 fi
 
