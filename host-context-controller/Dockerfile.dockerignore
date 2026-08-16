@@ -1,5 +1,7 @@
 **
 !packages/
+!packages/network-policy-core/
+!packages/network-policy-core/**
 !packages/workflow-recipe-capability-policy/
 !packages/workflow-recipe-capability-policy/**
 !packages/image-policy/

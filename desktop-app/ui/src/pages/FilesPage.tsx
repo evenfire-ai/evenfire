@@ -1,4 +1,11 @@
-import { type DragEvent as ReactDragEvent, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type DragEvent as ReactDragEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
 import { GfsImagePreview } from '@components/GfsImagePreview'
@@ -13,13 +20,16 @@ import {
   IconDownload,
 } from '@components/SidebarNav/icons'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
-import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import {
+  type GfsBrowserFailure,
+  describeGfsBrowserFailure,
+  useGfsBrowserController,
+} from '@hooks/domain/useGfsBrowserController'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
-import { GfsAgentAccessSection } from '@/gfs/GfsAgentAccessSection'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import {
   type GfsAgentSubjectOption,
@@ -100,7 +110,11 @@ function agentSubjectOptions(agents: MyAgentEntry[] | undefined): GfsAgentSubjec
   for (const agent of agents) {
     // Only agents with a canonical host gfsSubject are grantable targets.
     if (agent.gfsSubject?.type !== 'host' || !agent.gfsSubject.id) continue
-    options.set(agent.gfsSubject.id, { id: agent.gfsSubject.id, name: agent.name })
+    options.set(agent.gfsSubject.id, {
+      id: agent.gfsSubject.id,
+      name: agent.name,
+      displayName: agent.displayName,
+    })
   }
   return [...options.values()].sort((left, right) => left.name.localeCompare(right.name))
 }
@@ -110,7 +124,17 @@ function resourceSource(resource: GfsDriveResource, currentFolderName?: string):
   return resource.sources?.length ? resource.sources.join(' + ') : 'Shared'
 }
 
-export function FilesPage({ pushToast }: FilesPageProps) {
+function pickErrorMessage(error: unknown): string | null {
+  if (!error) return null
+  return error instanceof Error ? error.message : String(error)
+}
+
+function mergeErrorMessages(...errors: unknown[]): string | null {
+  const messages = errors.map(pickErrorMessage).filter((value): value is string => Boolean(value))
+  return messages.length > 0 ? messages.join(' · ') : null
+}
+
+export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
@@ -121,12 +145,24 @@ export function FilesPage({ pushToast }: FilesPageProps) {
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
+  const [mutationFailure, setMutationFailure] = useState<GfsBrowserFailure | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  const handlePreviewDownloadError = useCallback(
+    (error: unknown) => {
+      ctrl.handleAuthorityFailure(
+        error instanceof Error ? error.message : String(error),
+        'operation'
+      )
+    },
+    [ctrl.handleAuthorityFailure]
+  )
   const {
     current,
     crumbs,
+    view,
+    isOperatorRoot,
     accessibleResources,
     items,
     affordances,
@@ -159,12 +195,38 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     enabled: manageOpen,
   })
   const agentSubjects = useMemo(() => agentSubjectOptions(myAgentsQuery.data), [myAgentsQuery.data])
+  // Unified grant-subject list: people + teams (team directory) and the caller's
+  // own agents (canonical host subjects). Agents are badge-labelled and capped to
+  // read/write inside GfsDelegationPanel when present in the selection.
+  const grantSubjectOptions = useMemo<GfsDelegationSubjectOption[]>(
+    () => [
+      ...delegationSubjects,
+      ...agentSubjects.map(agent => ({
+        type: 'host' as const,
+        id: agent.id,
+        // Visible agent name (spec.displayName); the id-based `name` is the
+        // last-resort label for a blank/whitespace-only displayName so a
+        // selectable subject never renders an empty label.
+        label: (agent.displayName ?? '').trim() || agent.name,
+        description: 'Agent',
+        badge: 'Agent',
+      })),
+    ],
+    [agentSubjects, delegationSubjects]
+  )
   const grantsError = useMemo(
     () => (ctrl.grantsError ? describeGfsGrantError(ctrl.grantsError) : null),
     [ctrl.grantsError]
   )
-  const canWriteCurrent = hasBit(affordances, 'write')
-  const canDeleteCurrent = hasBit(affordances, 'delete')
+  const sharesError = useMemo(
+    () => (ctrl.sharesError ? describeGfsGrantError(ctrl.sharesError) : null),
+    [ctrl.sharesError]
+  )
+  const mutationUnauthorized = mutationFailure?.kind === 'unauthorized'
+  const accessRevoked = ctrl.accessState === 'revoked'
+  const canWriteCurrent = !accessRevoked && !mutationUnauthorized && hasBit(affordances, 'write')
+  const canDeleteCurrent =
+    !accessRevoked && !mutationUnauthorized && !isOperatorRoot && hasBit(affordances, 'delete')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
@@ -191,6 +253,33 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     if (!manageOpen || !current?.resourceId) return
     void refreshAffordances()
   }, [current?.resourceId, manageOpen, refreshAffordances])
+
+  useEffect(() => {
+    setMutationFailure(null)
+  }, [current?.resourceId, view])
+
+  useEffect(() => {
+    if (!accessRevoked) return
+    // A permission transition invalidates every operator-only surface in this
+    // Electron session. A later retry is server-backed through the controller.
+    setManageOpen(false)
+    setOpenLinkOpen(false)
+    setCreateFolderOpen(false)
+    setRenameOpen(false)
+    setDeleteOpen(false)
+    setFilePreview(null)
+  }, [accessRevoked])
+
+  const surfaceContentMutationError = (mutationError: unknown) => {
+    const raw = mutationError instanceof Error ? mutationError.message : String(mutationError)
+    const failure = describeGfsBrowserFailure(raw)
+    if (ctrl.handleAuthorityFailure(raw, 'operation')) {
+      setMutationFailure(failure)
+      pushToast?.(failure.message, 'error')
+      return
+    }
+    pushToast?.(raw, 'error')
+  }
 
   const openFilePreview = (
     resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'>
@@ -232,10 +321,20 @@ export function FilesPage({ pushToast }: FilesPageProps) {
   // One atomic bulk grant for every selected subject — the server grants all or
   // none (a `subjects_invalid` rejects the whole request), so there is no
   // partial-success outcome. A failure propagates to the panel's catch, which
-  // maps the server verdict via describeGfsGrantError. No inherit argument here:
-  // the user/team panel keeps inherit:false.
-  const handleGrant = async (subjectKeys: string[], bits: string[]) => {
-    await ctrl.grant(subjectKeys, bits)
+  // maps the server verdict via describeGfsGrantError. People, teams, and
+  // agents share a single picker; inherit is honored for directories and is
+  // forced false for files by the panel.
+  const failClosedOnAuthorizationError = (error: unknown): never => {
+    const message = error instanceof Error ? error.message : String(error)
+    ctrl.handleAuthorityFailure(message, 'operation')
+    throw error
+  }
+  const handleGrant = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
+    try {
+      await ctrl.grant(subjectKeys, bits, inherit)
+    } catch (error) {
+      failClosedOnAuthorizationError(error)
+    }
     pushToast?.(
       `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
       'success'
@@ -244,30 +343,37 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     await ctrl.refreshGrants()
   }
 
-  const handleGrantAgents = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
-    await ctrl.grant(subjectKeys, bits, inherit)
-    pushToast?.(
-      `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'agent' : 'agents'}`,
-      'success'
-    )
-    await ctrl.refreshGrants()
-  }
-
   const handleRevokeGrant = async (grantId: string, label: string) => {
     try {
       await ctrl.revokeGrant(grantId)
       pushToast?.(`Access revoked for ${label}`, 'success')
     } catch (revokeError) {
+      ctrl.handleAuthorityFailure(String(revokeError), 'operation')
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }
 
   const handleCreateShare = async (subjectKeys: string[]) => {
-    await ctrl.createShare(subjectKeys)
+    try {
+      await ctrl.createShare(subjectKeys)
+    } catch (error) {
+      failClosedOnAuthorizationError(error)
+    }
     pushToast?.(
       `${subjectKeys.length} ${subjectKeys.length === 1 ? 'share' : 'shares'} created`,
       'success'
     )
+    await ctrl.refreshShares()
+  }
+
+  const handleRevokeShare = async (shareId: string, label: string) => {
+    try {
+      await ctrl.revokeShare(shareId)
+      pushToast?.(`Shared access revoked for ${label}`, 'success')
+    } catch (revokeError) {
+      ctrl.handleAuthorityFailure(String(revokeError), 'operation')
+      pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+    }
   }
 
   const handleDownload = async (uri: string, name: string) => {
@@ -280,8 +386,12 @@ export function FilesPage({ pushToast }: FilesPageProps) {
       anchor.click()
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
       pushToast?.(`Downloaded ${name}`, 'success')
-    } catch (uploadError) {
-      pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
+    } catch (downloadError) {
+      ctrl.handleAuthorityFailure(String(downloadError), 'operation')
+      pushToast?.(
+        downloadError instanceof Error ? downloadError.message : String(downloadError),
+        'error'
+      )
     }
   }
 
@@ -304,17 +414,30 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     return true
   }
 
+  /**
+   * Open a link handed over from the app level (a plugin's `gfs://` click that
+   * this page handles better than the overlay). Cleared immediately so a
+   * re-render cannot reopen it, and failures surface the browser's own error.
+   */
+  useEffect(() => {
+    if (!pendingGfsUri) return
+    onPendingGfsUriHandled?.()
+    void handleOpenGfsLink(pendingGfsUri)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGfsUri])
+
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
     if (!requestedName) return
     try {
       const name = await normalizeGfsResourceName(requestedName)
       await ctrl.createFolder(name)
+      setMutationFailure(null)
       setCreateFolderName('')
       setCreateFolderOpen(false)
       pushToast?.(`Folder ${name} created`, 'success')
     } catch (createError) {
-      pushToast?.(createError instanceof Error ? createError.message : String(createError), 'error')
+      surfaceContentMutationError(createError)
     }
   }
 
@@ -326,9 +449,10 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     try {
       const name = await normalizeGfsResourceName(file.name)
       await ctrl.createFile(parentResourceId, name, await fileToEncodedData(file))
+      setMutationFailure(null)
       pushToast?.(`Uploaded ${name}`, 'success')
     } catch (uploadError) {
-      pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
+      surfaceContentMutationError(uploadError)
     }
   }
 
@@ -393,12 +517,10 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     if (!file || !current) return
     try {
       await ctrl.replaceFile(current.resourceId, await fileToEncodedData(file), current.version)
+      setMutationFailure(null)
       pushToast?.(`Replaced ${current.name}`, 'success')
     } catch (replaceError) {
-      pushToast?.(
-        replaceError instanceof Error ? replaceError.message : String(replaceError),
-        'error'
-      )
+      surfaceContentMutationError(replaceError)
     }
   }
 
@@ -410,10 +532,11 @@ export function FilesPage({ pushToast }: FilesPageProps) {
       const name = await normalizeGfsResourceName(requestedName)
       if (name === current.name) return
       await ctrl.renameResource(current.resourceId, name, current.version)
+      setMutationFailure(null)
       setRenameOpen(false)
       pushToast?.(`Renamed to ${name}`, 'success')
     } catch (renameError) {
-      pushToast?.(renameError instanceof Error ? renameError.message : String(renameError), 'error')
+      surfaceContentMutationError(renameError)
     }
   }
 
@@ -421,25 +544,60 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     if (!current) return
     try {
       await ctrl.deleteResource(current.resourceId, current.version)
+      setMutationFailure(null)
       setDeleteOpen(false)
       setManageOpen(false)
       pushToast?.(`Deleted ${current.name}`, 'success')
     } catch (deleteError) {
-      pushToast?.(deleteError instanceof Error ? deleteError.message : String(deleteError), 'error')
+      surfaceContentMutationError(deleteError)
     }
   }
 
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
-    const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
+    const resources = isOperatorRoot
+      ? accessibleResources
+      : currentIsFolder
+        ? items
+        : currentIsFile
+          ? []
+          : accessibleResources
     return [...resources].sort((left, right) => {
       if (left.kind === right.kind) return 0
       return left.kind === 'directory' ? -1 : 1
     })
-  }, [accessibleResources, currentIsFile, currentIsFolder, items])
-  const visibleLoading = currentIsFolder ? loading : !current ? loadingAccessible : false
-  const visibleError = currentIsFolder ? error : !current ? accessibleError : null
-  const hasMoreVisible = currentIsFolder ? ctrl.hasMore : !current && ctrl.hasMoreAccessible
-  const loadingMoreVisible = currentIsFolder ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
+  }, [accessibleResources, currentIsFile, currentIsFolder, isOperatorRoot, items])
+  const visibleLoading = isOperatorRoot
+    ? loadingAccessible
+    : currentIsFolder
+      ? loading
+      : !current
+        ? loadingAccessible
+        : false
+  const visibleError = isOperatorRoot
+    ? accessibleError
+    : currentIsFolder
+      ? error
+      : !current
+        ? accessibleError
+        : null
+  const visibleFailure = accessRevoked
+    ? describeGfsBrowserFailure('operator_link_inactive')
+    : visibleError
+      ? describeGfsBrowserFailure(visibleError)
+      : null
+  const hasMoreVisible = isOperatorRoot
+    ? ctrl.hasMoreAccessible
+    : currentIsFolder
+      ? ctrl.hasMore
+      : !current && ctrl.hasMoreAccessible
+  const loadingMoreVisible = isOperatorRoot
+    ? ctrl.isFetchingMoreAccessible
+    : currentIsFolder
+      ? ctrl.isFetchingMore
+      : ctrl.isFetchingMoreAccessible
+  const rootLabel = isOperatorRoot || view === 'operator' ? 'Global File System' : 'Shared with me'
+  const operatorRootResourceId =
+    view === 'operator' && crumbs[0]?.isDriveRoot ? crumbs[0].resourceId : undefined
 
   const openManage = (resource: GfsDriveResource) => {
     if (resource.resourceId !== current?.resourceId) ctrl.openResource(resource)
@@ -463,7 +621,11 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     <section className="page da-gfs-page">
       <div className="page-header">
         <h2>Files</h2>
-        <p className="muted">Browse and manage everything shared with you in one place.</p>
+        <p className="muted">
+          {view === 'operator'
+            ? 'Browse and manage the Global File System from its root.'
+            : 'Browse and manage everything shared with you in one place.'}
+        </p>
       </div>
 
       <div className="page-layout da-gfs-layout">
@@ -471,6 +633,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
           className="page-card da-gfs-drive"
           aria-label="Global File System browser"
           aria-busy={visibleLoading || droppedUploadCount > 0}
+          data-testid={`gfs-view-${view}`}
           onDragEnter={handleGfsDragEnter}
           onDragLeave={handleGfsDragLeave}
           onDragOver={handleGfsDragOver}
@@ -481,31 +644,77 @@ export function FilesPage({ pushToast }: FilesPageProps) {
               <Button
                 className="da-gfs-drive__breadcrumb"
                 color="neutral"
-                disabled={!current}
+                data-resource-id={operatorRootResourceId}
+                data-testid={`gfs-root-${view}`}
+                disabled={!current || isOperatorRoot}
                 onClick={() => {
                   setManageOpen(false)
                   ctrl.reset()
                 }}
                 variant="text"
               >
-                Shared with me
+                {rootLabel}
               </Button>
-              {crumbs.map((crumb, index) => (
-                <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
-                  <IconChevronRight aria-hidden="true" />
-                  <Button
-                    className="da-gfs-drive__breadcrumb"
-                    color="neutral"
-                    disabled={index === crumbs.length - 1}
-                    onClick={() => ctrl.goToCrumb(index)}
-                    variant="text"
-                  >
-                    {crumb.name}
-                  </Button>
-                </span>
-              ))}
+              {crumbs.map((crumb, index) =>
+                crumb.isDriveRoot ? null : (
+                  <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
+                    <IconChevronRight aria-hidden="true" />
+                    <Button
+                      className="da-gfs-drive__breadcrumb"
+                      color="neutral"
+                      disabled={index === crumbs.length - 1}
+                      onClick={() => ctrl.goToCrumb(index)}
+                      variant="text"
+                    >
+                      {crumb.name}
+                    </Button>
+                  </span>
+                )
+              )}
             </nav>
             <div className="da-gfs-drive__header-actions">
+              {currentIsFolder && canWriteCurrent ? (
+                <>
+                  <Button
+                    data-testid="gfs-create-folder-action"
+                    loading={ctrl.mutating}
+                    onClick={() => {
+                      setCreateFolderName('')
+                      setCreateFolderOpen(true)
+                      setDeleteOpen(false)
+                      setManageOpen(true)
+                    }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    New folder
+                  </Button>
+                  <Button
+                    data-testid="gfs-upload-action"
+                    loading={ctrl.mutating}
+                    onClick={() => uploadInputRef.current?.click()}
+                    size="sm"
+                    variant="outline"
+                  >
+                    Upload file
+                  </Button>
+                  {isOperatorRoot && (affordances?.canDelegate || affordances?.canCreateShare) ? (
+                    <Button
+                      data-testid="gfs-manage-access-action"
+                      onClick={() => {
+                        setCreateFolderOpen(false)
+                        setDeleteOpen(false)
+                        setRenameOpen(false)
+                        setManageOpen(true)
+                      }}
+                      size="sm"
+                      variant="outline"
+                    >
+                      Manage access
+                    </Button>
+                  ) : null}
+                </>
+              ) : null}
               <Button
                 color="neutral"
                 onClick={() => setOpenLinkOpen(true)}
@@ -534,6 +743,21 @@ export function FilesPage({ pushToast }: FilesPageProps) {
             </div>
           </div>
 
+          {currentIsFolder && canWriteCurrent ? (
+            <input
+              aria-label="Upload file"
+              className="visually-hidden"
+              data-testid="gfs-upload-input"
+              ref={uploadInputRef}
+              type="file"
+              onChange={event => {
+                const file = event.currentTarget.files?.[0]
+                event.currentTarget.value = ''
+                void handleUploadFile(file)
+              }}
+            />
+          ) : null}
+
           {dragActive || droppedUploadCount > 0 ? (
             <div className="composer-drop-overlay da-gfs-drop-overlay" role="status">
               {droppedUploadCount > 0
@@ -544,9 +768,39 @@ export function FilesPage({ pushToast }: FilesPageProps) {
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
-          {visibleError ? <StatusBanner tone="error" text={visibleError} /> : null}
 
-          {visibleLoading ? (
+          {mutationFailure ? (
+            <div
+              data-testid={`gfs-mutation-error-${mutationFailure.kind}`}
+              role="alert"
+              aria-label={mutationFailure.title}
+            >
+              <StatusBanner
+                tone="error"
+                text={`${mutationFailure.title}. ${mutationFailure.message}`}
+              />
+            </div>
+          ) : null}
+
+          {visibleFailure ? (
+            <div
+              data-testid={`gfs-error-${visibleFailure.kind}`}
+              role="alert"
+              aria-label={visibleFailure.title}
+            >
+              <EmptyState title={visibleFailure.title} body={visibleFailure.message} />
+              {accessRevoked ? (
+                <Button
+                  data-testid="gfs-retry-access-action"
+                  onClick={() => ctrl.retryAccess()}
+                  size="sm"
+                  variant="outline"
+                >
+                  Retry file access
+                </Button>
+              ) : null}
+            </div>
+          ) : visibleLoading ? (
             <div
               className="da-gfs-loading"
               role="status"
@@ -591,14 +845,24 @@ export function FilesPage({ pushToast }: FilesPageProps) {
               </div>
             </div>
           ) : visibleResources.length === 0 ? (
-            <EmptyState
-              title={currentIsFolder ? 'This folder is empty' : 'No shared files yet'}
-              body={
-                currentIsFolder
-                  ? 'Files and folders added here will appear in this list.'
-                  : 'Resources shared directly with you or your teams will appear here.'
-              }
-            />
+            <div data-testid={isOperatorRoot ? 'gfs-empty-operator' : 'gfs-empty-shared'}>
+              <EmptyState
+                title={
+                  isOperatorRoot
+                    ? 'Global File System is empty'
+                    : currentIsFolder
+                      ? 'This folder is empty'
+                      : 'No shared files yet'
+                }
+                body={
+                  isOperatorRoot
+                    ? 'Create a folder or upload a file to get started.'
+                    : currentIsFolder
+                      ? 'Files and folders added here will appear in this list.'
+                      : 'Resources shared directly with you or your teams will appear here.'
+                }
+              />
+            </div>
           ) : (
             <div
               className="da-grid da-gfs-drive__grid"
@@ -616,7 +880,11 @@ export function FilesPage({ pushToast }: FilesPageProps) {
               </div>
               <div className="da-grid__body">
                 {visibleResources.map(resource => (
-                  <div className="da-grid__row da-grid__row--compact" key={resource.resourceId}>
+                  <div
+                    className="da-grid__row da-grid__row--compact"
+                    data-testid={`gfs-resource-row-${resource.resourceId}`}
+                    key={resource.resourceId}
+                  >
                     <span className="da-gfs-list__icon da-grid__cell" aria-hidden="true">
                       {resource.kind === 'directory' ? <IconContexts /> : <IconAttachFile />}
                     </span>
@@ -685,7 +953,9 @@ export function FilesPage({ pushToast }: FilesPageProps) {
             <div className="da-gfs-footer-actions">
               <Button
                 loading={loadingMoreVisible}
-                onClick={currentIsFolder ? ctrl.loadMore : ctrl.loadMoreAccessible}
+                onClick={
+                  currentIsFolder && !isOperatorRoot ? ctrl.loadMore : ctrl.loadMoreAccessible
+                }
                 size="sm"
                 variant="outline"
               >
@@ -807,7 +1077,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                           : undefined
                       }
                       onDelete={
-                        canDeleteCurrent
+                        canDeleteCurrent && !isOperatorRoot
                           ? () => {
                               setDeleteOpen(true)
                               setCreateFolderOpen(false)
@@ -825,7 +1095,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                           : undefined
                       }
                       onRename={
-                        canWriteCurrent
+                        canWriteCurrent && !isOperatorRoot
                           ? () => {
                               setRenameName(current.name)
                               setRenameOpen(true)
@@ -871,19 +1141,6 @@ export function FilesPage({ pushToast }: FilesPageProps) {
               </span>
             </header>
 
-            {currentIsFolder && canWriteCurrent ? (
-              <input
-                aria-label="Upload file"
-                className="visually-hidden"
-                ref={uploadInputRef}
-                type="file"
-                onChange={event => {
-                  const file = event.currentTarget.files?.[0]
-                  event.currentTarget.value = ''
-                  void handleUploadFile(file)
-                }}
-              />
-            ) : null}
             {currentIsFile && canWriteCurrent ? (
               <input
                 aria-label="Replace file"
@@ -969,45 +1226,33 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                   <>
                     <GfsDelegationPanel
                       affordances={affordances}
-                      subjectOptions={delegationSubjects}
-                      subjectOptionsLoading={teamDirectoryQuery.isFetching}
-                      subjectOptionsError={
-                        teamDirectoryQuery.error instanceof Error
-                          ? teamDirectoryQuery.error.message
-                          : teamDirectoryQuery.error
-                            ? String(teamDirectoryQuery.error)
-                            : null
+                      subjectOptions={grantSubjectOptions}
+                      subjectOptionsLoading={
+                        teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
                       }
+                      subjectOptionsError={mergeErrorMessages(
+                        teamDirectoryQuery.error,
+                        myAgentsQuery.error
+                      )}
+                      isDirectory={currentIsFolder}
                       onGrant={handleGrant}
                       onCreateShare={affordances.canCreateShare ? handleCreateShare : undefined}
                     />
-                    {affordances.canDelegate ? (
-                      <GfsAgentAccessSection
-                        agents={agentSubjects}
-                        agentsLoading={myAgentsQuery.isFetching}
-                        agentsError={
-                          myAgentsQuery.error instanceof Error
-                            ? myAgentsQuery.error.message
-                            : myAgentsQuery.error
-                              ? String(myAgentsQuery.error)
-                              : null
-                        }
-                        isDirectory={Boolean(currentIsFolder)}
-                        onGrantAgents={handleGrantAgents}
-                      />
-                    ) : null}
                   </>
                 ) : (
                   <p className="muted">Loading permissions…</p>
                 )}
               </section>
 
-              <section className="da-gfs-manage-section da-gfs-manage-section--grants">
+              <section
+                className="da-gfs-manage-section da-gfs-manage-section--grants"
+                data-testid="gfs-access-management"
+              >
                 <div className="da-gfs-manage-section__header">
                   <div>
                     <h4>Who has access</h4>
                     <p className="muted">
-                      Existing grants on this resource. Revoking is immediate.
+                      Existing direct grants and shares on this resource. Revoking is immediate.
                     </p>
                   </div>
                 </div>
@@ -1015,9 +1260,13 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                   agents={agentSubjects}
                   error={grantsError}
                   items={ctrl.grants}
-                  loading={ctrl.loadingGrants}
+                  loading={ctrl.loadingGrants || ctrl.loadingShares}
                   onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
+                  onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
                   revoking={ctrl.revoking}
+                  revokingShare={ctrl.revokingShare}
+                  shareError={sharesError}
+                  shares={ctrl.shares}
                   subjects={delegationSubjects}
                 />
               </section>
@@ -1033,6 +1282,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
           gfsUri={filePreview.gfsUri}
           mimeType={filePreview.mimeType}
           onClose={() => setFilePreview(null)}
+          onDownloadError={handlePreviewDownloadError}
         />
       ) : null}
 
@@ -1042,6 +1292,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
           fileName={filePreview.name}
           gfsUri={filePreview.gfsUri}
           onClose={() => setFilePreview(null)}
+          onDownloadError={handlePreviewDownloadError}
         />
       ) : null}
     </section>

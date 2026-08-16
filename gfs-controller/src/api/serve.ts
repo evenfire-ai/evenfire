@@ -1,28 +1,47 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { GfsMetrics } from "../metrics";
-import type { AuthzContext } from "../authz/permissionClient";
-import type { AuditSink } from "../authz/audit";
-import type { AccessibleResourcePage } from "../authz/accessibleStore";
-import type { GfsPermission } from "../authz/resolve";
-import { checkTokenCeiling } from "../authz/tokenCeiling";
 import type { GfsVerifiedClaims } from "../auth/verify";
+import type { AccessibleResourcePage } from "../authz/accessibleStore";
+import type { AuditSink } from "../authz/audit";
+import { type AuthzContext, auditAttribution } from "../authz/permissionClient";
+import type { GfsPermission } from "../authz/resolve";
+import { GfsSubjectResolutionDeniedError } from "../authz/subjectResolver";
+import { checkTokenCeiling } from "../authz/tokenCeiling";
 import type { GfsWriteService } from "../db/writeStore";
-import { normalizeResourceId, PathError } from "../storage/paths";
+import type { GfsMetrics } from "../metrics";
+import { PathError, normalizeResourceId } from "../storage/paths";
+import { type CopyRouteDeps, executeCopyRoute } from "./copyRoute";
+import { ok, toResponse } from "./envelope";
+import { GfsError } from "./errors";
 import {
   BlobReader,
+  ResourceStore,
   downloadResource,
   listChildren,
-  ResourceStore,
   statResource,
   toView,
 } from "./read";
-import { ok, toResponse } from "./envelope";
-import { executeCopyRoute, type CopyRouteDeps } from "./copyRoute";
 import { executeRenameRoute } from "./renameRoute";
-import { GfsError } from "./errors";
-import { normalizeResourceName, ResourceNameError } from "./resourceName";
-import { planWrite, WriteError } from "./write";
+import { ResourceNameError, normalizeResourceName } from "./resourceName";
+import { WriteError, planWrite } from "./write";
+
+/**
+ * Strip control characters (CR/LF/tab, C0 controls, DEL) and bound the length of
+ * a user-controlled value before it is interpolated into a log line. Prevents
+ * log injection / log forging (CWE-117) when values that may carry user input
+ * (request method/target, or an error message/stack that echoes a decoded path)
+ * reach a log sink. CR/LF are removed; other control chars become '?'.
+ */
+export function sanitizeForLog(value: string): string {
+  // Remove CR/LF first (the log-forging vector; empty-string replace that
+  // enumerates \n is the barrier CodeQL's js/log-injection recognizes), then
+  // scrub any remaining C0 controls and DEL to '?', and bound the length to
+  // guard against log flooding.
+  return value
+    .replace(/[\n\r]/g, "")
+    .replace(/[\u0000-\u001f\u007f]/g, "?")
+    .slice(0, 512);
+}
 
 /**
  * gfsc read serving handler (spec community.md §Operator surfaces / §Auth,
@@ -50,13 +69,23 @@ import { planWrite, WriteError } from "./write";
 export interface ServingDeps {
   verifyToken: (token: string) => GfsVerifiedClaims;
   resolveContext: (
-    claims: { sub: string; drive: string },
+    claims: Pick<
+      GfsVerifiedClaims,
+      "sub" | "drive" | "brokeredAuthority" | "principalType" | "authGeneration"
+    >,
     requestId?: string
   ) => Promise<AuthzContext>;
   /** Permission-store authorization (the source of truth). */
-  authorize: (ctx: AuthzContext, resourceId: string, op: GfsPermission) => Promise<{ allowed: boolean }>;
+  authorize: (
+    ctx: AuthzContext,
+    resourceId: string,
+    op: GfsPermission
+  ) => Promise<{ allowed: boolean }>;
   /** Lists direct resources visible to the resolved principal. */
-  listAccessible?: (ctx: AuthzContext, opts: { limit?: unknown; cursor?: string }) => Promise<AccessibleResourcePage>;
+  listAccessible?: (
+    ctx: AuthzContext,
+    opts: { limit?: unknown; cursor?: string }
+  ) => Promise<AccessibleResourcePage>;
   store: ResourceStore;
   blobs: BlobReader;
   /** The transactional write data plane. Absent on a read-only replica — write
@@ -71,8 +100,24 @@ export interface ServingDeps {
   now?: () => number;
 }
 
-/** Largest mutation body gfsc accepts before failing loud with payload_too_large. */
-const MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
+/**
+ * Largest mutation body gfsc accepts before failing loud with payload_too_large.
+ * Configurable via GFS_MAX_WRITE_BODY_BYTES, plumbed to the gfsc pod through the
+ * host-context-controller gfsc template (deploy sets it to 24MiB for the 16MB upload
+ * cap). A non-integer or non-positive value fails loud to stderr and falls back to the
+ * 16MiB default — otherwise a config typo would silently 413 every large upload.
+ */
+const DEFAULT_MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_WRITE_BODY_BYTES = ((): number => {
+  const rawEnv = process.env.GFS_MAX_WRITE_BODY_BYTES;
+  if (rawEnv === undefined) return DEFAULT_MAX_WRITE_BODY_BYTES;
+  const raw = Number(rawEnv);
+  if (Number.isInteger(raw) && raw > 0) return raw;
+  console.error(
+    `[gfsc] ignoring invalid GFS_MAX_WRITE_BODY_BYTES="${rawEnv}" (must be a positive integer); using ${DEFAULT_MAX_WRITE_BODY_BYTES}`
+  );
+  return DEFAULT_MAX_WRITE_BODY_BYTES;
+})();
 const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
 const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
 
@@ -146,9 +191,30 @@ function requireRid(raw: string): string {
   }
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers?: Record<string, string>
+): void {
+  res.writeHead(status, { "Content-Type": "application/json", ...headers });
   res.end(JSON.stringify(body));
+}
+
+/**
+ * When a response is written BEFORE the request body was fully received (e.g.
+ * payload_too_large aborts the read mid-stream), the connection cannot be
+ * reused: unread bytes are still in flight and Node resets the socket after
+ * the response. Without advertising `Connection: close`, a pooling client
+ * (undici in control-api's gfs proxy) queues its next request onto the
+ * about-to-die socket and gets ECONNRESET → a spurious 502 gfsc_unreachable
+ * (reproduced live: 413 → immediately-following proxied request failed
+ * deterministically). `req.complete` is Node's own "entire message received"
+ * flag; `=== false` keeps plain-object test doubles (complete: undefined)
+ * and fully-consumed bodies on normal keep-alive.
+ */
+function abortConnectionHeader(req: IncomingMessage): Record<string, string> | undefined {
+  return req.complete === false ? { Connection: "close" } : undefined;
 }
 
 export class GfsServingHandler {
@@ -174,14 +240,34 @@ export class GfsServingHandler {
     if (!resourceMatch && !resolveMatch && !accessibleMatch && !copyMatch) return false;
 
     const method = req.method ?? "GET";
-    const isWrite = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+    const isWrite =
+      method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
     const copyWrite = method === "POST" && copyMatch && this.deps.writeService && this.deps.copy;
-    const renameWrite = method === "PATCH" && resourceMatch?.[2] === undefined
-      && this.deps.writeService && this.deps.audit && this.deps.rename;
-    const resourceWrite = isWrite && this.deps.writeService && resourceMatch
-      && (method === "DELETE" || Boolean(this.deps.audit));
-    if ((copyMatch && !copyWrite) || (method === "PATCH" && !renameWrite) || (method !== "GET" && !resourceWrite && !copyWrite)) {
-      sendJson(res, 404, { ok: false, error: { code: "not_found", message: "not found" } });
+    const renameWrite =
+      method === "PATCH" &&
+      resourceMatch?.[2] === undefined &&
+      this.deps.writeService &&
+      this.deps.audit &&
+      this.deps.rename;
+    const resourceWrite =
+      isWrite &&
+      this.deps.writeService &&
+      resourceMatch &&
+      (method === "DELETE" || Boolean(this.deps.audit));
+    if (
+      (copyMatch && !copyWrite) ||
+      (method === "PATCH" && !renameWrite) ||
+      (method !== "GET" && !resourceWrite && !copyWrite)
+    ) {
+      // This 404 can be written before a request body was consumed (e.g. a
+      // POST with a body to an unsupported verb/route) — same socket-poisoning
+      // risk as the catch path below, so it carries the same close semantics.
+      sendJson(
+        res,
+        404,
+        { ok: false, error: { code: "not_found", message: "not found" } },
+        abortConnectionHeader(req)
+      );
       return true;
     }
 
@@ -192,8 +278,14 @@ export class GfsServingHandler {
       : undefined;
     try {
       const claims = this.deps.verifyToken(bearerToken(req));
-      const needsMutationRequestId = Boolean(copyMatch) || Boolean(renameWrite)
-        || Boolean(resourceMatch && ((method === "POST" && resourceMatch[2] === "children") || (method === "PUT" && resourceMatch[2] === "content")));
+      const needsMutationRequestId =
+        Boolean(copyMatch) ||
+        Boolean(renameWrite) ||
+        Boolean(
+          resourceMatch &&
+          ((method === "POST" && resourceMatch[2] === "children") ||
+            (method === "PUT" && resourceMatch[2] === "content"))
+        );
       const requestId = needsMutationRequestId ? requireRequestId(req) : undefined;
       const ctx = await this.authContext(claims, req, requestId);
       copyAbort?.signal.throwIfAborted();
@@ -210,7 +302,20 @@ export class GfsServingHandler {
       }
     } catch (err) {
       const { status, body } = toResponse(err);
-      if (!res.headersSent) sendJson(res, status, body);
+      if (status >= 500) {
+        // A 5xx must never be invisible: an unknown throw (e.g. the base64
+        // RangeError that produced a bogus `internal` 500) previously left no
+        // trace anywhere in the system. Log code + stack (never the body/content).
+        // The stack/message is sanitized too: an underlying error (e.g. a driver
+        // error echoing a decoded path) can carry user input with real newlines,
+        // so it is a log-injection source just like method/url.
+        console.error(
+          `[gfsc] ${sanitizeForLog(method)} ${sanitizeForLog(req.url ?? "?")} -> ${status} ${body.error.code}: ${sanitizeForLog(
+            err instanceof Error ? (err.stack ?? err.message ?? "") : String(err)
+          )}`
+        );
+      }
+      if (!res.headersSent) sendJson(res, status, body, abortConnectionHeader(req));
       else res.end(); // a content stream already started; just terminate
     } finally {
       cancelCopyTimer?.();
@@ -280,11 +385,27 @@ export class GfsServingHandler {
   }
 
   /** Resolve the principal to its subject set; a store failure is fail-closed 503. */
-  private async authContext(claims: GfsVerifiedClaims, req: IncomingMessage, admittedRequestId?: string): Promise<AuthzContext> {
+  private async authContext(
+    claims: GfsVerifiedClaims,
+    req: IncomingMessage,
+    admittedRequestId?: string
+  ): Promise<AuthzContext> {
     const requestId = admittedRequestId ?? headerValue(req, "x-request-id");
     try {
-      return await this.deps.resolveContext({ sub: claims.sub, drive: claims.drive }, requestId);
+      return await this.deps.resolveContext(
+        {
+          sub: claims.sub,
+          drive: claims.drive,
+          ...(claims.brokeredAuthority ? { brokeredAuthority: claims.brokeredAuthority } : {}),
+          ...(claims.principalType ? { principalType: claims.principalType } : {}),
+          ...(claims.authGeneration === undefined ? {} : { authGeneration: claims.authGeneration }),
+        },
+        requestId
+      );
     } catch (err) {
+      if (err instanceof GfsSubjectResolutionDeniedError) {
+        throw new GfsError("forbidden", "principal is not authorized for GFS");
+      }
       throw new GfsError(
         "not_mounted",
         `subject resolution failed: ${err instanceof Error ? err.message : String(err)}`
@@ -339,7 +460,11 @@ export class GfsServingHandler {
       resourcePath: null,
     });
     if (!ceiling.allowed) {
-      throw new GfsError("forbidden", "read scope is required for accessible-resource discovery", ceiling.reason);
+      throw new GfsError(
+        "forbidden",
+        "read scope is required for accessible-resource discovery",
+        ceiling.reason
+      );
     }
     if (!this.deps.listAccessible) {
       throw new GfsError("not_mounted", "accessible-resource store is unavailable");
@@ -384,7 +509,12 @@ export class GfsServingHandler {
     rid: string
   ): Promise<void> {
     await this.authorizeOp(claims, ctx, rid, "read");
-    const { resource, stream } = await downloadResource(this.deps.store, this.deps.blobs, claims.drive, rid);
+    const { resource, stream } = await downloadResource(
+      this.deps.store,
+      this.deps.blobs,
+      claims.drive,
+      rid
+    );
     res.writeHead(200, {
       "Content-Type": "application/octet-stream",
       "Content-Length": String(resource.bytes),
@@ -440,7 +570,13 @@ export class GfsServingHandler {
   ): Promise<void> {
     const body = await readJsonBody(req, { signal });
     const data = await executeCopyRoute({
-      body, claims, context: ctx, requestId, admittedAtMs, signal, now: () => this.clock(),
+      body,
+      claims,
+      context: ctx,
+      requestId,
+      admittedAtMs,
+      signal,
+      now: () => this.clock(),
       deps: { ...this.deps.copy!, writes: this.deps.writeService! },
     });
     sendJson(res, 201, ok(data));
@@ -467,8 +603,17 @@ export class GfsServingHandler {
     await this.authorizeChecks(claims, ctx, plan.checks);
 
     const created = await this.deps.writeService!.create({
-      drive: claims.drive, parentId, name, kind, content,
-      mutation: { subject: ctx.primarySubject, requestId, audit: this.deps.audit! },
+      drive: claims.drive,
+      parentId,
+      name,
+      kind,
+      content,
+      mutation: {
+        subject: ctx.primarySubject,
+        requestId,
+        audit: this.deps.audit!,
+        ...auditAttribution(ctx),
+      },
     });
     sendJson(res, 201, ok(toView(created)));
   }
@@ -491,19 +636,36 @@ export class GfsServingHandler {
     await this.authorizeChecks(claims, ctx, plan.checks);
 
     const updated = await this.deps.writeService!.replace({
-      drive: claims.drive, resourceId, ifMatch, content,
-      mutation: { subject: ctx.primarySubject, requestId, audit: this.deps.audit! },
+      drive: claims.drive,
+      resourceId,
+      ifMatch,
+      content,
+      mutation: {
+        subject: ctx.primarySubject,
+        requestId,
+        audit: this.deps.audit!,
+        ...auditAttribution(ctx),
+      },
     });
     sendJson(res, 200, ok(toView(updated)));
   }
 
   private async serveRename(
-    req: IncomingMessage, res: ServerResponse, claims: GfsVerifiedClaims,
-    ctx: AuthzContext, resourceId: string, requestId: string
+    req: IncomingMessage,
+    res: ServerResponse,
+    claims: GfsVerifiedClaims,
+    ctx: AuthzContext,
+    resourceId: string,
+    requestId: string
   ): Promise<void> {
     const body = await readJsonBody(req);
     const data = await executeRenameRoute({
-      body, claims, context: ctx, resourceId, requestId, audit: this.deps.audit!,
+      body,
+      claims,
+      context: ctx,
+      resourceId,
+      requestId,
+      audit: this.deps.audit!,
       authorizeWrite: () => this.authorizeOp(claims, ctx, resourceId, "write"),
       writes: this.deps.writeService!,
       limits: this.deps.rename!,
@@ -547,7 +709,13 @@ function requireRequestId(req: IncomingMessage): string {
   const supplied = headerValue(req, "x-request-id");
   if (supplied === undefined) return randomUUID();
   const normalized = requireRid(supplied);
-  return [normalized.slice(0, 8), normalized.slice(8, 12), normalized.slice(12, 16), normalized.slice(16, 20), normalized.slice(20)].join("-");
+  return [
+    normalized.slice(0, 8),
+    normalized.slice(8, 12),
+    normalized.slice(12, 16),
+    normalized.slice(16, 20),
+    normalized.slice(20),
+  ].join("-");
 }
 
 function headerValue(req: IncomingMessage, name: string): string | undefined {
@@ -584,7 +752,8 @@ function optionalResourceKind(body: Record<string, unknown>): "file" | "director
 function readContentBuffer(body: Record<string, unknown>): Buffer {
   const encoded = body.contentBase64;
   if (encoded !== undefined) {
-    if (typeof encoded !== "string") throw new GfsError("path_invalid", "'contentBase64' must be a string");
+    if (typeof encoded !== "string")
+      throw new GfsError("path_invalid", "'contentBase64' must be a string");
     return decodeBase64Content(encoded);
   }
   return Buffer.from(requireString(body, "content"), "utf8");
@@ -592,8 +761,13 @@ function readContentBuffer(body: Record<string, unknown>): Buffer {
 
 function decodeBase64Content(encoded: string): Buffer {
   if (encoded.length === 0) return Buffer.alloc(0);
-  const standardBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-  if (!standardBase64.test(encoded)) {
+  // Canonical base64: length is a multiple of 4, only base64 chars, and padding
+  // ('=' x0-2) only at the very end. This uses a single character-class star,
+  // which V8 compiles to a linear loop. The previous `/(?:[A-Za-z0-9+/]{4})*.../`
+  // used a GROUPED quantifier that pushes an Irregexp backtrack frame per 4-char
+  // group and threw `RangeError: Maximum call stack size exceeded` above ~4.47M
+  // chars (~3.2MB raw) — surfacing as a bogus 500 `internal` on any large upload.
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
     throw new GfsError("path_invalid", "'contentBase64' must be valid base64");
   }
   return Buffer.from(encoded, "base64");
@@ -629,9 +803,11 @@ async function readJsonBody(
   const chunks: Buffer[] = [];
   let total = 0;
   const abort = (): void => {
-    req.destroy(opts.signal?.reason instanceof Error
-      ? opts.signal.reason
-      : new GfsError("precondition_failed", "synchronous copy deadline exceeded"));
+    req.destroy(
+      opts.signal?.reason instanceof Error
+        ? opts.signal.reason
+        : new GfsError("precondition_failed", "synchronous copy deadline exceeded")
+    );
   };
   opts.signal?.throwIfAborted();
   opts.signal?.addEventListener("abort", abort, { once: true });
@@ -641,7 +817,10 @@ async function readJsonBody(
       const buf = chunk as Buffer;
       total += buf.length;
       if (total > MAX_WRITE_BODY_BYTES) {
-        throw new GfsError("payload_too_large", `request body exceeds ${MAX_WRITE_BODY_BYTES} bytes`);
+        throw new GfsError(
+          "payload_too_large",
+          `request body exceeds ${MAX_WRITE_BODY_BYTES} bytes`
+        );
       }
       chunks.push(buf);
     }
@@ -661,6 +840,9 @@ async function readJsonBody(
     }
     return parsed as Record<string, unknown>;
   } catch (err) {
-    throw new GfsError("path_invalid", `invalid JSON body: ${err instanceof Error ? err.message : String(err)}`);
+    throw new GfsError(
+      "path_invalid",
+      `invalid JSON body: ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 }

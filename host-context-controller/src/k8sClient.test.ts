@@ -4,6 +4,7 @@ import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import {
   McpServerWatcher,
+  externalEgressResyncDelayMs,
   getContext,
   listAllCommunicationChannels,
   listAllGlobalFileSystems,
@@ -151,22 +152,24 @@ const mocks = vi.hoisted(() => {
   }
 })
 
-vi.mock('./config', () => ({
-  config: {
-    devMode: false,
-    namespace: 'mcp-server',
-    hostNamespace: 'mcp-host',
-    rpcProxyNamespace: 'rpc-proxy',
-    channelsNamespace: 'channels',
-    port: 8081,
-    runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
-    hostK8sRequestTimeoutMs: 30_000,
-    hostResyncIntervalSec: 0,
-    externalEgressResyncIntervalSec: 0,
-    controlApiBaseUrl: 'http://control-api.test:8090',
-    governedTracingEnabled: false,
-  },
+// Mutable so a test can enable the external-egress resync timer (R1-M4); every
+// other test keeps externalEgressResyncIntervalSec: 0 (reset in afterEach).
+const mockConfig = vi.hoisted(() => ({
+  devMode: false,
+  namespace: 'mcp-server',
+  hostNamespace: 'mcp-host',
+  rpcProxyNamespace: 'rpc-proxy',
+  channelsNamespace: 'channels',
+  port: 8081,
+  runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
+  hostK8sRequestTimeoutMs: 30_000,
+  hostResyncIntervalSec: 0,
+  externalEgressResyncIntervalSec: 0,
+  externalEgressRefreshFloorSec: 5,
+  controlApiBaseUrl: 'http://control-api.test:8090',
+  governedTracingEnabled: false,
 }))
+vi.mock('./config', () => ({ config: mockConfig }))
 
 vi.mock('./administrativeOutcomeReporter', () => ({
   createAdministrativeOutcomeReporter: mocks.createAdministrativeOutcomeReporter,
@@ -376,6 +379,7 @@ describe('McpServerWatcher startup', () => {
     // later test in the file. Restore it structurally rather than by
     // per-test discipline.
     mocks.hasCertifiedSafetyInventory.mockReset().mockReturnValue(true)
+    mockConfig.externalEgressResyncIntervalSec = 0 // keep periodic resync off by default
     mocks.ensureDefaultPolicies.mockReset().mockResolvedValue(undefined)
     mocks.netPolFullReconcile.mockReset().mockImplementation(async (...args: unknown[]) => {
       const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
@@ -9123,5 +9127,28 @@ describe('McpServerWatcher.startCommunicationChannelWatch — channel-reader rev
     expect(errorSpy).toHaveBeenCalled()
 
     errorSpy.mockRestore()
+  })
+})
+
+describe('externalEgressResyncDelayMs (issue #299 H2)', () => {
+  it('returns the configured interval (ms) when no TTL has been observed', () => {
+    expect(externalEgressResyncDelayMs(60, 5)).toBe(60_000)
+    expect(externalEgressResyncDelayMs(60, 5, Infinity)).toBe(60_000)
+  })
+
+  it('advances to TTL/2 when the observed TTL is faster than the interval', () => {
+    expect(externalEgressResyncDelayMs(60, 5, 15_000)).toBe(7_500)
+  })
+
+  it('never drops below the floor even for a tiny TTL', () => {
+    expect(externalEgressResyncDelayMs(60, 5, 6_000)).toBe(5_000)
+  })
+
+  it('keeps the configured interval when the observed TTL is large', () => {
+    expect(externalEgressResyncDelayMs(60, 5, 600_000)).toBe(60_000)
+  })
+
+  it('clamps a below-floor configured interval up to the floor', () => {
+    expect(externalEgressResyncDelayMs(3, 5)).toBe(5_000)
   })
 })

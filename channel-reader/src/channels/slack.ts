@@ -753,4 +753,21 @@ export class SlackAdapter implements ChannelAdapter {
       )
     }
   }
+
+  async sendEphemeral(channelId: string, userId: string, content: string): Promise<void> {
+    if (!this.client) {
+      console.warn('[Slack] Not connected, cannot send ephemeral message')
+      return
+    }
+    try {
+      await this.client.chat.postEphemeral({ channel: channelId, user: userId, text: content })
+    } catch (error) {
+      // Never let a failed notice break message processing.
+      console.warn(
+        `[Slack] Could not send ephemeral notice to ${userId} in ${channelId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+    }
+  }
 }

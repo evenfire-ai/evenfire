@@ -31,6 +31,12 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
+vi.mock('../HostAccessTab', () => ({
+  HostAccessTab: ({ hostName }: { hostName: string }) => (
+    <div data-testid="access-tab">Access editor for {hostName}</div>
+  ),
+}))
+
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
@@ -236,7 +242,7 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
   it('preserves an open Overview draft when Model & credentials is saved', async () => {
     const view = render(<HostDetailsPage />)
     await openOverviewEdit()
-    fireEvent.change(screen.getByLabelText('Name'), {
+    fireEvent.change(screen.getByLabelText('Display name'), {
       target: { value: 'unsaved-overview-name' },
     })
 

@@ -552,13 +552,18 @@ async function submitRegistryInstallForm(
 ) {
   await installForm.locator('#ri-name').clear()
   await installForm.locator('#ri-name').fill(serverName)
-  await installForm.locator('#ri-context').selectOption('context1')
+  await installForm.getByRole('button', { name: 'Continue' }).click()
+  await installForm.locator('#ri-context').click()
+  await installForm.getByRole('option', { name: 'context1', exact: true }).click()
+  await installForm.getByRole('button', { name: 'Continue' }).click()
   const credentialInputs = installForm.locator('fieldset input')
   for (let i = 0; i < (await credentialInputs.count()); i += 1) {
     await credentialInputs.nth(i).fill('e2e-test-value')
   }
   await installForm.getByRole('button', { name: 'Continue' }).click()
-  await expect(page.getByText(`Connector ${serverName} will be installed`)).toBeVisible({
+  await expect(
+    page.getByLabel('Install summary').getByText(serverName, { exact: true })
+  ).toBeVisible({
     timeout: 10_000,
   })
   const responsePromise = page.waitForResponse(
@@ -579,8 +584,9 @@ async function submitRegistryInstallForm(
   await page.getByRole('button', { name: /^Install$/ }).click()
   const response = await responsePromise
   expect(response.status()).toBe(201)
-  await expect(page).toHaveURL(/\/registry(?:$|\?)/, { timeout: 10_000 })
-  await expect(page.getByLabel('Search Marketplace entries')).toBeVisible({ timeout: 10_000 })
+  await expect(
+    page.getByRole('heading', { name: "Congratulations — you're ready to go" })
+  ).toBeVisible({ timeout: 10_000 })
 }
 
 function workflowEgressRecipe(name: string, exactHost = 'api.github.com'): Record<string, unknown> {
@@ -1402,9 +1408,12 @@ test.describe('H. Control-UI Smoke Tests', () => {
       const nameInput = installForm.locator('#ri-name')
       await nameInput.clear()
       await nameInput.fill(serverName)
-      await installForm.locator('#ri-context').selectOption('context1')
 
-      // Fill credentials if present
+      // Advance through Context to Credentials and fill fields if present.
+      await installForm.getByRole('button', { name: 'Continue' }).click()
+      await installForm.locator('#ri-context').click()
+      await installForm.getByRole('option', { name: 'context1', exact: true }).click()
+      await installForm.getByRole('button', { name: 'Continue' }).click()
       const credFieldset = installForm.locator('fieldset')
       if ((await credFieldset.count()) > 0) {
         const inputs = credFieldset.locator('input')
@@ -1415,9 +1424,9 @@ test.describe('H. Control-UI Smoke Tests', () => {
 
       // Submit
       await installForm.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByText(`Connector ${serverName} will be installed`)).toBeVisible({
-        timeout: 10_000,
-      })
+      await expect(
+        page.getByLabel('Install summary').getByText(serverName, { exact: true })
+      ).toBeVisible({ timeout: 10_000 })
       const submitBtn = page.getByRole('button', { name: /^Install$/ })
       await expect(submitBtn).toBeEnabled({ timeout: 10_000 })
 
@@ -1437,8 +1446,9 @@ test.describe('H. Control-UI Smoke Tests', () => {
       const resp = await responsePromise
 
       expect(resp.status()).toBe(201)
-      await expect(page).toHaveURL(/\/registry(?:$|\?)/, { timeout: 10_000 })
-      await expect(page.getByLabel('Search Marketplace entries')).toBeVisible({ timeout: 10_000 })
+      await expect(
+        page.getByRole('heading', { name: "Congratulations — you're ready to go" })
+      ).toBeVisible({ timeout: 10_000 })
       const { data } = await api(token, 'GET', '/api/v1/admin/mcp-servers')
       const items = data.items as Array<{ metadata: { name: string } }>
       expect(items.some(item => item.metadata.name === serverName)).toBe(true)
@@ -1537,18 +1547,14 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     await waitForRegistryEntry(token, publicEntryName)
   })
 
-  test('I1. Exact-host entry shows bounded egress warning and installs exact-host CRD', async ({
+  test('I1. Exact-host entry shows its egress configuration and installs exact-host CRD', async ({
     page,
   }) => {
     await login(page)
     await openRegistryInstallPackage(page, exactEntryName)
-    const egressAlert = page.getByRole('alert').filter({ hasText: 'External API access required' })
-
-    await expect(egressAlert).toContainText('External API access required')
-    await expect(egressAlert).toContainText('api.airtable.com')
-    await expect(egressAlert).toContainText('443')
-    await expect(egressAlert).not.toContainText('Public web egress required')
     const installForm = await continueToRegistryInstallForm(page)
+    await expect(installForm.getByText('External Egress')).toBeVisible()
+    await expect(installForm.getByLabel('Egress mode')).toHaveValue('exact-host')
 
     await submitRegistryInstallForm(page, installForm, exactServerName, exactEntryName)
 
@@ -1564,19 +1570,16 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     ])
   })
 
-  test('I2. Public-web entry shows explicit warning and installs public-web CRD', async ({
+  test('I2. Public-web entry shows its warning in configuration and installs public-web CRD', async ({
     page,
   }) => {
     await login(page)
     await openRegistryInstallPackage(page, publicEntryName)
-    const egressAlert = page.getByRole('alert').filter({ hasText: 'Public web egress required' })
-
-    await expect(egressAlert).toContainText('Public web egress required')
-    await expect(egressAlert).toContainText('public web egress')
-    await expect(egressAlert).toContainText('Private, metadata, cluster-internal')
-    await expect(egressAlert).toContainText('Listed domains')
-    await expect(egressAlert).toContainText('api.search.brave.com')
     const installForm = await continueToRegistryInstallForm(page)
+    await expect(installForm.getByLabel('Egress mode')).toHaveValue('public-web')
+    await expect(
+      installForm.getByText(/Public web egress allows outbound TCP 80\/443/i)
+    ).toBeVisible()
 
     await submitRegistryInstallForm(page, installForm, publicServerName, publicEntryName)
 
@@ -1596,7 +1599,7 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     page,
   }) => {
     await login(page)
-    await page.getByRole('link', { name: 'Connectors' }).click()
+    await page.getByRole('link', { name: 'Installed connectors', exact: true }).click()
     await expect(page).toHaveURL(/\/mcp-servers/)
 
     const serverRow = page.locator('tr', { hasText: exactServerName })
@@ -1606,6 +1609,7 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     await expect(
       page.getByRole('heading', { name: `Edit Connector: ${exactServerName}` })
     ).toBeVisible()
+    await page.getByRole('tab', { name: 'External Egress', exact: true }).click()
 
     const egressSection = page.locator('section', { hasText: 'External Egress' })
     await expect(egressSection.getByText('Egress summary:')).toBeVisible()
@@ -1642,6 +1646,7 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     await expect(editedRow).toBeVisible({ timeout: 15_000 })
     await editedRow.getByRole('button', { name: `Edit connector ${exactServerName}` }).click()
     await page.waitForURL(new RegExp(`/mcp-servers/${exactServerName}/edit`), { timeout: 10_000 })
+    await page.getByRole('tab', { name: 'External Egress', exact: true }).click()
 
     const restoredEgressSection = page.locator('section', { hasText: 'External Egress' })
     await restoredEgressSection.locator('select').first().selectOption('exact-host')
@@ -1756,7 +1761,7 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await login(page)
 
     await test.step('create exact-host connector from the visible form flow', async () => {
-      await page.getByRole('link', { name: 'Connectors' }).click()
+      await page.getByRole('link', { name: 'Installed connectors', exact: true }).click()
       await expect(page).toHaveURL(/\/mcp-servers/)
       await page.getByRole('button', { name: 'Create Connector' }).click()
       await expect(page).toHaveURL(/\/mcp-servers\/new/)
@@ -2163,13 +2168,16 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await installForm.locator('summary', { hasText: 'Configuration' }).click()
     await expect(installForm.locator('#ri-name')).toBeVisible({ timeout: 10_000 })
     await installForm.locator('#ri-name').fill(deferredMcpServerName)
-    await installForm.locator('#ri-context').selectOption('context1')
+    await installForm.getByRole('button', { name: 'Continue' }).click()
+    await installForm.locator('#ri-context').click()
+    await installForm.getByRole('option', { name: 'context1', exact: true }).click()
+    await installForm.getByRole('button', { name: 'Continue' }).click()
     await expect(
       installForm.getByText(/Leave all credential fields empty to install now/)
     ).toBeVisible()
     await installForm.getByRole('button', { name: 'Continue' }).click()
     await expect(
-      page.getByText(`Connector ${deferredMcpServerName} will be installed`)
+      page.getByLabel('Install summary').getByText(deferredMcpServerName, { exact: true })
     ).toBeVisible({ timeout: 10_000 })
 
     const installResponse = page.waitForResponse(
@@ -2215,8 +2223,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
         field: 'spec.envSecret',
       }),
     ])
-    await expect(page.getByText(/^Marketplace \(\d+\)$/)).toBeVisible({ timeout: 10_000 })
-    await expect(entryRow.getByRole('button', { name: 'Installed' })).toBeVisible()
+    await expect(
+      page.getByRole('heading', { name: "Congratulations — you're ready to go" })
+    ).toBeVisible({ timeout: 10_000 })
 
     const expectedSecretName = `${deferredMcpServerName}-credentials`
     const server = await waitForMcpServer(

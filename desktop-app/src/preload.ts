@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   HostMessageRequest,
   ProfileSettingsOpenOptions,
@@ -97,6 +98,9 @@ const clerum = Object.freeze({
     listGrants: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:listGrants', { resourceId, drive }),
     revokeGrant: (grantId: string) => ipcRenderer.invoke('gfs:revokeGrant', { grantId }),
+    listShares: (resourceId: string, drive?: string) =>
+      ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
+    revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
     // A desktop share grants READ access only (the minimal shared capability) —
     // unlike `grant`, it takes no permission bits by design. The server still
     // enforces the caller holds read + share (no-escalation).
@@ -437,6 +441,7 @@ const clerum = Object.freeze({
     open: (args: {
       recipeNs: string
       recipeName: string
+      title?: string
       defaultPath?: string
       routePath?: string
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
@@ -468,6 +473,48 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
     },
+  },
+  /**
+   * Plugin permissions, trusted-renderer half: the consent modal and the
+   * Settings revocation surface. The plugin-facing half lives in a different
+   * preload (`sandboxUiEmbedPreload.ts`) behind a different trust model.
+   */
+  pluginSdk: {
+    onConsentRequested: (callback: (request: PluginConsentRequest) => void) => {
+      const listener = (_event: unknown, request: PluginConsentRequest) => callback(request)
+      ipcRenderer.on('pluginSdk:consentRequested', listener)
+      return () => ipcRenderer.off('pluginSdk:consentRequested', listener)
+    },
+    onConsentCancelled: (callback: (args: { promptId: string }) => void) => {
+      const listener = (_event: unknown, args: { promptId: string }) => callback(args)
+      ipcRenderer.on('pluginSdk:consentCancelled', listener)
+      return () => ipcRenderer.off('pluginSdk:consentCancelled', listener)
+    },
+    onOpenGfsResource: (
+      callback: (args: { gfsUri: string; name: string; kind: string; bytes: number | null }) => void
+    ) => {
+      const listener = (
+        _event: unknown,
+        args: { gfsUri: string; name: string; kind: string; bytes: number | null }
+      ) => callback(args)
+      ipcRenderer.on('pluginSdk:openGfsResource', listener)
+      return () => ipcRenderer.off('pluginSdk:openGfsResource', listener)
+    },
+    onNotificationClicked: (callback: (args: { pluginId: string; ref: string | null }) => void) => {
+      const listener = (_event: unknown, args: { pluginId: string; ref: string | null }) =>
+        callback(args)
+      ipcRenderer.on('pluginSdk:notificationClicked', listener)
+      return () => ipcRenderer.off('pluginSdk:notificationClicked', listener)
+    },
+    resolveConsent: (promptId: string, allowed: string[]) =>
+      ipcRenderer.invoke('pluginSdk:resolveConsent', { promptId, allowed }),
+    listGrants: () => ipcRenderer.invoke('pluginSdk:listGrants'),
+    revoke: (pluginId: string, capability?: string) =>
+      ipcRenderer.invoke('pluginSdk:revoke', { pluginId, capability }),
+    activity: (limit?: number, includeAmbient?: boolean) =>
+      ipcRenderer.invoke('pluginSdk:activity', { limit, includeAmbient }),
+    clearActivity: () => ipcRenderer.invoke('pluginSdk:clearActivity'),
+    setTheme: (theme: string) => ipcRenderer.invoke('pluginSdk:setTheme', { theme }),
   },
 })
 

@@ -4,13 +4,15 @@ export interface DelegationAffordances {
   canCreateShare: boolean
 }
 
-export type GfsDelegationSubjectType = 'user' | 'team'
+export type GfsDelegationSubjectType = 'user' | 'team' | 'host'
 
 export interface GfsDelegationSubjectOption {
   type: GfsDelegationSubjectType
   id: string
   label: string
   description?: string
+  /** Display label for the subject kind (e.g. "Agent"); falls back to `type`. */
+  badge?: string
 }
 
 export interface GfsDelegationPanelProps {
@@ -18,7 +20,9 @@ export interface GfsDelegationPanelProps {
   subjectOptions: GfsDelegationSubjectOption[]
   subjectOptionsLoading?: boolean
   subjectOptionsError?: string | null
-  onGrant: (subjectKeys: string[], bits: string[]) => Promise<void>
+  /** Directories offer the "Include contents" toggle (default ON); files always send inherit=false. */
+  isDirectory: boolean
+  onGrant: (subjectKeys: string[], bits: string[], inherit: boolean) => Promise<void>
   onCreateShare?: (subjectKeys: string[]) => Promise<void>
 }
 
@@ -29,7 +33,10 @@ export interface GfsDelegationPanelProps {
  */
 export interface GfsAgentSubjectOption {
   id: string
+  /** Agent identifier (`metadata.name`) — used for keys and stable sorting. */
   name: string
+  /** Visible name (Agent CRD `spec.host`); rendered to the user when present. */
+  displayName?: string
 }
 
 /**
@@ -44,4 +51,14 @@ export interface GfsGrantListItem {
   subject: { type: string; id?: string }
   permissions: string[]
   inherit: boolean
+}
+
+/** A direct URI-share row from `window.clerum.gfs.listShares()`. */
+export interface GfsShareListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  includeDescendants: boolean
 }

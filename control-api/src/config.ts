@@ -28,6 +28,7 @@ type Config = {
   desktopRpcProxyBaseUrl: string
   desktopProfileUiBaseUrl: string
   desktopAppName: string
+  desktopGfsOperatorLinkingEnabled: boolean
   controlUiBaseUrl: string
   controlUiAppName: string
   sessionJwtPrivateKey: string
@@ -130,8 +131,27 @@ type Config = {
   approvalRlRequestPerMin: number
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
+  approvalRlExternalEdgePerMin: number
+  approvalRlExternalClientIpPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
+  // External Desktop GFS is a separate authority plane. The process-local
+  // ingress backstop is intentionally wider than the distributed operation
+  // buckets so normal Desktop read waterfalls cannot consume the security
+  // budgets before authority resolution. The narrower values remain the
+  // authoritative per-user/IP/actor operation ceilings.
+  externalGfsIngressRlPerMin: number
+  externalGfsTokenUserRlPerMin: number
+  externalGfsTokenIpRlPerMin: number
+  // Aggregate source-IP ceiling before authority resolution. This is a
+  // defense-in-depth ceiling across authenticated non-token GFS traffic; it
+  // is intentionally wider than the per-class/session/actor budgets.
+  externalGfsIpRlPerMin: number
+  // Read waterfalls have a separate budget from mutations. A Desktop root
+  // refresh legitimately performs more reads than a mutation burst, while
+  // mutation/grant/share ceilings remain deliberately narrow.
+  externalGfsReadRlPerMin: number
+  externalGfsOperationRlPerMin: number
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
   hostWakeRlPerMin: number
@@ -185,6 +205,11 @@ type Config = {
   gfscBaseUrl: string
   // In-cluster base URL of the writer-only gfsc Service for mutations.
   gfscWriteBaseUrl: string
+  // Timeout (ms) for the control-api→gfsc proxied fetch. Homologous with the browser
+  // client (GFS_UPLOAD_TIMEOUT_MS, 300s) and the control-ui server proxy
+  // (CONTROL_API_PROXY_TIMEOUT_MS, set to 300s in the deployment; its route.ts code
+  // fallback is 30s). This one defaults to 300s in code. Raise all three together.
+  gfscProxyTimeoutMs: number
   // ClusterIP service URL template for the per-SFS wfc. {hash} is replaced
   // with the 10-char sfsHash that HCC's sharedFileSystemReconciler computes.
   // The template ends without a trailing slash; the proxy concatenates the
@@ -208,6 +233,14 @@ function assertNotPlaceholder(label: string, value: string): void {
       `${label} has placeholder value "${value}". Run deploy/scripts/apply-inter-service-tokens.sh before deploying.`
     )
   }
+}
+
+// Parse a millisecond timeout env: must be a positive integer within the
+// setTimeout/AbortSignal safe range (2^31-1); anything else falls back to the
+// default (never lets NaN/overflow reach AbortSignal.timeout).
+function parseTimeoutMs(raw: string | undefined, fallback: number): number {
+  const parsed = raw ? Number(raw) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647 ? parsed : fallback
 }
 
 function parseInternalTokens(input: string): string[] {
@@ -324,6 +357,56 @@ function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
   if (raw === undefined || raw === '') return 'managed' // default; requiredness enforced in the guard below
   if (raw === 'managed' || raw === 'self-hosted') return raw
   throw new Error(`REGISTRY_CONNECTION_MODE must be 'managed' or 'self-hosted' (got '${raw}')`)
+}
+
+type ExternalRateLimitSource = 'default' | 'environment'
+
+function externalRateLimitSettingFromEnv(
+  name: string,
+  defaultValue: number
+): { value: number; source: ExternalRateLimitSource } {
+  const raw = process.env[name]
+  return {
+    value: positiveIntegerFromEnv(name, defaultValue),
+    source: raw === undefined || raw.trim() === '' ? 'default' : 'environment',
+  }
+}
+
+// External routes intentionally have three independent dimensions with
+// different scopes. operation <= session < clientIp is the recommended
+// capacity topology, but it is not a correctness invariant: an operator may
+// deliberately tune any one scope without changing the other two. Keep scalar
+// values fail-closed, preserve exact overrides, and make a crossed topology an
+// actionable boot advisory instead of a service-startup failure.
+const externalRateLimitConfig = (() => {
+  const operation = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_PER_MIN', 60)
+  const session = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_EDGE_PER_MIN', 120)
+  const clientIp = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_CLIENT_IP_PER_MIN', 1200)
+  const followsRecommendedTopology =
+    operation.value <= session.value && session.value < clientIp.value
+
+  if (!followsRecommendedTopology) {
+    console.warn(
+      '[ControlAPI] External rate-limit configuration crosses the recommended operation <= session < clientIp topology; preserving exact configured values',
+      {
+        resolved: { operation, session, clientIp },
+        recommendedTopology: 'operation <= session < clientIp',
+      }
+    )
+  }
+
+  return {
+    operation: operation.value,
+    session: session.value,
+    clientIp: clientIp.value,
+  }
+})()
+
+function failClosedBooleanFromEnv(name: string): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '' || raw === 'false') return false
+  if (raw === 'true') return true
+  throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
 }
 
 function publicKeyFromPrivateKey(privateKey: string): string {
@@ -536,6 +619,11 @@ export const config: Config = {
   desktopProfileUiBaseUrl:
     process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL || 'http://127.0.0.1:3001',
   desktopAppName: process.env.CONTROL_API_DESKTOP_APP_NAME || 'Evenfire',
+  // Narrow, explicit elevation switch. Missing/false is intentionally OFF;
+  // this must not inherit registry, password-seeding, or generic deploy mode.
+  desktopGfsOperatorLinkingEnabled: failClosedBooleanFromEnv(
+    'CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED'
+  ),
   controlUiBaseUrl: process.env.CONTROL_API_CONTROL_UI_BASE_URL || 'http://127.0.0.1:3000',
   controlUiAppName: process.env.CONTROL_API_CONTROL_UI_APP_NAME || 'Evenfire',
   sessionJwtPrivateKey: normalizePem(
@@ -699,9 +787,26 @@ export const config: Config = {
   ),
   approvalRlRequestPerMin: Number(process.env.APPROVAL_RL_REQUEST_PER_MIN || 120),
   approvalRlRefreshPerMin: Number(process.env.APPROVAL_RL_REFRESH_PER_MIN || 20),
-  approvalRlExternalPerMin: Number(process.env.APPROVAL_RL_EXTERNAL_PER_MIN || 60),
+  approvalRlExternalPerMin: externalRateLimitConfig.operation,
+  approvalRlExternalEdgePerMin: externalRateLimitConfig.session,
+  // By default the source-IP backstop is wider than the per-session edge bucket
+  // so a shared NAT does not turn the 120/min fairness budget into a
+  // platform-wide ceiling. Operators may override these independent scopes;
+  // crossed values are preserved after the boot advisory above.
+  approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
+  // Approved GFS authority-boundary budgets. Keep them fixed here rather than
+  // accepting an unreviewed environment override. The 1800/min ingress guard
+  // is only a coarse process-local backstop; the aggregate source-IP ceiling,
+  // read buckets, token buckets, and mutation/delegation buckets remain
+  // independently bounded below.
+  externalGfsIngressRlPerMin: 1_800,
+  externalGfsTokenUserRlPerMin: 10,
+  externalGfsTokenIpRlPerMin: 600,
+  externalGfsIpRlPerMin: 1_200,
+  externalGfsReadRlPerMin: 120,
+  externalGfsOperationRlPerMin: 30,
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
   // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in
@@ -798,6 +903,7 @@ export const config: Config = {
   gfscBaseUrl: process.env.CONTROL_API_GFSC_BASE_URL || 'http://gfsc.gfs.svc.cluster.local:8087',
   gfscWriteBaseUrl:
     process.env.CONTROL_API_GFSC_WRITE_BASE_URL || 'http://gfsc-writer.gfs.svc.cluster.local:8087',
+  gfscProxyTimeoutMs: parseTimeoutMs(process.env.CONTROL_API_GFSC_PROXY_TIMEOUT_MS, 300_000),
   // {hash} = first 10 chars of sha256(`${ns}/${name}`); see sharedFileSystemHash
   // in host-context-controller/src/k8s/sharedFileSystemFactory.ts.
   wfcServiceUrlTemplate:

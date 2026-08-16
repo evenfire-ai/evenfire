@@ -20,7 +20,9 @@ const mocks = vi.hoisted(() => ({
   requestSandboxUiOauthAuthorizeUrl: vi.fn(),
   getOrIssue: vi.fn(),
   rpcTokenManagerClear: vi.fn(),
-  rpcTokenManagerGetMetadata: vi.fn().mockReturnValue({ expiresAtMs: null, scopes: [], hostRefs: [] }),
+  rpcTokenManagerGetMetadata: vi
+    .fn()
+    .mockReturnValue({ expiresAtMs: null, scopes: [], hostRefs: [] }),
 }))
 
 vi.mock('electron', () => ({
@@ -119,7 +121,11 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
     await svc.requestSandboxUiOauthAuthorize(RECIPE_NS, RECIPE_NAME, CLIENT_ID, true)
 
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledWith(
-      'rpc-token', RECIPE_NS, RECIPE_NAME, CLIENT_ID, true
+      'rpc-token',
+      RECIPE_NS,
+      RECIPE_NAME,
+      CLIENT_ID,
+      true
     )
     expect(mocks.showMessageBox).toHaveBeenCalledOnce()
     expect(mocks.openExternal).toHaveBeenCalledWith(AUTHORIZE_URL)
@@ -146,7 +152,11 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
 
     expect(mocks.showMessageBox).not.toHaveBeenCalled()
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledWith(
-      'rpc-token', RECIPE_NS, RECIPE_NAME, CLIENT_ID, false
+      'rpc-token',
+      RECIPE_NS,
+      RECIPE_NAME,
+      CLIENT_ID,
+      false
     )
     expect(mocks.openExternal).toHaveBeenCalledWith(AUTHORIZE_URL)
   })
@@ -166,7 +176,11 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
     expect(mocks.rpcTokenManagerClear).toHaveBeenCalledOnce()
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledTimes(2)
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenLastCalledWith(
-      'rpc-token-new', RECIPE_NS, RECIPE_NAME, CLIENT_ID, true
+      'rpc-token-new',
+      RECIPE_NS,
+      RECIPE_NAME,
+      CLIENT_ID,
+      true
     )
     expect(mocks.openExternal).toHaveBeenCalledWith(AUTHORIZE_URL)
   })

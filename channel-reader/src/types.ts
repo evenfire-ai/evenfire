@@ -269,6 +269,9 @@ export interface ChannelAdapter {
     content: string,
     options?: SendMessageOptions
   ): Promise<void>
+
+  /** Slack only: post a message visible solely to `userId`. */
+  sendEphemeral?(channelId: string, userId: string, content: string): Promise<void>
 }
 
 export interface AdapterCredentials {

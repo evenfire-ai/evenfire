@@ -23,6 +23,9 @@
 - `GET /api/v1/team/members` - list team members
 - `POST /api/v1/team/members/invite` - invite member (`admin/inviter`)
 - `DELETE /api/v1/team/members/:userId` - remove member (`admin`)
+- `DELETE /api/v1/members/:userId` - retire a member account (`admin`); requires
+  JSON `{ "reason": "<non-empty>" }` and an `Idempotency-Key` header. Missing
+  fields return `400`; this is a breaking v1 contract for direct clients.
 - `POST /api/v1/invitations/accept` - accept invitation after profile-ui sign-in
 - `GET /api/v1/directory/search?q=...` - lookup directory users for channel mapping
 

@@ -148,7 +148,7 @@ describe('GfsClient.listChildren', () => {
 })
 
 describe('GfsClient.listAccessible', () => {
-  it('lists readable GFS resources for the current user session', async () => {
+  it('lists readable GFS resources for the current ordinary user session', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,
       data: {
@@ -170,6 +170,38 @@ describe('GfsClient.listAccessible', () => {
       'https://api.example/api/v1/me/gfs/resources?drive=main&cursor=cur1',
       { token: 'tok' }
     )
+  })
+
+  it('preserves linked-operator root metadata and root-child shape', async () => {
+    const rootResourceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const operatorChild = {
+      resourceId: RID,
+      rid: RID,
+      gfsUri: `gfs://main/${RID}`,
+      name: 'Projects',
+      kind: 'directory' as const,
+      path: '/Projects',
+      version: 1,
+      bytes: 0,
+    }
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: {
+        items: [operatorChild],
+        nextCursor: null,
+        rootResourceId,
+        view: 'operator',
+      },
+    })) as GfsTransport['requestJson']
+
+    const out = await new GfsClient(transport({ requestJson })).listAccessible('tok')
+
+    expect(out).toEqual({
+      items: [operatorChild],
+      nextCursor: null,
+      rootResourceId,
+      view: 'operator',
+    })
   })
 })
 
@@ -290,6 +322,7 @@ describe('GfsClient.grant', () => {
 })
 
 const GRANT_ID = '11111111-2222-3333-4444-555555555555'
+const SHARE_ID = '66666666-7777-4888-8999-aaaaaaaaaaaa'
 
 const GRANT_ITEM = {
   id: GRANT_ID,
@@ -373,6 +406,63 @@ describe('GfsClient.revokeGrant', () => {
   })
 })
 
+const SHARE_ITEM = {
+  id: SHARE_ID,
+  drive: 'main',
+  resourceId: RID,
+  subject: { type: 'team', id: 'team-1' },
+  permissions: ['read'],
+  includeDescendants: true,
+}
+
+describe('GfsClient.listShares', () => {
+  it('GETs the exact shares route and unwraps its direct items array', async () => {
+    const requestJson = vi.fn(async () => ({ items: [SHARE_ITEM] })) as GfsTransport['requestJson']
+    const out = await new GfsClient(transport({ requestJson })).listShares(
+      { resourceId: RID, drive: 'main' },
+      'tok'
+    )
+
+    expect(out).toEqual([SHARE_ITEM])
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      `https://api.example/api/v1/me/gfs/shares?drive=main&resourceId=${RID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('fails loud when the response carries no items array', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+
+    await expect(
+      new GfsClient(transport({ requestJson })).listShares({ resourceId: RID }, 'tok')
+    ).rejects.toThrow('unexpected gfs shares response: missing items array')
+  })
+})
+
+describe('GfsClient.revokeShare', () => {
+  it('DELETEs the exact share route with the bearer token', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+
+    await new GfsClient(transport({ requestJson })).revokeShare(SHARE_ID, 'tok')
+
+    expect(requestJson).toHaveBeenCalledWith(
+      'DELETE',
+      `https://api.example/api/v1/me/gfs/shares/${SHARE_ID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('rejects a non-UUID share id before any round-trip', async () => {
+    const t = transport()
+
+    await expect(new GfsClient(t).revokeShare('../shares', 'tok')).rejects.toThrow(
+      /share id must be a UUID/
+    )
+    expect(t.requestJson).not.toHaveBeenCalled()
+  })
+})
+
 describe('GfsClient.createShare', () => {
   it('POSTs ONE bulk read share for the subjects[] array', async () => {
     const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
@@ -420,13 +510,24 @@ describe('GfsClient resource mutations', () => {
       1,
       'POST',
       `https://api.example/api/v1/me/gfs/resources/${RID}/children?drive=main`,
-      { token: 'tok', body: { name: 'docs', kind: 'directory' } }
+      {
+        token: 'tok',
+        body: { name: 'docs', kind: 'directory' },
+        // Assert the concrete 300000, not config.gfsUploadTimeoutMs: vitest treats
+        // {timeoutMs: undefined} as equal to a call without the key, so referencing
+        // config would make this pass vacuously if the field were ever dropped.
+        timeoutMs: 300000,
+      }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
       2,
       'POST',
       `https://api.example/api/v1/me/gfs/resources/${RID}/children?drive=main`,
-      { token: 'tok', body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' } }
+      {
+        token: 'tok',
+        body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' },
+        timeoutMs: 300000,
+      }
     )
   })
 
@@ -443,7 +544,11 @@ describe('GfsClient resource mutations', () => {
       1,
       'PUT',
       `https://api.example/api/v1/me/gfs/resources/${RID}/content?drive=main`,
-      { token: 'tok', body: { contentBase64: 'aGVsbG8=', ifMatch: 1 } }
+      {
+        token: 'tok',
+        body: { contentBase64: 'aGVsbG8=', ifMatch: 1 },
+        timeoutMs: 300000,
+      }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
       2,

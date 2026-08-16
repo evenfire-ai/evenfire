@@ -7,6 +7,9 @@ export interface ManagedMutationContext {
   subject: string;
   requestId: string;
   audit: AuditSink;
+  actorOnBehalfOf?: string | null;
+  desktopUserId?: string;
+  authoritySource?: "user-session" | "linked-admin";
 }
 
 export async function recordManagedMutation(
@@ -19,6 +22,9 @@ export async function recordManagedMutation(
   if (!context) return;
   await context.audit.record({
     recordType: "mutation_outcome", subject: context.subject, op: input.op,
+    actorOnBehalfOf: context.actorOnBehalfOf ?? null,
+    desktopUserId: context.desktopUserId,
+    authoritySource: context.authoritySource,
     resourceId: normalizeResourceId(input.resourceId), drive: input.drive,
     outcome: outcome === "succeeded" ? "allow" : "error", reason,
     requestId: context.requestId, matchedSubject: null, authorizationSource: null,

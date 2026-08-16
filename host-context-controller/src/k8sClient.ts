@@ -110,6 +110,25 @@ const PLURAL_COMMUNICATIONCHANNELS = 'communicationchannels'
 // retain that convergence guarantee now that the sweeps run in the background.
 const INITIAL_CONVERGENCE_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
 const INVENTORY_CACHE_RECOVERY_RETRY_MS = 5000
+
+/**
+ * External-egress resync delay (ms), H2 (issue #299). The configured interval is
+ * the backstop; a finite observed DNS TTL advances the delay to <= TTL/2 so a
+ * rotating low-TTL host is sampled every rotation. The floor is the hard lower
+ * bound to avoid a hot-loop. Pure and unit-testable.
+ */
+export function externalEgressResyncDelayMs(
+  intervalSec: number,
+  floorSec: number,
+  minObservedTtlMs = Infinity
+): number {
+  const floorMs = floorSec * 1000
+  const configuredMs = intervalSec * 1000
+  const ttlAwareMs = Number.isFinite(minObservedTtlMs)
+    ? Math.min(configuredMs, minObservedTtlMs / 2)
+    : configuredMs
+  return Math.max(ttlAwareMs, floorMs)
+}
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
 const HOST_CACHE_RECOVERY_RETRY_MS = 5000
 const HOST_WATCH_RECONCILE_RETRY_DELAYS_MS = [5000, 15000, 30000]
@@ -2507,6 +2526,10 @@ export class McpServerWatcher implements McpServerProvider {
     }
 
     const externalEgressResyncSec = config.externalEgressResyncIntervalSec
+    // #205 delegates external-egress periodic resync to the convergence
+    // coordinator. Its runResyncCore drives reconcileExternalEgress, so the
+    // #299 sliding-window accumulation still converges on DNS rotation between
+    // McpServer events (the coordinator, not a standalone timer, owns cadence).
     this.externalEgressCoordinator.startPeriodicResync(externalEgressResyncSec)
 
     // Full convergence is observable and retains each lane's existing retry or

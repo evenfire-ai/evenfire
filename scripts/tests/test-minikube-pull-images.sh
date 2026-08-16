@@ -278,20 +278,25 @@ assert_it_never_pulls_a_registry_distributed_mcp_server() {
 # of main can pin a tag that is not promoted yet). A raw MANIFEST_UNKNOWN gives
 # a new contributor nothing to act on.
 assert_a_missing_tag_names_the_tag_and_the_override() {
-  local d out rc
+  local d out rc pin
   d="$(mktemp -d)"
+  # The tag has to be the one the puller will actually ask for, which is the
+  # committed pin. Hardcoding the release of the day made this assertion pass
+  # vacuously the moment the next release was cut: the simulated 404 was for a
+  # tag nobody requested, the pull succeeded, and rc=0 failed the assert.
+  pin="$(committed_pin)"
   # `A=1 out="$(cmd)"` does NOT put A in cmd's environment: every assignment's
   # value is expanded BEFORE any of them takes effect. Export it instead.
-  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/control-api:v0.6.0"
+  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/control-api:${pin}"
   out="$(run_puller "$d" --only=control-api)"; rc=$?
   unset TEST_MISSING_TAGS
   if [ "$rc" -ne 0 ] \
-     && grep -q "v0.6.0" <<< "$out" \
+     && grep -q "$pin" <<< "$out" \
      && grep -q "MINIKUBE_IMAGE_TAG" <<< "$out" \
      && grep -q "control-api" <<< "$out"; then
     pass "a missing tag fails naming the image, the tag, and MINIKUBE_IMAGE_TAG"
   else
-    fail "expected a named failure mentioning control-api, v0.6.0 and MINIKUBE_IMAGE_TAG; got rc=$rc out='$out'"
+    fail "expected a named failure mentioning control-api, ${pin} and MINIKUBE_IMAGE_TAG; got rc=$rc out='$out'"
   fi
   rm -rf "$d"
 }

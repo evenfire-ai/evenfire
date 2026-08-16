@@ -259,6 +259,9 @@ export function SandboxUiPage({
         await window.clerum.sandboxUi.open({
           recipeNs,
           recipeName,
+          // Title travels from the trusted app list into consent prompts and
+          // notification attribution. The plugin never gets to name itself.
+          ...(app.label ? { title: app.label } : {}),
           defaultPath: app.defaultPath,
           ...(app.routePath ? { routePath: app.routePath } : {}),
           bounds,

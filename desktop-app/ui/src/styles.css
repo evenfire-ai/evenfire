@@ -100,9 +100,9 @@ h3 {
 
 .global-search {
   position: relative;
-  width: min(480px, 44vw);
+  width: var(--app-notification-drawer-width);
   min-width: 220px;
-  max-width: 480px;
+  max-width: 100%;
 }
 
 .global-search::before {
@@ -477,11 +477,13 @@ h3 {
   padding: var(--space-1-5);
   display: grid;
   gap: var(--space-2-5);
+  align-content: start;
 }
 
 .notification-menu-section {
   display: grid;
   gap: var(--space-1-5);
+  align-content: start;
 }
 
 .notification-menu-section + .notification-menu-section {
@@ -557,6 +559,7 @@ h3 {
 .notification-menu-list {
   display: grid;
   gap: var(--space-1-5);
+  align-content: start;
 }
 
 .notification-menu-item {
@@ -2155,6 +2158,7 @@ h3 {
 
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
+  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
 
   height: 100vh;
   min-height: 0;
@@ -4012,6 +4016,11 @@ h3 {
 
 .stepper-details-chevron--open {
   transform: rotate(90deg);
+}
+
+.agent-workspace-shell .chat-thread-container {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .agent-workspace-shell .chat-thread {
@@ -6042,7 +6051,13 @@ h3 {
   color: var(--warning);
 }
 
+.chat-thread-container {
+  position: relative;
+  min-height: 0;
+}
+
 .chat-thread {
+  height: 100%;
   min-height: 280px;
   max-height: none;
   overflow: auto;
@@ -6055,6 +6070,36 @@ h3 {
   min-height: 0;
   align-content: start;
   gap: var(--space-2-5);
+}
+
+.chat-scroll-to-bottom {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: var(--space-3);
+  z-index: var(--layer-chat-overlay);
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.chat-scroll-to-bottom-button.ui-icon-button {
+  border-color: rgba(var(--edge-rgb), 0.58);
+  box-shadow: var(--shadow-soft);
+  pointer-events: auto;
+}
+
+.chat-scroll-to-bottom-button.ui-icon-button.ui-icon-button--solid.ui-icon-button--neutral:hover:enabled {
+  background: var(--bg-elev-2);
+}
+
+.chat-scroll-to-bottom-button.ui-icon-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .chat-history-page-control {
@@ -11427,7 +11472,7 @@ pre {
   display: grid;
   gap: var(--space-2);
   justify-items: start;
-  padding-right: 360px;
+  padding-right: var(--app-header-utilities-width);
 }
 
 .apps-page-header-text h2 {
@@ -12303,10 +12348,12 @@ pre {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  flex-wrap: wrap;
+  align-content: flex-start;
   gap: var(--space-2);
   min-width: 0;
   padding-top: var(--space-4);
-  padding-right: 360px;
+  padding-right: var(--app-header-utilities-width);
 }
 
 .sandbox-ui-conversation-btn,
@@ -12324,7 +12371,7 @@ pre {
 
 .sandbox-ui-conversation-btn {
   min-width: 0;
-  max-width: min(360px, 45vw);
+  max-width: min(280px, 40vw);
 }
 
 .sandbox-ui-conversation-btn span {
@@ -12364,7 +12411,7 @@ pre {
 }
 
 .content-panel.content-panel--app-notification-drawer-open > .page:has(.sandbox-ui-mounted-header) {
-  padding-right: calc(var(--app-notification-drawer-width) + var(--space-2));
+  padding-right: var(--app-header-utilities-width);
 }
 
 .content-panel.content-panel--app-notification-drawer-open .sandbox-ui-mounted-header {
@@ -12375,7 +12422,30 @@ pre {
   padding-left: var(--space-4);
 }
 
-@media (max-width: 1220px) {
+@media (min-width: 901px) and (max-width: 1220px) {
+  .content-panel {
+    --app-header-utilities-width: calc(
+      clamp(160px, 32vw, var(--app-notification-drawer-width)) + var(--space-2) + 36px
+    );
+  }
+
+  .content-panel.content-panel--app-notification-drawer-open {
+    --app-header-utilities-width: calc(
+      var(--app-notification-drawer-width) + var(--space-2) + 36px
+    );
+  }
+
+  .global-search {
+    width: clamp(160px, 32vw, var(--app-notification-drawer-width));
+    min-width: 160px;
+  }
+
+  .apps-page-header {
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 900px) {
   .apps-page-header,
   .sandbox-ui-mounted-header {
     padding-right: 0;
@@ -12628,21 +12698,56 @@ pre {
 
 .composer-reference-submenu {
   left: calc(100% + var(--space-1));
-  bottom: auto;
-  max-height: min(340px, 70vh);
-  overflow: auto;
+  bottom: calc(var(--space-1) + 34px);
+  top: auto;
+  max-height: min(420px, 65vh);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.composer-reference-submenu::-webkit-scrollbar {
+  width: 8px;
+}
+
+.composer-reference-submenu::-webkit-scrollbar-thumb {
+  background: rgba(var(--edge-rgb), 0.4);
+  border-radius: 4px;
+}
+
+.composer-reference-submenu::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--edge-rgb), 0.6);
 }
 
 .composer-reference-submenu--plugins {
-  top: var(--space-1);
+  bottom: calc(var(--space-1) + 68px);
 }
 
 .composer-reference-submenu--connectors {
-  top: calc(var(--space-1) + 34px);
+  bottom: calc(var(--space-1) + 34px);
 }
 
 .composer-reference-submenu--agent-files {
+  bottom: var(--space-1);
+}
+
+.composer-inline .composer-reference-submenu {
+  bottom: auto;
+  top: var(--space-1);
+}
+
+.composer-inline .composer-reference-submenu--plugins {
+  top: var(--space-1);
+  bottom: auto;
+}
+
+.composer-inline .composer-reference-submenu--connectors {
+  top: calc(var(--space-1) + 34px);
+  bottom: auto;
+}
+
+.composer-inline .composer-reference-submenu--agent-files {
   top: calc(var(--space-1) + 68px);
+  bottom: auto;
 }
 
 .composer-inline .composer-reference-menu-panel {
@@ -13566,6 +13671,11 @@ pre {
   color: var(--warning);
 }
 
+.da-gfs-subject-picker__avatar--host {
+  background: rgba(var(--success-rgb), 0.16);
+  color: var(--success);
+}
+
 .da-gfs-subject-picker__avatar svg {
   width: var(--space-4);
   height: var(--space-4);
@@ -14414,29 +14524,13 @@ pre {
   background: rgba(var(--accent-rgb), 0.07);
 }
 
-.da-gfs-agent-access {
-  display: grid;
-  gap: var(--space-3);
-  min-width: 0;
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border-soft);
+.da-gfs-delegation__hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
 }
 
-.da-gfs-agent-access__options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-}
-
-.da-gfs-agent-access__composer {
-  display: grid;
-  grid-template-columns: minmax(150px, 0.4fr) minmax(0, 1fr);
-  gap: var(--space-2);
-  align-items: center;
-}
-
-.da-gfs-agent-access__inherit {
+.da-gfs-delegation__inherit {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -14449,11 +14543,11 @@ pre {
   transition: box-shadow var(--motion-fast);
 }
 
-.da-gfs-agent-access__inherit:has(input:focus-visible) {
+.da-gfs-delegation__inherit:has(input:focus-visible) {
   box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.24);
 }
 
-.da-gfs-agent-access__inherit input[type='checkbox'] {
+.da-gfs-delegation__inherit input[type='checkbox'] {
   width: var(--space-3);
   min-width: var(--space-3);
   height: var(--space-3);
@@ -14465,16 +14559,10 @@ pre {
   accent-color: var(--accent);
 }
 
-.da-gfs-agent-access__inherit input[type='checkbox']:focus,
-.da-gfs-agent-access__inherit input[type='checkbox']:focus-visible {
+.da-gfs-delegation__inherit input[type='checkbox']:focus,
+.da-gfs-delegation__inherit input[type='checkbox']:focus-visible {
   box-shadow: none;
   outline: none;
-}
-
-.da-gfs-agent-access__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
 }
 
 .da-gfs-grant-list {
@@ -14550,8 +14638,7 @@ pre {
     display: grid;
   }
 
-  .da-gfs-delegation__composer,
-  .da-gfs-agent-access__composer {
+  .da-gfs-delegation__composer {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -14650,4 +14737,57 @@ pre {
   .da-gfs-manage-section--actions .da-gfs-inline-form {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ── Plugin consent prompt (spec §9.4) ─────────────────────────────────
+   Reuses the confirm-dialog shell; only the permission rows are new. Wider
+   than a confirm dialog because each row carries a full scope sentence, and
+   a batched prompt can list up to eight of them. */
+.da-plugin-consent {
+  width: min(480px, 100%);
+}
+
+.da-plugin-consent__count {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.da-plugin-consent__rows {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.da-plugin-consent__row {
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+}
+
+.da-plugin-consent__label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: start;
+  cursor: pointer;
+}
+
+.da-plugin-consent__row-title {
+  display: block;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-plugin-consent__row-detail {
+  display: block;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.da-plugin-consent__footer {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
 }
