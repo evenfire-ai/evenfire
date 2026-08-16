@@ -379,6 +379,9 @@ jobs:
           SINGLE_WRITER_OVERLAYS="deploy/overlays/minikube" \
             bash deploy/scripts/validate-postgres-single-writer-strategy.sh
 
+      - name: Test single-writer validator fails loud on an absent local deploy
+        run: bash scripts/tests/test-postgres-single-writer-strategy.sh
+
       - name: Test release coordinates (writer, checker, floor decoupling)
         run: bash scripts/tests/test-release-coordinates.sh
 
