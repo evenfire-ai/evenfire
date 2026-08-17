@@ -133,6 +133,17 @@ expect_code IMAGE_MANIFEST_MISMATCH stale-image stale-image \
   env "${repo_env[@]}" T2_IMAGE_MANIFEST="$manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG=old \
   bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=old; t2_image_check' bash "$COMMON"
 
+local_manifest="$tmp/local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:local"}}\n' >"$local_manifest"
+env "${repo_env[@]}" T2_IMAGE_MANIFEST="$local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
+ghcr_manifest="$tmp/ghcr-image-manifest.json"
+printf '{"imageSource":"ghcr","imageTag":""}\n' >"$ghcr_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH tagless-ghcr tagless-ghcr \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$ghcr_manifest" T2_IMAGE_SOURCE=ghcr T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=ghcr; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
 expect_code SECRET_MISSING missing-secret missing-secret \
   env "${repo_env[@]}" T2_BOOTSTRAP_REQUIRED=false T2_REQUIRED_NAMESPACES=control-plane \
   T2_REQUIRED_SERVICES=control-plane/control-api T2_REQUIRED_SECRETS=control-plane/absent \

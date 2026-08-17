@@ -322,7 +322,9 @@ except (OSError, ValueError):
     raise SystemExit("invalid")
 source = payload.get("imageSource") or payload.get("source") or payload.get("mode") or ""
 tag = payload.get("imageTag") or payload.get("tag") or ""
-if not source or not tag:
+# Local builds are identified by the per-image digests in the manifest and
+# intentionally have no registry tag. GHCR manifests still require a tag.
+if source not in {"local", "ghcr"} or (source == "ghcr" and not tag):
     raise SystemExit("missing")
 print(source + "\t" + tag)
 PY
