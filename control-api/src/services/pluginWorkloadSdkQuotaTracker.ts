@@ -12,9 +12,10 @@ import {
 // (platform protection against control-plane DoS); a grant-level per-minute
 // override still wins (decision §3.1) — it is a per-recipe fairness knob, NOT
 // the platform DoS ceiling, so it is intentionally NOT clamped to the default.
-// A raised override stays bounded by the grant-independent 600/min request
-// bucket + pre-auth limits (pluginWorkloadSdkRateLimits.ts /
-// plugin-workload-sdk.routes.ts), which are the actual anti-DoS backstop.
+// A raised override stays bounded by the grant-independent request bucket
+// (CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN, default 600/min) + pre-auth
+// limits (pluginWorkloadSdkRateLimits.ts / plugin-workload-sdk.routes.ts),
+// which are the actual anti-DoS backstop.
 //
 // The former per-period leg (`consumeQuota`, backed by
 // plugin_workload_sdk_quota_counters) was DELETED (issue #348): the deprecated

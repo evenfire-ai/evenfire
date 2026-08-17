@@ -3408,7 +3408,10 @@ export type PluginWorkloadSdkGrantInput = {
   allowedTargetRefs?: string[]
   allowedUserRefs?: string[]
   allowedCallers?: string[]
-  quotaLimits?: PluginWorkloadSdkQuotaLimits
+  // Input type omits the deprecated per-run keys (issue #348): this UI never
+  // sends them and the server strips them on write. The response
+  // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
+  quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
   promptTargets?: PluginWorkloadSdkPromptTarget[]
   defaultTargetRef?: string
