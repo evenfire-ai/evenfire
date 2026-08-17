@@ -47,7 +47,8 @@
 #   E2E_PLUGIN_SDK_DEMO_TARGET_REF   ordered policy target id (default: primary)
 #   E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT Secret data key owned by provider (derived when omitted)
 #   ADMIN_USERNAME       admin user     (default: admin)
-#   ADMIN_EMAIL          bootstrap email (default: admin@clerum.io)
+#   ADMIN_EMAIL          bootstrap email (default: admin@evenfire.local for
+#                        SEED_PROFILE=minimal, otherwise admin@clerum.io)
 #   ADMIN_PASSWORD       admin pass     (REQUIRED — bootstrap or rotated)
 #   CONTROL_API_NS       ns             (default: control-plane)
 # ======================================================================
@@ -66,6 +67,7 @@ source "${SCRIPT_DIR}/admin-credentials.sh"
 CONTEXT="${CONTEXT:-$(kubectl config current-context)}"
 KC="kubectl --context=${CONTEXT}"
 
+SEED_PROFILE="${SEED_PROFILE:-e2e}"
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
 DEV_NAME="${E2E_DEV_LOGIN_NAME:-Test User}"
 DEV_EMAIL_2="${E2E_DEV_LOGIN_EMAIL_2:-test2@clerum.io}"
@@ -98,7 +100,19 @@ AGENT_NAME="${E2E_HOST_REF:-chatllm}"
 CONTEXT_ID="${E2E_CONTEXT_ID:-context1}"
 
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-admin@clerum.io}"
+if [ -z "${ADMIN_EMAIL:-}" ]; then
+  if [ "$SEED_PROFILE" = "minimal" ]; then
+    ADMIN_EMAIL="admin@evenfire.local"
+  else
+    ADMIN_EMAIL="admin@clerum.io"
+  fi
+fi
+if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${E2E_DEV_LOGIN_EMAIL:-}" ]; then
+  DEV_EMAIL="$ADMIN_EMAIL"
+  if [ -z "${E2E_DEV_LOGIN_NAME:-}" ]; then
+    DEV_NAME="admin"
+  fi
+fi
 ADMIN_PASSWORD="$(e2e_resolve_admin_password "${REPO_ROOT}" || true)"
 DESKTOP_LOGIN_CREDENTIAL="$ADMIN_PASSWORD"
 SEED_DESKTOP_LOGIN="${E2E_SEED_DESKTOP_PASSWORDS:-}"
@@ -449,45 +463,6 @@ capture_admin_session_cookie() {
   } > "$AUTH_COOKIE_JAR"
 }
 
-# ─── Step 1: Admin login (bootstrap if cluster is fresh) ───────────────
-log "Admin login as '$ADMIN_USERNAME'"
-: > "$AUTH_HEADER_FILE"
-ADMIN_RESP="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
-  -X POST "$CAPI_BASE/admin/auth/login" \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
-    '{username: $u, password: $p}')" || true)"
-ADMIN_BODY="$(echo "$ADMIN_RESP" | sed '$d')"
-ADMIN_CODE="$(echo "$ADMIN_RESP" | tail -n1)"
-
-if [[ "$ADMIN_CODE" =~ ^2 ]]; then
-  capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
-  ok "Admin session cookie obtained"
-else
-  if [ "$ADMIN_CODE" != "401" ]; then
-    die "Admin login failed (status=$ADMIN_CODE body=$ADMIN_BODY)"
-  fi
-  # Fresh cluster → one-shot bootstrap. 409 means an admin already exists but
-  # the password we were given is wrong — that's a real auth failure, surface.
-  log "Login did not return an admin session; attempting first-time bootstrap"
-  : > "$AUTH_HEADER_FILE"
-  SETUP_RESP="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
-    -X POST "$CAPI_BASE/admin/auth/setup" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg e "$ADMIN_EMAIL" --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
-      '{email: $e, username: $u, password: $p}')" || true)"
-  SETUP_BODY="$(echo "$SETUP_RESP" | sed '$d')"
-  SETUP_CODE="$(echo "$SETUP_RESP" | tail -n1)"
-  if [ "$SETUP_CODE" = "409" ]; then
-    die "Admin already exists but login failed — ADMIN_PASSWORD is wrong for user '$ADMIN_USERNAME'"
-  fi
-  if ! [[ "$SETUP_CODE" =~ ^2 ]]; then
-    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
-  fi
-  capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
-  ok "Bootstrapped initial admin '$ADMIN_USERNAME'"
-fi
-
 AUTH_CURL=(-b "$AUTH_COOKIE_JAR" -c "$AUTH_COOKIE_JAR" -H 'Content-Type: application/json')
 
 admin_get() {
@@ -501,6 +476,112 @@ admin_get() {
     die "$label → $code body=$(echo "$resp" | sed '$d')"
   fi
 }
+
+login_admin_only() {
+  local resp body code
+  log "Admin login as '$ADMIN_USERNAME'"
+  : > "$AUTH_HEADER_FILE"
+  resp="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{username: $u, password: $p}')" || true)"
+  body="$(echo "$resp" | sed '$d')"
+  code="$(echo "$resp" | tail -n1)"
+  if ! [[ "$code" =~ ^2 ]]; then
+    die "Admin login failed (status=$code body=$body)"
+  fi
+  capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
+  ok "Admin session cookie obtained"
+}
+
+perform_initial_setup() {
+  local response
+  : > "$AUTH_HEADER_FILE"
+  response="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/setup" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg e "$ADMIN_EMAIL" --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{email: $e, username: $u, password: $p}')" || true)"
+  SETUP_BODY="$(echo "$response" | sed '$d')"
+  SETUP_CODE="$(echo "$response" | tail -n1)"
+}
+
+verify_minimal_operator_bootstrap() {
+  local admin_count status source desktop_user_id
+  ADMIN_GET_BODY=""
+  admin_get "$CAPI_BASE/admin/control-admins" "GET /admin/control-admins"
+  admin_count="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "${ADMIN_EMAIL,,}" \
+    '[.admins[]? | select(.username == $username and ((.email // "") | ascii_downcase) == $email)] | length')"
+  if [ "$admin_count" != "1" ]; then
+    die "Minimal bootstrap did not produce exactly one admin '$ADMIN_USERNAME' with email '$ADMIN_EMAIL'"
+  fi
+  status="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "${ADMIN_EMAIL,,}" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.status // "missing"')"
+  source="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "${ADMIN_EMAIL,,}" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.source // "missing"')"
+  desktop_user_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "${ADMIN_EMAIL,,}" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.desktopUserId // empty')"
+  if [ "$status" != "active" ] || [ "$source" != "initial_setup" ] || [ -z "$desktop_user_id" ]; then
+    die "Minimal bootstrap is incomplete: expected one active initial_setup Desktop link for '$ADMIN_EMAIL' (status=$status source=$source desktopUserId=${desktop_user_id:-missing}); refusing ordinary-user fallback"
+  fi
+  ok "Initial admin '$ADMIN_USERNAME' has active initial_setup Desktop operator link (desktopUserId=${desktop_user_id:0:8}…)"
+}
+
+login_first_legacy() {
+  local response body code
+  log "Admin login as '$ADMIN_USERNAME'"
+  : > "$AUTH_HEADER_FILE"
+  response="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{username: $u, password: $p}')" || true)"
+  body="$(echo "$response" | sed '$d')"
+  code="$(echo "$response" | tail -n1)"
+  if [[ "$code" =~ ^2 ]]; then
+    capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
+    ok "Admin session cookie obtained"
+    return
+  fi
+  if [ "$code" != "401" ]; then
+    die "Admin login failed (status=$code body=$body)"
+  fi
+  log "Login did not return an admin session; attempting first-time bootstrap"
+  perform_initial_setup
+  if [ "$SETUP_CODE" = "409" ]; then
+    die "Admin already exists but login failed — ADMIN_PASSWORD is wrong for user '$ADMIN_USERNAME'"
+  fi
+  if ! [[ "$SETUP_CODE" =~ ^2 ]]; then
+    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
+  fi
+  capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
+  ok "Bootstrapped initial admin '$ADMIN_USERNAME'"
+}
+
+# ─── Step 1: Bootstrap before login for the minimal self-hosted path ───
+# A fresh DB contains a technical bootstrap admin whose password already
+# matches ADMIN_PASSWORD. Login-first therefore consumes the one-shot setup
+# eligibility, then the normal /admin/users fallback creates an ordinary
+# Desktop member without the governed initial_setup operator link. Minimal
+# installs must consume setup first; reruns may fall back to login only after
+# proving that the active initial_setup link still exists.
+if [ "$SEED_PROFILE" = "minimal" ]; then
+  log "Minimal self-hosted bootstrap: attempting /admin/auth/setup before any admin login"
+  perform_initial_setup
+  if [[ "$SETUP_CODE" =~ ^2 ]]; then
+    capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
+    ok "Bootstrapped initial admin '$ADMIN_USERNAME' with Desktop workspace"
+  elif [ "$SETUP_CODE" = "409" ]; then
+    log "Initial setup already consumed; validating the existing governed link after login"
+    login_admin_only
+  else
+    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
+  fi
+  verify_minimal_operator_bootstrap
+else
+  login_first_legacy
+fi
 
 admin_post() {
   local url="$1" body="$2" label="$3"

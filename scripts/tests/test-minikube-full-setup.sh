@@ -250,7 +250,11 @@ assert_gfs_provisioning_follows_migrations_and_core_readiness() {
   ensure_line="$(grep -n 'ensure_control_postgres_ready' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
   migration_line="$(grep -n 'deploy/scripts/run-control-api-db-migration.sh' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
   reconcile_after_migration="$(grep -n 'reconcile-gfs-deploy-credentials.sh' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
-  control_ready_line="$(grep -n 'rollout status deployment/control-api.*timeout=180s' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  # There are two intentional control-api readiness fences: the re-use path
+  # waits before the HCC cutover, and the migration path waits afterwards.
+  # Assert the post-migration fence here so adding the bounded re-use wait does
+  # not make this ordering check select the earlier guard.
+  control_ready_line="$(grep -n 'rollout status deployment/control-api.*timeout=180s' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
   core_block="$(sed -n '/^CORE_DEPLOYS=(/,/^)/p' scripts/minikube/full-setup.sh)"
   reset_block="$(sed -n '/# 6a. Optional DB reset/,/# 6c. Re-apply generated service tokens/p' scripts/minikube/full-setup.sh)"
   wal_block="$(sed -n '/A stale or late corruption signature/,/err "${ns}\/\${name} NOT ready"/p' scripts/minikube/full-setup.sh)"
@@ -512,6 +516,31 @@ assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes() {
     fail "$problems"
   fi
   rm -rf "$d"
+}
+
+assert_minimal_seed_is_setup_first_and_link_fail_closed() {
+  local seed="$REPO_ROOT/scripts/e2e/seed-e2e-data.sh"
+  local minimal_block
+  minimal_block="$(sed -n '/^if \[ "\$SEED_PROFILE" = "minimal" \]; then$/,/^else$/p' "$seed")"
+  if printf '%s\n' "$minimal_block" | grep -Fq 'perform_initial_setup' && \
+     printf '%s\n' "$minimal_block" | grep -Fq 'login_admin_only' && \
+     printf '%s\n' "$minimal_block" | grep -Fq 'verify_minimal_operator_bootstrap' && \
+     grep -Fq 'refusing ordinary-user fallback' "$seed"; then
+    pass "minimal seed consumes setup before login and fails closed without an active initial_setup link"
+  else
+    fail "minimal seed does not prove setup-first ordering and fail-closed link verification"
+  fi
+}
+
+assert_minimal_setup_requires_admin_identity_email() {
+  if grep -Fq 'SEED_PROFILE=minimal requires the Desktop identity email' \
+    "$REPO_ROOT/scripts/minikube/full-setup.sh" && \
+    grep -Fq 'SEED_USER_DEFAULT_EMAIL="$ADMIN_EMAIL"' \
+    "$REPO_ROOT/scripts/minikube/full-setup.sh"; then
+    pass "minimal setup refuses a second unlinked Desktop identity"
+  else
+    fail "minimal setup can still create a Desktop identity different from the bootstrap admin"
+  fi
 }
 
 assert_an_unknown_image_source_is_a_hard_error() {
@@ -1106,6 +1135,8 @@ assert_image_source_local_is_honoured
 assert_bootstrap_seed_deferral_is_opt_in
 assert_bootstrap_seed_deferral_flag_resolves_for_local_minimal
 assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes
+assert_minimal_seed_is_setup_first_and_link_fail_closed
+assert_minimal_setup_requires_admin_identity_email
 assert_an_unknown_image_source_is_a_hard_error
 assert_ghcr_mode_moves_only_the_render_dir
 assert_ghcr_mode_with_skip_uis_renders_the_no_uis_ghcr_overlay
