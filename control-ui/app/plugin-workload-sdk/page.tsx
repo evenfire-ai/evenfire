@@ -516,12 +516,6 @@ function GrantFormModal({
       cancelled = true
     }
   }, [])
-  const [maxRequestsPerRun, setMaxRequestsPerRun] = useState(
-    grant?.quotaLimits.maxRequestsPerRun?.toString() ?? ''
-  )
-  const [maxNotificationsPerRun, setMaxNotificationsPerRun] = useState(
-    grant?.quotaLimits.maxNotificationsPerRun?.toString() ?? ''
-  )
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -627,22 +621,18 @@ function GrantFormModal({
     if (!canSubmit) return
     setSubmitting(true)
     setError('')
-    const quotaLimits: PluginWorkloadSdkGrantInput['quotaLimits'] = {}
-    const reqRun = Number.parseInt(maxRequestsPerRun, 10)
-    if (Number.isFinite(reqRun) && reqRun > 0) quotaLimits.maxRequestsPerRun = reqRun
-    const notifRun = Number.parseInt(maxNotificationsPerRun, 10)
-    if (Number.isFinite(notifRun) && notifRun > 0) quotaLimits.maxNotificationsPerRun = notifRun
-
     // Edit mode: the upsert is a full-column overwrite, and the form does not expose
-    // every quota/model field. Round-trip the unexposed fields from the original grant
-    // so editing does not silently wipe values configured outside this form.
+    // the quota fields. Round-trip every quota key from the original grant except the
+    // deprecated per-run keys (no longer enforced, issue #348) so editing does not
+    // silently wipe values configured outside this form.
+    const quotaLimits: PluginWorkloadSdkGrantInput['quotaLimits'] = {}
     if (grant) {
-      if (grant.quotaLimits.maxInvocationsPerMinute !== undefined)
-        quotaLimits.maxInvocationsPerMinute = grant.quotaLimits.maxInvocationsPerMinute
-      if (grant.quotaLimits.maxNotificationsPerMinute !== undefined)
-        quotaLimits.maxNotificationsPerMinute = grant.quotaLimits.maxNotificationsPerMinute
-      if (grant.quotaLimits.maxOutputTokens !== undefined)
-        quotaLimits.maxOutputTokens = grant.quotaLimits.maxOutputTokens
+      const {
+        maxRequestsPerRun: _d1,
+        maxNotificationsPerRun: _d2,
+        ...keptQuotaLimits
+      } = grant.quotaLimits
+      Object.assign(quotaLimits, keptQuotaLimits)
     }
 
     const routingPolicy =
@@ -990,13 +980,13 @@ function GrantFormModal({
               </FormSection>
             )}
 
-            <FormSection title="Callers & quota">
+            <FormSection title="Callers">
               <Field
                 label="Allowed callers"
                 htmlFor="sdk-callers"
                 required
                 error={callersMissing ? 'At least one caller is required.' : undefined}
-                description="Workload ids permitted to call. Comma- or newline-separated."
+                description="Workload ids permitted to call. Comma- or newline-separated. Per-minute rate limits use platform defaults and are not set in this form; a grant may still carry a per-minute override via the API."
               >
                 <TextInput
                   id="sdk-callers"
@@ -1007,31 +997,6 @@ function GrantFormModal({
                   placeholder="api, worker"
                 />
               </Field>
-              {family === 'promptBridge' ? (
-                <Field label="Max requests per run" htmlFor="sdk-maxreq">
-                  <TextInput
-                    id="sdk-maxreq"
-                    compact
-                    narrow
-                    type="number"
-                    min={1}
-                    value={maxRequestsPerRun}
-                    onChange={e => setMaxRequestsPerRun(e.target.value)}
-                  />
-                </Field>
-              ) : (
-                <Field label="Max notifications per run" htmlFor="sdk-maxnotif">
-                  <TextInput
-                    id="sdk-maxnotif"
-                    compact
-                    narrow
-                    type="number"
-                    min={1}
-                    value={maxNotificationsPerRun}
-                    onChange={e => setMaxNotificationsPerRun(e.target.value)}
-                  />
-                </Field>
-              )}
             </FormSection>
 
             {wildcardPresent ? (

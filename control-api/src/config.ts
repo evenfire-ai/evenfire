@@ -135,6 +135,14 @@ type Config = {
   approvalRlExternalClientIpPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
+  // Plugin Workload SDK platform rate limits (issue #348): per-minute
+  // ceilings on the plugin abuse surface (data-path + pre-auth). Platform
+  // protection, not per-service business quotas — usage/cost stays governed
+  // by Token Budgets.
+  pluginSdkNotificationsRlPerMin: number
+  pluginSdkPromptBridgeRlPerMin: number
+  pluginSdkRequestBucketRlPerMin: number
+  pluginSdkPreauthRlPerMin: number
   // External Desktop GFS is a separate authority plane. The process-local
   // ingress backstop is intentionally wider than the distributed operation
   // buckets so normal Desktop read waterfalls cannot consume the security
@@ -820,6 +828,23 @@ export const config: Config = {
   approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
+  // Plugin Workload SDK platform rate limits (issue #348). Parsed via
+  // positiveIntegerFromEnv so invalid operator config (non-integer, zero,
+  // negative) fails loud at boot instead of running with NaN limits, which
+  // would effectively fail open.
+  pluginSdkNotificationsRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN',
+    150
+  ),
+  pluginSdkPromptBridgeRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN',
+    120
+  ),
+  pluginSdkRequestBucketRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN',
+    600
+  ),
+  pluginSdkPreauthRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN', 600),
   // Approved GFS authority-boundary budgets. Keep them fixed here rather than
   // accepting an unreviewed environment override. The 1800/min ingress guard
   // is only a coarse process-local backstop; the aggregate source-IP ceiling,
