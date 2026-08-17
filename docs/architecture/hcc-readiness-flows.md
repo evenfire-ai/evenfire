@@ -33,9 +33,12 @@ full convergence:
 | Readiness gate | `/ready = ready && providerAuthoritativeFn()`; constructor default `() => false`; a throwing gate → 503 | `server.ts`, `readinessGate.ts` |
 | G1 — unconfigured authority | `currentWhenUnconfigured()` returns `false` + warns once; prod always wires the source, dev never constructs the reconciler | `reconciler.ts` |
 | F1 — readiness-poll rebind | rebinds `isCurrent`/`server` on a superseding reconcile so the poll window does not self-destruct on a stale fence | `reconciler.ts` |
+| Authority fence — `isCurrent` | **required** (not an optional/defaulted arg) on all three allow-granting reconcilers — `bindingPolicyReconciler`, `reconcileContext` (L2 context-allow), `reconcileExternalEgress` (L3 external-egress ALLOW). No `?? (() => true)` fail-open default: a caller cannot compile without supplying the fence (TS2554/TS2345) | `networkPolicyReconciler.ts`, `bindingPolicyReconciler.ts` |
 
-The affirmative literal (`() => true`) is reachable only from the dev wiring; every
-production path resolves the real authority function.
+The affirmative literal (`() => true`) is reachable only from the dev/test wiring;
+every production path resolves the real authority function, and — because the fence
+is a **required argument** on every allow-granting reconciler rather than a defaulted
+option — no production caller can silently fall back to it.
 
 ## 3. DNS external-egress contract (B3) — retain / revoke decision table
 

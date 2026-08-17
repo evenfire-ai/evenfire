@@ -49,7 +49,7 @@
 <line x1="993.5" y1="150.0" x2="1026.0" y2="150.0" stroke="#64748b" stroke-width="2.4" stroke-dasharray="6,4" marker-end="url(#aGray)" stroke-linecap="round"/>
 <rect x="946.15" y="130.0" width="127.2" height="16" rx="4" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>
 <text x="1009.75" y="142.0" text-anchor="middle" font-size="10" font-weight="700" fill="#475569">async · post-ready</text>
-<text x="40" y="275" font-size="13" font-weight="700" fill="#b91c1c">2 · Fences fail-closed (rondas R3 / R4)</text>
+<text x="40" y="275" font-size="13" font-weight="700" fill="#b91c1c">2 · Fences fail-closed (R3 · R4 · J3)</text>
 <rect x="40.0" y="284" width="380.0" height="76" rx="11" fill="#fef2f2" stroke="#dc2626" stroke-width="1.8" filter="url(#sh)"/>
 <text x="230.0" y="307" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">Readiness gate — default () =&gt; false</text>
 <text x="230.0" y="326" text-anchor="middle" font-size="11" fill="#475569">/ready = ready &amp;&amp; providerAuthoritativeFn()</text>
