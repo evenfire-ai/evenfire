@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { AccessCatalog, SessionMe, TeamMember, TeamSummary } from '../../../../src/types'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { AppService } from '../../../../src/appService'
+import type {
+  AccessCatalog,
+  SessionMe,
+  TeamDirectoryEntry,
+  TeamMember,
+  TeamSummary,
+} from '../../../../src/types'
 import { AuthContext } from '../../contexts/AuthContext'
 import type { AuthContextValue } from '../../contexts/AuthContext'
 import { NavigationContext } from '../../contexts/NavigationContext'
@@ -22,6 +29,24 @@ vi.mock('../../hooks/domain/useMcpServersDataController', () => ({
 
 vi.mock('../../hooks/domain/useTeamsDataController', () => ({
   useTeamsDataController: vi.fn(),
+}))
+
+// AppService (imported only to derive a real AccessCatalog fixture from the
+// producer — see deriveAccessCatalog) transitively imports electron at module
+// load; stub it so the import resolves under jsdom.
+vi.mock('electron', () => ({
+  app: {
+    isReady: () => false,
+    getPath: () => '/tmp/clerum-desktop-test',
+    getName: () => 'test',
+    on: () => {},
+  },
+  safeStorage: {
+    isEncryptionAvailable: () => false,
+    encryptString: () => Buffer.from(''),
+    decryptString: () => '',
+  },
+  shell: { openExternal: () => {} },
 }))
 
 const useContextsDataControllerMock = vi.mocked(useContextsDataController)
@@ -131,6 +156,7 @@ const makeContextsDataValue = (
   contextIds: accessCatalog?.contextIds ?? [],
   userContextIds: accessCatalog?.userContextIds ?? [],
   teamContextIds: accessCatalog?.teamContextIds ?? [],
+  contextDisplayById: accessCatalog?.contextDisplayById ?? {},
   sharedFilesByContext: {},
   sharedFileDirectoriesByContext: {},
   refresh: vi.fn(),
@@ -149,6 +175,7 @@ const makeMcpServersDataValue = (
   error: null,
   accessCatalog,
   agentNames: accessCatalog?.agentNames ?? [],
+  agentDisplayByName: accessCatalog?.agentDisplayByName ?? {},
   agentContextByName: accessCatalog?.agentContextByName ?? {},
   mcpServersByAgent: accessCatalog?.mcpServersByAgent ?? {},
   globalMcpServers: [],
@@ -317,5 +344,135 @@ describe('ContextDetailsPage', () => {
     expect(screen.getByRole('button', { name: 'Open agent gamma' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Open agent beta' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Open agent delta' })).toBeNull()
+  })
+})
+
+// Regression: cross-team agents (H1). scopedAgents / mappedAgents can include
+// agents that live only in another team's directory entry — never in the
+// current team's catalog — so `agentDisplayByName` (total ONLY over
+// catalog.agentNames) has no entry for them. Rendering the map lookup without a
+// fallback leaves an empty cell; the fix falls back to the identifier.
+describe('ContextDetailsPage — cross-team agent display (H1)', () => {
+  // T1: derive the catalog from the real producer (AppService.refreshAccessCatalog)
+  // instead of hand-tabulating it, so agentDisplayByName is genuinely total only
+  // over the catalog's own agents and genuinely omits the cross-team agent.
+  let derivedCatalog: AccessCatalog
+
+  const CROSS_TEAM_AGENT = 'crossteam-agent'
+  const OTHER_TEAM: TeamSummary = { id: 'team-2', name: 'Other Team', role: 'member' }
+  const OTHER_TEAM_DIRECTORY: Record<string, TeamDirectoryEntry> = {
+    'team-2': {
+      team: OTHER_TEAM,
+      members: [],
+      contextIds: ['ctx-alpha'],
+      agentNames: [CROSS_TEAM_AGENT],
+    },
+  }
+
+  async function deriveAccessCatalog(): Promise<AccessCatalog> {
+    const service = new AppService() as unknown as {
+      sessionToken: string
+      me: SessionMe
+      bindCurrentChatStore: (id: string) => Promise<void>
+      rpcTokenManager: { getOrIssue: () => unknown; clear: () => void }
+      authClient: Record<string, unknown>
+      refreshAccessCatalog: () => Promise<AccessCatalog>
+    }
+    service.sessionToken = 'session-token'
+    service.me = ME
+    // Catalog construction does not need the chat store; keep it out of the fixture.
+    service.bindCurrentChatStore = async () => {}
+    service.rpcTokenManager = { getOrIssue: vi.fn(), clear: vi.fn() }
+    const currentTeamAgents = {
+      agentNames: ['alpha', 'gamma'],
+      agents: [
+        { name: 'alpha', displayName: 'Alpha Host', contextRef: 'ctx-alpha', mcpServers: [] },
+        { name: 'gamma', displayName: 'Gamma Host', contextRef: 'ctx-alpha', mcpServers: [] },
+      ],
+    }
+    service.authClient = {
+      getMe: vi.fn().mockResolvedValue(ME),
+      getMyContexts: vi.fn().mockResolvedValue({ contextIds: ['ctx-alpha'] }),
+      getMyAgents: vi.fn().mockResolvedValue(currentTeamAgents),
+      getTeamContexts: vi.fn().mockResolvedValue({ contextIds: ['ctx-alpha'] }),
+      getTeamAgents: vi.fn().mockResolvedValue(currentTeamAgents),
+    }
+    return service.refreshAccessCatalog()
+  }
+
+  beforeAll(async () => {
+    derivedCatalog = await deriveAccessCatalog()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  it('producer catalog is total over its own agents and omits the cross-team agent', () => {
+    // Guards the fixture's realism (T1): if the producer ever started emitting a
+    // display entry for non-catalog agents, this test would no longer cover H1.
+    expect(Object.keys(derivedCatalog.agentDisplayByName ?? {}).sort()).toEqual(['alpha', 'gamma'])
+    expect(derivedCatalog.agentDisplayByName?.[CROSS_TEAM_AGENT]).toBeUndefined()
+    expect(derivedCatalog.agentNames).not.toContain(CROSS_TEAM_AGENT)
+  })
+
+  it('shows the identifier for a cross-team agent in the agents tab (no empty cell)', () => {
+    renderWithContexts(
+      { selectedContext: 'ctx-alpha' },
+      {
+        accessCatalog: derivedCatalog,
+        teams: {
+          teams: [{ id: 'team-1', name: 'Core Team', role: 'admin' }, OTHER_TEAM],
+          currentTeamId: 'team-1',
+          teamDirectory: OTHER_TEAM_DIRECTORY,
+        },
+      }
+    )
+
+    // Catalog agents still render their spec.host display name.
+    expect(screen.getByText('Alpha Host')).toBeTruthy()
+
+    // T4: assert the visible cell of the cross-team row, not an intermediate. The
+    // row exists (aria-label uses the id), but before the fix its display cell is
+    // empty because agentDisplayByName has no entry for the cross-team agent.
+    const crossTeamRow = screen.getByRole('button', {
+      name: `Open agent ${CROSS_TEAM_AGENT}`,
+    })
+    expect(within(crossTeamRow).getByText(CROSS_TEAM_AGENT)).toBeTruthy()
+  })
+
+  it('shows the identifier for a cross-team mapped agent in the connectors tab', () => {
+    renderWithContexts(
+      { selectedContext: 'ctx-alpha' },
+      {
+        accessCatalog: derivedCatalog,
+        teams: {
+          teams: [{ id: 'team-1', name: 'Core Team', role: 'admin' }, OTHER_TEAM],
+          currentTeamId: 'team-1',
+          teamDirectory: OTHER_TEAM_DIRECTORY,
+        },
+        mcpServers: {
+          selectedContextMcpServerMappingAvailable: true,
+          selectedContextMcpServerDetails: [
+            {
+              name: 'srv-1',
+              mappedAgentCount: 1,
+              mappedAgents: [CROSS_TEAM_AGENT],
+              mappingSource: 'context-map',
+            },
+          ],
+        },
+      }
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connectors' }))
+
+    // T4: the mapped-agent reference tag renders the identifier (aria-label uses
+    // the id; the visible label was empty before the fix).
+    const mappedTag = screen.getByRole('button', {
+      name: `Open connectors for agent ${CROSS_TEAM_AGENT}`,
+    })
+    expect(within(mappedTag).getByText(CROSS_TEAM_AGENT)).toBeTruthy()
   })
 })

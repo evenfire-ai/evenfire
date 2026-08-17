@@ -13,6 +13,8 @@ export type CreateFlowIconKey =
 export type CreateFlowLoadingConfig = {
   backLabel: string
   iconKey: CreateFlowIconKey
+  primaryActionLabel?: string
+  secondaryActionLabel?: string
   stepFlowClassName?: string
   steps: readonly string[]
   subtitle: string

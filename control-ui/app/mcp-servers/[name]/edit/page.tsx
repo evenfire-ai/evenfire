@@ -1,18 +1,45 @@
 'use client'
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
 import { IconCable } from '@components/Sidebar/icons'
+import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
+import {
+  CONNECTOR_EDIT_DEFAULT_TAB,
+  CONNECTOR_EDIT_TABS,
+  CONNECTOR_EDIT_TAB_LABELS,
+  type ConnectorEditTab,
+} from '@constants/connectorEdit'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { getMcpServer, updateMcpServer } from '@lib/api'
-import type { EgressBinding, EnvSecret, EnvSecretKeyMapping, McpServerResource } from '@lib/api'
+import { getAgentDisplayName } from '@lib/agentName'
+import {
+  getContextTeams,
+  getContextUsers,
+  getContexts,
+  getHosts,
+  getMcpServer,
+  updateMcpServer,
+} from '@lib/api'
+import type {
+  ContextResource,
+  EgressBinding,
+  EnvSecret,
+  EnvSecretKeyMapping,
+  McpServerResource,
+} from '@lib/api'
+import {
+  contextNamesForConnector,
+  mergeAccessSummaries,
+  sortAccessPrincipals,
+} from '@lib/connectorAccess'
 import type { EgressEditorStatus } from '@lib/egressModel'
 
 /**
@@ -37,11 +64,46 @@ function resolveEnvSecret(spec: Record<string, unknown> | undefined): EnvSecret 
   return { name: candidate.name, keys }
 }
 
+function parseConnectorEditTab(value: string | string[] | undefined): ConnectorEditTab {
+  const candidate = Array.isArray(value) ? value[0] : value
+  return CONNECTOR_EDIT_TABS.find(tab => tab === candidate) ?? CONNECTOR_EDIT_DEFAULT_TAB
+}
+
+type ContextAccess = {
+  agents: Array<{ id: string; label: string }>
+  teams: Array<{ id: string; label: string }>
+  users: Array<{ id: string; label: string }>
+}
+
+function resolveRegistryCredentialSource(
+  metadata: McpServerResource['metadata'] | undefined
+): { name: string; version: string } | undefined {
+  const labels = (metadata?.labels ?? {}) as Record<string, unknown>
+  const annotations = (metadata?.annotations ?? {}) as Record<string, unknown>
+  const name = String(
+    annotations['clerum.io/catalog-id'] ?? labels['clerum.io/catalog-id'] ?? ''
+  ).trim()
+  const version = String(
+    annotations['clerum.io/catalog-version'] ?? labels['clerum.io/catalog-version'] ?? ''
+  ).trim()
+  return name && version ? { name, version } : undefined
+}
+
+const EMPTY_CONTEXT_ACCESS: ContextAccess = { agents: [], teams: [], users: [] }
+
+const CONTEXT_ACCESS_GROUPS: Array<{ key: keyof ContextAccess; title: string }> = [
+  { key: 'users', title: 'Users' },
+  { key: 'teams', title: 'Teams' },
+  { key: 'agents', title: 'Agents' },
+]
+
 export default function EditMcpServerPage() {
   const router = useRouter()
-  const params = useParams<{ name: string }>()
+  const params = useParams<{ name: string; tab?: string | string[] }>()
   const name = decodeURIComponent(params?.name ?? '')
   const { showToast } = useToast()
+
+  const activeTab = parseConnectorEditTab(params?.tab)
 
   const [server, setServer] = useState<McpServerResource | null>(null)
   const [loading, setLoading] = useState(true)
@@ -50,9 +112,23 @@ export default function EditMcpServerPage() {
   const [saveError, setSaveError] = useState('')
   const [egressBindings, setEgressBindings] = useState<EgressBinding[] | undefined>(undefined)
   const [egressStatus, setEgressStatus] = useState<EgressEditorStatus | null>(null)
+  const [contextAccess, setContextAccess] = useState<ContextAccess>(EMPTY_CONTEXT_ACCESS)
+  const [contextNames, setContextNames] = useState<string[]>([])
+  const [loadingContexts, setLoadingContexts] = useState(true)
+  const [contextListError, setContextListError] = useState('')
+  const [contextAccessError, setContextAccessError] = useState('')
+  const [loadingContextAccess, setLoadingContextAccess] = useState(false)
 
   function backToList() {
     router.push(CONTROL_ROUTES.connectors.root)
+  }
+
+  function selectTab(next: ConnectorEditTab) {
+    if (next === CONNECTOR_EDIT_DEFAULT_TAB) {
+      router.replace(CONTROL_ROUTES.connectors.edit(name))
+    } else {
+      router.replace(CONTROL_ROUTES.connectors.editTab(name, next))
+    }
   }
 
   const handleEgressChange = useCallback(
@@ -87,6 +163,110 @@ export default function EditMcpServerPage() {
     }
   }, [name])
 
+  useEffect(() => {
+    let cancelled = false
+    async function loadContexts() {
+      setLoadingContexts(true)
+      setContextListError('')
+      try {
+        const result = await getContexts()
+        if (cancelled) return
+        setContextNames(contextNamesForConnector((result.items ?? []) as ContextResource[], name))
+      } catch {
+        if (!cancelled) {
+          setContextNames([])
+          setContextListError('Context access data is unavailable. Try again later.')
+        }
+      } finally {
+        if (!cancelled) setLoadingContexts(false)
+      }
+    }
+    if (name) void loadContexts()
+    return () => {
+      cancelled = true
+    }
+  }, [name])
+
+  useEffect(() => {
+    if (contextNames.length === 0) {
+      setContextAccess(EMPTY_CONTEXT_ACCESS)
+      setContextAccessError('')
+      setLoadingContextAccess(false)
+      return
+    }
+
+    let cancelled = false
+    setLoadingContextAccess(true)
+    setContextAccessError('')
+
+    void (async () => {
+      const [hostsResults, contextResults] = await Promise.all([
+        Promise.allSettled([getHosts()]),
+        Promise.all(
+          contextNames.map(async contextName => {
+            const [usersResult, teamsResult] = await Promise.allSettled([
+              getContextUsers(contextName),
+              getContextTeams(contextName),
+            ])
+            return { contextName, usersResult, teamsResult }
+          })
+        ),
+      ])
+      if (cancelled) return
+
+      const hostsResult = hostsResults[0]
+      const failed =
+        hostsResult.status === 'rejected' ||
+        contextResults.some(
+          result =>
+            result.usersResult.status === 'rejected' || result.teamsResult.status === 'rejected'
+        )
+      const hosts = hostsResult.status === 'fulfilled' ? (hostsResult.value.items ?? []) : []
+      setContextAccess(
+        mergeAccessSummaries(
+          contextResults.map(({ contextName, usersResult, teamsResult }) => ({
+            users:
+              usersResult.status === 'fulfilled'
+                ? sortAccessPrincipals(
+                    (usersResult.value.items ?? []).map(user => ({
+                      id: user.id,
+                      label: user.displayName || user.name || user.email || user.id,
+                    }))
+                  )
+                : [],
+            teams:
+              teamsResult.status === 'fulfilled'
+                ? sortAccessPrincipals(
+                    (teamsResult.value.items ?? []).map(team => ({
+                      id: team.id,
+                      label: team.name || team.id,
+                    }))
+                  )
+                : [],
+            agents: sortAccessPrincipals(
+              hosts
+                .filter(host => String(host.spec?.contextRef ?? '').trim() === contextName)
+                .map(host => {
+                  const agentName = host.metadata?.name || 'unknown'
+                  return { id: agentName, label: getAgentDisplayName(agentName) || agentName }
+                })
+            ),
+          }))
+        )
+      )
+      setContextAccessError(
+        failed
+          ? 'Some access information could not be loaded. The lists below may be incomplete.'
+          : ''
+      )
+      setLoadingContextAccess(false)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [contextNames])
+
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!server?.spec || saving || egressStatus?.errors.length) return
@@ -109,6 +289,14 @@ export default function EditMcpServerPage() {
     }
   }
 
+  const envSecret = server?.spec
+    ? resolveEnvSecret(server.spec as Record<string, unknown>)
+    : undefined
+  const registryCredentialSource = useMemo(
+    () => resolveRegistryCredentialSource(server?.metadata),
+    [server?.metadata]
+  )
+
   return (
     <AuthGate>
       <DashboardLayout isDetailPage>
@@ -117,34 +305,153 @@ export default function EditMcpServerPage() {
             <CreatePageHeader
               icon={<IconCable />}
               title={`Edit Connector: ${name}`}
-              subtitle="Update explicit external egress for this connector."
+              subtitle="Review context access, rotate credentials, and update external egress for this connector."
               backLabel="Back to connectors"
               onBack={backToList}
             />
           }
         >
+          <TabBar<ConnectorEditTab>
+            ariaLabel="Connector edit sections"
+            activeValue={activeTab}
+            className="cu-tabs--compact cu-connector-edit-tabs"
+            onChange={selectTab}
+            options={CONNECTOR_EDIT_TABS.map(tab => ({
+              value: tab,
+              label: CONNECTOR_EDIT_TAB_LABELS[tab],
+              href:
+                tab === CONNECTOR_EDIT_DEFAULT_TAB
+                  ? CONTROL_ROUTES.connectors.edit(name)
+                  : CONTROL_ROUTES.connectors.editTab(name, tab),
+            }))}
+          />
+
+          {loadError ? <div className="cu-banner cu-banner--error">{loadError}</div> : null}
+
           {loading ? (
-            <div className="cu-connector-edit-form">
-              <div className="cu-create-content">Loading connector...</div>
-            </div>
-          ) : loadError ? (
-            <div className="cu-connector-edit-form">
-              <div className="cu-banner cu-banner--error" role="alert">
-                {loadError}
+            activeTab === 'credentials' ? (
+              <div
+                role="status"
+                aria-busy="true"
+                aria-label="Loading connector credentials"
+                className="cu-connector-edit-form cu-body-loading-skeleton"
+              >
+                <section className="cu-body-loading-skeleton__section">
+                  <span className="cu-skeleton cu-body-loading-skeleton__heading" />
+                  <span className="cu-skeleton cu-body-loading-skeleton__line" />
+                  <div className="cu-body-loading-skeleton__fields">
+                    <span className="cu-skeleton cu-body-loading-skeleton__field" />
+                    <span className="cu-skeleton cu-body-loading-skeleton__field" />
+                  </div>
+                </section>
               </div>
-            </div>
+            ) : (
+              <div className="cu-connector-edit-form">
+                <FormSectionsSkeleton
+                  label="Connector"
+                  primaryActionLabel="Save egress"
+                  sections={2}
+                />
+              </div>
+            )
           ) : server ? (
-            <div className="cu-connector-edit-form">
-              <form className="cu-create-content cu-connector-edit-content" onSubmit={handleSave}>
+            activeTab === 'credentials' ? (
+              <div className="cu-connector-edit-form">
+                <UpdateConnectorCredentials
+                  serverName={name}
+                  envSecret={envSecret}
+                  registryCredentialSource={registryCredentialSource}
+                />
+              </div>
+            ) : activeTab === 'context' ? (
+              <div className="cu-connector-edit-form cu-connector-edit-content">
+                <section className="cu-form-section" aria-labelledby="connector-context-title">
+                  <div className="cu-form-section__header">
+                    <h2 id="connector-context-title" className="cu-form-section__title">
+                      Context access
+                    </h2>
+                    <p className="cu-form-section__description">
+                      This connector is available in the contexts shown below. Context assignments
+                      are derived from the current Context allowlists and cannot be changed here
+                      yet.
+                    </p>
+                  </div>
+
+                  {loadingContexts ? (
+                    <p className="cu-muted" role="status">
+                      Loading contexts…
+                    </p>
+                  ) : contextListError ? (
+                    <div className="cu-banner cu-banner--warn" role="alert">
+                      {contextListError}
+                    </div>
+                  ) : (
+                    <p className="cu-connector-edit-context-name" aria-label="Connector contexts">
+                      Contexts:{' '}
+                      <strong>{contextNames.length > 0 ? contextNames.join(', ') : 'None'}</strong>
+                    </p>
+                  )}
+
+                  {!loadingContexts && !contextListError && contextNames.length > 0 ? (
+                    loadingContextAccess ? (
+                      <p className="cu-muted">Loading context access…</p>
+                    ) : (
+                      <>
+                        {contextAccessError ? (
+                          <p className="cu-banner cu-banner--warn" role="status">
+                            {contextAccessError}
+                          </p>
+                        ) : null}
+                        <section className="cu-registry-context-access" aria-label="Context access">
+                          {CONTEXT_ACCESS_GROUPS.map(group => (
+                            <section
+                              className="cu-registry-context-access__group"
+                              data-kind={group.key}
+                              key={group.key}
+                            >
+                              <div className="cu-registry-context-access__heading">
+                                <h4>{group.title}</h4>
+                                <span>{contextAccess[group.key].length}</span>
+                              </div>
+                              {contextAccess[group.key].length > 0 ? (
+                                <ul className="cu-registry-context-access__list">
+                                  {contextAccess[group.key].map(principal => (
+                                    <li key={principal.id}>
+                                      <span>{principal.label}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <p className="cu-muted">
+                                  No {group.title.toLowerCase()} have access.
+                                </p>
+                              )}
+                            </section>
+                          ))}
+                        </section>
+                      </>
+                    )
+                  ) : null}
+                </section>
+              </div>
+            ) : (
+              <form
+                className="cu-connector-edit-form cu-connector-edit-content"
+                onSubmit={handleSave}
+              >
                 <div className="cu-connector-edit-meta">
                   <div>
                     <strong>Image:</strong>{' '}
                     <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
                   </div>
                   <div>
-                    <strong>Context:</strong>{' '}
+                    <strong>Contexts:</strong>{' '}
                     <code>
-                      {typeof server.spec?.contextRef === 'string' ? server.spec.contextRef : '-'}
+                      {loadingContexts
+                        ? 'Loading…'
+                        : contextListError
+                          ? 'Unavailable'
+                          : contextNames.join(', ') || '-'}
                     </code>
                   </div>
                 </div>
@@ -182,12 +489,7 @@ export default function EditMcpServerPage() {
                   </button>
                 </div>
               </form>
-
-              <UpdateConnectorCredentials
-                serverName={name}
-                envSecret={resolveEnvSecret(server.spec as Record<string, unknown> | undefined)}
-              />
-            </div>
+            )
           ) : null}
         </CreateFlowPanel>
       </DashboardLayout>

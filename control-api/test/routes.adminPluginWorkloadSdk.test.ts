@@ -4,6 +4,11 @@ import request from 'supertest'
 import { pool } from '../src/db.js'
 import { createAdminPluginWorkloadSdkRouter } from '../src/routes/admin/pluginWorkloadSdk.js'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
+
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn(),
+}))
 
 vi.mock('../src/db.js', () => ({
   pool: {
@@ -23,17 +28,19 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     upsertGrant: vi.fn(),
     deleteGrant: vi.fn(),
     getQuotaCounters: vi.fn(),
+    getPluginWorkloadSdkLegacyGrantInventory: vi.fn(),
+    hasUsableClientNotificationRecipients: vi.fn(),
     listInvocations: vi.fn(),
   }
 })
 
-function buildApp() {
+const DEFAULT_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
+
+function buildApp(sub: string | null = DEFAULT_ADMIN_SUB) {
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
-    ;(req as unknown as { adminAuth: { sub: string } }).adminAuth = {
-      sub: '11111111-1111-4111-8111-111111111111',
-    }
+    ;(req as unknown as { adminAuth: { sub?: string } }).adminAuth = sub === null ? {} : { sub }
     next()
   })
   app.use(createAdminPluginWorkloadSdkRouter())
@@ -46,6 +53,15 @@ const validGrantBody = {
   capabilityFamily: 'promptBridge',
   provider: 'zai',
   allowedModels: ['glm-4.7'],
+  promptTargets: [
+    {
+      targetRef: 'primary-zai',
+      provider: 'zai',
+      model: 'glm-4.7',
+      credentialSlot: 'zai-api-key',
+    },
+  ],
+  defaultTargetRef: 'primary-zai',
   allowedCallers: ['api'],
 }
 
@@ -54,7 +70,18 @@ beforeEach(() => {
   vi.mocked(sdkDb.upsertGrant).mockReset()
   vi.mocked(sdkDb.deleteGrant).mockReset()
   vi.mocked(sdkDb.getQuotaCounters).mockReset()
+  vi.mocked(sdkDb.getPluginWorkloadSdkLegacyGrantInventory).mockReset()
+  vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockReset()
   vi.mocked(sdkDb.listInvocations).mockReset()
+  vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockResolvedValue(true)
+  vi.mocked(checkAndIncrement).mockReset()
+  vi.mocked(checkAndIncrement).mockResolvedValue({
+    allowed: true,
+    remaining: 119,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+  })
   // R3 allowlist cross-check (listEnabledModelNamesForProvider) queries pool.
   // Default to the seed model so the valid-grant success paths pass; individual
   // tests override to simulate a disallowed model.
@@ -63,6 +90,34 @@ beforeEach(() => {
 })
 
 describe('routes/admin/pluginWorkloadSdk — grants', () => {
+  it('applies a principal-scoped admin rate limit before grant reads', async () => {
+    vi.mocked(sdkDb.listGrants).mockResolvedValue([])
+
+    const res = await request(buildApp()).get('/admin/plugin-workload-sdk/grants')
+
+    expect(res.status).toBe(200)
+    expect(checkAndIncrement).toHaveBeenCalledWith(
+      'plugin_workload_sdk_admin:11111111-1111-4111-8111-111111111111',
+      120
+    )
+  })
+
+  it('keeps separate admin principals in separate rate-limit buckets', async () => {
+    vi.mocked(sdkDb.listGrants).mockResolvedValue([])
+
+    await request(buildApp('admin-a')).get('/admin/plugin-workload-sdk/grants')
+    await request(buildApp('admin-b')).get('/admin/plugin-workload-sdk/grants')
+    await request(buildApp(null)).get('/admin/plugin-workload-sdk/grants')
+
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(1, 'plugin_workload_sdk_admin:admin-a', 120)
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(2, 'plugin_workload_sdk_admin:admin-b', 120)
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(
+      3,
+      'plugin_workload_sdk_admin:unauthenticated',
+      120
+    )
+  })
+
   it('lists grants with optional recipe filters', async () => {
     vi.mocked(sdkDb.listGrants).mockResolvedValue([])
     const res = await request(buildApp()).get(
@@ -71,6 +126,24 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(res.body.items).toEqual([])
     expect(sdkDb.listGrants).toHaveBeenCalledWith({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'r1',
+    })
+  })
+
+  it('exposes the read-only legacy migration gate with optional recipe filters', async () => {
+    vi.mocked(sdkDb.getPluginWorkloadSdkLegacyGrantInventory).mockResolvedValue({
+      totalPromptBridgeGrants: 1,
+      legacyPromptBridgeGrants: 0,
+      activationReady: true,
+      items: [],
+    })
+    const res = await request(buildApp()).get(
+      '/admin/plugin-workload-sdk/legacy-inventory?recipeNamespace=sandbox-recipes&recipeName=r1'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.activationReady).toBe(true)
+    expect(sdkDb.getPluginWorkloadSdkLegacyGrantInventory).toHaveBeenCalledWith({
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'r1',
     })
@@ -90,6 +163,20 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
       .send({ ...validGrantBody, allowedModels: ['*'] })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('wildcard_not_allowed')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
+  it('rejects model ids outside the shared runnable grammar', async () => {
+    const oversized = 'm'.repeat(129)
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        allowedModels: [oversized],
+        promptTargets: [{ ...validGrantBody.promptTargets[0], model: oversized }],
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toContain('allowedModels entries')
     expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
   })
 
@@ -121,13 +208,85 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(400)
   })
 
-  it('requires non-empty allowedModels for promptBridge grants', async () => {
+  it('requires an explicit ordered target policy for promptBridge grants', async () => {
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')
-      .send({ ...validGrantBody, allowedModels: [] })
+      .send({ ...validGrantBody, promptTargets: [] })
     expect(res.status).toBe(400)
-    expect(res.body.error).toBe('allowedModels must be non-empty for promptBridge grants')
+    expect(res.body.error).toBe('promptTargets must be a non-empty array for promptBridge grants')
     expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
+  it('rejects a default that is not the first operator-authored target', async () => {
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({ ...validGrantBody, defaultTargetRef: 'another-target' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toContain('defaultTargetRef')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
+  it('persists an ordered multiprovider policy without exposing a credential value', async () => {
+    vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'multiprovider' } as never)
+    vi.mocked(pool.query).mockImplementation(((_sql: string, values?: unknown[]) => {
+      const provider = values?.[0]
+      return Promise.resolve({
+        rows: [{ model: provider === 'openai' ? 'gpt-5.4' : 'glm-4.7' }],
+        rowCount: 1,
+      })
+    }) as never)
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        promptTargets: [
+          ...validGrantBody.promptTargets,
+          {
+            targetRef: 'openai-fallback',
+            provider: 'openai',
+            model: 'gpt-5.4',
+            credentialSlot: 'openai-api-key-fb1',
+          },
+        ],
+      })
+    expect(res.status).toBe(200)
+    expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultTargetRef: 'primary-zai',
+        promptTargets: expect.arrayContaining([
+          expect.objectContaining({ targetRef: 'openai-fallback', provider: 'openai' }),
+        ]),
+      }),
+      '11111111-1111-4111-8111-111111111111'
+    )
+    expect(JSON.stringify(vi.mocked(sdkDb.upsertGrant).mock.calls)).not.toContain('secret-value')
+  })
+
+  it('accepts a policy catalogue larger than the bounded execution suffix', async () => {
+    const targets = Array.from({ length: 5 }, (_, index) => ({
+      targetRef: `target-${index}`,
+      provider: 'zai',
+      model: `glm-4.${index + 7}`,
+      credentialSlot: 'zai-api-key',
+    }))
+    vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'catalogue' } as never)
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: targets.map(target => ({ model: target.model })),
+      rowCount: targets.length,
+    } as never)
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        allowedModels: targets.map(target => target.model),
+        promptTargets: targets,
+        defaultTargetRef: targets[0]!.targetRef,
+      })
+    expect(res.status).toBe(200)
+    expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
+      expect.objectContaining({ promptTargets: targets }),
+      '11111111-1111-4111-8111-111111111111'
+    )
   })
 
   it('requires an explicit provider for promptBridge grants (R1)', async () => {
@@ -167,12 +326,73 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     } as never)
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')
-      .send({ ...validGrantBody, provider: 'vertex', allowedModels: ['gemini-2.5-pro'] })
+      .send({
+        ...validGrantBody,
+        provider: 'vertex',
+        allowedModels: ['gemini-2.5-pro'],
+        promptTargets: [
+          {
+            targetRef: 'primary-vertex',
+            provider: 'vertex',
+            model: 'gemini-2.5-pro',
+            credentialSlot: 'vertex-service-account-json',
+          },
+        ],
+        defaultTargetRef: 'primary-vertex',
+      })
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'vertex' }),
       '11111111-1111-4111-8111-111111111111'
     )
+  })
+
+  it('rejects additive slots for multi-slot or multiline providers before persisting policy', async () => {
+    vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-bedrock' } as never)
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: [{ model: 'claude-3-7-sonnet' }],
+      rowCount: 1,
+    } as never)
+
+    const bedrock = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        provider: 'bedrock',
+        allowedModels: ['claude-3-7-sonnet'],
+        promptTargets: [
+          {
+            targetRef: 'bedrock-fallback-slot',
+            provider: 'bedrock',
+            model: 'claude-3-7-sonnet',
+            credentialSlot: 'aws-access-key-id-fallback',
+          },
+        ],
+        defaultTargetRef: 'bedrock-fallback-slot',
+      })
+    expect(bedrock.status).toBe(400)
+    expect(bedrock.body.error).toContain('credentialSlot')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+
+    const vertex = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        provider: 'vertex',
+        allowedModels: ['gemini-2.5-pro'],
+        promptTargets: [
+          {
+            targetRef: 'vertex-fallback-slot',
+            provider: 'vertex',
+            model: 'gemini-2.5-pro',
+            credentialSlot: 'vertex-service-account-json-fallback',
+          },
+        ],
+        defaultTargetRef: 'vertex-fallback-slot',
+      })
+    expect(vertex.status).toBe(400)
+    expect(vertex.body.error).toContain('credentialSlot')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
   })
 
   it('does not require a provider for clientNotifications grants', async () => {
@@ -185,12 +405,28 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         capabilityFamily: 'clientNotifications',
         allowedEventTypes: ['lead.followup.due'],
         allowedCallers: ['api'],
+        allowedUserRefs: ['11111111-1111-4111-8111-111111111111'],
       })
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ capabilityFamily: 'clientNotifications', provider: undefined }),
       '11111111-1111-4111-8111-111111111111'
     )
+  })
+
+  it('rejects clientNotifications grants without an authorized destination', async () => {
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        capabilityFamily: 'clientNotifications',
+        allowedEventTypes: ['lead.followup.due'],
+        allowedCallers: ['api'],
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toContain('allowedTargetRefs or allowedUserRefs')
+    expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
   })
 
   it('rejects empty allowedCallers', async () => {
@@ -234,19 +470,57 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         capabilityFamily: 'promptBridge',
         provider: 'zai',
         allowedCallers: ['api'],
-        quotaLimits: { maxRequestsPerRun: 10 },
+        // Issue #348 (plan 2.6, strip has LANDED): the deprecated per-run key
+        // is tolerated on write but STRIPPED before persistence — the persisted
+        // quotaLimits must be empty, not { maxRequestsPerRun: 10 }.
+        quotaLimits: {},
       }),
       '11111111-1111-4111-8111-111111111111'
     )
   })
 
-  it('rejects promptBridge allowedModels outside the provider allowlist (R3)', async () => {
+  it('accepts deprecated per-run keys, strips them, keeps active keys', async () => {
+    // Issue #348 (plan 2.6/2.7): deprecated per-run keys stay shape-validated
+    // (malformed still 400s, pinned above) but are dropped on write, while the
+    // active per-minute/token keys persist untouched.
+    vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+    const res = await request(buildApp())
+      .post('/admin/plugin-workload-sdk/grants')
+      .send({
+        ...validGrantBody,
+        quotaLimits: {
+          maxRequestsPerRun: 5,
+          maxNotificationsPerRun: 7,
+          maxInvocationsPerMinute: 30,
+        },
+      })
+    expect(res.status).toBe(200)
+    expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
+      expect.objectContaining({
+        quotaLimits: { maxInvocationsPerMinute: 30 },
+      }),
+      '11111111-1111-4111-8111-111111111111'
+    )
+  })
+
+  it('rejects promptBridge targets outside the provider allowlist', async () => {
     // Allowlist for provider `zai` enables only glm-4.7; the request asks for a
     // model that is not enabled → 400 model_not_allowed listing the offenders.
     vi.mocked(pool.query).mockResolvedValue({ rows: [{ model: 'glm-4.7' }], rowCount: 1 } as never)
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')
-      .send({ ...validGrantBody, allowedModels: ['glm-4.7', 'glm-9-not-allowed'] })
+      .send({
+        ...validGrantBody,
+        promptTargets: [
+          ...validGrantBody.promptTargets,
+          {
+            targetRef: 'not-allowed',
+            provider: 'zai',
+            model: 'glm-9-not-allowed',
+            credentialSlot: 'zai-api-key-fb1',
+          },
+        ],
+      })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('model_not_allowed')
     expect(res.body.provider).toBe('zai')

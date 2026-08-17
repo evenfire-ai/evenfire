@@ -3,6 +3,7 @@
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useInboundGrants } from '../../lib/hooks/useInboundGrants'
 import { isPublisherEnabled, usePublishScope } from '../../lib/hooks/usePublishScope'
+import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TabBar } from '../TabBar'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { DockerCredentialsPanel } from './DockerCredentials'
@@ -23,7 +24,9 @@ export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
   if (loading) {
     return (
       <div className="cu-card">
-        <div className="cu-card__body">Loading…</div>
+        <div className="cu-card__body">
+          <SectionLoadingSkeleton label="Loading publisher" rows={3} />
+        </div>
       </div>
     )
   }

@@ -2,21 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
-import type { GfsGrantListItem } from '@/gfs/delegation.types'
+import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { desktopQueryKeys } from './queryKeys'
 
 /**
  * P4-S07 — Desktop Global File System browser controller (user plane).
  *
  * TanStack Query is the server-state source of truth (desktop-app/ui rule). The
- * browse is access-driven: the user first sees explicit resources granted or
- * shared with them, and can still open a `gfs://` URI manually. There is no
- * full-drive tree on the user plane — listing the whole drive is an operator
- * capability. Children are paginated with `useInfiniteQuery` so a large folder
- * is never silently truncated.
+ * browse is access-driven for ordinary users: they first see explicit resources
+ * granted or shared with them, and can still open a `gfs://` URI manually. A
+ * linked operator instead starts at the real drive root returned by discovery.
+ * Children are paginated with `useInfiniteQuery` so a large folder is never
+ * silently truncated.
  *
  * Delegation (grant/share) and affordances flow through window.clerum.gfs, which
- * reaches control-api `/external/gfs/*` on the existing Session-JWT plane.
+ * reaches the `/api/v1/me/gfs/*` user plane with the existing Session JWT.
  * Enforcement (no-escalation) is always server-side; affordances only decide
  * which controls to SHOW.
  */
@@ -27,8 +27,8 @@ export interface GfsBrowserChild {
   resourceId: string
   rid: string
   gfsUri: string
-  drive: string
-  parentResourceId: string | null
+  drive?: string
+  parentResourceId?: string | null
   name: string
   kind: 'file' | 'directory'
   path: string | null
@@ -37,9 +37,9 @@ export interface GfsBrowserChild {
 }
 
 interface GfsAccessibleResource extends GfsBrowserChild {
-  sources: string[]
-  permissions: string[]
-  coversDescendants: boolean
+  sources?: string[]
+  permissions?: string[]
+  coversDescendants?: boolean
 }
 
 export interface GfsCrumb {
@@ -49,6 +49,17 @@ export interface GfsCrumb {
   kind: 'file' | 'directory'
   version: number
   bytes: number
+  /** True only for the real drive root returned to a linked GFS operator. */
+  isDriveRoot?: boolean
+}
+
+export type GfsBrowserView = 'operator' | 'shared'
+export type GfsBrowserAccessState = 'active' | 'revoked'
+
+export interface GfsBrowserFailure {
+  kind: 'uninitialized' | 'unauthorized' | 'upstream'
+  title: string
+  message: string
 }
 
 export interface GfsBrowserAffordances {
@@ -66,16 +77,153 @@ export interface GfsBrowserControllerOptions {
   grantsListEnabled?: boolean
 }
 
+export interface GfsUploadSnapshot {
+  state:
+    | 'initiated'
+    | 'uploading'
+    | 'paused'
+    | 'suspended_auth'
+    | 'finalizing'
+    | 'canceling'
+    | 'completed'
+    | 'aborted'
+    | 'failed'
+  session: {
+    uploadId: string
+    state: string
+    expectedBytes: number
+    committedBytes: number
+    resultResourceId?: string
+    resultVersion?: number
+  } | null
+  uploadedBytes: number
+  totalBytes: number
+}
+
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
 function isResourceDiscoveryUnavailable(message: string): boolean {
+  if (isUninitializedDriveError(message)) return false
   return (
     message.includes('listAccessible is not a function') ||
     message.includes('gfs:listAccessible') ||
     message.includes('404 Not Found')
   )
+}
+
+function isUninitializedDriveError(message: string): boolean {
+  const normalized = message.toLowerCase()
+  // A server authorization verdict wins over the generic wording below. For
+  // example, "403 Forbidden: drive not initialized" is still an authorization
+  // failure and must not be presented as a provisioning state.
+  if (
+    /(^|\D)(401|403)(\D|$)/.test(normalized) ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('forbidden')
+  ) {
+    return false
+  }
+  return (
+    normalized.includes('operator_root_missing') ||
+    normalized.includes('gfs_drive_unseeded') ||
+    normalized.includes('drive_not_seeded') ||
+    normalized.includes('gfs_root_unseeded') ||
+    normalized.includes('gfs_not_initialized') ||
+    normalized.includes('not initialized') ||
+    normalized.includes('unseeded')
+  )
+}
+
+const SESSION_AUTHORITY_ERROR_CODES = [
+  'desktop_user_retired',
+  'operator_link_inactive',
+  'operator_link_invalid',
+  'gfs_operator_link_invalid',
+] as const
+
+/**
+ * Only a session/operator authority failure may invalidate the browser's
+ * session-local access state. Per-resource policy verdicts such as
+ * `manage_acl_required`, `escalation_rejected`, and `foreign_agent_forbidden`
+ * are expected 403s and must remain local to the attempted operation.
+ */
+export function isGfsSessionAuthorityFailure(
+  message: string,
+  surface: 'discovery' | 'operation' = 'operation'
+): boolean {
+  const normalized = message.toLowerCase()
+  if (SESSION_AUTHORITY_ERROR_CODES.some(code => normalized.includes(code))) return true
+  if (surface !== 'discovery') {
+    // A bare 401 means the authenticated session is no longer accepted. It is
+    // distinct from a generic 403, which may be only a resource-policy denial
+    // and must not clear the whole browser session.
+    return (
+      /(^|\D)401(\D|$)/.test(normalized) ||
+      normalized.includes('not authenticated') ||
+      normalized.includes('unauthenticated')
+    )
+  }
+  return (
+    /(^|\D)(401|403)(\D|$)/.test(normalized) ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('forbidden')
+  )
+}
+
+/** A revoked operator link downgrades an active Desktop session to user scope. */
+export function isGfsOperatorLinkRevocation(message: string): boolean {
+  return message.toLowerCase().includes('operator_link_inactive')
+}
+
+/** Stable user-facing state for root/folder read failures crossing Electron IPC. */
+export function describeGfsBrowserFailure(message: string): GfsBrowserFailure {
+  if (isUninitializedDriveError(message)) {
+    return {
+      kind: 'uninitialized',
+      title: 'Global File System is not initialized',
+      message: 'The drive exists in this environment, but its root is not ready yet.',
+    }
+  }
+  const normalized = message.toLowerCase()
+  if (
+    /(^|\D)(401|403)(\D|$)/.test(normalized) ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('forbidden') ||
+    normalized.includes('not authenticated') ||
+    normalized.includes('operator_link_inactive') ||
+    normalized.includes('operator_link_invalid')
+  ) {
+    return {
+      kind: 'unauthorized',
+      title: 'File access is not authorized',
+      message:
+        'Your current Desktop session cannot access this location. Sign in again or contact an administrator.',
+    }
+  }
+  return {
+    kind: 'upstream',
+    title: 'Global File System is unavailable',
+    message:
+      'The file service did not return a usable response. Try again when the service is available.',
+  }
+}
+
+const RESOURCE_ID_RE =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+function rootCrumb(resourceId: string): GfsCrumb {
+  const rid = resourceId.replace(/-/g, '').toLowerCase()
+  return {
+    resourceId,
+    gfsUri: `gfs://${DRIVE}/${rid}`,
+    name: 'Global File System',
+    kind: 'directory',
+    version: 0,
+    bytes: 0,
+    isDriveRoot: true,
+  }
 }
 
 export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
@@ -85,7 +233,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
+  const [uploadSnapshot, setUploadSnapshot] = useState<GfsUploadSnapshot | null>(null)
+  const uploadIdRef = useRef<string | null>(null)
+  const uploadRehydrateGenerationRef = useRef(0)
+  // This is deliberately session-local. A 403 never becomes a persisted client
+  // capability decision: a later server-backed request is the only way out.
+  const [accessState, setAccessState] = useState<GfsBrowserAccessState>('active')
   const previousSessionScopeRef = useRef<string | null>(null)
+  const operatorViewRef = useRef(false)
+  const operatorRecoveryAttemptedRef = useRef(false)
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
   const currentIsDirectory = current?.kind === 'directory'
@@ -106,7 +262,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (previous !== null) {
       setCrumbs([])
       setOpenError(null)
-      void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+      setAccessState('active')
+      operatorViewRef.current = false
+      operatorRecoveryAttemptedRef.current = false
+      void queryClient.removeQueries({ queryKey: [...desktopQueryKeys.gfsRoot, previous] })
     }
   }, [queryClient, sessionScope])
 
@@ -119,10 +278,67 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       return listAccessible(DRIVE, pageParam)
     },
-    enabled: Boolean(sessionScope) && canListAccessibleResources,
+    enabled: Boolean(sessionScope) && canListAccessibleResources && accessState === 'active',
+    // Accessible resources are permission-derived state. The operator can
+    // revoke a grant/share from another Desktop session while this user is
+    // away from Files, so an Infinity-cached list must not survive a Files
+    // remount without a server check.
+    refetchOnMount: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
+
+  const firstAccessiblePage = accessibleQuery.data?.pages[0]
+  const view: GfsBrowserView = firstAccessiblePage?.view === 'operator' ? 'operator' : 'shared'
+  const operatorRootResourceId =
+    firstAccessiblePage?.view === 'operator' &&
+    typeof firstAccessiblePage.rootResourceId === 'string' &&
+    RESOURCE_ID_RE.test(firstAccessiblePage.rootResourceId)
+      ? firstAccessiblePage.rootResourceId
+      : null
+  const operatorRoot = useMemo(
+    () => (operatorRootResourceId ? rootCrumb(operatorRootResourceId) : null),
+    [operatorRootResourceId]
+  )
+
+  useEffect(() => {
+    if (view === 'operator') {
+      const wasOperator = operatorViewRef.current
+      operatorViewRef.current = true
+      // A successful operator discovery starts a fresh recovery cycle. Do not
+      // reset the guard on every render while stale operator data is still
+      // visible after a failed discovery; the next lifecycle denial must then
+      // fail closed instead of retrying indefinitely.
+      if (!wasOperator && firstAccessiblePage) operatorRecoveryAttemptedRef.current = false
+    } else if (view === 'shared' && accessState === 'active' && firstAccessiblePage) {
+      operatorViewRef.current = false
+      operatorRecoveryAttemptedRef.current = false
+    }
+  }, [accessState, firstAccessiblePage, view])
+  const rootContractError =
+    firstAccessiblePage?.view === 'operator' && !operatorRoot
+      ? 'operator_root_missing: operator view did not include a valid rootResourceId'
+      : null
+
+  useEffect(() => {
+    if (!firstAccessiblePage) return
+    if (!operatorRoot) {
+      setCrumbs(prev => (prev[0]?.isDriveRoot ? [] : prev))
+      return
+    }
+    setCrumbs(prev => {
+      const rest = prev[0]?.isDriveRoot ? prev.slice(1) : prev
+      const first = prev[0]
+      if (
+        first?.isDriveRoot &&
+        first.resourceId === operatorRoot.resourceId &&
+        first.name === operatorRoot.name
+      ) {
+        return prev
+      }
+      return [operatorRoot, ...rest]
+    })
+  }, [firstAccessiblePage, operatorRoot])
 
   const childrenQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsChildren(
@@ -132,7 +348,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     ),
     queryFn: ({ pageParam }) =>
       window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
-    enabled: Boolean(sessionScope) && Boolean(current) && currentIsDirectory,
+    enabled:
+      Boolean(sessionScope) &&
+      Boolean(current) &&
+      currentIsDirectory &&
+      !current?.isDriveRoot &&
+      accessState === 'active',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -144,7 +365,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       DRIVE
     ),
     queryFn: () => window.clerum.gfs.affordances(current!.resourceId, DRIVE),
-    enabled: Boolean(sessionScope) && Boolean(current),
+    enabled: Boolean(sessionScope) && Boolean(current) && accessState === 'active',
   })
   const refreshAffordances = useCallback(async () => {
     const resourceId = current?.resourceId
@@ -158,21 +379,125 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // The grants listing is the revoke-id source (the grant PUT returns no ids),
   // so writes must refetch it. Enabled only while the Manage dialog is open.
   const grantsQuery = useQuery({
-    queryKey: ['gfs', DRIVE, current?.resourceId ?? '', 'grants'],
+    queryKey: desktopQueryKeys.gfsGrants(
+      sessionScope ?? 'anonymous',
+      current?.resourceId ?? '',
+      DRIVE
+    ),
     queryFn: () => window.clerum.gfs.listGrants(current!.resourceId, DRIVE),
-    enabled: Boolean(sessionScope) && Boolean(current) && grantsListEnabled,
+    enabled:
+      Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
   const refreshGrants = useCallback(async () => {
     const resourceId = current?.resourceId
     if (!resourceId) return
     await queryClient.invalidateQueries({
       exact: true,
-      queryKey: ['gfs', DRIVE, resourceId, 'grants'],
+      queryKey: desktopQueryKeys.gfsGrants(sessionScope ?? 'anonymous', resourceId, DRIVE),
     })
-  }, [current?.resourceId, queryClient])
+  }, [current?.resourceId, queryClient, sessionScope])
   const revokeGrantMutation = useMutation({
     mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
     onSuccess: refreshGrants,
+  })
+  const sharesQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsShares(
+      sessionScope ?? 'anonymous',
+      current?.resourceId ?? '',
+      DRIVE
+    ),
+    queryFn: () => window.clerum.gfs.listShares(current!.resourceId, DRIVE),
+    enabled:
+      Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
+  })
+  const clearGfsState = useCallback(() => {
+    setCrumbs([])
+    setOpenError(null)
+    // Remove every GFS response for this Desktop session. In particular, never
+    // leave an operator root, ACL list, or affordance cached after a server
+    // revocation response.
+    queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+  }, [queryClient])
+  const revokeAccess = useCallback(() => {
+    setAccessState('revoked')
+    clearGfsState()
+  }, [clearGfsState])
+  const downgradeToOrdinaryUser = useCallback(() => {
+    // A link revoke removes only operator authority. The authenticated Desktop
+    // user remains eligible for explicitly shared GFS resources, so clear the
+    // operator cache and let fresh discovery resolve the user view.
+    setAccessState('active')
+    clearGfsState()
+  }, [clearGfsState])
+  const handleAuthorityFailure = useCallback(
+    (message: string, surface: 'discovery' | 'operation' = 'operation'): boolean => {
+      if (!isGfsSessionAuthorityFailure(message, surface)) return false
+      if (isGfsOperatorLinkRevocation(message) && !operatorRecoveryAttemptedRef.current) {
+        operatorRecoveryAttemptedRef.current = true
+        downgradeToOrdinaryUser()
+      } else revokeAccess()
+      return true
+    },
+    [downgradeToOrdinaryUser, revokeAccess]
+  )
+  const retryAccess = useCallback(() => {
+    // This does not restore a local capability. It only permits the normal
+    // discovery request to run again, so an explicit server-side reactivation
+    // remains the sole authority that can restore the operator root.
+    setAccessState('active')
+  }, [])
+  // Root discovery is a session/authority boundary. A resource-scoped 403 is
+  // a policy verdict and must remain local, while a 401 still means the
+  // authenticated session is no longer accepted and revokes session state.
+  const queryAuthorizationError = [
+    accessibleQuery.error
+      ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
+      : null,
+    childrenQuery.error
+      ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
+      : null,
+    affordancesQuery.error
+      ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
+      : null,
+    grantsQuery.error
+      ? { message: toMessage(grantsQuery.error), surface: 'operation' as const }
+      : null,
+    sharesQuery.error
+      ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
+      : null,
+  ]
+    .filter(
+      (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
+    )
+    .find(entry => isGfsSessionAuthorityFailure(entry.message, entry.surface))
+  useEffect(() => {
+    if (!queryAuthorizationError || accessState === 'revoked') return
+    const genericOperatorDiscoveryFailure =
+      queryAuthorizationError.surface === 'discovery' &&
+      operatorViewRef.current &&
+      !/(^|\D)401(\D|$)/.test(queryAuthorizationError.message.toLowerCase())
+    if (
+      (genericOperatorDiscoveryFailure ||
+        isGfsOperatorLinkRevocation(queryAuthorizationError.message)) &&
+      !operatorRecoveryAttemptedRef.current
+    ) {
+      operatorRecoveryAttemptedRef.current = true
+      downgradeToOrdinaryUser()
+      return
+    }
+    revokeAccess()
+  }, [accessState, downgradeToOrdinaryUser, queryAuthorizationError, revokeAccess])
+  const refreshShares = useCallback(async () => {
+    const resourceId = current?.resourceId
+    if (!resourceId) return
+    await queryClient.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsShares(sessionScope ?? 'anonymous', resourceId, DRIVE),
+    })
+  }, [current?.resourceId, queryClient, sessionScope])
+  const revokeShareMutation = useMutation({
+    mutationFn: (shareId: string) => window.clerum.gfs.revokeShare(shareId),
+    onSuccess: refreshShares,
   })
   const refreshGfs = useCallback(async () => {
     await queryClient.invalidateQueries({
@@ -191,21 +516,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onSuccess: refreshGfs,
   })
   const createFileMutation = useMutation({
-    mutationFn: (input: { parentResourceId: string; name: string; encodedData: string }) =>
-      window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
+    mutationFn: (input: { parentResourceId: string; name: string; filePath: string }) =>
+      window.clerum.gfs.createFileFromPath(
+        input.parentResourceId,
+        input.name,
+        input.filePath,
+        DRIVE
+      ),
     onSuccess: refreshGfs,
   })
   const replaceFileMutation = useMutation({
-    mutationFn: (input: { resourceId: string; encodedData: string; ifMatch?: number }) =>
-      window.clerum.gfs.replaceFile(input.resourceId, input.encodedData, DRIVE, input.ifMatch),
-    onSuccess: async resource => {
-      setCrumbs(prev =>
-        prev.map(crumb =>
-          crumb.resourceId === resource.resourceId
-            ? { ...crumb, name: resource.name, version: resource.version }
-            : crumb
+    mutationFn: (input: { resourceId: string; filePath: string; ifMatch?: number }) =>
+      window.clerum.gfs.replaceFileFromPath(input.resourceId, input.filePath, DRIVE, input.ifMatch),
+    onSuccess: async receipt => {
+      const legacyResource = receipt as unknown as { resourceId?: string; version?: number }
+      const resourceId = receipt.resultResourceId ?? legacyResource.resourceId
+      const version = receipt.resultVersion ?? legacyResource.version
+      if (resourceId && version !== undefined) {
+        setCrumbs(prev =>
+          prev.map(crumb => (crumb.resourceId === resourceId ? { ...crumb, version } : crumb))
         )
-      )
+      }
       await refreshGfs()
     },
   })
@@ -232,6 +563,162 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
   })
 
+  const waitForUpload = useCallback(async (uploadId: string): Promise<GfsUploadSnapshot> => {
+    const deadline = Date.now() + 24 * 60 * 60 * 1000
+    for (;;) {
+      if (Date.now() > deadline)
+        throw new Error(
+          'GFS upload status polling timed out; the upload can be resumed from the Files page.'
+        )
+      const snapshot = await window.clerum.gfs.getUploadSnapshot(uploadId, DRIVE)
+      if (!snapshot) throw new Error('GFS upload is no longer available in this desktop session')
+      setUploadSnapshot(snapshot)
+      if (
+        snapshot.state === 'paused' ||
+        snapshot.state === 'suspended_auth' ||
+        snapshot.state === 'completed' ||
+        snapshot.state === 'aborted' ||
+        snapshot.state === 'failed'
+      )
+        return snapshot
+      await new Promise(resolve => window.setTimeout(resolve, 500))
+    }
+  }, [])
+
+  // Persisted Desktop sessions are the source of truth after an app restart.
+  // Rehydrate one scoped session on mount/scope change so FilesPage can render
+  // the same progress and pause/resume/cancel controls it renders for a live
+  // upload. The IPC list is already owner/team/environment/drive scoped; the
+  // second snapshot read supplies the durable byte counters and state.
+  useEffect(() => {
+    const generation = uploadRehydrateGenerationRef.current + 1
+    uploadRehydrateGenerationRef.current = generation
+    if (!sessionScope) {
+      uploadIdRef.current = null
+      setUploadSnapshot(null)
+      return
+    }
+    const listUploadSessions = window.clerum?.gfs?.listUploadSessions
+    if (typeof listUploadSessions !== 'function') return
+    let disposed = false
+    void (async () => {
+      try {
+        const sessions = await listUploadSessions(DRIVE)
+        if (disposed || uploadRehydrateGenerationRef.current !== generation) return
+        const persisted = sessions.find(
+          session =>
+            session.drive === DRIVE &&
+            (session.status === 'active' ||
+              session.status === 'paused' ||
+              session.status === 'suspended_auth')
+        )
+        if (!persisted) return
+        uploadIdRef.current = persisted.uploadId
+        await waitForUpload(persisted.uploadId)
+      } catch (error) {
+        if (!disposed && uploadRehydrateGenerationRef.current === generation) {
+          setOpenError(toMessage(error))
+        }
+      }
+    })()
+    return () => {
+      disposed = true
+    }
+  }, [sessionScope, waitForUpload])
+
+  const startFileUpload = useCallback(
+    async (input: {
+      parentResourceId: string
+      name: string
+      filePath: string
+      resumeUploadId?: string
+    }): Promise<GfsUploadSnapshot> => {
+      const session = await window.clerum.gfs.startFileUpload(
+        input.parentResourceId,
+        input.name,
+        input.filePath,
+        DRIVE,
+        input.resumeUploadId
+      )
+      uploadIdRef.current = session.uploadId
+      const initialSnapshot: GfsUploadSnapshot = {
+        state: session.state as GfsUploadSnapshot['state'],
+        session,
+        uploadedBytes: session.committedBytes,
+        totalBytes: session.expectedBytes,
+      }
+      setUploadSnapshot(initialSnapshot)
+      // The legacy compatibility path returns a completed resource receipt,
+      // not a resumable upload session. There is no v2 snapshot to poll under
+      // that resource id; refresh the folder and finish immediately.
+      if (session.state === 'completed') {
+        await refreshGfs()
+        return initialSnapshot
+      }
+      const snapshot = await waitForUpload(session.uploadId)
+      if (snapshot.state === 'completed') await refreshGfs()
+      return snapshot
+    },
+    [refreshGfs, waitForUpload]
+  )
+
+  const startFileReplace = useCallback(
+    async (input: {
+      resourceId: string
+      filePath: string
+      ifMatch?: number
+      resumeUploadId?: string
+    }): Promise<GfsUploadSnapshot> => {
+      const session = await window.clerum.gfs.startFileReplace(
+        input.resourceId,
+        input.filePath,
+        DRIVE,
+        input.ifMatch,
+        input.resumeUploadId
+      )
+      uploadIdRef.current = session.uploadId
+      const initialSnapshot: GfsUploadSnapshot = {
+        state: session.state as GfsUploadSnapshot['state'],
+        session,
+        uploadedBytes: session.committedBytes,
+        totalBytes: session.expectedBytes,
+      }
+      setUploadSnapshot(initialSnapshot)
+      if (session.state === 'completed') {
+        await refreshGfs()
+        return initialSnapshot
+      }
+      const snapshot = await waitForUpload(session.uploadId)
+      if (snapshot.state === 'completed') await refreshGfs()
+      return snapshot
+    },
+    [refreshGfs, waitForUpload]
+  )
+
+  const pauseUpload = useCallback(async (): Promise<GfsUploadSnapshot> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) throw new Error('No active GFS upload')
+    await window.clerum.gfs.pauseUpload(uploadId, DRIVE)
+    return waitForUpload(uploadId)
+  }, [waitForUpload])
+
+  const resumeUpload = useCallback(async (): Promise<GfsUploadSnapshot> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) throw new Error('No paused GFS upload')
+    await window.clerum.gfs.resumeUpload(uploadId, DRIVE)
+    const snapshot = await waitForUpload(uploadId)
+    if (snapshot.state === 'completed') await refreshGfs()
+    return snapshot
+  }, [refreshGfs, waitForUpload])
+
+  const cancelUpload = useCallback(async (): Promise<void> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) return
+    await window.clerum.gfs.cancelUpload(uploadId, DRIVE)
+    setUploadSnapshot(previous => (previous ? { ...previous, state: 'aborted' } : null))
+    uploadIdRef.current = null
+  }, [])
+
   const items = useMemo<GfsBrowserChild[]>(
     () => (childrenQuery.data?.pages ?? []).flatMap(page => page.items),
     [childrenQuery.data]
@@ -241,7 +728,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [accessibleQuery.data]
   )
   const grants = useMemo<GfsGrantListItem[]>(() => grantsQuery.data ?? [], [grantsQuery.data])
-  const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
+  const shares = useMemo<GfsShareListItem[]>(() => sharesQuery.data ?? [], [sharesQuery.data])
+  const accessibleErrorMessage =
+    accessState === 'revoked'
+      ? 'operator_link_inactive'
+      : (rootContractError ?? (accessibleQuery.error ? toMessage(accessibleQuery.error) : null))
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
       ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
@@ -249,59 +740,74 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         ? 'Automatic GFS discovery is not available from this server yet. You can still open any GFS link you have.'
         : null
 
-  const openUri = useCallback(async (uri: string) => {
-    setOpenError(null)
-    setResolving(true)
-    try {
-      const resource = await window.clerum.gfs.resolve(uri.trim())
-      const crumb: GfsCrumb = {
-        resourceId: resource.resourceId,
-        gfsUri: resource.gfsUri,
-        name: resource.name,
-        kind: resource.kind === 'directory' ? 'directory' : 'file',
-        version: resource.version ?? 0,
-        // `resolve` may omit bytes (older servers) — crumbs display 0 then,
-        // matching the `version ?? 0` handling above.
-        bytes: resource.bytes ?? 0,
-      }
-      const ancestors: GfsCrumb[] = []
-      const seenResourceIds = new Set([resource.resourceId])
-      let parentResourceId = resource.parentResourceId
-
-      while (parentResourceId && ancestors.length < GFS_BREADCRUMB_MAX_DEPTH) {
-        if (seenResourceIds.has(parentResourceId)) break
-        seenResourceIds.add(parentResourceId)
-        try {
-          const parentRid = parentResourceId.replace(/-/g, '').toLowerCase()
-          const parent = await window.clerum.gfs.resolve(`gfs://${resource.drive}/${parentRid}`)
-          if (parent.kind !== 'directory') break
-          if (parent.name) {
-            ancestors.push({
-              resourceId: parent.resourceId,
-              gfsUri: parent.gfsUri,
-              name: parent.name,
-              kind: 'directory',
-              version: parent.version ?? 0,
-              bytes: parent.bytes ?? 0,
-            })
-          }
-          parentResourceId = parent.parentResourceId
-        } catch {
-          // A direct file grant can be readable while its parent is not. Keep
-          // the file open and show only the ancestors the caller may resolve.
-          break
+  const openUri = useCallback(
+    async (uri: string) => {
+      setOpenError(null)
+      setResolving(true)
+      try {
+        const resource = await window.clerum.gfs.resolve(uri.trim())
+        const crumb: GfsCrumb = {
+          resourceId: resource.resourceId,
+          gfsUri: resource.gfsUri,
+          name: resource.name,
+          kind: resource.kind === 'directory' ? 'directory' : 'file',
+          version: resource.version ?? 0,
+          // `resolve` may omit bytes (older servers) — crumbs display 0 then,
+          // matching the `version ?? 0` handling above.
+          bytes: resource.bytes ?? 0,
         }
-      }
+        const ancestors: GfsCrumb[] = []
+        const seenResourceIds = new Set([resource.resourceId])
+        let parentResourceId = resource.parentResourceId
 
-      setCrumbs([...ancestors.reverse(), crumb])
-      return crumb
-    } catch (error) {
-      setOpenError(toMessage(error))
-      return false
-    } finally {
-      setResolving(false)
-    }
-  }, [])
+        while (parentResourceId && ancestors.length < GFS_BREADCRUMB_MAX_DEPTH) {
+          if (seenResourceIds.has(parentResourceId)) break
+          seenResourceIds.add(parentResourceId)
+          try {
+            const parentRid = parentResourceId.replace(/-/g, '').toLowerCase()
+            const parent = await window.clerum.gfs.resolve(`gfs://${resource.drive}/${parentRid}`)
+            if (parent.kind !== 'directory') break
+            if (parent.name) {
+              ancestors.push({
+                resourceId: parent.resourceId,
+                gfsUri: parent.gfsUri,
+                name: parent.name,
+                kind: 'directory',
+                version: parent.version ?? 0,
+                bytes: parent.bytes ?? 0,
+              })
+            }
+            parentResourceId = parent.parentResourceId
+          } catch {
+            // A direct file grant can be readable while its parent is not. Keep
+            // the file open and show only the ancestors the caller may resolve.
+            break
+          }
+        }
+
+        const resolvedCrumbs = [...ancestors.reverse(), crumb]
+        setCrumbs(
+          operatorRoot
+            ? [
+                operatorRoot,
+                ...resolvedCrumbs.filter(item => item.resourceId !== operatorRoot.resourceId),
+              ]
+            : resolvedCrumbs
+        )
+        return crumb
+      } catch (error) {
+        const message = toMessage(error)
+        // Opening a URI is an operation on one resource. A generic 403 may be
+        // a per-resource policy decision; only typed lifecycle failures or a
+        // bare 401 invalidate the session-wide authority state.
+        if (!handleAuthorityFailure(message, 'operation')) setOpenError(message)
+        return false
+      } finally {
+        setResolving(false)
+      }
+    },
+    [handleAuthorityFailure, operatorRoot]
+  )
 
   const openChild = useCallback((child: GfsBrowserChild) => {
     if (child.kind !== 'directory') return
@@ -318,29 +824,37 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     ])
   }, [])
 
-  const openResource = useCallback((resource: GfsBrowserChild) => {
-    setOpenError(null)
-    setCrumbs([
-      {
+  const openResource = useCallback(
+    (resource: GfsBrowserChild) => {
+      setOpenError(null)
+      const crumb: GfsCrumb = {
         resourceId: resource.resourceId,
         gfsUri: resource.gfsUri,
         name: resource.name,
         kind: resource.kind === 'directory' ? 'directory' : 'file',
         version: resource.version,
         bytes: resource.bytes,
-      },
-    ])
-  }, [])
+      }
+      setCrumbs(
+        operatorRoot
+          ? resource.resourceId === operatorRoot.resourceId
+            ? [operatorRoot]
+            : [operatorRoot, crumb]
+          : [crumb]
+      )
+    },
+    [operatorRoot]
+  )
 
   const goToCrumb = useCallback((index: number) => {
     setCrumbs(prev => prev.slice(0, index + 1))
   }, [])
 
   const reset = useCallback(() => {
-    setCrumbs([])
+    setCrumbs(operatorRoot ? [operatorRoot] : [])
     setOpenError(null)
-    void queryClient.removeQueries({ queryKey: ['desktop-app', 'gfs'] })
-  }, [queryClient])
+    void queryClient.invalidateQueries({ queryKey: desktopQueryKeys.gfsRoot })
+  }, [operatorRoot, queryClient])
 
   // Delegation actions throw on server rejection (e.g. 403 escalation_rejected);
   // the caller surfaces that — never swallow it. `inherit` is only sent when a
@@ -365,6 +879,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   return {
     crumbs,
     current,
+    view,
+    accessState,
+    isOperatorRoot: Boolean(current?.isDriveRoot),
     accessibleResources,
     items,
     affordances: (affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null,
@@ -394,6 +911,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     openChild,
     goToCrumb,
     reset,
+    revokeAccess,
+    downgradeToOrdinaryUser,
+    handleAuthorityFailure,
+    retryAccess,
     refreshAffordances,
     grant,
     grants,
@@ -404,12 +925,24 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     refreshGrants,
     revokeGrant: (grantId: string) => revokeGrantMutation.mutateAsync(grantId),
     revoking: revokeGrantMutation.isPending,
+    shares,
+    sharesError: sharesQuery.error,
+    loadingShares: sharesQuery.isFetching,
+    refreshShares,
+    revokeShare: (shareId: string) => revokeShareMutation.mutateAsync(shareId),
+    revokingShare: revokeShareMutation.isPending,
     createShare,
     createFolder: (name: string) => createFolderMutation.mutateAsync(name),
-    createFile: (parentResourceId: string, name: string, encodedData: string) =>
-      createFileMutation.mutateAsync({ parentResourceId, name, encodedData }),
-    replaceFile: (resourceId: string, encodedData: string, ifMatch?: number) =>
-      replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
+    createFile: (parentResourceId: string, name: string, filePath: string) =>
+      createFileMutation.mutateAsync({ parentResourceId, name, filePath }),
+    replaceFile: (resourceId: string, filePath: string, ifMatch?: number) =>
+      replaceFileMutation.mutateAsync({ resourceId, filePath, ifMatch }),
+    uploadSnapshot,
+    startFileUpload,
+    startFileReplace,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
     deleteResource: (resourceId: string, ifMatch?: number) =>

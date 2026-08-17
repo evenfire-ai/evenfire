@@ -13,6 +13,22 @@ metadata:
     app: host-context-controller
 spec:
   replicas: 1
+  # HCC's /ready stays 503 until its initial fleet reconciliation finishes, so time-to-Ready
+  # scales with the McpServer/Context fleet rather than with process start. clerum-dev took
+  # 651s on 2026-08-05 at 108 McpServers / 22 Contexts.
+  #
+  # Unset, this defaults to 600s, and that default is what actually governed the deploy:
+  # `kubectl rollout status` aborts the instant the controller sets ProgressDeadlineExceeded,
+  # so provision-gfs-runtime.sh's --timeout could never exceed the deadline remaining. The
+  # clock also starts several steps earlier, at apply-inter-service-tokens.sh's `rollout
+  # restart` of HCC, so the wait inherits only what is left. On 2026-08-05 that was 600-160
+  # = 440s against a 480s timeout: the timeout raised in #202 never bound, and the deploy
+  # failed 50s before HCC came Ready.
+  #
+  # 1200s covers the 900s wait plus a 300s head-start allowance. This is a mitigation, not
+  # the fix — evenfire-ai/evenfire#205 decouples readiness from fleet convergence, after
+  # which both numbers should come back down.
+  progressDeadlineSeconds: 1200
   selector:
     matchLabels:
       app: host-context-controller
@@ -50,6 +66,15 @@ spec:
           value: clerum/mcp-host:0.9.5
         - name: CONTEXT_MAPPER_EGRESS_PROXY_IMAGE
           value: clerum/nginx-egress-proxy:0.1.0
+        # Legacy JSON GFS mutation cap (bytes), passed through to generated gfsc
+        # pods. Upload v2 uses raw indexed parts and is configured independently
+        # through CONTEXT_MAPPER_GFSC_UPLOAD_* private-infra settings.
+        - name: GFS_MAX_WRITE_BODY_BYTES
+          value: "25165824"
+        # gfsc memory limit for the legacy buffered path. v2 part streaming must be
+        # validated against the configured part/global concurrency budgets instead.
+        - name: CONTEXT_MAPPER_GFSC_LIMIT_MEMORY
+          value: 512Mi
         - name: STDIO_BRIDGE_IMAGE
           value: clerum/stdio-bridge:0.9.5
         - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
@@ -58,8 +83,14 @@ spec:
         # API or the HCC discovery API, so they get only deny-all + DNS.
         - name: CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES
           value: sandbox-ui
+        # issue #299: the external-egress resync interval MUST stay <= half the
+        # overlap window (HCC_EXTERNAL_EGRESS_OVERLAP_SEC, default 300s) so the
+        # persisted sliding window of resolved /32s never lapses between
+        # refreshes. The legacy 300 (== the overlap) let the accumulated set
+        # expire before the next refresh, which is the #299 drift itself; HCC
+        # now fails closed at startup on any interval > overlap/2.
         - name: HCC_EXTERNAL_EGRESS_RESYNC_SEC
-          value: "300"
+          value: "60"
         - name: HCC_HOST_K8S_REQUEST_TIMEOUT_MS
           value: "30000"
         # Bounded cross-Host concurrency for a full/lifecycle Host fleet pass.

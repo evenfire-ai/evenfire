@@ -30,8 +30,13 @@ export interface SessionRow {
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
   started_at: number
+  /** Materialized catalog sort key (migration 010). */
+  last_activity_at?: number | null
+  /** Materialized count of distinct persisted turn numbers (migration 010). */
+  turn_count?: number
   ended_at: number | null
   end_reason: string | null
+  /** Visible user/assistant bubble count after migration 010. */
   message_count: number
   tool_call_count: number
   input_tokens: number
@@ -111,9 +116,27 @@ export interface PersistedSession {
   pending_approval: PendingApprovalRow | null
 }
 
+export interface PersistedSessionSummary {
+  session: SessionRow
+  last_activity_at: number
+  turn_count: number
+  pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
+}
+
+export interface PersistedSessionMessagePage {
+  session: SessionRow
+  messages: MessageRow[]
+  pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
+  total_turns: number
+  first_turn_number: number | null
+  last_turn_number: number | null
+  last_activity_at: number
+}
+
 export interface LoadAllPendingApprovalsRow {
   approval: PendingApprovalRow
   session_key: string
+  ownership: Pick<SessionRow, 'user_id' | 'channel_type' | 'channel_id' | 'thread_id'>
 }
 
 /**
@@ -208,7 +231,23 @@ export type WorkerOp =
   | { kind: 'insert_pending_approval'; payload: PendingApprovalRow }
   | { kind: 'delete_pending_approval'; requestId: string }
   | { kind: 'load_active_session'; sessionKey: string }
+  | {
+      kind: 'load_session_message_page'
+      sessionKey: string
+      limit?: number
+      beforeTurn?: number
+      afterTurn?: number
+    }
   | { kind: 'list_sessions_by_prefix'; sessionKeyPrefix: string }
+  | {
+      kind: 'list_session_summaries_by_prefix'
+      sessionKeyPrefix: string
+      userId: string
+      limit?: number
+      cursorUpdatedAt?: number
+      cursorKey?: string
+      agentScoped?: boolean
+    }
   | { kind: 'load_all_pending_approvals' }
   | { kind: 'sweep_expired'; nowEpoch: number; ttlSeconds: number }
   | { kind: 'fts_search'; query: string; limit: number; userId?: string }

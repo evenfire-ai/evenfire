@@ -3,13 +3,22 @@ const path = require('path')
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  experimental: {
+    globalNotFound: true,
+  },
   // Keep Turbopack rooted at the monorepo so it can resolve the linked
   // @clerum packages without guessing from whichever lockfile it finds first.
   turbopack: {
     root: path.join(__dirname, '..'),
   },
   async rewrites() {
-    const controlApiDestination = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
+    // NOTE: `/control-api/:path*` is intentionally NOT rewritten here. It is served by
+    // the app-router handler app/control-api/[...path]/route.ts, which streams the body
+    // (no 10MiB proxyClientMaxBodySize truncation) and honours the runtime-configurable
+    // CONTROL_API_PROXY_TIMEOUT_MS. Routing it through a rewrite sends it via Next's
+    // internal proxy, which silently truncates request bodies at 10MiB and hard-caps at
+    // a 30s proxyTimeout — the "Request timed out" / "request aborted" failure on large
+    // GFS uploads. The handler reads CONTROL_API_INTERNAL_URL for its upstream.
     return [
       { source: '/agents', destination: '/hosts' },
       { source: '/agents/:path*', destination: '/hosts/:path*' },
@@ -36,10 +45,6 @@ const nextConfig = {
       { source: '/marketplace/:path*', destination: '/registry/:path*' },
       { source: '/cost-and-usage/:path*', destination: '/cost/:path*' },
       { source: '/settings/ui', destination: '/settings' },
-      {
-        source: '/control-api/:path*',
-        destination: `${controlApiDestination}/:path*`,
-      },
     ]
   },
   async redirects() {
@@ -106,6 +111,16 @@ const nextConfig = {
       { source: '/publisher/:path*', destination: '/marketplace/org/entries', permanent: true },
       { source: '/cost', destination: '/cost-and-usage/usage', permanent: true },
       { source: '/cost/:path*', destination: '/cost-and-usage/:path*', permanent: true },
+      // Host detail tab consolidation (R1-H1 in feat/agent-ux-polish PR
+      // review): the old top-level tabs are now sub-tabs under the new
+      // `access` and `advanced` parents. Send each old slug to its new
+      // parent so bookmarks, shared links, and the approval-tools E2E
+      // (which navigates to /hosts/<name>/approvals) still reach the
+      // section they used to.
+      { source: '/agents/:name/member-access', destination: '/agents/:name/access', permanent: true },
+      { source: '/agents/:name/team-access', destination: '/agents/:name/access', permanent: true },
+      { source: '/agents/:name/approvals', destination: '/agents/:name/advanced', permanent: true },
+      { source: '/agents/:name/env-vars', destination: '/agents/:name/advanced', permanent: true },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },
       { source: '/cost-and-usage', destination: '/cost-and-usage/usage', permanent: true },
       {

@@ -57,4 +57,75 @@ describe('PluginWorkloadSdk server usage attribution', () => {
       output_tokens: 5,
     })
   })
+
+  it('emits a server-bound SDK-only usage shape without inventing a workflow run', () => {
+    const invocationId = '00000000-0000-4000-8000-000000000099'
+    const event = buildPromptBridgeUsageEvent({
+      binding: {
+        hostRef: 'sandbox-recipes/stepless',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'stepless',
+      },
+      runtimeMode: 'sdk-only',
+      invocationId,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      inputTokens: 10,
+      outputTokens: 5,
+      callerRef: 'backend-worker',
+      promptBridgeMetadata: {
+        targetRef: 'openai-primary',
+        credentialSlot: 'openai-api-key',
+        fallbackUsed: false,
+        attemptCount: 1,
+      },
+      metadata: { llmSecretName: 'openai-api-key' },
+    })
+
+    expect(event).toMatchObject({
+      source_kind: 'plugin_workload_sdk',
+      channel_type: 'plugin_workload_sdk',
+      recipe_name: 'stepless',
+      run_id: null,
+      task_id: null,
+      llm_secret_name: 'openai-api-key',
+      prompt_bridge_metadata: { invocation_id: invocationId },
+    })
+  })
+
+  it('records actual promptBridge target attribution without credential values', () => {
+    const event = buildPromptBridgeUsageEvent({
+      binding: {
+        hostRef: 'plugin-workload-sdk/sandbox-app',
+        recipeNamespace: 'sandbox-apps',
+        recipeName: 'prompt-notify',
+      },
+      runtimeMode: 'sdk-only',
+      invocationId: '00000000-0000-4000-8000-000000000100',
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      inputTokens: 10,
+      outputTokens: 5,
+      callerRef: 'backend-worker',
+      promptBridgeMetadata: {
+        targetRef: 'fallback-openai',
+        credentialSlot: 'openai-api-key',
+        fallbackUsed: true,
+        attemptCount: 2,
+      },
+    })
+
+    expect(event).toMatchObject({
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      prompt_bridge_metadata: {
+        target_ref: 'fallback-openai',
+        credential_slot: 'openai-api-key',
+        fallback_used: true,
+        attempt_count: 2,
+      },
+    })
+    expect(JSON.stringify(event)).not.toContain('credentialTicket')
+    expect(JSON.stringify(event)).not.toContain('secret-')
+  })
 })

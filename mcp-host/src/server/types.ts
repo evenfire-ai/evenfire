@@ -330,7 +330,7 @@ export type ProviderWorkflowResultRequestHandler = (
 ) => Promise<MessageResponse>
 export type ProviderMessageAuthorizationHandler = (
   input: ProviderMessageAuthorization
-) => Promise<{ authorized: boolean }>
+) => Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }>
 export type WorkflowApprovalNotificationClaimHandler = (
   input: WorkflowApprovalNotificationClaim
 ) => Promise<{ deliveries: WorkflowApprovalNotificationDelivery[] } | { error: string }>
@@ -488,12 +488,25 @@ export type SessionsListItem = {
   agent: string
   chatId: string
   turnCount: number
+  messageCount?: number
   lastActivityAt: string
 } & SessionStateWire
 
+export type SessionsListQuery = {
+  agent?: string
+  limit?: number
+  cursor?: string
+}
+
+export type SessionsListResult = {
+  items: SessionsListItem[]
+  nextCursor?: string
+}
+
 export type SessionsListHandler = (
-  userSub: string
-) => { items: SessionsListItem[] } | Promise<{ items: SessionsListItem[] }>
+  userSub: string,
+  query: SessionsListQuery
+) => SessionsListResult | Promise<SessionsListResult>
 
 /**
  * A single tool call within a turn, projected for the desktop progress stepper
@@ -519,6 +532,13 @@ export type TurnToolStepWire = {
 export type SessionMessagesResult = {
   agent: string
   chatId: string
+  totalTurns: number
+  oldestTurnNumber?: number
+  latestTurnNumber?: number
+  /** True only when older turns exist before the returned non-empty window. */
+  hasMoreBefore: boolean
+  /** True only when newer turns exist after the returned non-empty window. */
+  hasMoreAfter: boolean
   turns: Array<{
     number: number
     user_input: string
@@ -532,10 +552,17 @@ export type SessionMessagesResult = {
   }>
 } & SessionStateWire
 
+export type SessionMessagesQuery = {
+  limit?: number
+  beforeTurn?: number
+  afterTurn?: number
+}
+
 export type SessionMessagesHandler = (
   userSub: string,
   agent: string,
-  chatId: string
+  chatId: string,
+  query: SessionMessagesQuery
 ) => SessionMessagesResult | null | Promise<SessionMessagesResult | null>
 
 /**

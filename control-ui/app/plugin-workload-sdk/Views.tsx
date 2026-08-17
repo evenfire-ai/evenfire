@@ -9,6 +9,7 @@ import type {
   PluginWorkloadSdkFamily,
   PluginWorkloadSdkGrant,
   PluginWorkloadSdkInvocation,
+  PluginWorkloadSdkLegacyGrantInventory,
 } from '@lib/api'
 
 const GRANT_COLUMNS: TableHeaderColumn[] = [
@@ -54,6 +55,9 @@ export function GrantsView({
   error,
   deletingId,
   userMap,
+  legacyInventory,
+  legacyInventoryLoading,
+  legacyInventoryError,
   onEdit,
   onDelete,
 }: {
@@ -62,6 +66,9 @@ export function GrantsView({
   error: string
   deletingId: string | null
   userMap: Map<string, string>
+  legacyInventory: PluginWorkloadSdkLegacyGrantInventory | null
+  legacyInventoryLoading: boolean
+  legacyInventoryError: string
   onEdit: (grant: PluginWorkloadSdkGrant) => void
   onDelete: (grant: PluginWorkloadSdkGrant) => void
 }) {
@@ -72,7 +79,24 @@ export function GrantsView({
       </div>
     )
   }
-  if (grants.length === 0 && !loading) {
+  if (legacyInventoryError) {
+    return (
+      <div className="cu-card__body">
+        <div className="cu-banner cu-banner--error">
+          SDK migration inventory is unavailable. Grant activation is blocked until it can be
+          verified: {legacyInventoryError}
+        </div>
+      </div>
+    )
+  }
+  if (legacyInventoryLoading) {
+    return (
+      <div className="cu-card__body">
+        <div className="cu-empty">Loading SDK migration inventory…</div>
+      </div>
+    )
+  }
+  if (grants.length === 0 && !loading && !legacyInventory?.legacyPromptBridgeGrants) {
     return (
       <div className="cu-card__body">
         <div className="cu-empty">
@@ -82,66 +106,88 @@ export function GrantsView({
     )
   }
   return (
-    <div className="cu-table-wrap">
-      <table className="cu-table">
-        <thead>
-          <TableHeaderRow columns={GRANT_COLUMNS} />
-        </thead>
-        <tbody>
-          {grants.map(grant => {
-            const allowlist =
-              grant.capabilityFamily === 'promptBridge'
-                ? grant.allowedModels
-                : grant.allowedEventTypes
-            const quotaParts: string[] = []
-            if (grant.quotaLimits.maxRequestsPerRun)
-              quotaParts.push(`${grant.quotaLimits.maxRequestsPerRun}/run`)
-            if (grant.quotaLimits.maxNotificationsPerRun)
-              quotaParts.push(`${grant.quotaLimits.maxNotificationsPerRun}/run`)
-            if (grant.quotaLimits.maxInvocationsPerMinute)
-              quotaParts.push(`${grant.quotaLimits.maxInvocationsPerMinute}/min`)
-            if (grant.quotaLimits.maxNotificationsPerMinute)
-              quotaParts.push(`${grant.quotaLimits.maxNotificationsPerMinute}/min`)
-            const userRefsDisplay =
-              grant.allowedUserRefs.length > 0
-                ? grant.allowedUserRefs.map(ref => userMap.get(ref) ?? ref).join(', ')
-                : null
-            return (
-              <tr key={grant.id} className="cu-table__row">
-                <td>
-                  <span className="cu-link">{grant.recipeName}</span>
-                  <span className="cu-field__hint"> ({grant.recipeNamespace})</span>
-                </td>
-                <td>
-                  <span className="cu-badge">{grant.capabilityFamily}</span>
-                </td>
-                <td>
-                  {allowlist.length === 0 ? '- (any declared)' : allowlist.join(', ')}
-                  {userRefsDisplay ? (
-                    <span className="cu-field__hint"> · users: {userRefsDisplay}</span>
-                  ) : null}
-                </td>
-                <td>{quotaParts.length === 0 ? '-' : quotaParts.join(', ')}</td>
-                <td className="cu-cell--right">
-                  <Button type="button" variant="ghost" size="sm" onClick={() => onEdit(grant)}>
-                    Edit
-                  </Button>
-                  <Button
-                    type="button"
-                    className="cu-btn--icon cu-btn--danger-icon"
-                    onClick={() => onDelete(grant)}
-                    disabled={deletingId === grant.id}
-                    aria-label={`Delete grant for ${grant.recipeName}`}
-                  >
-                    <IconX width={16} height={16} />
-                  </Button>
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+    <>
+      {legacyInventory && legacyInventory.legacyPromptBridgeGrants > 0 ? (
+        <div className="cu-card__body">
+          <div className="cu-banner cu-banner--error">
+            {legacyInventory.legacyPromptBridgeGrants} promptBridge grant(s) require explicit
+            operator review before activation. Open each row and save the ordered policy; no legacy
+            policy is activated automatically.
+          </div>
+        </div>
+      ) : null}
+      <div className="cu-table-wrap">
+        <table className="cu-table">
+          <thead>
+            <TableHeaderRow columns={GRANT_COLUMNS} />
+          </thead>
+          <tbody>
+            {grants.map(grant => {
+              const allowlist =
+                grant.capabilityFamily === 'promptBridge'
+                  ? (grant.promptTargets ?? []).map(
+                      (target, index) =>
+                        `${index === 0 ? 'default' : `fallback ${index}`}: ${target.provider}/${target.model} (${target.credentialSlot})`
+                    )
+                  : grant.allowedEventTypes
+              const quotaParts: string[] = []
+              if (grant.quotaLimits.maxInvocationsPerMinute)
+                quotaParts.push(`${grant.quotaLimits.maxInvocationsPerMinute}/min`)
+              if (grant.quotaLimits.maxNotificationsPerMinute)
+                quotaParts.push(`${grant.quotaLimits.maxNotificationsPerMinute}/min`)
+              const userRefsDisplay =
+                grant.allowedUserRefs.length > 0
+                  ? grant.allowedUserRefs.map(ref => userMap.get(ref) ?? ref).join(', ')
+                  : null
+              return (
+                <tr key={grant.id} className="cu-table__row">
+                  <td>
+                    <span className="cu-link">{grant.recipeName}</span>
+                    <span className="cu-field__hint"> ({grant.recipeNamespace})</span>
+                  </td>
+                  <td>
+                    <span className="cu-badge">{grant.capabilityFamily}</span>
+                    <span
+                      className={
+                        grant.policyState === 'active'
+                          ? 'cu-badge cu-badge--ok'
+                          : 'cu-badge cu-badge--error'
+                      }
+                    >
+                      {grant.policyState === 'active'
+                        ? 'Active'
+                        : grant.policyState.replace('_', ' ')}
+                    </span>
+                  </td>
+                  <td>
+                    {allowlist.length === 0 ? '- (migration required)' : allowlist.join(', ')}
+                    {userRefsDisplay ? (
+                      <span className="cu-field__hint"> · users: {userRefsDisplay}</span>
+                    ) : null}
+                  </td>
+                  {/* Per-run caps removed (issue #348). Shows API-set per-minute grant overrides when present (they take precedence over the platform ENV defaults); 'platform defaults' otherwise. The edit form does not manage these overrides. */}
+                  <td>{quotaParts.length === 0 ? 'platform defaults' : quotaParts.join(', ')}</td>
+                  <td className="cu-cell--right">
+                    <Button type="button" variant="ghost" size="sm" onClick={() => onEdit(grant)}>
+                      Edit
+                    </Button>
+                    <Button
+                      type="button"
+                      className="cu-btn--icon cu-btn--danger-icon"
+                      onClick={() => onDelete(grant)}
+                      disabled={deletingId === grant.id}
+                      aria-label={`Delete grant for ${grant.recipeName}`}
+                    >
+                      <IconX width={16} height={16} />
+                    </Button>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
   )
 }
 

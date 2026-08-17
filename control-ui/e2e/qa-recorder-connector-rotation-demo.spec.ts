@@ -19,7 +19,7 @@ import {
   requireRecorderConfirm,
   uniqueE2EName,
 } from './qa-recorder-helpers'
-import { humanClick, humanPause, humanReveal, humanType } from './support/human'
+import { humanClick, humanPause, humanType } from './support/human'
 
 const MOCK_MCP_IMAGE = process.env.TEST_MOCK_MCP_IMAGE ?? 'clerum/mock-mcp-server:test'
 
@@ -77,7 +77,10 @@ test.describe('demo: Control UI credential-rotation journey', () => {
       })
 
       await test.step('navigate: sidebar "Connectors" -> connectors list', async () => {
-        await humanClick(page, page.getByRole('link', { name: 'Connectors', exact: true }))
+        await humanClick(
+          page,
+          page.getByRole('link', { name: 'Installed connectors', exact: true })
+        )
         await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
         await humanPause(page)
       })
@@ -96,8 +99,11 @@ test.describe('demo: Control UI credential-rotation journey', () => {
         await humanPause(page)
       })
 
-      await test.step('scroll to "Update credentials" and read the key mapping', async () => {
-        await humanReveal(page, page.getByText('Update credentials', { exact: true }))
+      await test.step('open the Credentials tab and read the key mapping', async () => {
+        await humanClick(page, page.getByRole('tab', { name: 'Credentials', exact: true }))
+        await expect(page.getByText('Update credentials', { exact: true })).toBeVisible({
+          timeout: 20_000,
+        })
         const input = page.locator(`#mcp-cred-${secretKey}`)
         await expect(input).toBeVisible({ timeout: 20_000 })
         // Names-only: masked, empty input; the screen never shows a stored value.

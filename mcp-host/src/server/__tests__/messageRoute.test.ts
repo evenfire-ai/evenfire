@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
 import { config } from '../../config'
+import { ConversationError, ConversationErrorCode } from '../../core/errors'
 import { handleMessageRoute } from '../routes'
 import { makeHandlers } from './testHelpers'
 
@@ -190,6 +191,35 @@ describe('handleMessageRoute — rpc sender identity invariant', () => {
     await handleMessageRoute(req, captured.res, makeHandlers({ messageHandler }))
     expect(captured.statusCode).toBe(403)
     expect(messageHandler).not.toHaveBeenCalled()
+  })
+
+  it('maps persisted ownership mismatches to a generic 403', async () => {
+    const messageHandler = vi.fn().mockRejectedValue(
+      new ConversationError(
+        'sensitive ownership detail',
+        ConversationErrorCode.OwnershipMismatch
+      )
+    )
+    const req = {
+      runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: 'legit-user' },
+      body: {
+        sender: 'legit-user',
+        channelType: 'rpc',
+        channelId: 'agent-x',
+        threadId: 'chat-1',
+        content: 'hi',
+        timestamp: 'now',
+        messageId: 'm1',
+        hostRef: 'chatllm',
+      },
+      query: {},
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleMessageRoute(req, captured.res, makeHandlers({ messageHandler }))
+
+    expect(captured.statusCode).toBe(403)
+    expect(captured.jsonBody).toEqual({ success: false, error: 'session access denied' })
   })
 })
 

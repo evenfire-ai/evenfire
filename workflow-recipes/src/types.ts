@@ -483,12 +483,13 @@ export interface PluginWorkloadSdkSpec {
   promptBridge?: {
     allowedModels?: string[]
     maxOutputTokens?: number
+    /** @deprecated Accepted for compatibility; no longer enforced (issue #348). Platform per-minute rate limits apply. */
     maxRequestsPerRun?: number
     /** Max total bytes across messages[].content. */
     maxRequestContentBytes?: number
     /** Max parallel promptBridge calls per workload; default 5. */
     maxConcurrentInvocations?: number
-    /** Rate limit per workload; default 60. */
+    /** Rate limit per workload; platform default 120 when unset (ENV CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN, issue #348). */
     maxInvocationsPerMinute?: number
     /** How long invocation results are queryable; default 24. */
     resultRetentionHours?: number
@@ -501,8 +502,9 @@ export interface PluginWorkloadSdkSpec {
     allowedEventTypes: string[]
     allowedTargetRefs?: string[]
     allowedUserRefs?: boolean
+    /** @deprecated Accepted for compatibility; no longer enforced (issue #348). Platform per-minute rate limits apply. */
     maxNotificationsPerRun?: number
-    /** Rate limit per workload; default 120. */
+    /** Rate limit per workload; platform default 150 when unset (ENV CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN, issue #348). */
     maxNotificationsPerMinute?: number
     /** Default 256. */
     maxTitleBytes?: number
@@ -536,11 +538,22 @@ export interface PluginWorkloadSdkSnippetConfig {
  * actually has active (vs merely declared in spec).
  */
 export interface PluginWorkloadSdkCapabilityStatus {
-  state: 'validated' | 'disabled'
+  state: 'validated' | 'disabled' | 'degraded' | 'awaiting_policy'
   promptBridge: boolean
   clientNotifications: boolean
   message?: string
-  validatedAt?: string
+  // These fields are merge-patch clearable. A non-validated projection must
+  // explicitly send null so a previous validated record cannot survive a
+  // later degraded/awaiting-policy transition.
+  validatedAt?: string | null
+  bootstrapContractVersion?: 2 | null
+  bootstrapPodUid?: string | null
+  bootstrapProvider?: string | null
+  bootstrapModel?: string | null
+  policyRevision?: number | null
+  policyHash?: string | null
+  defaultTargetRef?: string | null
+  verifiedAt?: string | null
 }
 
 // ─── WorkflowRecipe CRD ─────────────────────────────────────────────────

@@ -13,11 +13,15 @@ import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { GfsImagePreview } from '@components/GfsImagePreview'
+import { PluginConsentModal } from '@components/PluginConsentModal'
+import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { SidebarNav } from '@components/SidebarNav'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import {
   canProcessSandboxUiDeepLinks,
   resolveSandboxUiDeepLinkApp,
@@ -33,6 +37,7 @@ import {
   deferPendingSandboxUiDeepLink,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
+  findPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
   removePendingSandboxUiDeepLink,
@@ -67,6 +72,61 @@ type PendingSandboxUiDeepLinkLaunch = {
   linkTeamId?: string
   switchedTeam: boolean
   conversationOrigin: SandboxUiConversationOrigin | null
+}
+
+const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+])
+
+const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
+  'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || 'Unknown error')
+}
+
+function errorCode(error: unknown): string {
+  if (!error || typeof error !== 'object') return ''
+  const record = error as { code?: unknown; cause?: { code?: unknown } }
+  return String(record.code || record.cause?.code || '').toUpperCase()
+}
+
+function isTransientSandboxUiTeamContextError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase()
+  if (
+    /\b(400|401|403|404)\b/.test(message) ||
+    message.includes('access denied') ||
+    message.includes('authenticat') ||
+    message.includes('forbidden') ||
+    message.includes('not a member') ||
+    message.includes('permission') ||
+    message.includes('select a team') ||
+    message.includes('teamid is required') ||
+    message.includes('validation')
+  ) {
+    return false
+  }
+
+  const code = errorCode(error)
+  if (TRANSIENT_TEAM_CONTEXT_ERROR_CODES.has(code)) return true
+
+  return (
+    message.includes('connection refused') ||
+    message.includes('connection reset') ||
+    message.includes('fetch failed') ||
+    message.includes('network error') ||
+    message.includes('socket hang up') ||
+    message.includes('temporarily unavailable') ||
+    message.includes('timed out') ||
+    message.includes('timeout')
+  )
 }
 
 function getInitialThemeMode(): ThemeMode {
@@ -177,6 +237,7 @@ export function App() {
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
   const launchingSandboxUiDeepLinkRef = React.useRef<PendingSandboxUiDeepLinkLaunch | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
+  const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
@@ -211,6 +272,78 @@ export function App() {
   ])
   activeConversationOriginRef.current = activeConversationOrigin
 
+  /**
+   * Plugin permission prompts (spec §9). Main hides the plugin's
+   * `WebContentsView` before pushing the request and restores it once the user
+   * answers, so the plugin can neither fake the prompt nor paint over it. The
+   * prompt is centered over — and its backdrop scoped to — the plugin's embed
+   * rect, not the whole window; the rest of the trusted app chrome stays visible.
+   */
+  const [pluginConsentPrompt, setPluginConsentPrompt] = React.useState<PluginConsentRequest | null>(
+    null
+  )
+
+  React.useEffect(() => {
+    const offRequested = window.clerum.pluginSdk?.onConsentRequested?.(request => {
+      setPluginConsentPrompt(request)
+    })
+    const offCancelled = window.clerum.pluginSdk?.onConsentCancelled?.(({ promptId }) => {
+      // Main withdrew the prompt (timeout, or the plugin was closed under it).
+      setPluginConsentPrompt(current => (current?.promptId === promptId ? null : current))
+    })
+    return () => {
+      offRequested?.()
+      offCancelled?.()
+    }
+  }, [])
+
+  /**
+   * A plugin asked to show a shared file — either through `clerum.gfs.open()` or
+   * by the user activating a `gfs://` link it rendered. Main has already
+   * resolved it with the user's session, so this only decides where it goes:
+   * images get a preview over the plugin, everything else hands off to Files.
+   */
+  const [pluginGfsPreview, setPluginGfsPreview] = React.useState<{
+    gfsUri: string
+    name: string
+    bytes: number
+    mimeType: string
+  } | null>(null)
+  const [pendingGfsUri, setPendingGfsUri] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
+      const mimeType = resource.kind === 'file' ? gfsImagePreviewMimeType(resource.name) : null
+      if (mimeType) {
+        // The embed's WebContentsView paints above renderer DOM, so it has to be
+        // hidden for the overlay to be visible at all.
+        void window.clerum.sandboxUi.setVisible(false).catch(() => undefined)
+        setPluginGfsPreview({
+          gfsUri: resource.gfsUri,
+          name: resource.name,
+          bytes: resource.bytes ?? 0,
+          mimeType,
+        })
+        return
+      }
+      // Folders and non-previewable files belong in the full browser, where the
+      // user gets breadcrumbs, download, and sharing.
+      setPendingGfsUri(resource.gfsUri)
+      vm.handleNavSelect(DESKTOP_ROUTES.files)
+    })
+    return () => off?.()
+  }, [vm.handleNavSelect])
+
+  const closePluginGfsPreview = React.useCallback(() => {
+    setPluginGfsPreview(null)
+    void window.clerum.sandboxUi.setVisible(true).catch(() => undefined)
+  }, [])
+
+  const resolvePluginConsent = React.useCallback((promptId: string, allowed: string[]) => {
+    setPluginConsentPrompt(current => (current?.promptId === promptId ? null : current))
+    void window.clerum.pluginSdk?.resolveConsent?.(promptId, allowed)?.catch?.(() => undefined)
+  }, [])
+
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', themeMode)
     try {
@@ -218,6 +351,11 @@ export function App() {
     } catch {
       // Ignore storage failures in restricted environments.
     }
+    // Mirror into the main process so `theme.read` and the `theme.changed`
+    // event can answer for plugin embeds, which have no access to this
+    // renderer's localStorage. The renderer stays the writer; main only keeps
+    // the last value it was told.
+    void window.clerum.pluginSdk?.setTheme?.(themeMode)?.catch?.(() => undefined)
   }, [themeMode])
 
   React.useEffect(() => {
@@ -275,6 +413,7 @@ export function App() {
     setPendingSandboxUiDeepLinks([])
     processingSandboxUiDeepLinkIdRef.current = null
     launchingSandboxUiDeepLinkRef.current = null
+    sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
     sandboxUiDeepLinkGenerationRef.current += 1
     void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
       console.warn('[Desktop] Could not clear stale app deep links:', error)
@@ -406,6 +545,7 @@ export function App() {
       const next = removePendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId)
       setPendingSandboxUiDeepLinkState(next)
       clearSandboxUiDeepLinkProcessing(linkId)
+      sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
       } catch (error) {
@@ -416,7 +556,11 @@ export function App() {
   )
 
   const deferSandboxUiDeepLink = React.useCallback(
-    (pending: PendingSandboxUiDeepLink, message: string, tone: 'info' | 'error' = 'error') => {
+    (
+      pending: PendingSandboxUiDeepLink,
+      message: string,
+      tone: 'info' | 'error' = 'error'
+    ): boolean => {
       clearSandboxUiDeepLinkProcessing(pending.link.id)
       if ((pending.retryCount ?? 0) >= MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS) {
         const next = failPendingSandboxUiDeepLink(
@@ -426,7 +570,7 @@ export function App() {
         )
         setPendingSandboxUiDeepLinkState(next)
         vm.pushToast(`Could not open app link: ${message}`, 'error')
-        return
+        return true
       }
       const next = deferPendingSandboxUiDeepLink(
         pendingSandboxUiDeepLinksRef.current,
@@ -435,6 +579,7 @@ export function App() {
       )
       setPendingSandboxUiDeepLinkState(next)
       vm.pushToast(message, tone)
+      return false
     },
     [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState, vm.pushToast]
   )
@@ -467,6 +612,20 @@ export function App() {
       }
     },
     [vm.getCurrentTeamId, vm.handleEnsureTeamContext, vm.handleSelectChatAgent, vm.pushToast]
+  )
+
+  const deferSandboxUiDeepLinkUntilTerminal = React.useCallback(
+    async (
+      pending: PendingSandboxUiDeepLink,
+      message: string,
+      launchContext: PendingSandboxUiDeepLinkLaunch,
+      tone: 'info' | 'error' = 'error'
+    ) => {
+      if (deferSandboxUiDeepLink(pending, message, tone)) {
+        await restoreSandboxUiDeepLinkTeam(launchContext)
+      }
+    },
+    [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
   )
 
   const closeActiveSandboxUiEmbedForHandoff = React.useCallback(async () => {
@@ -530,21 +689,73 @@ export function App() {
     const processingGeneration = sandboxUiDeepLinkGenerationRef.current
 
     void (async () => {
-      const originalTeamId = vm.getCurrentTeamId()
-      let switchedTeam = false
+      const restoreTeamId = sandboxUiDeepLinkRestoreTeamByIdRef.current.get(pending.link.id)
+      const originalTeamId = restoreTeamId ?? vm.getCurrentTeamId()
+      let switchedTeam = Boolean(
+        restoreTeamId && pending.link.teamId && restoreTeamId !== pending.link.teamId
+      )
+      const currentTeamId = vm.getCurrentTeamId()
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
-        if (pending.link.teamId && pending.link.teamId !== vm.getCurrentTeamId()) {
+        if (
+          restoreTeamId &&
+          pending.retryCount &&
+          pending.link.teamId &&
+          currentTeamId !== pending.link.teamId
+        ) {
+          sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
+          clearSandboxUiDeepLinkProcessing(pending.link.id)
+          const next = failPendingSandboxUiDeepLink(
+            pendingSandboxUiDeepLinksRef.current,
+            pending.link.id,
+            SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE
+          )
+          setPendingSandboxUiDeepLinkState(next)
+          vm.pushToast(
+            `Could not open app link: ${SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE}`,
+            'error'
+          )
+          return
+        }
+        if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
           await closeActiveSandboxUiEmbedForHandoff()
           try {
-            switchedTeam = await vm.handleEnsureTeamContext({
+            const didSwitchTeam = await vm.handleEnsureTeamContext({
               teamId: pending.link.teamId,
               announce: true,
             })
+            switchedTeam = switchedTeam || didSwitchTeam
+            if (switchedTeam && originalTeamId !== pending.link.teamId) {
+              sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
           } catch (error) {
             switchedTeam =
-              originalTeamId !== pending.link.teamId &&
-              vm.getCurrentTeamId() === pending.link.teamId
+              switchedTeam ||
+              (originalTeamId !== pending.link.teamId &&
+                vm.getCurrentTeamId() === pending.link.teamId)
+            if (switchedTeam && originalTeamId !== pending.link.teamId) {
+              sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
+            if (isTransientSandboxUiTeamContextError(error)) {
+              const launchContext: PendingSandboxUiDeepLinkLaunch = {
+                linkId: pending.link.id,
+                requestId: 0,
+                generation: processingGeneration,
+                originalTeamId,
+                linkTeamId: pending.link.teamId,
+                switchedTeam,
+                conversationOrigin: pending.conversationOrigin,
+              }
+              await deferSandboxUiDeepLinkUntilTerminal(
+                pending,
+                `Could not switch to the linked team yet: ${errorMessage(
+                  error
+                )}. This link will retry shortly.`,
+                launchContext,
+                'info'
+              )
+              return
+            }
             throw error
           }
         }
@@ -567,10 +778,10 @@ export function App() {
             switchedTeam,
             conversationOrigin: pending.conversationOrigin,
           }
-          await restoreSandboxUiDeepLinkTeam(launchContext)
-          deferSandboxUiDeepLink(
+          await deferSandboxUiDeepLinkUntilTerminal(
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
+            launchContext,
             'info'
           )
           return
@@ -617,7 +828,8 @@ export function App() {
     activeSandboxUiApp,
     bootSplashLoading,
     closeActiveSandboxUiEmbedForHandoff,
-    deferSandboxUiDeepLink,
+    clearSandboxUiDeepLinkProcessing,
+    deferSandboxUiDeepLinkUntilTerminal,
     launchSandboxUiApp,
     pendingSandboxUiDeepLinks,
     restoreSandboxUiDeepLinkTeam,
@@ -628,6 +840,7 @@ export function App() {
     vm.handleEnsureTeamContext,
     vm.isAuthenticated,
     vm.pushToast,
+    setPendingSandboxUiDeepLinkState,
   ])
 
   React.useEffect(() => {
@@ -662,14 +875,16 @@ export function App() {
         await acknowledgeSandboxUiDeepLink(launch.linkId)
         return
       }
-      await restoreSandboxUiDeepLinkTeam(launch)
-      deferSandboxUiDeepLink(pending, result.message || 'The native app view did not mount')
+      await deferSandboxUiDeepLinkUntilTerminal(
+        pending,
+        result.message || 'The native app view did not mount',
+        launch
+      )
     },
     [
       acknowledgeSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
-      deferSandboxUiDeepLink,
-      restoreSandboxUiDeepLinkTeam,
+      deferSandboxUiDeepLinkUntilTerminal,
     ]
   )
 
@@ -707,19 +922,20 @@ export function App() {
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
   }`
 
-  const pendingSandboxUiConfirmation = vm.authenticatedPrincipalIdentity
-    ? pendingSandboxUiDeepLinks.find(item =>
-        isPendingSandboxUiDeepLinkAwaitingConfirmation(item, vm.authenticatedPrincipalIdentity)
-      )
-    : null
+  const pendingSandboxUiConfirmation =
+    findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinks,
+      vm.authenticatedPrincipalIdentity
+    ) ?? null
   const failedSandboxUiDeepLink = vm.authenticatedPrincipalIdentity
     ? pendingSandboxUiDeepLinks.find(item => item.failedMessage)
     : null
 
   const handleConfirmSandboxUiDeepLink = React.useCallback(() => {
     const identity = vm.authenticatedPrincipalIdentity
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item =>
-      identity ? isPendingSandboxUiDeepLinkAwaitingConfirmation(item, identity) : false
+    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinksRef.current,
+      identity
     )
     if (!identity || !pending) return
     const next = confirmPendingSandboxUiDeepLink(
@@ -732,8 +948,9 @@ export function App() {
 
   const handleDismissSandboxUiDeepLink = React.useCallback(() => {
     const identity = vm.authenticatedPrincipalIdentity
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item =>
-      identity ? isPendingSandboxUiDeepLinkAwaitingConfirmation(item, identity) : false
+    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinksRef.current,
+      identity
     )
     if (!pending) return
     void acknowledgeSandboxUiDeepLink(pending.link.id)
@@ -977,8 +1194,11 @@ export function App() {
       activeChatId: vm.activeChatId,
       chatList: vm.chatList,
       chatListLoading: vm.chatListLoading,
+      chatListMoreLoading: vm.chatListMoreLoading,
+      chatListHasMoreRemoteSessions: vm.chatListHasMoreRemoteSessions,
       latestChatSessions: vm.latestChatSessions,
       latestChatSessionsLoading: vm.latestChatSessionsLoading,
+      loadMoreChatSessions: vm.loadMoreChatSessions,
       sessionStateByChatId: vm.sessionStateByChatId,
       sessionStateByChatKey: vm.sessionStateByChatKey,
     }),
@@ -986,8 +1206,11 @@ export function App() {
       vm.activeChatId,
       vm.chatList,
       vm.chatListLoading,
+      vm.chatListMoreLoading,
+      vm.chatListHasMoreRemoteSessions,
       vm.latestChatSessions,
       vm.latestChatSessionsLoading,
+      vm.loadMoreChatSessions,
       vm.sessionStateByChatId,
       vm.sessionStateByChatKey,
     ]
@@ -1020,6 +1243,9 @@ export function App() {
       activeMessages: vm.activeMessages,
       groupedMessages: vm.groupedMessages,
       chatMessagesLoading: vm.chatMessagesLoading,
+      hasOlderMessages: vm.hasOlderMessages,
+      olderMessagesLoading: vm.olderMessagesLoading,
+      handleLoadOlderMessages: vm.handleLoadOlderMessages,
       activityByMessageId: vm.activityByMessageId,
       progressByMessageId: vm.progressByMessageId,
     }),
@@ -1028,6 +1254,9 @@ export function App() {
       vm.activeMessages,
       vm.groupedMessages,
       vm.chatMessagesLoading,
+      vm.hasOlderMessages,
+      vm.olderMessagesLoading,
+      vm.handleLoadOlderMessages,
       vm.activityByMessageId,
       vm.progressByMessageId,
     ]
@@ -1189,7 +1418,11 @@ export function App() {
                               )}
                               {vm.navItem === DESKTOP_ROUTES.contexts && <ContextsPage />}
                               {vm.navItem === DESKTOP_ROUTES.files && (
-                                <FilesPage pushToast={vm.pushToast} />
+                                <FilesPage
+                                  pushToast={vm.pushToast}
+                                  pendingGfsUri={pendingGfsUri}
+                                  onPendingGfsUriHandled={() => setPendingGfsUri(null)}
+                                />
                               )}
                               {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
                               {vm.navItem === DESKTOP_ROUTES.contextDetails && (
@@ -1246,6 +1479,21 @@ export function App() {
                         {environmentSetupConfirmationDialog}
                         {environmentSetupSuccessDialog}
                         {sandboxUiDeepLinkDialog}
+                        {pluginConsentPrompt ? (
+                          <PluginConsentModal
+                            request={pluginConsentPrompt}
+                            onResolve={resolvePluginConsent}
+                          />
+                        ) : null}
+                        {pluginGfsPreview ? (
+                          <GfsImagePreview
+                            byteLength={pluginGfsPreview.bytes}
+                            fileName={pluginGfsPreview.name}
+                            gfsUri={pluginGfsPreview.gfsUri}
+                            mimeType={pluginGfsPreview.mimeType}
+                            onClose={closePluginGfsPreview}
+                          />
+                        ) : null}
                       </DesktopStateProvider>
                     </McpRuntimeProvider>
                   </AgentChatProviders>

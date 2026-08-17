@@ -683,6 +683,41 @@ describe('RPCServer v1 runtime interface contract', () => {
     }
   })
 
+  it('round-trips an unresolved authorization reason through the channel-reader edge', async () => {
+    const onAuthorize = vi.fn(async () => ({ authorized: false, reason: 'unresolved' as const }))
+    const { server, baseUrl } = await startServer(rpcServer => {
+      rpcServer.onProviderMessageAuthorization(onAuthorize)
+    })
+    const providerIdentity = {
+      medium: 'telegram',
+      providerUserId: '123456',
+      providerChannelId: 'telegram-chat-1',
+      providerChannelType: 'private',
+      providerTarget: {
+        hostRef: 'agent-a',
+        communicationChannelNamespace: 'channels',
+        communicationChannelName: 'agent-a-telegram',
+      },
+    }
+
+    try {
+      const response = await fetch(`${baseUrl}/v1/runtime/provider-messages/authorize`, {
+        method: 'POST',
+        headers: channelReaderEdgeHeaders(
+          { channelType: 'telegram', channelId: 'telegram-chat-1', sender: '123456' },
+          { 'Content-Type': 'application/json' }
+        ),
+        body: JSON.stringify({ providerIdentity }),
+      })
+
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toEqual({ authorized: false, reason: 'unresolved' })
+      expect(onAuthorize).toHaveBeenCalledWith({ providerIdentity })
+    } finally {
+      await server.stop()
+    }
+  })
+
   it('routes workflow approval notification claim and terminal updates through channel-reader edges', async () => {
     const onNotificationClaim = vi.fn(async () => ({
       deliveries: [

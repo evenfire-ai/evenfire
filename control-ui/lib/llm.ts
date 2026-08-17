@@ -13,6 +13,33 @@ import {
 // multi-slot secrets form itself is B3; here we only re-cable the data source.
 export type LlmProvider = LlmProviderId
 
+export type PromptBridgeTargetPolicyInput = {
+  targetRef: string
+  provider: string
+  model: string
+  credentialSlot: string
+}
+
+/**
+ * Serialize the operator's ordered promptBridge list without inventing a
+ * second default-selection rule. The first reviewed target is authoritative;
+ * every other field is derived from that same ordered list.
+ */
+export function buildPromptBridgeTargetPolicy(targets: PromptBridgeTargetPolicyInput[]): {
+  provider?: string
+  allowedModels: string[]
+  promptTargets: PromptBridgeTargetPolicyInput[]
+  defaultTargetRef?: string
+} {
+  const promptTargets = targets.map(target => ({ ...target }))
+  const first = promptTargets[0]
+  return {
+    ...(first ? { provider: first.provider, defaultTargetRef: first.targetRef } : {}),
+    allowedModels: promptTargets.map(target => target.model),
+    promptTargets,
+  }
+}
+
 export const LLM_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> = PROVIDER_IDS.map(
   id => ({ value: id, label: PROVIDER_DISPLAY_LABELS[id] })
 )
@@ -187,6 +214,17 @@ export function getLlmCredentialGroup(provider: LlmProvider): LlmCredentialGroup
   return (
     LLM_CREDENTIAL_GROUPS.find(group => group.provider === provider) ?? LLM_CREDENTIAL_GROUPS[0]
   )
+}
+
+// Derive the providers a Secret can serve from its data-key NAMES alone. Secret
+// values never reach the control UI: a provider is available only when every
+// required key in its registry group is present (e.g. both Bedrock keys).
+export function getProvidersWithCompleteCredentials(secretKeys: string[]): LlmProvider[] {
+  const keys = new Set(secretKeys)
+  return LLM_CREDENTIAL_GROUPS.filter(group => {
+    const requiredSlots = group.slots.filter(slot => slot.required)
+    return requiredSlots.length > 0 && requiredSlots.every(slot => keys.has(slot.dataKey))
+  }).map(group => group.provider)
 }
 
 // The canonical (registry) credential dataKeys a provider loads by default —
@@ -560,9 +598,10 @@ export function providerSupportsFallbackCredentialSlot(provider: LlmProvider): b
 // Dropdown options for a fallback entry's `credentialSlot` (spec R4.5.6): the
 // provider's canonical registry slots first, then any EXTRA keys already present
 // in the LLM Secret that belong to this provider (e.g. `claude-api-key-fb1`).
-// Extra keys are matched by the `<provider>-` prefix or a registry slot prefix
-// (the suggested `<slot>-fb1` naming), excluding keys that are canonical slots of
-// another provider. The empty option ('') means "use the provider's normal slot".
+// Extra keys are matched only by a canonical registry slot prefix (the
+// suggested `<slot>-fb1` naming), excluding keys that are canonical slots of
+// another provider. A provider-name prefix alone (for example
+// `openai-project`) is not a credential slot and must not be offered.
 // Providers that can't express a single-key slot (Bedrock/Vertex) offer NOTHING —
 // their fallbacks reuse the primary credentials (mirrors the backend gate).
 export function getCredentialSlotOptions(
@@ -571,7 +610,31 @@ export function getCredentialSlotOptions(
 ): string[] {
   if (!providerSupportsFallbackCredentialSlot(provider)) return []
   const registrySlots = PROVIDER_CREDENTIAL_SLOTS[provider].map(slot => slot.dataKey)
-  const prefixes = [...registrySlots, `${provider}-`]
+  const prefixes = registrySlots
+  const extras = secretKeys
+    .filter(key => !ALL_REGISTRY_SLOT_KEYS.has(key))
+    .filter(key => prefixes.some(prefix => key.startsWith(prefix)))
+    .sort((a, b) => a.localeCompare(b))
+  return Array.from(new Set([...registrySlots, ...extras]))
+}
+
+/**
+ * Credential identities for an ordered promptBridge target. Unlike a Host
+ * failover override, a promptBridge target names the complete provider
+ * credential set that the WRC broker resolves for that attempt. Canonical
+ * multiline and multi-slot providers therefore remain selectable; only
+ * single-key providers may add suffixed extra slots.
+ */
+export function getPromptBridgeCredentialSlotOptions(
+  provider: LlmProvider,
+  secretKeys: string[] = []
+): string[] {
+  const slots = PROVIDER_CREDENTIAL_SLOTS[provider]
+  const registrySlots = slots.map(slot => slot.dataKey)
+  if (registrySlots.length === 0) return []
+  if (slots.length !== 1 || slots[0].multiline === true) return registrySlots
+
+  const prefixes = registrySlots
   const extras = secretKeys
     .filter(key => !ALL_REGISTRY_SLOT_KEYS.has(key))
     .filter(key => prefixes.some(prefix => key.startsWith(prefix)))
@@ -597,7 +660,7 @@ export function providerForDataKey(dataKey: string): LlmProvider | null {
     if (group.slots.some(slot => slot.dataKey === dataKey)) return group.provider
   }
   for (const group of LLM_CREDENTIAL_GROUPS) {
-    const prefixes = [...group.slots.map(slot => slot.dataKey), `${group.provider}-`]
+    const prefixes = group.slots.map(slot => slot.dataKey)
     if (prefixes.some(prefix => dataKey.startsWith(prefix))) return group.provider
   }
   return null

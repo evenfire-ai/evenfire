@@ -204,7 +204,7 @@ describe('LlmModelTable filters', () => {
     })
     expect(screen.queryByText('No models match this filter.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Expand Google models' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Expand google models' })).toBeInTheDocument()
   })
 
   it('shows the filtered empty state when no row matches', () => {
@@ -318,5 +318,80 @@ describe('LlmModelTable provider groups', () => {
       '/cost-and-usage/llm-prices/new?provider=claude&model=claude-sonnet-4-6'
     )
     expect(screen.queryByText(/allowed models? have no enabled price/i)).toBeNull()
+  })
+})
+
+describe('LlmModelTable sorting', () => {
+  const newModel = (overrides: Partial<LlmAllowedModel>): LlmAllowedModel => ({
+    ...baseModel,
+    id: overrides.id ?? baseModel.id,
+    ...overrides,
+  })
+
+  function expandedRowOrder(): string[] {
+    const rows = document.querySelectorAll('tr.cu-llm-model-row')
+    return Array.from(rows).map(row => {
+      const cell = row.querySelector('td.cu-px-model')
+      return cell?.textContent?.trim() ?? ''
+    })
+  }
+
+  it('keeps the static LLM Models title regardless of filters', () => {
+    renderTable([baseModel])
+    expect(document.querySelector('.cu-panel-title')?.textContent).toContain('LLM Models')
+  })
+
+  it('sorts models inside a provider group by model name when ascending', () => {
+    const alpha = newModel({ id: 'a', model: 'alpha', display_name: 'Alpha' })
+    const bravo = newModel({ id: 'b', model: 'bravo', display_name: 'Bravo' })
+    const charlie = newModel({ id: 'c', model: 'charlie', display_name: 'Charlie' })
+    renderTable([charlie, alpha, bravo])
+    expandAnthropicModels()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+
+    expect(expandedRowOrder()).toEqual(['alpha', 'bravo', 'charlie'])
+  })
+
+  it('toggles a sort header to descending on the second click', () => {
+    const alpha = newModel({ id: 'a', model: 'alpha' })
+    const bravo = newModel({ id: 'b', model: 'bravo' })
+    renderTable([alpha, bravo])
+    expandAnthropicModels()
+
+    const modelSort = screen.getByRole('button', { name: 'Sort by model ascending' })
+    fireEvent.click(modelSort)
+    expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by model descending' }))
+    expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
+  })
+
+  it('sorts context window descending by default and pushes null values to the end', () => {
+    const small = newModel({ id: 's', model: 'small', context_window_tokens: 8_000 })
+    const large = newModel({ id: 'l', model: 'large', context_window_tokens: 1_000_000 })
+    const unknown = newModel({ id: 'u', model: 'unknown', context_window_tokens: null })
+    renderTable([small, large, unknown])
+    expandAnthropicModels()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+
+    expect(expandedRowOrder()).toEqual(['large', 'small', 'unknown'])
+  })
+
+  it('resets to the natural default direction when switching sort columns', () => {
+    const alpha = newModel({ id: 'a', model: 'alpha', context_window_tokens: 100 })
+    const bravo = newModel({ id: 'b', model: 'bravo', context_window_tokens: 200 })
+    renderTable([alpha, bravo])
+    expandAnthropicModels()
+
+    // Model asc (default for text columns).
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+    expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
+
+    // Switching to context window uses its natural default (descending) — not
+    // the previous direction — so the operator gets the most useful ordering.
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+    expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
   })
 })

@@ -7,7 +7,6 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
-import { LoadingScreen } from '@components/LoadingScreen'
 import { RegistryEntryDetailSkeleton } from '@components/RegistryEntryDetailSkeleton'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
@@ -23,6 +22,7 @@ import {
 } from '@lib/api'
 import { useRegistryCapability } from '@lib/hooks/useRegistryCapability'
 import { trustBgColor, trustColor } from '@lib/trustLevel'
+import RegistryEntryDetailLoading from './loading'
 
 export const dynamic = 'force-dynamic'
 
@@ -123,7 +123,7 @@ function RegistryEntryActionsMenu({
 
 export default function RegistryEntryDetailPage() {
   return (
-    <Suspense fallback={<LoadingScreen />}>
+    <Suspense fallback={<RegistryEntryDetailLoading />}>
       <RegistryEntryDetailContent />
     </Suspense>
   )
@@ -351,30 +351,39 @@ function RegistryEntryDetailContent() {
                         : entry.recipe_type || '—'}
                     </span>
                   </div>
-                  <div className="cu-expandable-field cu-expandable-field--wide">
-                    <div className="cu-expandable-tags">
-                      <span
-                        className="cu-registry-chip"
-                        style={{
-                          color: trustColor(entry.trust_level),
-                          backgroundColor: trustBgColor(entry.trust_level),
-                          borderColor: trustColor(entry.trust_level),
-                        }}
-                      >
-                        {entry.trust_level.toUpperCase()}
-                      </span>
-                      <span
-                        className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
-                      >
-                        {entry.quality_tier}
-                      </span>
-                      {entry.tags.map(tag => (
-                        <span key={tag} className="cu-registry-tag">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
+                  <div className="cu-expandable-field">
+                    <span className="cu-expandable-field__label">Trust</span>
+                    <span
+                      className="cu-registry-chip"
+                      style={{
+                        color: trustColor(entry.trust_level),
+                        backgroundColor: trustBgColor(entry.trust_level),
+                        borderColor: trustColor(entry.trust_level),
+                      }}
+                    >
+                      {entry.trust_level.toUpperCase()}
+                    </span>
                   </div>
+                  <div className="cu-expandable-field">
+                    <span className="cu-expandable-field__label">Verification</span>
+                    <span
+                      className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
+                    >
+                      {entry.quality_tier}
+                    </span>
+                  </div>
+                  {entry.tags.length > 0 && (
+                    <div className="cu-expandable-field">
+                      <span className="cu-expandable-field__label">Tags</span>
+                      <div className="cu-expandable-tags">
+                        {entry.tags.map(tag => (
+                          <span key={tag} className="cu-registry-tag">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <p className="cu-expandable-detail__description">
                   {entry.description || 'No description provided.'}

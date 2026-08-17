@@ -21,7 +21,6 @@ export const packageRoots = [
   'channel-reader',
   'control-api',
   'control-ui',
-  'desktop-app',
   'external-rest-api',
   'host-context-controller',
   'mcp-host',

@@ -9,7 +9,7 @@ import {
   roleCanDeleteMembers,
   roleCanInviteMembers,
 } from './types.js'
-import { adminDeleteUser } from './users.js'
+import { DesktopUserRetirementError, retireDesktopUser } from './users.js'
 
 export const INVITATION_TTL_HOURS = 48
 const DRAFT_INVITATION_CLEANUP_HOURS = 24
@@ -51,6 +51,8 @@ type InvitationUserRow = {
   name: string | null
   picture: string | null
   password_hash: string | null
+  lifecycle_state?: 'active' | 'retired' | string | null
+  lifecycle_version?: number | string | null
 }
 
 type InvitationWithTeams = {
@@ -168,7 +170,7 @@ async function ensureInvitationUser(
   const normalizedEmail = email.trim().toLowerCase()
   const normalizedInviteeName = String(inviteeName || '').trim() || null
   const existing = await db.query(
-    `SELECT id, email, name, picture, password_hash
+    `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
        FROM users
       WHERE email = $1
       LIMIT 1`,
@@ -184,7 +186,7 @@ async function ensureInvitationUser(
        ON CONFLICT (email) DO UPDATE
            SET name = COALESCE(users.name, EXCLUDED.name),
                updated_at = NOW()
-       RETURNING id, email, name, picture, password_hash`,
+       RETURNING id, email, name, picture, password_hash, lifecycle_state, lifecycle_version`,
         [normalizedEmail, normalizedInviteeName]
       )
     ).rows[0] as InvitationUserRow
@@ -195,7 +197,7 @@ async function ensureInvitationUser(
             SET name = $2,
                 updated_at = NOW()
           WHERE id = $1
-       RETURNING id, email, name, picture, password_hash`,
+       RETURNING id, email, name, picture, password_hash, lifecycle_state, lifecycle_version`,
         [user.id, normalizedInviteeName]
       )
     ).rows[0] as InvitationUserRow
@@ -218,6 +220,10 @@ async function ensureInvitationUser(
   }
 
   return user
+}
+
+function invitationUserIsRetired(user: InvitationUserRow): boolean {
+  return user.lifecycle_state === 'retired'
 }
 
 function normalizeInvitationTeamAssignments(
@@ -358,6 +364,8 @@ function invitationResponse(
   acceptedAt: string | null
   userId: string | null
   passwordPending: boolean
+  authGeneration: number | null
+  lifecycleState: string | null
 } {
   const primaryTeam = teams[0] || null
   return {
@@ -377,6 +385,11 @@ function invitationResponse(
     acceptedAt: invitation.accepted_at ? invitation.accepted_at.toISOString() : null,
     userId: invitation.accepted_user_id || user?.id || null,
     passwordPending: !user?.password_hash,
+    authGeneration:
+      user?.lifecycle_version === undefined || user.lifecycle_version === null
+        ? null
+        : Number(user.lifecycle_version),
+    lifecycleState: user?.lifecycle_state ?? null,
   }
 }
 
@@ -385,9 +398,11 @@ export async function findMembership(userId: string, teamId: string) {
     `SELECT tm.team_id, tm.role, t.name AS team_name
        FROM team_members tm
        JOIN teams t ON t.id = tm.team_id
+       JOIN users u ON u.id = tm.user_id
       WHERE tm.user_id = $1
         AND tm.team_id = $2
         AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [userId, teamId]
   )
@@ -406,6 +421,7 @@ export async function getMe(userId: string, teamId: string) {
   LEFT JOIN teams t ON t.id = tm.team_id
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE u.id = $1
+        AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [userId, teamId]
   )
@@ -468,6 +484,7 @@ export async function listMembers(teamId: string) {
        JOIN users u ON u.id = tm.user_id
       WHERE tm.team_id = $1
         AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
    ORDER BY u.email ASC`,
     [teamId]
   )
@@ -478,9 +495,11 @@ export async function findMemberRole(teamId: string, userId: string) {
   const result = await pool.query(
     `SELECT role
        FROM team_members
+       JOIN users u ON u.id = team_members.user_id
       WHERE team_id = $1
         AND user_id = $2
         AND status = 'active'
+        AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [teamId, userId]
   )
@@ -830,6 +849,7 @@ export async function requestProfilePasswordReset(email: string): Promise<{ requ
     `SELECT id, email, name
        FROM users
       WHERE email = $1
+        AND lifecycle_state = 'active'
       LIMIT 1`,
     [normalizedEmail]
   )
@@ -1015,7 +1035,7 @@ export async function getInvitationByToken(token: string) {
   const user = invitation.accepted_user_id
     ? ((
         await pool.query(
-          `SELECT id, email, name, picture, password_hash
+          `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
            FROM users
           WHERE id = $1
           LIMIT 1`,
@@ -1024,7 +1044,7 @@ export async function getInvitationByToken(token: string) {
       ).rows[0] as InvitationUserRow | undefined) || null
     : ((
         await pool.query(
-          `SELECT id, email, name, picture, password_hash
+          `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
            FROM users
           WHERE email = $1
           LIMIT 1`,
@@ -1079,6 +1099,7 @@ export async function setInvitationPasswordForUser(
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
     if (user.id !== trimmedUserId) {
       return { error: 'forbidden' as const }
     }
@@ -1088,7 +1109,8 @@ export async function setInvitationPasswordForUser(
           SET password_hash = $2,
               password_set_at = NOW(),
               updated_at = NOW()
-        WHERE id = $1`,
+        WHERE id = $1
+          AND lifecycle_state = 'active'`,
       [user.id, passwordHash]
     )
     if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
@@ -1164,13 +1186,15 @@ export async function setInvitationPasswordForEmail(
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
     const passwordHash = await bcrypt.hash(trimmedPassword, 12)
     await db.query(
       `UPDATE users
           SET password_hash = $2,
               password_set_at = NOW(),
               updated_at = NOW()
-        WHERE id = $1`,
+        WHERE id = $1
+          AND lifecycle_state = 'active'`,
       [user.id, passwordHash]
     )
     if (invitation.purpose === 'password_reset' && invitation.status === 'pending') {
@@ -1229,6 +1253,7 @@ export async function acceptInvitation(
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
     if (user.id !== userId) {
       return { error: 'forbidden' as const }
     }
@@ -1284,6 +1309,7 @@ export async function acceptInvitationForEmail(email: string, token: string, inv
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
     if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
       await applyInvitationMemberships(db, invitation, user.id)
@@ -1337,6 +1363,7 @@ export async function acceptInvitationById(email: string, invitationId: string) 
     }
 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
     if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
       await applyInvitationMemberships(db, invitation, user.id)
@@ -1384,6 +1411,7 @@ export async function searchDirectory(teamId: string, q: string) {
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE tm.team_id = $1
         AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
         AND (
           u.email ILIKE $2
           OR COALESCE(u.name, '') ILIKE $2
@@ -1401,9 +1429,11 @@ export async function listManageableTeamsForUser(userId: string) {
     `SELECT t.id, t.name, tm.role
        FROM team_members tm
        JOIN teams t ON t.id = tm.team_id
+       JOIN users u ON u.id = tm.user_id
       WHERE tm.user_id = $1
         AND tm.status = 'active'
         AND tm.role IN ('admin', 'inviter')
+        AND u.lifecycle_state = 'active'
       ORDER BY t.name ASC`,
     [userId.trim()]
   )
@@ -1421,12 +1451,14 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
   const result = normalizedTargetUserId
     ? await pool.query(
         `WITH managed_teams AS (
-           SELECT tm.team_id, tm.role AS manager_role, t.name AS team_name
+         SELECT tm.team_id, tm.role AS manager_role, t.name AS team_name
              FROM team_members tm
              JOIN teams t ON t.id = tm.team_id
+             JOIN users manager ON manager.id = tm.user_id
             WHERE tm.user_id = $1
               AND tm.status = 'active'
               AND tm.role IN ('admin', 'inviter')
+              AND manager.lifecycle_state = 'active'
          ),
          eligible_target AS (
            SELECT 1
@@ -1467,6 +1499,7 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
       LEFT JOIN managed_teams mt ON mt.team_id = target_tm.team_id
       LEFT JOIN profiles p ON p.user_id = u.id
           WHERE u.id::text = $2
+            AND u.lifecycle_state = 'active'
             AND EXISTS (SELECT 1 FROM eligible_target)
        GROUP BY u.id, u.email, u.name, u.picture, p.display_name
        ORDER BY COALESCE(p.display_name, u.name, u.email) ASC`,
@@ -1477,9 +1510,11 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
            SELECT tm.team_id, tm.role AS manager_role, t.name AS team_name
              FROM team_members tm
              JOIN teams t ON t.id = tm.team_id
+             JOIN users manager ON manager.id = tm.user_id
             WHERE tm.user_id = $1
               AND tm.status = 'active'
               AND tm.role IN ('admin', 'inviter')
+              AND manager.lifecycle_state = 'active'
          ),
          visible_users AS (
            SELECT DISTINCT target_tm.user_id
@@ -1487,6 +1522,8 @@ export async function listManagedMembersForUser(userId: string, targetUserId?: s
              JOIN team_members target_tm
                ON target_tm.team_id = mt.team_id
               AND target_tm.status = 'active'
+             JOIN users visible ON visible.id = target_tm.user_id
+              AND visible.lifecycle_state = 'active'
          )
          SELECT u.id,
                 u.email,
@@ -1561,10 +1598,12 @@ async function getManagerRolesForTeams(
   if (teamIds.length === 0) return new Map()
   const result = await pool.query(
     `SELECT team_id, role
-       FROM team_members
+       FROM team_members tm
+       JOIN users u ON u.id = tm.user_id
       WHERE user_id = $1
         AND team_id = ANY($2::uuid[])
-        AND status = 'active'`,
+        AND status = 'active'
+        AND u.lifecycle_state = 'active'`,
     [managerUserId.trim(), teamIds]
   )
   return new Map(
@@ -1597,11 +1636,13 @@ export async function listManagedPendingInvitationsForUser(managerUserId: string
   const normalizedManagerUserId = managerUserId.trim()
   const result = await pool.query(
     `WITH managed_teams AS (
-       SELECT tm.team_id, tm.role AS manager_role
+     SELECT tm.team_id, tm.role AS manager_role
          FROM team_members tm
+         JOIN users manager ON manager.id = tm.user_id
         WHERE tm.user_id = $1
           AND tm.status = 'active'
           AND tm.role IN ('admin', 'inviter')
+          AND manager.lifecycle_state = 'active'
      )
      SELECT DISTINCT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at,
             i.accepted_at, i.accepted_user_id,
@@ -1655,10 +1696,12 @@ export async function createManagedInvitationForUser(
     `SELECT tm.team_id, tm.role, t.name AS team_name
        FROM team_members tm
        JOIN teams t ON t.id = tm.team_id
+       JOIN users manager ON manager.id = tm.user_id
       WHERE tm.user_id = $1
         AND tm.team_id = ANY($2::uuid[])
         AND tm.status = 'active'
-        AND tm.role IN ('admin', 'inviter')`,
+        AND tm.role IN ('admin', 'inviter')
+        AND manager.lifecycle_state = 'active'`,
     [managerUserId.trim(), assignments.map(assignment => assignment.teamId)]
   )
   const managerRoles = new Map(
@@ -1756,7 +1799,11 @@ export async function deleteManagedMemberForUser(
   return { deleted }
 }
 
-export async function deleteManagedUserForUser(managerUserId: string, targetUserId: string) {
+export async function deleteManagedUserForUser(
+  managerUserId: string,
+  targetUserId: string,
+  retirement: { reason: string; idempotencyKey: string; requestId: string | null }
+) {
   const normalizedManagerUserId = managerUserId.trim()
   const normalizedTargetUserId = targetUserId.trim()
   if (!normalizedManagerUserId || !normalizedTargetUserId) {
@@ -1768,9 +1815,11 @@ export async function deleteManagedUserForUser(managerUserId: string, targetUser
 
   const teamsResult = await pool.query(
     `SELECT team_id
-       FROM team_members
+       FROM team_members tm
+       JOIN users target ON target.id = tm.user_id
       WHERE user_id = $1
-        AND status = 'active'`,
+        AND status = 'active'
+        AND target.lifecycle_state = 'active'`,
     [normalizedTargetUserId]
   )
   const teamIds = (teamsResult.rows as Array<{ team_id: string }>).map(row => row.team_id)
@@ -1782,11 +1831,24 @@ export async function deleteManagedUserForUser(managerUserId: string, targetUser
     return { error: 'forbidden_uncontrolled_teams' as const }
   }
 
-  const deleted = await adminDeleteUser(normalizedTargetUserId)
-  if ('error' in deleted) {
-    return { error: 'not_found' as const }
+  try {
+    const outcome = await retireDesktopUser(
+      { kind: 'platform_user', desktopUserId: normalizedManagerUserId },
+      normalizedTargetUserId,
+      retirement.reason,
+      retirement.idempotencyKey,
+      retirement.requestId
+    )
+    return { deleted: { ok: true as const, id: outcome.id }, outcome }
+  } catch (error) {
+    if (error instanceof DesktopUserRetirementError) {
+      if (error.code === 'not_found') return { error: 'not_found' as const }
+      if (error.code === 'invalid_input') return { error: 'invalid_retirement_input' as const }
+      if (error.code === 'idempotency_conflict') return { error: 'idempotency_conflict' as const }
+      return { error: 'retirement_conflict' as const }
+    }
+    throw error
   }
-  return { deleted }
 }
 
 export async function resendManagedInvitationForUser(managerUserId: string, invitationId: string) {

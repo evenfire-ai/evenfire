@@ -1,0 +1,27 @@
+name: Image guard
+
+# Runs on dev, not on pull_request and not on main.
+#
+# Not pull_request: an image first exists only AFTER a merge to dev, so a
+# PR-triggered guard would red-fail the very PR that adds an image, which can
+# then never merge.
+#
+# Not main: main is far behind dev (33 commits at the time of writing), so a
+# main-triggered guard fires roughly once per release, leaving a newly-private
+# or amd64-only image to break the dev mirror for a full release cycle first.
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Published images are public and multi-arch
+    runs-on: ubuntu-latest
+    if: github.repository == 'evenfire-ai/evenfire'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: node scripts/ci/check-image-visibility.mjs

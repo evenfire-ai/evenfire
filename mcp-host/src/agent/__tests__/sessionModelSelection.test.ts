@@ -91,6 +91,17 @@ describe('applySessionModelSelection (R2 shared core)', () => {
     expect(resolved).toEqual({ model: 'claude-haiku-4-5' })
   })
 
+  it('fails closed when an exact session key is already owned by another subject', async () => {
+    await cm.getOrCreate(sessionKey, { userId: 'different-owner' })
+
+    await expect(
+      applySessionModelSelection(makeDeps(cm), USER, HOST, CHAT, 'claude-haiku-4-5')
+    ).rejects.toMatchObject({
+      name: 'ConversationError',
+      code: 'CONV_OWNERSHIP_MISMATCH',
+    })
+  })
+
   it('(b) rejects a non-allowlisted model and leaves the existing selection unchanged', async () => {
     // Seed a valid prior selection on the session.
     const seeded = await cm.getOrCreate(sessionKey, {

@@ -56,6 +56,17 @@ data:
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_INTERVAL_MS: "5000"
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_BATCH_SIZE: "10"
   APPROVAL_RL_REQUEST_PER_MIN: "120"
+  # Plugin Workload SDK platform rate limits (issue #348). Per-run SDK quotas
+  # (maxRequestsPerRun / maxNotificationsPerRun) are deprecated and ignored;
+  # limits are enforced over a trailing 60s window (no fixed reset); once
+  # traffic slows below the limit the window drains within ~60s — stepless
+  # recipes are never permanently trapped. Values MUST equal the code defaults
+  # in control-api/src/config.ts (150/120/600/600) — the config deploy-mirror
+  # test fails on drift.
+  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "150"
+  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "120"
+  CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: "600"
   # Hard ceiling for caller-provided ttlSeconds. Defaults to 48h so a client
   # asking for ttlSeconds=604800 (code default) can't freeze a workflow step
   # for a full week. Overlays may tighten further for stricter environments.
@@ -498,7 +509,48 @@ data:
         # clientNotifications) to control-api through this gateway. Same RS256
         # runtime access JWT that the workflow-approvals endpoints accept;
         # control-api authorizes each call against the recipe grant.
+        location = /api/v1/mcp-host/plugin-workload-sdk/capabilities {
+          limit_except GET {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/v2 {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
         location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        # JIT credential tickets are issued immediately before each
+        # provider attempt (including an ordered fallback target). Keep this
+        # route on the same mcp-host JWT gateway as the initial authorization;
+        # otherwise promptBridge authorizes successfully and then fails at
+        # the gateway before the provider or credential broker is reached.
+        location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket {
           limit_except POST {
             deny all;
           }
@@ -538,6 +590,40 @@ data:
         }
 
         location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/status$ {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        # SDK-only promptBridge finalization is the atomic accounting boundary:
+        # it closes the physical provider attempt, logical invocation, and
+        # exact/unknown spend outcome in one control-api transaction. Keep it
+        # behind the same mcp-host JWT gateway as invocation status; omitting
+        # this route lets the provider execute while the runtime can only
+        # surface provider_unavailable after the result is already billable.
+        location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$ {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        # Provider-attempt status is part of the promptBridge audit contract.
+        # It must remain behind the same mcp-host JWT gateway as invocation
+        # status; otherwise the provider call can be authorized and issued a
+        # JIT ticket, but the runtime cannot close the attempt lease.
+        location ~ ^/api/v1/mcp-host/plugin-workload-sdk/provider-attempts/[^/]+/status$ {
           limit_except POST {
             deny all;
           }

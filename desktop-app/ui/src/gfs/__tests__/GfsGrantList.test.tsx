@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { GfsGrantList } from '../GfsGrantList'
-import type { GfsGrantListItem } from '../delegation.types'
+import type { GfsGrantListItem, GfsShareListItem } from '../delegation.types'
 
 /**
  * "Who has access" list (Manage modal). Rows resolve host subjects to agent
@@ -27,6 +27,18 @@ function grantItem(overrides: Partial<GfsGrantListItem>): GfsGrantListItem {
     subject: { type: 'host', id: '1st:mcp-host/chatllm' },
     permissions: ['read'],
     inherit: false,
+    ...overrides,
+  }
+}
+
+function shareItem(overrides: Partial<GfsShareListItem>): GfsShareListItem {
+  return {
+    id: 'share-1',
+    drive: 'main',
+    resourceId: 'res-1',
+    subject: { type: 'team', id: 'team-1' },
+    permissions: ['read'],
+    includeDescendants: true,
     ...overrides,
   }
 }
@@ -63,6 +75,28 @@ describe('GfsGrantList', () => {
     expect(screen.getByText('1st:mcp-host/unknown')).toBeTruthy()
   })
 
+  it('labels a host subject by its displayName, falling back to the identifier when blank', () => {
+    render(
+      <GfsGrantList
+        agents={[
+          { id: '1st:mcp-host/withdisplay', name: 'withdisplay', displayName: 'Support Bot' },
+          { id: '1st:mcp-host/blankdisplay', name: 'blankdisplay', displayName: '   ' },
+        ]}
+        items={[
+          grantItem({ id: 'g-1', subject: { type: 'host', id: '1st:mcp-host/withdisplay' } }),
+          grantItem({ id: 'g-2', subject: { type: 'host', id: '1st:mcp-host/blankdisplay' } }),
+        ]}
+        onRevoke={vi.fn()}
+        subjects={subjects}
+      />
+    )
+
+    // Present displayName wins over the identifier.
+    expect(screen.getByText('Support Bot')).toBeTruthy()
+    // A whitespace-only displayName must NOT render a blank label — fall back to the id-based name.
+    expect(screen.getByText('blankdisplay')).toBeTruthy()
+  })
+
   it('fires the revoke callback from the row button with an accessible name', () => {
     const onRevoke = vi.fn()
     const item = grantItem({ id: 'grant-1' })
@@ -71,6 +105,32 @@ describe('GfsGrantList', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Revoke access for Chat LLM' }))
 
     expect(onRevoke).toHaveBeenCalledWith(item, 'Chat LLM')
+  })
+
+  it('combines direct shares with grants and routes share revoke separately', () => {
+    const onRevoke = vi.fn()
+    const onRevokeShare = vi.fn()
+    const share = shareItem({})
+    render(
+      <GfsGrantList
+        agents={agents}
+        items={[grantItem({})]}
+        onRevoke={onRevoke}
+        onRevokeShare={onRevokeShare}
+        shares={[share]}
+        subjects={subjects}
+      />
+    )
+
+    const shareRow = screen.getByTestId('gfs-access-row-share-share-1')
+    expect(within(shareRow).getByText('Share · team')).toBeTruthy()
+    expect(within(shareRow).getByText('Includes contents')).toBeTruthy()
+    fireEvent.click(
+      within(shareRow).getByRole('button', { name: 'Revoke shared access for Core Team' })
+    )
+
+    expect(onRevokeShare).toHaveBeenCalledWith(share, 'Core Team')
+    expect(onRevoke).not.toHaveBeenCalled()
   })
 
   it('renders manage_acl_required as a quiet informational banner instead of the list', () => {
@@ -112,6 +172,6 @@ describe('GfsGrantList', () => {
   it('renders an empty notice when nothing has been granted', () => {
     render(<GfsGrantList agents={agents} items={[]} onRevoke={vi.fn()} subjects={subjects} />)
 
-    expect(screen.getByText('No one has been granted access yet.')).toBeTruthy()
+    expect(screen.getByText('No direct grants or shares yet.')).toBeTruthy()
   })
 })

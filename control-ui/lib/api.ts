@@ -55,6 +55,10 @@ export type Metadata = {
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
 const ADMIN_TOKEN_STORAGE_KEY = 'controlUiAdminToken'
 const API_REQUEST_TIMEOUT_MS = 30000
+// Legacy JSON GFS uploads send file bytes base64-encoded inside a request body. The
+// v2 path uses binary indexed parts and does not use this timeout/body contract;
+// this constant remains only for the compatibility helper and old API callers.
+export const GFS_UPLOAD_TIMEOUT_MS = 300000
 const inFlightGetRequests = new Map<string, Promise<unknown>>()
 let sessionEpoch = 0
 type ApiRequestOptions = {
@@ -81,7 +85,7 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
   return JSON.parse(text)
 }
 
-function formatApiError(res: Response, text: string): Error {
+export function formatApiError(res: Response, text: string): Error {
   let detail = text
   let parsedBody: Record<string, unknown> | null = null
   try {
@@ -161,10 +165,15 @@ async function apiPublicPost<T>(path: string, body: unknown): Promise<T> {
 
 async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs: number = API_REQUEST_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS)
+  // A non-positive or non-finite override means "use the default", never "abort
+  // immediately" — this matches the server proxy's resolveProxyTimeoutMs semantics.
+  const effectiveTimeoutMs =
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : API_REQUEST_TIMEOUT_MS
+  const timeoutId = window.setTimeout(() => controller.abort(), effectiveTimeoutMs)
   const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
   try {
     return await fetch(input, {
@@ -249,17 +258,22 @@ export async function apiSend(
   path: string,
   body?: unknown,
   query: Record<string, string | undefined> = {},
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  options: { timeoutMs?: number } = {}
 ) {
-  const res = await fetchWithTimeout(`${API_BASE}${path}${qs(query)}`, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders(),
-      ...extraHeaders,
+  const res = await fetchWithTimeout(
+    `${API_BASE}${path}${qs(query)}`,
+    {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+        ...extraHeaders,
+      },
+      body: body ? JSON.stringify(body) : undefined,
     },
-    body: body ? JSON.stringify(body) : undefined,
-  })
+    options.timeoutMs
+  )
   if (!res.ok) {
     const text = await res.text()
     if (res.status === 401) {
@@ -528,6 +542,17 @@ export type ControlAdminListItem = {
   status: 'active' | 'disabled' | 'pending_password'
   passwordPending?: boolean
   invitationId?: string
+  gfsOperatorLink?: {
+    desktopUserId: string
+    controlAdminId: string
+    source: 'initial_setup' | 'unknown'
+    createdAt: string | null
+    status: 'active' | 'inactive_admin' | 'revoked' | 'error'
+    generation?: number | null
+    rowVersion?: number | null
+    revocationReason?: string | null
+  } | null
+  gfsOperatorLinkStatus?: 'none' | 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
   createdAt: string
 }
@@ -614,6 +639,56 @@ export async function cancelControlAdminInvitation(invitationId: string): Promis
 export async function deleteControlAdmin(adminId: string): Promise<{ deleted: true }> {
   return apiSend('DELETE', `/api/v1/admin/control-admins/${adminId}`) as Promise<{
     deleted: true
+  }>
+}
+
+export async function revokeControlAdminGfsOperatorLink(
+  adminId: string,
+  payload: { rowVersion?: number | null; reason?: string } = {}
+): Promise<{
+  revoked: boolean
+  gfsOperatorLinkStatus: 'revoked'
+  controlAdminId: string
+  desktopUserId: string | null
+  generation?: number | null
+  rowVersion?: number | null
+}> {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link`,
+    payload
+  ) as Promise<{
+    revoked: boolean
+    gfsOperatorLinkStatus: 'revoked'
+    controlAdminId: string
+    desktopUserId: string | null
+    generation?: number | null
+    rowVersion?: number | null
+  }>
+}
+
+export async function reactivateControlAdminGfsOperatorLink(
+  adminId: string,
+  payload: { rowVersion: number; reason: string }
+): Promise<{
+  reactivated: boolean
+  gfsOperatorLinkStatus: 'active' | 'revoked'
+  controlAdminId: string
+  desktopUserId: string | null
+  generation?: number | null
+  rowVersion?: number | null
+}> {
+  return apiSend(
+    'POST',
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link/reactivate`,
+    payload
+  ) as Promise<{
+    reactivated: boolean
+    gfsOperatorLinkStatus: 'active' | 'revoked'
+    controlAdminId: string
+    desktopUserId: string | null
+    generation?: number | null
+    rowVersion?: number | null
   }>
 }
 
@@ -764,6 +839,9 @@ export type ContextSharedFileSystemStatus = {
 }
 export type ContextSpec = {
   contextId: string
+  // Editable, human-visible name (free text). Optional/new: existing contexts
+  // won't have it, so consumers fall back to `metadata.name`.
+  displayName?: string
   description?: string
   mcpServers: string[]
   sharedFileSystems?: ContextSharedFileSystemRef[]
@@ -886,6 +964,16 @@ export type AdminUser = {
 // `keys` are the Secret's data-key NAMES only (never values); the detail bundle
 // populates them via listHostSecrets. Optional for compat with older payloads.
 export type HostSecretResource = { name: string; keys?: string[] }
+
+/**
+ * Host/LLM Secret metadata only. `keys` are Kubernetes data-key names; values
+ * are never returned. SDK target editors use this rather than recipe-scoped
+ * sandbox secrets because promptBridge credentials resolve from host Secrets.
+ */
+export async function listLlmHostSecrets() {
+  return apiGet('/api/v1/admin/secrets') as Promise<{ items?: HostSecretResource[] }>
+}
+
 export type HostDetailBundle = {
   host: HostResource
   contexts: ContextResource[]
@@ -989,7 +1077,10 @@ export async function createContext(payload: { metadata: { name: string }; spec:
   return apiSend('POST', '/api/v1/admin/contexts', payload) as Promise<ContextResource>
 }
 
-export async function updateContext(name: string, payload: { spec: ContextSpec }) {
+export async function updateContext(
+  name: string,
+  payload: { metadata: { resourceVersion: string }; spec: ContextSpec }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/contexts/${encodeURIComponent(name)}`,
@@ -2061,12 +2152,62 @@ export async function deleteAdminTeam(teamId: string) {
   }>
 }
 
+export type DeleteAdminUserRequest = {
+  /** Persisted with the governed retirement operation for its audit trail. */
+  reason?: string
+  /** Reuse this on a transport retry of the same user action. */
+  idempotencyKey?: string
+  /** Connects the browser request to the Control API retirement audit row. */
+  correlationId?: string
+}
+
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function generateRetirementRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  // The Control API accepts a correlation header only when it is UUID-shaped.
+  // This compatibility branch keeps embedded/legacy browser retries traceable.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, marker => {
+    const nibble = Math.floor(Math.random() * 16)
+    return (marker === 'x' ? nibble : (nibble & 0x3) | 0x8).toString(16)
+  })
+}
+
+/** Creates one stable request identity for all transport retries in a UI operation. */
+export function createDeleteAdminUserRequest(
+  reason = 'control_ui_user_retirement'
+): Required<DeleteAdminUserRequest> {
+  return {
+    reason,
+    idempotencyKey: generateRetirementRequestId(),
+    correlationId: generateRetirementRequestId(),
+  }
+}
+
 /**
- * Hard-deletes the user account (CASCADE on profile and personal access).
- * Team memberships cascade; teams are retained even when this leaves them with no members.
+ * Retires the user through the governed lifecycle contract. A caller may retain
+ * the supplied key when retrying the same action; an ordinary UI action gets a
+ * new request identity and an explicit audit reason.
  */
-export async function deleteAdminUser(userId: string) {
-  return apiSend('DELETE', `/api/v1/admin/users/${encodeURIComponent(userId)}`) as Promise<{
+export async function deleteAdminUser(userId: string, request: DeleteAdminUserRequest = {}) {
+  const idempotencyKey = request.idempotencyKey?.trim() || generateRetirementRequestId()
+  const providedCorrelationId = request.correlationId?.trim() || ''
+  const correlationId = UUID_ANY_RE.test(providedCorrelationId)
+    ? providedCorrelationId.toLowerCase()
+    : generateRetirementRequestId()
+  const reason = request.reason?.trim() || 'control_ui_user_retirement'
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/users/${encodeURIComponent(userId)}`,
+    { reason },
+    {},
+    {
+      'Idempotency-Key': idempotencyKey,
+      'x-correlation-id': correlationId,
+    }
+  ) as Promise<{
     deleted: boolean
     id: string
   }>
@@ -3187,8 +3328,24 @@ export type PluginWorkloadSdkModelPolicy = {
   maxCostUsd?: number
 }
 
+export type PluginWorkloadSdkPromptTarget = {
+  targetRef: string
+  provider: string
+  model: string
+  // Identity of a provider-owned secret data key; never a secret value.
+  credentialSlot: string
+}
+
 export type PluginWorkloadSdkQuotaLimits = {
+  /**
+   * @deprecated No longer enforced (issue #348); platform per-minute ENV rate
+   * limits apply. Still returned on legacy grants; never sent by this UI.
+   */
   maxRequestsPerRun?: number
+  /**
+   * @deprecated No longer enforced (issue #348); platform per-minute ENV rate
+   * limits apply. Still returned on legacy grants; never sent by this UI.
+   */
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
@@ -3201,8 +3358,9 @@ export type PluginWorkloadSdkGrant = {
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
   // Explicit provider bound to a promptBridge grant (R1). `null` for older
-  // grants written before the column existed (and for clientNotifications) —
-  // the form falls back to inferProviderFromModels when reading a null provider.
+  // grants written before the column existed (and for clientNotifications).
+  // Null promptBridge grants are legacy/unreviewed; the editor must require an
+  // explicit operator resave and never infer a routable provider from models.
   provider: string | null
   allowedModels: string[]
   allowedEventTypes: string[]
@@ -3211,8 +3369,32 @@ export type PluginWorkloadSdkGrant = {
   allowedCallers: string[]
   quotaLimits: PluginWorkloadSdkQuotaLimits
   modelPolicies: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef: string | null
+  policyState: 'active' | 'legacy_unreviewed' | 'revoking' | 'disabled'
+  revocationId: string | null
+  policyRevision: number
   createdAt: string
   updatedAt: string
+}
+
+export type PluginWorkloadSdkLegacyGrantInventoryItem = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  policyState: string
+  policyRevision: number
+  providerPresent: boolean
+  promptTargetsCount: number
+  defaultTargetRefPresent: boolean
+  reasons: string[]
+}
+
+export type PluginWorkloadSdkLegacyGrantInventory = {
+  totalPromptBridgeGrants: number
+  legacyPromptBridgeGrants: number
+  activationReady: boolean
+  items: PluginWorkloadSdkLegacyGrantInventoryItem[]
 }
 
 export type PluginWorkloadSdkGrantInput = {
@@ -3226,8 +3408,13 @@ export type PluginWorkloadSdkGrantInput = {
   allowedTargetRefs?: string[]
   allowedUserRefs?: string[]
   allowedCallers?: string[]
-  quotaLimits?: PluginWorkloadSdkQuotaLimits
+  // Input type omits the deprecated per-run keys (issue #348): this UI never
+  // sends them and the server strips them on write. The response
+  // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
+  quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets?: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef?: string
 }
 
 export type PluginWorkloadSdkQuotaCounter = {
@@ -3271,6 +3458,16 @@ export async function listPluginWorkloadSdkGrants(filter?: {
     recipeNamespace: filter?.recipeNamespace,
     recipeName: filter?.recipeName,
   }) as Promise<{ items?: PluginWorkloadSdkGrant[] }>
+}
+
+export async function getPluginWorkloadSdkLegacyInventory(filter?: {
+  recipeNamespace?: string
+  recipeName?: string
+}): Promise<PluginWorkloadSdkLegacyGrantInventory> {
+  return apiGet('/api/v1/admin/plugin-workload-sdk/legacy-inventory', {
+    recipeNamespace: filter?.recipeNamespace,
+    recipeName: filter?.recipeName,
+  }) as Promise<PluginWorkloadSdkLegacyGrantInventory>
 }
 
 export async function upsertPluginWorkloadSdkGrant(

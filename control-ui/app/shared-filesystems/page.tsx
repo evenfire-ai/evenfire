@@ -2,7 +2,6 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAuth } from '@components/AuthContext'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconSharedFiles } from '@components/Sidebar/icons'
@@ -20,7 +19,6 @@ import {
   getSharedFileSystems,
   isSilentApiError,
 } from '@lib/api'
-import { buildControlUiLoginPath, getCurrentControlUiPath } from '@lib/authRedirect'
 
 const SHARED_FILE_SYSTEM_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
@@ -44,10 +42,9 @@ const DELETE_REFRESH_ATTEMPTS = 6
  * NetworkPolicies in the background.
  */
 export default function SharedFileSystemsPage() {
-  const { authState } = useAuth()
   const router = useRouter()
   const { showToast } = useToast()
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [items, setItems] = useState<SharedFileSystemResource[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -118,16 +115,8 @@ export default function SharedFileSystemsPage() {
   }, [])
 
   useEffect(() => {
-    if (authState.isLoggedIn && !authState.isLoading) {
-      void load()
-    }
-  }, [authState.isLoggedIn, authState.isLoading, load])
-
-  useEffect(() => {
-    if (!authState.isLoading && !authState.isLoggedIn) {
-      router.replace(buildControlUiLoginPath(getCurrentControlUiPath()))
-    }
-  }, [authState.isLoading, authState.isLoggedIn, router])
+    void load()
+  }, [load])
 
   async function handleDelete(name: string) {
     if (deletingNames.has(name)) return
@@ -150,38 +139,6 @@ export default function SharedFileSystemsPage() {
       markDeleting(name, false)
       showToast(e instanceof Error ? e.message : 'Delete failed', { tone: 'error' })
     }
-  }
-
-  if (authState.isLoading) {
-    return (
-      <DashboardLayout>
-        <div className="cu-card cu-card--viewport-fill">
-          <TablePanelHeader
-            title={
-              <>
-                <IconSharedFiles />
-                Agent Files
-              </>
-            }
-            subtitle="Workspace volumes that Contexts can mount read-only into agent pods."
-          />
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <TableHeaderRow columns={SHARED_FILE_SYSTEM_COLUMNS} />
-              </thead>
-              <tbody>
-                <SkeletonTableRows columns={SHARED_FILE_SYSTEM_COLUMNS.length} rows={5} />
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </DashboardLayout>
-    )
-  }
-
-  if (!authState.isLoggedIn) {
-    return null
   }
 
   const normalizedSearch = searchQuery.trim().toLowerCase()
@@ -261,67 +218,71 @@ export default function SharedFileSystemsPage() {
                 <TableHeaderRow columns={SHARED_FILE_SYSTEM_COLUMNS} />
               </thead>
               <tbody>
-                {filteredItems.map(item => {
-                  const name = item.metadata?.name || ''
-                  const isDeleting = deletingNames.has(name)
-                  const status = item.status || {}
-                  const mountedBy = status.mountedByContexts || []
-                  const phase = status.phase || 'Unknown'
-                  const phaseClass =
-                    phase === 'Ready'
-                      ? 'cu-badge cu-badge--ok'
-                      : phase === 'Failed' || phase === 'Degraded'
-                        ? 'cu-badge cu-badge--error'
-                        : 'cu-badge'
-                  return (
-                    <tr
-                      key={name}
-                      className="cu-table__row cu-table__row--clickable"
-                      onClick={() => {
-                        if (!isDeleting) {
-                          router.push(CONTROL_ROUTES.agentFiles.detail(name))
-                        }
-                      }}
-                      onKeyDown={e => {
-                        if (isDeleting) return
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          router.push(CONTROL_ROUTES.agentFiles.detail(name))
-                        }
-                      }}
-                      tabIndex={0}
-                      role="link"
-                      aria-label={`Open shared filesystem ${name}`}
-                    >
-                      <td>
-                        <span className="cu-link">{name}</span>
-                      </td>
-                      <td>
-                        <span className={phaseClass}>{phase}</span>
-                      </td>
-                      <td>{status.capacity || item.spec?.size || '—'}</td>
-                      <td>{status.storageClassName || item.spec?.storageClassName || '—'}</td>
-                      <td>
-                        {mountedBy.length === 0
-                          ? '—'
-                          : mountedBy.map(c => `${c.namespace}/${c.name}`).join(', ')}
-                      </td>
-                      <td style={{ textAlign: 'right' }} onClick={e => e.stopPropagation()}>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                          onClick={() => setDeleteTarget(name)}
-                          disabled={isDeleting}
-                          aria-label={
-                            isDeleting ? `Deleting ${name}` : `Delete shared filesystem ${name}`
+                {isInitialLoad ? (
+                  <SkeletonTableRows columns={SHARED_FILE_SYSTEM_COLUMNS.length} rows={5} />
+                ) : (
+                  filteredItems.map(item => {
+                    const name = item.metadata?.name || ''
+                    const isDeleting = deletingNames.has(name)
+                    const status = item.status || {}
+                    const mountedBy = status.mountedByContexts || []
+                    const phase = status.phase || 'Unknown'
+                    const phaseClass =
+                      phase === 'Ready'
+                        ? 'cu-badge cu-badge--ok'
+                        : phase === 'Failed' || phase === 'Degraded'
+                          ? 'cu-badge cu-badge--error'
+                          : 'cu-badge'
+                    return (
+                      <tr
+                        key={name}
+                        className="cu-table__row cu-table__row--clickable"
+                        onClick={() => {
+                          if (!isDeleting) {
+                            router.push(CONTROL_ROUTES.agentFiles.detail(name))
                           }
-                        >
-                          <IconX width={16} height={16} />
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
+                        }}
+                        onKeyDown={e => {
+                          if (isDeleting) return
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            router.push(CONTROL_ROUTES.agentFiles.detail(name))
+                          }
+                        }}
+                        tabIndex={0}
+                        role="link"
+                        aria-label={`Open shared filesystem ${name}`}
+                      >
+                        <td>
+                          <span className="cu-link">{name}</span>
+                        </td>
+                        <td>
+                          <span className={phaseClass}>{phase}</span>
+                        </td>
+                        <td>{status.capacity || item.spec?.size || '—'}</td>
+                        <td>{status.storageClassName || item.spec?.storageClassName || '—'}</td>
+                        <td>
+                          {mountedBy.length === 0
+                            ? '—'
+                            : mountedBy.map(c => `${c.namespace}/${c.name}`).join(', ')}
+                        </td>
+                        <td style={{ textAlign: 'right' }} onClick={e => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                            onClick={() => setDeleteTarget(name)}
+                            disabled={isDeleting}
+                            aria-label={
+                              isDeleting ? `Deleting ${name}` : `Delete shared filesystem ${name}`
+                            }
+                          >
+                            <IconX width={16} height={16} />
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
               </tbody>
             </table>
           </div>

@@ -150,6 +150,7 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.open).toHaveBeenCalledWith({
         recipeNs: 'sandbox-recipes',
         recipeName: 'sales-crm',
+        title: "Andy's Sales CRM",
         defaultPath: '/',
         bounds: {
           x: 16,
@@ -188,6 +189,9 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.open).toHaveBeenCalledWith({
         recipeNs: 'sandbox-recipes',
         recipeName: 'task-board',
+        // Host-owned title: consent prompts and notification attribution read
+        // this, so it must come from the app list, never from the plugin.
+        title: 'Agentic Task Board',
         defaultPath: '/',
         routePath: '/tasks/task-42',
         bounds: {
@@ -270,6 +274,37 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.close).toHaveBeenCalledTimes(1)
       expect(onBackToConversation).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('keeps a long conversation return label available to assistive technology and hover text', async () => {
+    const title =
+      'A deliberately long conversation title that must remain available to assistive technology'
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(
+      <SandboxUiPage
+        conversationOrigin={{ agentName: 'sales-agent', chatId: 'chat-123', title }}
+        onBackToConversation={vi.fn()}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    const button = await screen.findByRole('button', { name: `Back to ${title}` })
+
+    expect(button.getAttribute('title')).toBe(`Back to ${title}`)
+    expect(button.querySelector('span')?.textContent).toBe(`Back to ${title}`)
   })
 
   it('keeps the app mounted when returning to the conversation fails', async () => {

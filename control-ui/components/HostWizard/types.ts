@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react'
-import type { ChannelType } from '../../lib/channelTypes'
 
 export type McpServer = {
   metadata?: { name?: string; namespace?: string }
@@ -8,19 +7,9 @@ export type McpServer = {
 export type SecretMeta = {
   metadata?: { name?: string; namespace?: string }
   name?: string
+  // Data-key names only; Secret values are never included in this response.
+  keys?: string[]
   type?: string
-}
-
-export type { ChannelType }
-
-export type ChannelProvider = Extract<ChannelType, 'telegram' | 'slack'>
-
-export type NewChannelDraft = {
-  slackBotHandle: string
-  slackReplyOnlyWhenMentioned: boolean
-  slackReplyInThreads: boolean
-  telegramBotHandle: string
-  telegramReplyOnlyWhenMentioned: boolean
 }
 
 export type ContextOption = {
@@ -36,6 +25,16 @@ export type ChannelOption = {
   spec: Record<string, unknown>
 }
 
+// A sibling resource this wizard run created via a create-only POST, tracked so
+// a later failure (before the Host exists) can compensate it with an inverse
+// DELETE. ONLY POSTs succeeded by THIS submit are recorded — never inferred from
+// slug or label ownership. The channel `mode=existing` PUT is an edit of a
+// pre-existing resource and is NEVER tracked here.
+export type CreatedResource = {
+  kind: 'secret' | 'context' | 'communication-channel'
+  name: string
+}
+
 export type HostWizardProps = {
   existingSecrets: SecretMeta[]
   mcpServers: McpServer[]
@@ -48,6 +47,7 @@ export type HostWizardProps = {
 export type WizardSelectOption = {
   label: ReactNode
   meta?: ReactNode
+  providers?: { id: string; label: string }[]
   value: string
 }
 

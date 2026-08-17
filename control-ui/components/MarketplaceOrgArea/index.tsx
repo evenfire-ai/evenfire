@@ -1,6 +1,5 @@
 'use client'
 
-import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useInboundGrants } from '../../lib/hooks/useInboundGrants'
 import { useRegistryCapability } from '../../lib/hooks/useRegistryCapability'
@@ -10,6 +9,7 @@ import { OwnedEntries } from '../PublisherView/OwnedEntries'
 import { RetryBanner } from '../PublisherView/RetryBanner'
 import RegistryApiKeysPanel from '../RegistryApiKeysPanel'
 import RegistryConnectPanel from '../RegistryConnectPanel'
+import { IconStore } from '../Sidebar/icons'
 import { TabBar } from '../TabBar'
 import { TablePanelHeader } from '../TablePanelHeader'
 
@@ -48,18 +48,6 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
   const { capability, loading, error, reload } = useRegistryCapability()
   const inbound = useInboundGrants()
 
-  const orgName = capability?.orgName ?? null
-  const orgLabel = orgName ? `@${orgName}` : loading ? 'Organization' : 'Your org'
-  // Once we know the org, its name is a shortcut into the org's own published
-  // plugins (the Entries tab). While the name is still resolving, keep it plain
-  // text so we don't link a placeholder label.
-  const orgTitle = orgName ? (
-    <Link className="cu-link" href={CONTROL_ROUTES.marketplace.orgEntries}>
-      {orgLabel}
-    </Link>
-  ) : (
-    orgLabel
-  )
   const orgScope = capability?.scope ?? null
   const canManageOrg = capability?.canManageOrg === true
   // Cross-org sharing availability, mirrored from the inbound-grants probe.
@@ -69,8 +57,16 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
   return (
     <section>
       <div className="cu-card cu-card--viewport-fill">
+        <TablePanelHeader
+          title={
+            <>
+              <IconStore />
+              Marketplace
+            </>
+          }
+          subtitle="Everything your org owns on the registry"
+        />
         <MarketplaceTabs active="org" />
-        <TablePanelHeader title={orgTitle} subtitle="Everything your org owns on the registry" />
         <div className="cu-card__body">
           <TabBar<OrgAreaTab>
             ariaLabel="Organization sections"

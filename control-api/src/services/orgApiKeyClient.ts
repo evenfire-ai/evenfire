@@ -1,16 +1,21 @@
 import { config } from '../config.js'
 import { rootLogger } from '../observability/logger.js'
 import type { AdminUserRecord } from './adminAuthService.js'
+import {
+  isRegistryIdentityCacheGenerationCurrent,
+  withCurrentRegistryIdentity,
+} from './registryIdentityCache.js'
 import { mintIdentityVoucher } from './registryVoucher.js'
 
 const API_BASE = `${config.registryUrl}/api/v1`
 
-/** Per-admin cache of the exchanged registry USER token. Keyed by admin.id;
- *  evicted only on a 401 from a gated call (authoritative invalidation).
- *  No TTL / no sessionVersion — see spec §3.3. */
-const userTokenCache = new Map<string, string>()
+/** Per-admin cache of the exchanged registry USER token. */
+const userTokenCache = new Map<string, { generation: number; token: string }>()
+const pendingUserTokenRequests = new Map<string, { generation: number; promise: Promise<string> }>()
+
 export function __resetUserTokenCacheForTests(): void {
   userTokenCache.clear()
+  pendingUserTokenRequests.clear()
 }
 
 /** Error carrying an HTTP status the route maps to a response. `.message` is a
@@ -96,11 +101,31 @@ async function exchangeVoucher(admin: AdminUserRecord): Promise<string> {
 }
 
 async function getUserToken(admin: AdminUserRecord): Promise<string> {
-  const cached = userTokenCache.get(admin.id)
-  if (cached) return cached
-  const token = await exchangeVoucher(admin)
-  userTokenCache.set(admin.id, token)
-  return token
+  return withCurrentRegistryIdentity(
+    generation => {
+      const cached = userTokenCache.get(admin.id)
+      if (cached?.generation === generation) return Promise.resolve(cached.token)
+
+      const pending = pendingUserTokenRequests.get(admin.id)
+      if (pending?.generation === generation) return pending.promise
+
+      const promise = exchangeVoucher(admin)
+        .then(token => {
+          if (isRegistryIdentityCacheGenerationCurrent(generation)) {
+            userTokenCache.set(admin.id, { generation, token })
+          }
+          return token
+        })
+        .finally(() => {
+          if (pendingUserTokenRequests.get(admin.id)?.promise === promise) {
+            pendingUserTokenRequests.delete(admin.id)
+          }
+        })
+      pendingUserTokenRequests.set(admin.id, { generation, promise })
+      return promise
+    },
+    { staleError: () => new RegistryStatusError('registry_integration_error', 502) }
+  )
 }
 
 /** Parse the registry { error } body into a bare-code RegistryStatusError.

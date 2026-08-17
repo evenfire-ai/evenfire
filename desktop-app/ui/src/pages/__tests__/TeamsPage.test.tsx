@@ -20,6 +20,10 @@ vi.mock('../../hooks/domain/useTeamsDataController', () => ({
   useTeamsDataController: vi.fn(),
 }))
 
+vi.mock('../../hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({ agentDisplayByName: {} }),
+}))
+
 const useTeamsDataControllerMock = vi.mocked(useTeamsDataController)
 
 const ME: SessionMe = {

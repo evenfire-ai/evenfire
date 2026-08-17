@@ -66,6 +66,7 @@ async function createTestApp(
   serviceOverride?: {
     executeStep?: ReturnType<typeof vi.fn>
     configure?: ReturnType<typeof vi.fn>
+    configurePluginWorkloadSdkBootstrap?: ReturnType<typeof vi.fn>
     getStatus?: ReturnType<typeof vi.fn>
   }
 ): Promise<{ baseUrl: string; server: http.Server }> {
@@ -83,6 +84,18 @@ async function createTestApp(
   const service = {
     executeStep: vi.fn().mockResolvedValue({ stepId: 's1', status: 'completed' }),
     configure: vi.fn().mockReturnValue({ configured: true }),
+    configurePluginWorkloadSdkBootstrap: vi.fn().mockResolvedValue({
+      configured: true,
+      ready: true,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      contractVersion: 2,
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
+      defaultTargetRef: 'primary-openai',
+      defaultProvider: 'openai',
+      defaultModel: 'gpt-5.4-mini',
+    }),
     getStatus: vi.fn().mockReturnValue({ ready: true, configured: true }),
     ...serviceOverride,
   }
@@ -355,6 +368,70 @@ describe('workflowRouter — JWT auth middleware', () => {
       expect(body.error).toMatch(/Endpoint requires sub: wrc/)
     } finally {
       server.close()
+    }
+  })
+
+  it('POST /plugin-workload-sdk/bootstrap accepts only public identity and forwards no credential', async () => {
+    const token = await signWorkflowToken({ sub: 'wrc', scopes: ['configure'] })
+    const bootstrap = vi.fn().mockResolvedValue({
+      configured: true,
+      ready: true,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      contractVersion: 2,
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
+      defaultTargetRef: 'primary-openai',
+      defaultProvider: 'openai',
+      defaultModel: 'gpt-5.4-mini',
+    })
+    const { baseUrl, server } = await createTestApp(publicKeyPem, true, {
+      configurePluginWorkloadSdkBootstrap: bootstrap,
+    })
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/workflow/plugin-workload-sdk/bootstrap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          provider: 'openai',
+          model: 'gpt-5.4-mini',
+          apiKey: 'must-not-pass',
+        }),
+      })
+      expect(res.status).toBe(200)
+      expect(bootstrap).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-5.4-mini' })
+    } finally {
+      server.close()
+    }
+  })
+
+  it('rate-limits repeated SDK bootstrap calls per verified recipe', async () => {
+    const recipeName = 'rate-limit-wf'
+    const previousRecipe = process.env.CLERUM_WORKFLOW_RECIPE
+    process.env.CLERUM_WORKFLOW_RECIPE = recipeName
+    const token = await signWorkflowToken({
+      sub: 'wrc',
+      recipeName,
+      scopes: ['configure'],
+    })
+    const { baseUrl, server } = await createTestApp(publicKeyPem, true)
+    try {
+      const request = () =>
+        fetch(`${baseUrl}/api/v1/workflow/plugin-workload-sdk/bootstrap`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ provider: 'openai', model: 'gpt-5.4-mini' }),
+        })
+      for (let index = 0; index < 60; index += 1) {
+        expect((await request()).status).toBe(200)
+      }
+      const limited = await request()
+      expect(limited.status).toBe(429)
+      expect(limited.headers.get('retry-after')).toBeTruthy()
+    } finally {
+      server.close()
+      if (previousRecipe === undefined) delete process.env.CLERUM_WORKFLOW_RECIPE
+      else process.env.CLERUM_WORKFLOW_RECIPE = previousRecipe
     }
   })
 

@@ -26,7 +26,11 @@ import {
   IconWorkflows,
 } from '@components/SidebarNav/icons'
 import { WorkflowRunArtifactActions } from '@components/WorkflowRunArtifactActions'
-import { AGENT_ERROR_CODE_LABELS, SESSION_PREVIEW_LIMIT } from '@constants/agents'
+import {
+  AGENT_ERROR_CODE_LABELS,
+  CHAT_NEAR_BOTTOM_THRESHOLD_PX,
+  SESSION_PREVIEW_LIMIT,
+} from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
 import type { ChatMessageAttachment } from '../../../../src/types'
 import {
@@ -49,10 +53,48 @@ import { NudgeArea } from './NudgeArea'
 
 type ChatThreadProps = {
   showAgentLabel?: boolean
+  onScrollPositionChange?: (isScrolledAwayFromBottom: boolean) => void
 }
-
 type RenderableChatMessage = AgentChatMessage & {
   messageKey: string
+}
+
+const VIRTUAL_MESSAGE_GROUPS_PER_CHUNK = 8
+
+type ChunkableMessageGroup = {
+  groupKey: string
+  items: Array<Pick<RenderableChatMessage, 'serverTurnNumber'>>
+}
+
+export function buildMessageGroupChunks<T extends ChunkableMessageGroup>(
+  groupedWithKeys: T[]
+): Array<{
+  chunkKey: string
+  groups: Array<{ group: T; groupIndex: number }>
+}> {
+  const chunks: Array<{
+    chunkKey: string
+    groups: Array<{ group: T; groupIndex: number }>
+  }> = []
+  const seenBaseKeys = new Set<string>()
+  let lastBaseKey: string | null = null
+  for (const [groupIndex, group] of groupedWithKeys.entries()) {
+    const firstTurn = group.items[0]?.serverTurnNumber
+    const baseKey =
+      firstTurn !== undefined
+        ? `server-turns-${Math.floor((firstTurn - 1) / (VIRTUAL_MESSAGE_GROUPS_PER_CHUNK / 2))}`
+        : `local-${group.groupKey}`
+    const current = chunks.at(-1)
+    if (current && lastBaseKey === baseKey) {
+      current.groups.push({ group, groupIndex })
+    } else {
+      const chunkKey = seenBaseKeys.has(baseKey) ? `${baseKey}#${group.groupKey}` : baseKey
+      seenBaseKeys.add(baseKey)
+      chunks.push({ chunkKey, groups: [{ group, groupIndex }] })
+      lastBaseKey = baseKey
+    }
+  }
+  return chunks
 }
 
 type WorkflowArtifactScope = {
@@ -173,18 +215,28 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
   )
 }
 
-export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
+export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
   const { decideApproval } = useNotificationsContext()
   const {
     activeMessages,
     groupedMessages,
     chatMessagesLoading,
+    hasOlderMessages,
+    olderMessagesLoading,
+    handleLoadOlderMessages,
     activeChatId,
     activityByMessageId,
     progressByMessageId,
   } = useChatThreadStateContext()
-  const { chatList, chatListLoading, sessionStateByChatId } = useChatListContext()
+  const {
+    chatList,
+    chatListLoading,
+    chatListMoreLoading = false,
+    chatListHasMoreRemoteSessions = false,
+    loadMoreChatSessions,
+    sessionStateByChatId,
+  } = useChatListContext()
   const {
     chatEndRef,
     handleSelectChat: onSelectChat,
@@ -204,21 +256,32 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
   } | null>(null)
   const dedicatedSessionsRef = useRef<HTMLDivElement | null>(null)
   const sessionRenameInputRef = useRef<HTMLInputElement | null>(null)
+  const chatThreadRef = useRef<HTMLDivElement | null>(null)
   const sessionRenameClosedRef = useRef(false)
   const chatListRef = useRef(chatList)
   const copyResetTimeoutRef = useRef<number | null>(null)
 
   const groupedWithKeys = useMemo(
     () =>
-      groupedMessages.map((group, groupIndex) => ({
-        ...group,
-        groupKey: `${group.role}-${groupIndex}`,
-        items: group.items.map((message, messageIndex) => ({
-          ...message,
-          messageKey: `${message.timestamp}-${groupIndex}-${messageIndex}`,
-        })),
-      })),
+      groupedMessages.map((group, groupIndex) => {
+        const first = group.items[0]
+        const last = group.items.at(-1)
+        const firstKey = first?.id ?? first?.timestamp ?? groupIndex
+        const lastKey = last?.id ?? last?.timestamp ?? groupIndex
+        return {
+          ...group,
+          groupKey: `${group.role}-${firstKey}-${lastKey}-${group.items.length}`,
+          items: group.items.map(message => ({
+            ...message,
+            messageKey: message.id,
+          })),
+        }
+      }),
     [groupedMessages]
+  )
+  const messageGroupChunks = useMemo(
+    () => buildMessageGroupChunks(groupedWithKeys),
+    [groupedWithKeys]
   )
 
   const localMessageIds = useMemo(
@@ -233,7 +296,8 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
       ),
     [chatList]
   )
-  const hasMoreSessions = sortedChats.length > SESSION_PREVIEW_LIMIT
+  const hasMoreSessions =
+    sortedChats.length > SESSION_PREVIEW_LIMIT || chatListHasMoreRemoteSessions
   const visibleChats = showAllSessions ? sortedChats : sortedChats.slice(0, SESSION_PREVIEW_LIMIT)
 
   const isDedicatedAgentView = !activeChatId
@@ -241,6 +305,24 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
   useEffect(() => {
     chatListRef.current = chatList
   }, [chatList])
+
+  useEffect(() => {
+    const chatThread = chatThreadRef.current
+    if (!chatThread || !activeChatId) {
+      onScrollPositionChange?.(false)
+      return
+    }
+
+    const updateScrollPosition = () => {
+      const distanceFromBottom =
+        chatThread.scrollHeight - chatThread.scrollTop - chatThread.clientHeight
+      onScrollPositionChange?.(distanceFromBottom > CHAT_NEAR_BOTTOM_THRESHOLD_PX)
+    }
+
+    updateScrollPosition()
+    chatThread.addEventListener('scroll', updateScrollPosition, { passive: true })
+    return () => chatThread.removeEventListener('scroll', updateScrollPosition)
+  }, [activeChatId, chatMessagesLoading, groupedWithKeys, onScrollPositionChange])
 
   useEffect(() => {
     if (renamingSessionId && sessionRenameInputRef.current) {
@@ -258,7 +340,11 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
   }, [])
 
   useEffect(() => {
-    if (chatList.length <= SESSION_PREVIEW_LIMIT && showAllSessions) {
+    if (
+      chatList.length <= SESSION_PREVIEW_LIMIT &&
+      !chatListHasMoreRemoteSessions &&
+      showAllSessions
+    ) {
       setShowAllSessions(false)
     }
     if (sessionMenuChatId && !chatList.some(chat => chat.id === sessionMenuChatId)) {
@@ -268,7 +354,13 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
       setRenamingSessionId(null)
       setSessionRenameValue('')
     }
-  }, [chatList, renamingSessionId, sessionMenuChatId, showAllSessions])
+  }, [
+    chatList,
+    chatListHasMoreRemoteSessions,
+    renamingSessionId,
+    sessionMenuChatId,
+    showAllSessions,
+  ])
 
   useEffect(() => {
     if (!sessionMenuChatId) return
@@ -413,7 +505,7 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
   const renderHydratedToolSteps = useCallback(
     (message: RenderableChatMessage) => {
       const toolSteps = message.toolSteps
-      if (!toolSteps || toolSteps.length === 0) return null
+      if (!Array.isArray(toolSteps) || toolSteps.length === 0) return null
       const steps: ProgressStep[] = toolSteps.map((s, i) => ({
         toolCallId: `${message.id}-tool-${i}`,
         toolName: s.toolName,
@@ -445,185 +537,210 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
 
   return (
     <div
+      ref={chatThreadRef}
       data-testid="message-list"
       className={`chat-thread ${isDedicatedAgentView ? 'chat-thread-dedicated' : ''}`}
     >
+      {activeChatId && hasOlderMessages && (
+        <div className="chat-history-page-control">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={olderMessagesLoading}
+            onClick={() => void handleLoadOlderMessages()}
+          >
+            {olderMessagesLoading ? 'Loading older messages…' : 'Load older messages'}
+          </Button>
+        </div>
+      )}
       {activeChatId &&
-        groupedWithKeys.map((group, groupIndex) => {
-          const prevGroup = groupIndex > 0 ? groupedWithKeys[groupIndex - 1] : null
+        messageGroupChunks.map(chunk => (
+          <div key={chunk.chunkKey} className="virtualized-message-chunk">
+            {chunk.groups.map(({ group, groupIndex }) => {
+              const prevGroup = groupIndex > 0 ? groupedWithKeys[groupIndex - 1] : null
 
-          return (
-            <Fragment key={group.groupKey}>
-              <section className={`chat-group ${group.role}`}>
-                {group.items.map((message, messageIndex) => {
-                  const parsedUserMessage =
-                    message.role === 'user' ? parseChatMessageDisplay(message.content) : null
-                  const displayContent = parsedUserMessage?.content ?? message.content
-                  const displayAttachments =
-                    message.role === 'user'
-                      ? message.attachments && message.attachments.length
-                        ? message.attachments
-                        : (parsedUserMessage?.attachments ?? [])
-                      : message.attachments && message.attachments.length
-                        ? message.attachments
-                        : []
-                  const hasResponseFileAttachment = displayAttachments.some(
-                    attachment => attachment.type === 'response_file'
-                  )
-                  const isJson = looksLikeJson(displayContent)
-                  const htmlPreview =
-                    message.role === 'assistant' ? extractHtmlVisualization(displayContent) : null
-                  const hasHtmlArtifactMention =
-                    message.role === 'assistant' &&
-                    /\b[a-zA-Z0-9][a-zA-Z0-9._-]*\.html?\b/i.test(displayContent)
-                  const showMetaRow = message.role === 'assistant' || message.role === 'user'
-                  const copyContent = message.role === 'user' ? displayContent : message.content
-                  const metaRowRoleClass =
-                    message.role === 'user'
-                      ? 'chat-message-meta-row--user'
-                      : message.role === 'assistant'
-                        ? 'chat-message-meta-row--assistant'
-                        : ''
-                  const isLastAssistantMessage =
-                    group.role === 'assistant' && messageIndex === group.items.length - 1
-                  const workflowArtifactScopeForAssistant =
-                    message.role === 'assistant' && prevGroup?.role === 'user'
-                      ? (prevGroup.items
-                          .map(prevMessage =>
-                            extractWorkflowArtifactScopeFromProgress(
-                              progressByMessageId[prevMessage.id]
-                            )
-                          )
-                          .find((scope): scope is WorkflowArtifactScope => scope !== null) ?? null)
-                      : null
-                  return (
-                    <article
-                      key={message.messageKey}
-                      data-testid={message.role === 'assistant' ? 'agent-response' : undefined}
-                      className={`chat-bubble ${message.role}${message.isError ? ' chat-bubble--error' : ''}${
-                        htmlPreview || hasHtmlArtifactMention ? ' chat-bubble--wide' : ''
-                      }`}
-                    >
-                      {message.isError ? (
-                        <div className="error-bubble-content">
-                          <div className="error-bubble-icon">✕</div>
-                          <div className="error-bubble-body">
-                            <div className="error-bubble-label">
-                              {AGENT_ERROR_CODE_LABELS[message.errorCode ?? ''] ?? 'Error'}
-                              {message.errorProvider
-                                ? ` · ${message.errorProvider.toUpperCase()}`
-                                : ''}
+              return (
+                <Fragment key={group.groupKey}>
+                  <section className={`chat-group ${group.role}`}>
+                    {group.items.map((message, messageIndex) => {
+                      const parsedUserMessage =
+                        message.role === 'user' ? parseChatMessageDisplay(message.content) : null
+                      const displayContent = parsedUserMessage?.content ?? message.content
+                      const displayAttachments =
+                        message.role === 'user'
+                          ? message.attachments && message.attachments.length
+                            ? message.attachments
+                            : (parsedUserMessage?.attachments ?? [])
+                          : message.attachments && message.attachments.length
+                            ? message.attachments
+                            : []
+                      const hasResponseFileAttachment = displayAttachments.some(
+                        attachment => attachment.type === 'response_file'
+                      )
+                      const isJson = looksLikeJson(displayContent)
+                      const htmlPreview =
+                        message.role === 'assistant'
+                          ? extractHtmlVisualization(displayContent)
+                          : null
+                      const hasHtmlArtifactMention =
+                        message.role === 'assistant' &&
+                        /\b[a-zA-Z0-9][a-zA-Z0-9._-]*\.html?\b/i.test(displayContent)
+                      const showMetaRow = message.role === 'assistant' || message.role === 'user'
+                      const copyContent = message.role === 'user' ? displayContent : message.content
+                      const metaRowRoleClass =
+                        message.role === 'user'
+                          ? 'chat-message-meta-row--user'
+                          : message.role === 'assistant'
+                            ? 'chat-message-meta-row--assistant'
+                            : ''
+                      const isLastAssistantMessage =
+                        group.role === 'assistant' && messageIndex === group.items.length - 1
+                      const workflowArtifactScopeForAssistant =
+                        message.role === 'assistant' && prevGroup?.role === 'user'
+                          ? (prevGroup.items
+                              .map(prevMessage =>
+                                extractWorkflowArtifactScopeFromProgress(
+                                  progressByMessageId[prevMessage.id]
+                                )
+                              )
+                              .find((scope): scope is WorkflowArtifactScope => scope !== null) ??
+                            null)
+                          : null
+                      return (
+                        <article
+                          key={message.messageKey}
+                          data-testid={message.role === 'assistant' ? 'agent-response' : undefined}
+                          className={`chat-bubble ${message.role}${message.isError ? ' chat-bubble--error' : ''}${
+                            htmlPreview || hasHtmlArtifactMention ? ' chat-bubble--wide' : ''
+                          }`}
+                        >
+                          {message.isError ? (
+                            <div className="error-bubble-content">
+                              <div className="error-bubble-icon">✕</div>
+                              <div className="error-bubble-body">
+                                <div className="error-bubble-label">
+                                  {AGENT_ERROR_CODE_LABELS[message.errorCode ?? ''] ?? 'Error'}
+                                  {message.errorProvider
+                                    ? ` · ${message.errorProvider.toUpperCase()}`
+                                    : ''}
+                                </div>
+                                <div className="error-bubble-message">
+                                  {message.content.length > 180
+                                    ? `${message.content.slice(0, 177)}...`
+                                    : message.content}
+                                </div>
+                                <details className="error-bubble-details">
+                                  <summary>Details</summary>
+                                  <pre className="error-bubble-details-text">{message.content}</pre>
+                                </details>
+                              </div>
                             </div>
-                            <div className="error-bubble-message">
-                              {message.content.length > 180
-                                ? `${message.content.slice(0, 177)}...`
-                                : message.content}
-                            </div>
-                            <details className="error-bubble-details">
-                              <summary>Details</summary>
-                              <pre className="error-bubble-details-text">{message.content}</pre>
-                            </details>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          {htmlPreview && (
-                            <SecureHtmlPreview
-                              html={htmlPreview}
-                              previewId={message.messageKey}
-                              title="HTML visualization"
-                              maxBytes={HTML_PREVIEW_INLINE_MAX_BYTES}
-                            />
-                          )}
-                          {isJson ? (
-                            <pre className="message-block json-content">{displayContent}</pre>
-                          ) : message.role === 'assistant' ? (
-                            <div className="message-block markdown-content">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {displayContent}
-                              </ReactMarkdown>
-                              {selectedAgent && !hasResponseFileAttachment && (
-                                <MessageArtifactActions
-                                  hostRef={selectedAgent}
-                                  content={displayContent}
+                          ) : (
+                            <>
+                              {htmlPreview && (
+                                <SecureHtmlPreview
+                                  html={htmlPreview}
+                                  previewId={message.messageKey}
+                                  title="HTML visualization"
+                                  maxBytes={HTML_PREVIEW_INLINE_MAX_BYTES}
                                 />
                               )}
-                              {workflowArtifactScopeForAssistant ? (
-                                <WorkflowRunArtifactActions
-                                  workflow={workflowArtifactScopeForAssistant}
-                                />
+                              {isJson ? (
+                                <pre className="message-block json-content">{displayContent}</pre>
+                              ) : message.role === 'assistant' ? (
+                                <div className="message-block markdown-content">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {displayContent}
+                                  </ReactMarkdown>
+                                  {selectedAgent && !hasResponseFileAttachment && (
+                                    <MessageArtifactActions
+                                      hostRef={selectedAgent}
+                                      content={displayContent}
+                                    />
+                                  )}
+                                  {workflowArtifactScopeForAssistant ? (
+                                    <WorkflowRunArtifactActions
+                                      workflow={workflowArtifactScopeForAssistant}
+                                    />
+                                  ) : null}
+                                </div>
+                              ) : displayContent ? (
+                                <p className="message-block">{displayContent}</p>
                               ) : null}
-                            </div>
-                          ) : displayContent ? (
-                            <p className="message-block">{displayContent}</p>
-                          ) : null}
-                          <MessageAttachmentList attachments={displayAttachments} />
-                        </>
-                      )}
-                      {isLastAssistantMessage &&
-                        prevGroup?.role === 'user' &&
-                        (() => {
-                          // Prefer the live progress (keyed by the user message);
-                          // fall back to the assistant's persisted toolSteps after
-                          // a reload, when the live map is empty (#582).
-                          const liveNodes = prevGroup.items
-                            .map(msg => renderProgressStepper(msg, 'completed'))
-                            .filter((node): node is ReactElement => node != null)
-                          if (liveNodes.length > 0) return liveNodes
-                          return renderHydratedToolSteps(message)
-                        })()}
-                      {showMetaRow && (
-                        <footer className={`chat-message-meta-row ${metaRowRoleClass}`.trim()}>
-                          <div className="chat-message-meta-main">
-                            <span className="chat-time-label">
-                              {formatChatTimestamp(message.timestamp || Date.now())}
-                            </span>
-                            {message.role === 'assistant' && message.tokens && (
-                              <MessageTokens tokens={message.tokens} />
-                            )}
-                          </div>
-                          <IconButton
-                            className={`message-copy-button message-copy-button--inline${
-                              copiedMessageKey === message.messageKey ? ' copied' : ''
-                            }`}
-                            onClick={() => void handleCopyMessage(message.messageKey, copyContent)}
-                            aria-label={
-                              copiedMessageKey === message.messageKey ? 'Copied' : 'Copy text'
-                            }
-                            label={copiedMessageKey === message.messageKey ? 'Copied' : 'Copy text'}
-                            size="xs"
-                            variant="ghost"
-                          >
-                            <svg viewBox="0 0 24 24" aria-hidden="true">
-                              <path fill="none" d="M0 0h24v24H0V0z" />
-                              <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
-                            </svg>
-                            {copiedMessageKey === message.messageKey && (
-                              <span className="copy-tooltip">Copied!</span>
-                            )}
-                          </IconButton>
-                        </footer>
-                      )}
-                    </article>
-                  )
-                })}
-              </section>
-              {group.role === 'user' &&
-                group.items.map(message => {
-                  const node = renderProgressStepper(message, 'non-completed')
-                  if (!node) return null
-                  return (
-                    <section
-                      key={`progress-${message.messageKey}`}
-                      className="chat-group assistant"
-                    >
-                      <div className="chat-bubble assistant">{node}</div>
-                    </section>
-                  )
-                })}
-            </Fragment>
-          )
-        })}
+                              <MessageAttachmentList attachments={displayAttachments} />
+                            </>
+                          )}
+                          {isLastAssistantMessage &&
+                            prevGroup?.role === 'user' &&
+                            (() => {
+                              // Prefer the live progress (keyed by the user message);
+                              // fall back to the assistant's persisted toolSteps after
+                              // a reload, when the live map is empty (#582).
+                              const liveNodes = prevGroup.items
+                                .map(msg => renderProgressStepper(msg, 'completed'))
+                                .filter((node): node is ReactElement => node != null)
+                              if (liveNodes.length > 0) return liveNodes
+                              return renderHydratedToolSteps(message)
+                            })()}
+                          {showMetaRow && (
+                            <footer className={`chat-message-meta-row ${metaRowRoleClass}`.trim()}>
+                              <div className="chat-message-meta-main">
+                                <span className="chat-time-label">
+                                  {formatChatTimestamp(message.timestamp || Date.now())}
+                                </span>
+                                {message.role === 'assistant' && message.tokens && (
+                                  <MessageTokens tokens={message.tokens} />
+                                )}
+                              </div>
+                              <IconButton
+                                className={`message-copy-button message-copy-button--inline${
+                                  copiedMessageKey === message.messageKey ? ' copied' : ''
+                                }`}
+                                onClick={() =>
+                                  void handleCopyMessage(message.messageKey, copyContent)
+                                }
+                                aria-label={
+                                  copiedMessageKey === message.messageKey ? 'Copied' : 'Copy text'
+                                }
+                                label={
+                                  copiedMessageKey === message.messageKey ? 'Copied' : 'Copy text'
+                                }
+                                size="xs"
+                                variant="ghost"
+                              >
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                  <path fill="none" d="M0 0h24v24H0V0z" />
+                                  <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
+                                </svg>
+                                {copiedMessageKey === message.messageKey && (
+                                  <span className="copy-tooltip">Copied!</span>
+                                )}
+                              </IconButton>
+                            </footer>
+                          )}
+                        </article>
+                      )
+                    })}
+                  </section>
+                  {group.role === 'user' &&
+                    group.items.map(message => {
+                      const node = renderProgressStepper(message, 'non-completed')
+                      if (!node) return null
+                      return (
+                        <section
+                          key={`progress-${message.messageKey}`}
+                          className="chat-group assistant"
+                        >
+                          <div className="chat-bubble assistant">{node}</div>
+                        </section>
+                      )
+                    })}
+                </Fragment>
+              )
+            })}
+          </div>
+        ))}
       {activeChatId && chatMessagesLoading && groupedWithKeys.length === 0 && (
         <section className="chat-group assistant" aria-label="Loading conversation">
           <div className="chat-bubble assistant chat-loading-bubble">
@@ -788,14 +905,37 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
                 <span className="agent-dedicated-sessions-meta">
                   {sortedChats.length} {sortedChats.length === 1 ? 'session' : 'sessions'}
                 </span>
-                {hasMoreSessions && (
+                {hasMoreSessions && !showAllSessions && (
                   <Button
                     color="neutral"
-                    onClick={() => setShowAllSessions(previous => !previous)}
+                    onClick={() => setShowAllSessions(true)}
                     size="xs"
                     variant="text"
                   >
-                    {showAllSessions ? 'Show less' : 'Show more'}
+                    Show more
+                  </Button>
+                )}
+                {showAllSessions && sortedChats.length > SESSION_PREVIEW_LIMIT && (
+                  <Button
+                    color="neutral"
+                    onClick={() => setShowAllSessions(false)}
+                    size="xs"
+                    variant="text"
+                  >
+                    Show less
+                  </Button>
+                )}
+                {showAllSessions && chatListHasMoreRemoteSessions && loadMoreChatSessions && (
+                  <Button
+                    color="neutral"
+                    disabled={chatListMoreLoading}
+                    onClick={() => {
+                      void loadMoreChatSessions()
+                    }}
+                    size="xs"
+                    variant="text"
+                  >
+                    {chatListMoreLoading ? 'Loading…' : 'Load more'}
                   </Button>
                 )}
               </div>

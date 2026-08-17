@@ -10,9 +10,13 @@ control_admin_revoked_tokens	legacy_dml
 control_admin_users	legacy_dml
 gfs_audit	legacy_dml
 gfs_blob_manifests	none
+gfs_desktop_operator_links	link_lifecycle
+desktop_user_retirement_operations	link_lifecycle
 gfs_grants	legacy_dml
 gfs_resources	legacy_dml
 gfs_shares	legacy_dml
+gfs_upload_parts	none
+gfs_upload_sessions	none
 governed_event_read_v1	read
 governed_event_stream	append
 governed_run_attribution_bindings	append
@@ -32,9 +36,13 @@ llm_model_prices	legacy_dml
 member_registration_credentials	upsert
 notification_deliveries	legacy_dml
 oauth_grants	legacy_dml
+plugin_workload_sdk_credential_ticket_jtis	legacy_dml
+plugin_workload_sdk_invocation_attempts	legacy_dml
 plugin_workload_sdk_grants	legacy_dml
 plugin_workload_sdk_invocations	legacy_dml
+plugin_workload_sdk_provider_attempts	legacy_dml
 plugin_workload_sdk_quota_counters	legacy_dml
+plugin_workload_sdk_spend_outcomes	append
 profiles	legacy_dml
 rate_limit_buckets	legacy_dml
 registry_connection	legacy_dml

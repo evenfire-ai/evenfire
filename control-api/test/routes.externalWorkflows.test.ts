@@ -18,7 +18,12 @@ const mockIsAdminTokenRevoked = vi.fn()
 
 vi.mock('../src/db.js', () => ({
   pool: {
-    query: (...args: unknown[]) => mockPoolQuery(...args),
+    query: (...args: unknown[]) => {
+      if (String(args[0]).includes('SELECT lifecycle_state, lifecycle_version')) {
+        return Promise.resolve({ rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] })
+      }
+      return mockPoolQuery(...args)
+    },
   },
   withTransaction: (...args: unknown[]) => mockWithTransaction(...args),
 }))
@@ -79,6 +84,7 @@ const USER_SESSION_CLAIMS = {
   email: 'user@example.com',
   teamId: 'team-1',
   role: 'member' as const,
+  authGeneration: 1,
   exp: Math.floor(Date.now() / 1000) + 3600,
 }
 

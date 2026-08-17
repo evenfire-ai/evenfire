@@ -4,6 +4,7 @@ import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
   GfsGrantListItem,
+  GfsShareListItem,
 } from '@/gfs/delegation.types'
 import type { GfsGrantListProps } from './types'
 
@@ -16,13 +17,15 @@ import type { GfsGrantListProps } from './types'
  */
 
 function subjectLabel(
-  subject: GfsGrantListItem['subject'],
+  subject: GfsGrantListItem['subject'] | GfsShareListItem['subject'],
   agents: GfsAgentSubjectOption[],
   subjects: GfsDelegationSubjectOption[]
 ): string {
   if (subject.type === 'host' && subject.id) {
     const agent = agents.find(candidate => candidate.id === subject.id)
-    if (agent) return agent.name
+    // Visible agent name (spec.displayName); fall back to the id-based `name`
+    // when the displayName is absent or blank/whitespace-only.
+    if (agent) return (agent.displayName ?? '').trim() || agent.name
   }
   if ((subject.type === 'user' || subject.type === 'team') && subject.id) {
     const match = subjects.find(
@@ -35,34 +38,54 @@ function subjectLabel(
 
 export function GfsGrantList({
   items,
+  shares = [],
   loading = false,
   error = null,
+  shareError = null,
   agents,
   subjects,
   onRevoke,
+  onRevokeShare,
   revoking = false,
+  revokingShare = false,
 }: GfsGrantListProps) {
-  if (error) {
+  if (error || shareError) {
     return (
-      <StatusBanner tone={error.severity === 'quiet' ? 'info' : 'error'} text={error.message} />
+      <div className="da-gfs-grant-list__errors" data-testid="gfs-access-list-error">
+        {error ? (
+          <StatusBanner tone={error.severity === 'quiet' ? 'info' : 'error'} text={error.message} />
+        ) : null}
+        {shareError ? (
+          <StatusBanner
+            tone={shareError.severity === 'quiet' ? 'info' : 'error'}
+            text={shareError.message}
+          />
+        ) : null}
+      </div>
     )
   }
-  if (loading && items.length === 0) {
+  if (loading && items.length === 0 && shares.length === 0) {
     return <p className="muted">Loading access…</p>
   }
-  if (items.length === 0) {
-    return <p className="muted">No one has been granted access yet.</p>
+  if (items.length === 0 && shares.length === 0) {
+    return <p className="muted">No direct grants or shares yet.</p>
   }
 
   return (
-    <ul className="da-gfs-grant-list">
+    <ul className="da-gfs-grant-list" aria-label="Resource access">
       {items.map(item => {
         const label = subjectLabel(item.subject, agents, subjects)
         return (
-          <li className="da-gfs-grant-list__row" key={item.id}>
+          <li
+            className="da-gfs-grant-list__row"
+            data-testid={`gfs-access-row-grant-${item.id}`}
+            key={`grant:${item.id}`}
+          >
             <span className="da-gfs-grant-list__identity">
               <span className="da-gfs-grant-list__label">{label}</span>
-              <span className="da-gfs-grant-list__subject-type">{item.subject.type}</span>
+              <span className="da-gfs-grant-list__subject-type">
+                Direct grant · {item.subject.type}
+              </span>
             </span>
             <span className="da-gfs-grant-list__meta">
               <span className="da-gfs-grant-list__chips">
@@ -77,8 +100,46 @@ export function GfsGrantList({
             <Button
               aria-label={`Revoke access for ${label}`}
               color="danger"
+              data-testid={`gfs-revoke-grant-${item.id}`}
               disabled={revoking}
               onClick={() => void onRevoke(item, label)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              Revoke
+            </Button>
+          </li>
+        )
+      })}
+      {shares.map(item => {
+        const label = subjectLabel(item.subject, agents, subjects)
+        return (
+          <li
+            className="da-gfs-grant-list__row"
+            data-testid={`gfs-access-row-share-${item.id}`}
+            key={`share:${item.id}`}
+          >
+            <span className="da-gfs-grant-list__identity">
+              <span className="da-gfs-grant-list__label">{label}</span>
+              <span className="da-gfs-grant-list__subject-type">Share · {item.subject.type}</span>
+            </span>
+            <span className="da-gfs-grant-list__meta">
+              <span className="da-gfs-grant-list__chips">
+                {item.permissions.map(permission => (
+                  <Pill key={permission} size="xs" tone="neutral">
+                    {GFS_PERMISSION_LABELS[permission] ?? permission}
+                  </Pill>
+                ))}
+              </span>
+              {item.includeDescendants ? <Badge tone="accent">Includes contents</Badge> : null}
+            </span>
+            <Button
+              aria-label={`Revoke shared access for ${label}`}
+              color="danger"
+              data-testid={`gfs-revoke-share-${item.id}`}
+              disabled={revokingShare || !onRevokeShare}
+              onClick={() => void onRevokeShare?.(item, label)}
               size="sm"
               type="button"
               variant="outline"

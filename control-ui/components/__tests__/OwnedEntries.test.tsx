@@ -42,6 +42,16 @@ beforeEach(() => {
 })
 
 describe('OwnedEntries', () => {
+  it('renders a skeleton while owned entries load', () => {
+    vi.mocked(api.getOwnedRegistryEntries).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.getOwnedRegistryEntries>
+    )
+    const view = render(<OwnedEntries orgScope="acme" />)
+    expect(screen.getByRole('status', { name: /loading published entries/i })).toBeInTheDocument()
+    expect(screen.queryByText(/Loading your published entries/i)).toBeNull()
+    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+  })
+
   it('renders owned entries with visibility + status', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
@@ -99,7 +109,7 @@ describe('OwnedEntries', () => {
     expect(screen.queryByText('Connector')).toBeNull()
   })
 
-  it('shows Share access only for private entries; public shows a no-grant note', async () => {
+  it('shows Share access only for private entries; public shows no note', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
         { name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' },
@@ -109,7 +119,7 @@ describe('OwnedEntries', () => {
     render(<OwnedEntries orgScope="acme" />)
     await screen.findByText('@acme/db')
     expect(screen.getAllByRole('button', { name: /share access/i })).toHaveLength(1)
-    expect(screen.getByText(/no grant needed/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no grant needed/i)).toBeNull()
   })
 
   it('clicking Share access opens the Grant access modal', async () => {
@@ -123,6 +133,20 @@ describe('OwnedEntries', () => {
     expect(await screen.findByRole('dialog', { name: /grant access/i })).toBeInTheDocument()
     expect(await screen.findByLabelText(/grantee org/i)).toBeInTheDocument()
     expect(api.listOrgGrants).toHaveBeenCalledWith('@acme/db')
+  })
+
+  it('renders a skeleton while grant access details load', async () => {
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [{ name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' }],
+    })
+    vi.mocked(api.listOrgGrants).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.listOrgGrants>
+    )
+    const view = render(<OwnedEntries orgScope="acme" />)
+    fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
+    expect(screen.getByRole('status', { name: /loading grants/i })).toBeInTheDocument()
+    expect(screen.queryByText(/Loading grants/i)).toBeNull()
+    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
   })
 
   it('closing the modal unmounts it from the DOM', async () => {
