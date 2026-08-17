@@ -32,7 +32,10 @@ export interface GuardrailLimits {
   maxRules?: number
   maxHooksPerPhase?: number
   maxHookTimeoutMs?: number
+  /** Tight cap for non-rewrite hook responses (moderate/post_call/on_error). Default 1 MiB. */
   maxHookOutputBytes?: number
+  /** Generous cap for `pre_call` rewrite output — the whole conversation. Default 5 MiB (~1M tokens). */
+  maxHookRewriteBytes?: number
 }
 
 /**

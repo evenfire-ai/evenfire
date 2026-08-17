@@ -266,6 +266,9 @@ export function maybeWrapHookedLlmPort(
   const hooks = buildLlmLaneHooks(config?.hookDescriptors, {
     getAuthToken: deps.getAuthToken ?? (() => ''),
     fetchImpl: deps.fetchImpl,
+    // Per-point response caps from the admin limits block (§5); defaults in the fetcher.
+    maxOutputBytes: config?.limits?.maxHookOutputBytes,
+    maxRewriteBytes: config?.limits?.maxHookRewriteBytes,
   })
   const hasHooks =
     hooks.preCall.length > 0 ||

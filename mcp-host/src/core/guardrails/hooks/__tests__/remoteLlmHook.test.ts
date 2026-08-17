@@ -412,6 +412,20 @@ describe('circuit breaker (§8.6)', () => {
     expect(cf.calls()).toBe(6) // never short-circuited
   })
 
+  it('oversized responses do NOT trip the breaker (response-too-big ≠ hook-down)', async () => {
+    const reg = new HookBreakerRegistry()
+    const oversized: HookFetcher = async () => ({
+      status: 200,
+      body: undefined,
+      unavailable: true,
+      oversized: true,
+    })
+    const h = new RemoteLlmHook(advisory(), oversized, reg, () => 0)
+    for (let i = 0; i < 10; i++) await h.moderate(req()) // far past failureThreshold(3)
+    // Breaker never opens → a small payload that fits would still be dialed.
+    expect(reg.isOpen('http://svc/', 0)).toBe(false)
+  })
+
   it('strict mode never trips (always dials)', async () => {
     const reg = new HookBreakerRegistry()
     const cf = countingFetcher(() => unavailable)

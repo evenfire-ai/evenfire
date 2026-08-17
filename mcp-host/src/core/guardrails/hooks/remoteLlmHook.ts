@@ -131,7 +131,13 @@ export class RemoteLlmHook {
     const res = await this.fetchWithDeadline(args)
     if (engaged) {
       const policy = this.descriptor.onUnavailable!
-      if (res.unavailable) {
+      // "Response too big" (oversized) is NOT a hook-down failure — it must not
+      // trip the breaker (which would then skip small payloads that would fit).
+      // Leave breaker state unchanged for oversized; only a real transport failure
+      // counts, and a reachable response resets it.
+      if (res.oversized) {
+        // no-op on breaker state
+      } else if (res.unavailable) {
         const tripped = this.breakers.recordFailure(
           this.breakerKey(),
           policy.failureThreshold,

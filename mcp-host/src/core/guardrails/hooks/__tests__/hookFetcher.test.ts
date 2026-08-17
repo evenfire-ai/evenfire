@@ -64,3 +64,44 @@ describe('createHookFetcher transport routing', () => {
     expect(res.status).toBe(0)
   })
 })
+
+describe('point-aware response caps (§8.1)', () => {
+  // ~ (chars+10) byte JSON body, valid so pre_call parses when under its cap.
+  const bigFetch = (chars: number): FetchLike => {
+    const body = JSON.stringify({ pad: 'x'.repeat(chars) })
+    return vi.fn(async () => ({ status: 200, text: async () => body }))
+  }
+  const caps = (fetchImpl: FetchLike) =>
+    createHookFetcher({
+      getAuthToken: () => 't',
+      fetchImpl,
+      maxOutputBytes: 100,
+      maxRewriteBytes: 1000,
+    })
+
+  it('pre_call: a large rewrite UNDER the generous rewrite cap is applied (not oversized)', async () => {
+    const f = caps(bigFetch(500))
+    const out = await f({ point: 'pre_call', descriptor: base, body: {} })
+    expect(out.unavailable).toBe(false)
+    expect(out.oversized).toBeFalsy()
+    expect(out.body).toBeDefined()
+  })
+
+  it('moderate: the SAME body exceeds the tight response cap → oversized + unavailable', async () => {
+    const f = caps(bigFetch(500))
+    const out = await f({
+      point: 'moderate',
+      descriptor: { ...base, lifecyclePoints: ['moderate'] },
+      body: {},
+    })
+    expect(out.unavailable).toBe(true)
+    expect(out.oversized).toBe(true)
+  })
+
+  it('pre_call: over EVEN the rewrite cap → oversized + unavailable', async () => {
+    const f = caps(bigFetch(2000))
+    const out = await f({ point: 'pre_call', descriptor: base, body: {} })
+    expect(out.unavailable).toBe(true)
+    expect(out.oversized).toBe(true)
+  })
+})

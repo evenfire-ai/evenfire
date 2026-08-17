@@ -19,6 +19,9 @@ export interface LlmLaneHookDeps {
   getAuthToken: () => string
   /** Injected for tests / a future SSRF-guarded remote transport. */
   fetchImpl?: FetchLike
+  /** Per-point response caps (spec §5/§8.1). Defaults applied in `createHookFetcher`. */
+  maxOutputBytes?: number
+  maxRewriteBytes?: number
 }
 
 export function buildLlmLaneHooks(
@@ -33,7 +36,12 @@ export function buildLlmLaneHooks(
   for (const d of ordered) {
     const hook = new RemoteLlmHook(
       d,
-      createHookFetcher({ getAuthToken: deps.getAuthToken, fetchImpl: deps.fetchImpl })
+      createHookFetcher({
+        getAuthToken: deps.getAuthToken,
+        fetchImpl: deps.fetchImpl,
+        maxOutputBytes: deps.maxOutputBytes,
+        maxRewriteBytes: deps.maxRewriteBytes,
+      })
     )
     if (d.lifecyclePoints.includes('pre_call')) preCall.push(hook)
     if (d.lifecyclePoints.includes('moderate')) moderate.push(hook)

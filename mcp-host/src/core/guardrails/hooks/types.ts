@@ -76,6 +76,12 @@ export interface HookHttpResult {
   status: number
   body: unknown
   unavailable: boolean
+  /**
+   * True when the response was rejected for exceeding the per-point size cap
+   * (§8.1). Still `unavailable` (the response can't be applied), but "response too
+   * big" is NOT a hook-down failure — the §8.6 breaker must not count it.
+   */
+  oversized?: boolean
 }
 
 /** Injected transport: POST the redacted body to `{endpoint}{path}/v1/{point}` and return the parsed result. */

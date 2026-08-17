@@ -28,7 +28,10 @@ export type FetchLike = (
 export interface HookFetcherDeps {
   getAuthToken: () => string
   timeoutMs?: number
+  /** Tight cap for non-rewrite responses (moderate/post_call/on_error/tool). Default 1 MiB. */
   maxOutputBytes?: number
+  /** Generous cap for `pre_call` rewrite output (the whole conversation). Default 5 MiB (~1M tokens). */
+  maxRewriteBytes?: number
   /** In-cluster transport. Defaults to the global `fetch`. */
   fetchImpl?: FetchLike
   /** External (remote) transport. Defaults to the SSRF-guarded impl. Injectable for tests. */
@@ -119,14 +122,24 @@ function makeInClusterFetch(maxBytes: number): FetchLike {
 
 export function createHookFetcher(deps: HookFetcherDeps): HookFetcher {
   const timeoutMs = deps.timeoutMs ?? 5000
-  const maxOutputBytes = deps.maxOutputBytes ?? 65536
-  const inClusterFetch: FetchLike = deps.fetchImpl ?? makeInClusterFetch(maxOutputBytes)
+  // Point-aware response caps (§8.1). A `pre_call` `may_rewrite` output IS the whole
+  // (possibly compressed) conversation — legitimately large — whereas a `moderate`
+  // verdict, a `post_call` redaction, or an `on_error` recovery is small. A single
+  // tight cap for all silently discards rewrites (they blow past 64 KiB) and no-ops
+  // the hook. So: a generous cap for pre_call, a tight cap for everything else.
+  const rewriteCap = deps.maxRewriteBytes ?? 5 * 1024 * 1024 // pre_call: ~1M tokens
+  const responseCap = deps.maxOutputBytes ?? 1 * 1024 * 1024 // moderate / post_call / on_error / tool
+  // The streaming transports enforce only the LARGER ceiling — purely for memory
+  // safety (OOM/flood, §8.6). The per-point APPLICATION cap is checked after parse.
+  const memoryCeiling = Math.max(rewriteCap, responseCap)
+  const inClusterFetch: FetchLike = deps.fetchImpl ?? makeInClusterFetch(memoryCeiling)
   const externalFetch: FetchLike =
-    deps.externalFetchImpl ?? makeSsrfGuardedFetch(timeoutMs, maxOutputBytes)
+    deps.externalFetchImpl ?? makeSsrfGuardedFetch(timeoutMs, memoryCeiling)
 
   return async ({ point, descriptor, body }) => {
     const url = buildHookUrl(descriptor.endpoint, descriptor.path, point)
     const doFetch = descriptor.external ? externalFetch : inClusterFetch
+    const applyCap = point === 'pre_call' ? rewriteCap : responseCap
     try {
       const res = await doFetch(url, {
         method: 'POST',
@@ -138,8 +151,15 @@ export function createHookFetcher(deps: HookFetcherDeps): HookFetcher {
         signal: AbortSignal.timeout(timeoutMs),
       })
       const text = await res.text()
-      if (text.length > maxOutputBytes) {
-        return { status: res.status, body: undefined, unavailable: true } // oversized → unavailable
+      if (text.length > applyCap) {
+        // Over the per-point cap → cannot be applied. NEVER silent (this used to
+        // no-op a rewrite invisibly), and flagged `oversized` so the §8.6 breaker
+        // does NOT count "response too big" as a hook-down failure (§12.4).
+        console.warn(
+          `[Guardrails] hook ${descriptor.id} ${point} response ${text.length}B exceeds the ` +
+            `${point === 'pre_call' ? 'rewrite' : 'response'} cap (${applyCap}B) — discarding as unavailable`
+        )
+        return { status: res.status, body: undefined, unavailable: true, oversized: true }
       }
       let parsed: unknown = {}
       if (text) {
