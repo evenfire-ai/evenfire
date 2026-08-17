@@ -749,10 +749,15 @@ deny-authoritative, but then it must fail-closed (§8.6).
   every dial against a **hard per-hook deadline** (belt-and-braces, §8.6): even a transport that fails to
   settle resolves to **unavailable**, so a hook can never hang the awaiting turn. Exceeding either bound is
   treated as **unavailable** (below).
-- **Body cap — bounded in bytes, while streaming.** Request and response bodies are bounded by
-  `maxHookOutputBytes` (§5); the response is capped **as it streams** and the connection destroyed once it
-  exceeds the cap, so an oversized body is never fully buffered (no memory spike). An over-limit or non-JSON
-  body is rejected → **unavailable**.
+- **Body cap — point-aware, bounded while streaming.** Response caps are **per lifecycle point**: a
+  `pre_call` `may_rewrite` output IS the whole (possibly compressed) conversation — legitimately large — so
+  it gets a **generous** cap (`maxHookRewriteBytes`, default **5 MiB ≈ 1M tokens**), while a `moderate`
+  verdict, `post_call` redaction, or `on_error` recovery gets a **tight** cap (`maxHookOutputBytes`, default
+  **1 MiB**). A single tight cap for all silently discards rewrites (they blow past 64 KiB) and no-ops the
+  hook — see §12.4. The transports enforce only the **larger** ceiling for memory safety (streamed + the
+  connection destroyed once exceeded — no buffering spike); the per-point application cap is checked after
+  parse. An over-cap response is **logged** (never a silent no-op) and mapped to **unavailable**, but flagged
+  `oversized` so the §8.6 breaker does **not** count "response too big" as a hook-down failure.
 - **Status semantics** — `200` returns the endpoint's action body (§8.1 table); a `moderate` `4xx
   {code,message}` is a **fail** (→ `deny`). **`5xx`, timeout, connection error, a malformed/oversized body,
   or a `4xx` that isn't a valid action** are all treated as **hook-unavailable** → the hook's declared
@@ -1447,6 +1452,17 @@ which a guardrail `allow` never bypasses.
 
 ### 12.4 · Known residual risks & follow-ups
 
+- **`pre_call` rewrite silently discarded by a too-tight response cap — RESOLVED (§8.1/§8.6).** The response
+  cap was a single hardcoded 64 KiB (`maxHookOutputBytes` existed in config but was never wired). A
+  `pre_call` `may_rewrite` hook (e.g. a token compactor) returns the whole rewritten conversation, which
+  blows past 64 KiB → mcp-host marked it `unavailable` → for a `failMode: open` advisory hook that's *no
+  contribution* → the original **uncompressed** prompt went to the model, invisibly (the hook logged 200;
+  the fail-open path logged nothing). It also poisoned the breaker (each oversized response counted as a
+  failure → trip after N → the hook skipped for the cooldown, including small payloads that would fit).
+  Fixed: **point-aware caps** (generous `maxHookRewriteBytes` 5 MiB for `pre_call`, tight `maxHookOutputBytes`
+  1 MiB for verdicts/redactions), both **wired from the admin `limits` block**; an over-cap response is now
+  **logged** (never silent) and flagged **`oversized`** so the breaker does not count it. The streaming cap
+  still enforces the larger ceiling for OOM safety.
 - **Hook transport liveness — RESOLVED (§8.1/§8.6).** Earlier the `remote` transport dropped the abort
   signal and relied on a socket **idle** timer (reset by a trickling peer) and capped the body only **after**
   fully buffering it — so an active-but-unbounded hook endpoint (a compromised/hijacked vendor domain, not
