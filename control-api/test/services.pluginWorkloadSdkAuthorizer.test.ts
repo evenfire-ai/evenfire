@@ -17,6 +17,13 @@ vi.mock('../src/db.js', () => ({
   withTransaction: vi.fn(),
 }))
 
+// Issue #348: `consumePeriodQuota` was DELETED from pluginWorkloadSdkDb (the
+// per-run quota leg is gone; any production caller is now a compile error).
+// The hoisted spy keeps the legacy export name mocked so the per-run-inert
+// tests below can assert it is NEVER called — a regression that re-wired the
+// per-run leg through the old symbol would trip these assertions loudly.
+const consumePeriodQuotaSpy = vi.hoisted(() => vi.fn())
+
 vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   const actual = await vi.importActual<typeof import('../src/services/pluginWorkloadSdkDb.js')>(
     '../src/services/pluginWorkloadSdkDb.js'
@@ -27,7 +34,7 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     insertInvocation: vi.fn(),
     reviveFailedInvocation: vi.fn(),
     updateInvocationStatus: vi.fn(),
-    consumePeriodQuota: vi.fn(),
+    consumePeriodQuota: consumePeriodQuotaSpy,
     countRecentInvocations: vi.fn(),
     getInvocationById: vi.fn(),
     getPluginWorkloadSdkAttemptReceipt: vi.fn(),
@@ -83,6 +90,7 @@ function grant(
     defaultTargetRef: 'primary-zai',
     policyState: 'active',
     policyRevision: 1,
+    revocationId: null,
     createdAt: '2026-06-09T00:00:00.000Z',
     updatedAt: '2026-06-09T00:00:00.000Z',
     ...overrides,
@@ -138,7 +146,7 @@ beforeEach(() => {
   vi.mocked(sdkDb.insertInvocation).mockReset()
   vi.mocked(sdkDb.reviveFailedInvocation).mockReset()
   vi.mocked(sdkDb.updateInvocationStatus).mockReset()
-  vi.mocked(sdkDb.consumePeriodQuota).mockReset()
+  consumePeriodQuotaSpy.mockReset()
   vi.mocked(sdkDb.countRecentInvocations).mockReset()
   vi.mocked(sdkDb.getInvocationById).mockReset()
   vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockReset()
@@ -147,7 +155,6 @@ beforeEach(() => {
   vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockReset()
   vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockReset()
   vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(0)
-  vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(true)
   vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockResolvedValue(true)
   vi.mocked(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).mockResolvedValue(true)
   vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue({
@@ -562,24 +569,23 @@ describe('authorizePromptBridge', () => {
       value: { invocationId: 'inv-1', replay: true, status: 'complete' },
     })
     expect(sdkDb.countRecentInvocations).not.toHaveBeenCalled()
-    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+    expect(consumePeriodQuotaSpy).not.toHaveBeenCalled()
   })
 
-  it('marks the invocation failed when period quota is exceeded', async () => {
-    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ quotaLimits: { maxRequestsPerRun: 3 } }))
-    vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(false)
+  it('ignores the deprecated maxRequestsPerRun cap — the per-run leg is inert (issue #348)', async () => {
+    // Pre-#348 this grant denied the invocation via consumeQuota once the
+    // per-run counter was exhausted. The per-run leg is now deleted: even the
+    // tightest possible cap (1) never denies and never touches the period
+    // quota counters.
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ quotaLimits: { maxRequestsPerRun: 1 } }))
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
-    expect(result).toMatchObject({ ok: false, error: 'quota_exceeded' })
-    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith(
-      'inv-1',
-      'failed',
-      expect.objectContaining({
-        completed: true,
-        recipeNamespace: NS,
-        recipeName: RECIPE,
-        expectedAttemptGeneration: 1,
-      })
-    )
+    expect(result).toMatchObject({
+      ok: true,
+      value: { invocationId: 'inv-1', replay: false },
+    })
+    expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
+    expect(consumePeriodQuotaSpy).not.toHaveBeenCalled()
+    expect(sdkDb.updateInvocationStatus).not.toHaveBeenCalled()
   })
 
   it('authorizes a valid request and records the invocation', async () => {
@@ -596,7 +602,9 @@ describe('authorizePromptBridge', () => {
       value: { invocationId: 'inv-1', replay: false, maxOutputTokens: 2048 },
     })
     expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
-    expect(sdkDb.consumePeriodQuota).toHaveBeenCalledOnce()
+    // Issue #348: the per-run leg is inert — no period quota is consumed even
+    // though the grant still carries a legacy maxRequestsPerRun value.
+    expect(consumePeriodQuotaSpy).not.toHaveBeenCalled()
   })
 
   it('authorizes an explicitly approved non-default model', async () => {
@@ -637,10 +645,10 @@ describe('authorizePromptBridge', () => {
       ok: true,
       value: { invocationId: 'inv-1', replay: true, status: 'complete' },
     })
-    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+    expect(consumePeriodQuotaSpy).not.toHaveBeenCalled()
   })
 
-  it('re-consumes quota and revives status for a failed-replay retry', async () => {
+  it('revives status for a failed-replay retry without consuming period quota', async () => {
     const currentGrant = grant({ quotaLimits: { maxRequestsPerRun: 10 } })
     vi.mocked(sdkDb.findGrant).mockResolvedValue(currentGrant)
     vi.mocked(sdkDb.reviveFailedInvocation).mockResolvedValue(2)
@@ -657,9 +665,9 @@ describe('authorizePromptBridge', () => {
     })
     const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
     // A failed replay is a new physical attempt, but it remains the same
-    // logical idempotent invocation and therefore does not consume period
-    // quota a second time.
-    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+    // logical idempotent invocation; with the per-run leg deleted (issue
+    // #348) no path may consume period quota.
+    expect(consumePeriodQuotaSpy).not.toHaveBeenCalled()
     // The retry transition is performed atomically by the DB revive operation.
     expect(sdkDb.reviveFailedInvocation).toHaveBeenCalledWith({
       id: 'inv-1',
@@ -900,6 +908,27 @@ describe('authorizeClientNotification', () => {
     })
   })
 
+  it('ignores the deprecated maxNotificationsPerRun cap — the per-run leg is inert (issue #348)', async () => {
+    // Pre-#348 the notification path consumed one period-quota unit per
+    // accepted notification and denied once maxNotificationsPerRun was
+    // exhausted. The per-run leg is now deleted: even the tightest possible
+    // cap (1) never denies and never touches the period quota counters.
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      notificationGrant({ quotaLimits: { maxNotificationsPerRun: 1 } })
+    )
+    const result = await authorizeClientNotification({
+      claims: claims(),
+      ...baseNotificationParams,
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { notificationId: 'inv-1', replay: false, status: 'accepted' },
+    })
+    expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
+    expect(consumePeriodQuotaSpy).not.toHaveBeenCalled()
+    expect(sdkDb.updateInvocationStatus).not.toHaveBeenCalled()
+  })
+
   it('rate-limits per recipe + eventType', async () => {
     vi.mocked(sdkDb.findGrant).mockResolvedValue(
       notificationGrant({ quotaLimits: { maxNotificationsPerMinute: 2 } })
@@ -960,7 +989,7 @@ describe('authorizeListRecipients', () => {
     expect(result).toMatchObject({ ok: true, value: { allowedUserRefs: refs } })
     // Read-only: no invocation row, no quota consumption.
     expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
-    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+    expect(consumePeriodQuotaSpy).not.toHaveBeenCalled()
   })
 
   it.each(['revoking', 'disabled'] as const)(

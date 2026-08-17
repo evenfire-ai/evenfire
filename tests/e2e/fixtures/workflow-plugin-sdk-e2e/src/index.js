@@ -277,6 +277,21 @@ async function exerciseIdempotency() {
 // The default and explicit-target prompt calls consumed 2 slots; the
 // idempotency replay does NOT consume a slot. Fill the remaining slots, then
 // attempt one beyond.
+//
+// PER-MINUTE WINDOW CAVEAT (issue #348): enforcement moved from a per-run
+// counter (no clock) to a trailing 60s window. Reusing the Phase-1 happy call
+// and the Phase-2 explicit call as 2 of the QUOTA_LIMIT slots means those two
+// rows must still be inside the 60s window when the exceed call fires. Rows are
+// timestamped record-first (call start), but the SPACING between them absorbs
+// real provider latency (up to ~15s/promptBridge fetch + notification
+// transport). If the happy row ages past 60s before the exceed call, the window
+// count drops below the limit and the exceed call is wrongly ACCEPTED — a
+// spurious RED (never a false pass). A deterministic fix requires the gate to
+// reset invocation rows immediately before a tight, self-contained quota burst
+// so earlier phases can't age out of the window; that coordinated gate+fixture
+// change must be validated on a live minikube cert run (deferred). Until then
+// the FAIL reasons below name the window hypothesis so a spurious RED is
+// diagnosable at a glance.
 async function exerciseQuotaEnforcement() {
   try {
     const remaining = QUOTA_LIMIT - 2
@@ -288,7 +303,10 @@ async function exerciseQuotaEnforcement() {
       })
       if (status !== 200) {
         const code = (body && (body.error || body.code)) || `http_${status}`
-        log(`E2E_SDK_QUOTA_EXCEEDED_FAIL=fill_call_failed:${code}`)
+        // A quota/429 here means an EARLIER phase's rows plus these fills already
+        // crossed the per-minute limit within the 60s window (window over-count).
+        const hint = code.includes('quota') || status === 429 ? ':window_overcount' : ''
+        log(`E2E_SDK_QUOTA_EXCEEDED_FAIL=fill_call_failed:${code}${hint}`)
         return
       }
     }
@@ -307,7 +325,10 @@ async function exerciseQuotaEnforcement() {
         log(`E2E_SDK_QUOTA_EXCEEDED_FAIL=wrong_error:${code}`)
       }
     } else {
-      log('E2E_SDK_QUOTA_EXCEEDED_FAIL=call_accepted_after_quota_exhausted')
+      // Accepted when it should have been denied. Under per-minute semantics the
+      // likeliest cause is an earlier filler row aging past the 60s window
+      // before this call, so the in-window count fell below the limit.
+      log('E2E_SDK_QUOTA_EXCEEDED_FAIL=call_accepted_after_quota_exhausted:possible_window_ageout')
     }
   } catch (err) {
     log(`E2E_SDK_QUOTA_EXCEEDED_FAIL=exception:${err && err.message ? err.message : err}`)

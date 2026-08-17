@@ -17,6 +17,7 @@
     "test:native:sandbox-find": "npm run build:main --silent && node ./scripts/run-native-sandbox-find.mjs",
     "test:native:sandbox-shortcut-focus": "npm run build:main --silent && node ./scripts/run-native-sandbox-shortcut-focus.mjs",
     "test:native:chat-workspace-geometry": "node ./scripts/run-native-chat-workspace-geometry.mjs",
+    "test:e2e:gfs-operator": "npm run build && playwright test --config test/e2e-playwright/playwright.gfs-desktop-operator.config.ts",
     "qa:recorder:auth": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-auth.spec.ts",
     "qa:recorder:navigation": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-navigation.spec.ts",
     "qa:recorder:agents": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-agents.spec.ts",

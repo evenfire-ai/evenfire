@@ -1,9 +1,9 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { LlmProviderIcon } from './LlmProviderIcon'
 import { getProviderLabel } from '../lib/llm'
 import type { HostItem, HostLifecycleInfo, HostRef } from './HostTable.types'
+import { LlmProviderIcon } from './LlmProviderIcon'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconRobot } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
@@ -50,15 +50,11 @@ function getHostLifecycleInfo(host: HostItem): HostLifecycleInfo {
 }
 
 export function collectProviderIds(spec: Record<string, unknown>): string[] {
-  const primary = String(
-    (spec.model as { provider?: string } | undefined)?.provider || ''
-  ).trim()
+  const primary = String((spec.model as { provider?: string } | undefined)?.provider || '').trim()
   const fallbacks = Array.isArray(
     (spec.llmPolicy as { fallbacks?: Array<{ provider?: string }> } | undefined)?.fallbacks
   )
-    ? (
-        spec.llmPolicy as { fallbacks: Array<{ provider?: string }> }
-      ).fallbacks
+    ? (spec.llmPolicy as { fallbacks: Array<{ provider?: string }> }).fallbacks
         .map(f => String(f.provider || '').trim())
         .filter(Boolean)
     : []

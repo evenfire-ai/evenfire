@@ -39,6 +39,21 @@ spec:
                 configMapKeyRef:
                   key: EXTERNAL_REST_API_JSON_BODY_LIMIT
                   name: external-rest-api-config
+            - name: EXTERNAL_REST_API_GFS_EDGE_AGGREGATE_RL_PER_MIN
+              valueFrom:
+                configMapKeyRef:
+                  key: EXTERNAL_REST_API_GFS_EDGE_AGGREGATE_RL_PER_MIN
+                  name: external-rest-api-config
+            - name: EXTERNAL_REST_API_GFS_EDGE_AUTHENTICATED_IP_RL_PER_MIN
+              valueFrom:
+                configMapKeyRef:
+                  key: EXTERNAL_REST_API_GFS_EDGE_AUTHENTICATED_IP_RL_PER_MIN
+                  name: external-rest-api-config
+            - name: EXTERNAL_REST_API_GFS_EDGE_TOKEN_IP_RL_PER_MIN
+              valueFrom:
+                configMapKeyRef:
+                  key: EXTERNAL_REST_API_GFS_EDGE_TOKEN_IP_RL_PER_MIN
+                  name: external-rest-api-config
             - name: EXTERNAL_REST_API_CORS_ORIGIN
               value: 'http://localhost:3001'
             - name: EXTERNAL_REST_API_GOOGLE_CLIENT_ID

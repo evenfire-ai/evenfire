@@ -1,5 +1,6 @@
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
+import { gfsDesktopOperatorLinkService } from '../gfsDesktopOperatorLinkService.js'
 import {
   type ControlApiPermissionChange,
   appendControlApiPermissionEventsInTransaction,
@@ -83,23 +84,35 @@ export async function ensureDefaultTeamAndGrants(
  * Provision a desktop identity for an admin email, idempotently, in one
  * transaction: ensure the users row, optionally set its password to the
  * supplied bcrypt hash (`seedPassword`, default true — one credential across
- * Control UI + desktop), then ensure a default team and grants. Safe to re-run.
+ * Control UI + desktop), then ensure a default team and grants. When the narrow
+ * self-hosted link switch is enabled, the exact Control Admin/Desktop pair is
+ * linked in this same transaction. Safe to re-run; returns the exact user id.
  */
-export async function provisionAdminDesktopWorkspace(input: {
+export type AdminDesktopWorkspaceProvisioningInput = {
+  controlAdminId: string
   email: string
   displayName: string
   passwordHash: string
   agentNames: string[]
   contextIds: string[]
+  /** Narrow self-hosted setup switch; false keeps the existing Desktop user path unchanged. */
+  linkDesktopOperator: boolean
+  /** Correlates the initial link event with the public setup request. */
+  requestId?: string | null
   /** When false, skip writing users.password_hash — the desktop password then
    *  comes only from the invitation flow (managed installs). Defaults to
    *  true: the Control-UI human first-run keeps one credential for both apps. */
   seedPassword?: boolean
-}): Promise<void> {
+}
+
+export async function provisionAdminDesktopWorkspace(
+  input: AdminDesktopWorkspaceProvisioningInput,
+  transactionDb?: Pick<DbClient, 'query'>
+): Promise<{ userId: string }> {
   const email = input.email.trim().toLowerCase()
   const name = input.displayName.trim() || null
   const teamLabel = input.displayName.trim() || email
-  await withTransaction(async db => {
+  const provision = async (db: Pick<DbClient, 'query'>): Promise<{ userId: string }> => {
     const existing = await db.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [email])
     let userId = (existing.rows[0] as { id: string } | undefined)?.id
     if (!userId) {
@@ -125,7 +138,22 @@ export async function provisionAdminDesktopWorkspace(input: {
     }
 
     await ensureDefaultTeamAndGrants(db, userId, teamLabel, input.agentNames, input.contextIds)
-  })
+
+    if (input.linkDesktopOperator) {
+      await gfsDesktopOperatorLinkService.linkInTransaction(db, {
+        desktopUserId: userId,
+        controlAdminId: input.controlAdminId,
+        operatorSub: input.controlAdminId,
+        source: 'initial_setup',
+        requestId: input.requestId,
+      })
+    }
+
+    return { userId }
+  }
+
+  if (transactionDb) return provision(transactionDb)
+  return withTransaction(provision)
 }
 
 export async function findMemberByEmail(

@@ -1,0 +1,73 @@
+{
+  "format": "fireworks-tech-graph",
+  "style": 1,
+  "diagramType": "architecture-data-flow",
+  "title": "GFS Upload v2 — PR #311",
+  "subtitle": "Resumable indexed uploads up to 200 MiB",
+  "background": "#e8f7ee",
+  "viewBox": "0 0 1400 920",
+  "source": {
+    "svg": "gfs-upload-v2-pr311.svg",
+    "png": "gfs-upload-v2-pr311.png"
+  },
+  "design": {
+    "style": "Flat Icon",
+    "intent": "Make the Cloudflare per-request boundary, the Control API authority, and durable resume/reconciliation responsibilities visible without crossing arrows.",
+    "greenBackground": "#e8f7ee",
+    "flowColors": {
+      "data": "#2563eb",
+      "control": "#ea580c",
+      "persistence": "#16a34a",
+      "recovery": "#9333ea",
+      "negative": "#dc2626"
+    }
+  },
+  "contract": {
+    "productMaxBytes": 209715200,
+    "preferredPartBytes": 8388608,
+    "hardPartBytes": 16777216,
+    "defaultConcurrency": 4,
+    "instabilityFallbackConcurrency": 2,
+    "instabilityFailureThreshold": 3,
+    "cloudflareRule": "Each data-bearing request stays below the 16 MiB part cap; the 200 MiB file is assembled from indexed parts.",
+    "ambiguousOutcome": "HEAD/status reconciliation; no blind replay when the durable outcome is unknown."
+  },
+  "layers": [
+    {"id": "clients", "label": "Clients", "role": "Visible user journeys"},
+    {"id": "edge", "label": "Edge + authority", "role": "Rate limit, auth, canonical drive, admission"},
+    {"id": "writer", "label": "Writer + persistence", "role": "Indexed parts, leases, checksums, finalization"},
+    {"id": "storage", "label": "Storage", "role": "Staging parts and immutable blob"}
+  ],
+  "nodes": [
+    {"id": "control-ui", "layer": "clients", "label": "Control UI", "detail": "XHR · progress · resume"},
+    {"id": "desktop", "layer": "clients", "label": "Desktop App", "detail": "bounded streams · 4→2 · resume"},
+    {"id": "chunker", "layer": "clients", "label": "Chunk scheduler", "detail": "8 MiB target · 16 MiB hard cap"},
+    {"id": "external-rest", "layer": "edge", "label": "External REST API", "detail": "edge limiter · Retry-After"},
+    {"id": "control-api", "layer": "edge", "label": "Control API", "detail": "owner / drive / token canonical"},
+    {"id": "negative-gate", "layer": "edge", "label": "Negative gate", "detail": "4xx · 429 · geometry · auth"},
+    {"id": "gfsc", "layer": "writer", "label": "GFSC writer", "detail": "indexed parts · checksum · leases"},
+    {"id": "postgres", "layer": "writer", "label": "PostgreSQL", "detail": "sessions · parts · quotas"},
+    {"id": "staging", "layer": "storage", "label": "GFS staging", "detail": "committed part files"},
+    {"id": "blob", "layer": "storage", "label": "Immutable blob", "detail": "published final object"},
+    {"id": "recovery", "layer": "recovery", "label": "Resume / reconcile", "detail": "HEAD + status → missing parts only"}
+  ],
+  "flows": [
+    {"from": "control-ui", "to": "external-rest", "kind": "data", "label": "create + parts"},
+    {"from": "desktop", "to": "external-rest", "kind": "data", "label": "stream parts"},
+    {"from": "external-rest", "to": "control-api", "kind": "control", "label": "authorize + admit"},
+    {"from": "control-api", "to": "gfsc", "kind": "data", "label": "stream bounded body"},
+    {"from": "gfsc", "to": "postgres", "kind": "persistence", "label": "reserve / commit rows"},
+    {"from": "gfsc", "to": "staging", "kind": "persistence", "label": "fsync part"},
+    {"from": "staging", "to": "blob", "kind": "persistence", "label": "ordered publish"},
+    {"from": "gfsc", "to": "recovery", "kind": "recovery", "label": "outcome_unknown"},
+    {"from": "recovery", "to": "chunker", "kind": "recovery", "label": "HEAD/status resume"},
+    {"from": "control-api", "to": "negative-gate", "kind": "negative", "label": "reject before body"}
+  ],
+  "legend": [
+    {"kind": "data", "label": "data path"},
+    {"kind": "control", "label": "auth / control"},
+    {"kind": "persistence", "label": "durable write"},
+    {"kind": "recovery", "label": "resume / reconcile"},
+    {"kind": "negative", "label": "negative response"}
+  ]
+}

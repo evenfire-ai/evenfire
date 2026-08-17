@@ -97,6 +97,27 @@ export interface GfsFactoryConfig {
   syncCopyTimeoutMs?: string
   /** Optional largest mutation body gfsc accepts (bytes), passed through to gfsc. */
   maxWriteBodyBytes?: string
+  /** Strict upload-v2 settings are operator-owned and passed only to gfsc. */
+  uploadV2Enabled?: string
+  uploadProtocolMaxFileBytes?: string
+  uploadProductMaxFileBytes?: string
+  uploadMaxFileBytes?: string
+  uploadPreferredChunkBytes?: string
+  uploadMaxChunkBytes?: string
+  uploadMinPartBytes?: string
+  uploadMaxPartCount?: string
+  uploadSessionTtlMs?: string
+  uploadCompletedReceiptTtlMs?: string
+  uploadStalePartLeaseMs?: string
+  uploadMaxActivePerSubject?: string
+  uploadMaxActiveGlobal?: string
+  uploadMaxConcurrentPartsPerSession?: string
+  uploadMaxConcurrentPartStreamsGlobal?: string
+  uploadInstabilityFailureThreshold?: string
+  uploadMaxConcurrentFinalizations?: string
+  uploadMinFreeBytes?: string
+  uploadPartTimeoutMs?: string
+  uploadFinalizeTimeoutMs?: string
   /** Optional kube-dns Service ClusterIP /32 for GKE NodeLocal DNS + Calico. */
   nodeLocalDnsCidr?: string
 }
@@ -265,6 +286,25 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
     ['GFS_SYNC_COPY_MAX_BYTES', config.syncCopyMaxBytes],
     ['GFS_SYNC_COPY_TIMEOUT_MS', config.syncCopyTimeoutMs],
     ['GFS_MAX_WRITE_BODY_BYTES', config.maxWriteBodyBytes],
+    ['GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES', config.uploadProtocolMaxFileBytes],
+    ['GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', config.uploadProductMaxFileBytes],
+    ['GFS_UPLOAD_MAX_FILE_BYTES', config.uploadMaxFileBytes],
+    ['GFS_UPLOAD_PREFERRED_CHUNK_BYTES', config.uploadPreferredChunkBytes],
+    ['GFS_UPLOAD_MAX_CHUNK_BYTES', config.uploadMaxChunkBytes],
+    ['GFS_UPLOAD_MIN_PART_BYTES', config.uploadMinPartBytes],
+    ['GFS_UPLOAD_MAX_PART_COUNT', config.uploadMaxPartCount],
+    ['GFS_UPLOAD_SESSION_TTL_MS', config.uploadSessionTtlMs],
+    ['GFS_UPLOAD_COMPLETED_RECEIPT_TTL_MS', config.uploadCompletedReceiptTtlMs],
+    ['GFS_UPLOAD_STALE_PART_LEASE_MS', config.uploadStalePartLeaseMs],
+    ['GFS_UPLOAD_MAX_ACTIVE_PER_SUBJECT', config.uploadMaxActivePerSubject],
+    ['GFS_UPLOAD_MAX_ACTIVE_GLOBAL', config.uploadMaxActiveGlobal],
+    ['GFS_UPLOAD_MAX_CONCURRENT_PARTS_PER_SESSION', config.uploadMaxConcurrentPartsPerSession],
+    ['GFS_UPLOAD_MAX_CONCURRENT_PART_STREAMS_GLOBAL', config.uploadMaxConcurrentPartStreamsGlobal],
+    ['GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD', config.uploadInstabilityFailureThreshold],
+    ['GFS_UPLOAD_MAX_CONCURRENT_FINALIZATIONS', config.uploadMaxConcurrentFinalizations],
+    ['GFS_UPLOAD_MIN_FREE_BYTES', config.uploadMinFreeBytes],
+    ['GFS_UPLOAD_PART_TIMEOUT_MS', config.uploadPartTimeoutMs],
+    ['GFS_UPLOAD_FINALIZE_TIMEOUT_MS', config.uploadFinalizeTimeoutMs],
   ]
   const passthroughEnv = passthroughEnvEntries.flatMap(([name, value]): k8s.V1EnvVar[] =>
     value === undefined ? [] : [{ name, value }]
@@ -276,6 +316,9 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
     { name: 'GFS_STORAGE_ROLE', value: role },
     { name: 'GFS_DRIVE_NAME', value: config.driveName },
     { name: 'GFS_TOKEN_AUDIENCE', value: config.tokenAudience },
+    ...(role === 'writer' && config.uploadV2Enabled !== undefined
+      ? [{ name: 'GFS_UPLOAD_V2_ENABLED', value: config.uploadV2Enabled }]
+      : []),
     {
       name: 'GFS_JWT_PUBLIC_KEY',
       valueFrom: {
