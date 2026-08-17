@@ -173,10 +173,14 @@ export function shouldPatchRecipeStatus(
  * when the projection is otherwise identical, `verifiedAt` is refreshed on a
  * throttle: patch only when the newly-computed `verifiedAt` is strictly NEWER
  * than the persisted one AND the persisted one is older than
- * `VERIFIED_AT_REFRESH_MS` (see the inline INVARIANT). Loop-safety rests on that
- * strictly-newer guard alone: an equal-or-older projected timestamp can never
- * trigger a patch, and after any refresh the persisted value equals the
- * projected one, so the next pass is not strictly newer and returns false.
+ * `VERIFIED_AT_REFRESH_MS` (see the inline INVARIANT). The WINDOW clause is the
+ * primary loop-stopper: `verifiedAt` is recomputed fresh on essentially every
+ * proof parse (so the projected timestamp is normally NEWER, not equal), but
+ * right after a refresh `persisted ≈ now`, so `now - persisted` is under the
+ * threshold and no patch fires until the 5-min window reopens — bounding steady
+ * state to ≤1 patch / 5 min. The `projected > persisted` guard is NOT that
+ * bound; it only defends the edge where a future projection carries a STALE
+ * (equal-or-older) timestamp, which must never trigger a patch.
  *
  * A `undefined` projection (paths that do not run the SDK lane, e.g. the
  * workload-status-only refresh) short-circuits to false — that pass has no SDK
@@ -214,11 +218,15 @@ function pluginWorkloadSdkProjectionChanged(
   // signal stays current without a per-reconcile patch loop. INVARIANT: only
   // refresh when the newly-computed verifiedAt is strictly NEWER than the
   // persisted one AND the persisted one is older than VERIFIED_AT_REFRESH_MS.
-  // Requiring projected > persisted is what makes this loop-proof even if a
-  // future projection ever carried a STALE (equal or older) timestamp: such a
-  // projection can never trigger a patch, so patch→reconcile→patch cannot
-  // self-sustain. After any refresh the persisted value equals the projected
-  // one, so the next pass is not strictly newer and returns false.
+  // The WINDOW clause (nowMs - persistedMs > VERIFIED_AT_REFRESH_MS) is the
+  // PRIMARY loop-stopper: verifiedAt is recomputed fresh on essentially every
+  // proof parse, so the projected timestamp is normally NEWER — the loop is not
+  // stopped by the two eventually becoming equal. It is stopped because right
+  // after a refresh persistedMs ≈ nowMs, so (nowMs - persistedMs) is under the
+  // threshold and no patch fires until the 5-min window reopens (≤1 patch/5min).
+  // The projectedMs > persistedMs guard is NOT that bound; it only defends the
+  // edge where a future projection carries a STALE (equal-or-older) timestamp,
+  // which must never trigger a patch.
   if (!projected.verifiedAt) return false
   if (!current.verifiedAt) return true
   const projectedMs = Date.parse(projected.verifiedAt)

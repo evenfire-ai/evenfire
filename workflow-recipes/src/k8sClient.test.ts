@@ -598,6 +598,54 @@ describe('shouldPatchRecipeStatus', () => {
       )
     ).toBe(true)
   })
+
+  // Symmetric to #375 (computed-but-not-published): when a recipe DROPS
+  // spec.pluginWorkloadSdk while a capability is still persisted in status, the
+  // projection computes `capability === null` (clear the field). The
+  // `projected === null` branch is the ONLY thing that publishes that clear — a
+  // regression to `return false` there would leave a stale validated/
+  // awaiting_policy record proclaimed forever.
+  it('patches to clear status.pluginWorkloadSdk when the capability is removed from spec', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        makeWorkflowRecipe({
+          spec: { steps: [] },
+          status: {
+            phase: 'active',
+            message: 'All workloads deployed',
+            pluginWorkloadSdk: {
+              state: 'validated',
+              promptBridge: true,
+              clientNotifications: false,
+            } as never,
+          },
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: { conditions: [], capability: null },
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('does not patch when the capability is absent both in the projection and in status', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        makeWorkflowRecipe({
+          spec: { steps: [] },
+          status: { phase: 'active', message: 'All workloads deployed' },
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: { conditions: [], capability: null },
+        }
+      )
+    ).toBe(false)
+  })
 })
 
 describe('infrastructure telemetry projections', () => {
