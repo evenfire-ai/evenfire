@@ -174,8 +174,9 @@ export function createHookFetcher(deps: HookFetcherDeps): HookFetcher {
     } catch (err) {
       // timeout / connection error / SSRF refusal → unavailable (→ fail-mode, §8.6).
       if (err instanceof SsrfBlockedError) {
+        const safeErrMessage = String(err.message).replace(/[\r\n]+/g, ' ')
         console.warn(
-          `[Guardrails] remote hook ${descriptor.id} blocked by SSRF guard: ${err.message}`
+          `[Guardrails] remote hook ${descriptor.id} blocked by SSRF guard: ${safeErrMessage}`
         )
       }
       return { status: 0, body: undefined, unavailable: true }
