@@ -619,7 +619,7 @@ assert_the_migration_job_renders_the_overlay_the_cluster_runs() {
   if [ "$rc" -eq 0 ] \
      && grep -q "renderDir=.*/deploy/overlays/minikube-ghcr" <<< "$out" \
      && grep -Fq 'newTag: latest' "$(grep -o 'renderDir=.*' <<< "$out" | head -1 | cut -d= -f2-)/../../components/ghcr-images/kustomization.yaml" \
-     && ! grep -Fq "$hardcoded" "$REPO_ROOT/scripts/minikube/pre-gate-sync.sh" \
+     && ! grep -Fq -- "$hardcoded" "$REPO_ROOT/scripts/minikube/pre-gate-sync.sh" \
      && grep -Fq -- '--overlay "${PRE_GATE_RENDER_DIR}"' "$REPO_ROOT/scripts/minikube/pre-gate-sync.sh"; then
     pass "the migration Job renders the overlay (and tag) the cluster actually runs"
   else

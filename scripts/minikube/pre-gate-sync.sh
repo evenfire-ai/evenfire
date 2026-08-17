@@ -534,6 +534,18 @@ if [[ "${cluster_changed}" == "true" ]]; then
     "${SCRIPT_DIR}/pf-all-stack.sh"
   fi
 
+  # Full deploy may regenerate ignored, profile-specific inputs such as the
+  # Kubernetes API-IP patch. Recompute after that generation and before
+  # stamping the marker; otherwise a strict consumer can correctly reject a
+  # marker that describes the pre-generation tree.
+  if ! cluster_fingerprint="$(pre_gate_marker_cluster_fingerprint "${PROJECT_DIR}")"; then
+    log "ERROR: unable to recompute the cluster fingerprint after deployment; refusing to stamp the marker"
+    exit 1
+  fi
+  if ! infra_fingerprint="$(pre_gate_marker_infra_fingerprint "${PROJECT_DIR}")"; then
+    log "ERROR: unable to recompute the infrastructure fingerprint after deployment; refusing to stamp the marker"
+    exit 1
+  fi
   persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}"
   persist_state cluster "${cluster_fingerprint}"
   persist_state infra "${infra_fingerprint}"

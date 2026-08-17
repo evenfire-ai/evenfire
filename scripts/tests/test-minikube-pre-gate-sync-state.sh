@@ -184,6 +184,19 @@ else
   fail "pre-gate sync does not build workflow-runtime-core before dependent package tests"
 fi
 
+final_cluster_fingerprint_line="$(grep -n 'cluster_fingerprint=.*pre_gate_marker_cluster_fingerprint' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+final_infra_fingerprint_line="$(grep -n 'infra_fingerprint=.*pre_gate_marker_infra_fingerprint' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+persist_marker_line="$(grep -nF 'persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}"' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+if [ -n "$final_cluster_fingerprint_line" ] &&
+   [ -n "$final_infra_fingerprint_line" ] &&
+   [ -n "$persist_marker_line" ] &&
+   [ "$final_cluster_fingerprint_line" -lt "$persist_marker_line" ] &&
+   [ "$final_infra_fingerprint_line" -lt "$persist_marker_line" ]; then
+  pass "pre-gate recomputes both fingerprints after generated deploy inputs before stamping the marker"
+else
+  fail "pre-gate can stamp a marker from fingerprints computed before generated deploy inputs"
+fi
+
 marker_failure_dir="$(mktemp -d)"
 mkdir -p "${marker_failure_dir}/bin" "${marker_failure_dir}/repo/control-api"
 printf '#!/usr/bin/env bash\nexit 42\n' >"${marker_failure_dir}/bin/find"
