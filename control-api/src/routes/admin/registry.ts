@@ -11,7 +11,7 @@ import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
-import { syncHookRefsInHosts } from '../../services/hostGuardrailRefs.js'
+import { listHostsReferencingHook, syncHookRefsInHosts } from '../../services/hostGuardrailRefs.js'
 import { createKey, listImages, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
 import type { RegistryEntry } from '../../services/registryClient.js'
 import {
@@ -235,6 +235,83 @@ export function resolveHookTrustLevel(
   if (curated) return column
   const cap = config.defaultHookTrustCap
   return (HOOK_TRUST_ORDER[column] ?? 0) <= (HOOK_TRUST_ORDER[cap] ?? 1) ? column : cap
+}
+
+/**
+ * Host-INDEPENDENT admissibility gates shared by install-hook AND upgrade-hook
+ * (§8.4). resources.ts withholds raw create/update on `llmhooks` precisely so
+ * these run on every install; upgrade-hook is the sanctioned update path and so
+ * must clear the same gates or it becomes a bypass (a low-trust image hook could
+ * "upgrade" to a content-bearing remote target and exfiltrate). Returns the
+ * resolved trust level on success, or a typed rejection (HTTP status + body).
+ * Per-Host gates (trust floor, capability ceiling) stay with the callers, which
+ * hold the Host context.
+ */
+type HookAdmission =
+  | { ok: true; trustLevel: string }
+  | { ok: false; status: number; body: { error: string; reason?: string } }
+
+function assertHookAdmissible(
+  entry: Pick<RegistryEntry, 'name' | 'trust_level' | 'owner_type'>,
+  hookMeta: HookMetaShape,
+  clusterOrgScope: string | null
+): HookAdmission {
+  // Org-scoped only (§8.5).
+  if (entry.owner_type && entry.owner_type !== 'org') {
+    return { ok: false, status: 403, body: { error: 'hook_requires_org_scope' } }
+  }
+  // Authoritative trust level — never face-value for a self-published hook (§8.4).
+  const trustLevel = resolveHookTrustLevel(entry, clusterOrgScope)
+  // contentAccess: metadata is contradictory for an inherently content-bearing point.
+  if (
+    hookMeta.contentAccess === 'metadata' &&
+    hookMeta.lifecyclePoints.some(p => INHERENTLY_CONTENT_POINTS.has(p))
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: 'content_access_conflict',
+        reason:
+          'contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError (§8.4)',
+      },
+    }
+  }
+  // Content/egress separation: content-bearing + (egress | remote) ⇒ high trust only.
+  const hasEgress = Array.isArray(hookMeta.requiredEgress) && hookMeta.requiredEgress.length > 0
+  const isRemote = !!hookMeta.target.remote
+  if (
+    contentEgressRequiresHighTrust({
+      lifecyclePoints: hookMeta.lifecyclePoints,
+      contentAccess: hookMeta.contentAccess,
+      hasEgress,
+      isRemote,
+      trustLevel,
+    })
+  ) {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: 'content_egress_requires_high_trust',
+        reason:
+          'a content-bearing hook (preCall/moderate/postCallSuccess/onError) with egress or a remote target requires trust_level high (§8.4)',
+      },
+    }
+  }
+  return { ok: true, trustLevel }
+}
+
+/** The declared target kind of a hook_meta / LlmHook spec (§8.5). */
+function hookTargetKind(target: {
+  image?: unknown
+  service?: unknown
+  remote?: unknown
+}): 'image' | 'service' | 'remote' | 'unknown' {
+  if (target.image) return 'image'
+  if (target.service) return 'service'
+  if (target.remote) return 'remote'
+  return 'unknown'
 }
 
 type SecretSnapshot = {
@@ -1730,10 +1807,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           })
           return
         }
-        if (entry.owner_type && entry.owner_type !== 'org') {
-          res.status(403).json({ error: 'hook_requires_org_scope' })
-          return
-        }
         const hookMeta = entry.hook_meta as HookMetaShape | null
         if (
           !hookMeta?.target ||
@@ -1744,14 +1817,21 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
-        // Step 2 — authoritative trust level (§8.4; never face-value for a
-        // self-published hook). The cluster's OWN org (this deployment's publish
-        // scope) and official evenfire are auto-curated; other orgs are capped
-        // unless in the additive CONTROL_API_CURATED_HOOK_ORGS allowlist.
+        // Steps 1/2/5 — shared host-independent gates: org scope, authoritative
+        // trust level, contentAccess conflict, and content/egress separation.
+        // (The per-Host floor/ceiling gates below hold the Host context.) The
+        // cluster's OWN org (this deployment's publish scope) and official
+        // evenfire are auto-curated; other orgs are capped unless in the additive
+        // CONTROL_API_CURATED_HOOK_ORGS allowlist.
         const clusterOrgScope = await resolvePublishScope()
           .then(s => s.scope)
           .catch(() => null)
-        const trustLevel = resolveHookTrustLevel(entry, clusterOrgScope)
+        const admission = assertHookAdmissible(entry, hookMeta, clusterOrgScope)
+        if (!admission.ok) {
+          res.status(admission.status).json(admission.body)
+          return
+        }
+        const trustLevel = admission.trustLevel
 
         // Step 3 — load target Host + its guardrails policy.
         let host: HostShape
@@ -1779,41 +1859,11 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
-        // Step 5 — content/egress separation gate (§8.4 / registry gap #2). A
-        // content-bearing hook that can also reach the network is an exfiltration
-        // path, admissible only for a vetted high-trust hook.
+        // Content/egress separation + the contentAccess-conflict check are
+        // enforced by assertHookAdmissible above. hasEgress is still needed to
+        // build the CR's egressBindings below.
         const hasEgress =
           Array.isArray(hookMeta.requiredEgress) && hookMeta.requiredEgress.length > 0
-        const isRemote = !!hookMeta.target.remote
-        // contentAccess: metadata is contradictory for an inherently content-bearing
-        // point (mirrors the CRD CEL). Reject early with a clear error.
-        if (
-          hookMeta.contentAccess === 'metadata' &&
-          hookMeta.lifecyclePoints.some(p => INHERENTLY_CONTENT_POINTS.has(p))
-        ) {
-          res.status(400).json({
-            error: 'content_access_conflict',
-            reason:
-              'contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError (§8.4)',
-          })
-          return
-        }
-        if (
-          contentEgressRequiresHighTrust({
-            lifecyclePoints: hookMeta.lifecyclePoints,
-            contentAccess: hookMeta.contentAccess,
-            hasEgress,
-            isRemote,
-            trustLevel,
-          })
-        ) {
-          res.status(403).json({
-            error: 'content_egress_requires_high_trust',
-            reason:
-              'a content-bearing hook (preCall/moderate/postCallSuccess/onError) with egress or a remote target requires trust_level high (§8.4)',
-          })
-          return
-        }
 
         // Step 6 — capability gate: requested ⊆ Host.capabilityCeiling; may_deny ⇒ fail closed.
         const capabilities = Array.isArray(body.capabilities) ? body.capabilities : []
@@ -2142,6 +2192,67 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
           newDigest = newImage.ref?.includes('@') ? newImage.ref.split('@')[1] : undefined
+        }
+
+        // Host-independent admissibility gates — upgrade-hook is the sanctioned
+        // update path, so it MUST clear the same gates as install (resources.ts
+        // withholds raw create/update for exactly this reason). Without this a
+        // low-trust image hook could "upgrade" into a content-bearing remote/egress
+        // target and exfiltrate.
+        const clusterOrgScope = await resolvePublishScope()
+          .then(s => s.scope)
+          .catch(() => null)
+        const admission = assertHookAdmissible(entry, hookMeta, clusterOrgScope)
+        if (!admission.ok) {
+          res.status(admission.status).json(admission.body)
+          return
+        }
+        const trustLevel = admission.trustLevel
+
+        // Target kind is immutable across an upgrade (§8.2 is an IMAGE bump, not a
+        // re-target). Switching image↔service↔remote changes the security posture
+        // AND, for a non-image target, drops the pinned digest binding on every
+        // referencing Host (silently un-quarantining the hook).
+        const curTargetKind = hookTargetKind(
+          ((current.spec ?? {}).target ?? {}) as {
+            image?: unknown
+            service?: unknown
+            remote?: unknown
+          }
+        )
+        const newTargetKind = hookTargetKind(hookMeta.target)
+        if (curTargetKind !== newTargetKind) {
+          res.status(422).json({
+            error: 'hook_target_kind_immutable',
+            reason: `upgrade cannot change the hook target kind (installed: ${curTargetKind}, new: ${newTargetKind})`,
+          })
+          return
+        }
+
+        // Per-Host trust-floor gate (§8.4): refuse the whole upgrade if the new
+        // trust level would drop any referencing Host's hook below its floor. Done
+        // BEFORE touching the CR, so the refusal is atomic and fail-closed.
+        const referencingHosts = (await listHostsReferencingHook(
+          gateway,
+          body.hookName,
+          config.hostsNamespace
+        )) as Array<{
+          spec?: { guardrails?: HostGuardrailsShape }
+          metadata?: { name?: string }
+        }>
+        const belowFloor = referencingHosts
+          .filter(h => {
+            const floor = h.spec?.guardrails?.minInstalledHookTrustLevel
+            return !!floor && (HOOK_TRUST_ORDER[trustLevel] ?? 0) < (HOOK_TRUST_ORDER[floor] ?? 0)
+          })
+          .map(h => h.metadata?.name)
+          .filter((n): n is string => !!n)
+        if (belowFloor.length > 0) {
+          res.status(403).json({
+            error: 'hook_below_trust_floor',
+            reason: `upgraded hook trust_level ${trustLevel} is below the trust floor on: ${belowFloor.join(', ')}`,
+          })
+          return
         }
 
         // Build the upgraded spec: bump the version-shaped fields (image ref,
