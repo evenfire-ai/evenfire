@@ -123,7 +123,7 @@ async function loadSessionForUpdate(db: SessionDatabase, sid: string): Promise<S
             s.absolute_expires_at, s.revoked_at, s.revocation_reason,
             s.authentication_methods, s.authenticated_at
        FROM external_user_sessions s
-       JOIN users u ON u.id = s.user_id
+       JOIN users u ON u.id = s.user_id AND u.lifecycle_state = 'active'
       WHERE s.sid = $1
       FOR UPDATE OF s`,
     [sid]
@@ -425,9 +425,12 @@ export async function validateLegacyUserSession(
 ): Promise<UserSessionValidation> {
   const issuedAt = claims.iat
   if (!issuedAt) return { status: 'invalid', reason: 'invalid_legacy_representation' }
+  if (!Number.isSafeInteger(claims.authGeneration) || Number(claims.authGeneration) < 1) {
+    return { status: 'invalid', reason: 'invalid_legacy_representation' }
+  }
   const work = async (db: SessionDatabase): Promise<UserSessionValidation> => {
     const result = await db.query(
-      `SELECT u.id,
+      `SELECT u.id, u.lifecycle_state, u.lifecycle_version,
             epoch.valid_after,
             EXISTS (
               SELECT 1
@@ -443,9 +446,22 @@ export async function validateLegacyUserSession(
       [claims.userId, legacySessionFingerprint(token)]
     )
     const row = result.rows[0] as
-      | { id: string; valid_after: Date | string | null; token_revoked: boolean }
+      | {
+          id: string
+          lifecycle_state: string
+          lifecycle_version: number | string
+          valid_after: Date | string | null
+          token_revoked: boolean
+        }
       | undefined
     if (!row) return { status: 'invalid', reason: 'user_not_found' }
+    if (
+      row.lifecycle_state !== 'active' ||
+      !Number.isSafeInteger(claims.authGeneration) ||
+      Number(claims.authGeneration) !== Number(row.lifecycle_version)
+    ) {
+      return { status: 'revoked', reason: 'security_event' }
+    }
     if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
     if (row.valid_after && issuedAt * 1000 <= dateOf(row.valid_after).getTime()) {
       return { status: 'revoked', reason: 'security_event' }

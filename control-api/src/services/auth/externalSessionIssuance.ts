@@ -47,6 +47,7 @@ export async function issueExternalUserSession(
     email: string
     teamId: string | null
     role: TeamRole
+    authGeneration?: number
     authenticationMethods: string[]
   },
   options: {
@@ -73,12 +74,16 @@ export async function issueExternalUserSession(
   if (!policy.issueV1 || !policy.acceptV1) {
     throw new Error('legacy user-session issuance is not effective')
   }
+  if (!Number.isSafeInteger(input.authGeneration) || Number(input.authGeneration) < 1) {
+    throw new Error('legacy user-session issuance requires an active lifecycle generation')
+  }
   return {
     token: signExternalSessionToken({
       userId: input.userId,
       email: input.email,
       teamId: input.teamId,
       role: input.role,
+      authGeneration: Number(input.authGeneration),
     }),
     contract: 'v1',
   }

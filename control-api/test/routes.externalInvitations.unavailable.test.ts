@@ -118,6 +118,7 @@ describe('external invitation routes when the hub is unavailable', () => {
           email: 'a@b.c',
           teamId: null,
           role: 'member',
+          authGeneration: 1,
         },
       })
       .mockResolvedValueOnce({ error: 'not_pending' })
@@ -156,6 +157,8 @@ describe('external invitation routes when the hub is unavailable', () => {
         id: '00000000-0000-4000-8000-000000000200',
         userId: '00000000-0000-4000-8000-000000000001',
         passwordUpdated: true,
+        authGeneration: 1,
+        lifecycleState: 'active',
       },
     })
 

@@ -130,6 +130,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           name: google.name,
           picture: google.picture,
         })
+        if ('error' in login) return res.status(403).json({ error: login.error })
         const role = login.membership.role
         const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
         if (selection.status !== 'selected') {
@@ -142,6 +143,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
             email: google.email,
             teamId: login.membership.team_id || null,
             role,
+            authGeneration: login.authGeneration,
             authenticationMethods: ['google'],
           },
           { policy }
@@ -309,18 +311,21 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           return
         }
         const membership = await pool.query(
-          `SELECT tm.role
+          `SELECT tm.role, u.lifecycle_version
            FROM users u
            JOIN team_members tm ON tm.user_id = u.id
           WHERE u.id = $1
             AND LOWER(u.email) = LOWER($2)
             AND tm.team_id = $3
             AND tm.status = 'active'
+            AND u.lifecycle_state = 'active'
           LIMIT 1`,
           [userId, email, teamId]
         )
         const liveRole = (
-          membership.rows[0] as { role?: 'admin' | 'inviter' | 'member' } | undefined
+          membership.rows[0] as
+            | { role?: 'admin' | 'inviter' | 'member'; lifecycle_version?: number | string }
+            | undefined
         )?.role
         if (!liveRole) {
           return res.status(403).json({ error: 'membership_not_found' })
@@ -339,6 +344,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
             email,
             teamId,
             role: liveRole,
+            authGeneration: Number(
+              (membership.rows[0] as { lifecycle_version?: number | string }).lifecycle_version
+            ),
             authenticationMethods: [],
           },
           { policy: authentication.policy }
