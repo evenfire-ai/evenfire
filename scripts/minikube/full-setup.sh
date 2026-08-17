@@ -966,7 +966,10 @@ if [ "$RESET_DB" = true ]; then
 else
   writer_dsn="$($KC -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
   if [ -n "${writer_dsn}" ]; then
-    if ! $KC rollout status deployment/control-api -n control-plane --timeout=5s >/dev/null 2>&1; then
+    # Token reconciliation above restarts control-api before this GFS cutover
+    # check. Use the normal rollout budget so a transient readiness window is
+    # not misclassified as an unsafe control-api state.
+    if ! $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null 2>&1; then
       err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
       exit 1
     fi
