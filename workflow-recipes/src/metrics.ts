@@ -121,3 +121,15 @@ export const externalEgressProviderDriftTotal = counter({
   help: 'Resolved IPs outside declared provider ranges (issue #299 drift canary).',
   labelNames: ['recipe', 'fqdn'] as const,
 })
+
+// issue #299 Phase 2 seam rule — permanent-DNS-failure catalog exemption
+// (docs/architecture/issue-299-phase2-dns-failure-seam.md, G3). Incremented each
+// reconcile a provider binding renders its catalog CIDRs despite a permanent,
+// non-blocked DNS failure (NXDOMAIN/no-records) that would otherwise fail the
+// recipe. The exemption removes the terminal `failed` phase signal, so this is the
+// durable, alertable replacement (drift-canary parity: metric + throttled warn).
+export const externalEgressPermanentDnsExemptedTotal = counter({
+  name: 'clerum_wrc_external_egress_permanent_dns_exempted_total',
+  help: 'Provider bindings served catalog-only despite a permanent DNS failure (issue #299 seam).',
+  labelNames: ['recipe', 'fqdn'] as const,
+})

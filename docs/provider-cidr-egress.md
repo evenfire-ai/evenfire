@@ -98,18 +98,32 @@ live-verified in this repo. Only minikube · Calico has a planned live gate (GAT
 **IPv6 stance:** provider ranges are stored family-keyed but rendered **IPv4-only**. On
 dual-stack, v4-only rules are fail-closed for v6 (safe). IPv6-only clusters are unsupported.
 
-## Known limitation: permanent DNS failure on a brand-new provider binding
+## Provider bindings under a permanent DNS failure (the seam rule)
 
-A provider binding whose FQDN receives a *permanent* controller-DNS answer (NXDOMAIN,
-no A records, or a blocked/invalid address) while **no prior NetworkPolicy exists** fails
-closed — even though the catalog CIDRs do not depend on the controller's DNS. This is
-deliberate and symmetric across HCC and WRC (a WRC-only exemption was implemented and
-reverted within this milestone): a deterministic NXDOMAIN/blocked answer for a curated host
-is the maximally-suspicious slice (resolver sinkhole, poisoning, or a mis-configured host),
-where loud failure is correct. H3 is unaffected — any *live* NP is retained on failure, and
-a cold start has no egress to lose. Operator action: fix the controller's DNS (or the
-binding's FQDN); the binding converges on the next reconcile. The failure surfaces as
-`ExternalEgressRejected` (HCC) / the recipe's failed phase (WRC).
+The catalog CIDRs do **not** depend on the controller's DNS — that is the whole point of
+provider mode (#299 root cause). So a provider binding whose FQDN receives a *permanent,
+non-blocked* answer (NXDOMAIN / no A records) **still renders its catalog CIDRs**, in both HCC
+and WRC. DNS gates only the residual `/32` sliding window, never the catalog. This is the
+authoritative seam rule — see
+[docs/architecture/issue-299-phase2-dns-failure-seam.md](architecture/issue-299-phase2-dns-failure-seam.md)
+for the full decision table and the guards.
+
+The limitation is now **blocked-only**: a binding whose FQDN resolves *into a blocked/private
+range* (a resolver sinkhole or active poisoning — the maximally-suspicious slice) fails closed
+loud, and so does any binding co-declared with a non-provider **exact-host** sibling on the same
+FQDN (that sibling has no catalog to fall back on, so the whole policy fails closed — this is
+what keeps a same-FQDN exact-host binding from silently inheriting the exemption). H3/LKG is
+unaffected — any *live* NP is retained on failure. The blocked-vs-absent distinction is carried
+by a structured `failureKind` discriminator on the resolver (never string-matched), so an error-
+message edit can never flip a blocked answer into a served one.
+
+**Decay trade-off (accepted, symmetric with HCC):** while a provider host's DNS stays absent, its
+residual `/32` window expires after ttl+overlap and the grant decays to *catalog-only*, breaking
+egress to any drifted (out-of-catalog) endpoints. Every such IP was flagged at entry by the drift
+canary, and the catalog-only state is surfaced by the `clerum_wrc_external_egress_permanent_dns_exempted_total`
+metric plus a throttled log (drift-canary parity — the recipe no longer flips to a terminal
+`failed` phase, so the metric is the durable operator signal). Operator action: fix the
+controller's DNS (or the binding's FQDN); the binding re-folds the window on the next reconcile.
 
 ## Rollback
 

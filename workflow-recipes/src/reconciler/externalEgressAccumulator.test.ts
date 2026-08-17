@@ -97,7 +97,9 @@ describe('accumulateExternalEgress — H1 fail-static under transient DNS failur
     )
     const resolveResult: ResolveResult = {
       resolved: [],
-      failures: [{ fqdn: 'api.github.com', error: 'ESERVFAIL', retryable: true }],
+      failures: [
+        { fqdn: 'api.github.com', error: 'ESERVFAIL', retryable: true, failureKind: 'transient' },
+      ],
     }
     const out = accumulateExternalEgress({
       externals: [{ fqdn: 'api.github.com', port: 443 }],
@@ -191,7 +193,9 @@ describe('accumulateExternalEgress — F1 revocation of a removed fqdn (audit #2
       externals: [{ fqdn: 'api.github.com', port: 443 }],
       resolveResult: {
         resolved: [],
-        failures: [{ fqdn: 'api.github.com', error: 'ESERVFAIL', retryable: true }],
+        failures: [
+          { fqdn: 'api.github.com', error: 'ESERVFAIL', retryable: true, failureKind: 'transient' },
+        ],
       },
       previousAnnotations: prev,
       now: NOW + 1000,
@@ -210,7 +214,14 @@ describe('accumulateExternalEgress — permanent failure expires normally', () =
     )
     const resolveResult: ResolveResult = {
       resolved: [],
-      failures: [{ fqdn: 'gone.example.com', error: 'no A or AAAA records', retryable: false }],
+      failures: [
+        {
+          fqdn: 'gone.example.com',
+          error: 'no A or AAAA records',
+          retryable: false,
+          failureKind: 'absent',
+        },
+      ],
     }
     const out = accumulateExternalEgress({
       externals: [{ fqdn: 'gone.example.com', port: 443 }],

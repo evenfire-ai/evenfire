@@ -22,7 +22,10 @@ import {
 import { lookupFqdnProvider, providerBounds } from '@clerum/network-policy-core/providerRegistry'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
-import { externalEgressProviderDriftTotal } from '../metrics'
+import {
+  externalEgressPermanentDnsExemptedTotal,
+  externalEgressProviderDriftTotal,
+} from '../metrics'
 import {
   ConfigMapResourceDef,
   CronJobDef,
@@ -63,6 +66,8 @@ import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { sort as sortDependencies } from './dependencyGraph'
 import { type AccumulateOutput, accumulateExternalEgress } from './externalEgressAccumulator'
 import {
+  type EgressFailureKind,
+  type EgressResolutionFailure,
   type FqdnLookup,
   defaultFqdnLookup,
   isBlockedExternalIPv4,
@@ -516,7 +521,12 @@ class ImmutableStatefulSetDriftError extends Error {
  */
 function egressResolutionError(
   context: string,
-  failures: Array<{ fqdn: string; error: string; retryable: boolean }>
+  failures: Array<{
+    fqdn: string
+    error: string
+    retryable: boolean
+    failureKind?: EgressFailureKind
+  }>
 ): Error {
   const message = `${context}: ${failures.map(f => `${f.fqdn} (${f.error})`).join(', ')}`
   return failures.every(f => f.retryable)
@@ -4117,30 +4127,113 @@ export class WorkflowRecipeReconciler {
     )
   }
 
+  // issue #299 Phase 2 seam rule (docs/architecture/issue-299-phase2-dns-failure-seam.md).
+  // Partition permanent (non-retryable) egress failures into those that must still
+  // FAIL LOUD (fatal) and those EXEMPTED because the fqdn is a provider binding with a
+  // valid catalog — those render catalog-only, matching HCC's shipped catch-path
+  // behavior (host-context-controller/src/networkPolicyReconciler.ts:1225-1271 →
+  // externalEgressAccumulator.ts:138 unconditional union).
+  //
+  // G1: keys on the STRUCTURED `failureKind === 'absent'` — never a blocked answer,
+  //     never a parsed error string. A blocked answer stays fatal.
+  // G2: the exemption is quantified POSITIONALLY over `providerRanges` (index-aligned
+  //     with `externals`): a fqdn is exempt only if it is declared as a provider AND
+  //     EVERY declaration carrying it is provider-backed with a non-empty catalog. One
+  //     exact-host sibling on the same fqdn (empty providerRanges[i]) forces the whole
+  //     fqdn back to fatal — this is what closes the round-4 co-declared-exact-host
+  //     leak (commit 36b36497) structurally, keyed on declarations not fqdns.
+  private partitionPermanentEgressFailures(
+    externals: Array<{ fqdn: string }>,
+    providerRanges: Array<string[] | undefined>,
+    failures: EgressResolutionFailure[]
+  ): { fatal: EgressResolutionFailure[]; exempted: EgressResolutionFailure[] } {
+    const fullyProviderBacked = (fqdn: string): boolean =>
+      externals.some((e, i) => e.fqdn === fqdn && (providerRanges[i]?.length ?? 0) > 0) &&
+      externals.every((e, i) => e.fqdn !== fqdn || (providerRanges[i]?.length ?? 0) > 0)
+    const isExempt = (f: EgressResolutionFailure): boolean =>
+      f.failureKind === 'absent' && fullyProviderBacked(f.fqdn)
+    const permanent = failures.filter(f => !f.retryable)
+    return {
+      fatal: permanent.filter(f => !isExempt(f)),
+      exempted: permanent.filter(isExempt),
+    }
+  }
+
+  // G3 observability (drift-canary parity: metric + throttled warn, NO status
+  // condition — matches externalEgressProviderDriftTotal). The exemption removes the
+  // terminal `failed` phase, so a provider host served catalog-only while its DNS is
+  // sinkholed must still be visible/alertable.
+  private permanentDnsExemptedLastWarned = new Map<string, number>()
+  private recordPermanentDnsExemptions(
+    recipeName: string,
+    policyName: string,
+    namespace: string,
+    exempted: EgressResolutionFailure[]
+  ): void {
+    const key = `${namespace}/${policyName}`
+    if (exempted.length === 0) {
+      this.permanentDnsExemptedLastWarned.delete(key)
+      return
+    }
+    for (const f of exempted) {
+      externalEgressPermanentDnsExemptedTotal.inc({ recipe: recipeName, fqdn: f.fqdn })
+    }
+    const now = Date.now()
+    // Expire stale throttle entries (age >= window can never suppress a warn), so a
+    // deleted recipe / removed binding stops leaking map keys — same pattern as the
+    // drift throttle above.
+    for (const [k, t] of this.permanentDnsExemptedLastWarned) {
+      if (now - t >= 3_600_000) this.permanentDnsExemptedLastWarned.delete(k)
+    }
+    const last = this.permanentDnsExemptedLastWarned.get(key)
+    if (last !== undefined && now - last < 3_600_000) return
+    this.permanentDnsExemptedLastWarned.set(key, now)
+    const detail = exempted.map(f => `${f.fqdn} (${f.error})`).join('; ')
+    console.warn(
+      `[WR-Reconciler] ${namespace}/${policyName}: serving provider catalog-only despite a ` +
+        `permanent DNS failure: ${detail} — the residual /32 window will decay to catalog-only ` +
+        `until DNS recovers (issue #299 seam rule)`
+    )
+  }
+
   private async reconcileUiEgressPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
     const policyName = `ui-egress-${recipe.metadata.name}`
     const ns = this.config.sandboxUiNamespace
 
     const externals = recipe.spec.ui?.egress?.external ?? []
+    const label = `WorkflowRecipe "${recipe.metadata.name}" ui external egress`
     const { resolved, failures } = await resolveExternalEgress(externals, this.fqdnLookup)
     this.recordExternalEgressTtl(resolved)
 
-    // Permanent failures (no-records / blocked range) never author a partial
-    // policy — fail exactly as the single-snapshot resolver did.
-    // PR335 known-limitation (symmetric with HCC by design): this throw fires
-    // before a fresh provider render, so a permanently blocked/absent A record on
-    // a provider binding fail-closes at cold start even though the catalog CIDRs
-    // could be served. That is deliberate: a deterministic NXDOMAIN/blocked answer
-    // for a curated host is the maximally-suspicious slice (sinkhole/poisoning/
-    // misconfig) where loud failure is correct; H3 protects egress you already
-    // have (a live NP is retained on failure), and cold start has none to lose.
-    const permanentFailures = failures.filter(f => !f.retryable)
-    if (permanentFailures.length > 0) {
-      throw egressResolutionError(
-        `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
-        permanentFailures
-      )
+    // issue #299 Phase 2 seam rule (docs/architecture/issue-299-phase2-dns-failure-seam.md).
+    // Resolve provider ranges from the catalog FIRST (H3-by-throw: an invalid/empty
+    // catalog or CM outage throws HERE — row 9 — before any exemption is computed),
+    // so the permanent-failure gate below can render a provider binding's catalog
+    // CIDRs even when its DNS answer is permanently ABSENT (NXDOMAIN/no-records),
+    // matching HCC's shipped catch-path behavior. This is index-aligned with
+    // `externals` (positional per PR335-WRC-002) and reused by the accumulator below.
+    const providerRanges =
+      externals.length > 0
+        ? await this.resolveProviderRangesPerDeclaration(
+            externals.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
+            label
+          )
+        : []
+
+    // Seam rule: a permanent (non-retryable) failure fails the recipe loud UNLESS it
+    // is an ABSENT answer for a fully-provider-backed fqdn (G1 structured `blocked`
+    // discriminator + G2 positional every-quantifier). A BLOCKED answer, or ANY
+    // exact-host sibling on the same fqdn, keeps the whole-policy throw — H3-by-throw
+    // retains the live NP, so even an exempted sibling does not render that round.
+    const { fatal, exempted } = this.partitionPermanentEgressFailures(
+      externals,
+      providerRanges,
+      failures
+    )
+    if (fatal.length > 0) {
+      throw egressResolutionError(`${label} resolution failed`, fatal)
     }
+    this.recordPermanentDnsExemptions(recipe.metadata.name, policyName, ns, exempted)
 
     let effectiveResolved: rb.ResolvedExternalEgressInput[] = resolved
     let stateAnnotations: Record<string, string> | undefined
@@ -4159,12 +4252,7 @@ export class WorkflowRecipeReconciler {
     // external egress it also seeds the accumulator's rehydration (H5).
     existing = await this.readNetworkPolicyOrNull(policyName, ns)
     if (externals.length > 0) {
-      // issue #299 Phase 2 — resolve provider ranges from the catalog first
-      // (H3-by-throw: a CM/spec problem throws, retaining the live policy).
-      const providerRanges = await this.resolveProviderRangesPerDeclaration(
-        externals.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
-        `WorkflowRecipe "${recipe.metadata.name}" ui external egress`
-      )
+      // providerRanges resolved above (seam-rule reorder) — reused here.
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
       const acc = accumulateExternalEgress({
@@ -4619,42 +4707,47 @@ export class WorkflowRecipeReconciler {
         // ran upstream and would have thrown.
       }
 
+      const wlLabel = `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress`
+      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
       const { resolved: resolvedExternal, failures } = await resolveExternalEgress(
         externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
         this.fqdnLookup
       )
       this.recordExternalEgressTtl(resolvedExternal)
 
-      // Permanent failures never author a partial policy — fail as before.
-      // PR335 known-limitation (symmetric with HCC + the UI path): fires before a
-      // fresh provider render, so a permanently blocked/absent A record on a
-      // provider binding fail-closes at cold start even though the catalog CIDRs
-      // could be served — deliberate; loud failure is correct for a deterministic
-      // NXDOMAIN/blocked answer, and H3 still retains any live NP on failure.
-      const permanentFailures = failures.filter(f => !f.retryable)
-      if (permanentFailures.length > 0) {
-        throw egressResolutionError(
-          `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
-          permanentFailures
-        )
+      // issue #299 Phase 2 seam rule (docs/architecture/issue-299-phase2-dns-failure-seam.md).
+      // Mirror of the UI path: resolve provider ranges FIRST (invalid/empty catalog or
+      // CM outage throws here — row 9), then exempt an ABSENT permanent failure for a
+      // fully-provider-backed fqdn so its catalog renders (matching HCC); a BLOCKED
+      // answer or any exact-host sibling keeps the whole-policy throw (H3-by-throw).
+      const providerRanges =
+        externalDeclared.length > 0
+          ? await this.resolveProviderRangesPerDeclaration(
+              externalDeclared.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
+              wlLabel
+            )
+          : []
+      const { fatal, exempted } = this.partitionPermanentEgressFailures(
+        externalDeclared,
+        providerRanges,
+        failures
+      )
+      if (fatal.length > 0) {
+        throw egressResolutionError(`${wlLabel} resolution failed`, fatal)
       }
+      this.recordPermanentDnsExemptions(recipe.metadata.name, wlPolicyName, wlNs, exempted)
 
       let effectiveExternal: rb.ResolvedExternalEgressInput[] = resolvedExternal
       let wlStateAnnotations: Record<string, string> | undefined
       let existingWlPolicy: k8s.V1NetworkPolicy | null = null
       let wlEgressRenewalDue = false
       let wlEgressStateChanged = false // H-E: catch fqdn-attribution-only changes
-      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
       // R1-M2: read the live policy for ALL cases so an internal-only (cluster-
       // local) workload egress policy hits the no-op gate instead of churning
       // every reconcile; for external egress it also seeds rehydration (H5).
       existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
       if (externalDeclared.length > 0) {
-        // issue #299 Phase 2 — resolve provider ranges (H3-by-throw retains the NP).
-        const providerRanges = await this.resolveProviderRangesPerDeclaration(
-          externalDeclared.map(e => ({ fqdn: e.fqdn, provider: e.provider })),
-          `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress`
-        )
+        // providerRanges resolved above (seam-rule reorder) — reused here.
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
         const acc = accumulateExternalEgress({
           externals: externalDeclared.map((e, i) => ({

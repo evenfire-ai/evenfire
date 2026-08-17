@@ -176,12 +176,30 @@ export const defaultFqdnLookup: FqdnLookup = async host => {
   return { kind: 'error', error: 'no A or AAAA records' }
 }
 
+// issue #299 Phase 2 — the seam rule (docs/architecture/issue-299-phase2-dns-failure-seam.md).
+// A structured discriminator so the reconciler can tell a BLOCKED answer (private/
+// blocked-CIDR — active-poisoning signal, must fail loud) from an ABSENT answer
+// (NXDOMAIN/no-records — a provider binding may still render its DNS-independent
+// catalog) WITHOUT string-matching the error message. The value is set at the two
+// structurally-distinct classification sites below (blocked = successful resolution
+// + isBlockedExternalIPv4; absent/transient = resolver error + classifyDnsError), so
+// it is trustworthy by construction and can never be produced by parsing text.
+export type EgressFailureKind = 'transient' | 'absent' | 'blocked'
+
+export interface EgressResolutionFailure {
+  fqdn: string
+  error: string
+  // `retryable` is true only when the error was a transient resolver failure. A
+  // blocked-address rejection or a no-records answer is never retryable — it fails
+  // closed permanently. Retained for existing consumers; `failureKind` is the
+  // authoritative discriminator.
+  retryable: boolean
+  failureKind: EgressFailureKind
+}
+
 export interface ResolveResult {
   resolved: ResolvedExternalEgress[]
-  // `retryable` is true only when EVERY error for that fqdn was a transient
-  // resolver failure. A blocked-address rejection is never retryable — it fails
-  // closed permanently.
-  failures: Array<{ fqdn: string; error: string; retryable: boolean }>
+  failures: EgressResolutionFailure[]
 }
 
 /**
@@ -209,24 +227,33 @@ export async function resolveExternalEgress(
   lookup: FqdnLookup = defaultFqdnLookup
 ): Promise<ResolveResult> {
   const resolved: ResolvedExternalEgress[] = []
-  const failures: Array<{ fqdn: string; error: string; retryable: boolean }> = []
+  const failures: EgressResolutionFailure[] = []
 
   for (const entry of externals) {
     const result = await lookup(entry.fqdn)
     if (result.kind === 'error') {
+      // Resolver error branch: a transient failure is retryable; a permanent
+      // no-records/NXDOMAIN answer is ABSENT (not blocked). classifyDnsError
+      // already made this call upstream and encoded it in `retryable`.
+      const retryable = result.retryable ?? false
       failures.push({
         fqdn: entry.fqdn,
         error: result.error,
-        retryable: result.retryable ?? false,
+        retryable,
+        failureKind: retryable ? 'transient' : 'absent',
       })
       continue
     }
     const blocked = result.ipv4.filter(isBlockedExternalIPv4)
     if (blocked.length > 0) {
+      // Successful resolution into a blocked/private range — the maximally-
+      // suspicious slice (sinkhole/poisoning). Always fails loud; never eligible
+      // for the provider-catalog exemption.
       failures.push({
         fqdn: entry.fqdn,
         error: `resolved to blocked IPv4 address(es): ${blocked.join(', ')}`,
         retryable: false,
+        failureKind: 'blocked',
       })
       continue
     }

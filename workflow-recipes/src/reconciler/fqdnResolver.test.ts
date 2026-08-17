@@ -111,7 +111,8 @@ describe('resolveExternalEgress', () => {
     )
     expect(result.resolved.map(r => r.cidr)).toEqual(['93.184.216.5/32'])
     expect(result.failures).toEqual([
-      { fqdn: 'bad.example.com', error: 'NXDOMAIN', retryable: false },
+      // issue #299 seam G1: a permanent no-records/NXDOMAIN answer is ABSENT, not blocked.
+      { fqdn: 'bad.example.com', error: 'NXDOMAIN', retryable: false, failureKind: 'absent' },
     ])
   })
 
@@ -140,8 +141,31 @@ describe('resolveExternalEgress', () => {
         fqdn: 'mixed.example.com',
         error: 'resolved to blocked IPv4 address(es): 169.254.169.254',
         retryable: false,
+        // issue #299 seam G1: a successful resolution into a blocked range is BLOCKED
+        // (never eligible for the provider-catalog exemption), distinct from absent.
+        failureKind: 'blocked',
       },
     ])
+  })
+
+  it('issue #299 seam G1: classifies transient / absent / blocked failures with a structured failureKind', async () => {
+    const lookup = fakeLookup({
+      'transient.example.com': { kind: 'error', error: 'ESERVFAIL', retryable: true },
+      'absent.example.com': { kind: 'error', error: 'no A or AAAA records' },
+      'blocked.example.com': { kind: 'ok', ipv4: ['10.0.0.7'], ipv6: [], ttlSeconds: 300 },
+    })
+    const result = await resolveExternalEgress(
+      [
+        { fqdn: 'transient.example.com', port: 443 },
+        { fqdn: 'absent.example.com', port: 443 },
+        { fqdn: 'blocked.example.com', port: 443 },
+      ],
+      lookup
+    )
+    const byFqdn = Object.fromEntries(result.failures.map(f => [f.fqdn, f.failureKind]))
+    expect(byFqdn['transient.example.com']).toBe('transient')
+    expect(byFqdn['absent.example.com']).toBe('absent')
+    expect(byFqdn['blocked.example.com']).toBe('blocked')
   })
 
   it('returns an empty result for an empty input', async () => {
@@ -157,7 +181,12 @@ describe('resolveExternalEgress', () => {
     const result = await resolveExternalEgress([{ fqdn: 'flaky.example.com', port: 443 }], lookup)
     expect(result.resolved).toEqual([])
     expect(result.failures).toEqual([
-      { fqdn: 'flaky.example.com', error: 'DNS timeout (ETIMEOUT)', retryable: true },
+      {
+        fqdn: 'flaky.example.com',
+        error: 'DNS timeout (ETIMEOUT)',
+        retryable: true,
+        failureKind: 'transient',
+      },
     ])
   })
 })

@@ -10061,6 +10061,217 @@ describe('WorkflowRecipeReconciler', () => {
       expect(provenance).toContain(`api.github.com=${GITHUB_API_CIDR}`)
     })
 
+    // ─── issue #299 Phase 2 seam rule (row 7): a provider binding whose DNS is
+    // PERMANENTLY ABSENT (NXDOMAIN/no-records) still renders its catalog CIDRs,
+    // matching HCC. RED against the pre-fix throw-first code.
+    // docs/architecture/issue-299-phase2-dns-failure-seam.md
+    const ABSENT_LOOKUP = async () => ({
+      kind: 'error' as const,
+      error: 'no A or AAAA records',
+    })
+    // A blocked/link-local answer — a successful resolution into a blocked range.
+    const BLOCKED_LOOKUP = async () => ({
+      kind: 'ok' as const,
+      ipv4: ['169.254.169.254'],
+      ipv6: [],
+      ttlSeconds: 300,
+    })
+    function reconcilerWith(lookup: unknown) {
+      return new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: lookup as never,
+      })
+    }
+
+    it('SEAM row 7 (workload): a provider binding renders the catalog despite a permanent-ABSENT DNS answer', async () => {
+      mockProviderNetblocksCm()
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await reconcilerWith(ABSENT_LOOKUP).reconcile(recipe)
+
+      expect(result.phase).toBe('active')
+      const body = createdPolicyByName('wl-egress-test-recipe-worker')
+      expect(collectIpBlockPairs(body)).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+    })
+
+    it('SEAM row 7 (ui): a provider ui.egress.external binding renders the catalog despite a permanent-ABSENT DNS answer', async () => {
+      mockProviderNetblocksCm()
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+          ui: {
+            workloadRef: 'frontend',
+            port: 8080,
+            egress: {
+              external: [
+                {
+                  fqdn: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          },
+        },
+      })
+
+      const result = await reconcilerWith(ABSENT_LOOKUP).reconcile(recipe)
+
+      expect(result.phase).toBe('active')
+      const body = createdPolicyByName('ui-egress-test-recipe')
+      expect(collectIpBlockPairs(body)).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
+    })
+
+    it('SEAM round-4 guard: a co-declared exact-host sibling on the same fqdn forces the whole policy to FAIL LOUD (no catalog render)', async () => {
+      mockProviderNetblocksCm()
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+                // Same fqdn, exact-host, different port — the round-4 leak: this
+                // sibling's fail-close must NOT be dropped by the exemption.
+                { egressClass: 'exact-host', dns: 'api.github.com', port: 22 },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await reconcilerWith(ABSENT_LOOKUP).reconcile(recipe)
+
+      expect(result.phase).toBe('failed')
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+          .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
+          .filter(b => b?.metadata?.name === 'wl-egress-test-recipe-worker')
+      ).toHaveLength(0)
+    })
+
+    it('SEAM round-4 guard (reversed declaration order): exact-host declared first still forces fail loud', async () => {
+      mockProviderNetblocksCm()
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                { egressClass: 'exact-host', dns: 'api.github.com', port: 22 },
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await reconcilerWith(ABSENT_LOOKUP).reconcile(recipe)
+      expect(result.phase).toBe('failed')
+    })
+
+    it('SEAM row 8: a provider binding whose DNS resolves into a BLOCKED range fails loud (never renders catalog off a blocked answer)', async () => {
+      mockProviderNetblocksCm()
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await reconcilerWith(BLOCKED_LOOKUP).reconcile(recipe)
+      expect(result.phase).toBe('failed')
+    })
+
+    it('SEAM row 9: a provider binding whose catalog category is ABSENT fails loud even on a permanent-absent DNS answer', async () => {
+      // CM present but lacking the declared category → resolveProviderRanges is
+      // invalid → throw BEFORE the exemption can be computed (catalog gate wins).
+      mockCoreApi.readNamespacedConfigMap.mockImplementation(({ name }: { name?: string }) =>
+        name === 'clerum-provider-netblocks'
+          ? Promise.resolve({
+              metadata: { resourceVersion: '1' },
+              data: { 'github.web.ipv4': GITHUB_WEB_CIDR },
+            })
+          : Promise.resolve({ metadata: { resourceVersion: '1' } })
+      )
+      const recipe = makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [
+                {
+                  egressClass: 'provider',
+                  dns: 'api.github.com',
+                  port: 443,
+                  provider: { name: 'github', categories: ['api'] },
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const result = await reconcilerWith(ABSENT_LOOKUP).reconcile(recipe)
+      expect(result.phase).toBe('failed')
+    })
+
     it('COLDSTART (WRC): a provider workload on a FRESH cluster (no catalog CM) fails loud, never active and never ships a partial workload NetworkPolicy', async () => {
       // Clean-install cold start: the seed/catalog ConfigMap is not present yet.
       // The reconcile must NOT report 'active' (silent success) and must NOT
