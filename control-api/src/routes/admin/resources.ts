@@ -748,9 +748,14 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // CR persists (below). Empty for every non-host / non-stale write.
       const hostWarnings: StaleModelWarning[] = []
 
-      // N1 — the CR read by the ratchet below is handed to updateResource so a
-      // hosts/contexts PUT reads the apiserver ONCE, not twice (updateResource
-      // already reads `current` internally). Undefined for non hosts/contexts
+      // N1 — the CR read by the ratchet below is the single pre-write read for
+      // hosts + contexts. For CONTEXTS it is handed to updateResource
+      // (preReadCurrent, see below) so the PUT reads the apiserver ONCE, not
+      // twice. For HOSTS it also feeds the Pieza D tolerance (storedHostSpec,
+      // below) — but the host write goes through the carrier transaction, whose
+      // updateResource deliberately reads afresh UNDER the advisory lock (INV-1:
+      // a pre-lock snapshot would reopen the availability race the lock closes),
+      // so preReadCurrent is not used there. Undefined for non hosts/contexts
       // plurals and on the 404 path, where updateResource reads afresh and
       // surfaces the real 404.
       let ratchetCurrent: MutableResourceSnapshot | undefined
@@ -807,22 +812,18 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // (Pieza D) — so the tolerance is preserved, not tightened (mini-spec §7).
       if (plural === 'hosts' && body.spec) {
         const hostSpec = body.spec
-        // Read the stored CR so the write gate can tolerate a pre-existing
+        // The stored CR lets the write gate tolerate a pre-existing
         // model_not_allowed incoherence this write does not worsen (Pieza D — the
-        // editability trap). If the stored CR cannot be read, tolerance is skipped
-        // (fail-closed: the gate behaves exactly as before this feature). Read
-        // before the lock: it feeds tolerance, not the availability race, and the
-        // K8s resourceVersion precondition guards CR-level concurrency.
-        let storedHostSpec: Record<string, unknown> | undefined
-        try {
-          const existing = (await gateway.getResource(plural, req.params.name, ns)) as {
-            spec?: Record<string, unknown>
-          } | null
-          storedHostSpec =
-            existing?.spec && typeof existing.spec === 'object' ? existing.spec : undefined
-        } catch {
-          storedHostSpec = undefined
-        }
+        // editability trap). Reuse the snapshot the ratchet already read above
+        // (ratchetCurrent) instead of a second getResource: for hosts the ratchet
+        // block always ran (its guard is a superset of this one), so ratchetCurrent
+        // is set, or undefined on the 404 path. If it is absent, tolerance is
+        // skipped (fail-closed: the gate behaves exactly as before this feature).
+        // This snapshot feeds tolerance, not the availability race — the write gate
+        // re-reads fresh under the lock — and the K8s resourceVersion precondition
+        // guards CR-level concurrency.
+        const storedHostSpec: Record<string, unknown> | undefined =
+          recordValue(ratchetCurrent?.spec) ?? undefined
         let updated: unknown
         try {
           updated = await withTransaction(async db => {
