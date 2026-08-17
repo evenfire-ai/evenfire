@@ -11,6 +11,9 @@ export interface RenameInput {
   requestId: string;
   subject: string;
   audit: AuditSink;
+  actorOnBehalfOf?: string | null;
+  desktopUserId?: string;
+  authoritySource?: "user-session" | "linked-admin";
   drive: string;
   resourceId: string;
   newName: string;
@@ -172,6 +175,9 @@ function buildPaths(tree: readonly Row[], root: Row, parentPath: string, newName
 function auditEvent(input: RenameInput, outcome: "succeeded" | "failed", reason?: string) {
   return {
     recordType: "mutation_outcome" as const, subject: input.subject, op: "rename",
+    actorOnBehalfOf: input.actorOnBehalfOf ?? null,
+    desktopUserId: input.desktopUserId,
+    authoritySource: input.authoritySource,
     resourceId: normalizeResourceId(input.resourceId), drive: input.drive,
     outcome: outcome === "succeeded" ? "allow" as const : "error" as const,
     reason, requestId: input.requestId, matchedSubject: null,

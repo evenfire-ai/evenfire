@@ -115,6 +115,8 @@ describe('ipc host status stream handlers', () => {
     grantGfs: vi.fn(),
     listGfsGrants: vi.fn(),
     revokeGfsGrant: vi.fn(),
+    listGfsShares: vi.fn(),
+    revokeGfsShare: vi.fn(),
     listMyAgents: vi.fn(),
     createGfsShare: vi.fn(),
     setSandboxUiVisible: vi.fn(),
@@ -490,6 +492,30 @@ describe('ipc host status stream handlers', () => {
     expect(service.revokeGfsGrant).toHaveBeenCalledWith('22222222-2222-2222-2222-222222222222')
   })
 
+  it('routes GFS share list and revoke through trusted IPC with sanitized input', async () => {
+    service.listGfsShares.mockResolvedValue([])
+    service.revokeGfsShare.mockResolvedValue(undefined)
+    const { event } = makeTrustedEvent()
+
+    const listHandler = testState.handlers.get('gfs:listShares')
+    await Promise.resolve(
+      listHandler?.(event, {
+        resourceId: ' 11111111-1111-1111-1111-111111111111 ',
+        drive: ' main ',
+      })
+    )
+    expect(service.listGfsShares).toHaveBeenCalledWith(
+      '11111111-1111-1111-1111-111111111111',
+      'main'
+    )
+
+    const revokeHandler = testState.handlers.get('gfs:revokeShare')
+    await Promise.resolve(
+      revokeHandler?.(event, { shareId: ' 22222222-2222-4222-8222-222222222222 ' })
+    )
+    expect(service.revokeGfsShare).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222')
+  })
+
   it('lists my agents through the dedicated channel (not the cached catalog)', async () => {
     const agents = [
       {
@@ -556,6 +582,26 @@ describe('ipc host status stream handlers', () => {
       )
     ).rejects.toThrow('Untrusted IPC sender')
     expect(service.revokeGfsGrant).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['gfs:listShares', { resourceId: '11111111-1111-1111-1111-111111111111', drive: 'main' }],
+    ['gfs:revokeShare', { shareId: '22222222-2222-4222-8222-222222222222' }],
+  ])('rejects untrusted sender for %s', async (channel, payload) => {
+    const handler = testState.handlers.get(channel)
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          payload
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(service.listGfsShares).not.toHaveBeenCalled()
+    expect(service.revokeGfsShare).not.toHaveBeenCalled()
   })
 
   it('rejects untrusted sender for my agents listing', async () => {

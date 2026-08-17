@@ -33,7 +33,10 @@ export interface GfsDelegationPanelProps {
  */
 export interface GfsAgentSubjectOption {
   id: string
+  /** Agent identifier (`metadata.name`) — used for keys and stable sorting. */
   name: string
+  /** Visible name (Agent CRD `spec.host`); rendered to the user when present. */
+  displayName?: string
 }
 
 /**
@@ -48,4 +51,14 @@ export interface GfsGrantListItem {
   subject: { type: string; id?: string }
   permissions: string[]
   inherit: boolean
+}
+
+/** A direct URI-share row from `window.clerum.gfs.listShares()`. */
+export interface GfsShareListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  includeDescendants: boolean
 }

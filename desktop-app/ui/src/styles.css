@@ -11472,7 +11472,7 @@ pre {
   display: grid;
   gap: var(--space-2);
   justify-items: start;
-  padding-right: 360px;
+  padding-right: var(--app-header-utilities-width);
 }
 
 .apps-page-header-text h2 {
@@ -12423,6 +12423,18 @@ pre {
 }
 
 @media (min-width: 901px) and (max-width: 1220px) {
+  .content-panel {
+    --app-header-utilities-width: calc(
+      clamp(160px, 32vw, var(--app-notification-drawer-width)) + var(--space-2) + 36px
+    );
+  }
+
+  .content-panel.content-panel--app-notification-drawer-open {
+    --app-header-utilities-width: calc(
+      var(--app-notification-drawer-width) + var(--space-2) + 36px
+    );
+  }
+
   .global-search {
     width: clamp(160px, 32vw, var(--app-notification-drawer-width));
     min-width: 160px;
@@ -13813,6 +13825,44 @@ pre {
   align-items: center;
   gap: var(--space-1);
   flex: 0 0 auto;
+}
+
+.da-gfs-upload-status {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-3);
+  border: 1px solid rgba(var(--accent-rgb), 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.da-gfs-upload-status__head,
+.da-gfs-upload-status__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.da-gfs-upload-status__head {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-upload-status__head strong {
+  color: var(--text);
+}
+
+.da-gfs-upload-status progress {
+  width: 100%;
+  height: 0.5rem;
+  accent-color: var(--accent-strong);
+}
+
+.da-gfs-upload-status__actions {
+  justify-content: flex-end;
 }
 
 .da-gfs-drive > .status-banner,

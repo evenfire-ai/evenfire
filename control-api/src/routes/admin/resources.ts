@@ -12,7 +12,11 @@ import { validateCommunicationChannelSpec } from '../../http/validateCommunicati
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { getModelAllowlistState, isModelAllowed } from '../../services/llmAllowedModels.js'
-import { K8sConflictError } from '../../services/resourceService.js'
+import {
+  K8sConflictError,
+  K8sNotFoundError,
+  type MutableResourceSnapshot,
+} from '../../services/resourceService.js'
 import { secretKeyNames } from '../../services/secretKeyNames.js'
 import { ClerumResourceType } from '../../types.js'
 import {
@@ -31,6 +35,7 @@ import {
   type HostSpecIncoherenceToleratedEvent,
   emitHostSpecIncoherenceTolerated,
 } from './hostWriteGateAudit.js'
+import { collectResourceSpecFieldIssues, validateResourceName } from './resourceFieldValidation.js'
 import type { StaleModelWarning } from './staleModelWarning.js'
 
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
@@ -155,6 +160,74 @@ async function rollbackPrunedCommunicationChannelUpdate(
   } catch (err) {
     console.warn(
       `[Admin] cc pruned-setting rollback failed for "${name}": ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+/**
+ * Deploy-order guard for the additive context `spec.displayName` field (PR #304).
+ *
+ * `spec.displayName` is a new, optional, additive field on the context CRD. If a
+ * create/update carries a non-empty `spec.displayName` but the CRD applied to
+ * the cluster does NOT yet declare the field (deploy-order skew: control-ui
+ * writes the field before the CRD update lands), the apiserver PRUNES the
+ * unknown field SILENTLY and returns success — the display name is lost with no
+ * error surfaced to the operator.
+ *
+ * This is a pure read-after-write check: it compares the value the caller sent
+ * against the object the apiserver actually persisted. A create/replace returns
+ * the persisted object AFTER pruning, so this reuses that response with NO extra
+ * apiserver read (preserving the N1 single-read-per-PUT optimization).
+ *
+ * STRICTLY SCOPED to `contexts` + `spec.displayName` — the only additive field
+ * at pruning risk in this PR. Do NOT generalize to other fields or resources:
+ * that would be a decision module (which fields, precedence) requiring its own
+ * mini-spec, not a one-field hardening net.
+ */
+function contextDisplayNameNotPersisted(
+  requestedSpec: Record<string, unknown>,
+  persisted: unknown
+): boolean {
+  const requested = requestedSpec.displayName
+  // Only fire when the caller actually asked for a non-empty display name.
+  if (typeof requested !== 'string' || requested.trim() === '') return false
+  const persistedSpec = recordValue((persisted as { spec?: unknown } | null)?.spec) || {}
+  // Missing (pruned) OR differs from what was sent — either way it did not
+  // round-trip. displayName is stored verbatim (free text, no server-side
+  // normalization), so a mismatch here means loss, not transformation.
+  return persistedSpec.displayName !== requested
+}
+
+function sendPrunedDisplayNameError(res: Response): void {
+  console.warn('[Admin] Context spec.displayName was pruned by the apiserver (CRD outdated)')
+  res.status(409).json({
+    code: 'context_crd_outdated',
+    error:
+      'Context spec.displayName was not persisted by Kubernetes; the context CRD does not ' +
+      'support spec.displayName. Apply the latest clerum-crds (which add spec.displayName) ' +
+      'before setting a display name.',
+  })
+}
+
+/**
+ * Best-effort rollback of a context whose create silently dropped
+ * `spec.displayName`. Unlike the update path, a POST is NOT idempotent: leaving
+ * the pruned context in place would make the operator's retry (after applying
+ * the CRD) collide with a 409 AlreadyExists. Deleting it restores a clean retry
+ * path. Mirrors rollbackPrunedCommunicationChannelCreate.
+ */
+async function rollbackPrunedContextCreate(
+  gateway: K8sGateway,
+  name: string,
+  namespace: string
+): Promise<void> {
+  try {
+    await gateway.deleteResource('contexts', name, namespace)
+  } catch (err) {
+    const safeName = String(name).replace(/[\r\n]/g, '')
+    const safeErrMsg = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]/g, '')
+    console.warn(
+      `[Admin] context pruned-displayName rollback failed for "${safeName}": ${safeErrMsg}`
     )
   }
 }
@@ -432,6 +505,25 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // non-host create.
       const hostWarnings: StaleModelWarning[] = []
 
+      // FIX-A1: validate metadata.name (RFC1123) for ALL plurals BEFORE any spec
+      // validation or side effect (e.g. CC credentials Secret creation). An
+      // invalid name would otherwise reach K8s and its 422 would collapse to 500.
+      const nameIssue = validateResourceName(body.metadata?.name)
+      if (nameIssue) {
+        res.status(422).json(nameIssue)
+        return
+      }
+
+      // F0.3: identifier/display field validation for hosts + contexts (create =
+      // no ratchet; every present field is validated).
+      if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
+        const fieldIssues = collectResourceSpecFieldIssues(plural, body.spec, null)
+        if (fieldIssues.length > 0) {
+          res.status(422).json({ errors: fieldIssues })
+          return
+        }
+      }
+
       if (plural === 'communicationchannels' && body.spec) {
         const errors = validateCommunicationChannelSpec(body.spec)
         if (errors.length > 0) {
@@ -607,6 +699,15 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           return
         }
       }
+      if (
+        plural === 'contexts' &&
+        body.spec &&
+        contextDisplayNameNotPersisted(body.spec, created)
+      ) {
+        await rollbackPrunedContextCreate(gateway, body.metadata.name, ns)
+        sendPrunedDisplayNameError(res)
+        return
+      }
       // Host CR persisted: attach any Fase 6 warnings additively (older clients
       // ignore the field). Absent when there is nothing to warn about.
       res
@@ -646,6 +747,38 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // Fase 6 soft-quarantine warnings, returned in the 200 body only after the
       // CR persists (below). Empty for every non-host / non-stale write.
       const hostWarnings: StaleModelWarning[] = []
+
+      // N1 — the CR read by the ratchet below is handed to updateResource so a
+      // hosts/contexts PUT reads the apiserver ONCE, not twice (updateResource
+      // already reads `current` internally). Undefined for non hosts/contexts
+      // plurals and on the 404 path, where updateResource reads afresh and
+      // surfaces the real 404.
+      let ratchetCurrent: MutableResourceSnapshot | undefined
+
+      // F0.3 RATCHET: for hosts + contexts, validate an identifier/display field
+      // ONLY IF its value changed vs the current CR, so a legacy resource whose
+      // spec.host / contextId is out of norm is never blocked for other edits.
+      if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
+        let currentSpec: Record<string, unknown> | null = null
+        try {
+          const current = (await gateway.getResource(plural, req.params.name, ns)) as
+            | (MutableResourceSnapshot & { spec?: Record<string, unknown> })
+            | null
+          currentSpec = recordValue(current?.spec)
+          ratchetCurrent = current ?? undefined
+        } catch (err) {
+          // Missing resource: fall through with currentSpec=null (validate every
+          // present field). The subsequent updateResource surfaces the real 404.
+          // getResource wraps a namespaced 404 as K8sNotFoundError (httpStatus),
+          // which extractK8sStatusCode does not read, so check both.
+          if (!(err instanceof K8sNotFoundError) && extractK8sStatusCode(err) !== 404) throw err
+        }
+        const fieldIssues = collectResourceSpecFieldIssues(plural, body.spec, currentSpec)
+        if (fieldIssues.length > 0) {
+          res.status(422).json({ errors: fieldIssues })
+          return
+        }
+      }
 
       if (plural === 'communicationchannels' && body.spec) {
         const errors = validateCommunicationChannelSpec(body.spec)
@@ -787,7 +920,13 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
       }
       try {
-        const updated = await gateway.updateResource(plural, req.params.name, updateBody, ns)
+        // Only the ratchet path (hosts/contexts) has a pre-read to hand off; the
+        // CC/mcpservers paths call with the original 4-arg arity untouched.
+        const updated = ratchetCurrent
+          ? await gateway.updateResource(plural, req.params.name, updateBody, ns, {
+              preReadCurrent: ratchetCurrent,
+            })
+          : await gateway.updateResource(plural, req.params.name, updateBody, ns)
         // Host CR persisted: NOW emit any Pieza D tolerations (never before the
         // write lands, so a K8s conflict/error leaves no audit record).
         for (const event of hostTolerations) emitHostSpecIncoherenceTolerated(event)
@@ -804,6 +943,20 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             sendPrunedProviderSettingError(res, missingField)
             return
           }
+        }
+        if (
+          plural === 'contexts' &&
+          body.spec &&
+          contextDisplayNameNotPersisted(body.spec, updated)
+        ) {
+          // Deliberately NO spec restore (unlike the CC update rollback): the
+          // context's other spec fields persisted legitimately, and a PUT is
+          // idempotent — once the operator applies the CRD and replays the same
+          // request, spec.displayName round-trips and the whole spec converges.
+          // Restoring the prior spec would instead discard those legitimate
+          // edits. The loud 409 is the recovery signal.
+          sendPrunedDisplayNameError(res)
+          return
         }
         res
           .status(200)
@@ -888,7 +1041,11 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         try {
           const ctxList = (await gateway.listResource('contexts', contextsNs)) as Array<{
             metadata?: { name?: string }
-            spec?: { contextId?: string; description?: string; mcpServers?: string[] }
+            spec?: Record<string, unknown> & {
+              contextId?: string
+              description?: string
+              mcpServers?: string[]
+            }
           }>
           for (const ctx of ctxList) {
             const ctxName = ctx.metadata?.name
@@ -899,8 +1056,8 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
                 ctxName,
                 {
                   spec: {
+                    ...ctx.spec,
                     contextId: ctx.spec?.contextId ?? ctxName,
-                    description: ctx.spec?.description,
                     mcpServers: servers.filter(s => s !== name),
                   } as Record<string, unknown>,
                 },
