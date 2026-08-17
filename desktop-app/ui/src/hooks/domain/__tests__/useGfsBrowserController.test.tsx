@@ -126,7 +126,7 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw==')
+            ? void ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'notes.md')
             : undefined
         }
       >
@@ -150,11 +150,32 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.replaceFile(ctrl.current.resourceId, 'aGVsbG8=', ctrl.current.version)
+            ? void ctrl.replaceFile(ctrl.current.resourceId, 'replacement.md', ctrl.current.version)
             : undefined
         }
       >
         replace current
+      </button>
+    </>
+  )
+}
+
+function UploadProbe() {
+  const ctrl = useGfsBrowserController()
+  return (
+    <>
+      <div data-testid="upload-state">{ctrl.uploadSnapshot?.state ?? 'none'}</div>
+      <button
+        type="button"
+        onClick={() =>
+          void ctrl.startFileUpload({
+            parentResourceId: 'parent-rid',
+            name: 'legacy.bin',
+            filePath: '/tmp/legacy.bin',
+          })
+        }
+      >
+        start upload
       </button>
     </>
   )
@@ -686,6 +707,110 @@ describe('useGfsBrowserController', () => {
     )
   })
 
+  it('finishes a completed legacy receipt without polling it as a v2 session', async () => {
+    const startFileUpload = vi.fn(async () => ({
+      uploadId: 'legacy-resource-id',
+      drive: 'main',
+      operation: 'create' as const,
+      expectedBytes: 12,
+      partBytes: 12,
+      partCount: 1,
+      state: 'completed',
+      contiguousBytes: 12,
+      committedBytes: 12,
+      committedPartCount: 1,
+      activePartCount: 0,
+      expiresAt: new Date().toISOString(),
+      resultResourceId: 'legacy-resource-id',
+      resultVersion: 1,
+    }))
+    const getUploadSnapshot = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          startFileUpload,
+          getUploadSnapshot,
+        },
+      },
+    })
+
+    render(<UploadProbe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'start upload' }).click()
+    })
+
+    await waitFor(() => expect(screen.getByTestId('upload-state').textContent).toBe('completed'))
+    expect(startFileUpload).toHaveBeenCalledWith(
+      'parent-rid',
+      'legacy.bin',
+      '/tmp/legacy.bin',
+      'main',
+      undefined
+    )
+    expect(getUploadSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('rehydrates a scoped persisted upload after the renderer mounts', async () => {
+    const listUploadSessions = vi.fn(async () => [
+      {
+        uploadId: 'terminal-upload',
+        fileName: 'done.bin',
+        fileSize: 12,
+        name: 'done.bin',
+        drive: 'main',
+        status: 'failed' as const,
+        target: { operation: 'create' as const, parentRid: 'parent-rid' },
+      },
+      {
+        uploadId: 'persisted-upload',
+        fileName: 'resume.bin',
+        fileSize: 12,
+        name: 'resume.bin',
+        drive: 'main',
+        status: 'suspended_auth' as const,
+        target: { operation: 'create' as const, parentRid: 'parent-rid' },
+      },
+    ])
+    const getUploadSnapshot = vi.fn(async () => ({
+      state: 'suspended_auth' as const,
+      session: {
+        uploadId: 'persisted-upload',
+        state: 'paused',
+        expectedBytes: 12,
+        committedBytes: 8,
+      },
+      uploadedBytes: 8,
+      totalBytes: 12,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listUploadSessions,
+          getUploadSnapshot,
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<UploadProbe />, { wrapper: Harness })
+
+    await waitFor(() =>
+      expect(screen.getByTestId('upload-state').textContent).toBe('suspended_auth')
+    )
+    expect(listUploadSessions).toHaveBeenCalledWith('main')
+    expect(getUploadSnapshot).toHaveBeenCalledWith('persisted-upload', 'main')
+  })
+
   it('refreshes cached affordances after permissions change outside Desktop', async () => {
     let held = ['read']
     const affordances = vi.fn(async () => ({
@@ -738,7 +863,7 @@ describe('useGfsBrowserController', () => {
       grantableBits: [],
       canCreateShare: false,
     }))
-    const createFile = vi.fn(async () => undefined)
+    const createFileFromPath = vi.fn(async () => undefined)
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -752,7 +877,7 @@ describe('useGfsBrowserController', () => {
           })),
           listChildren,
           affordances,
-          createFile,
+          createFileFromPath,
         },
       },
     })
@@ -769,7 +894,7 @@ describe('useGfsBrowserController', () => {
     })
 
     await waitFor(() =>
-      expect(createFile).toHaveBeenCalledWith('root', 'notes.md', 'IyBOb3Rlcw==', 'main')
+      expect(createFileFromPath).toHaveBeenCalledWith('root', 'notes.md', 'notes.md', 'main')
     )
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
     expect(affordances).toHaveBeenCalledTimes(1)
@@ -1018,7 +1143,7 @@ describe('useGfsBrowserController', () => {
             canCreateShare: false,
           })),
           renameResource: vi.fn(async () => ({ resourceId: 'file-1', version: 2 })),
-          replaceFile: vi.fn(async () => ({
+          replaceFileFromPath: vi.fn(async () => ({
             ...fileResource,
             name: 'Renamed report.md',
             version: 3,

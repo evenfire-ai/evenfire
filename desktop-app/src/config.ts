@@ -557,10 +557,11 @@ export const config: DesktopConfig = {
   desktopProfileUiBaseUrl: deriveProfileUiBaseUrl(initialRuntimeConfig.externalRestApiBaseUrl),
   desktopProfileUiBaseUrlExplicit: hasExplicitProfileUiBaseUrl(),
   requestTimeoutMs: Number(requiredOrDefault('REQUEST_TIMEOUT_MS', '60000')),
-  // Generous per-call deadline for GFS uploads: a 16 MB file is a ~22.4 MB
-  // base64 body, ~60s alone on a slow uplink — the 60s REQUEST_TIMEOUT_MS would
-  // abort it while every downstream hop still waits 300s. Parity with control-ui
-  // GFS_UPLOAD_TIMEOUT_MS.
+  // Generous deadline for legacy JSON GFS uploads: a 16 MiB file is a ~22.4 MiB
+  // base64 body, ~60s alone on a slow uplink. v2 streams binary indexed parts and
+  // has its own per-part/finalization deadlines.
+  // Keep legacy parity with control-ui GFS_UPLOAD_TIMEOUT_MS while each v2 part
+  // remains bounded by the upload protocol timeout.
   gfsUploadTimeoutMs: Number(requiredOrDefault('GFS_UPLOAD_TIMEOUT_MS', '300000')),
   appName: initialRuntimeConfig.appName?.trim() || DEFAULT_APP_NAME,
 }

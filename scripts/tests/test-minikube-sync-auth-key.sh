@@ -48,8 +48,9 @@ restart_count() {
 }
 
 if [[ "${1:-}" == "get" && "${2:-}" == "secret" && "${3:-}" == "rpc-proxy-secrets" ]]; then
+  [[ "${TEST_SOURCE_SECRET_PRESENT:-1}" == "1" ]] || exit 1
   if has_output_flag "$@"; then
-    printf 'cHVibGljLWtleQ=='
+    [[ "${TEST_SOURCE_KEY_EMPTY:-0}" == "1" ]] || printf 'cHVibGljLWtleQ=='
   fi
   exit 0
 fi
@@ -158,5 +159,74 @@ if grep -q 'rollout restart deployment -l' "${LOG_FILE}"; then
   cat "${OUT_FILE}" >&2
   exit 1
 fi
+
+: >"${LOG_FILE}"
+if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_SOURCE_SECRET_PRESENT=0 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake >"${OUT_FILE}" 2>&1; then
+  echo "FAIL: optional bootstrap auth sync no longer skips an absent source Secret" >&2
+  exit 1
+fi
+grep -q 'Skipping auth key sync (rpc-proxy-secrets not found)' "${OUT_FILE}"
+
+: >"${LOG_FILE}"
+if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_SOURCE_SECRET_PRESENT=0 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
+  echo "FAIL: strict GFS auth sync accepted a missing source Secret" >&2
+  exit 1
+fi
+grep -q 'required GFS auth source rpc-proxy/rpc-proxy-secrets is missing or unreadable' "${OUT_FILE}" || {
+  cat "${OUT_FILE}" >&2
+  echo "FAIL: strict GFS auth sync did not diagnose its missing source Secret" >&2
+  exit 1
+}
+if grep -Eq '^(patch|rollout restart)' "${LOG_FILE}"; then
+  echo "FAIL: missing required GFS source mutated consumers" >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+
+: >"${LOG_FILE}"
+if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_SOURCE_KEY_EMPTY=1 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
+  echo "FAIL: strict GFS auth sync accepted an empty source key" >&2
+  exit 1
+fi
+grep -q 'required GFS auth source key RPC_PROXY_JWT_PUBLIC_KEY is empty' "${OUT_FILE}" || {
+  cat "${OUT_FILE}" >&2
+  echo "FAIL: strict GFS auth sync did not diagnose its empty source key" >&2
+  exit 1
+}
+
+: >"${LOG_FILE}"
+if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
+  echo "FAIL: strict GFS auth sync accepted a missing gfs-config target" >&2
+  exit 1
+fi
+grep -q 'required GFS auth target gfs/gfs-config is missing or unreadable' "${OUT_FILE}" || {
+  cat "${OUT_FILE}" >&2
+  echo "FAIL: strict GFS auth sync did not diagnose its missing target" >&2
+  exit 1
+}
+if grep -Eq '^(patch|rollout restart)' "${LOG_FILE}"; then
+  echo "FAIL: missing required GFS target mutated another auth consumer" >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+
+: >"${LOG_FILE}"
+if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_GFS_CONFIG_PRESENT=1 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo "FAIL: strict GFS auth sync rejected complete authority inputs" >&2
+  exit 1
+fi
+grep -q 'patch configmap gfs-config' "${LOG_FILE}"
 
 echo "PASS: auth-key sync retries transient rollout restart race and skips gfsc restart until DSN provisioning"

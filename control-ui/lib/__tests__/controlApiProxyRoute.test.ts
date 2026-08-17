@@ -295,6 +295,103 @@ describe('control-ui control-api proxy route', () => {
     })
   })
 
+  describe('raw GFS part bodies are counted before forwarding', () => {
+    const path = [
+      'api',
+      'v1',
+      'gfs',
+      'proxy',
+      'v1',
+      'uploads',
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'parts',
+      '0',
+    ]
+
+    it('rejects a streamed part that exceeds the declared length', async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response(null, { status: 204 }))
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(3))
+          controller.enqueue(new Uint8Array(2))
+          controller.close()
+        },
+      })
+      const req = new NextRequest(
+        'http://localhost:3000/control-api/api/v1/gfs/proxy/v1/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/parts/0',
+        {
+          method: 'PUT',
+          headers: { 'Upload-Chunk-Length': '4' },
+          body: stream,
+          duplex: 'half',
+        } as RequestInit & { duplex: 'half' }
+      )
+
+      const res = await POST(req, { params: { path } })
+
+      expect(res.status).toBe(400)
+      await expect(res.json()).resolves.toEqual({ error: 'upload_length_mismatch' })
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
+
+    it('rejects a streamed part above the hard 16 MiB cap even when the header lies', async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response(null, { status: 204 }))
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(16 * 1024 * 1024))
+          controller.enqueue(new Uint8Array(1))
+          controller.close()
+        },
+      })
+      const req = new NextRequest(
+        'http://localhost:3000/control-api/api/v1/gfs/proxy/v1/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/parts/0',
+        {
+          method: 'PUT',
+          headers: { 'Upload-Chunk-Length': String(16 * 1024 * 1024) },
+          body: stream,
+          duplex: 'half',
+        } as RequestInit & { duplex: 'half' }
+      )
+
+      const res = await POST(req, { params: { path } })
+
+      expect(res.status).toBe(413)
+      await expect(res.json()).resolves.toEqual({ error: 'payload_too_large' })
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
+
+    it('forwards the exact counted bytes as a bounded ArrayBuffer', async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response(null, { status: 204 }))
+      const payload = new Uint8Array([1, 2, 3, 4])
+      const req = new NextRequest(
+        'http://localhost:3000/control-api/api/v1/gfs/proxy/v1/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/parts/0',
+        {
+          method: 'PUT',
+          headers: { 'Upload-Chunk-Length': String(payload.byteLength) },
+          body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(payload)
+              controller.close()
+            },
+          }),
+          duplex: 'half',
+        } as RequestInit & { duplex: 'half' }
+      )
+
+      const res = await POST(req, { params: { path } })
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+
+      expect(res.status).toBe(204)
+      expect(Buffer.from(init.body as ArrayBuffer)).toEqual(Buffer.from(payload))
+    })
+  })
+
   describe('header handling', () => {
     afterEach(() => vi.restoreAllMocks())
 

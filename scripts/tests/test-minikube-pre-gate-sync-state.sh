@@ -128,11 +128,13 @@ else
 fi
 
 if runtime_contains 'assert_workflow_gateway_prompt_bridge_finalization_route()' &&
-   runtime_contains 'nginx -T' &&
-   runtime_contains 'invocations/[^/]+/finalize'; then
-  pass "pre-gate sync fails closed when the running gateway lacks SDK finalization"
+   runtime_contains 'nginx_config="$(${KC} exec' &&
+   runtime_contains 'could not inspect the active nginx configuration' &&
+   runtime_contains '[[ "${nginx_config}" != *"${expected_route}"* ]]' &&
+   ! grep -F 'nginx -T' "$RUNTIME_SCRIPT" | grep -Fq '|'; then
+  pass "pre-gate runtime guard separates nginx inspection from route validation"
 else
-  fail "pre-gate sync does not verify the running SDK finalization route"
+  fail "pre-gate runtime guard can confuse SIGPIPE or exec failure with a missing route"
 fi
 
 if contains 'fingerprint_dir packages/workflow-runtime-core' &&

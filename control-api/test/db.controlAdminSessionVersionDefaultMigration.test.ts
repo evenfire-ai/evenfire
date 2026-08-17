@@ -16,7 +16,9 @@ describe('0096_control_admin_session_version_default migration', () => {
     expect(sessionVersionMigration).toBeGreaterThanOrEqual(0)
     expect(lifecycleProjectionMigration).toBeGreaterThan(sessionVersionMigration)
     expect(defaultMigration).toBeGreaterThan(lifecycleProjectionMigration)
-    expect(defaultMigration).toBe(versions.length - 1)
+    // Later feature migrations may follow this dev migration. Its contract is
+    // the ordering relative to the lifecycle projection, not being globally
+    // last in a branch that also carries another feature's migrations.
 
     const migration = CONTROL_API_MIGRATIONS.find(
       candidate => candidate.version === '0096_control_admin_session_version_default'

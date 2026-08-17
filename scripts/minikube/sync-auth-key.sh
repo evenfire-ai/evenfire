@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PROFILE="clerum-test"
+REQUIRE_GFS=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -13,8 +14,15 @@ while [[ $# -gt 0 ]]; do
       PROFILE="${1#--context=}"
       shift
       ;;
+    --require-gfs)
+      # Reset recovery cannot restore GFSC until the canonical platform key is
+      # materialized in gfs-config. Generic bootstrap callers retain the
+      # existing skip-if-absent behavior.
+      REQUIRE_GFS=true
+      shift
+      ;;
     -h|--help)
-      echo "Usage: scripts/minikube/sync-auth-key.sh [--context <kubectl-context>]" >&2
+      echo "Usage: scripts/minikube/sync-auth-key.sh [--context <kubectl-context>] [--require-gfs]" >&2
       exit 0
       ;;
     *)
@@ -42,6 +50,10 @@ GFS_TARGET_KEY="jwt-public-key"
 GFS_DEPLOY_SELECTOR="clerum.io/managed-by=host-context-controller"
 
 log() { printf '[sync-auth-key] %s\n' "$*"; }
+die() {
+  log "ERROR: $*" >&2
+  exit 1
+}
 
 rollout_restart_with_retry() {
   local deployment="$1"
@@ -78,10 +90,20 @@ PY
 # The public key is the SAME for every consumer (one platform keypair), so it is
 # fetched once and synced into each consumer's ConfigMap below.
 if ! "${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" >/dev/null 2>&1; then
+  if [[ "${REQUIRE_GFS}" == "true" ]]; then
+    die "required GFS auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET} is missing or unreadable"
+  fi
   log "Skipping auth key sync (${SOURCE_SECRET} not found)"
   exit 0
 fi
 source_key="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" -o "jsonpath={.data.${SOURCE_KEY}}" | base64 -d)"
+if [[ "${REQUIRE_GFS}" == "true" && -z "${source_key}" ]]; then
+  die "required GFS auth source key ${SOURCE_KEY} is empty"
+fi
+if [[ "${REQUIRE_GFS}" == "true" ]] && \
+   ! "${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" >/dev/null 2>&1; then
+  die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} is missing or unreadable"
+fi
 
 # ── Target 1: mcp-host-config (restart named chatllm/mcp-host with retry) ──────
 sync_mcp_host() {
@@ -114,6 +136,9 @@ sync_mcp_host() {
 # ── Target 2: gfs-config (gfsc fails closed without the verification key) ──────
 sync_gfs() {
   if ! "${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" >/dev/null 2>&1; then
+    if [[ "${REQUIRE_GFS}" == "true" ]]; then
+      die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} disappeared or became unreadable during sync"
+    fi
     log "Skipping ${GFS_CONFIGMAP} sync (not found)"
     return 0
   fi

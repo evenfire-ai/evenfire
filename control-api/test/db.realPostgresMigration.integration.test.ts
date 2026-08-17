@@ -470,6 +470,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       )
     }
     expectPrivileges([...(controlApiRelations.gfs_blob_manifests ?? new Set())], [])
+    expectPrivileges([...(controlApiRelations.gfs_upload_parts ?? new Set())], [])
+    expectPrivileges([...(controlApiRelations.gfs_upload_sessions ?? new Set())], [])
 
     const linkUserId = randomUUID()
     const linkAdminId = randomUUID()
