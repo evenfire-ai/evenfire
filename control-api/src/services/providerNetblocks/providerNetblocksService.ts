@@ -252,7 +252,10 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
     }
 
     // Merge: keep other sources' data keys, replace this run's staged sources.
-    const newData: Record<string, string> = {}
+    // Object.create(null): a CM data key literally named "__proto__" (the CM key
+    // regex permits it) must not be silently dropped by a plain-{} setter — mirror
+    // the null-proto defense in countsForSource (adversarial-audit hardening).
+    const newData: Record<string, string> = Object.create(null)
     for (const [key, value] of Object.entries(currentData)) {
       if (key === '_meta') continue
       const src = key.split('.')[0]

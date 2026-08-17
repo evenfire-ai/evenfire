@@ -75,6 +75,12 @@ function lookupFqdnProvider(fqdn) {
 }
 
 function providerBounds(name) {
+  // Prototype-safety (adversarial audit): key on own-property only, so an
+  // attacker-controllable declaredName of "__proto__"/"constructor" returns
+  // DEFAULT_BOUNDS, not Object.prototype. Consistent with lookupFqdnProvider's
+  // own-property guard. (Impact is nil today — validateProviderRanges reads the
+  // bounds with != null guards — but keep the invariant explicit.)
+  if (!Object.prototype.hasOwnProperty.call(PROVIDER_BOUNDS, name)) return DEFAULT_BOUNDS
   return PROVIDER_BOUNDS[name] ?? DEFAULT_BOUNDS
 }
 

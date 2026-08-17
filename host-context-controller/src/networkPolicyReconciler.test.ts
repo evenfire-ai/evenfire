@@ -822,6 +822,58 @@ describe('NetworkPolicyReconciler', () => {
       )
     })
 
+    it('H3 (newbug): a partial spec edit (egressClass flipped off provider, provider object lingering) RETAINS the live NP', async () => {
+      // Adversarial-audit finding: the "provider declarations require egressClass
+      // provider" fail-close branch did NOT retain the live NP, so a partial edit
+      // (provider→exact-host while the provider: object remains) let the stale-policy
+      // GC delete the already-validated live NP → egress loss. RED against the pre-fix
+      // branch (no desiredPolicyNames.add).
+      const mockCore = makeMockCoreApi()
+      mockCore.readNamespacedConfigMap.mockResolvedValue({
+        data: { 'github.api.ipv4': PROVIDER_API_24 },
+      })
+      const custom = makeMockCustomApi()
+      const r = makeReconciler(mockApi, undefined, custom, mockCore)
+      resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }])
+
+      // Phase 1: a valid provider binding creates the live NP.
+      await r.reconcileExternalEgress(providerServer())
+      const liveNp = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+      expect(liveNp.spec?.egress?.length).toBeGreaterThan(0)
+
+      // Phase 2: egressClass flipped to exact-host but the provider object lingers.
+      vi.clearAllMocks()
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [liveNp] })
+      const flipped: McpServerCRD = {
+        name: 'gh-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'x:latest',
+          transport: { type: 'streamableHttp', url: 'http://x:3000', port: 3000 },
+          egressBindings: [
+            {
+              egressClass: 'exact-host',
+              dns: 'api.github.com',
+              port: 443,
+              provider: { name: 'github' },
+            },
+          ],
+        },
+      }
+
+      await expect(r.reconcileExternalEgress(flipped)).rejects.toThrow()
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(JSON.stringify(custom.patchNamespacedCustomObjectStatus.mock.calls)).toContain(
+        'ExternalEgressRejected'
+      )
+    })
+
     it('H3 (BLOCKER): a blocked/empty/invalid DNS answer RETAINS the live provider policy (LKG, never egress loss)', async () => {
       const mockCore = makeMockCoreApi()
       mockCore.readNamespacedConfigMap.mockResolvedValue({

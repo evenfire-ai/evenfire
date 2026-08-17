@@ -10205,6 +10205,13 @@ describe('WorkflowRecipeReconciler', () => {
 
       const result = await reconcilerWith(ABSENT_LOOKUP).reconcile(recipe)
       expect(result.phase).toBe('failed')
+      // fail-close proof: no workload NP may be authored (a rendered-but-failed
+      // regression must fail here, not only on the phase).
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+          .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
+          .filter(b => b?.metadata?.name === 'wl-egress-test-recipe-worker')
+      ).toHaveLength(0)
     })
 
     it('SEAM row 8: a provider binding whose DNS resolves into a BLOCKED range fails loud (never renders catalog off a blocked answer)', async () => {
@@ -10233,6 +10240,13 @@ describe('WorkflowRecipeReconciler', () => {
 
       const result = await reconcilerWith(BLOCKED_LOOKUP).reconcile(recipe)
       expect(result.phase).toBe('failed')
+      // A regression that rendered the NP AND reported failed must not slip past:
+      // assert no workload egress policy was authored off the blocked answer.
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+          .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
+          .filter(b => b?.metadata?.name === 'wl-egress-test-recipe-worker')
+      ).toHaveLength(0)
     })
 
     it('SEAM row 9: a provider binding whose catalog category is ABSENT fails loud even on a permanent-absent DNS answer', async () => {
@@ -10270,6 +10284,13 @@ describe('WorkflowRecipeReconciler', () => {
 
       const result = await reconcilerWith(ABSENT_LOOKUP).reconcile(recipe)
       expect(result.phase).toBe('failed')
+      // fail-close proof: no workload NP may be authored (a rendered-but-failed
+      // regression must fail here, not only on the phase).
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+          .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
+          .filter(b => b?.metadata?.name === 'wl-egress-test-recipe-worker')
+      ).toHaveLength(0)
     })
 
     it('COLDSTART (WRC): a provider workload on a FRESH cluster (no catalog CM) fails loud, never active and never ships a partial workload NetworkPolicy', async () => {

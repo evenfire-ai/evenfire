@@ -1059,6 +1059,12 @@ export class NetworkPolicyReconciler {
 
       // A provider object is only meaningful on a provider-class binding.
       if (egressClass !== 'provider' && binding.provider !== undefined) {
+        // H3: RETAIN the live NP (LKG). A partial spec edit — flipping egressClass
+        // provider→exact-host while the `provider:` object lingers — must NOT let
+        // the stale-policy GC delete the already-validated live NP (the name is
+        // (server,dns,port)-derived, identical across classes). Mirrors every
+        // sibling fail-close branch; NEVER egress loss on a transient bad spec.
+        if (existingPolicy) desiredPolicyNames.add(name)
         failures.push('provider declarations require egressClass "provider"')
         continue
       }

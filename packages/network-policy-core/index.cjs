@@ -432,6 +432,10 @@ const DEFAULT_PROVIDER_BOUNDS = { minPrefixLength: 16, maxRanges: 256, maxSpanAd
 // STRICT octet: no leading zeros (except "0" itself), 0-255. Rejects the
 // leading-zero inputs the old HCC parser accepted (G2 intentional strictening).
 function strictIpv4ToNumber(ip) {
+  // Robustness (adversarial audit): a non-string input must return undefined, not
+  // throw — consistent with cidrRange/isValidIpv4's typeof guards. Callers (the
+  // R1-L5 numeric comparator, exported API) rely on non-parsable → undefined.
+  if (typeof ip !== 'string') return undefined
   const parts = ip.split('.')
   if (parts.length !== 4) return undefined
   let value = 0
