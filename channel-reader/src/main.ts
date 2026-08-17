@@ -100,11 +100,41 @@ const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 /** One "you are not linked" notice per Slack user per conversation per day. */
 const UNRESOLVED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const UNRESOLVED_NOTICE_COPY =
-  "I can't accept messages from this Slack account. If you haven't linked it yet, " +
-  'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+  "I can't accept messages from this Slack account. If you haven't linked it yet, open " +
+  'Settings > Social channels > Slack and choose Connect Slack. ' +
+  'If you think you should already have access, contact your admin.'
 const UNRESOLVED_NOTICE_COPY_TEAMS =
-  "I can't accept messages from this Teams account. If you haven't linked it yet, " +
-  'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+  "I can't accept messages from this Teams account. If you haven't linked it yet, open " +
+  'Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+  'If you think you should already have access, contact your admin.'
+
+/**
+ * Profile UI tab that owns the Connect button for a provider.
+ *
+ * The bare Profile UI root lands the user on their profile with no sign of
+ * where to go next, and the control they need is four levels in: Settings >
+ * Social channels > <provider> > Connect. These are real App Router segments
+ * (profile-ui/app/settings/social/[network]), not query params, so they are
+ * safe to link directly.
+ *
+ * The copy above still names the path in words. A deep link can be defeated by
+ * a sign-in redirect that drops the user at the root, and someone reading this
+ * from a phone needs to be able to find the screen without the link.
+ */
+const PROFILE_SOCIAL_CHANNEL_PATH: Partial<Record<ChannelType, string>> = {
+  slack: '/settings/social/slack',
+  teams: '/settings/social/teams',
+}
+
+/**
+ * Profile UI link for the tab where `channelType` is linked. Falls back to the
+ * configured base URL for a provider with no such tab, so a new channel type
+ * degrades to today's behaviour rather than emitting a 404 path.
+ */
+export function profileSocialChannelUrl(baseUrl: string, channelType: ChannelType): string {
+  const base = baseUrl.trim().replace(/\/+$/, '')
+  return `${base}${PROFILE_SOCIAL_CHANNEL_PATH[channelType] ?? ''}`
+}
 // Telegram deliberately gets no Profile UI link and no product name: unlike Teams
 // and Slack, anyone who discovers the bot handle can message it, so a reply must
 // not confirm what the bot belongs to.
@@ -1642,7 +1672,9 @@ export class ChannelReader {
       const profileUrl = config.profileUiUrl?.trim()
       const baseCopy =
         msg.channelType === 'teams' ? UNRESOLVED_NOTICE_COPY_TEAMS : UNRESOLVED_NOTICE_COPY
-      content = profileUrl ? `${baseCopy} ${profileUrl}` : baseCopy
+      content = profileUrl
+        ? `${baseCopy} ${profileSocialChannelUrl(profileUrl, msg.channelType)}`
+        : baseCopy
     }
     try {
       if (msg.channelType === 'teams') {
