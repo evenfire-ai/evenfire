@@ -513,6 +513,39 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     )
   })
 
+  it('sends only the selected provider, not empty arrays for the other two', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82' },
+    })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
+    })
+    fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), { target: { value: 'secret' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const body = vi.mocked(api.apiSend).mock.calls[0][2] as { spec: Record<string, unknown> }
+    const specKeys = Object.keys(body.spec)
+
+    // A Teams channel used to ship `telegram: []` and `slack: []` too. Those are
+    // truthy in channel-reader's provider guards, which made it treat the channel
+    // as a misconfigured Telegram channel and skip its real providers.
+    expect(specKeys).toContain('teamsSettings')
+    expect(specKeys).not.toContain('telegram')
+    expect(specKeys).not.toContain('telegramSettings')
+    expect(specKeys).not.toContain('slack')
+    expect(specKeys).not.toContain('slackSettings')
+  })
+
   it('prefills copied access and agent while creating the selected provider', async () => {
     mockSearchParams.set('copyFrom', 'source-channel')
     mockSearchParams.set('provider', 'slack')

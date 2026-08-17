@@ -106,6 +106,22 @@ function credentialLabel(key: keyof CredentialDraft): string {
   }
 }
 
+/**
+ * Spec fields for the selected provider, and only that provider.
+ *
+ * This deliberately does not emit empty arrays for the providers that were not
+ * selected. channel-reader guards its polling branches on the presence of the
+ * provider array, and `[]` is truthy, so a Teams channel carrying `telegram: []`
+ * entered the telegram branch, found no telegram adapter, and skipped every
+ * remaining provider on that channel. Sending only the chosen provider keeps a
+ * channel's spec an honest description of what it is.
+ *
+ * This is the create payload, so there is nothing to clear: a POST builds a
+ * fresh spec, and control-api validates each array only when it is present
+ * (`if (Array.isArray(...))`). An edit flow that has to unset a previously
+ * configured provider needs its own explicit empty array and must not rely on
+ * this helper.
+ */
 function providerSettings(provider: ChannelProvider, draft: DraftState) {
   if (provider === 'telegram') {
     return {
@@ -114,12 +130,10 @@ function providerSettings(provider: ChannelProvider, draft: DraftState) {
         botHandle: draft.telegramBotHandle.trim(),
         replyOnlyWhenMentioned: draft.telegramReplyOnlyWhenMentioned,
       },
-      slack: [],
     }
   }
   if (provider === 'slack') {
     return {
-      telegram: [],
       slack: [],
       slackSettings: {
         botHandle: draft.slackBotHandle.trim(),
@@ -129,8 +143,6 @@ function providerSettings(provider: ChannelProvider, draft: DraftState) {
     }
   }
   return {
-    telegram: [],
-    slack: [],
     teams: [],
     teamsSettings: {
       appName: draft.teamsAppName.trim(),

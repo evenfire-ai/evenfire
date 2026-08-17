@@ -1239,3 +1239,54 @@ describe('ChannelReader cron result delivery', () => {
     expect(rpc.acknowledgeCronResult).not.toHaveBeenCalled()
   })
 })
+
+describe('ChannelReader pollCycle provider guards', () => {
+  // control-ui's create page writes every provider array on every channel, so a
+  // Teams or Slack channel arrives carrying `telegram: []`. An empty array is
+  // truthy, so the telegram branch used to run for those channels, find no
+  // telegram adapter, and `continue` -- skipping every remaining provider on the
+  // same channel. The empty array means "no telegram groups to poll", not "this
+  // is a telegram channel".
+  it('still polls other providers on a channel that carries an empty telegram array', async () => {
+    const emailAdapter = {
+      fetchMessages: vi.fn(async () => [
+        {
+          channelType: 'email' as const,
+          channelId: 'inbox-1',
+          sender: 'someone@example.com',
+          content: 'hello',
+          timestamp: new Date('2026-08-17T12:00:00.000Z'),
+          messageId: 'email-1',
+        },
+      ]),
+      sendMessage: vi.fn(async () => undefined),
+    }
+
+    const reader = new ChannelReader({
+      rpcClient: rpcClient(),
+      notificationDeliveryClient: null,
+      adapters: new Map([['email', emailAdapter as unknown as ChannelAdapter]]),
+    })
+    ;(reader as unknown as { channels: unknown[] }).channels = [
+      {
+        name: 'evenfire-teams-jose',
+        namespace: 'channels',
+        spec: {
+          hostRef: 'agentjose',
+          telegram: [],
+          email: [{ channelId: 'inbox-1', emails: ['someone@example.com'] }],
+          teamsSettings: {
+            appId: 'a2dad48d-1b07-4b53-b177-35820f4306d3',
+            tenantId: '18517e81-9d09-4c73-88f3-e84a6c90c3d9',
+            appName: 'evenfire-teams-jose',
+          },
+        },
+      },
+    ]
+
+    const messages = await reader.pollCycle()
+
+    expect(emailAdapter.fetchMessages).toHaveBeenCalledOnce()
+    expect(messages).toHaveLength(1)
+  })
+})

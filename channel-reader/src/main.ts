@@ -1260,7 +1260,14 @@ export class ChannelReader {
       const { spec } = channelCRD
 
       // Process Telegram private chats, groups, and supergroups. Personal identity is verified separately.
-      if (spec.telegram) {
+      //
+      // Guard on length, not presence. control-ui writes every provider array on
+      // every channel, so a Teams or Slack channel arrives carrying `telegram: []`.
+      // An empty array is truthy, so this branch used to run for those channels,
+      // fail to find a telegram adapter, and `continue` -- skipping every
+      // remaining provider on the same channel. An empty array means "no telegram
+      // groups to poll", not "this is a telegram channel".
+      if (spec.telegram?.length) {
         const adapter = this.adapterForChannel('telegram', channelCRD)
         if (!adapter) continue
         const providerTarget = providerTargetFromChannel(channelCRD)
@@ -1341,8 +1348,8 @@ export class ChannelReader {
         }
       }
 
-      // Process Email groups
-      if (spec.email) {
+      // Process Email groups. Same empty-array reasoning as the telegram guard above.
+      if (spec.email?.length) {
         const adapter = this.adapterForChannel('email', channelCRD)
         if (!adapter) continue
         for (const group of spec.email) {
