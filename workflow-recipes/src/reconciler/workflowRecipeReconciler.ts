@@ -4100,6 +4100,13 @@ export class WorkflowRecipeReconciler {
       return
     }
     const now = Date.now()
+    // PR335 re-review: expire throttle entries older than the window. An entry with
+    // age >= the window can never suppress a warn (the check below), so removal is
+    // behavior-identical — and deleted recipes / removed provider bindings stop
+    // leaking map keys (there is no per-reconcile desiredPolicyNames sweep in WRC).
+    for (const [k, t] of this.providerDriftLastWarned) {
+      if (now - t >= 3_600_000) this.providerDriftLastWarned.delete(k)
+    }
     const last = this.providerDriftLastWarned.get(key)
     if (last !== undefined && now - last < 3_600_000) return
     this.providerDriftLastWarned.set(key, now)

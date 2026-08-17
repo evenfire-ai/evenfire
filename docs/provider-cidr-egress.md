@@ -98,6 +98,19 @@ live-verified in this repo. Only minikube · Calico has a planned live gate (GAT
 **IPv6 stance:** provider ranges are stored family-keyed but rendered **IPv4-only**. On
 dual-stack, v4-only rules are fail-closed for v6 (safe). IPv6-only clusters are unsupported.
 
+## Known limitation: permanent DNS failure on a brand-new provider binding
+
+A provider binding whose FQDN receives a *permanent* controller-DNS answer (NXDOMAIN,
+no A records, or a blocked/invalid address) while **no prior NetworkPolicy exists** fails
+closed — even though the catalog CIDRs do not depend on the controller's DNS. This is
+deliberate and symmetric across HCC and WRC (a WRC-only exemption was implemented and
+reverted within this milestone): a deterministic NXDOMAIN/blocked answer for a curated host
+is the maximally-suspicious slice (resolver sinkhole, poisoning, or a mis-configured host),
+where loud failure is correct. H3 is unaffected — any *live* NP is retained on failure, and
+a cold start has no egress to lose. Operator action: fix the controller's DNS (or the
+binding's FQDN); the binding converges on the next reconcile. The failure surfaces as
+`ExternalEgressRejected` (HCC) / the recipe's failed phase (WRC).
+
 ## Rollback
 
 Reverse of apply: (1) flip provider bindings back to `/32` mode; (2) revert controllers;

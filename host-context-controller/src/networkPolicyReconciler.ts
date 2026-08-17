@@ -241,6 +241,13 @@ export class NetworkPolicyReconciler {
   ): void {
     const key = `${namespace}/${policyName}`
     const now = Date.now()
+    // PR335 re-review: expire throttle entries older than the window. An entry
+    // with age >= the window can never suppress a warn (the check below), so its
+    // removal is behavior-identical — and deleted McpServers / removed bindings /
+    // DNS-frozen policies stop leaking map keys over a long-lived controller.
+    for (const [k, t] of this.providerDriftLastWarned) {
+      if (now - t >= 3_600_000) this.providerDriftLastWarned.delete(k)
+    }
     const last = this.providerDriftLastWarned.get(key)
     if (last !== undefined && now - last < 3_600_000) return
     this.providerDriftLastWarned.set(key, now)

@@ -67,7 +67,15 @@ if [ "${#existing[@]}" -eq 0 ]; then
   exit 1
 fi
 
-hits=$(grep -niE "\\b(${NAMES})\\b" "${existing[@]}" || true)
+# Distinguish grep rc=1 (no match → clean) from rc>=2 (I/O error / bad pattern
+# from a registry name with a regex metachar). `|| true` collapsed rc>=2 into an
+# empty `hits` and a false OK — a fail-open in a CI gate. Fail loud on rc>=2.
+rc=0
+hits=$(grep -niE "\\b(${NAMES})\\b" "${existing[@]}") || rc=$?
+if [ "${rc}" -ge 2 ]; then
+  echo "FAIL: grep exited ${rc} (I/O or pattern error) while scanning gated files — cannot certify provider-blindness" >&2
+  exit 1
+fi
 if [ -n "${hits}" ]; then
   echo "FAIL: provider names (${NAMES}) leaked into provider-blind layers:" >&2
   echo "${hits}" >&2
