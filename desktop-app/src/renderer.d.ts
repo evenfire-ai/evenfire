@@ -23,6 +23,8 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
+  LoginBackendHint,
+  MessageToolStep,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
@@ -66,6 +68,7 @@ declare global {
         deleteRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
         googleLogin: (idToken: string) => Promise<SessionState>
         passwordLogin: (email: string, password: string) => Promise<PasswordLoginResult>
+        diagnoseLoginBackend: () => Promise<LoginBackendHint | null>
         startDesktopSetup: (email: string) => Promise<{ profileUiUrl: string; appName: string }>
         openForgotPassword: (email?: string) => Promise<{ profileUiUrl: string }>
         openProfileSettings: (
