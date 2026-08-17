@@ -205,10 +205,10 @@ t2_profile_scope() {
     T2_NEXT_COMMAND='regenerate the profile for the current branch'
     t2_fail PROFILE_OWNERSHIP_MISMATCH 'profile branch does not match current branch'
   fi
-  if [[ "$T2_HEAD" != "$profile_sha"* ]]; then
-    T2_NEXT_COMMAND='regenerate the profile for the current HEAD'
-    t2_fail PROFILE_OWNERSHIP_MISMATCH 'profile SHA does not match current HEAD'
-  fi
+  # A healthy branch-owned profile is reusable across commits. The cache SHA
+  # is historical naming metadata; exact runtime identity is enforced below
+  # by the pre-gate marker's gitHead/worktreeId pair, not by recreating a
+  # Minikube cluster for every commit.
   if [ ! -f "$T2_PORTS_ENV" ]; then
     T2_NEXT_COMMAND='generate the profile-owned random ports before starting a gate'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "profile-owned ports.env is missing: $T2_PORTS_ENV"

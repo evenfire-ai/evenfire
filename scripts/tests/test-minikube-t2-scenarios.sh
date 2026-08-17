@@ -34,6 +34,7 @@ expect_code() {
 
 repo="$tmp/evenfire"
 mkdir -p "$repo"
+repo="$(cd "$repo" && pwd -P)"
 git init -q -b dev "$repo"
 git -C "$repo" config user.email test@example.invalid
 git -C "$repo" config user.name scenario-test
@@ -63,12 +64,14 @@ repo_env=(
   T2_PROFILE_ROOT="$tmp/profiles"
   T2_PROFILE_ENV="$profile_root/profile.env"
   T2_PORTS_ENV="$profile_root/ports.env"
+  T2_BRANCH=feat/scenario
+  T2_HEAD="$feature_sha"
   T2_LOCK_ROOT="$tmp/locks"
   T2_EVIDENCE_ROOT="$tmp/evidence"
 )
 
 expect_code DEVELOPMENT_SCOPE_REQUIRED wrong-repository wrong-repository \
-  env "${repo_env[@]}" bash -c 'git -C "$T2_PROJECT_DIR" remote set-url origin https://example.invalid/not-evenfire.git; source "$1"; t2_repo_metadata' bash "$COMMON"
+  env "${repo_env[@]}" bash -c 'git -C "$T2_PROJECT_DIR" remote set-url origin https://example.invalid/other-repository.git; source "$1"; t2_repo_metadata' bash "$COMMON"
 git -C "$repo" remote set-url origin https://github.com/evenfire-ai/evenfire.git
 
 git -C "$repo" branch main "$base_sha"
@@ -117,6 +120,12 @@ printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s
   "$profile" "$(git -C "$repo" rev-parse --short=8 HEAD)" "$tmp/other" >"$tmp/ownership.env"
 expect_code PROFILE_OWNERSHIP_MISMATCH profile-ownership profile-ownership \
   env "${ownership_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+
+stale_profile_env="$tmp/stale-profile.env"
+printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=oldsha1\nDIRTY=false\nREPO_DIR=%s\n' \
+  "$profile" "$repo" >"$stale_profile_env"
+env "${repo_env[@]}" T2_PROFILE_ENV="$stale_profile_env" \
+  bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
 
 marker_env=("${repo_env[@]}" T2_HEAD="$feature_sha" T2_WORKTREE_ID=worktree-a)
 expect_code HEAD_MARKER_MISMATCH stale-marker stale-marker \
