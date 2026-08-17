@@ -83,7 +83,7 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
 
   it('generates egress policy in rpc-proxy namespace when context has servers', async () => {
     const ctx = makeContext('ctx-alpha', ['mongodb-mcp'])
-    await reconciler.reconcileContext(ctx)
+    await reconciler.reconcileContext(ctx, { isCurrent: () => true })
 
     const rpcProxyCalls = mockApply.mock.calls.filter(call => call[2] === 'rpc-proxy')
     expect(rpcProxyCalls.length).toBeGreaterThanOrEqual(1)
@@ -91,7 +91,7 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
 
   it('egress policy targets correct server pod by mcpserver label', async () => {
     const ctx = makeContext('ctx-alpha', ['mongodb-mcp'])
-    await reconciler.reconcileContext(ctx)
+    await reconciler.reconcileContext(ctx, { isCurrent: () => true })
 
     const rpcProxyCalls = mockApply.mock.calls.filter(call => call[2] === 'rpc-proxy')
     expect(rpcProxyCalls.length).toBeGreaterThanOrEqual(1)
@@ -103,7 +103,7 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
 
   it('egress policy uses correct port from McpServer spec', async () => {
     const ctx = makeContext('ctx-beta', ['airtable-mcp'])
-    await reconciler.reconcileContext(ctx)
+    await reconciler.reconcileContext(ctx, { isCurrent: () => true })
 
     const rpcProxyCalls = mockApply.mock.calls.filter(
       call => call[1] === 'rpc-egress-ctx-beta-airtable-mcp'
@@ -146,7 +146,7 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
   it('deletes orphaned egress policies when server removed from context', async () => {
     // First reconcile with both servers
     const ctx1 = makeContext('ctx-delta', ['mongodb-mcp', 'airtable-mcp'])
-    await reconciler.reconcileContext(ctx1)
+    await reconciler.reconcileContext(ctx1, { isCurrent: () => true })
     const existingRpcProxyPolicies = mockApply.mock.calls
       .filter(call => call[2] === 'rpc-proxy')
       .map(call => {
@@ -180,7 +180,7 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
 
     // Now reconcile with only one server — orphaned rpc-proxy policy should be cleaned
     const ctx2 = makeContext('ctx-delta', ['mongodb-mcp'])
-    await reconciler.reconcileContext(ctx2)
+    await reconciler.reconcileContext(ctx2, { isCurrent: () => true })
 
     // applyNetworkPolicy should be called for mongodb-mcp in rpc-proxy but not airtable-mcp
     const rpcProxyCalls = mockApply.mock.calls.filter(call => call[2] === 'rpc-proxy')
@@ -205,7 +205,7 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
 
   it('skips egress generation when server not found in cache', async () => {
     const ctx = makeContext('ctx-epsilon', ['nonexistent-server'])
-    await reconciler.reconcileContext(ctx)
+    await reconciler.reconcileContext(ctx, { isCurrent: () => true })
 
     const rpcProxyCalls = mockApply.mock.calls.filter(call => call[2] === 'rpc-proxy')
     expect(rpcProxyCalls.length).toBe(0)

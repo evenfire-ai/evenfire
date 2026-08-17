@@ -52,7 +52,12 @@ type JsonPatchOperation = {
 }
 
 type NetworkPolicyMutationOptions = {
-  isCurrent?: () => boolean
+  // Required (not optional): reconcileContext and reconcileExternalEgress are the
+  // two functions that CREATE/RETAIN context-allow (L2) and external-egress ALLOW
+  // (L3) policies, so the authority fence must be supplied at compile time. A
+  // fail-open `?? (() => true)` default here would silently readmit the exact
+  // fail-open class hardened out of bindingPolicyReconciler (required isCurrent).
+  isCurrent: () => boolean
   onRevoked?: () => void
   /**
    * Set only by a caller that reads the returned boolean and withholds
@@ -862,9 +867,9 @@ export class NetworkPolicyReconciler {
    */
   async reconcileContext(
     context: ContextCRD,
-    options: NetworkPolicyMutationOptions = {}
+    options: NetworkPolicyMutationOptions
   ): Promise<boolean> {
-    const callerIsCurrent = options.isCurrent ?? (() => true)
+    const callerIsCurrent = options.isCurrent
     if (!callerIsCurrent()) return false
     const contextId = context.spec.contextId
     const allowedServers = context.spec.mcpServers || []
@@ -1902,9 +1907,9 @@ export class NetworkPolicyReconciler {
    */
   async reconcileExternalEgress(
     server: McpServerCRD,
-    options: NetworkPolicyMutationOptions = {}
+    options: NetworkPolicyMutationOptions
   ): Promise<void> {
-    const isCurrent = options.isCurrent ?? (() => true)
+    const isCurrent = options.isCurrent
     if (!isCurrent()) return
     let existingPolicies: k8s.V1NetworkPolicy[]
     try {

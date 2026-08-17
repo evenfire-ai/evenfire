@@ -1012,7 +1012,7 @@ if [ "$RESET_DB" = true ]; then
     $KC -n control-plane rollout status deployment/trace-maintenance-worker --timeout=180s >/dev/null
   fi
   if [ "$RESET_HCC_REPLICAS" -gt 0 ]; then
-    $KC -n control-plane rollout status deployment/host-context-controller --timeout=480s >/dev/null
+    $KC -n control-plane rollout status deployment/host-context-controller --timeout=900s >/dev/null
   fi
   ok "Control-api database and GFS roles converged after reset"
 else
