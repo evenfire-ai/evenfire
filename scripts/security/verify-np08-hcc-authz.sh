@@ -8,6 +8,8 @@ set -euo pipefail
 context=''
 read_only=0
 redact=0
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/np08-live-authz.XXXXXX")"
+trap 'rm -rf "${tmp_dir}"' EXIT
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --context)
@@ -70,11 +72,14 @@ check proxy_singleton_replicas "$([[ "${proxy_replicas}" == '1' ]] && echo 1 || 
 check proxy_singleton_ready "$([[ "${proxy_ready}" == '1' ]] && echo 1 || echo 0)"
 
 host_policy_json="$(kubectl --context="${context}" -n mcp-host get networkpolicies -o json)"
-network_policy_result="$(RUBYOPT=--disable=gems ruby "${BASH_SOURCE[0]%/*}/check-np08-mcp-host-networkpolicy.rb" <<<"${host_policy_json}")"
+kubectl --context="${context}" -n mcp-host get pods -o json >"${tmp_dir}/host-pods.json"
+network_policy_result="$(RUBYOPT=--disable=gems ruby "${BASH_SOURCE[0]%/*}/check-np08-mcp-host-networkpolicy.rb" --host-pods "${tmp_dir}/host-pods.json" <<<"${host_policy_json}")"
 network_policy_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["egress_contract_ok"] ? 1 : 0)' <<<"${network_policy_result}")"
+selector_contract_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["selector_contract_ok"] ? 1 : 0)' <<<"${network_policy_result}")"
 hcc_lane_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["hcc_lane"] ? 1 : 0)' <<<"${network_policy_result}")"
 host_proxy_8083_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["proxy_8083"] ? 0 : 1)' <<<"${network_policy_result}")"
 check mcp_host_egress_contract "${network_policy_ok}"
+check mcp_host_selector_contract "${selector_contract_ok}"
 check hcc_gateway_egress_lane "${hcc_lane_ok}"
 check no_host_proxy_8083_egress "${host_proxy_8083_ok}"
 

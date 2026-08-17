@@ -154,11 +154,12 @@ else
   fail "pre-gate does not verify the running NP-08 HCC gateway contract"
 fi
 
+nginx_inspection_pipeline_lines="$(grep -F 'nginx -T' "$RUNTIME_SCRIPT" | grep -vE '^[[:space:]]*#' | grep -E '\\|[[:space:]]*(grep|rg|sed|awk|head|tail|cut|sort|tr|wc)([[:space:]]|$)' || true)"
 if runtime_contains 'assert_workflow_gateway_prompt_bridge_finalization_route()' &&
    runtime_contains 'nginx_config="$(${KC} exec' &&
    runtime_contains 'could not inspect the active nginx configuration' &&
    runtime_contains '[[ "${nginx_config}" != *"${expected_route}"* ]]' &&
-   ! grep -F 'nginx -T' "$RUNTIME_SCRIPT" | grep -Fq '|'; then
+   [[ -z "$nginx_inspection_pipeline_lines" ]]; then
   pass "pre-gate runtime guard separates nginx inspection from route validation"
 else
   fail "pre-gate runtime guard can confuse SIGPIPE or exec failure with a missing route"

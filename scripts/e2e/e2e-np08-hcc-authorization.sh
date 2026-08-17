@@ -18,6 +18,9 @@ usage: scripts/e2e/e2e-np08-hcc-authorization.sh --context <branch-owned-minikub
 USAGE
 }
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+
 context=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +44,12 @@ if [[ -z "${context}" ]]; then
   exit 2
 fi
 
+profile="${MINIKUBE_PROFILE:-${context}}"
+if [[ "${profile}" != "${context}" ]]; then
+  echo "FAIL: MINIKUBE_PROFILE must equal --context for the deployed NP-08 gate" >&2
+  exit 2
+fi
+
 case "${context}" in
   clerum-codex-np-08-cross-context-mcp-token-plan-*) ;;
   *)
@@ -49,7 +58,7 @@ case "${context}" in
     ;;
 esac
 
-for command_name in kubectl jq; do
+for command_name in kubectl jq git shasum awk python3; do
   command -v "${command_name}" >/dev/null || {
     echo "FAIL: required command missing: ${command_name}" >&2
     exit 1
@@ -60,28 +69,120 @@ kctl() {
   kubectl --context="${context}" "$@"
 }
 
+SYNC_CONFIGMAP="${CLERUM_PRE_GATE_SYNC_CONFIGMAP:-clerum-pre-gate-sync-state}"
+PORTS_ENV="${CLERUM_PROFILE_PORTS_ENV:-${HOME}/.cache/clerum/minikube-profiles/${profile}/ports.env}"
+
+verify_profile_ownership() {
+  [[ -f "${PORTS_ENV}" ]] || {
+    echo "FAIL: branch profile ports.env is missing: ${PORTS_ENV}" >&2
+    exit 1
+  }
+  local profile_dir profile_name profile_repo profile_dirty
+  profile_dir="${PORTS_ENV%/ports.env}"
+  profile_name="$(awk -F= '$1 == "PROFILE" { print substr($0, index($0, "=") + 1); exit }' "${profile_dir}/profile.env" 2>/dev/null || true)"
+  profile_repo="$(awk -F= '$1 == "REPO_DIR" { print substr($0, index($0, "=") + 1); exit }' "${profile_dir}/profile.env" 2>/dev/null || true)"
+  profile_dirty="$(awk -F= '$1 == "DIRTY" { print substr($0, index($0, "=") + 1); exit }' "${profile_dir}/profile.env" 2>/dev/null || true)"
+  [[ "${profile_name}" == "${profile}" ]] || {
+    echo "FAIL: profile marker belongs to '${profile_name:-unknown}', not ${profile}" >&2
+    exit 1
+  }
+  [[ "${profile_dirty}" == "false" ]] || {
+    echo "FAIL: profile marker is dirty; refuse stale-profile E2E" >&2
+    exit 1
+  }
+  [[ -n "${profile_repo}" && "$(cd -- "${profile_repo}" 2>/dev/null && pwd -P)" == "${PROJECT_DIR}" ]] || {
+    echo "FAIL: profile marker belongs to another worktree: ${profile_repo:-unknown}" >&2
+    exit 1
+  }
+}
+
+verify_clean_and_sync_marker() {
+  local head worktree_id marker_json
+  [[ -z "$(git -C "${PROJECT_DIR}" status --porcelain)" ]] || {
+    echo "FAIL: worktree is dirty; commit or restore before deployed NP-08 E2E" >&2
+    exit 1
+  }
+  head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD)"
+  worktree_id="$(printf '%s' "${PROJECT_DIR}" | shasum | awk '{print $1}')"
+  marker_json="$(kctl -n control-plane get configmap "${SYNC_CONFIGMAP}" -o json 2>/dev/null)" || {
+    echo "FAIL: pre-gate marker is missing: control-plane/${SYNC_CONFIGMAP}" >&2
+    exit 1
+  }
+  python3 - "${worktree_id}" "${head}" "${marker_json}" <<'PY'
+import json
+import sys
+
+expected_worktree, expected_head, marker_json = sys.argv[1:]
+data = (json.loads(marker_json).get("data") or {})
+if not data.get("clusterFingerprint"):
+    raise SystemExit("FAIL: pre-gate marker has no cluster fingerprint")
+if data.get("worktreeId") != expected_worktree:
+    raise SystemExit("FAIL: pre-gate marker belongs to another worktree")
+if data.get("gitHead") != expected_head:
+    raise SystemExit("FAIL: pre-gate marker does not match current HEAD")
+if data.get("imageSource") != "local":
+    raise SystemExit("FAIL: pre-gate marker is not for local images")
+PY
+}
+
 MCP_NS='mcp-server'
 HOST_NS='mcp-host'
 CONTROL_NS='control-plane'
 HOST_DEPLOYMENT='chatllm'
+RUN_ID="${NP08_E2E_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}"
+OWNER_LABEL_KEY='np08.evenfire/owner'
+OWNER_LABEL_VALUE='hcc-authorization'
 CONTEXT_A='context1'
-CONTEXT_B='np08-e2e-context-b'
-SERVER_A='np08-e2e-server-a'
-SERVER_B='np08-e2e-server-b'
-SECRET_A='np08-e2e-server-a-auth'
-SECRET_B='np08-e2e-server-b-auth'
+CONTEXT_B="np08-e2e-${RUN_ID}-context-b"
+SERVER_A="np08-e2e-${RUN_ID}-server-a"
+SERVER_B="np08-e2e-${RUN_ID}-server-b"
+SECRET_A="np08-e2e-${RUN_ID}-server-a-auth"
+SECRET_B="np08-e2e-${RUN_ID}-server-b-auth"
+
+verify_profile_ownership
+verify_clean_and_sync_marker
 
 cleanup() {
   local status=$?
+  local cleanup_status=0
+  local remove_patch residual context_contains_fixture context_a_json
   set +e
-  if [[ -n "${original_servers:-}" ]]; then
-    local restore_patch
-    restore_patch="$(jq -cn --argjson servers "${original_servers}" '{spec:{mcpServers:$servers}}')"
-    kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=merge -p "${restore_patch}" >/dev/null 2>&1
+  if [[ "${fixture_context_patched:-0}" == 1 ]]; then
+    remove_patch="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json 2>/dev/null | jq -c --arg server "${SERVER_A}" '
+      [(.spec.mcpServers // [] | to_entries[] | select(.value == $server) | .key)]
+      | reverse | map({op:"remove", path:("/spec/mcpServers/" + tostring)})' 2>/dev/null)"
+    if [[ -z "${remove_patch}" || "${remove_patch}" == "null" ]]; then
+      cleanup_status=1
+    elif [[ "${remove_patch}" != '[]' ]] && ! kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json -p "${remove_patch}" >/dev/null 2>&1; then
+      cleanup_status=1
+    fi
   fi
-  kctl -n "${MCP_NS}" delete mcpserver "${SERVER_A}" "${SERVER_B}" --ignore-not-found >/dev/null 2>&1
-  kctl -n "${MCP_NS}" delete context "${CONTEXT_B}" --ignore-not-found >/dev/null 2>&1
-  kctl -n "${MCP_NS}" delete secret "${SECRET_A}" "${SECRET_B}" --ignore-not-found >/dev/null 2>&1
+  for resource in mcpserver secret context; do
+    if ! kctl -n "${MCP_NS}" delete "${resource}" \
+      -l "${OWNER_LABEL_KEY}=${OWNER_LABEL_VALUE},np08.evenfire/run=${RUN_ID}" \
+      --ignore-not-found >/dev/null 2>&1; then
+      cleanup_status=1
+    fi
+  done
+  context_a_json="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json 2>/dev/null)" || cleanup_status=1
+  if [[ -n "${context_a_json}" ]]; then
+    context_contains_fixture="$(jq -r --arg server "${SERVER_A}" '(.spec.mcpServers // []) | any(. == $server)' <<<"${context_a_json}" 2>/dev/null)" || cleanup_status=1
+  else
+    context_contains_fixture='unknown'
+  fi
+  if [[ "${context_contains_fixture}" == "true" ]]; then
+    cleanup_status=1
+  fi
+  for resource in mcpserver secret context; do
+    residual="$(kctl -n "${MCP_NS}" get "${resource}" -l "${OWNER_LABEL_KEY}=${OWNER_LABEL_VALUE},np08.evenfire/run=${RUN_ID}" -o name 2>/dev/null)"
+    if [[ -n "${residual}" ]]; then
+      cleanup_status=1
+    fi
+  done
+  if [[ "${cleanup_status}" -ne 0 ]]; then
+    status=1
+    echo 'FAIL: NP-08 E2E cleanup did not remove all owned fixtures' >&2
+  fi
   if [[ "${status}" -eq 0 ]]; then
     echo 'PASS: NP-08 deployed HCC authorization E2E'
   else
@@ -100,7 +201,10 @@ kctl -n "${CONTROL_NS}" get deployment host-context-controller-api-gateway \
 kctl -n "${HOST_NS}" get deployment "${HOST_DEPLOYMENT}" \
   -o jsonpath='{.status.readyReplicas}' | grep -qx '1'
 
-original_servers="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json | jq -c '.spec.mcpServers // []')"
+if kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json | jq -e --arg server "${SERVER_A}" '(.spec.mcpServers // []) | any(. == $server)' >/dev/null; then
+  echo "FAIL: generated fixture server name already exists in ${CONTEXT_A}" >&2
+  exit 1
+fi
 
 # The fixtures are deliberately managed:false: HCC must expose their live
 # authority state without creating a workload or opening a new transport lane.
@@ -110,24 +214,33 @@ kind: Secret
 metadata:
   name: ${SECRET_A}
   namespace: ${MCP_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
 type: Opaque
 stringData:
-  token: np08-synthetic-a
+  token: np08-synthetic-${RUN_ID}-a
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   name: ${SECRET_B}
   namespace: ${MCP_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
 type: Opaque
 stringData:
-  token: np08-synthetic-b
+  token: np08-synthetic-${RUN_ID}-b
 ---
 apiVersion: clerum.io/v1alpha1
 kind: Context
 metadata:
   name: ${CONTEXT_B}
   namespace: ${MCP_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
 spec:
   contextId: ${CONTEXT_B}
   mcpServers:
@@ -138,6 +251,9 @@ kind: McpServer
 metadata:
   name: ${SERVER_A}
   namespace: ${MCP_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
 spec:
   contextRef: ${CONTEXT_A}
   image: clerum/mock-mcp-server:dev
@@ -157,6 +273,9 @@ kind: McpServer
 metadata:
   name: ${SERVER_B}
   namespace: ${MCP_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
 spec:
   contextRef: ${CONTEXT_B}
   image: clerum/mock-mcp-server:dev
@@ -172,25 +291,28 @@ spec:
   enabled: true
 YAML
 
-# Append only the fixture owned by this test, preserving the original Context
-# allowlist for cleanup and for any concurrently seeded local E2E data.
+# Append only the fixture owned by this test; cleanup removes only this
+# test's matching server entry and labeled resources.
 kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
   -p="[{\"op\":\"add\",\"path\":\"/spec/mcpServers/-\",\"value\":\"${SERVER_A}\"}]" >/dev/null
+fixture_context_patched=1
 
 echo 'E2E setup: waiting for HCC to observe the synthetic Context/McpServer fixtures'
 
 # Keep the runtime JWT and the returned synthetic token inside the Host pod.
 # The process emits only assertion labels and status/error classes.
-kctl -n "${HOST_NS}" exec -i "deploy/${HOST_DEPLOYMENT}" -- node - <<'NODE'
+kctl -n "${HOST_NS}" exec -i "deploy/${HOST_DEPLOYMENT}" -- \
+  env "NP08_SERVER_A=${SERVER_A}" "NP08_SERVER_B=${SERVER_B}" \
+  "NP08_EXPECTED_SYNTHETIC_TOKEN=np08-synthetic-${RUN_ID}-a" node - <<'NODE'
 const base = 'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
 let accessToken = process.env.MCP_HOST_RUNTIME_ACCESS_TOKEN
 const refreshToken = process.env.MCP_HOST_RUNTIME_REFRESH_TOKEN
 const workflowToken = process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN
-const serverA = 'np08-e2e-server-a'
-const serverB = 'np08-e2e-server-b'
-const expectedSyntheticToken = 'np08-synthetic-a'
+const serverA = process.env.NP08_SERVER_A
+const serverB = process.env.NP08_SERVER_B
+const expectedSyntheticToken = process.env.NP08_EXPECTED_SYNTHETIC_TOKEN
 
-if (!accessToken || !refreshToken || !workflowToken) {
+if (!accessToken || !refreshToken || !workflowToken || !serverA || !serverB || !expectedSyntheticToken) {
   throw new Error('runtime token environment is unavailable')
 }
 
@@ -258,7 +380,7 @@ await assertEventually('same-Context inventory', async () => {
   if (!Array.isArray(body?.servers)) return false
   const names = body.servers.map(server => server?.name)
   if (!names.includes(serverA) || names.includes(serverB)) return false
-  if (JSON.stringify(body).includes('secretRef') || JSON.stringify(body).includes('np08-synthetic-a')) {
+  if (JSON.stringify(body).includes('secretRef') || JSON.stringify(body).includes(expectedSyntheticToken)) {
     throw new Error('inventory exposed credential material')
   }
   return true

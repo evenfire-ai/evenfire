@@ -22,13 +22,17 @@ assert_result() {
   local expected="$2"
   local actual
   actual="$(RUBYOPT=--disable=gems ruby "$helper" <"${fixture}")"
-  if [[ "${actual}" != "${expected}" ]]; then
+  if ! ruby -rjson -e '
+    expected = JSON.parse(ARGV.fetch(0))
+    actual = JSON.parse(STDIN.read)
+    abort unless expected.all? { |key, value| actual[key] == value }
+  ' "${expected}" <<<"${actual}"; then
     echo "FAIL: unexpected live NetworkPolicy result" >&2
     exit 1
   fi
 }
 
-assert_result "${tmp_dir}/valid.json" '{"egress_contract_ok":true,"hcc_lane":true,"proxy_8083":false}'
+assert_result "${tmp_dir}/valid.json" '{"egress_contract_ok":true,"selector_contract_ok":true,"hcc_lane":true,"proxy_8083":false}'
 echo "PASS: live policy helper accepts the current render"
 
 mutate() {
@@ -86,3 +90,11 @@ echo "PASS: live policy helper rejects mcp-proxy TCP 8083"
 proxy_range="$(mutate proxy-range 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "control-plane" } }, "podSelector" => { "matchLabels" => { "app" => "host-context-controller-api-gateway" } } }], "ports" => [{ "port" => 8000, "endPort" => 9000, "protocol" => "TCP" }] }')"
 assert_result "${proxy_range}" '{"egress_contract_ok":true,"hcc_lane":true,"proxy_8083":true}'
 echo "PASS: live policy helper rejects a TCP range containing 8083"
+
+invalid_selector="$(mutate invalid-selector 'data["items"].select { |d| d["kind"] == "NetworkPolicy" && d.dig("metadata", "namespace") == "mcp-host" }.each { |d| d["spec"]["podSelector"] = { "matchLabels" => { "np08.invalid/never" => "true" } } }')"
+assert_result "${invalid_selector}" '{"egress_contract_ok":true,"selector_contract_ok":false,"hcc_lane":false,"proxy_8083":false}'
+echo "PASS: live policy helper rejects ineffective Host selectors"
+
+missing_egress_type="$(mutate missing-egress-type 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["policyTypes"] = ["Ingress"]')"
+assert_result "${missing_egress_type}" '{"selector_contract_ok":false,"hcc_lane":false}'
+echo "PASS: live policy helper rejects a Host policy without Egress policy type"

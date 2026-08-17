@@ -102,6 +102,22 @@ when 'named-port'
     'to' => [{ 'ipBlock' => { 'cidr' => '198.51.100.1/32' } }],
     'ports' => [{ 'port' => 'mcp-http', 'protocol' => 'TCP' }],
   }
+when 'invalid-host-selector'
+  policies = documents.select do |document|
+    document['kind'] == 'NetworkPolicy' && document.dig('metadata', 'namespace') == 'mcp-host'
+  end
+  abort('fixture source is missing mcp-host NetworkPolicies') if policies.empty?
+  policies.each do |policy|
+    policy['spec']['podSelector'] = { 'matchLabels' => { 'np08.invalid/never' => 'true' } }
+  end
+when 'missing-egress-policy-type'
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host'
+  end
+  abort('fixture source is missing mcp-host NetworkPolicy') unless policy
+  policy['spec']['policyTypes'] = ['Ingress']
 when 'host-secret-grant'
   documents << {
     'apiVersion' => 'rbac.authorization.k8s.io/v1',
@@ -148,6 +164,26 @@ when 'host-secret-user-grant', 'host-secret-group-grant'
       'name' => "fixture-#{mutation}",
     },
     'subjects' => [subject],
+  }
+when 'host-secret-authenticated-group-grant'
+  documents << {
+    'apiVersion' => 'rbac.authorization.k8s.io/v1',
+    'kind' => 'Role',
+    'metadata' => { 'name' => 'fixture-host-secret-authenticated-reader', 'namespace' => 'mcp-server' },
+    'rules' => [
+      { 'apiGroups' => [''], 'resources' => ['secrets'], 'verbs' => ['get'] },
+    ],
+  }
+  documents << {
+    'apiVersion' => 'rbac.authorization.k8s.io/v1',
+    'kind' => 'RoleBinding',
+    'metadata' => { 'name' => 'fixture-host-secret-authenticated-reader', 'namespace' => 'mcp-server' },
+    'roleRef' => {
+      'apiGroup' => 'rbac.authorization.k8s.io',
+      'kind' => 'Role',
+      'name' => 'fixture-host-secret-authenticated-reader',
+    },
+    'subjects' => [{ 'kind' => 'Group', 'name' => 'system:authenticated' }],
   }
 else
   abort("unknown fixture mutation: #{mutation}")
@@ -210,6 +246,20 @@ assert_rejected \
   'mcp-host egress must use numeric ports' \
   'named mcp-host egress port'
 
+invalid_host_selector="${tmpdir}/invalid-host-selector.yaml"
+mutate_render invalid-host-selector "${invalid_host_selector}"
+assert_rejected \
+  "${invalid_host_selector}" \
+  'mcp-host default-deny must select every pod and enforce Egress' \
+  'mcp-host policies with ineffective selectors'
+
+missing_egress_policy_type="${tmpdir}/missing-egress-policy-type.yaml"
+mutate_render missing-egress-policy-type "${missing_egress_policy_type}"
+assert_rejected \
+  "${missing_egress_policy_type}" \
+  'mcp-host allow policy must select HCC-managed Host pods and enforce Egress' \
+  'mcp-host policy without Egress type'
+
 host_secret_grant="${tmpdir}/host-secret-grant.yaml"
 mutate_render host-secret-grant "${host_secret_grant}"
 assert_rejected \
@@ -225,3 +275,10 @@ for identity in user group; do
     'mcp-host identities must not receive MCP Secret read grants' \
     "mcp-host MCP Secret ${identity} grant"
 done
+
+host_secret_authenticated_group="${tmpdir}/host-secret-authenticated-group-grant.yaml"
+mutate_render host-secret-authenticated-group-grant "${host_secret_authenticated_group}"
+assert_rejected \
+  "${host_secret_authenticated_group}" \
+  'mcp-host identities must not receive MCP Secret read grants' \
+  'mcp-host MCP Secret system:authenticated grant'

@@ -107,6 +107,33 @@ for rendered in "$@"; do
     policies = documents.select do |document|
       document["kind"] == "NetworkPolicy" && document.dig("metadata", "namespace") == "mcp-host"
     end
+    policy_types_include_egress = lambda do |policy|
+      Array(policy.dig("spec", "policyTypes")).include?("Egress")
+    end
+    exact_pod_selector = lambda do |policy, expected_labels|
+      selector = policy.dig("spec", "podSelector")
+      selector.is_a?(Hash) && selector.keys.sort == ["matchLabels"] &&
+        selector["matchLabels"] == expected_labels && Array(selector["matchExpressions"]).empty?
+    end
+    default_deny = policies.find { |policy| policy.dig("metadata", "name") == "deny-all-mcp-host" }
+    abort("mcp-host default-deny must select every pod and enforce Egress") unless
+      default_deny && default_deny.dig("spec", "podSelector") == {} && policy_types_include_egress.call(default_deny)
+    managed_host_policy = policies.find { |policy| policy.dig("metadata", "name") == "mcp-host" }
+    abort("mcp-host allow policy must select HCC-managed Host pods and enforce Egress") unless
+      managed_host_policy && exact_pod_selector.call(managed_host_policy, { "clerum.io/managed-by" => "host-context-controller" }) &&
+      policy_types_include_egress.call(managed_host_policy)
+    context_allow_policies = policies.select do |policy|
+      policy.dig("metadata", "labels", "clerum.io/policy-type") == "context-allow"
+    end
+    context_allow_policies.each do |policy|
+      source_labels = policy.dig("spec", "podSelector", "matchLabels")
+      context = policy.dig("metadata", "labels", "clerum.io/context")
+      abort("context-allow policy does not select its live Context Host pods") unless
+        source_labels.is_a?(Hash) && source_labels["clerum.io/managed-by"] == "host-context-controller" &&
+        source_labels["clerum.io/context"] == context &&
+        Array(policy.dig("spec", "podSelector", "matchExpressions")).empty? &&
+        policy_types_include_egress.call(policy)
+    end
     broad_host_egress = policies.any? do |policy|
       Array(policy.dig("spec", "egress")).any? do |rule|
         !rule.key?("to") || Array(rule["to"]).empty? ||
@@ -242,6 +269,8 @@ for rendered in "$@"; do
     abort("mcp-host egress must use numeric ports") if named_port
 
     hcc_lane = policies.any? do |policy|
+      next false unless policy_types_include_egress.call(policy) &&
+        exact_pod_selector.call(policy, { "clerum.io/managed-by" => "host-context-controller" })
       Array(policy.dig("spec", "egress")).any? do |rule|
         ports = Array(rule["ports"])
         peers = Array(rule["to"])
@@ -300,7 +329,7 @@ for rendered in "$@"; do
       when "User"
         subject["name"].to_s.match?(/\Asystem:serviceaccount:mcp-host:[^:]+\z/)
       when "Group"
-        %w[system:serviceaccounts system:serviceaccounts:mcp-host].include?(subject["name"])
+        %w[system:authenticated system:serviceaccounts system:serviceaccounts:mcp-host].include?(subject["name"])
       else
         false
       end
