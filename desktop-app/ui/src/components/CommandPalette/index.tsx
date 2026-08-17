@@ -1,10 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Button, TextInput } from '@components/Common'
-import {
-  DESKTOP_COMMANDS,
-  type DesktopCommandId,
-  formatDesktopShortcut,
-} from '../../../../src/desktopCommands'
+import { TextInput } from '@components/Common'
+import { DESKTOP_COMMANDS, type DesktopCommandId } from '../../../../src/desktopCommands'
+import { CommandPaletteList } from './CommandPaletteList'
 import type { CommandPaletteProps } from './types'
 
 export function CommandPalette({
@@ -129,37 +126,13 @@ export function CommandPalette({
             value={query}
           />
         </div>
-        <div className="command-palette__list" role="listbox" aria-label="Desktop commands">
-          {commands.length ? (
-            commands.map(command => {
-              const commandId = command.id as DesktopCommandId
-              const eligible = isEligible(commandId)
-              const selected = eligible && selectedId === commandId
-              return (
-                <Button
-                  aria-selected={selected}
-                  className={`command-palette__item${selected ? ' is-selected' : ''}`}
-                  color="neutral"
-                  disabled={!eligible}
-                  key={command.id}
-                  onClick={() => execute(commandId)}
-                  role="option"
-                  variant="ghost"
-                >
-                  <span className="command-palette__item-copy">
-                    <strong>{command.label}</strong>
-                    <span>{command.description}</span>
-                  </span>
-                  {command.defaultBinding ? (
-                    <kbd>{formatDesktopShortcut(command.defaultBinding, platform)}</kbd>
-                  ) : null}
-                </Button>
-              )
-            })
-          ) : (
-            <p className="command-palette__empty">No matching commands.</p>
-          )}
-        </div>
+        <CommandPaletteList
+          commands={commands}
+          isEligible={isEligible}
+          onExecute={execute}
+          platform={platform}
+          selectedId={selectedId}
+        />
       </div>
     </div>
   )
