@@ -163,17 +163,23 @@ export class HookedLlmPort implements LlmPort {
     // and a reject blocks the call outright (no tokens spent).
     const preContribs: Array<Contributor<ToolCompletionRequest, ToolCompletionResponse>> = []
     for (const hook of this.hooks.preCall) {
-      const before = approxRequestChars(req)
+      const preReq = req
       const c = await hook.preCall(req)
       if (c) {
         preContribs.push(c)
         if (c.rewrite) req = c.rewrite // already system-role-stripped + capability-gated (N4/F4)
       }
-      // Diagnostic (content-free, sizes only per §8.4): make the dial AND whether
-      // the rewrite was actually applied observable, so a may_rewrite hook's
-      // compaction can be confirmed end-to-end against the hook's own logs — the
-      // `before→after` here should match the hook's reported before/after chars.
+      // Diagnostic (content-free, sizes only per §8.4): log only the meaningful,
+      // low-frequency outcomes — a rewrite that was APPLIED (with before→after
+      // chars, which should match the hook's own reported before/after), a deny,
+      // or a non-standard contribution (e.g. a reject downgraded to no_decision
+      // when the hook lacks may_deny). The common no-op — a hook that returned
+      // `continue` with nothing to do — is deliberately NOT logged: it fires on
+      // every tool-loop iteration, and the hook's own logs already record the
+      // dial. Sizes are measured only when a rewrite lands, so the no-op path
+      // stays free.
       if (c?.rewrite) {
+        const before = approxRequestChars(preReq)
         const after = approxRequestChars(req)
         console.log(
           `[HookedLlmPort] pre_call ${hook.id}: applied rewrite ${before}→${after} chars (Δ${before - after})`
@@ -182,8 +188,8 @@ export class HookedLlmPort implements LlmPort {
         console.log(
           `[HookedLlmPort] pre_call ${hook.id}: deny (reason=${logSafeReason(c.reasonCode)})`
         )
-      } else {
-        console.log(`[HookedLlmPort] pre_call ${hook.id}: no rewrite (continue), ${before} chars`)
+      } else if (c) {
+        console.log(`[HookedLlmPort] pre_call ${hook.id}: ${c.decision} (no rewrite)`)
       }
     }
     if (aggregateDecision(preContribs) === 'deny') return this.denyRefusal(preContribs, 'pre_call')
