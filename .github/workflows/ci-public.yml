@@ -402,6 +402,9 @@ jobs:
       - name: Test WRC internal dependency NetworkPolicy contracts
         run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
 
+      - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
+        run: bash scripts/tests/test-lint-networkpolicies.sh
+
       - name: Test Plugin Workload SDK auth bootstrap policy
         run: bash scripts/tests/test-plugin-workload-sdk-auth-bootstrap.sh
 
@@ -425,6 +428,9 @@ jobs:
 
       - name: Test single-writer validator fails loud on an absent local deploy
         run: bash scripts/tests/test-postgres-single-writer-strategy.sh
+
+      - name: Test post-reset convergence isolates DB-dependent controllers
+        run: bash scripts/tests/test-converge-control-db-after-reset.sh
 
       - name: Test release coordinates (writer, checker, floor decoupling)
         run: bash scripts/tests/test-release-coordinates.sh

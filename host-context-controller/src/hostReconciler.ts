@@ -4204,7 +4204,8 @@ export class HostReconciler {
    * that path, so cache presence at admission is the correct fence. This
    * mirrors the F2/#827 in-serializer re-check in collectHostCleanupFailures.
    *
-   * Callers that omit `opts` keep the previous unconditional behavior exactly.
+   * Callers that omit `opts` drop only the extra `skipIf` term; the
+   * resolveCurrentHost supersede fence still gates the delete.
    */
   async reconcileDelete(
     name: string,
