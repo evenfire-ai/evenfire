@@ -104,6 +104,10 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED remote-context remote-context \
   bash -c 'source "$1"; t2_context_check' bash "$COMMON"
 env "${repo_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=127.0.0.1 \
   bash -c 'source "$1"; t2_context_check' bash "$COMMON"
+env "${repo_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT='[::1]' \
+  bash -c 'source "$1"; t2_context_check' bash "$COMMON"
+env "${repo_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=localhost \
+  bash -c 'source "$1"; t2_context_check' bash "$COMMON"
 
 missing_profile_state="$(env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_profile_status; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
 [ "$missing_profile_state" = full-bootstrap ] || fail "missing profile selected $missing_profile_state instead of full-bootstrap"

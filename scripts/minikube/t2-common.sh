@@ -228,10 +228,15 @@ t2_context_check() {
   fi
   host="${endpoint#*://}"
   host="${host%%/*}"
-  host="${host%%:*}"
+  if [[ "$host" == \[*\]* ]]; then
+    host="${host#\[}"
+    host="${host%%\]*}"
+  else
+    host="${host%%:*}"
+  fi
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
   case "$host" in
-    127.0.0.1|192.168.*|*.minikube) ;;
+    127.0.0.1|localhost|::1|192.168.*|*.minikube) ;;
     *)
       T2_NEXT_COMMAND='select the generated branch-owned Minikube context, not a remote cluster context'
       t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is not local: $host"
