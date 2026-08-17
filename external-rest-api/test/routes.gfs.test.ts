@@ -9,10 +9,12 @@ const { ControlApiError, clientMock } = vi.hoisted(() => {
       message: string,
       public status: number,
       public body: unknown,
-      public headers: Record<string, string> = {}
+      headers: Record<string, string> | Headers = {}
     ) {
       super(message)
+      this.headers = headers instanceof Headers ? Object.fromEntries(headers.entries()) : headers
     }
+    public headers: Record<string, string>
   }
   return {
     ControlApiError,
@@ -31,10 +33,15 @@ vi.mock('../src/authToken.js', () => authTokenMock)
 const REQUEST_ID = '11111111-2222-4333-8444-555555555555'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function buildApp(edgeLimits?: ExternalGfsEdgeLimits) {
+function buildApp(options: number | ExternalGfsEdgeLimits = 120) {
   const app = express()
+  app.set('trust proxy', 1)
   app.use(express.json())
-  app.use(createGfsRouter(edgeLimits ? { edgeLimits } : undefined))
+  app.use(
+    createGfsRouter(
+      typeof options === 'number' ? { edgeRequestLimit: options } : { edgeLimits: options }
+    )
+  )
   return app
 }
 
@@ -52,6 +59,239 @@ beforeEach(() => {
 })
 
 describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', () => {
+  it('applies one shared local edge bucket across v2 methods before proxying', async () => {
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    const app = buildApp(1)
+    const first = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+    const second = await request(app)
+      .get('/me/gfs/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/status?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+
+    expect(first.status).toBe(200)
+    expect(second.status).toBe(429)
+    expect(second.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
+    expect(second.headers['x-ratelimit-limit']).toBe('1')
+    expect(second.headers['x-gfs-ratelimit-scope']).toBe('public_edge_requests')
+    expect(second.headers['x-ratelimit-remaining']).toBe('0')
+    expect(second.body).toEqual({
+      error: 'gfs_upload_rate_limited',
+      limit: 'public_edge_requests',
+      retryAfterSeconds: expect.any(Number),
+    })
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not spend an authenticated bucket on unauthenticated requests', async () => {
+    const app = buildApp(1)
+    const unauthenticated = await request(app).get('/me/gfs/capabilities?drive=archive')
+    expect(unauthenticated.status).toBe(401)
+
+    clientMock.controlApiStreamRequest.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    const authenticated = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(authenticated.status).toBe(200)
+  })
+
+  it('isolates users and groups IPv6 addresses by the library subnet policy', async () => {
+    authTokenMock.verifyToken.mockImplementation((token: string) => ({
+      userId: token === 'sess-two' ? 'u2' : 'u1',
+      email: `${token}@example.com`,
+      teamId: null,
+      role: 'member',
+      exp: 9_999_999_999,
+    }))
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    const app = buildApp(1)
+    const first = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-one')
+      .set('x-forwarded-for', '2001:db8:abcd:0012::1')
+    const differentUser = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-two')
+      .set('x-forwarded-for', '2001:db8:abcd:0012::1')
+    const sameUserPrefix = await request(app)
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-one')
+      .set('x-forwarded-for', '2001:db8:abcd:0012::2')
+
+    expect(first.status).toBe(200)
+    expect(differentUser.status).toBe(200)
+    expect(sameUserPrefix.status).toBe(429)
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps capabilities drive-independent while control-api rejects mismatched creates', async () => {
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async (
+        method: string,
+        path: string,
+        options: { query?: { drive?: string }; body?: unknown }
+      ) => {
+        const drive = options.query?.drive
+        const body = typeof options.body === 'string' ? JSON.parse(options.body) : undefined
+        if (method === 'POST' && path === '/external/gfs/uploads' && body?.drive !== drive) {
+          throw new ControlApiError('drive mismatch', 400, { error: 'drive_mismatch' })
+        }
+        return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+    )
+    const missing = await request(buildApp())
+      .get('/me/gfs/capabilities')
+      .set('authorization', 'Bearer sess-xyz')
+    const mismatched = await request(buildApp())
+      .post('/me/gfs/uploads?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ drive: 'main', operation: 'create' })
+    expect(missing.status).toBe(200)
+    expect(missing.body).toEqual({ upload: { resumableV2: { enabled: true } } })
+    expect(mismatched.status).toBe(400)
+    expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(2)
+  })
+
+  it('forwards malformed drive values unchanged for control-api to reject', async () => {
+    const forwardedDrives: unknown[] = []
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async (_method: string, _path: string, options: { query?: { drive?: string } }) => {
+        const drive = options.query?.drive
+        forwardedDrives.push(drive)
+        if (!drive || drive.trim() !== drive) {
+          throw new ControlApiError('drive required', 400, { error: 'drive_required' })
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      }
+    )
+    const malformed = ['', ' archive', 'archive ', '\tarchive', 'archive\n']
+    for (const drive of malformed) {
+      const response = await request(buildApp())
+        .get(`/me/gfs/capabilities?drive=${encodeURIComponent(drive)}`)
+        .set('authorization', 'Bearer sess-xyz')
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'drive_required' })
+    }
+    const arrayValue = await request(buildApp())
+      .get('/me/gfs/capabilities?drive=archive&drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(arrayValue.status).toBe(400)
+    expect(arrayValue.body).toEqual({ error: 'drive_required' })
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(6)
+    expect(forwardedDrives).toEqual([...malformed, undefined])
+  })
+
+  it('preserves one non-main drive and the part stream through every upload lifecycle relay', async () => {
+    const uploadId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    let streamedPart = Buffer.alloc(0)
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async (method: string, _path: string, options: { body?: unknown }) => {
+        if (method === 'PUT' && options.body && typeof options.body !== 'string') {
+          const chunks: Buffer[] = []
+          for await (const chunk of options.body as AsyncIterable<Buffer>) {
+            chunks.push(Buffer.from(chunk))
+          }
+          streamedPart = Buffer.concat(chunks)
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+    )
+    const app = buildApp()
+    const authed = (builder: request.Test) => builder.set('authorization', 'Bearer sess-xyz')
+
+    await authed(request(app).get('/me/gfs/capabilities?drive=archive')).expect(200)
+    await authed(request(app).post('/me/gfs/uploads?drive=archive'))
+      .send({ drive: 'archive', operation: 'create' })
+      .expect(200)
+    await authed(request(app).head(`/me/gfs/uploads/${uploadId}?drive=archive`)).expect(200)
+    await authed(
+      request(app).get(`/me/gfs/uploads/${uploadId}/status?drive=archive&limit=256&cursor=next`)
+    ).expect(200)
+    await authed(
+      request(app)
+        .put(`/me/gfs/uploads/${uploadId}/parts/0?drive=archive`)
+        .set('content-type', 'application/offset+octet-stream')
+        .set('upload-part-number', '0')
+        .set('upload-offset', '0')
+        .set('upload-chunk-length', '4')
+        .set('upload-checksum', 'sha256 dGVzdA==')
+    )
+      .send(Buffer.from('test'))
+      .expect(200)
+    for (const action of ['pause', 'resume', 'complete']) {
+      await authed(request(app).post(`/me/gfs/uploads/${uploadId}/${action}?drive=archive`))
+        .send({})
+        .expect(200)
+    }
+    await authed(request(app).delete(`/me/gfs/uploads/${uploadId}?drive=archive`)).expect(200)
+
+    expect(streamedPart.toString()).toBe('test')
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(9)
+    for (const call of clientMock.controlApiStreamRequest.mock.calls) {
+      expect(call[2]).toMatchObject({
+        userSessionToken: 'sess-xyz',
+        query: { drive: 'archive' },
+      })
+    }
+    const partOptions = clientMock.controlApiStreamRequest.mock.calls[4][2]
+    expect(partOptions.extraHeaders).toMatchObject({
+      'content-length': '4',
+      'upload-chunk-length': '4',
+      'x-gfs-upload-source-ip': expect.any(String),
+    })
+  })
+
+  it('propagates the authoritative upload 429 and Retry-After header unchanged', async () => {
+    clientMock.controlApiStreamRequest.mockRejectedValue(
+      new ControlApiError(
+        'rate limited',
+        429,
+        { error: 'gfs_upload_rate_limited', limit: 'principal_bytes', retryAfterSeconds: 7 },
+        new Headers({
+          'retry-after': '7',
+          'x-ratelimit-limit': '512',
+          'x-gfs-ratelimit-scope': 'principal_bytes',
+        })
+      )
+    )
+    const response = await request(buildApp())
+      .get('/me/gfs/capabilities?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(response.status).toBe(429)
+    expect(response.headers['retry-after']).toBe('7')
+    expect(response.headers['x-ratelimit-limit']).toBe('512')
+    expect(response.headers['x-gfs-ratelimit-scope']).toBe('principal_bytes')
+    expect(response.body).toEqual({
+      error: 'gfs_upload_rate_limited',
+      limit: 'principal_bytes',
+      retryAfterSeconds: 7,
+    })
+  })
+
   it('mints a user gfs token, forwarding the session token to control-api', async () => {
     clientMock.controlApiRequest.mockResolvedValue({ token: 'gfs-tok', expiresInSeconds: 300 })
     const res = await request(buildApp())
@@ -324,18 +564,64 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(res.body).toEqual({ error: 'escalation_rejected' })
   })
 
-  it('propagates control-api gfsc 5xx codes (504/502) verbatim, not a generic 500', async () => {
-    // control-api emits 504 gfsc_timeout / 502 gfsc_unreachable on the me-path;
-    // without them in PROPAGATED, forwardControlApiError fell through to the global
-    // handler which collapses every 5xx to 500 — the documented codes became
-    // unobservable at the desktop (a wedged gfsc looked like an internal bug).
+  it('preserves a public 413 payload_too_large response and its safe transport headers', async () => {
+    const body = {
+      ok: false,
+      error: {
+        code: 'payload_too_large',
+        message: 'upload exceeds the 200 MiB product limit',
+      },
+    }
+    clientMock.controlApiRequest.mockRejectedValue(
+      new ControlApiError(
+        'payload too large',
+        413,
+        body,
+        new Headers({
+          'content-type': 'application/json',
+          'retry-after': '9',
+          'upload-length': '209715200',
+          'x-ratelimit-limit': '16',
+          'x-internal-secret': 'must-not-cross-the-public-boundary',
+        })
+      )
+    )
+
+    const res = await request(buildApp())
+      .put('/me/gfs/resources/abc/content?drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ contentBase64: 'AAAA' })
+
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual(body)
+    expect(res.headers['retry-after']).toBe('9')
+    expect(res.headers['upload-length']).toBe('209715200')
+    expect(res.headers['x-ratelimit-limit']).toBe('16')
+    expect(res.headers['x-internal-secret']).toBeUndefined()
+  })
+
+  it('propagates GFS transport statuses/body/headers without changing retry semantics', async () => {
+    // 507 is terminal for Desktop/Control UI, while 408/425 and the transient
+    // 5xx family are retryable. The public relay must not turn any of them into
+    // a generic 500 before the client can apply that policy.
     for (const [status, error] of [
-      [504, 'gfsc_timeout'],
+      [408, 'request_timeout'],
+      [425, 'too_early'],
+      [500, 'gfsc_internal'],
       [502, 'gfsc_unreachable'],
+      [503, 'gfsc_unavailable'],
+      [504, 'gfsc_timeout'],
+      [507, 'insufficient_storage'],
+      [599, 'upstream_unknown'],
     ] as const) {
       clientMock.controlApiRequest.mockReset()
       clientMock.controlApiRequest.mockRejectedValue(
-        new ControlApiError('gfsc failure', status, { error })
+        new ControlApiError(
+          'gfsc failure',
+          status,
+          { error },
+          new Headers({ 'retry-after': '7', 'x-ratelimit-limit': '16' })
+        )
       )
       const res = await request(buildApp())
         .put('/me/gfs/resources/abc/content?drive=main')
@@ -343,6 +629,8 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         .send({ contentBase64: 'AAAA' })
       expect(res.status).toBe(status)
       expect(res.body).toEqual({ error })
+      expect(res.headers['retry-after']).toBe('7')
+      expect(res.headers['x-ratelimit-limit']).toBe('16')
     }
   })
 

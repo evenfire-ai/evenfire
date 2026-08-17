@@ -11,9 +11,43 @@ import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/
 import { rootLogger } from '../../observability/logger.js'
 
 const DEFAULT_DRIVE = 'main'
-const PASSTHROUGH_RESPONSE_HEADERS = ['content-type', 'content-disposition', 'content-length']
+const PASSTHROUGH_RESPONSE_HEADERS = [
+  'content-type',
+  'content-disposition',
+  'content-length',
+  'location',
+  'upload-offset',
+  'upload-length',
+  'upload-part-bytes',
+  'upload-part-count',
+  'upload-active-parts',
+  'upload-state',
+  'upload-expires',
+  'upload-part-number',
+  'upload-part-offset',
+  'upload-part-length',
+  'upload-checksum',
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-gfs-ratelimit-scope',
+]
+const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const UPLOAD_PART_PATH = new RegExp(`^/v1/uploads/${UUID_PATH}/parts/[0-9]+(?:\\?|$)`, 'i')
+const UPLOAD_PATH = /^\/v1\/(?:capabilities|uploads)(?:\/|\?|$)/i
+const STREAM_REQUEST_HEADERS = [
+  'content-type',
+  'upload-part-number',
+  'upload-offset',
+  'upload-chunk-length',
+  'upload-checksum',
+]
 
-function gfscBaseUrlFor(method: string): string {
+function gfscBaseUrlFor(method: string, path: string): string {
+  // Upload lifecycle reads (capabilities, HEAD/status) are stateful writer
+  // operations too.  Routing them to the reader can return stale session
+  // offsets immediately after a part commit and break resume/cancel races.
+  if (UPLOAD_PATH.test(path)) return config.gfscWriteBaseUrl
   return method === 'GET' || method === 'HEAD' ? config.gfscBaseUrl : config.gfscWriteBaseUrl
 }
 
@@ -45,8 +79,9 @@ export function registerGfsProxyRoute(router: Router): void {
         return
       }
 
-      const scope =
-        req.method === 'GET' || req.method === 'HEAD'
+      const scope = UPLOAD_PATH.test(req.url || '')
+        ? GFS_WRITE_SCOPE
+        : req.method === 'GET' || req.method === 'HEAD'
           ? GFS_READ_SCOPE
           : req.method === 'POST' || req.method === 'PUT'
             ? GFS_WRITE_SCOPE
@@ -60,7 +95,7 @@ export function registerGfsProxyRoute(router: Router): void {
       }
 
       const subPath = req.url === '/' ? '' : req.url
-      const target = `${gfscBaseUrlFor(req.method).replace(/\/+$/, '')}${subPath}`
+      const target = `${gfscBaseUrlFor(req.method, subPath).replace(/\/+$/, '')}${subPath}`
       const { token } = signGfsToken({
         subject,
         drive: DEFAULT_DRIVE,
@@ -70,7 +105,13 @@ export function registerGfsProxyRoute(router: Router): void {
       })
       const headers: Record<string, string> = {}
       headers['author' + 'ization'] = ['Bearer', token].join(' ')
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const isUploadPart = req.method === 'PUT' && UPLOAD_PART_PATH.test(subPath)
+      if (isUploadPart) {
+        for (const name of STREAM_REQUEST_HEADERS) {
+          const value = req.headers[name]
+          if (typeof value === 'string') headers[name] = value
+        }
+      } else if (req.method !== 'GET' && req.method !== 'HEAD') {
         headers['content-type'] = 'application/json'
       }
 
@@ -84,15 +125,19 @@ export function registerGfsProxyRoute(router: Router): void {
       const deadline = new AbortController()
       const deadlineTimer = setTimeout(() => deadline.abort(), config.gfscProxyTimeoutMs)
       try {
-        upstreamRes = await fetch(target, {
+        const fetchInit: RequestInit & { duplex?: 'half' } = {
           method: req.method,
           headers,
           body:
             req.method === 'GET' || req.method === 'HEAD'
               ? undefined
-              : JSON.stringify(req.body ?? {}),
+              : isUploadPart
+                ? (req as unknown as BodyInit)
+                : JSON.stringify(req.body ?? {}),
           signal: deadline.signal,
-        })
+        }
+        if (isUploadPart) fetchInit.duplex = 'half'
+        upstreamRes = await fetch(target, fetchInit)
       } catch (err) {
         // Never silent: a failed or timed-out gfsc fetch is logged with the target.
         const timedOut =
@@ -128,6 +173,12 @@ export function registerGfsProxyRoute(router: Router): void {
         res.status(upstreamRes.status)
         const contentType = upstreamRes.headers.get('content-type')
         if (contentType) res.setHeader('content-type', contentType)
+        const retryAfter = upstreamRes.headers.get('retry-after')
+        if (retryAfter) res.setHeader('retry-after', retryAfter)
+        for (const header of PASSTHROUGH_RESPONSE_HEADERS) {
+          const value = upstreamRes.headers.get(header)
+          if (value) res.setHeader(header, value)
+        }
         res.send(errorBody)
         return
       }

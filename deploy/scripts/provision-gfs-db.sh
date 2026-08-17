@@ -117,6 +117,8 @@ SELECT (:'role_kind' <> 'reader' OR (
   AND NOT has_table_privilege(:'role_name', 'gfs_blob_manifests', 'DELETE,TRUNCATE,TRIGGER')
   AND NOT has_any_column_privilege(:'role_name', 'gfs_audit', 'SELECT,UPDATE,REFERENCES')
   AND NOT has_table_privilege(:'role_name', 'gfs_audit', 'DELETE,TRUNCATE,TRIGGER')
+  AND NOT has_table_privilege(:'role_name', 'gfs_upload_sessions', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+  AND NOT has_table_privilege(:'role_name', 'gfs_upload_parts', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
 )) AS privilege_ok \gset
 \if :privilege_ok
 \else
@@ -146,6 +148,16 @@ SELECT (:'role_kind' <> 'writer' OR (
   AND NOT has_sequence_privilege(:'role_name', 'gfs_audit_sequence_no_seq', 'UPDATE')
   AND NOT has_any_column_privilege(:'role_name', 'gfs_audit', 'SELECT,UPDATE,REFERENCES')
   AND NOT has_table_privilege(:'role_name', 'gfs_audit', 'DELETE,TRUNCATE,TRIGGER')
+  AND has_table_privilege(:'role_name', 'gfs_upload_sessions', 'SELECT')
+  AND has_table_privilege(:'role_name', 'gfs_upload_sessions', 'INSERT')
+  AND has_table_privilege(:'role_name', 'gfs_upload_sessions', 'UPDATE')
+  AND has_table_privilege(:'role_name', 'gfs_upload_sessions', 'DELETE')
+  AND has_table_privilege(:'role_name', 'gfs_upload_parts', 'SELECT')
+  AND has_table_privilege(:'role_name', 'gfs_upload_parts', 'INSERT')
+  AND has_table_privilege(:'role_name', 'gfs_upload_parts', 'UPDATE')
+  AND has_table_privilege(:'role_name', 'gfs_upload_parts', 'DELETE')
+  AND NOT has_table_privilege(:'role_name', 'gfs_upload_sessions', 'TRUNCATE,REFERENCES,TRIGGER')
+  AND NOT has_table_privilege(:'role_name', 'gfs_upload_parts', 'TRUNCATE,REFERENCES,TRIGGER')
 )) AS writer_privilege_ok \gset
 \if :writer_privilege_ok
 \else

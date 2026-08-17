@@ -112,6 +112,23 @@ describe('external GFS rate boundary', () => {
 
   it.each([
     ['POST', '/token', 'token', '/external/gfs/token'],
+    ['GET', '/capabilities', 'resource', '/external/gfs/capabilities'],
+    ['POST', '/uploads', 'resource-mutation', '/external/gfs/uploads'],
+    ['HEAD', `/uploads/${RESOURCE_ID}`, 'resource', '/external/gfs/uploads/:id'],
+    ['GET', `/uploads/${RESOURCE_ID}/status`, 'resource', '/external/gfs/uploads/:id/status'],
+    [
+      'PUT',
+      `/uploads/${RESOURCE_ID}/parts/0`,
+      'resource-mutation',
+      '/external/gfs/uploads/:id/parts/:part',
+    ],
+    [
+      'POST',
+      `/uploads/${RESOURCE_ID}/complete`,
+      'resource-mutation',
+      '/external/gfs/uploads/:id/:action',
+    ],
+    ['DELETE', `/uploads/${RESOURCE_ID}`, 'resource-mutation', '/external/gfs/uploads/:id'],
     ['GET', '/resolve', 'resource', '/external/gfs/resolve'],
     ['GET', '/resources', 'resource', '/external/gfs/resources'],
     [

@@ -218,6 +218,17 @@ type Config = {
   // (CONTROL_API_PROXY_TIMEOUT_MS, set to 300s in the deployment; its route.ts code
   // fallback is 30s). This one defaults to 300s in code. Raise all three together.
   gfscProxyTimeoutMs: number
+  // Upload-v2 edge admission. These are transport-abuse budgets, separate
+  // from the 200 MiB product/file limit and GFSC's 4/16 stream authority.
+  gfsUploadRequestPerMinute: number
+  gfsUploadIpRequestPerMinute: number
+  gfsUploadByteUnitBytes: number
+  gfsUploadByteUnitsPerMinute: number
+  gfsUploadIpByteUnitsPerMinute: number
+  gfsUploadMaxActivePerSubject: number
+  gfsUploadMaxActivePerIp: number
+  gfsUploadMaxActiveGlobal: number
+  gfsUploadMaxPartBytes: number
   // ClusterIP service URL template for the per-SFS wfc. {hash} is replaced
   // with the 10-char sfsHash that HCC's sharedFileSystemReconciler computes.
   // The template ends without a trailing slash; the proxy concatenates the
@@ -929,6 +940,31 @@ export const config: Config = {
   gfscWriteBaseUrl:
     process.env.CONTROL_API_GFSC_WRITE_BASE_URL || 'http://gfsc-writer.gfs.svc.cluster.local:8087',
   gfscProxyTimeoutMs: parseTimeoutMs(process.env.CONTROL_API_GFSC_PROXY_TIMEOUT_MS, 300_000),
+  gfsUploadRequestPerMinute: positiveIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_REQUESTS_PER_MINUTE',
+    120
+  ),
+  gfsUploadIpRequestPerMinute: positiveIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_IP_REQUESTS_PER_MINUTE',
+    600
+  ),
+  gfsUploadByteUnitBytes: 1024 * 1024,
+  gfsUploadByteUnitsPerMinute: positiveIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MIB_PER_MINUTE', 512),
+  gfsUploadIpByteUnitsPerMinute: positiveIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_IP_MIB_PER_MINUTE',
+    2048
+  ),
+  gfsUploadMaxActivePerSubject: positiveIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_MAX_ACTIVE_PER_SUBJECT',
+    8
+  ),
+  gfsUploadMaxActivePerIp: positiveIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_ACTIVE_PER_IP', 16),
+  gfsUploadMaxActiveGlobal: positiveIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_ACTIVE_GLOBAL', 32),
+  gfsUploadMaxPartBytes: boundedIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES',
+    16 * 1024 * 1024,
+    16 * 1024 * 1024
+  ),
   // {hash} = first 10 chars of sha256(`${ns}/${name}`); see sharedFileSystemHash
   // in host-context-controller/src/k8s/sharedFileSystemFactory.ts.
   wfcServiceUrlTemplate:

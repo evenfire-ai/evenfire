@@ -23,4 +23,15 @@ describe('external-rest-api app wiring', () => {
       config.jsonBodyLimit = previousLimit
     }
   })
+
+  it('keeps malformed upload IDs on the binary route instead of the JSON parser', async () => {
+    const app = createApp()
+    await request(app)
+      .put('/api/v1/me/gfs/uploads/not-a-uuid/parts/0')
+      .set('content-type', 'application/json')
+      .send(Buffer.from([0xff, 0x00, 0x01]))
+      // Auth is intentionally the first route-level response. A 400 JSON
+      // parser error here would prove the binary bypass regressed.
+      .expect(401)
+  })
 })
