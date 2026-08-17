@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { pool } from '../src/db.js'
 import {
-  consumePeriodQuota,
   deleteGrant,
   failStaleInvocations,
   finalizePluginWorkloadSdkRevocation,
@@ -20,9 +19,8 @@ import {
 
 const permissionEvents = vi.hoisted(() => ({ append: vi.fn() }))
 
-// Mock the pg pool so we can inspect the exact SQL + bind parameters that the
-// real consumePeriodQuota produces (the quota-tracker test mocks
-// consumePeriodQuota itself, so it never exercises this SQL/param path).
+// Mock the pg pool so we can inspect the exact SQL + bind parameters the real
+// db-layer functions produce.
 vi.mock('../src/db.js', () => ({
   ...(() => {
     const query = vi.fn().mockResolvedValue({ rows: [{ prompt_bridge_count: 1 }], rowCount: 1 })
@@ -37,12 +35,6 @@ vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
   appendControlApiPermissionEventsInTransaction: (...args: unknown[]) =>
     permissionEvents.append(...args),
 }))
-
-/** Highest $N placeholder referenced in a SQL string. */
-function maxPlaceholder(sql: string): number {
-  const matches = sql.match(/\$(\d+)/g) ?? []
-  return matches.reduce((max, p) => Math.max(max, Number(p.slice(1))), 0)
-}
 
 function mockUpsertGrantQueries(row: Record<string, unknown>): void {
   // recipe advisory lock → family row → recipe kill-switch guard → upsert.
@@ -65,43 +57,8 @@ function mockUpsertGrantQueries(row: Record<string, unknown>): void {
   }
 }
 
-describe('consumePeriodQuota — SQL bind parameter contract', () => {
-  beforeEach(() => {
-    vi.mocked(pool.query).mockClear()
-    vi.mocked(pool.query).mockResolvedValue({
-      rows: [{ prompt_bridge_count: 1 }],
-      rowCount: 1,
-    } as never)
-  })
-
-  // Regression: a malformed bind array (more params than placeholders) makes
-  // node-postgres throw "bind message supplies N parameters, but prepared
-  // statement requires M", which silently breaks every quota consumption.
-  it('binds exactly as many params as the SQL references (foldEagerUsage=false → no $6)', async () => {
-    await consumePeriodQuota('ns', 'name', 'promptBridge', 3, new Date(0), false)
-    expect(pool.query).toHaveBeenCalledTimes(1)
-    const [sql, params] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
-    expect(sql).not.toContain('$6')
-    expect(params).toHaveLength(maxPlaceholder(sql))
-    expect(params).toHaveLength(5)
-  })
-
-  it('binds the eager period as $6 only when folding eager usage (foldEagerUsage=true)', async () => {
-    await consumePeriodQuota(
-      'ns',
-      'name',
-      'promptBridge',
-      3,
-      new Date('2026-06-10T12:00:00Z'),
-      true
-    )
-    expect(pool.query).toHaveBeenCalledTimes(1)
-    const [sql, params] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
-    expect(sql).toContain('$6')
-    expect(params).toHaveLength(maxPlaceholder(sql))
-    expect(params).toHaveLength(6)
-  })
-})
+// The `consumePeriodQuota — SQL bind parameter contract` block was removed
+// with the function itself (issue #348, plan §1.6 dead-code sweep).
 
 describe('JIT credential ticket jti registry', () => {
   beforeEach(() => {
