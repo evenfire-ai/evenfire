@@ -568,7 +568,9 @@ test('CORE-10 partitionIpsByProviderRanges splits covered vs uncovered', () => {
     ['140.82.121.5', '20.26.156.210', '8.8.8.8'],
     API_24
   )
-  assert.deepEqual(covered, ['140.82.121.5', '20.26.156.210'])
+  // R1-L5: covered/uncovered are sorted NUMERICALLY by 32-bit value (20.x < 140.x),
+  // consistent with the rest of the module — not lexicographically ('140' < '20').
+  assert.deepEqual(covered, ['20.26.156.210', '140.82.121.5'])
   assert.deepEqual(uncovered, ['8.8.8.8'])
 })
 

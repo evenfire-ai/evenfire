@@ -43,7 +43,7 @@ export type TickResult =
   | 'error'
 
 export interface TickMetrics {
-  tick(result: 'ok' | 'skipped_lock' | 'error'): void
+  tick(result: 'ok' | 'skipped_lock' | 'error' | 'all_failed'): void
   fetchOutcome(source: string, result: 'not_modified'): void
   fetchFailure(source: string, reason: string): void
   lastSuccess(source: string, epochMs: number): void
@@ -57,7 +57,11 @@ export interface TickDeps {
   http: FetchHttp
   now: number
   metrics: TickMetrics
+  // R1-M2: injectable log seams so this background service routes through the
+  // pino rootLogger (level control + structured output) instead of raw console.
+  // Both default to console for standalone/test callers.
   log?: (msg: string) => void
+  logError?: (msg: string) => void
 }
 
 interface SourceMeta {
@@ -92,6 +96,7 @@ function countsForSource(
 export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResult> {
   const { fetchers, cmStore, pool, http, now, metrics } = deps
   const log = deps.log ?? console.log
+  const logError = deps.logError ?? console.error
 
   let lockClient: PoolClient | undefined
   let acquired = false
@@ -152,7 +157,7 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
       }
       if (result.kind === 'error') {
         metrics.fetchFailure(fetcher.source, 'fetch')
-        console.error(`[provider-netblocks] ${fetcher.source} fetch failed: ${result.reason}`)
+        logError(`[provider-netblocks] ${fetcher.source} fetch failed: ${result.reason}`)
         continue // fail-static: keep LKG (§4)
       }
 
@@ -175,7 +180,7 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
         }
         const validation = validateProviderRanges(ipv4, providerBounds(fetcher.source))
         if (validation.kind === 'invalid') {
-          console.error(
+          logError(
             `[provider-netblocks] ${fetcher.source}.${category} invalid: ${validation.reasons.join('; ')}`
           )
           rejectReason = 'validation'
@@ -213,9 +218,7 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
 
       if (rejectReason) {
         metrics.fetchFailure(fetcher.source, rejectReason)
-        console.error(
-          `[provider-netblocks] ${fetcher.source} rejected: ${rejectReason} (LKG retained)`
-        )
+        logError(`[provider-netblocks] ${fetcher.source} rejected: ${rejectReason} (LKG retained)`)
         continue // fail-static
       }
 
@@ -238,7 +241,13 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
       // state) and an all-failed tick both land here. Bump exactly the 304
       // sources; failed/rejected ones stay un-bumped.
       for (const src of healthySources) metrics.lastSuccess(src, now)
-      metrics.tick('ok')
+      // R1-L1: a 100%-failed tick (no source succeeded) must NOT report result=ok
+      // — that misleads any dashboard keying on ticks_total{result=ok}. Distinguish
+      // it with an `all_failed` label. Only genuine no-op ticks (>=1 healthy source,
+      // all 304) stay `ok`. The `fetchers.length > 0` guard keeps a zero-fetcher
+      // config from reporting all_failed.
+      const allFailed = fetchers.length > 0 && healthySources.size === 0
+      metrics.tick(allFailed ? 'all_failed' : 'ok')
       return 'nothing_staged'
     }
 
@@ -277,7 +286,7 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
       // must not flatline clerum_provider_netblocks_ticks_total (indistinguishable
       // from a dead cron); this is a failed write, so it counts as an error tick.
       metrics.tick('error')
-      console.error(
+      logError(
         '[provider-netblocks] rejected write: ConfigMap exceeds the size budget (LKG retained)'
       )
       return 'cm-size-budget'
@@ -294,7 +303,7 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
     // §4: an unexpected throw is contained here — the tick never propagates.
     metrics.fetchFailure('*', 'unexpected')
     metrics.tick('error')
-    console.error(
+    logError(
       `[provider-netblocks] tick failed (contained): ${err instanceof Error ? err.message : String(err)}`
     )
     return 'error'
@@ -306,7 +315,7 @@ export async function runProviderNetblocksTick(deps: TickDeps): Promise<TickResu
           await lockClient.query(`SELECT pg_advisory_unlock(${LOCK_KEY_SQL})`)
         } catch (err) {
           unlockError = err instanceof Error ? err : new Error(String(err))
-          console.error(
+          logError(
             `[provider-netblocks] advisory unlock failed — destroying the pooled session so the session-scoped lock cannot wedge future ticks: ${unlockError.message}`
           )
         }

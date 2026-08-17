@@ -491,8 +491,13 @@ function partitionCidrsByFamily(cidrs) {
       continue
     }
     const t = c.trim()
+    // R1-L6: gate the ipv4 bucket on the STRICT parser, not a shape regex. The
+    // regex admitted out-of-range octets/prefixes (999.1.1.1/8, 1.2.3.4/40) into
+    // `ipv4`; an out-of-package consumer trusting `.ipv4` would then carry junk.
+    // cidrRange() enforces octet<=255 and prefix<=32 (and accepts non-canonical
+    // host-bits-set CIDRs), so no currently-valid input changes bucket.
     if (t.includes(':')) ipv6.push(t)
-    else if (/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(t)) ipv4.push(t)
+    else if (cidrRange(t) !== undefined) ipv4.push(t)
     else invalid.push(t)
   }
   return { ipv4, ipv6, invalid }
@@ -582,7 +587,13 @@ function partitionIpsByProviderRanges(ips, ranges) {
   const parsed = ranges.map(cidrRange).filter(Boolean)
   const covered = []
   const uncovered = []
-  for (const ip of [...new Set(ips)].sort()) {
+  // R1-L5: sort NUMERICALLY (by 32-bit value), consistent with the rest of the
+  // module (validateProviderRanges sorts by `start`). A lexicographic string sort
+  // would order "10.0.0.1" before "2.0.0.1"; deterministic but inconsistent.
+  // Non-parsable strings sort first (-1) and always land in `uncovered` anyway.
+  for (const ip of [...new Set(ips)].sort(
+    (a, b) => (strictIpv4ToNumber(a) ?? -1) - (strictIpv4ToNumber(b) ?? -1)
+  )) {
     const n = strictIpv4ToNumber(ip)
     if (n !== undefined && parsed.some(r => n >= r.start && n <= r.end)) covered.push(ip)
     else uncovered.push(ip)

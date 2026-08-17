@@ -9,6 +9,7 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { pool } from '../../db.js'
+import { rootLogger } from '../../observability/logger.js'
 import {
   providerNetblocksCidrs,
   providerNetblocksFetchFailuresTotal,
@@ -119,6 +120,10 @@ export function startProviderNetblocksCron(options: ProviderNetblocksCronOptions
   const http = makeBoundedHttp(options.timeoutMs, options.maxResponseBytes)
   const metrics = metricsAdapter()
 
+  // R1-M2: route the background tick's logs through the pino rootLogger (level
+  // control + structured output + redact list) instead of raw console.
+  const logger = rootLogger.child({ module: 'provider-netblocks' })
+
   const runOnce = async (): Promise<void> => {
     if (inFlight) return
     inFlight = true
@@ -130,11 +135,13 @@ export function startProviderNetblocksCron(options: ProviderNetblocksCronOptions
         http,
         now: Date.now(),
         metrics,
+        log: msg => logger.info(msg),
+        logError: msg => logger.error(msg),
       })
     } catch (err) {
       // Defensive: the tick is designed never to throw, but a bug must not kill
       // the process — log and let the next tick run.
-      console.error(
+      logger.error(
         `[provider-netblocks] cron tick threw (contained): ${err instanceof Error ? err.message : String(err)}`
       )
     } finally {

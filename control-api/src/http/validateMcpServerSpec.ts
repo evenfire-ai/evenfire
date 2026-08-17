@@ -353,12 +353,15 @@ export function validateMcpServerSpec(
             if (
               p.categories !== undefined &&
               (!Array.isArray(p.categories) ||
+                // R1-M1: the CRD declares categories.minItems=1; an empty array
+                // passed all three validators here and only failed at kubectl apply.
+                p.categories.length < 1 ||
                 p.categories.length > 10 ||
                 p.categories.some(c => typeof c !== 'string' || c.length < 1 || c.length > 63))
             ) {
               errors.push({
                 field: `${field}.provider.categories`,
-                message: 'provider.categories must be an array of up to 10 non-empty strings',
+                message: 'provider.categories must be an array of 1 to 10 non-empty strings',
               })
             }
           }

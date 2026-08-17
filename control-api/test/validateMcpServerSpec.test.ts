@@ -49,6 +49,18 @@ describe('validateMcpServerSpec', () => {
           })
         ).toEqual([])
       })
+      it('R1-M1: rejects a provider binding with an EMPTY categories array (CRD minItems=1 parity)', () => {
+        expect(
+          check({
+            egressClass: 'provider',
+            dns: 'api.github.com',
+            port: 443,
+            provider: { name: 'github', categories: [] },
+          })
+        ).toContainEqual(
+          expect.objectContaining({ field: 'spec.egressBindings[0].provider.categories' })
+        )
+      })
       it('accepts an unknown provider name (open string, catalog-checked at reconcile)', () => {
         expect(
           check({

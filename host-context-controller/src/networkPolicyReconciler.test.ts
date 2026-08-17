@@ -789,6 +789,39 @@ describe('NetworkPolicyReconciler', () => {
       )
     })
 
+    it('R1-L8 (H3): a PRESENT-but-empty catalog CM (data:{}) RETAINS the live provider policy (LKG, never egress loss)', async () => {
+      const mockCore = makeMockCoreApi()
+      mockCore.readNamespacedConfigMap.mockResolvedValue({
+        data: { 'github.api.ipv4': PROVIDER_API_24 },
+      })
+      const custom = makeMockCustomApi()
+      const r = makeReconciler(mockApi, undefined, custom, mockCore)
+      resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }])
+
+      // Phase 1: a successful reconcile creates the live provider policy.
+      await r.reconcileExternalEgress(providerServer())
+      const liveNp = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+      expect(liveNp.spec?.egress?.length).toBeGreaterThan(0)
+
+      // Phase 2: the catalog CM is PRESENT but empty (data:{}) — distinct from the
+      // CM-404 (HCC-9) and blocked-DNS (H3 BLOCKER) cases. resolveProviderRanges
+      // returns invalid ("category not present"), which must RETAIN the live NP.
+      vi.clearAllMocks()
+      mockCore.readNamespacedConfigMap.mockResolvedValue({ data: {} })
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [liveNp] })
+
+      await expect(r.reconcileExternalEgress(providerServer())).rejects.toThrow()
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(JSON.stringify(custom.patchNamespacedCustomObjectStatus.mock.calls)).toContain(
+        'ExternalEgressRejected'
+      )
+    })
+
     it('H3 (BLOCKER): a blocked/empty/invalid DNS answer RETAINS the live provider policy (LKG, never egress loss)', async () => {
       const mockCore = makeMockCoreApi()
       mockCore.readNamespacedConfigMap.mockResolvedValue({

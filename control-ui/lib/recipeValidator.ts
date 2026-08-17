@@ -994,6 +994,9 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
               if (
                 p.categories !== undefined &&
                 (!Array.isArray(p.categories) ||
+                  // R1-M1: the CRD declares categories.minItems=1; an empty array
+                  // passed all three validators and only failed at kubectl apply.
+                  p.categories.length < 1 ||
                   p.categories.length > 10 ||
                   p.categories.some(c => typeof c !== 'string' || c.length < 1 || c.length > 63))
               ) {
@@ -1001,7 +1004,7 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
                   phase: 'schema',
                   severity: 'error',
                   path: `${bindingPath}.provider.categories`,
-                  message: 'provider.categories must be an array of up to 10 non-empty strings',
+                  message: 'provider.categories must be an array of 1 to 10 non-empty strings',
                 })
               }
             }
