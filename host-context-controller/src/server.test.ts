@@ -11,6 +11,7 @@ import {
   McpAuthorizationService,
   type McpAuthorizationStore,
 } from './mcpAuthorization'
+import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
 import { ContextMapperServer, McpHostApiRateLimiter } from './server'
 import type { McpServerInfo } from './types'
 
@@ -207,7 +208,10 @@ describe('ContextMapperServer', () => {
           status: { deployed: true, ready: true, message: 'internal status detail' },
         },
       ]),
-      0
+      0,
+      undefined,
+      undefined,
+      () => true
     )
     server.setReady(true)
 
@@ -235,7 +239,7 @@ describe('ContextMapperServer', () => {
   )
 
   it('tombstones legacy Host-selected routes for every method before readiness and CORS', async () => {
-    server = new ContextMapperServer(new FakeProvider(), 0)
+    server = new ContextMapperServer(new FakeProvider(), 0, undefined, undefined, () => true)
 
     for (const [path, method] of [
       ['/api/v1/mcpservers/context/context-a', 'OPTIONS'],
@@ -267,7 +271,7 @@ describe('ContextMapperServer', () => {
   })
 
   it('keeps direct protected-route startup and not-found errors generic and non-cacheable', async () => {
-    server = new ContextMapperServer(new FakeProvider(), 0)
+    server = new ContextMapperServer(new FakeProvider(), 0, undefined, undefined, () => true)
 
     let response = await invoke(server, '/api/v2/hosts/self/mcpservers')
     expect(response.statusCode).toBe(503)
@@ -370,6 +374,14 @@ describe('ContextMapperServer', () => {
 })
 
 describe('McpHostApiRateLimiter', () => {
+  let server: ContextMapperServer | null = null
+
+  afterEach(async () => {
+    await server?.stop()
+    server = null
+    vi.restoreAllMocks()
+  })
+
   it('limits each signed Host identity/action independently and resets after one minute', () => {
     let now = 1_000
     const limiter = new McpHostApiRateLimiter(1, () => now)

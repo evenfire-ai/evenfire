@@ -633,7 +633,7 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
 
     const stateless = makeStatelessHost({ name: 'transition-host' })
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: stateless.name, namespace: stateless.namespace },
+      metadata: { name: stateless.name, namespace: stateless.namespace, uid: stateless.uid },
       spec: stateless.spec,
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
@@ -667,7 +667,7 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
     const { reconciler, appsApi, customApi } = createReconciler()
     const stateless = makeStatelessHost({ name: 'new-stateless-host' })
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: stateless.name, namespace: stateless.namespace },
+      metadata: { name: stateless.name, namespace: stateless.namespace, uid: stateless.uid },
       spec: stateless.spec,
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
@@ -1336,7 +1336,12 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: host.name, namespace: host.namespace },
+      metadata: {
+        name: host.name,
+        namespace: host.namespace,
+        uid: host.uid,
+        resourceVersion: '42',
+      },
       spec: host.spec,
       status: host.status,
     })
@@ -1422,7 +1427,18 @@ describe('HostReconciler stateless lifecycle — kill-switches', () => {
 
   it('kill-switch: removing spec.lifecycle returns a suspended host to active', async () => {
     const { reconciler, appsApi, customApi } = createReconciler()
-    await reconciler.reconcile(makeHost({ name: 'stateless-host', status: suspendedStatus(2) }))
+    const host = makeHost({ name: 'stateless-host', status: suspendedStatus(2) })
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      metadata: {
+        name: host.name,
+        namespace: host.namespace,
+        uid: host.uid,
+        resourceVersion: '42',
+      },
+      spec: host.spec,
+      status: host.status,
+    })
+    await reconciler.reconcile(host)
 
     expect(hostDeploymentBody(appsApi, 'stateless-host').spec?.replicas).toBe(1)
     const writes = lifecycleStatusWrites(customApi)
@@ -1475,7 +1491,7 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
     // FIX 1 replicas guard: state the server-side truth explicitly — the
     // fresh read must agree with the observed (converged) active status.
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: 'stateless-host', namespace: 'mcp-host' },
+      metadata: { name: 'stateless-host', namespace: 'mcp-host', uid: 'stateless-host-uid' },
       spec: {
         host: 'stateless-host',
         contextRef: 'context-a',
@@ -1521,7 +1537,12 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     reason?: string
   }) {
     return {
-      metadata: { name: 'stateless-host', namespace: 'mcp-host', resourceVersion: '42' },
+      metadata: {
+        name: 'stateless-host',
+        namespace: 'mcp-host',
+        uid: 'stateless-host-uid',
+        resourceVersion: '42',
+      },
       spec: {
         host: 'stateless-host',
         contextRef: 'context-a',

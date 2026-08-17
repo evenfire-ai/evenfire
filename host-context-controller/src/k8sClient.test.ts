@@ -225,9 +225,22 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
     getAllServerInfos: () => [],
   } as unknown as Parameters<typeof createMcpAuthorizationStore>[0]
 
-  beforeEach(() => {
-    mocks.getNamespacedCustomObject.mockReset()
+  const restoreDefaultReadMocks = () => {
+    mocks.getNamespacedCustomObject
+      .mockReset()
+      .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }))
     mocks.readNamespacedSecret.mockReset()
+  }
+
+  beforeEach(() => {
+    restoreDefaultReadMocks()
+  })
+
+  afterEach(() => {
+    // These tests intentionally reset the shared Kubernetes read mocks. Restore
+    // the normal 404 default so later watcher tests still model an absent
+    // object instead of an accidentally resolved undefined response.
+    restoreDefaultReadMocks()
   })
 
   it('treats ApiException.code=404 as absent for every CR authority read', async () => {

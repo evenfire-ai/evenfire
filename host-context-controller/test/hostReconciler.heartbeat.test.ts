@@ -119,6 +119,16 @@ function createReconciler() {
   const networkingApi = createMockNetworkingApi()
   const rbacApi = createMockRbacApi()
   const customApi = createMockCustomApi()
+  customApi.getNamespacedCustomObject.mockResolvedValue({
+    metadata: { name: 'stateless-host', namespace: 'mcp-host' },
+    spec: {
+      host: 'stateless-host',
+      contextRef: 'context-a',
+      secretRef: 'host-secret',
+      lifecycle: { stateless: true },
+    },
+    status: { lifecycle: { state: 'suspended', wakeHandledGeneration: 0 } },
+  })
 
   const reconciler = new HostReconciler({} as k8s.KubeConfig, {
     appsApi: asAppsApi(appsApi),
