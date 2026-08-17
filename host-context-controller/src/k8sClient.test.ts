@@ -9271,4 +9271,128 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
       logSpy.mockRestore()
     }
   })
+
+  // R1 (fail-closed guardrail): the content-identity gate must NOT paper over a
+  // genuine safety failure. If the authoritative pass could not revoke a real
+  // stale allow (hasCertifiedSafetyInventory stays false), readiness must remain
+  // 503 no matter how quiet the content is. This is the barrier that stops a
+  // future "fix" from certifying on identical content when safety never certified.
+  it('stays fail-closed under sustained churn when the safety pass never certified', async () => {
+    vi.useFakeTimers()
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'contexts') {
+        return {
+          metadata: { resourceVersion: 'ctx-rv-stable' },
+          items: [
+            {
+              metadata: { name: 'fc-ctx', namespace: 'mcp-server', uid: 'fc-uid', generation: 1 },
+              spec: { contextId: 'fc-ctx', mcpServers: [] },
+            },
+          ],
+        }
+      }
+      if (plural === 'mcpservers') return { metadata: { resourceVersion: 'mcp-rv' }, items: [] }
+      if (plural === 'hosts') return { metadata: { resourceVersion: 'host-rv' }, items: [] }
+      if (plural === 'communicationchannels') return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
+      return { items: [] }
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+    // The authoritative pass aborts revoking a real stale allow: it never certifies.
+    mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
+    let passes = 0
+    mocks.netPolFullReconcile.mockImplementation(async () => {
+      passes += 1
+      ;(watcher as any).contextWatchGeneration += 2
+      ;(watcher as any).mcpWatchGeneration += 2
+      // No onAuthoritativeRevocationComplete: the revocation did not complete.
+    })
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+    try {
+      await watcher.start()
+      server.setReady(true)
+      const CHURN_PASSES = 5
+      for (let i = 0; i < CHURN_PASSES; i += 1) {
+        await (watcher as any).runInitialNetworkPolicyConvergence()
+        await flushMicrotasks()
+      }
+      expect(passes).toBeGreaterThanOrEqual(CHURN_PASSES)
+      expect(
+        watcher.isReadinessInventoryAuthoritative(),
+        'fail-closed violated: readiness certified while the safety pass never did'
+      ).toBe(false)
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+    } finally {
+      await server.stop()
+      await watcher.stop()
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+      errorSpy.mockRestore()
+      warnSpy.mockRestore()
+      logSpy.mockRestore()
+    }
+  })
+
+  it('installContextSnapshot bumps the desired revision only when re-listed content changed', () => {
+    const watcher = new McpServerWatcher()
+    const ctxA = {
+      name: 'a',
+      namespace: 'mcp-server',
+      uid: 'ua',
+      generation: 1,
+      spec: { contextId: 'a', mcpServers: [] },
+    }
+    ;(watcher as any).installContextSnapshot({ contexts: [ctxA], resourceVersion: 'rv1' })
+    const base = (watcher as any).contextDesiredRevision
+    // Identical re-LIST (a Premature-close reconnect) must NOT bump.
+    ;(watcher as any).installContextSnapshot({ contexts: [ctxA], resourceVersion: 'rv2' })
+    expect((watcher as any).contextDesiredRevision).toBe(base)
+    // A spec change on the same identity MUST bump.
+    ;(watcher as any).installContextSnapshot({
+      contexts: [{ ...ctxA, generation: 2, spec: { contextId: 'a', mcpServers: ['s1'] } }],
+      resourceVersion: 'rv3',
+    })
+    expect((watcher as any).contextDesiredRevision).toBe(base + 1)
+    // A removal MUST bump.
+    ;(watcher as any).installContextSnapshot({ contexts: [], resourceVersion: 'rv4' })
+    expect((watcher as any).contextDesiredRevision).toBe(base + 2)
+    // An addition MUST bump.
+    ;(watcher as any).installContextSnapshot({ contexts: [ctxA], resourceVersion: 'rv5' })
+    expect((watcher as any).contextDesiredRevision).toBe(base + 3)
+  })
+
+  it('installMcpServerSnapshot bumps the desired revision only when re-listed content changed', () => {
+    const watcher = new McpServerWatcher()
+    const srvA = {
+      name: 'a',
+      namespace: 'mcp-server',
+      uid: 'ua',
+      generation: 1,
+      spec: {
+        contextRef: 'ctx',
+        image: 'clerum/a:v1',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    ;(watcher as any).installMcpServerSnapshot({ servers: [srvA], resourceVersion: 'rv1' })
+    const base = (watcher as any).mcpServerDesiredRevision
+    // Identical re-LIST must NOT bump.
+    ;(watcher as any).installMcpServerSnapshot({ servers: [srvA], resourceVersion: 'rv2' })
+    expect((watcher as any).mcpServerDesiredRevision).toBe(base)
+    // A spec change MUST bump.
+    ;(watcher as any).installMcpServerSnapshot({
+      servers: [{ ...srvA, generation: 2, spec: { ...srvA.spec, image: 'clerum/a:v2' } }],
+      resourceVersion: 'rv3',
+    })
+    expect((watcher as any).mcpServerDesiredRevision).toBe(base + 1)
+    // A removal MUST bump.
+    ;(watcher as any).installMcpServerSnapshot({ servers: [], resourceVersion: 'rv4' })
+    expect((watcher as any).mcpServerDesiredRevision).toBe(base + 2)
+  })
 })
