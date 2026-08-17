@@ -2567,8 +2567,7 @@ export function useAgentChatController({
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
           const errorRecord = responseRecord.error as
-            | { message?: string; code?: string; provider?: string }
-            | undefined
+            { message?: string; code?: string; provider?: string } | undefined
           const content =
             typeof errorRecord?.message === 'string'
               ? errorRecord.message

@@ -114,8 +114,18 @@ describe('external GFS rate boundary', () => {
     ['POST', '/token', 'token', '/external/gfs/token'],
     ['GET', '/capabilities', 'resource', '/external/gfs/capabilities'],
     ['POST', '/uploads', 'resource-mutation', '/external/gfs/uploads'],
-    ['HEAD', `/uploads/${RESOURCE_ID}`, 'resource', '/external/gfs/uploads/:id'],
-    ['GET', `/uploads/${RESOURCE_ID}/status`, 'resource', '/external/gfs/uploads/:id/status'],
+    [
+      'HEAD',
+      `/uploads/${RESOURCE_ID}`,
+      'resource',
+      '/external/gfs/uploads/:id',
+    ],
+    [
+      'GET',
+      `/uploads/${RESOURCE_ID}/status`,
+      'resource',
+      '/external/gfs/uploads/:id/status',
+    ],
     [
       'PUT',
       `/uploads/${RESOURCE_ID}/parts/0`,
@@ -128,7 +138,12 @@ describe('external GFS rate boundary', () => {
       'resource-mutation',
       '/external/gfs/uploads/:id/:action',
     ],
-    ['DELETE', `/uploads/${RESOURCE_ID}`, 'resource-mutation', '/external/gfs/uploads/:id'],
+    [
+      'DELETE',
+      `/uploads/${RESOURCE_ID}`,
+      'resource-mutation',
+      '/external/gfs/uploads/:id',
+    ],
     ['GET', '/resolve', 'resource', '/external/gfs/resolve'],
     ['GET', '/resources', 'resource', '/external/gfs/resources'],
     [

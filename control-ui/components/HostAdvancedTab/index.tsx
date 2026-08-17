@@ -33,7 +33,11 @@ export function HostAdvancedTab({
       <div className="cu-advanced-section">
         {subTab === 'approvals' ? (
           initialLoading ? (
-            <div className="cu-table-wrap" role="status" aria-label="Loading approval tools">
+            <div
+              className="cu-table-wrap"
+              role="status"
+              aria-label="Loading approval tools"
+            >
               <table className="cu-table cu-table--header-band cu-table--static-rows">
                 <thead>
                   <tr>

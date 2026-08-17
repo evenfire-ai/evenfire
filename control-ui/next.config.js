@@ -117,11 +117,7 @@ const nextConfig = {
       // parent so bookmarks, shared links, and the approval-tools E2E
       // (which navigates to /hosts/<name>/approvals) still reach the
       // section they used to.
-      {
-        source: '/agents/:name/member-access',
-        destination: '/agents/:name/access',
-        permanent: true,
-      },
+      { source: '/agents/:name/member-access', destination: '/agents/:name/access', permanent: true },
       { source: '/agents/:name/team-access', destination: '/agents/:name/access', permanent: true },
       { source: '/agents/:name/approvals', destination: '/agents/:name/advanced', permanent: true },
       { source: '/agents/:name/env-vars', destination: '/agents/:name/advanced', permanent: true },
