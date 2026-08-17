@@ -259,9 +259,14 @@ if [ -z "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" ]; then
     || { printf 'Unsupported promptBridge fallback provider %q; set E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT explicitly\n' "$E2E_PROMPT_FALLBACK_PROVIDER" >&2; exit 2; }
 fi
 if [ "$E2E_WORKFLOW_MODEL_PROVIDER" = "$E2E_PROMPT_FALLBACK_PROVIDER" ]; then
-  printf 'promptBridge E2E requires two distinct providers; got %q for both primary and fallback\n' \
-    "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
-  exit 2
+  if [ "${E2E_PROMPT_ALLOW_SAME_PROVIDER:-0}" = "1" ]; then
+    printf 'promptBridge E2E: primary and fallback share provider %q; proceeding because E2E_PROMPT_ALLOW_SAME_PROVIDER=1 (quota-limited local override — the ordered-fallback policy is still two ordered targets)\n' \
+      "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
+  else
+    printf 'promptBridge E2E requires two distinct providers; got %q for both primary and fallback\n' \
+      "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
+    exit 2
+  fi
 fi
 
 gate_assert_deadline() {
@@ -457,6 +462,14 @@ cleanup_sdk_recipe() {
 # shellcheck disable=SC2329 # Registered below through the EXIT trap.
 cleanup_on_exit() {
   local status=$?
+  # A non-zero abort that no assertion recorded (a prerequisite helper that died
+  # in a command-substitution subshell, a bare `exit` mid-phase, or a `set -e`
+  # abort) would otherwise let print_results claim "All tests passed!" over a run
+  # that skipped later phases. Record it as a real, countable failure first so
+  # the summary — and the gate verdict — stay honest.
+  if [ "$status" -ne 0 ] && [ "${e2e_fail:-0}" -eq 0 ]; then
+    fail "run aborted before completion (exit ${status}) — later phases were skipped; see the log above for the failing step"
+  fi
   if [ "${e2e_total:-0}" -gt 0 ] && [ "${E2E_SUPPRESS_RESULTS:-0}" != "1" ]; then
     print_results || true
   fi
@@ -726,8 +739,14 @@ ensure_external_rest_api_reachable() {
   if curl -sf -m 5 "$url" >/dev/null 2>&1; then
     return 0
   fi
-  fail "external-rest-api not reachable at ${E2E_EXTERNAL_REST_API_URL} (run branch-profile-pf for ${KUBECONTEXT:-<profile>})"
-  exit 1
+  # This helper runs inside obtain_desktop_session_token's command substitution,
+  # so `exit 1` would only terminate that subshell (aborting the parent via
+  # `set -e` with NO recorded failure) and a `fail` here would bump a counter the
+  # parent shell never sees. Propagate a non-zero RETURN instead and let the
+  # parent-shell caller record the countable, visible failure.
+  printf 'external-rest-api not reachable at %s (run branch-profile-pf for %s)\n' \
+    "${E2E_EXTERNAL_REST_API_URL}" "${KUBECONTEXT:-<profile>}" >&2
+  return 1
 }
 
 obtain_desktop_session_token() {
@@ -735,7 +754,7 @@ obtain_desktop_session_token() {
   if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
-  ensure_external_rest_api_reachable
+  ensure_external_rest_api_reachable || return 1
   response="$(
     printf '%s\0%s' "$email" "$password" \
       | jq -Rs 'split("\u0000") | {email: .[0], password: .[1]}' \
@@ -766,6 +785,18 @@ create_grant() {
     payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerMinute":10,"maxNotificationsPerRun":10}}'
   fi
   admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$payload"
+  # admin_curl only reflects transport success; the admin API returns 200 on
+  # accept and 4xx on a rejected policy (e.g. a duplicate provider+model target).
+  # Without this check a rejected grant looks "created" and the real failure only
+  # surfaces far downstream. Fail loud with a grant-specific, HTTP-bearing reason.
+  case "${ADMIN_CURL_HTTP_STATUS:-}" in
+    2[0-9][0-9]) return 0 ;;
+    *)
+      printf 'grant creation (%s) rejected by admin API: HTTP %s\n' \
+        "$family" "${ADMIN_CURL_HTTP_STATUS:-unknown}" >&2
+      return 1
+      ;;
+  esac
 }
 
 # The admin API validates the policy; jq is used here solely to serialize E2E
