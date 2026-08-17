@@ -1,6 +1,14 @@
 'use client'
 
-import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import type { ToastContextValue, ToastOptions, ToastRecord } from './types'
 
 const DEFAULT_DURATION_MS = 3500
@@ -9,6 +17,13 @@ const ToastContext = createContext<ToastContextValue | undefined>(undefined)
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<ToastRecord[]>([])
   const timersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(timersRef.current)) clearTimeout(timer)
+      timersRef.current = {}
+    }
+  }, [])
 
   const dismissToast = useCallback((id: string) => {
     setItems(prev => prev.filter(item => item.id !== id))

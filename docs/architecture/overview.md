@@ -78,6 +78,9 @@ webhook and file planes, see [/ARCHITECTURE.md](../../ARCHITECTURE.md). For the
 three human surfaces — the Control UI console, the Desktop App client, and the
 Profile UI — see [docs/surfaces/](../surfaces/README.md).
 
+The self-hosted Desktop GFS authority boundary, lifecycle generations, and
+validation flow are documented in [Desktop GFS operator parity](gfs-desktop-operator-parity.md).
+
 | Service                     | Directory                  | Namespace       | Port | Role                                                                                                 |
 | --------------------------- | -------------------------- | --------------- | ---- | ---------------------------------------------------------------------------------------------------- |
 | **channel-reader**          | `/channel-reader`          | `channels`      | -    | Watches CommunicationChannel CRDs, polls Telegram/Email/Slack, forwards to mcp-host                  |

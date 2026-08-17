@@ -12,11 +12,14 @@ describe('GFS_STORAGE_ROLE', () => {
     expect(loadConfig().storageRole).toBe(role)
   })
 
-  it.each([undefined, ''])('rejects absent or empty role %s instead of granting writer authority', role => {
-    vi.stubEnv('GFS_DEV_MODE', 'true')
-    vi.stubEnv('GFS_STORAGE_ROLE', role)
-    expect(() => loadConfig()).toThrow(/GFS_STORAGE_ROLE must be explicitly set/)
-  })
+  it.each([undefined, ''])(
+    'rejects absent or empty role %s instead of granting writer authority',
+    role => {
+      vi.stubEnv('GFS_DEV_MODE', 'true')
+      vi.stubEnv('GFS_STORAGE_ROLE', role)
+      expect(() => loadConfig()).toThrow(/GFS_STORAGE_ROLE must be explicitly set/)
+    }
+  )
 
   it.each(['Writer', 'read', 'writer ', 'unknown'])('rejects unknown value %s', role => {
     vi.stubEnv('GFS_DEV_MODE', 'true')
@@ -73,17 +76,7 @@ describe('GFS_SYNC_COPY_*', () => {
     'GFS_SYNC_RENAME_MAX_OBJECTS',
     'GFS_SYNC_RENAME_TIMEOUT_MS',
   ])('rejects invalid explicitly configured values for %s', name => {
-    for (const raw of [
-      '',
-      ' ',
-      '0',
-      '-1',
-      '1.5',
-      'NaN',
-      'Infinity',
-      '1e3',
-      '9007199254740992',
-    ]) {
+    for (const raw of ['', ' ', '0', '-1', '1.5', 'NaN', 'Infinity', '1e3', '9007199254740992']) {
       expect(() => configWith(name, raw), `${name}=${JSON.stringify(raw)}`).toThrow(
         new RegExp(`${name} must be a positive safe integer`)
       )
@@ -94,5 +87,99 @@ describe('GFS_SYNC_COPY_*', () => {
     expect(
       configWith('GFS_SYNC_COPY_MAX_OBJECTS', String(Number.MAX_SAFE_INTEGER)).syncCopyMaxObjects
     ).toBe(Number.MAX_SAFE_INTEGER)
+  })
+})
+
+describe('GFS_UPLOAD_V2 strict disabled contract', () => {
+  beforeEach(() => vi.stubEnv('GFS_STORAGE_ROLE', 'writer'))
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('uses the 200 MiB product policy, 1 GiB protocol ceiling, and disabled capability defaults', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    expect(loadConfig().uploadV2).toMatchObject({
+      productMaxFileBytes: 209715200,
+      protocolMaxFileBytes: 1073741824,
+      preferredPartBytes: 8388608,
+      maxPartBytes: 16777216,
+      maxConcurrentPartsPerSession: 4,
+      maxConcurrentPartStreamsGlobal: 16,
+      instabilityFailureThreshold: 3,
+      enabled: false,
+    })
+  })
+
+  it('accepts an explicit enable only as a configuration value; runtime readiness owns activation', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_V2_ENABLED', 'true')
+    expect(loadConfig().uploadV2.enabled).toBe(true)
+  })
+
+  it('requires the product boundary and deprecated max-file alias to agree', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', '209715200')
+    vi.stubEnv('GFS_UPLOAD_MAX_FILE_BYTES', '209715199')
+    expect(() => loadConfig()).toThrow(/must match/)
+  })
+
+  it('accepts the plan-owned chunk and millisecond TTL names', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PREFERRED_CHUNK_BYTES', '8388608')
+    vi.stubEnv('GFS_UPLOAD_MAX_CHUNK_BYTES', '16777216')
+    vi.stubEnv('GFS_UPLOAD_MIN_PART_BYTES', '1048576')
+    vi.stubEnv('GFS_UPLOAD_SESSION_TTL_MS', '86400000')
+    vi.stubEnv('GFS_UPLOAD_COMPLETED_RECEIPT_TTL_MS', '86400000')
+    expect(loadConfig().uploadV2).toMatchObject({
+      productMaxFileBytes: 209715200,
+      preferredPartBytes: 8388608,
+      maxPartBytes: 16777216,
+      sessionTtlSeconds: 86400,
+      receiptRetentionSeconds: 86400,
+    })
+  })
+
+  it.each(['', '1', 'yes', 'TRUE'])('rejects non-canonical flag %s', raw => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_V2_ENABLED', raw)
+    expect(() => loadConfig()).toThrow(/must be exactly 'true' or 'false'/)
+  })
+
+  it('rejects a protocol ceiling below the product boundary or above 1 GiB', () => {
+    for (const raw of ['209715199', '1073741825']) {
+      vi.stubEnv('GFS_DEV_MODE', 'true')
+      vi.stubEnv('GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES', raw)
+      expect(() => loadConfig()).toThrow(/GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES/)
+      vi.unstubAllEnvs()
+      vi.stubEnv('GFS_STORAGE_ROLE', 'writer')
+    }
+  })
+
+  it('rejects a fallback concurrency that cannot reduce the four-part window', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_FALLBACK_CONCURRENCY', '4')
+    expect(() => loadConfig()).toThrow(/FALLBACK_CONCURRENCY must be lower/)
+  })
+
+  it('accepts the bounded instability threshold and rejects values outside the capability contract', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD', '7')
+    expect(loadConfig().uploadV2.instabilityFailureThreshold).toBe(7)
+    for (const raw of ['0', '101', '1.5', 'NaN', 'Infinity']) {
+      vi.stubEnv('GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD', raw)
+      expect(() => loadConfig(), `threshold=${raw}`).toThrow(
+        /GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD must be an integer from 1 through 100/
+      )
+    }
+  })
+
+  it('fails closed when stale lease cleanup could race an active part timeout', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PART_TIMEOUT_MS', '600000')
+    vi.stubEnv('GFS_UPLOAD_STALE_PART_LEASE_MS', '600000')
+    expect(() => loadConfig()).toThrow(
+      /GFS_UPLOAD_STALE_PART_LEASE_MS must be greater than GFS_UPLOAD_PART_TIMEOUT_MS/
+    )
+
+    vi.stubEnv('GFS_UPLOAD_STALE_PART_LEASE_MS', '600001')
+    expect(loadConfig().uploadV2.stalePartLeaseMs).toBe(600001)
   })
 })

@@ -10,6 +10,8 @@
 #   ./scripts/minikube/full-setup.sh                # Full setup
 #   ./scripts/minikube/full-setup.sh --skip-build   # Skip image build
 #   ./scripts/minikube/full-setup.sh --skip-uis     # Skip UIs and Desktop App
+#   ./scripts/minikube/full-setup.sh --defer-bootstrap-seed
+#                                                     # Leave first-run setup for browser E2E
 #   ./scripts/minikube/full-setup.sh --reset-db     # Reset postgres DB
 #   ./scripts/minikube/full-setup.sh --force-keys   # Regenerate JWT keys
 #   ./scripts/minikube/full-setup.sh -h | --help
@@ -122,6 +124,7 @@ SKIP_BUILD=false
 SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
 RESET_DB=true
 FORCE_KEYS=false
+DEFER_BOOTSTRAP_SEED="${MINIKUBE_DEFER_BOOTSTRAP_SEED:-false}"
 CONTROL_DB_RESET_PVC_UID="${CONTROL_DB_RESET_PVC_UID:-}"
 CONTROL_DB_RESET_RESUME="${CONTROL_DB_RESET_RESUME:-false}"
 
@@ -184,6 +187,11 @@ Options:
                          test fixtures. e2e: adds the E2E fixtures (test user,
                          e2e-* recipes, demo MCP servers). Requires ADMIN_PASSWORD
                          unless --seed-profile=e2e.
+  --defer-bootstrap-seed
+                         local branch-E2E mode: skip Step 10's admin/user
+                         seed so the browser owns the one-shot
+                         /api/v1/admin/auth/setup bootstrap. Requires
+                         IMAGE_SOURCE=local and --seed-profile=minimal.
   --reset-db     Force a postgres DB rebuild (already the default; deletes PVC, re-deploys)
   --keep-db      Preserve the existing postgres DB volume (skip the default rebuild)
   --force-keys   Force JWT key regeneration (invalidates existing tokens)
@@ -198,6 +206,9 @@ Environment:
                          default rebuilds control-postgres from scratch every run
   MINIKUBE_SEED_PROFILE, ADMIN_PASSWORD
                          See --seed-profile above
+  MINIKUBE_DEFER_BOOTSTRAP_SEED
+                         Set true to select the same browser-bootstrap mode
+                         as --defer-bootstrap-seed
   MINIKUBE_RECREATE_PROFILE
                          Set true to allow destructive broken-profile recreation
   CONFIRM_PROFILE        Must match MINIKUBE_PROFILE before any profile deletion
@@ -229,6 +240,7 @@ Examples:
   $(basename "$0") --skip-build          # Re-deploy without rebuilding images
   $(basename "$0") --skip-uis            # Deploy backend services without UIs
   $(basename "$0") --seed-profile=e2e     # Full E2E fixture set
+  $(basename "$0") --defer-bootstrap-seed # Leave first-run setup to browser E2E
   $(basename "$0") --keep-db             # Preserve the existing DB (skip the default rebuild)
   $(basename "$0") --force-keys          # Regenerate all JWT keys
 EOF
@@ -240,6 +252,7 @@ for arg in "$@"; do
     --skip-build) SKIP_BUILD=true ;;
     --skip-uis)   SKIP_UIS=true ;;
     --seed-profile=*) SEED_PROFILE="${arg#*=}" ;;
+    --defer-bootstrap-seed) DEFER_BOOTSTRAP_SEED=true ;;
     --reset-db)   RESET_DB=true ;;
     --keep-db)    RESET_DB=false ;;
     --force-keys) FORCE_KEYS=true ;;
@@ -255,6 +268,23 @@ case "${SEED_PROFILE}" in
   minimal|e2e) ;;
   *) err "Unknown --seed-profile: '${SEED_PROFILE}' (expected: minimal | e2e)"; exit 1 ;;
 esac
+
+case "${DEFER_BOOTSTRAP_SEED}" in
+  true|1|yes) DEFER_BOOTSTRAP_SEED=true ;;
+  false|0|no|"") DEFER_BOOTSTRAP_SEED=false ;;
+  *) err "Unknown MINIKUBE_DEFER_BOOTSTRAP_SEED: '${DEFER_BOOTSTRAP_SEED}' (expected: true | false)"; exit 1 ;;
+esac
+
+if [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  if [ "$SEED_PROFILE" != "minimal" ]; then
+    err "--defer-bootstrap-seed requires --seed-profile=minimal; the e2e fixture profile owns its seed flow."
+    exit 1
+  fi
+  if [ "$IMAGE_SOURCE" != "local" ]; then
+    err "--defer-bootstrap-seed requires IMAGE_SOURCE=local so browser evidence can correspond to this worktree HEAD."
+    exit 1
+  fi
+fi
 
 # ── The mode follows the cluster on a run that acquires nothing ────────
 #
@@ -549,7 +579,7 @@ ok "ruby is available"
 
 # Fail here, not at Step 10. Image builds dominate a 5-10 min first run
 # (README.md:178); aborting after them for a missing .env line is hostile.
-if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
+if [ "$SEED_PROFILE" = "minimal" ] && [ "$DEFER_BOOTSTRAP_SEED" != true ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
   err "ADMIN_PASSWORD is not set."
   err ""
   err "  This is your Control UI admin password AND your Desktop App login."
@@ -568,7 +598,7 @@ fi
 # hold the publicly-known default. Keep these bounds in sync with auth.ts. Scope
 # to the minimal profile: the E2E profile may use its local-only fallback when
 # no canonical or explicit admin credential is configured.
-if [ "$SEED_PROFILE" = "minimal" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+if [ "$SEED_PROFILE" = "minimal" ] && [ "$DEFER_BOOTSTRAP_SEED" != true ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
   pw_len=${#ADMIN_PASSWORD}
   if [ "$pw_len" -lt 8 ] || [ "$pw_len" -gt 256 ]; then
     err "ADMIN_PASSWORD must be between 8 and 256 characters (got ${pw_len})."
@@ -579,7 +609,9 @@ if [ "$SEED_PROFILE" = "minimal" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
     exit 1
   fi
 fi
-if [ -n "${ADMIN_PASSWORD:-}" ]; then
+if [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  ok "Bootstrap admin/user seed deferred; the first-run browser setup owns /api/v1/admin/auth/setup"
+elif [ -n "${ADMIN_PASSWORD:-}" ]; then
   ok "ADMIN_PASSWORD resolved from the canonical environment contract"
 else
   ok "No admin password configured; the E2E-only local fallback will be used at seed time"
@@ -1363,60 +1395,70 @@ fi
 # ======================================================================
 step_header 10 $TOTAL_STEPS "Seed Test User"
 
-# The e2e profile seeds the test identities used by the Desktop and Control UI
-# journeys. The minimal profile must not seed anything named test*.
-if [ "$SEED_PROFILE" = "e2e" ]; then
-  SEED_USER_DEFAULT_EMAIL="test@clerum.io"
-  SEED_USER_DEFAULT_NAME="Test User"
-  # ADMIN_PASSWORD was resolved once above. Use the known local test fallback
-  # only when neither the canonical .env nor the process configured any admin
-  # alias; never replace a real seeded credential.
-  if [ -z "${ADMIN_PASSWORD:-}" ]; then
-    ADMIN_PASSWORD="$(printf '%s%s' 'changeme123' '!')"
-  fi
+if [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  # The browser E2E must be the first actor to consume the one-shot
+  # /api/v1/admin/auth/setup route. Do not invoke seed-test-data.sh here: it
+  # logs in as the auto-seeded admin and makes that route correctly reject a
+  # later setup attempt with HTTP 409.
+  SEED_USER_OK=deferred
+  SEED_USER_EMAIL=""
+  log "Deferring bootstrap/admin seed; browser E2E owns /api/v1/admin/auth/setup"
 else
-  # Minimal: the Control-UI admin IS the sole Desktop App member — no separate
-  # seeded user. Point both the admin-bootstrap email and the seeded desktop
-  # user at the same evenfire-branded address so the seeder's (idempotent)
-  # user+team step converges on the admin identity that /admin/auth/setup
-  # already provisioned (users row + "<username> team" + chatllm/context1
-  # grants), instead of minting a second member/team. `admin@clerum.io` would
-  # leak the internal code name onto a product surface (the Desktop member
-  # list) — evenfire branding belongs here (docs/concepts/code-names.md). If
-  # the best-effort admin desktop provisioning ever fails, the seeder still
-  # creates this one identity, so the minimal install is never member-less.
-  SEED_USER_DEFAULT_EMAIL="admin@evenfire.local"
-  SEED_USER_DEFAULT_NAME="admin"
-  : "${ADMIN_EMAIL:=admin@evenfire.local}"
-fi
-SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
-SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
-log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
-SEED_USER_OK=true
-if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
-   SEED_PROFILE="${SEED_PROFILE}" \
-   ADMIN_EMAIL="${ADMIN_EMAIL:-}" \
-   E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
-   E2E_DEV_LOGIN_NAME="${SEED_USER_NAME}" \
-   bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
-  ok "Test user seeded"
-else
-  SEED_USER_OK=false
-  if [ "$SEED_PROFILE" = "minimal" ]; then
-    # This step is the only place that both creates the owner user AND
-    # rotates the bootstrap admin credential (POST /admin/auth/setup, called
-    # from seed-test-data.sh → scripts/e2e/seed-e2e-data.sh). generate-keys.sh
-    # bakes a hardcoded bcrypt hash of changeme123! into the admin Secret,
-    # and control-api/src/db.ts auto-inserts a live `admin` row from it on
-    # every fresh DB. If this step fails under the default (minimal)
-    # profile, that publicly-known credential is still live — a green
-    # summary would ship an install that is both unusable and insecure.
-    # Abort instead; setup is idempotent, so re-running after the underlying
-    # issue is fixed recovers cleanly.
-    err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
-    exit 1
+  # The e2e profile seeds the test identities used by the Desktop and Control UI
+  # journeys. The minimal profile must not seed anything named test*.
+  if [ "$SEED_PROFILE" = "e2e" ]; then
+    SEED_USER_DEFAULT_EMAIL="test@clerum.io"
+    SEED_USER_DEFAULT_NAME="Test User"
+    # ADMIN_PASSWORD was resolved once above. Use the known local test fallback
+    # only when neither the canonical .env nor the process configured any admin
+    # alias; never replace a real seeded credential.
+    if [ -z "${ADMIN_PASSWORD:-}" ]; then
+      ADMIN_PASSWORD="$(printf '%s%s' 'changeme123' '!')"
+    fi
   else
-    warn "Test user seed encountered errors — check output above"
+    # Minimal: the Control-UI admin IS the sole Desktop App member — no separate
+    # seeded user. Point both the admin-bootstrap email and the seeded desktop
+    # user at the same evenfire-branded address so the seeder's (idempotent)
+    # user+team step converges on the admin identity that /admin/auth/setup
+    # already provisioned (users row + "<username> team" + chatllm/context1
+    # grants), instead of minting a second member/team. `admin@clerum.io` would
+    # leak the internal code name onto a product surface (the Desktop member
+    # list) — evenfire branding belongs here (docs/concepts/code-names.md). If
+    # the best-effort admin desktop provisioning ever fails, the seeder still
+    # creates this one identity, so the minimal install is never member-less.
+    SEED_USER_DEFAULT_EMAIL="admin@evenfire.local"
+    SEED_USER_DEFAULT_NAME="admin"
+    : "${ADMIN_EMAIL:=admin@evenfire.local}"
+  fi
+  SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
+  SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
+  log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
+  SEED_USER_OK=true
+  if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+     SEED_PROFILE="${SEED_PROFILE}" \
+     ADMIN_EMAIL="${ADMIN_EMAIL:-}" \
+     E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
+     E2E_DEV_LOGIN_NAME="${SEED_USER_NAME}" \
+     bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
+    ok "Test user seeded"
+  else
+    SEED_USER_OK=false
+    if [ "$SEED_PROFILE" = "minimal" ]; then
+      # This step is the only place that both creates the owner user AND
+      # rotates the bootstrap admin credential (POST /admin/auth/setup, called
+      # from seed-test-data.sh → scripts/e2e/seed-e2e-data.sh). generate-keys.sh
+      # bakes a hardcoded bcrypt hash of changeme123! into the admin Secret,
+      # and control-api/src/db.ts auto-inserts a live `admin` row from it on
+      # every fresh DB. If this step fails under the default (minimal)
+      # profile, that publicly-known credential is still live — a green
+      # summary would ship an install that is both unusable and insecure.
+      # Abort instead; setup is idempotent, so re-running after the underlying
+      # issue is fixed recovers cleanly.
+      err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
+      exit 1
+    else
+      warn "Test user seed encountered errors — check output above"
+    fi
   fi
 fi
 
@@ -1493,36 +1535,32 @@ else
 fi
 echo ""
 echo -e "  ${BOLD}Already done by setup:${NC}"
-# Step 10 (Seed Test User) is what actually rotates the bootstrap admin
-# credential and creates the seed user. If it failed, SEED_USER_OK=false and
-# these lines must say so instead of printing a false ✓ (a failed Step 10
-# under minimal already aborts before reaching here — see Step 10 above —
-# so this else branch is reachable only via the e2e soft-fail path).
-if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
-  else
-    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
-  fi
+# Step 10 either owns the normal seed flow or is deliberately deferred so the
+# first-run browser setup can consume /api/v1/admin/auth/setup. Keep the
+# summary explicit: deferred is not a successful seed and must never be shown
+# as one.
+if [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  echo -e "    ${YELLOW}•${NC} Bootstrap admin seed deferred — browser E2E owns /api/v1/admin/auth/setup"
+  echo -e "    ${YELLOW}•${NC} Owner user seed deferred — created by the browser setup journey"
 else
   if [ "${SEED_USER_OK:-true}" = "true" ]; then
     echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
   else
     echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
   fi
-fi
-if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+  if [ "${SEED_PROFILE:-}" = "e2e" ]; then
+    if [ "${SEED_USER_OK:-true}" = "true" ]; then
+      echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+    else
+      echo -e "    ${RED}✗${NC} Test user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
+    fi
+    echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
   else
-    echo -e "    ${RED}✗${NC} Test user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
-  fi
-  echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
-else
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
-  else
-    echo -e "    ${RED}✗${NC} Owner user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
+    if [ "${SEED_USER_OK:-true}" = "true" ]; then
+      echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+    else
+      echo -e "    ${RED}✗${NC} Owner user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
+    fi
   fi
 fi
 echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
