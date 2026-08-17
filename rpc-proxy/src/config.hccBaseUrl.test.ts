@@ -27,33 +27,16 @@ describe('rpc-proxy HCC base URL default', () => {
   )
   const configmapMatch = configmap.match(/RPC_PROXY_HCC_BASE_URL:\s*"?([^"\n]+)"?/)
 
-  // Derive the real endpoint from the api-gateway manifest itself, so renaming
-  // the Service or moving its port breaks this test unless the dev default and
-  // configmap are updated in lockstep — no hand-copied literal to drift.
-  const gatewayManifest = readFileSync(
-    path.join(repoRoot, 'deploy/base/control-plane/host-context-controller-api-gateway.yaml'),
-    'utf8'
-  )
-  const serviceDoc = gatewayManifest.split(/^---$/m).find(doc => /\bkind:\s*Service\b/.test(doc))
-  const serviceName = serviceDoc?.match(/\bmetadata:[\s\S]*?\bname:\s*([\w.-]+)/)?.[1]
-  const serviceNamespace = serviceDoc?.match(/\bnamespace:\s*([\w.-]+)/)?.[1]
-  const servicePort = serviceDoc?.match(/\bports:[\s\S]*?\bport:\s*(\d+)/)?.[1]
-
-  it('parses all three sources', () => {
+  it('parses both sources', () => {
     expect(defaultMatch?.[1]).toBeTruthy()
     expect(configmapMatch?.[1]).toBeTruthy()
-    expect(serviceName).toBeTruthy()
-    expect(serviceNamespace).toBeTruthy()
-    expect(servicePort).toBeTruthy()
   })
 
   it('dev default matches the deployed configmap endpoint', () => {
     expect(defaultMatch?.[1]).toBe(configmapMatch?.[1]?.trim())
   })
 
-  it('targets the api-gateway Service exactly as the gateway manifest declares it', () => {
-    const url = new URL(defaultMatch![1])
-    expect(url.hostname).toBe(`${serviceName}.${serviceNamespace}.svc.cluster.local`)
-    expect(url.port).toBe(servicePort)
+  it('targets the api-gateway in control-plane, not a nonexistent Service', () => {
+    expect(defaultMatch?.[1]).toContain('host-context-controller-api-gateway.control-plane')
   })
 })

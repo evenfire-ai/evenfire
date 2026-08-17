@@ -51,7 +51,7 @@ case "$*" in
   *'rollout status deployment/workflow-recipes --timeout=180s') exit 0 ;;
   *'rollout status deployment/trace-maintenance-worker --timeout=180s') exit 0 ;;
   *'scale deployment/host-context-controller --replicas=4') exit 0 ;;
-  *'rollout status deployment/host-context-controller --timeout=900s') exit 0 ;;
+  *'rollout status deployment/host-context-controller --timeout=180s') exit 0 ;;
   *'get pods -l app=workflow-recipes -o name') printf 'pod/workflow-old\n' ;;
   *'get pods -l app=trace-maintenance-worker -o name') printf 'pod/trace-old\n' ;;
   *'wait --for=delete pod -l app=workflow-recipes --timeout=180s') exit 0 ;;

@@ -37,18 +37,6 @@ export interface BindingDef {
   protocol?: 'TCP' | 'UDP'
 }
 
-export interface BindingPolicyReconcileOptions {
-  // Required (fail-closed): every caller must supply the authority predicate so
-  // a retired reconcile pass cannot keep mutating binding NetworkPolicies. There
-  // is no assume-current default — an omitted predicate is a compile error, not
-  // a silent fail-open (the old `?? (() => true)`) nor a silent no-op.
-  isCurrent: () => boolean
-}
-
-export interface BindingPolicyCleanupOptions {
-  deleteAllowed?: () => Promise<boolean>
-}
-
 export class BindingPolicyReconciler {
   private networkingApi: k8s.NetworkingV1Api
   private mcpServerNamespace: string
@@ -72,86 +60,70 @@ export class BindingPolicyReconciler {
     recipeName: string,
     bindings: BindingDef[],
     mcpWorkloadName: string,
-    mcpServerName = mcpWorkloadName,
-    options: BindingPolicyReconcileOptions
+    mcpServerName = mcpWorkloadName
   ): Promise<void> {
-    const isCurrent = options.isCurrent
-    if (!isCurrent()) return
     console.log(`[BindingNP] Reconciling ${bindings.length} binding(s) for recipe "${recipeName}"`)
 
-    // Sequence writes so authority can be rechecked between every Kubernetes
-    // effect. A retired pass must not start the next binding policy mutation.
-    for (const binding of bindings) {
-      if (!isCurrent()) return
-      const protocol = binding.protocol ?? 'TCP'
+    await Promise.all(
+      bindings.map(async binding => {
+        const protocol = binding.protocol ?? 'TCP'
 
-      // Determine namespaces based on which workload is the MCP server.
-      // The MCP workload (with transport) lives in mcp-server namespace,
-      // the other workload lives in sandbox-recipes namespace.
-      const fromIsMcp = binding.from === mcpWorkloadName
-      const fromNs = fromIsMcp ? this.mcpServerNamespace : SANDBOX_NAMESPACE
-      const toNs = fromIsMcp ? SANDBOX_NAMESPACE : this.mcpServerNamespace
-      const fromPodSelector: Record<string, string> = fromIsMcp
-        ? { [MCPSERVER_LABEL]: mcpServerName }
-        : { app: binding.from }
-      const toPodSelector: Record<string, string> = fromIsMcp
-        ? { app: binding.to }
-        : { [MCPSERVER_LABEL]: mcpServerName }
+        // Determine namespaces based on which workload is the MCP server.
+        // The MCP workload (with transport) lives in mcp-server namespace,
+        // the other workload lives in sandbox-recipes namespace.
+        const fromIsMcp = binding.from === mcpWorkloadName
+        const fromNs = fromIsMcp ? this.mcpServerNamespace : SANDBOX_NAMESPACE
+        const toNs = fromIsMcp ? SANDBOX_NAMESPACE : this.mcpServerNamespace
+        const fromPodSelector: Record<string, string> = fromIsMcp
+          ? { [MCPSERVER_LABEL]: mcpServerName }
+          : { app: binding.from }
+        const toPodSelector: Record<string, string> = fromIsMcp
+          ? { app: binding.to }
+          : { [MCPSERVER_LABEL]: mcpServerName }
 
-      const egressName = this.policyName(recipeName, binding.from, binding.to, 'egress')
-      const egressPolicy = this.buildEgressPolicy(
-        egressName,
-        recipeName,
-        fromPodSelector,
-        toPodSelector,
-        fromNs,
-        toNs,
-        binding.port,
-        protocol
-      )
-      const ingressName = this.policyName(recipeName, binding.from, binding.to, 'ingress')
-      const ingressPolicy = this.buildIngressPolicy(
-        ingressName,
-        recipeName,
-        fromPodSelector,
-        toPodSelector,
-        fromNs,
-        toNs,
-        binding.port,
-        protocol
-      )
+        const egressName = this.policyName(recipeName, binding.from, binding.to, 'egress')
+        const egressPolicy = this.buildEgressPolicy(
+          egressName,
+          recipeName,
+          fromPodSelector,
+          toPodSelector,
+          fromNs,
+          toNs,
+          binding.port,
+          protocol
+        )
+        const ingressName = this.policyName(recipeName, binding.from, binding.to, 'ingress')
+        const ingressPolicy = this.buildIngressPolicy(
+          ingressName,
+          recipeName,
+          fromPodSelector,
+          toPodSelector,
+          fromNs,
+          toNs,
+          binding.port,
+          protocol
+        )
 
-      if (!isCurrent()) return
-      await this.applyPolicy(egressName, egressPolicy, fromNs, isCurrent)
-      if (!isCurrent()) return
-      await this.applyPolicy(ingressName, ingressPolicy, toNs, isCurrent)
-    }
+        // Egress and ingress target different namespaces — safe to parallelize
+        await Promise.all([
+          this.applyPolicy(egressName, egressPolicy, fromNs),
+          this.applyPolicy(ingressName, ingressPolicy, toNs),
+        ])
+      })
+    )
   }
 
   /**
    * Delete all binding-scoped NetworkPolicies for a recipe.
    */
-  async cleanupBindings(
-    recipeName: string,
-    options: BindingPolicyCleanupOptions = {}
-  ): Promise<void> {
+  async cleanupBindings(recipeName: string): Promise<void> {
     console.log(`[BindingNP] Cleaning up binding policies for recipe "${recipeName}"`)
 
-    // LIST operations are read-only and namespace-independent. Each resulting
-    // delete is separately authorized after its LIST completes.
-    const results = await Promise.allSettled([
-      this.deletePoliciesForRecipe(recipeName, SANDBOX_NAMESPACE, options.deleteAllowed),
-      this.deletePoliciesForRecipe(recipeName, this.mcpServerNamespace, options.deleteAllowed),
+    // Delete from both namespaces in parallel (independent operations)
+    await Promise.all([
+      this.deletePoliciesForRecipe(recipeName, SANDBOX_NAMESPACE),
+      this.deletePoliciesForRecipe(recipeName, this.mcpServerNamespace),
     ])
-    const failures = results.flatMap(result =>
-      result.status === 'rejected' ? [result.reason] : []
-    )
-    if (failures.length > 0) {
-      throw new AggregateError(
-        failures,
-        `Failed to clean up binding policies for recipe "${recipeName}"`
-      )
-    }
   }
 
   // ─── Policy Builders ────────────────────────────────────────────
@@ -270,49 +242,43 @@ export class BindingPolicyReconciler {
   private async applyPolicy(
     name: string,
     policy: k8s.V1NetworkPolicy,
-    namespace: string,
-    isCurrent: () => boolean
+    namespace: string
   ): Promise<void> {
-    await applyNetworkPolicy(this.networkingApi, name, namespace, policy, '[BindingNP]', isCurrent)
+    await applyNetworkPolicy(this.networkingApi, name, namespace, policy, '[BindingNP]')
   }
 
-  private async deletePoliciesForRecipe(
-    recipeName: string,
-    namespace: string,
-    deleteAllowed?: () => Promise<boolean>
-  ): Promise<void> {
-    let response: k8s.V1NetworkPolicyList
+  private async deletePoliciesForRecipe(recipeName: string, namespace: string): Promise<void> {
     try {
-      response = await this.networkingApi.listNamespacedNetworkPolicy({
+      const response = await this.networkingApi.listNamespacedNetworkPolicy({
         namespace,
         labelSelector: `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${POLICY_TYPE_LABEL}=binding-allow,${RECIPE_LABEL}=${recipeName}`,
       })
+
+      await Promise.all(
+        (response.items || []).map(async policy => {
+          const policyName = policy.metadata?.name
+          if (!policyName) {
+            console.warn(`[BindingNP] Skipping policy with no name in ${namespace}`)
+            return
+          }
+          try {
+            await this.networkingApi.deleteNamespacedNetworkPolicy({
+              name: policyName,
+              namespace,
+            })
+            console.log(`[BindingNP] Deleted policy "${policyName}" in ${namespace}`)
+          } catch (error: unknown) {
+            if (getErrorCode(error) !== 404) {
+              console.error(`[BindingNP] Failed to delete policy "${policyName}":`, error)
+            }
+          }
+        })
+      )
     } catch (error) {
       console.error(
         `[BindingNP] Failed to list policies for recipe "${recipeName}" in ${namespace}:`,
         error
       )
-      throw error
-    }
-
-    for (const policy of response.items || []) {
-      const policyName = policy.metadata?.name
-      if (!policyName) {
-        console.warn(`[BindingNP] Skipping policy with no name in ${namespace}`)
-        continue
-      }
-      try {
-        if (deleteAllowed && !(await deleteAllowed())) return
-        await this.networkingApi.deleteNamespacedNetworkPolicy({
-          name: policyName,
-          namespace,
-        })
-        console.log(`[BindingNP] Deleted policy "${policyName}" in ${namespace}`)
-      } catch (error: unknown) {
-        if (getErrorCode(error) === 404) continue
-        console.error(`[BindingNP] Failed to delete policy "${policyName}":`, error)
-        throw error
-      }
     }
   }
 }

@@ -1,82 +1,28 @@
 #!/usr/bin/env bash
 
-# Safety helpers shared by disruptive HCC fault-injection fixtures.
-
-profile_env_value() {
-  local key=$1 file=$2
-  awk -v key="$key" '
-    index($0, key "=") == 1 {
-      print substr($0, length(key) + 2)
-      exit
-    }
-  ' "$file"
-}
+# Safety helpers for the HCC CommunicationChannel watch-recovery fault fixture.
 
 require_branch_owned_hcc_gate() {
-  local marker_namespace="${1:-control-plane}"
-  local actual_worktree_id actual_head actual_cluster_fingerprint actual_gate
-  local worktree_dirty expected_branch profile_env
-  local pre_gate_state_root cluster_fingerprint_file expected_cluster_fingerprint
+  local repo_root expected_worktree_id expected_head actual_worktree_id actual_head worktree_dirty
 
   is_branch_scoped_e2e_context "$E2E_KUBECONTEXT" ||
     die "fault injection requires a generated branch-scoped context, got '${E2E_KUBECONTEXT}'"
 
-  HCC_BRANCH_GATE_REPO_ROOT="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel)"
-  worktree_dirty="$(
-    git -C "$HCC_BRANCH_GATE_REPO_ROOT" status --porcelain --untracked-files=normal
-  )"
+  repo_root="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel)"
+  worktree_dirty="$(git -C "$repo_root" status --porcelain --untracked-files=normal)"
   [ -z "$worktree_dirty" ] ||
     die "worktree has uncommitted changes; commit and re-sync before runtime proof"
-  HCC_BRANCH_GATE_EXPECTED_WORKTREE_ID="$(
-    printf '%s' "$HCC_BRANCH_GATE_REPO_ROOT" | shasum | awk '{print $1}'
-  )"
-  HCC_BRANCH_GATE_EXPECTED_HEAD="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" rev-parse HEAD)"
-  expected_branch="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" branch --show-current)"
-  [ -n "$expected_branch" ] ||
-    die "branch-owned runtime proof requires a named branch, not detached HEAD"
-  [ "${MINIKUBE_PROFILE:-}" = "$E2E_KUBECONTEXT" ] ||
-    die "MINIKUBE_PROFILE must explicitly select context ${E2E_KUBECONTEXT}, got ${MINIKUBE_PROFILE:-missing}"
+  expected_worktree_id="$(printf '%s' "$repo_root" | shasum | awk '{print $1}')"
+  expected_head="$(git -C "$repo_root" rev-parse HEAD)"
+  actual_worktree_id="$(kctl get configmap clerum-pre-gate-sync-state -n control-plane \
+    -o jsonpath='{.data.worktreeId}' 2>/dev/null || true)"
+  actual_head="$(kctl get configmap clerum-pre-gate-sync-state -n control-plane \
+    -o jsonpath='{.data.gitHead}' 2>/dev/null || true)"
 
-  profile_env="${E2E_BRANCH_PROFILE_ENV:-${HOME}/.cache/clerum/minikube-profiles/${E2E_KUBECONTEXT}/profile.env}"
-  [ -r "$profile_env" ] ||
-    die "branch-profile helper evidence is missing at ${profile_env}; run a state-writing branch-profile helper action from this worktree"
-  [ "$(profile_env_value PROFILE "$profile_env")" = "$E2E_KUBECONTEXT" ] ||
-    die "branch-profile helper output does not select context ${E2E_KUBECONTEXT}"
-  [ "$(profile_env_value REPO_DIR "$profile_env")" = "$HCC_BRANCH_GATE_REPO_ROOT" ] ||
-    die "branch-profile helper output belongs to a different worktree"
-  [ "$(profile_env_value BRANCH "$profile_env")" = "$expected_branch" ] ||
-    die "branch-profile helper output belongs to a different branch"
-  [ "$(profile_env_value DIRTY "$profile_env")" = false ] ||
-    die "branch-profile helper recorded a dirty worktree; refresh it after committing"
-
-  pre_gate_state_root="${E2E_PRE_GATE_STATE_ROOT:-${TMPDIR:-/tmp}/clerum-pre-gate-sync}"
-  cluster_fingerprint_file="${pre_gate_state_root}/${HCC_BRANCH_GATE_EXPECTED_WORKTREE_ID}/cluster.sha"
-  [ -r "$cluster_fingerprint_file" ] ||
-    die "pre-gate fingerprint evidence is missing at ${cluster_fingerprint_file}"
-  expected_cluster_fingerprint="$(sed -n '1p' "$cluster_fingerprint_file")"
-  [[ "$expected_cluster_fingerprint" =~ ^[0-9a-f]{40}$ ]] ||
-    die "pre-gate fingerprint evidence is malformed"
-  [ -n "${E2E_EXPECTED_PRE_GATE_GATE:-}" ] ||
-    die "E2E_EXPECTED_PRE_GATE_GATE must name the gate recorded by the branch-owned pre-gate sync"
-
-  HCC_BRANCH_GATE_SYNC_MARKER="$(
-    kctl get configmap clerum-pre-gate-sync-state -n "$marker_namespace" -o json 2>/dev/null
-  )" || die "cluster has no readable pre-gate sync marker"
-  actual_worktree_id="$(jq -r '.data.worktreeId // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER")"
-  actual_head="$(jq -r '.data.gitHead // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER")"
-  actual_cluster_fingerprint="$(
-    jq -r '.data.clusterFingerprint // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER"
-  )"
-  actual_gate="$(jq -r '.data.gate // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER")"
-
-  [ "$actual_worktree_id" = "$HCC_BRANCH_GATE_EXPECTED_WORKTREE_ID" ] ||
+  [ "$actual_worktree_id" = "$expected_worktree_id" ] ||
     die "cluster ownership marker does not match this worktree; run minikube-pre-gate-sync first"
-  [ "$actual_head" = "$HCC_BRANCH_GATE_EXPECTED_HEAD" ] ||
-    die "cluster HEAD marker ${actual_head:-missing} does not match ${HCC_BRANCH_GATE_EXPECTED_HEAD}"
-  [ "$actual_cluster_fingerprint" = "$expected_cluster_fingerprint" ] ||
-    die "cluster fingerprint marker does not match this worktree's last pre-gate sync"
-  [ "$actual_gate" = "$E2E_EXPECTED_PRE_GATE_GATE" ] ||
-    die "cluster gate marker ${actual_gate:-missing} does not match expected ${E2E_EXPECTED_PRE_GATE_GATE}"
+  [ "$actual_head" = "$expected_head" ] ||
+    die "cluster HEAD marker ${actual_head:-missing} does not match ${expected_head}"
 }
 
 create_hcc_api_proxy() {
@@ -338,10 +284,10 @@ delete_hcc_proxy_fixture() {
 }
 
 restore_hcc_after_fault_injection() {
-  local host_override port_override api_cidrs_override host_aliases desired ready
+  local host_override port_override host_aliases desired ready
 
   kctl set env deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
-    KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- CONTEXT_MAPPER_K8S_API_CIDRS- >/dev/null || return 1
+    KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- >/dev/null || return 1
   kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=merge \
     -p '{"spec":{"template":{"spec":{"hostAliases":null}}}}' >/dev/null || return 1
   kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null || return 1
@@ -350,12 +296,10 @@ restore_hcc_after_fault_injection() {
     -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="KUBERNETES_SERVICE_HOST")].name}')"
   port_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
     -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="KUBERNETES_SERVICE_PORT")].name}')"
-  api_cidrs_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
-    -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="CONTEXT_MAPPER_K8S_API_CIDRS")].name}')"
   host_aliases="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.hostAliases}')"
   desired="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.replicas}')"
   ready="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.status.readyReplicas}')"
-  [ -z "$host_override$port_override$api_cidrs_override$host_aliases" ] && [ "$desired" = "$ready" ]
+  [ -z "$host_override$port_override$host_aliases" ] && [ "$desired" = "$ready" ]
 }
 
 print_hcc_repair_instructions() {
@@ -364,7 +308,7 @@ HCC restoration failed. Proxy resources were retained for repair.
 Context: ${E2E_KUBECONTEXT}
 Proxy: ${HCC_NS}/${PROXY_NAME}
 Repair commands:
-  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} set env deployment/${HCC_DEPLOY} KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- CONTEXT_MAPPER_K8S_API_CIDRS-
+  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} set env deployment/${HCC_DEPLOY} KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT-
   kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} patch deployment/${HCC_DEPLOY} --type=merge -p '{"spec":{"template":{"spec":{"hostAliases":null}}}}'
   kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} rollout status deployment/${HCC_DEPLOY} --timeout=180s
 After HCC is healthy, delete ${PROXY_NAME}, ${PROXY_EGRESS_NP}, ${HCC_PROXY_NP}, and ${PROBE_EGRESS_NP} in ${HCC_NS}.

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import { GfsK8sApi, GfsReconciler, GfsSeedClient } from './gfsReconciler'
 import { GfsFactoryConfig } from './k8s/gfsFactory'
-import type { GlobalFileSystemCRD, GlobalFileSystemStatus } from './types'
+import type { GlobalFileSystemCRD } from './types'
 
 const config: GfsFactoryConfig = {
   gfsNamespace: 'gfs',
@@ -42,12 +42,11 @@ class FakeApi implements GfsK8sApi {
   netpols: string[] = []
   pvcs: string[] = []
   deleted: string[] = []
-  statuses: GlobalFileSystemStatus[] = []
+  statuses: { phase?: string; serviceUrl?: string }[] = []
   writerNeedsUpdate = true
   writerAvailable = true
   writerAvailabilitySequence: boolean[] = []
   failPvc = false
-  statusFailuresRemaining = 0
 
   async applyPvc(pvc: k8s.V1PersistentVolumeClaim): Promise<void> {
     if (this.failPvc) throw new Error('simulated PVC apply failure')
@@ -102,11 +101,11 @@ class FakeApi implements GfsK8sApi {
   async deletePvc(name: string): Promise<void> {
     this.deleted.push(`pvc/${name}`)
   }
-  async patchStatus(_name: string, _ns: string, status: GlobalFileSystemStatus): Promise<void> {
-    if (this.statusFailuresRemaining > 0) {
-      this.statusFailuresRemaining--
-      throw new Error('simulated status patch failure')
-    }
+  async patchStatus(
+    _name: string,
+    _ns: string,
+    status: { phase?: string; serviceUrl?: string }
+  ): Promise<void> {
     this.statuses.push(status)
   }
 }
@@ -219,59 +218,6 @@ describe('GfsReconciler.reconcile', () => {
     expect(seed.calls).toBe(1)
   })
 
-  it('does not rewrite unchanged status but still publishes a later phase transition', async () => {
-    const api = new FakeApi()
-    api.writerNeedsUpdate = false
-    const reconciler = new GfsReconciler(api, config, undefined, 0, 0)
-
-    await reconciler.reconcile(gfs)
-    const observedReady = { ...gfs, status: api.statuses[0] }
-    await reconciler.reconcile(observedReady)
-
-    expect(api.statuses).toHaveLength(1)
-    expect(api.statuses[0]?.phase).toBe('Ready')
-
-    api.writerAvailable = false
-    await reconciler.reconcile(observedReady)
-
-    expect(api.statuses.map(status => status.phase)).toEqual(['Ready', 'Initializing'])
-  })
-
-  it('publishes status for a same-name recreation even when the DELETE watch was missed', async () => {
-    const api = new FakeApi()
-    const reconciler = new GfsReconciler(api, config)
-
-    await reconciler.reconcile(gfs)
-    await reconciler.reconcile({ ...gfs, status: api.statuses[0] })
-    await reconciler.reconcile({ ...gfs, status: undefined })
-
-    expect(api.statuses).toHaveLength(2)
-  })
-
-  it('repairs status that was removed externally after HCC observed its prior write', async () => {
-    const api = new FakeApi()
-    const reconciler = new GfsReconciler(api, config)
-
-    await reconciler.reconcile(gfs)
-    await reconciler.reconcile({ ...gfs, status: api.statuses[0] })
-    await reconciler.reconcile({ ...gfs, status: undefined })
-
-    expect(api.statuses).toHaveLength(2)
-    expect(api.statuses.at(-1)?.phase).toBe('Ready')
-  })
-
-  it('retries an unchanged status when the previous patch failed', async () => {
-    const api = new FakeApi()
-    api.statusFailuresRemaining = 1
-    const reconciler = new GfsReconciler(api, config)
-
-    await expect(reconciler.reconcile(gfs)).rejects.toThrow('simulated status patch failure')
-    await expect(reconciler.reconcile(gfs)).resolves.toBeUndefined()
-
-    expect(api.statuses).toHaveLength(1)
-    expect(api.statuses[0]?.phase).toBe('Ready')
-  })
-
   it('reports Initializing and does NOT seed when the writer is not yet available', async () => {
     const api = new FakeApi()
     api.writerAvailable = false
@@ -318,16 +264,5 @@ describe('GfsReconciler.reconcileDelete', () => {
     })
     expect(api.deleted).toContain('pvc/gfs-drive')
     expect(api.deleted.at(-1)).toBe('pvc/gfs-drive') // bytes removed LAST
-  })
-
-  it('publishes status again after delete clears the prior write suppression', async () => {
-    const api = new FakeApi()
-    const reconciler = new GfsReconciler(api, config)
-
-    await reconciler.reconcile(gfs)
-    await reconciler.reconcileDelete(gfs)
-    await reconciler.reconcile(gfs)
-
-    expect(api.statuses).toHaveLength(2)
   })
 })

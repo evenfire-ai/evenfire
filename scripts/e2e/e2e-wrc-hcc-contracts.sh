@@ -271,8 +271,6 @@ spec:
   agent:
     provider: zai
     model: glm-4.7
-  triggers:
-    onDemand: {}
   steps:
     - id: tool-step
       instruction: "Synthetic status-contract step for toolsCalled args validation."
@@ -298,7 +296,7 @@ else
 fi
 rm -f "$running_response_file"
 
-if wait_for_running_workflowrecipe_status >/dev/null; then
+if running_status_json="$(wait_for_running_workflowrecipe_status)"; then
   ok "WorkflowRecipe becomes active when workflow execution is running"
 else
   fail "WorkflowRecipe did not become active on running workflow execution"
@@ -429,7 +427,7 @@ else
 fi
 rm -f "$pending_response_file"
 
-if wait_for_pending_preserves_non_terminal_recipe_status >/dev/null; then
+if pending_status_json="$(wait_for_pending_preserves_non_terminal_recipe_status)"; then
   ok "WorkflowRecipe stays non-terminal when workflow execution is pending"
 else
   fail "WorkflowRecipe did not stay non-terminal on pending workflow execution"
