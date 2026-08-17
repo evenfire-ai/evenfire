@@ -63,7 +63,6 @@ describe('resolvePinnedPublicIp', () => {
 })
 
 describe('requestPinned — bounded in time and bytes', () => {
-  let server: http.Server
   let port: number
   const servers: http.Server[] = []
 
