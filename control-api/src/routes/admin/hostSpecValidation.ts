@@ -4,6 +4,7 @@ import {
   PROVIDER_CREDENTIAL_SLOTS,
   isLlmProviderId,
 } from '@clerum/llm-providers'
+import { rootLogger } from '../../observability/logger.js'
 import {
   getModelAllowlistState as getModelAllowlistStateDefault,
   isModelAllowed as isModelAllowedDefault,
@@ -20,6 +21,8 @@ import {
   offeredKey,
 } from './modelAllowlistTolerance.js'
 import { STALE_MODEL_ASSIGNED, type StaleModelWarning } from './staleModelWarning.js'
+
+const logger = rootLogger.child({ module: 'admin-host-spec-validation' })
 
 // A Kubernetes Secret/ConfigMap data key: `[-._a-zA-Z0-9]`, max 253 chars.
 // A fallback `credentialSlot` names a key inside the chatllm-api-keys Secret, so
@@ -400,10 +403,13 @@ async function maybeWarnStale(
   try {
     state = await getState(provider, model)
   } catch (err) {
-    console.warn(
-      `[Admin] stale-model warning lookup failed for "${provider}/${model}"; proceeding without a warning: ${
-        err instanceof Error ? err.message : String(err)
-      }`
+    // Structured (Pino) logging JSON-escapes field values — CR/LF included — so a
+    // request-derived provider/model cannot forge or split a log record. Do NOT
+    // interpolate these into a line-oriented sink (console.*). Best-effort:
+    // swallow and proceed without a warning; behavior is unchanged.
+    logger.warn(
+      { provider, model, err: err instanceof Error ? err.message : String(err) },
+      'stale-model warning lookup failed; proceeding without a warning'
     )
     return
   }

@@ -9,6 +9,22 @@ import { MockGateway } from './mockGateway.js'
 // after the Host CR persists — never on a rejected or failed write. isModelAllowed
 // is mocked to disable the model; the logger is mocked to observe emission.
 
+// R1-H3 fase 1: Host create/update wrap validation + the K8s write in a carrier
+// transaction holding a per-model-name advisory lock. Keep db.js real; stub only
+// the transaction runner + lock / idle-timeout guards so these route tests need no
+// live Postgres (serialization is covered by the real-Postgres race test).
+vi.mock('../src/db.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/db.js')>('../src/db.js')
+  return {
+    ...actual,
+    withTransaction: (work: (db: { query: (...a: unknown[]) => unknown }) => Promise<unknown>) =>
+      work({ query: async () => ({ rows: [], rowCount: 0 }) }),
+    advisoryLockModelName: async () => {},
+    advisoryLockModelNames: async () => {},
+    boundCarrierTransactionIdleTimeout: async () => {},
+  }
+})
+
 const llm = vi.hoisted(() => ({ isModelAllowed: vi.fn() }))
 vi.mock('../src/services/llmAllowedModels.js', async () => {
   const actual = await vi.importActual<typeof import('../src/services/llmAllowedModels.js')>(

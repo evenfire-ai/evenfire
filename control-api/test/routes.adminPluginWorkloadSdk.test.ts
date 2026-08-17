@@ -10,13 +10,23 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(),
 }))
 
-vi.mock('../src/db.js', () => ({
-  pool: {
+vi.mock('../src/db.js', () => {
+  // The grant upsert route now composes its enabled-ness gate + the upsert inside
+  // ONE carrier transaction (R1-H3 fase 2). `withTransaction` must invoke the
+  // callback with the (mocked) pool so the gate's `listEnabledModelsWithStaleFor
+  // Provider(provider, db)` read still hits `pool.query`; the per-model advisory
+  // lock helpers are no-op in a mocked DB.
+  const pool = {
     query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     connect: vi.fn(),
-  },
-  withTransaction: vi.fn(),
-}))
+  }
+  return {
+    pool,
+    withTransaction: vi.fn(async (cb: (db: typeof pool) => unknown) => cb(pool)),
+    advisoryLockModelNames: vi.fn().mockResolvedValue(undefined),
+    boundCarrierTransactionIdleTimeout: vi.fn().mockResolvedValue(undefined),
+  }
+})
 
 vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   const actual = await vi.importActual<typeof import('../src/services/pluginWorkloadSdkDb.js')>(
@@ -257,7 +267,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
           expect.objectContaining({ targetRef: 'openai-fallback', provider: 'openai' }),
         ]),
       }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
     expect(JSON.stringify(vi.mocked(sdkDb.upsertGrant).mock.calls)).not.toContain('secret-value')
   })
@@ -285,7 +296,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ promptTargets: targets }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
@@ -343,7 +355,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'vertex' }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
@@ -410,7 +423,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ capabilityFamily: 'clientNotifications', provider: undefined }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
@@ -472,7 +486,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         allowedCallers: ['api'],
         quotaLimits: { maxRequestsPerRun: 10 },
       }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 

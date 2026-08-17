@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
+import { withExternalRequestContext } from './requestContext.js'
 import { createAuthRouter } from './routes/auth.js'
 import { createContextSharedFilesystemsRouter } from './routes/contextSharedFilesystems.js'
 import { createDesktopRouter } from './routes/desktop.js'
@@ -19,16 +20,42 @@ import { createUserApprovalDecisionsRouter } from './routes/userApprovalDecision
 import { createWorkflowApprovalMediumsRouter } from './routes/workflowApprovalMediums.js'
 import { createExternalWorkflowsRouter } from './routes/workflows.js'
 
+// Upload v2 part bodies are streamed octets and must not pass through the
+// global JSON parser (which would buffer/reject the binary payload).
+// Match the route shape, not only a valid UUID. Control API owns the UUID
+// validation and must receive malformed IDs as upload requests; otherwise a
+// binary body can be consumed by the global JSON parser and produce a parser
+// error before the canonical 4xx path is reached.
+const GFS_UPLOAD_PART_PATH = /^\/api\/v1\/me\/gfs\/uploads\/[^/]+\/parts\/[0-9]+$/i
+
 export function createApp() {
   const app = express()
+  // The deployment admits traffic only from the cloudflared ingress namespace
+  // (see deploy/base/profiles/networkpolicies.yaml). That single trusted hop
+  // overwrites the client address before this process, so req.ip is the stable
+  // limiter identity. Direct service exposure would invalidate this contract
+  // and must be rejected by deployment policy rather than by accepting a
+  // caller-controlled X-Forwarded-For chain here.
   app.set('trust proxy', 1)
+  // Capture the proxy-attested client once at the external boundary. The
+  // control-api receives it through the authenticated service channel so its
+  // non-GFS edge buckets do not collapse every Desktop client onto the funnel
+  // pod address.
+  app.use(withExternalRequestContext)
   app.use(
     cors({
       origin: config.corsOrigin === '*' ? true : config.corsOrigin,
       credentials: true,
     })
   )
-  app.use(express.json({ limit: config.jsonBodyLimit }))
+  const jsonBodyParser = express.json({ limit: config.jsonBodyLimit })
+  app.use((req, res, next) => {
+    if (req.method === 'PUT' && GFS_UPLOAD_PART_PATH.test(req.path)) {
+      next()
+      return
+    }
+    jsonBodyParser(req, res, next)
+  })
 
   app.use(createHealthRouter())
 

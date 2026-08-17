@@ -109,7 +109,7 @@ describe('OwnedEntries', () => {
     expect(screen.queryByText('Connector')).toBeNull()
   })
 
-  it('shows Share access only for private entries; public shows a no-grant note', async () => {
+  it('shows Share access only for private entries; public shows no note', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
         { name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' },
@@ -119,7 +119,7 @@ describe('OwnedEntries', () => {
     render(<OwnedEntries orgScope="acme" />)
     await screen.findByText('@acme/db')
     expect(screen.getAllByRole('button', { name: /share access/i })).toHaveLength(1)
-    expect(screen.getByText(/no grant needed/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no grant needed/i)).toBeNull()
   })
 
   it('clicking Share access opens the Grant access modal', async () => {

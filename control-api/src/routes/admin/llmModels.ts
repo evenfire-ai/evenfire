@@ -1,6 +1,12 @@
 import { type Request, type Response, Router } from 'express'
 import { z } from 'zod'
 import { config } from '../../config.js'
+import {
+  type DbClient,
+  advisoryLockModelName,
+  boundCarrierTransactionIdleTimeout,
+  withTransaction,
+} from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
@@ -19,10 +25,28 @@ import {
 import { computeAttention } from '../../services/llmAttention.js'
 import { getLastCatalogSyncRun, syncDiscoveredModels } from '../../services/llmCatalogSync.js'
 import {
+  type ModelImpact,
   computeModelImpact,
   modelImpactHasReferences,
   modelImpactSourcesFromGateway,
+  modelImpactSourcesFromGatewayTx,
 } from '../../services/llmModelImpact.js'
+
+// The reductor lost the availability-reduction race: a live Host/grant reference
+// to the pair was enumerated UNDER the advisory lock, so disabling/removing it
+// would strand that reference (INV-1). Thrown from inside the carrier transaction
+// so it ROLLS BACK (the mutation never persists) and mapped to the same
+// 409 `model_in_use` body the gate has always returned.
+class ModelInUseError extends Error {
+  constructor(readonly impact: ModelImpact) {
+    super('model_in_use')
+    this.name = 'ModelInUseError'
+  }
+}
+
+// The 409 message is unchanged (mini-spec §6: the response shape is byte-stable).
+const MODEL_IN_USE_MESSAGE =
+  'this model is still referenced by one or more Hosts or grants; retry with ?force=true to disable/remove it and leave those references pointing at a disabled/removed model'
 
 // `id` is a UUID column; a malformed id would otherwise reach Postgres and
 // raise 22P02 (→ 500). Treat a non-UUID id as a missing row (404).
@@ -105,29 +129,49 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // this single module (regla D4).
   const impactSources = modelImpactSourcesFromGateway(gateway, hostNamespaces)
 
-  // Availability-reduction gate (Fase 3). A DELETE (always), a PUT that flips
-  // `enabled` true→false, or a PUT that RENAMES an enabled pair (its old
-  // identity leaves the ConfigMap on re-materialize) yanks the model out of the
-  // runtime allowlist ConfigMap. The caller computes the impact over whichever
-  // pair leaves — the OLD one on rename.
-  // Without `?force`, if any Host/grant still references `(provider, model)`,
-  // answer 409 WITH the impact body so the operator sees what would be stranded
-  // instead of breaking it silently. Returns true when a 409 was sent (the
-  // caller must stop). `?force=true` skips the enumeration entirely and proceeds.
-  async function blockedByImpact(
-    req: Request,
-    res: Response,
+  // Availability-reduction gate (Fase 3), now SERIALIZED (R1-H3 fase 1). A DELETE
+  // (always), a PUT that flips `enabled` true→false, or a PUT that RENAMES an
+  // enabled pair (its old identity leaves the ConfigMap on re-materialize) yanks
+  // the model out of the runtime allowlist ConfigMap. The caller computes the
+  // impact over whichever pair leaves — the OLD one on rename.
+  //
+  // The whole gate runs inside a carrier transaction that HOLDS the per-model-name
+  // advisory lock across the impact read AND the mutation, so a concurrent host
+  // create/update cannot slip a reference in between (INV-1). Grants are read on
+  // the transaction client; Hosts are LISTed LIVE from K8s under the lock. If any
+  // Host/grant still references the pair, a `ModelInUseError` rolls the
+  // transaction back — nothing is mutated — and the caller answers 409 WITH the
+  // impact body. `?force=true` never reaches here (the caller mutates without the
+  // lock, deliberately renouncing INV-1 — mini-spec §6).
+  async function gatedReduce<T>(
     provider: string,
-    model: string
-  ): Promise<boolean> {
-    if (isForced(req)) return false
-    const impact = await computeModelImpact(provider, model, impactSources)
-    if (!modelImpactHasReferences(impact)) return false
+    model: string,
+    mutate: (db: DbClient) => Promise<T>
+  ): Promise<T> {
+    return withTransaction(async db => {
+      // Bound the idle-in-transaction tenancy first: the lock is held across a
+      // live K8s LIST, during which the connection is idle-in-transaction.
+      await boundCarrierTransactionIdleTimeout(db)
+      await advisoryLockModelName(db, model)
+      const impact = await computeModelImpact(
+        provider,
+        model,
+        modelImpactSourcesFromGatewayTx(gateway, hostNamespaces, db)
+      )
+      if (modelImpactHasReferences(impact)) throw new ModelInUseError(impact)
+      return mutate(db)
+    })
+  }
+
+  // Map a caught `ModelInUseError` to the stable 409 body; return true when it was
+  // handled so the caller stops. Non-`ModelInUseError` errors are left to the
+  // caller's existing `handleServiceError` / rethrow path.
+  function sentModelInUse(res: Response, error: unknown): boolean {
+    if (!(error instanceof ModelInUseError)) return false
     res.status(409).json({
       error: 'model_in_use',
-      message:
-        'this model is still referenced by one or more Hosts or grants; retry with ?force=true to disable/remove it and leave those references pointing at a disabled/removed model',
-      impact,
+      message: MODEL_IN_USE_MESSAGE,
+      impact: error.impact,
     })
     return true
   }
@@ -264,16 +308,20 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
         (parsed.data.provider !== undefined && parsed.data.provider !== existing.provider) ||
         (parsed.data.model !== undefined && parsed.data.model !== existing.model)
       const oldPairLeavesConfigMap = existing.enabled === true && (disables || renamed)
-      if (
-        oldPairLeavesConfigMap &&
-        (await blockedByImpact(req, res, existing.provider, existing.model))
-      ) {
-        return
-      }
+      // Serialize the mutation only when the gate actually runs: the OLD pair
+      // leaves the ConfigMap AND this is not a `?force` override. A metadata edit
+      // that keeps the pair in the ConfigMap strands nothing, so it takes no lock
+      // and runs on the pool exactly as before (mini-spec §7, item 3).
+      const runGate = oldPairLeavesConfigMap && !isForced(req)
       let model
       try {
-        model = await updateAllowedModel(req.params.id, parsed.data, actorOf(req))
+        model = runGate
+          ? await gatedReduce(existing.provider, existing.model, db =>
+              updateAllowedModel(req.params.id, parsed.data, actorOf(req), db)
+            )
+          : await updateAllowedModel(req.params.id, parsed.data, actorOf(req))
       } catch (error) {
+        if (sentModelInUse(res, error)) return
         if (handleServiceError(res, error)) return
         throw error
       }
@@ -303,11 +351,19 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
         res.status(404).json({ error: 'not_found' })
         return
       }
-      if (await blockedByImpact(req, res, existing.provider, existing.model)) return
+      // A DELETE always removes the pair, so the gate runs unconditionally unless
+      // `?force`. When it runs, the impact read + the delete are serialized under
+      // the per-model-name advisory lock (INV-1); `?force` deletes on the pool
+      // without the lock (renounces INV-1, mini-spec §6).
       let deleted
       try {
-        deleted = await deleteAllowedModel(req.params.id, actorOf(req))
+        deleted = isForced(req)
+          ? await deleteAllowedModel(req.params.id, actorOf(req))
+          : await gatedReduce(existing.provider, existing.model, db =>
+              deleteAllowedModel(req.params.id, actorOf(req), db)
+            )
       } catch (error) {
+        if (sentModelInUse(res, error)) return
         if (handleServiceError(res, error)) return
         throw error
       }

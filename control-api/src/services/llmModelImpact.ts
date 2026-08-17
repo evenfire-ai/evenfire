@@ -49,6 +49,7 @@
  * (`routes/admin/llmModels.ts`) and, later, `GET /admin/attention` (Fase 5).
  * Neither reconstructs the impact — both call `computeModelImpact`.
  */
+import type { DbClient } from '../db.js'
 import {
   type HostModelRole,
   enumerateHostModelReferences,
@@ -119,10 +120,29 @@ export function modelImpactSourcesFromGateway(
   gateway: HostListGateway,
   hostNamespaces: string[]
 ): ModelImpactSources {
+  // Delegates with `db` unset so the grant query defaults to the global pool —
+  // ONE derivation of the sources (regla D4), shared with the transactional form.
+  return modelImpactSourcesFromGatewayTx(gateway, hostNamespaces)
+}
+
+/**
+ * The impact sources for the R1-H3 reductor path: the grant query is bound to the
+ * caller's TRANSACTION client `db` (so the impact recompute happens under the
+ * advisory lock, on the same connection), while the Host LIST still reads K8s LIVE
+ * (a consistent etcd read — never a watch-cache, adenda A5 — so the reductor sees
+ * a CR a concurrent host-create just committed). Passing `db` omitted reproduces
+ * the non-transactional form exactly (grant query on the pool). `computeModelImpact`
+ * and its fail-loud contract are untouched.
+ */
+export function modelImpactSourcesFromGatewayTx(
+  gateway: HostListGateway,
+  hostNamespaces: string[],
+  db?: DbClient
+): ModelImpactSources {
   return {
     hostNamespaces,
     listHostsInNamespace: namespace => gateway.listResource('hosts', namespace),
-    listGrantsForModel: model => listGrantsReferencingModel(model),
+    listGrantsForModel: model => listGrantsReferencingModel(model, db),
   }
 }
 

@@ -466,9 +466,25 @@ export interface UpsertGrantParams {
 
 export async function upsertGrant(
   params: UpsertGrantParams,
-  operatorSub: string
+  operatorSub: string,
+  // When the caller already runs inside a carrier transaction (the grant
+  // write-gate, which holds the per-model advisory locks — R1-H3 fase 2), the
+  // upsert MUST reuse that same transaction so the recipe lock is taken AFTER
+  // the model locks (global order: `llm-model:*` before `plugin_workload_sdk:*`)
+  // and the enabled-ness revalidation + the write commit atomically. Every other
+  // caller passes no `db` and gets its own transaction, exactly as before.
+  db?: DbClient
 ): Promise<PluginWorkloadSdkGrant> {
-  return withTransaction(async db => {
+  if (db) return upsertGrantInTransaction(params, operatorSub, db)
+  return withTransaction(inner => upsertGrantInTransaction(params, operatorSub, inner))
+}
+
+async function upsertGrantInTransaction(
+  params: UpsertGrantParams,
+  operatorSub: string,
+  db: DbClient
+): Promise<PluginWorkloadSdkGrant> {
+  {
     // All capability families for a recipe share one lock. A family-scoped
     // lock permits an SDK-only revoke to race an upsert for the other family.
     const recipeLock = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}`
@@ -614,13 +630,20 @@ export async function upsertGrant(
     ]
     await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
     return grant
-  })
+  }
 }
 
-export async function listGrants(filter?: {
-  recipeNamespace?: string
-  recipeName?: string
-}): Promise<PluginWorkloadSdkGrant[]> {
+export async function listGrants(
+  filter?: {
+    recipeNamespace?: string
+    recipeName?: string
+  },
+  // Accepts a transaction client so the grant write-gate can read the stored
+  // grant (Pieza D no-worsening context) on the SAME connection that holds the
+  // model advisory locks — no extra pool checkout under the lock (adenda A3).
+  // Defaults to the global pool for every other (unlocked) caller.
+  db: Pick<DbClient, 'query'> = pool
+): Promise<PluginWorkloadSdkGrant[]> {
   const clauses: string[] = []
   const values: unknown[] = []
   if (filter?.recipeNamespace) {
@@ -632,7 +655,7 @@ export async function listGrants(filter?: {
     clauses.push(`recipe_name = $${values.length}`)
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT * FROM plugin_workload_sdk_grants ${where}
      ORDER BY recipe_namespace, recipe_name, capability_family`,
     values

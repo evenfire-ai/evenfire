@@ -1,12 +1,13 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
+import { LlmProviderIcon } from '@/components/LlmProviderIcon'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
-import { IconAlertTriangle, IconCheck, IconInfoCircle, IconX } from '@/components/icons'
+import { IconAlertTriangle, IconCheck, IconX } from '@/components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@/components/ui'
 import {
   apiGet,
@@ -18,6 +19,7 @@ import {
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
+import { getAgentNameError } from '@/lib/k8sValidation'
 import {
   type HostAllowedModel,
   type LlmPolicy,
@@ -41,7 +43,7 @@ import {
   STEPS,
   STEP_DETAILS,
 } from './constants'
-import type { ContextOption, HostWizardProps, WizardSelectProps } from './types'
+import type { ContextOption, CreatedResource, HostWizardProps, WizardSelectProps } from './types'
 
 // Stateless lifecycle support remains intact in the API and existing-agent UI;
 // only creation through this wizard is temporarily unavailable.
@@ -84,7 +86,20 @@ function WizardSelect({
       >
         <span className="cu-agent-select__button-copy">
           <span>{selectedOption?.label || placeholder}</span>
-          {selectedOption?.meta ? (
+          {selectedOption?.providers && selectedOption.providers.length > 0 ? (
+            <span className="cu-agent-select__providers">
+              <span className="cu-agent-select__providers-label">Providers: </span>
+              {selectedOption.providers.map((provider, index) => (
+                <Fragment key={provider.id}>
+                  {index > 0 ? ', ' : null}
+                  <span className="cu-agent-select__provider">
+                    <LlmProviderIcon provider={provider.id} label={provider.label} />
+                    <span>{provider.label}</span>
+                  </span>
+                </Fragment>
+              ))}
+            </span>
+          ) : selectedOption?.meta ? (
             <span className="cu-agent-select__button-meta">{selectedOption.meta}</span>
           ) : null}
         </span>
@@ -110,7 +125,20 @@ function WizardSelect({
               >
                 <span className="cu-agent-select__option-copy">
                   <span className="cu-agent-select__option-name">{option.label}</span>
-                  {option.meta ? (
+                  {option.providers && option.providers.length > 0 ? (
+                    <span className="cu-agent-select__providers">
+                      <span className="cu-agent-select__providers-label">Providers: </span>
+                      {option.providers.map((provider, index) => (
+                        <Fragment key={provider.id}>
+                          {index > 0 ? ', ' : null}
+                          <span className="cu-agent-select__provider">
+                            <LlmProviderIcon provider={provider.id} label={provider.label} />
+                            <span>{provider.label}</span>
+                          </span>
+                        </Fragment>
+                      ))}
+                    </span>
+                  ) : option.meta ? (
                     <span className="cu-agent-select__option-meta">{option.meta}</span>
                   ) : null}
                 </span>
@@ -121,6 +149,79 @@ function WizardSelect({
       ) : null}
     </div>
   )
+}
+
+// The DELETE path for one tracked sibling. The server fixes each resource's
+// namespace (secrets → config.secretsNamespace; hosts/contexts/channels →
+// their configured namespace), so — exactly like the SecretsTable /
+// CommunicationChannelsTable / deleteContext call-sites — no namespace query is
+// sent. Deleting a communicationchannel also removes its credentials Secret
+// server-side, so a channel's credential Secret is never tracked or deleted
+// separately here.
+function compensationPath(entry: CreatedResource): string {
+  const encoded = encodeURIComponent(entry.name)
+  switch (entry.kind) {
+    case 'secret':
+      return `/api/v1/admin/secrets/${encoded}`
+    case 'context':
+      return `/api/v1/admin/contexts/${encoded}`
+    case 'communication-channel':
+      return `/api/v1/admin/communication-channels/${encoded}`
+  }
+}
+
+// Inverse-order (channel → context → secret) best-effort rollback of the
+// siblings THIS run created before the Host create failed, so a failed create
+// never leaves an orphaned secret/context/channel behind. Best-effort: each
+// DELETE is independent, a 404 is success (idempotent — the resource is already
+// gone), and NO failure is re-thrown — a rollback error must never mask the
+// original create error the caller is about to surface. The server performs a
+// direct delete with no referential-integrity/finalizer coupling between the
+// siblings, so inverse order is for tidiness, not correctness.
+async function compensateCreated(created: CreatedResource[]): Promise<void> {
+  for (let i = created.length - 1; i >= 0; i -= 1) {
+    const entry = created[i]
+    try {
+      await apiSend('DELETE', compensationPath(entry))
+    } catch (err) {
+      console.warn(
+        `HostWizard: best-effort rollback of ${entry.kind} "${entry.name}" failed after a create error`,
+        err
+      )
+    }
+  }
+}
+
+// A create-only POST, with the 409 disambiguation done HERE — at the create
+// site — never in the shared submitAll catch. This is deliberate: only a POST to
+// a create-only /admin/{secrets,contexts,communication-channels,hosts} endpoint
+// can turn a code-less 409 into an UNAMBIGUOUS AlreadyExists name collision. The
+// grant endpoints (409 `deleted_agent_history_limit_exceeded`) share the
+// top-level catch but can NEVER reach here, so their messages are preserved.
+//
+// The two 409 shapes from THESE endpoints (V-1):
+//   - WITH a body `code` (context_crd_outdated / communication_channel_crd_outdated)
+//     → a CRD-outdated response, NOT a collision. formatApiError already set
+//       e.message to the server's human `error` text, so re-throw e untouched.
+//   - WITHOUT a body `code` → apiserver AlreadyExists. The create-only POST
+//     refused to overwrite a foreign resource; replace the raw K8s text with the
+//     friendly, per-resource `collisionMessage`.
+// Discriminate on `body.code` (the field INSIDE the JSON body), never on the
+// client's `.code` (which formatApiError sets from `body.error`, the message).
+// Any non-409 error is re-thrown verbatim.
+async function createOrThrow(path: string, body: unknown, collisionMessage: string): Promise<void> {
+  try {
+    await apiSend('POST', path, body)
+  } catch (e) {
+    if (e instanceof Error && (e as Error & { status?: number }).status === 409) {
+      const errBody = (e as Error & { body?: { code?: unknown } }).body
+      const hasCode = typeof errBody?.code === 'string' && errBody.code.length > 0
+      // Code-less 409 from a create-only POST = unambiguous name collision.
+      if (!hasCode) throw new Error(collisionMessage)
+      // Coded 409 (CRD-outdated) keeps the server's own message (e.message).
+    }
+    throw e
+  }
 }
 
 function isStepValid(
@@ -143,7 +244,8 @@ function isStepValid(
     directoryLoadFailed: boolean
   }
 ): boolean {
-  if (stepIndex === 0) return state.hostName.trim().length > 0
+  if (stepIndex === 0)
+    return state.hostName.trim().length > 0 && getAgentNameError(state.hostName) === ''
   if (stepIndex === 1) {
     if (state.contextMode === 'existing') return state.selectedExistingContext.trim().length > 0
     return state.contextName.trim().length > 0
@@ -197,14 +299,13 @@ export function HostWizard({
 
   const [hostName, setHostName] = useState('')
   const hostNamespace = HOST_NAMESPACE
+  const agentNameError = getAgentNameError(hostName)
 
   const [contextName, setContextName] = useState('')
   const [contextMode, setContextMode] = useState<'existing' | 'new'>('existing')
   const [selectedExistingContext, setSelectedExistingContext] = useState('')
-  const [contextSelectOpen, setContextSelectOpen] = useState(false)
   const [selectedMcp, setSelectedMcp] = useState<string[]>([])
   const [existingContexts, setExistingContexts] = useState<ContextOption[]>([])
-  const contextSelectRef = useRef<HTMLDivElement | null>(null)
 
   // Reuse an existing shared Secret by default. Creating an agent-specific Secret
   // remains available when the operator explicitly chooses New credential.
@@ -264,7 +365,11 @@ export function HostWizard({
           return {
             value: name,
             label: name,
-            meta: `${secret.metadata?.namespace || HOST_NAMESPACE} · ${providerSummary}`,
+            meta: providerSummary,
+            providers:
+              providers && providers.length > 0
+                ? providers.map(id => ({ id, label: getProviderLabel(id) }))
+                : undefined,
           }
         })
         .filter(option => option !== null)
@@ -277,7 +382,6 @@ export function HostWizard({
       null,
     [existingContexts, selectedExistingContext]
   )
-  const selectedContextLabel = selectedContextOption?.contextId || 'Select context...'
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, provider),
     [allowedCatalog, provider]
@@ -486,7 +590,10 @@ export function HostWizard({
   )
 
   const validationMessage = useMemo(() => {
-    if (step === 0 && !hostName.trim()) return 'Agent name is required.'
+    if (step === 0) {
+      const agentNameError = getAgentNameError(hostName)
+      if (agentNameError) return agentNameError
+    }
     if (step === 1 && contextMode === 'existing' && !selectedExistingContext.trim())
       return 'Select an existing context.'
     if (step === 1 && contextMode === 'new' && !contextName.trim())
@@ -527,19 +634,6 @@ export function HostWizard({
     selectedTeamIds,
   ])
 
-  async function upsertResource(
-    pluralPath: string,
-    name: string,
-    createBody: unknown,
-    updateBody: unknown
-  ) {
-    try {
-      await apiSend('PUT', `/api/v1/${pluralPath}/${encodeURIComponent(name)}`, updateBody)
-    } catch {
-      await apiSend('POST', `/api/v1/${pluralPath}`, createBody)
-    }
-  }
-
   function resetForm() {
     setStep(0)
     setError('')
@@ -548,7 +642,6 @@ export function HostWizard({
     setContextName('')
     setContextMode('existing')
     setSelectedExistingContext('')
-    setContextSelectOpen(false)
     setSelectedMcp([])
     setSecretMode('existing')
     setExistingSecret('')
@@ -580,12 +673,18 @@ export function HostWizard({
 
   function selectExistingContext(context: ContextOption) {
     setSelectedExistingContext(`${context.namespace}/${context.name}`)
-    setContextSelectOpen(false)
   }
 
   async function submitAll() {
     setBusy(true)
     setError('')
+    // Rollback ledger for the create-only seam: every sibling THIS run POSTs
+    // successfully is appended here so a later failure (before the Host exists)
+    // can inverse-compensate it. Only successful POSTs of this execution are
+    // tracked — never inferred from slug/label. Declared outside the try so the
+    // catch can read it.
+    const created: CreatedResource[] = []
+    let hostCreated = false
     try {
       const normalizedHostName = toKebabCase(hostName)
       const normalizedContextName = toKebabCase(contextName)
@@ -607,20 +706,31 @@ export function HostWizard({
         if (slotErrors.length > 0) {
           throw new Error(slotErrors[0])
         }
-        await apiSend('POST', '/api/v1/admin/secrets', {
-          name: normalizedSecretName,
-          namespace: hostNamespace,
-          labels: {
-            [HOST_SECRET_LABEL_KEY]: HOST_SECRET_LABEL_VALUE,
+        // Create-only POST (R5-C1/R5-B1): a name collision must 409 AlreadyExists
+        // server-side, never silently overwrite a foreign Secret via a PUT. The
+        // 409 → friendly message translation is scoped to createOrThrow.
+        await createOrThrow(
+          '/api/v1/admin/secrets',
+          {
+            name: normalizedSecretName,
+            namespace: hostNamespace,
+            labels: {
+              [HOST_SECRET_LABEL_KEY]: HOST_SECRET_LABEL_VALUE,
+            },
+            stringData,
           },
-          stringData,
-        })
+          `A credential secret named "${normalizedSecretName}" already exists — choose another name.`
+        )
+        // The host's own LLM Secret (${slug}-llm). Tracked so a later failure
+        // rolls it back explicitly by name.
+        created.push({ kind: 'secret', name: normalizedSecretName })
       }
 
       if (contextMode === 'new') {
-        await upsertResource(
-          'admin/contexts',
-          normalizedContextName,
+        // Create-only POST (R5-C1/R5-B1): a name collision must 409 AlreadyExists
+        // server-side, never silently overwrite a foreign context via a PUT.
+        await createOrThrow(
+          '/api/v1/admin/contexts',
           {
             metadata: { name: normalizedContextName },
             spec: {
@@ -629,14 +739,9 @@ export function HostWizard({
               mcpServers: Array.from(new Set(selectedMcp)),
             },
           },
-          {
-            spec: {
-              contextId: normalizedContextName,
-              description: `Context for agent ${normalizedHostName}`,
-              mcpServers: Array.from(new Set(selectedMcp)),
-            },
-          }
+          `A context named "${normalizedContextName}" already exists — choose another name.`
         )
+        created.push({ kind: 'context', name: normalizedContextName })
       }
 
       // Effective per-host model subset (Topic 3a): prune the draft to the
@@ -670,21 +775,26 @@ export function HostWizard({
         ...(stateless ? { lifecycle: { stateless: true } } : {}),
       }
 
-      await upsertResource(
-        'admin/hosts',
-        normalizedHostName,
+      // Create-only POST (R5-C1/R5-B1): the Host is the seam boundary. A name
+      // collision must 409 AlreadyExists rather than overwrite a foreign agent's
+      // entire spec. Once this resolves, hostCreated flips the compensation off:
+      // the siblings now belong to a real Host and must NOT be rolled back.
+      await createOrThrow(
+        '/api/v1/admin/hosts',
         {
           metadata: { name: normalizedHostName },
           spec: hostSpec,
         },
-        {
-          spec: hostSpec,
-        }
+        `That agent name is already in use — choose another name.`
       )
+      hostCreated = true
 
       // Associate authorized users and teams with the new agent in a single
       // atomic call each, rather than looping N×(GET+PUT) per selection.
       // Uses the agent-centric endpoints PUT /admin/agents/:name/users|teams.
+      // These run AFTER hostCreated=true: if a grant fails, the Host + siblings
+      // stay (V-7) — the operator retries grants from the agent detail page — so
+      // no compensation runs for a grant failure.
       if (selectedUserIds.length > 0) {
         await updateAgentUsers(normalizedHostName, selectedUserIds)
       }
@@ -698,6 +808,20 @@ export function HostWizard({
       if (!mountedRef.current) return
       onClose()
     } catch (e) {
+      // The Host is the compensation boundary (V-7): if it never got created, the
+      // siblings created before it are orphans — inverse-compensate them
+      // best-effort. If it DID get created, leave everything (a grant failure is
+      // recoverable from the agent detail page). Always await the rollback before
+      // surfacing the error so a caller/test observes the terminal state.
+      if (!hostCreated) {
+        await compensateCreated(created)
+      }
+      // NO 409 remap here: each create-only POST already translated its OWN
+      // collision inside createOrThrow. This catch also sees errors from paths
+      // that run AFTER the Host — the grant calls (409
+      // `deleted_agent_history_limit_exceeded`) — whose messages formatApiError
+      // already produced; masking them as "already in use" told the operator a
+      // collision that never happened. Preserve e.message verbatim.
       if (mountedRef.current) {
         setError(e instanceof Error ? e.message : 'Failed to create agent resources')
       }
@@ -750,9 +874,18 @@ export function HostWizard({
                   autoFocus
                 />
                 {hostName.trim() ? (
-                  <span className="cu-agent-input-shell__status" aria-label="Valid agent name">
-                    <IconCheck width={16} height={16} />
-                  </span>
+                  agentNameError ? (
+                    <span
+                      className="cu-agent-input-shell__status cu-agent-input-shell__status--invalid"
+                      aria-label={agentNameError}
+                    >
+                      <IconAlertTriangle width={16} height={16} />
+                    </span>
+                  ) : (
+                    <span className="cu-agent-input-shell__status" aria-label="Valid agent name">
+                      <IconCheck width={16} height={16} />
+                    </span>
+                  )
                 ) : null}
               </span>
             </Field>
@@ -801,16 +934,6 @@ export function HostWizard({
                 </div>
               </div>
             ) : null}
-            <div className="cu-agent-info-card">
-              <IconInfoCircle width={16} height={16} />
-              <div>
-                <strong>Naming conventions</strong>
-                <p>
-                  Use lowercase letters, numbers, and hyphens only. Must start with a letter and be
-                  3-63 characters long.
-                </p>
-              </div>
-            </div>
           </div>
         )}
 
@@ -848,50 +971,26 @@ export function HostWizard({
               <>
                 <div className="cu-agent-access-section">
                   <strong>Select Context</strong>
-                  <div
-                    className="cu-agent-select"
-                    ref={contextSelectRef}
-                    onBlur={event => {
-                      if (!event.currentTarget.contains(event.relatedTarget)) {
-                        setContextSelectOpen(false)
-                      }
+                  <SelectionDropdown
+                    multiple={false}
+                    value={selectedExistingContext ? [selectedExistingContext] : []}
+                    onChange={values => {
+                      const next = values[0] || ''
+                      const context = existingContexts.find(
+                        ctx => `${ctx.namespace}/${ctx.name}` === next
+                      )
+                      if (context) selectExistingContext(context)
+                      else setSelectedExistingContext('')
                     }}
-                  >
-                    <button
-                      type="button"
-                      className="cu-agent-select__button"
-                      aria-expanded={contextSelectOpen}
-                      aria-haspopup="listbox"
-                      onClick={() => setContextSelectOpen(open => !open)}
-                    >
-                      <span>{selectedContextLabel}</span>
-                      <span className="cu-agent-select__chevron" aria-hidden="true" />
-                    </button>
-                    {contextSelectOpen ? (
-                      <div className="cu-agent-select__menu" role="listbox">
-                        {existingContexts.length === 0 ? (
-                          <span className="cu-agent-select__empty">No contexts available.</span>
-                        ) : (
-                          existingContexts.map(ctx => {
-                            const value = `${ctx.namespace}/${ctx.name}`
-                            return (
-                              <button
-                                key={value}
-                                type="button"
-                                className="cu-agent-select__option"
-                                data-active={selectedExistingContext === value ? 'true' : 'false'}
-                                role="option"
-                                aria-selected={selectedExistingContext === value}
-                                onClick={() => selectExistingContext(ctx)}
-                              >
-                                {ctx.contextId}
-                              </button>
-                            )
-                          })
-                        )}
-                      </div>
-                    ) : null}
-                  </div>
+                    options={existingContexts.map(ctx => ({
+                      value: `${ctx.namespace}/${ctx.name}`,
+                      label: ctx.contextId,
+                    }))}
+                    placeholder="Select context..."
+                    searchPlaceholder="Search contexts..."
+                    selectionLabel="Selected context"
+                    emptyLabel="No contexts available."
+                  />
                 </div>
                 {selectedContextOption && (
                   <section
@@ -958,7 +1057,7 @@ export function HostWizard({
             <div className="cu-agent-access-section">
               <strong>Credentials</strong>
               <span className="cu-muted cu-agent-access-hint">
-                Store this agent&apos;s own LLM credentials, or use a shared Kubernetes Secret.
+                Store this agent&apos;s own LLM credentials, or use a shared secret.
               </span>
               <div className="cu-agent-radio-group">
                 <label className="cu-agent-radio cu-agent-radio--card">
@@ -968,9 +1067,9 @@ export function HostWizard({
                     onChange={() => setSecretMode('existing')}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">Use an existing Secret</span>
+                    <span className="cu-agent-radio__title">Use an existing secret</span>
                     <span className="cu-agent-radio__description">
-                      Select a saved Kubernetes Secret that already contains LLM API keys.
+                      Select a saved secret that already contains LLM API keys.
                     </span>
                   </span>
                 </label>
@@ -981,9 +1080,9 @@ export function HostWizard({
                     onChange={() => setSecretMode('new')}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">New credential</span>
+                    <span className="cu-agent-radio__title">New secret</span>
                     <span className="cu-agent-radio__description">
-                      Create a new Secret for this agent. Its name is derived from the agent name.
+                      Create a new secret for this agent. Its name is derived from the agent name.
                     </span>
                   </span>
                 </label>
