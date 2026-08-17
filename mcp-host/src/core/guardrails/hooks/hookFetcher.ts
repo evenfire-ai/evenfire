@@ -47,6 +47,10 @@ const POINT_PATH: Record<LifecyclePoint, string> = {
   post_tool_use: 'post_tool_use',
 }
 
+function sanitizeForLog(value: unknown): string {
+  return String(value).replace(/[\r\n]+/g, ' ').replace(/[\u0000-\u001F\u007F]/g, '')
+}
+
 /** Build `{endpoint}{path}/v1/{point}`, normalizing slashes (spec §8.1). */
 export function buildHookUrl(endpoint: string, path: string, point: LifecyclePoint): string {
   const base = endpoint.replace(/\/+$/, '')
@@ -174,9 +178,10 @@ export function createHookFetcher(deps: HookFetcherDeps): HookFetcher {
     } catch (err) {
       // timeout / connection error / SSRF refusal → unavailable (→ fail-mode, §8.6).
       if (err instanceof SsrfBlockedError) {
-        const safeErrMessage = String(err.message).replace(/[\r\n]+/g, ' ')
+        const safeErrMessage = sanitizeForLog(err.message)
+        const safeDescriptorId = sanitizeForLog(descriptor.id)
         console.warn(
-          `[Guardrails] remote hook ${descriptor.id} blocked by SSRF guard: ${safeErrMessage}`
+          `[Guardrails] remote hook ${safeDescriptorId} blocked by SSRF guard: ${safeErrMessage}`
         )
       }
       return { status: 0, body: undefined, unavailable: true }
