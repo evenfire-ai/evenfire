@@ -203,8 +203,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
   })
 
   // ─── Prerequisite Check ──────────────────────────────────────────────
-  it('Calico CNI is active', () => {
-    if (!clusterReachable) return
+  it('Calico CNI is active', (ctx) => {
+    if (!clusterReachable) ctx.skip()
     const pods = execFileSync(
       'kubectl',
       ['get', 'pods', '-n', 'kube-system', '-l', 'k8s-app=calico-node', '--no-headers'],
@@ -213,8 +213,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
     expect(pods).toContain('Running')
   })
 
-  it('deny-all policies exist in secured namespaces', () => {
-    if (!clusterReachable) return
+  it('deny-all policies exist in secured namespaces', (ctx) => {
+    if (!clusterReachable) ctx.skip()
     const namespaces = ['mcp-host', 'mcp-server', 'rpc-proxy', 'sandbox-recipes']
     for (const ns of namespaces) {
       let nps: string
@@ -247,8 +247,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
 
   // ─── POSITIVE TESTS (Allowed Traffic) ────────────────────────────────
   describe('Allowed traffic (positive)', () => {
-    it('control-api → registry-api:8085 (cross-namespace, registry access)', () => {
-      if (!clusterReachable) return
+    it('control-api → registry-api:8085 (cross-namespace, registry access)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'control-plane',
         'control-api',
@@ -257,8 +257,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.reachable).toBe(true)
     })
 
-    it('control-ui → control-api:8090 (UI backend path)', () => {
-      if (!clusterReachable) return
+    it('control-ui → control-api:8090 (UI backend path)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'control-plane',
         'control-ui',
@@ -267,8 +267,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.reachable).toBe(true)
     })
 
-    it('external-rest-api → profile-control-funnel:8080 (internal control path)', () => {
-      if (!clusterReachable) return
+    it('external-rest-api → profile-control-funnel:8080 (internal control path)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'profiles',
         'external-rest-api',
@@ -277,14 +277,14 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.reachable).toBe(true)
     })
 
-    it('rpc-proxy → mcp-host:8080 (message relay)', () => {
-      if (!clusterReachable) return
+    it('rpc-proxy → mcp-host:8080 (message relay)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity('rpc-proxy', 'rpc-proxy', getMcpHostRuntimeUrl())
       expect(result.reachable).toBe(true)
     })
 
-    it('mcp-host can reach the HCC gateway readiness endpoint', () => {
-      if (!clusterReachable) return
+    it('mcp-host can reach the HCC gateway readiness endpoint', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'mcp-host',
         getMcpHostRuntimeName(),
@@ -298,8 +298,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
 
   // ─── NEGATIVE TESTS (Blocked by Design) ──────────────────────────────
   describe('Blocked traffic (negative — deny-all enforced)', () => {
-    it('mcp-host → rpc-proxy:8094 (reverse direction blocked)', () => {
-      if (!clusterReachable) return
+    it('mcp-host → rpc-proxy:8094 (reverse direction blocked)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'mcp-host',
         getMcpHostRuntimeName(),
@@ -309,8 +309,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.error).toContain('timeout')
     })
 
-    it('mcp-host → control-api:8090 (no direct access to control-plane)', () => {
-      if (!clusterReachable) return
+    it('mcp-host → control-api:8090 (no direct access to control-plane)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'mcp-host',
         getMcpHostRuntimeName(),
@@ -320,8 +320,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.error).toContain('timeout')
     })
 
-    it('channel-reader → workflow approval gateway:8092 (must go through mcp-host)', () => {
-      if (!clusterReachable) return
+    it('channel-reader → workflow approval gateway:8092 (must go through mcp-host)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const podName = getChannelReaderPodName()
       if (!podName) {
         console.warn('SKIPPED: no running channel-reader pod in channels')
@@ -337,8 +337,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.error).toContain('timeout')
     })
 
-    it('mcp-host → registry-api:8085 (no direct registry access)', () => {
-      if (!clusterReachable) return
+    it('mcp-host → registry-api:8085 (no direct registry access)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'mcp-host',
         getMcpHostRuntimeName(),
@@ -348,8 +348,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.error).toContain('timeout')
     })
 
-    it('control-api → rpc-proxy:8094 (no direct control-plane hop)', () => {
-      if (!clusterReachable) return
+    it('control-api → rpc-proxy:8094 (no direct control-plane hop)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'control-plane',
         'control-api',
@@ -359,8 +359,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.error).toContain('timeout')
     })
 
-    it('external-rest-api → rpc-proxy:8094 (desktop app reaches rpc-proxy directly, not via backend)', () => {
-      if (!clusterReachable) return
+    it('external-rest-api → rpc-proxy:8094 (desktop app reaches rpc-proxy directly, not via backend)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'profiles',
         'external-rest-api',
@@ -370,22 +370,22 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.error).toContain('timeout')
     })
 
-    it('control-api → mcp-host:8080 directly (must go through rpc-proxy)', () => {
-      if (!clusterReachable) return
+    it('control-api → mcp-host:8080 directly (must go through rpc-proxy)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity('control-plane', 'control-api', getMcpHostRuntimeUrl())
       expect(result.reachable).toBe(false)
       expect(result.error).toContain('timeout')
     })
 
-    it('external-rest-api → mcp-host:8080 directly (must go through rpc-proxy)', () => {
-      if (!clusterReachable) return
+    it('external-rest-api → mcp-host:8080 directly (must go through rpc-proxy)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity('profiles', 'external-rest-api', getMcpHostRuntimeUrl())
       expect(result.reachable).toBe(false)
       expect(result.error).toContain('timeout')
     })
 
-    it('mcp-proxy → external-rest-api:3000 (no reverse path)', () => {
-      if (!clusterReachable) return
+    it('mcp-proxy → external-rest-api:3000 (no reverse path)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const result = testConnectivity(
         'mcp-server',
         'mcp-proxy',
@@ -425,8 +425,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       }
     }
 
-    it('sandbox-recipes → control-api:8090 (isolated sandbox)', () => {
-      if (!clusterReachable) return
+    it('sandbox-recipes → control-api:8090 (isolated sandbox)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const podName = findExecPod('sandbox-recipes', 'app=db')
       if (!podName) {
         console.warn('SKIPPED: no running db pod in sandbox-recipes')
@@ -442,8 +442,8 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       expect(result.error).toContain('timeout')
     })
 
-    it('sandbox-recipes → rpc-proxy:8094 (isolated sandbox)', () => {
-      if (!clusterReachable) return
+    it('sandbox-recipes → rpc-proxy:8094 (isolated sandbox)', (ctx) => {
+      if (!clusterReachable) ctx.skip()
       const podName = findExecPod('sandbox-recipes', 'app=db')
       if (!podName) {
         console.warn('SKIPPED: no running db pod in sandbox-recipes')
