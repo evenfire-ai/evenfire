@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button, TextInput } from '@components/Common'
 import {
   DESKTOP_COMMANDS,
@@ -34,10 +34,15 @@ export function CommandPalette({
   }, [query])
   const eligibleCommands = commands.filter(command => isEligible(command.id as DesktopCommandId))
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     previousFocusRef.current = document.activeElement as HTMLElement | null
-    inputRef.current?.focus()
+    const input = inputRef.current
+    input?.focus()
+    const verificationFrame = requestAnimationFrame(() => {
+      if (input?.isConnected && document.activeElement !== input) input.focus()
+    })
     return () => {
+      cancelAnimationFrame(verificationFrame)
       const previous = previousFocusRef.current
       if (restoreFocusOnUnmountRef.current) {
         requestAnimationFrame(() => {
