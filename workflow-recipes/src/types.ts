@@ -495,12 +495,13 @@ export interface PluginWorkloadSdkSpec {
   promptBridge?: {
     allowedModels?: string[]
     maxOutputTokens?: number
+    /** @deprecated Accepted for compatibility; no longer enforced (issue #348). Platform per-minute rate limits apply. */
     maxRequestsPerRun?: number
     /** Max total bytes across messages[].content. */
     maxRequestContentBytes?: number
     /** Max parallel promptBridge calls per workload; default 5. */
     maxConcurrentInvocations?: number
-    /** Rate limit per workload; default 60. */
+    /** Rate limit per workload; platform default 120 when unset (ENV CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN, issue #348). */
     maxInvocationsPerMinute?: number
     /** How long invocation results are queryable; default 24. */
     resultRetentionHours?: number
@@ -513,8 +514,9 @@ export interface PluginWorkloadSdkSpec {
     allowedEventTypes: string[]
     allowedTargetRefs?: string[]
     allowedUserRefs?: boolean
+    /** @deprecated Accepted for compatibility; no longer enforced (issue #348). Platform per-minute rate limits apply. */
     maxNotificationsPerRun?: number
-    /** Rate limit per workload; default 120. */
+    /** Rate limit per workload; platform default 150 when unset (ENV CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN, issue #348). */
     maxNotificationsPerMinute?: number
     /** Default 256. */
     maxTitleBytes?: number
