@@ -52,7 +52,7 @@ else
 fi
 
 probe_line="$(grep -n '^preflight_host_lifecycle_probe$' "$PARENT" | cut -d: -f1)"
-fingerprint_line="$(grep -n '^cluster_fingerprint=' "$PARENT" | cut -d: -f1)"
+fingerprint_line="$(grep -n 'cluster_fingerprint=.*pre_gate_marker_cluster_fingerprint' "$PARENT" | cut -d: -f1)"
 if [ -n "$probe_line" ] && [ -n "$fingerprint_line" ] && [ "$probe_line" -lt "$fingerprint_line" ]; then
   pass "probe preflight runs before package checks and cluster rebuild"
 else

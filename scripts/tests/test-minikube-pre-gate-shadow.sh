@@ -937,7 +937,8 @@ assert_a_targeted_build_carries_the_recorded_coordinate_forward() {
 
 assert_the_touched_scripts_parse() {
   local f bad=""
-  for f in scripts/minikube/image-mode.sh scripts/minikube/pre-gate-sync.sh \
+  for f in scripts/minikube/image-mode.sh scripts/minikube/pre-gate-marker.sh \
+           scripts/minikube/pre-gate-sync.sh \
            scripts/minikube/pre-gate-incremental.sh scripts/minikube/build-images.sh \
            scripts/tests/test-minikube-pre-gate-shadow.sh; do
     bash -n "$REPO_ROOT/$f" || bad+="$f "

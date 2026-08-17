@@ -58,7 +58,7 @@ case "${context}" in
     ;;
 esac
 
-for command_name in kubectl jq git shasum awk python3; do
+for command_name in kubectl jq git shasum awk python3 node; do
   command -v "${command_name}" >/dev/null || {
     echo "FAIL: required command missing: ${command_name}" >&2
     exit 1
@@ -68,6 +68,15 @@ done
 kctl() {
   kubectl --context="${context}" "$@"
 }
+
+# shellcheck source=scripts/minikube/pre-gate-marker.sh
+source "${PROJECT_DIR}/scripts/minikube/pre-gate-marker.sh"
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${PROJECT_DIR}/scripts/minikube/image-mode.sh"
+# shellcheck source=scripts/e2e/_lib/np08-cleanup.sh
+source "${SCRIPT_DIR}/_lib/np08-cleanup.sh"
+# shellcheck source=scripts/e2e/_lib/np08-provenance.sh
+source "${SCRIPT_DIR}/_lib/np08-provenance.sh"
 
 SYNC_CONFIGMAP="${CLERUM_PRE_GATE_SYNC_CONFIGMAP:-clerum-pre-gate-sync-state}"
 PORTS_ENV="${CLERUM_PROFILE_PORTS_ENV:-${HOME}/.cache/clerum/minikube-profiles/${profile}/ports.env}"
@@ -98,31 +107,43 @@ verify_profile_ownership() {
 
 verify_clean_and_sync_marker() {
   local head worktree_id marker_json
+  local expected_cluster expected_infra expected_image_source expected_image_tag
+  local expected_images_generated_at
   [[ -z "$(git -C "${PROJECT_DIR}" status --porcelain)" ]] || {
     echo "FAIL: worktree is dirty; commit or restore before deployed NP-08 E2E" >&2
     exit 1
   }
   head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD)"
   worktree_id="$(printf '%s' "${PROJECT_DIR}" | shasum | awk '{print $1}')"
-  marker_json="$(kctl -n control-plane get configmap "${SYNC_CONFIGMAP}" -o json 2>/dev/null)" || {
+  marker_json="$(np08_read_sync_marker control-plane "${SYNC_CONFIGMAP}")" || {
     echo "FAIL: pre-gate marker is missing: control-plane/${SYNC_CONFIGMAP}" >&2
     exit 1
   }
-  python3 - "${worktree_id}" "${head}" "${marker_json}" <<'PY'
-import json
-import sys
-
-expected_worktree, expected_head, marker_json = sys.argv[1:]
-data = (json.loads(marker_json).get("data") or {})
-if not data.get("clusterFingerprint"):
-    raise SystemExit("FAIL: pre-gate marker has no cluster fingerprint")
-if data.get("worktreeId") != expected_worktree:
-    raise SystemExit("FAIL: pre-gate marker belongs to another worktree")
-if data.get("gitHead") != expected_head:
-    raise SystemExit("FAIL: pre-gate marker does not match current HEAD")
-if data.get("imageSource") != "local":
-    raise SystemExit("FAIL: pre-gate marker is not for local images")
-PY
+  if ! expected_cluster="$(pre_gate_marker_cluster_fingerprint "${PROJECT_DIR}")"; then
+    echo "FAIL: unable to compute current cluster fingerprint" >&2
+    exit 1
+  fi
+  if ! expected_infra="$(pre_gate_marker_infra_fingerprint "${PROJECT_DIR}")"; then
+    echo "FAIL: unable to compute current infrastructure fingerprint" >&2
+    exit 1
+  fi
+  if ! expected_image_source="$(image_mode_source "${PROJECT_DIR}")"; then
+    echo "FAIL: unable to resolve current image source" >&2
+    exit 1
+  fi
+  if ! expected_image_tag="$(image_mode_tag "${PROJECT_DIR}")"; then
+    echo "FAIL: unable to resolve current image tag" >&2
+    exit 1
+  fi
+  if ! expected_images_generated_at="$(image_mode_images_generated_at "${PROJECT_DIR}")"; then
+    echo "FAIL: unable to resolve current image acquisition timestamp" >&2
+    exit 1
+  fi
+  np08_verify_sync_marker \
+    "${worktree_id}" "${head}" \
+    "${expected_cluster}" "${expected_infra}" \
+    "${expected_image_source}" "${expected_image_tag}" \
+    "${expected_images_generated_at}" "${marker_json}"
 }
 
 MCP_NS='mcp-server'
@@ -145,7 +166,7 @@ verify_clean_and_sync_marker
 cleanup() {
   local status=$?
   local cleanup_status=0
-  local remove_patch residual context_contains_fixture context_a_json
+  local remove_patch context_contains_fixture context_a_json
   set +e
   if [[ "${fixture_context_patched:-0}" == 1 ]]; then
     remove_patch="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json 2>/dev/null | jq -c --arg server "${SERVER_A}" '
@@ -174,15 +195,15 @@ cleanup() {
     cleanup_status=1
   fi
   for resource in mcpserver secret context; do
-    residual="$(kctl -n "${MCP_NS}" get "${resource}" -l "${OWNER_LABEL_KEY}=${OWNER_LABEL_VALUE},np08.evenfire/run=${RUN_ID}" -o name 2>/dev/null)"
-    if [[ -n "${residual}" ]]; then
+    if ! np08_cleanup_check_residual "${resource}" \
+      "${OWNER_LABEL_KEY}=${OWNER_LABEL_VALUE},np08.evenfire/run=${RUN_ID}"; then
       cleanup_status=1
     fi
   done
   if [[ "${cleanup_status}" -ne 0 ]]; then
-    status=1
     echo 'FAIL: NP-08 E2E cleanup did not remove all owned fixtures' >&2
   fi
+  status="$(np08_cleanup_final_status "${status}" "${cleanup_status}")"
   if [[ "${status}" -eq 0 ]]; then
     echo 'PASS: NP-08 deployed HCC authorization E2E'
   else

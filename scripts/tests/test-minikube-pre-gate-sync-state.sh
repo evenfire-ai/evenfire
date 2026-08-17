@@ -3,6 +3,7 @@ set -u
 
 FAIL=0
 SCRIPT="scripts/minikube/pre-gate-sync.sh"
+MARKER_SCRIPT="scripts/minikube/pre-gate-marker.sh"
 RUNTIME_SCRIPT="scripts/minikube/pre-gate-runtime.sh"
 INCREMENTAL_SCRIPT="scripts/minikube/pre-gate-incremental.sh"
 REGISTRY_SCRIPT="scripts/minikube/deploy-evenfire-registry.sh"
@@ -25,6 +26,10 @@ incremental_contains() {
   grep -Fq -- "$1" "$INCREMENTAL_SCRIPT"
 }
 
+marker_contains() {
+  grep -Fq -- "$1" "$MARKER_SCRIPT"
+}
+
 not_contains() {
   ! grep -Fq -- "$1" "$SCRIPT"
 }
@@ -33,6 +38,12 @@ if bash -n "$SCRIPT"; then
   pass "pre-gate sync script has valid bash syntax"
 else
   fail "pre-gate sync script has invalid bash syntax"
+fi
+
+if bash -n "$MARKER_SCRIPT"; then
+  pass "shared pre-gate marker helper has valid bash syntax"
+else
+  fail "shared pre-gate marker helper has invalid bash syntax"
 fi
 
 if bash -n "$INCREMENTAL_SCRIPT"; then
@@ -165,13 +176,36 @@ else
   fail "pre-gate runtime guard can confuse SIGPIPE or exec failure with a missing route"
 fi
 
-if contains 'fingerprint_dir packages/workflow-runtime-core' &&
+if marker_contains 'packages/workflow-runtime-core' &&
    contains 'run_if_changed packages/workflow-runtime-core "npm test && npm run build"' &&
    contains 'ensure_artifact packages/workflow-runtime-core dist/index.js "npm run build"'; then
   pass "pre-gate sync builds workflow-runtime-core before dependent package tests"
 else
   fail "pre-gate sync does not build workflow-runtime-core before dependent package tests"
 fi
+
+marker_failure_dir="$(mktemp -d)"
+mkdir -p "${marker_failure_dir}/bin" "${marker_failure_dir}/repo/control-api"
+printf '#!/usr/bin/env bash\nexit 42\n' >"${marker_failure_dir}/bin/find"
+chmod +x "${marker_failure_dir}/bin/find"
+if (
+  # shellcheck source=/dev/null
+  source "$MARKER_SCRIPT"
+  PATH="${marker_failure_dir}/bin:${PATH}"
+  export PATH
+  pre_gate_marker_fingerprint_dir "${marker_failure_dir}/repo" control-api >/dev/null
+) || (
+  # shellcheck source=/dev/null
+  source "$MARKER_SCRIPT"
+  PATH="${marker_failure_dir}/bin:${PATH}"
+  export PATH
+  pre_gate_marker_cluster_fingerprint "${marker_failure_dir}/repo" >/dev/null
+); then
+  fail "shared pre-gate marker helper can turn a hashing failure into a valid fingerprint"
+else
+  pass "shared pre-gate marker helper propagates hashing failures instead of stamping empty input"
+fi
+rm -rf "${marker_failure_dir}"
 
 control_api_migration_line="$(grep -nF 'run-control-api-db-migration.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 runtime_roles_line="$(grep -nF 'provision-control-api-runtime-roles.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
