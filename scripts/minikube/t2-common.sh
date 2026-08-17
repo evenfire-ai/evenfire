@@ -324,13 +324,21 @@ source = payload.get("imageSource") or payload.get("source") or payload.get("mod
 tag = payload.get("imageTag") or payload.get("tag") or ""
 # Local builds are identified by the per-image digests in the manifest and
 # intentionally have no registry tag. GHCR manifests still require a tag.
+images = payload.get("images")
 if source not in {"local", "ghcr"} or (source == "ghcr" and not tag):
     raise SystemExit("missing")
+if source == "local":
+    import re
+    if not isinstance(images, dict) or not images:
+        raise SystemExit("local-images")
+    digest = re.compile(r"^sha256:[0-9a-fA-F]{32,64}$")
+    if any(not isinstance(name, str) or not name or not isinstance(value, str) or not digest.fullmatch(value) for name, value in images.items()):
+        raise SystemExit("local-digests")
 print(source + "\t" + tag)
 PY
   )"; then
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
-    t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or has no source/tag'
+    t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or incomplete for its image source'
   fi
   local manifest_source manifest_tag
   IFS=$'\t' read -r manifest_source manifest_tag <<< "$manifest_values"

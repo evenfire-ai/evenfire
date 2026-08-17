@@ -143,8 +143,20 @@ expect_code IMAGE_MANIFEST_MISMATCH stale-image stale-image \
   bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=old; t2_image_check' bash "$COMMON"
 
 local_manifest="$tmp/local-image-manifest.json"
-printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:local"}}\n' >"$local_manifest"
+printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$local_manifest"
 env "${repo_env[@]}" T2_IMAGE_MANIFEST="$local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
+empty_local_manifest="$tmp/empty-local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":"","images":{}}\n' >"$empty_local_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH empty-local empty-local \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$empty_local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
+not_built_local_manifest="$tmp/not-built-local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"NOT_BUILT"}}\n' >"$not_built_local_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH not-built-local not-built-local \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$not_built_local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
   bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
 
 ghcr_manifest="$tmp/ghcr-image-manifest.json"

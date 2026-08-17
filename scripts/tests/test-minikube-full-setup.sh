@@ -525,10 +525,49 @@ assert_minimal_seed_is_setup_first_and_link_fail_closed() {
   if printf '%s\n' "$minimal_block" | grep -Fq 'perform_initial_setup' && \
      printf '%s\n' "$minimal_block" | grep -Fq 'login_admin_only' && \
      printf '%s\n' "$minimal_block" | grep -Fq 'verify_minimal_operator_bootstrap' && \
+     grep -Fq 'clerum_initial_setup_link_is_active' "$seed" && \
      grep -Fq 'refusing ordinary-user fallback' "$seed"; then
     pass "minimal seed consumes setup before login and fails closed without an active initial_setup link"
   else
     fail "minimal seed does not prove setup-first ordering and fail-closed link verification"
+  fi
+}
+
+assert_minimal_bootstrap_contract_runs_on_system_bash() {
+  local contract="$REPO_ROOT/scripts/e2e/minimal-bootstrap-contract.sh"
+  local output
+  if ! /bin/bash -n "$contract" "$REPO_ROOT/scripts/e2e/seed-e2e-data.sh" "$REPO_ROOT/scripts/minikube/full-setup.sh"; then
+    fail "minimal bootstrap scripts are not parseable by the system Bash"
+    return
+  fi
+  output="$(/bin/bash -c '
+    set -e
+    source "$1"
+    [ "$(clerum_canonical_email "Admin@EvenFire.Local")" = "admin@evenfire.local" ]
+    clerum_initial_setup_link_is_active active initial_setup desktop-id true
+    ! clerum_initial_setup_link_is_active revoked initial_setup desktop-id true
+    ! clerum_initial_setup_link_is_active active revoked desktop-id true
+    ! clerum_initial_setup_link_is_active active initial_setup "" true
+    printf ok
+  ' bash "$contract")"
+  if [ "$output" = "ok" ] && \
+     ! grep -Eq '\$\{[A-Za-z_][A-Za-z0-9_]*,,\}' "$REPO_ROOT/scripts/e2e/seed-e2e-data.sh" "$REPO_ROOT/scripts/minikube/full-setup.sh"; then
+    pass "minimal bootstrap canonicalization and link contract run on system Bash 3.2"
+  else
+    fail "minimal bootstrap still contains a Bash-4 lowercase expansion or contract failure"
+  fi
+}
+
+assert_minimal_seed_rejects_a_divergent_identity() {
+  local seed="$REPO_ROOT/scripts/e2e/seed-e2e-data.sh"
+  local output rc=0
+  output="$(CONTEXT=clerum-test SEED_PROFILE=minimal \
+    ADMIN_EMAIL='Admin@EvenFire.Local' E2E_DEV_LOGIN_EMAIL='other@example.invalid' \
+    ADMIN_PASSWORD='test-password-only' /bin/bash "$seed" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] && grep -Fq 'requires the Desktop identity email' <<<"$output"; then
+    pass "minimal seeder rejects a Desktop identity that differs from the bootstrap admin"
+  else
+    fail "minimal seeder accepted a divergent Desktop identity (rc=$rc output=$output)"
   fi
 }
 
@@ -1137,6 +1176,8 @@ assert_bootstrap_seed_deferral_flag_resolves_for_local_minimal
 assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes
 assert_minimal_seed_is_setup_first_and_link_fail_closed
 assert_minimal_setup_requires_admin_identity_email
+assert_minimal_bootstrap_contract_runs_on_system_bash
+assert_minimal_seed_rejects_a_divergent_identity
 assert_an_unknown_image_source_is_a_hard_error
 assert_ghcr_mode_moves_only_the_render_dir
 assert_ghcr_mode_with_skip_uis_renders_the_no_uis_ghcr_overlay

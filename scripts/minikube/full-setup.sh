@@ -40,6 +40,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "${PROJECT_DIR}/scripts/e2e/load-dotenv.sh"
 # shellcheck source=scripts/e2e/admin-credentials.sh
 source "${PROJECT_DIR}/scripts/e2e/admin-credentials.sh"
+# shellcheck source=scripts/e2e/minimal-bootstrap-contract.sh
+source "${PROJECT_DIR}/scripts/e2e/minimal-bootstrap-contract.sh"
 
 # ── Color helpers ──────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -1429,7 +1431,7 @@ else
     # second ordinary member/team. `admin@clerum.io` would leak the internal
     # code name onto a product surface (the Desktop member list) — evenfire
     # branding belongs here (docs/concepts/code-names.md).
-    : "${ADMIN_EMAIL:=admin@evenfire.local}"
+    ADMIN_EMAIL="$(clerum_canonical_email "${ADMIN_EMAIL:-admin@evenfire.local}")"
     SEED_USER_DEFAULT_EMAIL="$ADMIN_EMAIL"
     SEED_USER_DEFAULT_NAME="admin"
   fi
@@ -1438,12 +1440,12 @@ else
     # process/.env E2E override silently mint a second ordinary Desktop user;
     # only the explicitly named seed override is considered, and the guard
     # below still requires it to equal ADMIN_EMAIL.
-    SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}"
+    SEED_USER_EMAIL="$(clerum_canonical_email "${CLERUM_SEED_USER_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}")"
   else
     SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
   fi
   SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
-  if [ "$SEED_PROFILE" = "minimal" ] && [ "${SEED_USER_EMAIL,,}" != "${ADMIN_EMAIL,,}" ]; then
+  if [ "$SEED_PROFILE" = "minimal" ] && [ "$SEED_USER_EMAIL" != "$ADMIN_EMAIL" ]; then
     err "SEED_PROFILE=minimal requires the Desktop identity email (${SEED_USER_EMAIL}) to equal the bootstrap admin email (${ADMIN_EMAIL}); refusing to create an unlinked ordinary member"
     exit 1
   fi

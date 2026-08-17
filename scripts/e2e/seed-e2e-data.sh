@@ -62,6 +62,8 @@ source "${SCRIPT_DIR}/load-dotenv.sh"
 dotenv_load_canonical_root "${REPO_ROOT}"
 # shellcheck source=scripts/e2e/admin-credentials.sh
 source "${SCRIPT_DIR}/admin-credentials.sh"
+# shellcheck source=scripts/e2e/minimal-bootstrap-contract.sh
+source "${SCRIPT_DIR}/minimal-bootstrap-contract.sh"
 
 # ─── Config (all overridable) ──────────────────────────────────────────
 CONTEXT="${CONTEXT:-$(kubectl config current-context)}"
@@ -107,8 +109,13 @@ if [ -z "${ADMIN_EMAIL:-}" ]; then
     ADMIN_EMAIL="admin@clerum.io"
   fi
 fi
-if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${E2E_DEV_LOGIN_EMAIL:-}" ]; then
-  DEV_EMAIL="$ADMIN_EMAIL"
+if [ "$SEED_PROFILE" = "minimal" ]; then
+  ADMIN_EMAIL="$(clerum_canonical_email "$ADMIN_EMAIL")"
+  DEV_EMAIL="$(clerum_canonical_email "$DEV_EMAIL")"
+  if [ "$DEV_EMAIL" != "$ADMIN_EMAIL" ]; then
+    printf '%s\n' "  ERROR — SEED_PROFILE=minimal requires the Desktop identity email (${DEV_EMAIL}) to equal the bootstrap admin email (${ADMIN_EMAIL}); refusing to create an unlinked ordinary member" >&2
+    exit 1
+  fi
   if [ -z "${E2E_DEV_LOGIN_NAME:-}" ]; then
     DEV_NAME="admin"
   fi
@@ -508,22 +515,26 @@ perform_initial_setup() {
 }
 
 verify_minimal_operator_bootstrap() {
-  local admin_count status source desktop_user_id
+  local admin_count admin_id status source desktop_user_id link_admin_id
   ADMIN_GET_BODY=""
   admin_get "$CAPI_BASE/admin/control-admins" "GET /admin/control-admins"
-  admin_count="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "${ADMIN_EMAIL,,}" \
+  admin_count="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
     '[.admins[]? | select(.username == $username and ((.email // "") | ascii_downcase) == $email)] | length')"
   if [ "$admin_count" != "1" ]; then
     die "Minimal bootstrap did not produce exactly one admin '$ADMIN_USERNAME' with email '$ADMIN_EMAIL'"
   fi
-  status="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "${ADMIN_EMAIL,,}" \
+  admin_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .id // empty')"
+  status="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
     '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.status // "missing"')"
-  source="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "${ADMIN_EMAIL,,}" \
+  source="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
     '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.source // "missing"')"
-  desktop_user_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "${ADMIN_EMAIL,,}" \
+  desktop_user_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
     '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.desktopUserId // empty')"
-  if [ "$status" != "active" ] || [ "$source" != "initial_setup" ] || [ -z "$desktop_user_id" ]; then
-    die "Minimal bootstrap is incomplete: expected one active initial_setup Desktop link for '$ADMIN_EMAIL' (status=$status source=$source desktopUserId=${desktop_user_id:-missing}); refusing ordinary-user fallback"
+  link_admin_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.controlAdminId // empty')"
+  if ! clerum_initial_setup_link_is_active "$status" "$source" "$desktop_user_id" "$([ "$link_admin_id" = "$admin_id" ] && printf true || printf false)"; then
+    die "Minimal bootstrap is incomplete: expected one active initial_setup Desktop link for '$ADMIN_EMAIL' (status=$status source=$source desktopUserId=${desktop_user_id:-missing} controlAdminId=${link_admin_id:-missing}); refusing ordinary-user fallback"
   fi
   ok "Initial admin '$ADMIN_USERNAME' has active initial_setup Desktop operator link (desktopUserId=${desktop_user_id:0:8}…)"
 }
@@ -644,6 +655,7 @@ ensure_seed_user_and_team() {
   local email="$1"
   local name="$2"
   local team_name="${name} team"
+  email="$(clerum_canonical_email "$email")"
 
   ADMIN_GET_BODY=""
   admin_get "$CAPI_BASE/admin/users?$(jq -rn --arg q "$email" '$q|@uri' | sed 's/^/q=/')" \
