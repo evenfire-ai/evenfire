@@ -327,6 +327,11 @@ if not source or not tag:
 print(source + "\t" + tag)
 PY
   )"; then
+    if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
+      T2_PLAN_STATE=full-bootstrap
+      T2_PLAN_REASON='image manifest is invalid or has no source/tag; bootstrap will replace it'
+      return 0
+    fi
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or has no source/tag'
   fi
