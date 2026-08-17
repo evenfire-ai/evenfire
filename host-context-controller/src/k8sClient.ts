@@ -648,10 +648,12 @@ export class McpServerWatcher implements McpServerProvider {
   // Generations bind the completed safety sweep to the exact LIST -> WATCH
   // pair that supplied its absence decisions. A recovered watch invalidates
   // this marker until the new inventory's orphan-allow sweep completes.
-  private networkPolicyRevocationContextGeneration = 0
-  private networkPolicyRevocationServerGeneration = 0
-  private networkPolicyRevocationContextRevision = 0
-  private networkPolicyRevocationServerRevision = 0
+  // Sentinel -1 = "no authoritative revocation has certified yet". A real
+  // desired revision starts at 0, so the readiness gate stays closed until the
+  // first recordNetworkPolicySafetyCertificate writes a real revision here —
+  // the startup role the (now removed) generation equalities used to play.
+  private networkPolicyRevocationContextRevision = -1
+  private networkPolicyRevocationServerRevision = -1
   private mcpServerCacheSynced = false
   private contextCacheSynced = false
   private mcpServerCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
@@ -911,16 +913,19 @@ export class McpServerWatcher implements McpServerProvider {
       this.mcpServerCacheSynced &&
       this.contextCacheSynced &&
       this.hostCacheSynced &&
-      // The generation/revision equalities below prove no newer desired state
-      // is outstanding; they cannot prove the last pass actually revoked what
-      // it set out to revoke. Losing a delete fence bumps no generation and
-      // moves no revision, so it is invisible to every other term here while
-      // leaving live an allow the pass classified as stale. The reconciler
-      // degrades this fence at the point of loss; readiness reads it so the
-      // gate re-closes for the same reason it opened.
+      // Certification is pinned to CONTENT identity (the desired-revision
+      // counters), not CHANNEL identity (the watch-generation counters). A
+      // "Premature close" reconnect re-LISTs the same inventory and bumps the
+      // generation without changing desired state; gating readiness on the
+      // generation there livelocked the certificate forever under sustained GKE
+      // watch-churn (the clerum-dev incident) while the underlying safety
+      // decision stayed valid. The revision only moves when the diffing snapshot
+      // installer observes a real desired-state change, so a same-content
+      // reconnect no longer re-closes the gate, while a genuine change still
+      // forces re-certification. Losing a delete fence bumps no revision, so
+      // hasCertifiedSafetyInventory() remains the fence for that one failure
+      // mode that no equality below can see.
       this.netPolReconciler.hasCertifiedSafetyInventory() &&
-      this.networkPolicyRevocationContextGeneration === this.contextWatchGeneration &&
-      this.networkPolicyRevocationServerGeneration === this.mcpWatchGeneration &&
       this.networkPolicyRevocationContextRevision === this.contextDesiredRevision &&
       this.networkPolicyRevocationServerRevision === this.mcpServerDesiredRevision
     )
@@ -1218,14 +1223,51 @@ export class McpServerWatcher implements McpServerProvider {
     return resourceVersion
   }
 
+  // A re-LIST after a watch reconnect ("Premature close") reinstalls the whole
+  // cache. Diff the incoming snapshot against the current cache BEFORE replacing
+  // it and bump the desired revision iff the desired state actually changed
+  // (an add, a removal, or a spec change under the canonical comparator). This
+  // is the counterpart to the watch-event revision bump: it makes the desired
+  // revision a monotonic CONTENT identity that survives channel loss, so the
+  // safety certificate can gate on content instead of the churning generation.
+  // Same-content reconnect → no bump → certification survives the churn. Real
+  // change carried by the re-LIST → bump → forced re-certification (fail-closed).
+  private mcpServerSnapshotChangesDesiredState(snapshot: McpServerSnapshot): boolean {
+    if (snapshot.servers.length !== this.servers.size) return true
+    for (const server of snapshot.servers) {
+      const previous = this.servers.get(server.name)
+      if (previous === undefined || !sameMcpServerDesiredRevision(previous, server)) {
+        return true
+      }
+    }
+    return false
+  }
+
   private installMcpServerSnapshot(snapshot: McpServerSnapshot): void {
+    if (this.mcpServerSnapshotChangesDesiredState(snapshot)) {
+      this.mcpServerDesiredRevision += 1
+    }
     this.servers.clear()
     for (const server of snapshot.servers) {
       this.servers.set(server.name, server)
     }
   }
 
+  private contextSnapshotChangesDesiredState(snapshot: ContextSnapshot): boolean {
+    if (snapshot.contexts.length !== this.contexts.size) return true
+    for (const context of snapshot.contexts) {
+      const previous = this.contexts.get(context.name)
+      if (previous === undefined || !sameContextDesiredRevision(previous, context)) {
+        return true
+      }
+    }
+    return false
+  }
+
   private installContextSnapshot(snapshot: ContextSnapshot): void {
+    if (this.contextSnapshotChangesDesiredState(snapshot)) {
+      this.contextDesiredRevision += 1
+    }
     this.contexts.clear()
     for (const context of snapshot.contexts) {
       this.contexts.set(context.name, context)
@@ -2596,8 +2638,7 @@ export class McpServerWatcher implements McpServerProvider {
       !this.contextCacheSynced ||
       !this.mcpServerCacheSynced ||
       !this.netPolReconciler.hasCertifiedSafetyInventory() ||
-      this.networkPolicyRevocationContextGeneration !== this.contextWatchGeneration ||
-      this.networkPolicyRevocationServerGeneration !== this.mcpWatchGeneration ||
+      // Content identity, not channel identity — see isReadinessInventoryAuthoritative.
       this.networkPolicyRevocationContextRevision !== this.contextDesiredRevision ||
       this.networkPolicyRevocationServerRevision !== this.mcpServerDesiredRevision
     ) {
@@ -2618,15 +2659,13 @@ export class McpServerWatcher implements McpServerProvider {
       this.stopped ||
       !this.contextCacheSynced ||
       !this.mcpServerCacheSynced ||
-      this.contextWatchGeneration !== certificate.contextGeneration ||
-      this.mcpWatchGeneration !== certificate.serverGeneration ||
+      // Content identity, not channel identity — a Premature-close reconnect
+      // that re-LISTs the same inventory must not invalidate this certificate.
       this.contextDesiredRevision !== certificate.contextRevision ||
       this.mcpServerDesiredRevision !== certificate.serverRevision
     ) {
       return false
     }
-    this.networkPolicyRevocationContextGeneration = certificate.contextGeneration
-    this.networkPolicyRevocationServerGeneration = certificate.serverGeneration
     this.networkPolicyRevocationContextRevision = certificate.contextRevision
     this.networkPolicyRevocationServerRevision = certificate.serverRevision
     return true
@@ -2638,8 +2677,7 @@ export class McpServerWatcher implements McpServerProvider {
     const current = this.currentNetworkPolicySafetyCertificate()
     return (
       current !== null &&
-      current.contextGeneration === certificate.contextGeneration &&
-      current.serverGeneration === certificate.serverGeneration &&
+      // Content identity, not channel identity — see isReadinessInventoryAuthoritative.
       current.contextRevision === certificate.contextRevision &&
       current.serverRevision === certificate.serverRevision
     )

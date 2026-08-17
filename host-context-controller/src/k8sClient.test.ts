@@ -100,10 +100,6 @@ function markMcpServerInventoryAuthoritative(watcher: McpServerWatcher): void {
 }
 
 function markNetworkPolicyRevocationAuthoritative(watcher: McpServerWatcher): void {
-  ;(watcher as any).networkPolicyRevocationContextGeneration = (
-    watcher as any
-  ).contextWatchGeneration
-  ;(watcher as any).networkPolicyRevocationServerGeneration = (watcher as any).mcpWatchGeneration
   ;(watcher as any).networkPolicyRevocationContextRevision = (watcher as any).contextDesiredRevision
   ;(watcher as any).networkPolicyRevocationServerRevision = (
     watcher as any
@@ -3785,8 +3781,11 @@ describe('McpServerWatcher startup', () => {
 
     await (watcher as any).runInitialNetworkPolicyConvergence()
 
-    expect((watcher as any).networkPolicyRevocationContextGeneration).not.toBe(21)
-    expect((watcher as any).networkPolicyRevocationServerGeneration).not.toBe(34)
+    // Authority lost at the callback boundary (contextCacheSynced=false) → record
+    // refuses, so the content-identity revocation counters stay at the "never
+    // certified" sentinel rather than adopting the captured revision.
+    expect((watcher as any).networkPolicyRevocationContextRevision).toBe(-1)
+    expect((watcher as any).networkPolicyRevocationServerRevision).toBe(-1)
     await watcher.stop()
   })
 
@@ -3939,7 +3938,7 @@ describe('McpServerWatcher startup', () => {
     errorSpy.mockRestore()
   })
 
-  it('fences runtime effects when either generation retires the safety certificate', async () => {
+  it('fences runtime effects when a desired-revision change retires the safety certificate', async () => {
     const selected = {
       name: 'certificate-fenced-server',
       namespace: 'mcp-server',
@@ -3972,7 +3971,12 @@ describe('McpServerWatcher startup', () => {
 
     const convergence = (watcher as any).runInitialMcpServerConvergence()
     await egressStarted.promise
-    ;(watcher as any).contextWatchGeneration = 12
+    // A real desired-state change lands mid-convergence: the content identity
+    // moves, retiring the captured safety certificate. A watch reconnect that
+    // did NOT change content (generation-only bump) would correctly NOT fence —
+    // that is the whole point of the content-identity gate — so the fence must
+    // key on the revision, which this change advances.
+    ;(watcher as any).contextDesiredRevision += 1
     releaseEgress.resolve(undefined)
     await convergence
 
@@ -9197,21 +9201,23 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
       return { items: [] }
     })
 
-    // Capture the real Context watch doneCallback so we can drive a Premature
-    // close through the exact production path (retireContextWatch bumps the
-    // generation synchronously, then schedules recovery).
-    let contextDone: ((err: Error | null) => void) | null = null
-    mocks.watch.mockImplementation(
-      async (path: string, _opts: unknown, _cb: unknown, done: (err: Error | null) => void) => {
-        if (path.endsWith('/contexts')) contextDone = done
-        return { abort: vi.fn() }
-      }
-    )
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
 
-    // Every authoritative revocation pass takes a Premature close of the Context
-    // watch BEFORE it certifies — the production race, made deterministic.
+    // Model a "Premature close" reconnect that lands DURING each authoritative
+    // revocation pass: the pass captures its safety certificate, then the watch
+    // reconnects and recovery re-LISTs the identical inventory — so the watch
+    // GENERATION advances (channel identity) while the desired REVISION (content
+    // identity) is unchanged and the cache stays authoritative. The #205 code
+    // pinned the certificate to the generation, so it refused here on every pass
+    // and livelocked; the fix pins it to the revision, so it certifies through
+    // the churn.
     let passes = 0
-    let prematureCloses = 0
+    let reconnects = 0
     mocks.netPolFullReconcile.mockImplementation(
       async (
         _ctxs: unknown,
@@ -9219,22 +9225,13 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
         options: { onAuthoritativeRevocationComplete?: () => void } | undefined
       ) => {
         passes += 1
-        if (contextDone) {
-          contextDone(new Error('Premature close'))
-          prematureCloses += 1
-        }
-        // Old code: record refuses (generation moved). Fixed code: record
-        // accepts (content revision is unchanged — identical re-LIST).
+        ;(watcher as any).contextWatchGeneration += 2
+        ;(watcher as any).mcpWatchGeneration += 2
+        reconnects += 1
         options?.onAuthoritativeRevocationComplete?.()
       }
     )
 
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const watcher = new McpServerWatcher()
-    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
     const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
       watcher.isReadinessInventoryAuthoritative()
     )
@@ -9243,27 +9240,26 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
     try {
       await watcher.start()
       server.setReady(true)
-      await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalled())
 
-      // Sustain the churn: each recovery cycle reinstates the watch and fires a
-      // fresh pass, which takes another Premature close. Bounded by MAX_PASSES so
-      // a livelock fails loudly by count instead of hanging.
-      const MAX_PASSES = 8
-      for (let i = 0; i < MAX_PASSES; i += 1) {
-        if (watcher.isReadinessInventoryAuthoritative()) break
-        // INVENTORY_CACHE_RECOVERY_RETRY_MS (production constant) is 5000ms.
-        await vi.advanceTimersByTimeAsync(5000)
+      // Sustain the churn for a fixed number of authoritative passes. Each pass
+      // takes a reconnect (generation bump) with a byte-identical re-LIST. We do
+      // NOT stop early: the regime must run enough times that a livelock is
+      // unmistakable, and the fix must hold readiness through all of it.
+      const CHURN_PASSES = 5
+      for (let i = 0; i < CHURN_PASSES; i += 1) {
+        await (watcher as any).runInitialNetworkPolicyConvergence()
         await flushMicrotasks()
       }
 
       // The adverse regime actually ran (zero-tests-is-never-success).
-      expect(passes).toBeGreaterThanOrEqual(3)
-      expect(prematureCloses).toBeGreaterThanOrEqual(3)
-      // The livelock assertion: identical re-LIST must not keep readiness down.
+      expect(passes).toBeGreaterThanOrEqual(CHURN_PASSES)
+      expect(reconnects).toBeGreaterThanOrEqual(CHURN_PASSES)
+      // The livelock assertion: an identical re-LIST must not keep readiness
+      // down. #205 code → false (livelock). Fixed code → true.
       expect(
         watcher.isReadinessInventoryAuthoritative(),
         `livelock: ${passes} authoritative passes completed under sustained churn ` +
-          `(${prematureCloses} Premature close, identical inventory on every re-LIST) ` +
+          `(${reconnects} reconnects, identical inventory on every re-LIST) ` +
           `and none certified the safety inventory`
       ).toBe(true)
       expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
