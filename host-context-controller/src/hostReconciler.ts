@@ -194,6 +194,14 @@ export type ResolveContextMountsFn = (host: HostCRD) => Promise<ResolvedSfsMount
 const CONTEXT_LABEL = 'clerum.io/context'
 const CONTEXT_MOUNT_PATH_PATTERN = /^\/[a-zA-Z0-9_.][a-zA-Z0-9_.\/-]*$/
 const RUNTIME_TOKEN_REVISION_ANNOTATION = 'clerum.io/runtime-token-revision'
+// Rolls the mcp-host pod when Host.spec.guardrails changes. mcp-host reads the
+// guardrails block (installed-hook refs, built-ins, limits) ONLY at boot, so an
+// install/uninstall/upgrade of a hook — or any edit to the block — would
+// otherwise not reach the running agent until the pod happened to restart.
+// Stamping a hash of the guardrails spec onto the pod template makes any change
+// flip the template → rolling restart → mcp-host re-reads guardrails at boot.
+// Mirrors the runtime-token / credentials revision annotations.
+const GUARDRAILS_REVISION_ANNOTATION = 'clerum.io/guardrails-revision'
 const RUNTIME_TOKEN_SECRET_REVISION_ANNOTATION = 'clerum.io/runtime-token-secret-revision'
 const RUNTIME_TOKEN_ISSUED_AT_ANNOTATION = 'clerum.io/runtime-token-issued-at'
 const RUNTIME_TOKEN_REFRESH_EXPIRES_AT_ANNOTATION = 'clerum.io/runtime-token-refresh-expires-at'
@@ -2354,6 +2362,16 @@ export class HostReconciler {
     const podAnnotations: Record<string, string> = {}
     if (runtimeTokenRevision) {
       podAnnotations[RUNTIME_TOKEN_REVISION_ANNOTATION] = runtimeTokenRevision
+    }
+    // Roll the mcp-host pod whenever the guardrails block changes: mcp-host reads
+    // Host.spec.guardrails only at boot, so without a pod-template diff an
+    // installed-hook change never reaches the running agent. Stamp a hash of the
+    // block — present→changed→removed all flip the template and trigger a rollout
+    // (when guardrails is absent the annotation is simply omitted).
+    if (host.spec.guardrails) {
+      podAnnotations[GUARDRAILS_REVISION_ANNOTATION] = createHash('sha256')
+        .update(canonicalStringify(host.spec.guardrails as unknown as Record<string, unknown>))
+        .digest('hex')
     }
 
     // Security context — desktop needs runAsNonRoot: false for s6-overlay init,
