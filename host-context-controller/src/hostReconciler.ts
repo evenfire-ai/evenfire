@@ -202,6 +202,29 @@ const RUNTIME_TOKEN_REVISION_ANNOTATION = 'clerum.io/runtime-token-revision'
 // flip the template → rolling restart → mcp-host re-reads guardrails at boot.
 // Mirrors the runtime-token / credentials revision annotations.
 const GUARDRAILS_REVISION_ANNOTATION = 'clerum.io/guardrails-revision'
+
+/**
+ * Deep, key-sorted JSON for a stable content hash. Object keys are sorted at
+ * EVERY level — unlike `canonicalStringify`, which sorts only the top level —
+ * so a guardrails block that differs only in nested key order (e.g. the API
+ * returning `hooks` phases or a hook ref's fields in a different order) hashes
+ * identically and does not roll mcp-host for nothing. Array order is PRESERVED:
+ * hook precedence within a phase is semantic, so reordering it is a real change.
+ */
+function deepStableStringify(value: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(norm)
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        out[k] = norm((v as Record<string, unknown>)[k])
+      }
+      return out
+    }
+    return v
+  }
+  return JSON.stringify(norm(value))
+}
 const RUNTIME_TOKEN_SECRET_REVISION_ANNOTATION = 'clerum.io/runtime-token-secret-revision'
 const RUNTIME_TOKEN_ISSUED_AT_ANNOTATION = 'clerum.io/runtime-token-issued-at'
 const RUNTIME_TOKEN_REFRESH_EXPIRES_AT_ANNOTATION = 'clerum.io/runtime-token-refresh-expires-at'
@@ -2370,7 +2393,7 @@ export class HostReconciler {
     // (when guardrails is absent the annotation is simply omitted).
     if (host.spec.guardrails) {
       podAnnotations[GUARDRAILS_REVISION_ANNOTATION] = createHash('sha256')
-        .update(canonicalStringify(host.spec.guardrails as unknown as Record<string, unknown>))
+        .update(deepStableStringify(host.spec.guardrails))
         .digest('hex')
     }
 
