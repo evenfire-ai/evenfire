@@ -5,6 +5,7 @@ import { config as hccConfig } from '../config'
 import { HostReconciler, type ResolvedSfsMount } from '../hostReconciler'
 import { issueMcpHostRuntimeTokens } from '../mcpHostRuntimeTokenIssuerClient'
 import type { HostCRD } from '../types'
+import { canonicalStringify } from '../utils'
 
 vi.mock('../mcpHostRuntimeTokenIssuerClient', () => ({
   issueMcpHostRuntimeTokens: vi.fn().mockResolvedValue({
@@ -988,6 +989,47 @@ describe('HostReconciler.buildDeployment — SharedFileSystem mounts', () => {
     expect(dep.spec!.template!.metadata!.annotations).toMatchObject({
       'clerum.io/runtime-token-revision': 'runtime-token-revision-1',
     })
+  })
+
+  it('omits the guardrails-revision annotation when the host has no guardrails', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const dep = reconciler.buildDeployment(makeHost())
+    expect(dep.spec!.template!.metadata!.annotations ?? {}).not.toHaveProperty(
+      'clerum.io/guardrails-revision'
+    )
+  })
+
+  it('stamps sha256(canonicalStringify(guardrails)) on the pod template when guardrails are set', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const guardrails: HostCRD['spec']['guardrails'] = {
+      hooks: { preCall: [{ id: 'h1', digest: 'sha256:abc' }] },
+    }
+    const host: HostCRD = { ...makeHost(), spec: { ...makeHost().spec, guardrails } }
+    const dep = reconciler.buildDeployment(host)
+    const expected = createHash('sha256')
+      .update(canonicalStringify(guardrails as unknown as Record<string, unknown>))
+      .digest('hex')
+    expect(dep.spec!.template!.metadata!.annotations?.['clerum.io/guardrails-revision']).toBe(
+      expected
+    )
+  })
+
+  it('changes the guardrails-revision on a guardrails change and is stable otherwise', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const revFor = (guardrails: HostCRD['spec']['guardrails']): string | undefined => {
+      const host: HostCRD = { ...makeHost(), spec: { ...makeHost().spec, guardrails } }
+      return reconciler.buildDeployment(host).spec!.template!.metadata!.annotations?.[
+        'clerum.io/guardrails-revision'
+      ]
+    }
+    const a = revFor({ hooks: { preCall: [{ id: 'h1', digest: 'sha256:abc' }] } })
+    const aAgain = revFor({ hooks: { preCall: [{ id: 'h1', digest: 'sha256:abc' }] } })
+    const b = revFor({ hooks: { preCall: [{ id: 'h2', digest: 'sha256:def' }] } })
+    // Same guardrails → same hash: no spurious rolls.
+    expect(a).toBe(aAgain)
+    // Changed guardrails → new hash → the pod template flips → rolling restart.
+    expect(a).not.toBe(b)
+    expect(a).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('keeps liveness separate from runtime-auth readiness', () => {
