@@ -87,6 +87,11 @@ export class RemoteLlmHook {
     private readonly hardDeadlineMs: number = 15000
   ) {}
 
+  /** Stable hook id (the descriptor's id) — for diagnostics/logging only. */
+  get id(): string {
+    return this.descriptor.id
+  }
+
   private has(cap: Capability): boolean {
     return this.descriptor.capabilities.includes(cap)
   }

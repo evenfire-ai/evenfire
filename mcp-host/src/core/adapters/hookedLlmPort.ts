@@ -93,6 +93,20 @@ function refusalResponse(reason?: string): ToolCompletionResponse {
   }
 }
 
+/**
+ * Approximate request size for the pre_call diagnostic log: total chars across
+ * message string content only. Sizes, never content (§8.4). Mirrors the hook's
+ * own `messagesChars`, so mcp-host's `before→after` lines up with the hook's
+ * reported `beforeChars/afterChars` when a rewrite lands.
+ */
+function approxRequestChars(req: ToolCompletionRequest): number {
+  let n = 0
+  for (const m of req.messages ?? []) {
+    if (typeof m.content === 'string') n += m.content.length
+  }
+  return n
+}
+
 export class HookedLlmPort implements LlmPort {
   constructor(
     private readonly inner: LlmPort,
@@ -149,10 +163,27 @@ export class HookedLlmPort implements LlmPort {
     // and a reject blocks the call outright (no tokens spent).
     const preContribs: Array<Contributor<ToolCompletionRequest, ToolCompletionResponse>> = []
     for (const hook of this.hooks.preCall) {
+      const before = approxRequestChars(req)
       const c = await hook.preCall(req)
       if (c) {
         preContribs.push(c)
         if (c.rewrite) req = c.rewrite // already system-role-stripped + capability-gated (N4/F4)
+      }
+      // Diagnostic (content-free, sizes only per §8.4): make the dial AND whether
+      // the rewrite was actually applied observable, so a may_rewrite hook's
+      // compaction can be confirmed end-to-end against the hook's own logs — the
+      // `before→after` here should match the hook's reported before/after chars.
+      if (c?.rewrite) {
+        const after = approxRequestChars(req)
+        console.log(
+          `[HookedLlmPort] pre_call ${hook.id}: applied rewrite ${before}→${after} chars (Δ${before - after})`
+        )
+      } else if (c?.decision === 'deny') {
+        console.log(
+          `[HookedLlmPort] pre_call ${hook.id}: deny (reason=${logSafeReason(c.reasonCode)})`
+        )
+      } else {
+        console.log(`[HookedLlmPort] pre_call ${hook.id}: no rewrite (continue), ${before} chars`)
       }
     }
     if (aggregateDecision(preContribs) === 'deny') return this.denyRefusal(preContribs, 'pre_call')
