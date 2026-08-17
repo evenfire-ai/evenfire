@@ -166,7 +166,10 @@ export function ridOf(resourceId: string): string {
 }
 
 export function assertFixtureName(name: string): void {
-  if (!/^e2e-gfs-[a-z0-9-]+$/.test(name)) {
+  // Resource fixtures may be user-visible file names (for example
+  // `e2e-gfs-...-root.md`). Keep the namespace/path guard strict while
+  // allowing one safe lowercase extension so teardown can clean those files.
+  if (!/^e2e-gfs-[a-z0-9-]+(?:\.[a-z0-9]+)?$/.test(name)) {
     throw new Error(`refusing to mutate non-E2E GFS fixture "${name}"`)
   }
 }

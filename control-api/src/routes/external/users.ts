@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -83,7 +84,12 @@ async function mapWithConcurrencyLimit<T, R>(
 
 export function createExternalUsersRouter(gateway: K8sGateway): Router {
   const router = Router()
-  router.use('/external/users', requireValidExternalSessionToken)
+  const externalUsersRateLimits = createExternalClientRateLimiters(
+    'users',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
+  router.use('/external/users', ...externalUsersRateLimits, requireValidExternalSessionToken)
 
   router.get(
     '/external/users/:userId/teams',

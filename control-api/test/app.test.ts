@@ -183,6 +183,7 @@ describe('app router wiring', () => {
       userId: 'user-1',
       email: 'user@example.com',
       teamId: 'team-1',
+      authGeneration: 1,
     }
     const currentToken = signExternalSessionToken(payload)
 
@@ -195,10 +196,21 @@ describe('app router wiring', () => {
 
     vi.spyOn(pool, 'query')
       .mockResolvedValueOnce({
-        rows: [{ id: payload.userId, valid_after: null, token_revoked: false }],
+        rows: [
+          {
+            id: payload.userId,
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+            valid_after: null,
+            token_revoked: false,
+          },
+        ],
         rowCount: 1,
       })
-      .mockResolvedValueOnce({ rows: [{ role: payload.role }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ role: payload.role, lifecycle_version: 1 }],
+        rowCount: 1,
+      })
 
     const res = await request(app)
       .post('/api/v1/external/auth/session-token')

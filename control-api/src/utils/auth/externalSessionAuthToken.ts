@@ -13,16 +13,32 @@ export function signExternalSessionToken(
   claims: Omit<AuthClaims, 'exp'>,
   ttlSeconds = 60 * 60 * 12
 ): string {
-  return jwt.sign(claims, config.sessionJwtPrivateKey, {
-    algorithm: 'RS256',
-    expiresIn: ttlSeconds,
-    issuer: config.jwtIssuer,
-    audience: config.jwtAudience,
-  })
+  const authGeneration = claims.authGeneration
+  if (
+    typeof authGeneration !== 'number' ||
+    !Number.isSafeInteger(authGeneration) ||
+    authGeneration < 1
+  ) {
+    throw new Error('auth_generation_required')
+  }
+  return jwt.sign(
+    {
+      ...claims,
+      authGeneration,
+    },
+    config.sessionJwtPrivateKey,
+    {
+      algorithm: 'RS256',
+      expiresIn: ttlSeconds,
+      issuer: config.jwtIssuer,
+      audience: config.jwtAudience,
+    }
+  )
 }
 
 export function verifyExternalSessionToken(token: string): AuthClaims | null {
   try {
+    if (token.length > 4096) return null
     const payload = jwt.verify(token, sessionJwtPublicKey, {
       algorithms: ['RS256'],
       issuer: config.jwtIssuer,
@@ -30,12 +46,15 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
     }) as jwt.JwtPayload & Omit<AuthClaims, 'exp'>
 
     const teamId = payload?.teamId
+    const authGeneration = payload?.authGeneration
     if (
       typeof payload?.userId !== 'string' ||
       typeof payload?.email !== 'string' ||
       (teamId !== null && typeof teamId !== 'string') ||
       typeof payload?.role !== 'string' ||
-      typeof payload?.exp !== 'number'
+      typeof payload?.exp !== 'number' ||
+      !Number.isSafeInteger(authGeneration) ||
+      Number(authGeneration) < 1
     ) {
       return null
     }
@@ -48,6 +67,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       email: payload.email,
       teamId,
       role: payload.role as AuthClaims['role'],
+      authGeneration: Number(authGeneration),
       exp: payload.exp,
       ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
     }

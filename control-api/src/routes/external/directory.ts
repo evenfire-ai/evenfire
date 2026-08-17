@@ -1,5 +1,7 @@
 import { Router } from 'express'
+import { config } from '../../config.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   requireExternalRoleWithPublicErrors,
@@ -15,7 +17,16 @@ import {
 
 export function createExternalDirectoryRouter(): Router {
   const router = Router()
-  router.use('/external/directory', requireValidExternalSessionTokenWithPublicErrors)
+  const externalDirectoryRateLimits = createExternalClientRateLimiters(
+    'directory',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
+  router.use(
+    '/external/directory',
+    ...externalDirectoryRateLimits,
+    requireValidExternalSessionTokenWithPublicErrors
+  )
 
   router.get(
     '/external/directory/search',

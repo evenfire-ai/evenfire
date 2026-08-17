@@ -1,12 +1,7 @@
 import jwt from "jsonwebtoken";
 import { VerificationKey } from "./keys";
 
-export type GfsScope =
-  | "gfs.read"
-  | "gfs.write"
-  | "gfs.delete"
-  | "gfs.manage_acl"
-  | "gfs.share";
+export type GfsScope = "gfs.read" | "gfs.write" | "gfs.delete" | "gfs.manage_acl" | "gfs.share";
 
 const VALID_SCOPES = new Set<string>([
   "gfs.read",
@@ -21,13 +16,92 @@ export interface GfsPathBinding {
   permissions: string[];
 }
 
+export interface GfsBrokeredAuthority {
+  desktopUserId: string;
+  controlAdminId: string;
+  authoritySource: "linked-admin";
+  linkLineageId?: string;
+  linkGeneration?: number;
+  desktopUserGeneration?: number;
+}
+
 export interface GfsVerifiedClaims {
   sub: string;
   drive: string;
   scopes: GfsScope[];
   pathBindings: GfsPathBinding[];
+  /** users.lifecycle_version or control_admin_users.session_version. */
+  authGeneration?: number;
+  brokeredAuthority?: GfsBrokeredAuthority;
+  principalType?: "user" | "control-admin";
   iat: number;
   exp: number;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function parseBrokeredAuthority(raw: unknown, sub: string): GfsBrokeredAuthority | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new GfsAuthError("brokeredAuthority must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  const supportedKeys = new Set([
+    "authoritySource",
+    "controlAdminId",
+    "desktopUserId",
+    "linkLineageId",
+    "linkGeneration",
+    "desktopUserGeneration",
+  ]);
+  if (Object.keys(record).some((key) => !supportedKeys.has(key))) {
+    throw new GfsAuthError("brokeredAuthority must contain exactly the supported fields");
+  }
+  const desktopUserId = record.desktopUserId;
+  const controlAdminId = record.controlAdminId;
+  if (typeof desktopUserId !== "string" || !UUID_RE.test(desktopUserId)) {
+    throw new GfsAuthError("brokeredAuthority.desktopUserId must be a UUID");
+  }
+  if (typeof controlAdminId !== "string" || !UUID_RE.test(controlAdminId)) {
+    throw new GfsAuthError("brokeredAuthority.controlAdminId must be a UUID");
+  }
+  if (record.authoritySource !== "linked-admin") {
+    throw new GfsAuthError("brokeredAuthority.authoritySource is invalid");
+  }
+  if (sub.toLowerCase() !== controlAdminId.toLowerCase()) {
+    throw new GfsAuthError("brokeredAuthority control admin must match token sub");
+  }
+  const linkLineageId = record.linkLineageId;
+  if (
+    linkLineageId !== undefined &&
+    (typeof linkLineageId !== "string" || !UUID_RE.test(linkLineageId))
+  ) {
+    throw new GfsAuthError("brokeredAuthority.linkLineageId must be a UUID");
+  }
+  const parseGeneration = (value: unknown, field: string): number | undefined => {
+    if (value === undefined) return undefined;
+    if (!Number.isSafeInteger(value) || Number(value) < 1) {
+      throw new GfsAuthError(`brokeredAuthority.${field} must be a positive integer`);
+    }
+    return Number(value);
+  };
+  return {
+    desktopUserId: desktopUserId.toLowerCase(),
+    controlAdminId: controlAdminId.toLowerCase(),
+    authoritySource: "linked-admin",
+    ...(linkLineageId === undefined ? {} : { linkLineageId: linkLineageId.toLowerCase() }),
+    ...(parseGeneration(record.linkGeneration, "linkGeneration") === undefined
+      ? {}
+      : { linkGeneration: parseGeneration(record.linkGeneration, "linkGeneration") }),
+    ...(parseGeneration(record.desktopUserGeneration, "desktopUserGeneration") === undefined
+      ? {}
+      : {
+          desktopUserGeneration: parseGeneration(
+            record.desktopUserGeneration,
+            "desktopUserGeneration"
+          ),
+        }),
+  };
 }
 
 export class GfsAuthError extends Error {
@@ -119,12 +193,34 @@ export function verifyGfsToken(token: string, opts: VerifyOptions): GfsVerifiedC
   const rawScopes = record.scopes;
   const iat = record.iat;
   const exp = record.exp;
+  const principalType = record.principalType;
+  const rawAuthGeneration = record.authGeneration;
 
   if (typeof sub !== "string" || sub.length === 0) throw new GfsAuthError("missing sub");
   if (typeof drive !== "string" || drive.length === 0) throw new GfsAuthError("missing drive");
   if (!Array.isArray(rawScopes)) throw new GfsAuthError("missing scopes");
   if (!Number.isSafeInteger(iat)) throw new GfsAuthError("missing or invalid iat");
   if (!Number.isSafeInteger(exp)) throw new GfsAuthError("missing or invalid exp");
+  if (
+    principalType !== undefined &&
+    principalType !== "user" &&
+    principalType !== "control-admin"
+  ) {
+    throw new GfsAuthError("invalid principalType");
+  }
+  if (
+    rawAuthGeneration !== undefined &&
+    (!Number.isSafeInteger(rawAuthGeneration) || Number(rawAuthGeneration) < 0)
+  ) {
+    throw new GfsAuthError("invalid authGeneration");
+  }
+  if (
+    (principalType === "user" || principalType === "control-admin") &&
+    rawAuthGeneration !== undefined &&
+    Number(rawAuthGeneration) < 1
+  ) {
+    throw new GfsAuthError("human principal authGeneration must be positive");
+  }
   const issuedAt = iat as number;
   const expiresAt = exp as number;
   if (expiresAt <= issuedAt) throw new GfsAuthError("token exp must be after iat");
@@ -137,11 +233,19 @@ export function verifyGfsToken(token: string, opts: VerifyOptions): GfsVerifiedC
     scopes.push(scope as GfsScope);
   }
 
+  const brokeredAuthority = parseBrokeredAuthority(record.brokeredAuthority, sub);
+  if (brokeredAuthority && principalType !== "control-admin") {
+    throw new GfsAuthError("brokeredAuthority requires control-admin principalType");
+  }
+
   return {
     sub,
     drive,
     scopes,
     pathBindings: parsePathBindings(record.pathBindings),
+    ...(rawAuthGeneration === undefined ? {} : { authGeneration: Number(rawAuthGeneration) }),
+    ...(brokeredAuthority ? { brokeredAuthority } : {}),
+    ...(principalType ? { principalType } : {}),
     iat: issuedAt,
     exp: expiresAt,
   };

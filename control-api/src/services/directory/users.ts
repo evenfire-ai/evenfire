@@ -1,6 +1,150 @@
+import { createHash } from 'node:crypto'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import {
+  type GfsDesktopOperatorLifecycleActor,
+  GfsDesktopOperatorLinkError,
+  gfsDesktopOperatorLinkService,
+} from '../gfsDesktopOperatorLinkService.js'
 import type { AdminDeleteUserResult } from './types.js'
 import { normalizeChannels } from './types.js'
+
+export type DesktopUserRetirementActor = GfsDesktopOperatorLifecycleActor
+export type DesktopUserRetirementOutcome = 'retired' | 'deleted'
+
+export type RetireDesktopUserResult = {
+  id: string
+  outcome: DesktopUserRetirementOutcome
+  operationId: string
+  lifecycleVersion: number | null
+  replayed: boolean
+}
+
+export type DesktopUserRetirementErrorCode =
+  | 'invalid_input'
+  | 'not_found'
+  | 'idempotency_conflict'
+  | 'retirement_conflict'
+
+export class DesktopUserRetirementError extends Error {
+  constructor(
+    readonly code: DesktopUserRetirementErrorCode,
+    message: string = code
+  ) {
+    super(message)
+    this.name = 'DesktopUserRetirementError'
+  }
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const RETIREMENT_OPERATION = 'retire_desktop_user'
+
+function requireUuid(value: unknown, field: string): string {
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase()
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new DesktopUserRetirementError('invalid_input', `${field} must be a UUID`)
+  }
+  return normalized
+}
+
+function normalizeRetirementActor(actor: DesktopUserRetirementActor): DesktopUserRetirementActor {
+  if (!actor || typeof actor !== 'object') {
+    throw new DesktopUserRetirementError('invalid_input', 'actor is required')
+  }
+  if (actor.kind === 'control_admin') {
+    return {
+      kind: 'control_admin',
+      controlAdminId: requireUuid(actor.controlAdminId, 'actor.controlAdminId'),
+    }
+  }
+  if (actor.kind === 'platform_user') {
+    return {
+      kind: 'platform_user',
+      desktopUserId: requireUuid(actor.desktopUserId, 'actor.desktopUserId'),
+    }
+  }
+  throw new DesktopUserRetirementError('invalid_input', 'actor kind is not supported')
+}
+
+function retirementActorId(actor: DesktopUserRetirementActor): string {
+  return actor.kind === 'control_admin' ? actor.controlAdminId : actor.desktopUserId
+}
+
+function requireRetirementReason(value: unknown): string {
+  const normalized = String(value ?? '').trim()
+  if (!normalized || normalized.length > 512) {
+    throw new DesktopUserRetirementError(
+      'invalid_input',
+      'reason is required and must be at most 512 characters'
+    )
+  }
+  return normalized
+}
+
+function requireIdempotencyKey(value: unknown): string {
+  const normalized = String(value ?? '').trim()
+  if (!normalized || normalized.length > 256 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new DesktopUserRetirementError(
+      'invalid_input',
+      'Idempotency-Key is required and must be a printable value of at most 256 characters'
+    )
+  }
+  return normalized
+}
+
+function normalizeRequestId(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null
+  const normalized = value.trim()
+  if (!normalized) return null
+  if (normalized.length > 256 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new DesktopUserRetirementError(
+      'invalid_input',
+      'requestId must be a printable value of at most 256 characters'
+    )
+  }
+  return normalized
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function requireLifecycleVersion(value: unknown): number {
+  const normalized = typeof value === 'number' ? value : Number(value)
+  if (!Number.isSafeInteger(normalized) || normalized < 1) {
+    throw new DesktopUserRetirementError('retirement_conflict', 'user lifecycle version is invalid')
+  }
+  return normalized
+}
+
+type RetirementOperationRow = {
+  id: string
+  request_fingerprint: string
+  status: string
+  outcome: DesktopUserRetirementOutcome | null
+  lifecycle_version: string | number | null
+}
+
+function completedReplay(
+  row: RetirementOperationRow,
+  targetUserId: string
+): RetireDesktopUserResult {
+  if (row.status !== 'completed' || (row.outcome !== 'retired' && row.outcome !== 'deleted')) {
+    throw new DesktopUserRetirementError(
+      'retirement_conflict',
+      'retirement operation is not terminal'
+    )
+  }
+  return {
+    id: targetUserId,
+    outcome: row.outcome,
+    operationId: String(row.id),
+    lifecycleVersion:
+      row.outcome === 'retired' ? requireLifecycleVersion(row.lifecycle_version) : null,
+    replayed: true,
+  }
+}
 
 type AdminUserRow = {
   id: string
@@ -192,8 +336,300 @@ export async function updateAdminUserContext(
 }
 
 /**
- * Hard-delete a user account. Teams are retained even when this delete leaves them with zero
- * active members. Memberships are removed via CASCADE when the user row is deleted.
+ * Retire a Desktop user under one caller-owned transaction.
+ *
+ * A user with operator-link history is retained as a lifecycle tombstone. The
+ * legacy physical delete remains available only when no such history exists,
+ * and its durable operation row makes retries safe even after the user row is
+ * gone. Every non-terminal failure throws so the transaction rolls back the
+ * pending operation, governed events, link state, and user mutation together.
+ */
+export async function retireDesktopUser(
+  actorInput: DesktopUserRetirementActor,
+  userIdInput: string,
+  reasonInput: string,
+  idempotencyKeyInput: string,
+  requestIdInput: string | null | undefined,
+  options: { db?: DbClient; authorize?: (db: DbClient) => Promise<void> } = {}
+): Promise<RetireDesktopUserResult> {
+  const actor = normalizeRetirementActor(actorInput)
+  const targetUserId = requireUuid(userIdInput, 'userId')
+  const reason = requireRetirementReason(reasonInput)
+  const idempotencyKey = requireIdempotencyKey(idempotencyKeyInput)
+  const requestId = normalizeRequestId(requestIdInput)
+  const actorId = retirementActorId(actor)
+  const idempotencyKeyHash = sha256(idempotencyKey)
+  const requestFingerprint = sha256(
+    JSON.stringify({
+      operation: RETIREMENT_OPERATION,
+      actor,
+      targetUserId,
+      reason,
+      idempotencyKeyHash,
+    })
+  )
+  const actorColumn =
+    actor.kind === 'control_admin' ? 'actor_control_admin_id' : 'actor_desktop_user_id'
+
+  const work = async (db: DbClient): Promise<RetireDesktopUserResult> => {
+    const claim = await db.query(
+      `INSERT INTO desktop_user_retirement_operations(
+         operation,
+         actor_type,
+         actor_control_admin_id,
+         actor_desktop_user_id,
+         target_user_id,
+         idempotency_key_hash,
+         request_fingerprint,
+         reason,
+         request_id
+       )
+       VALUES (
+         '${RETIREMENT_OPERATION}',
+         $1,
+         $2::uuid,
+         $3::uuid,
+         $4::uuid,
+         $5,
+         $6,
+         $7,
+         $8
+       )
+       ON CONFLICT DO NOTHING
+       RETURNING id::text AS id`,
+      [
+        actor.kind,
+        actor.kind === 'control_admin' ? actor.controlAdminId : null,
+        actor.kind === 'platform_user' ? actor.desktopUserId : null,
+        targetUserId,
+        idempotencyKeyHash,
+        requestFingerprint,
+        reason,
+        requestId,
+      ]
+    )
+
+    if ((claim.rowCount ?? 0) === 0) {
+      const existing = await db.query(
+        `SELECT id::text AS id,
+                request_fingerprint,
+                status,
+                outcome,
+                lifecycle_version
+           FROM desktop_user_retirement_operations
+          WHERE operation = '${RETIREMENT_OPERATION}'
+            AND ${actorColumn} = $1::uuid
+            AND target_user_id = $2::uuid
+            AND idempotency_key_hash = $3
+          FOR UPDATE`,
+        [actorId, targetUserId, idempotencyKeyHash]
+      )
+      const row = existing.rows[0] as RetirementOperationRow | undefined
+      if (!row) {
+        throw new DesktopUserRetirementError(
+          'retirement_conflict',
+          'retirement operation could not be resolved after an idempotency conflict'
+        )
+      }
+      if (row.request_fingerprint !== requestFingerprint) {
+        throw new DesktopUserRetirementError(
+          'idempotency_conflict',
+          'Idempotency-Key was reused with a different retirement request'
+        )
+      }
+      return completedReplay(row, targetUserId)
+    }
+
+    const operationId = String((claim.rows[0] as { id?: unknown } | undefined)?.id ?? '')
+    if (!UUID_PATTERN.test(operationId)) {
+      throw new DesktopUserRetirementError(
+        'retirement_conflict',
+        'retirement operation id is invalid'
+      )
+    }
+
+    const userResult = await db.query(
+      `SELECT id::text AS id, lifecycle_state, lifecycle_version
+         FROM users
+        WHERE id = $1::uuid
+        FOR UPDATE`,
+      [targetUserId]
+    )
+    const user = userResult.rows[0] as
+      | { id?: unknown; lifecycle_state?: unknown; lifecycle_version?: unknown }
+      | undefined
+    if (!user || user.id !== targetUserId) {
+      throw new DesktopUserRetirementError('not_found', 'Desktop user does not exist')
+    }
+    if (user.lifecycle_state !== 'active') {
+      throw new DesktopUserRetirementError(
+        'retirement_conflict',
+        'Desktop user is not in the active lifecycle state'
+      )
+    }
+    const lifecycleVersion = requireLifecycleVersion(user.lifecycle_version)
+    await options.authorize?.(db)
+
+    const history = await db.query(
+      `SELECT EXISTS(
+         SELECT 1
+           FROM gfs_desktop_operator_links
+          WHERE user_id = $1::uuid
+       ) AS has_link_history`,
+      [targetUserId]
+    )
+    const hasLinkHistory =
+      (history.rows[0] as { has_link_history?: unknown } | undefined)?.has_link_history === true
+
+    if (!hasLinkHistory) {
+      await db.query(
+        `UPDATE workflow_approval_medium_accounts
+            SET disabled_at = COALESCE(disabled_at, NOW()),
+                updated_at = NOW()
+          WHERE user_id = $1::uuid
+            AND disabled_at IS NULL`,
+        [targetUserId]
+      )
+      await db.query(
+        `UPDATE workflow_approval_medium_challenges
+            SET consumed_at = COALESCE(consumed_at, NOW()),
+                expires_at = LEAST(expires_at, NOW())
+          WHERE user_id = $1::uuid
+            AND consumed_at IS NULL`,
+        [targetUserId]
+      )
+      const deleted = await db.query(
+        `DELETE FROM users
+          WHERE id = $1::uuid
+            AND lifecycle_state = 'active'
+            AND lifecycle_version = $2
+          RETURNING id::text AS id`,
+        [targetUserId, lifecycleVersion]
+      )
+      if ((deleted.rowCount ?? 0) !== 1) {
+        throw new DesktopUserRetirementError(
+          'retirement_conflict',
+          'Desktop user changed during retirement'
+        )
+      }
+      const completed = await db.query(
+        `UPDATE desktop_user_retirement_operations
+            SET status = 'completed',
+                outcome = 'deleted',
+                completed_at = NOW()
+          WHERE id = $1::uuid
+            AND status = 'pending'`,
+        [operationId]
+      )
+      if ((completed.rowCount ?? 0) !== 1) {
+        throw new DesktopUserRetirementError(
+          'retirement_conflict',
+          'retirement operation changed before completion'
+        )
+      }
+      return {
+        id: targetUserId,
+        outcome: 'deleted',
+        operationId,
+        lifecycleVersion: null,
+        replayed: false,
+      }
+    }
+
+    let revoked = false
+    try {
+      revoked = await gfsDesktopOperatorLinkService.retireParentInTransaction(db, {
+        kind: 'desktop_user',
+        parentId: targetUserId,
+        actor,
+        reason,
+        requestId,
+        operationId,
+      })
+    } catch (error) {
+      if (error instanceof GfsDesktopOperatorLinkError && error.code === 'link_conflict') {
+        throw new DesktopUserRetirementError(
+          'retirement_conflict',
+          'operator link changed during retirement'
+        )
+      }
+      throw error
+    }
+    if (!revoked) {
+      throw new DesktopUserRetirementError(
+        'retirement_conflict',
+        'operator-link history has no active generation to retire'
+      )
+    }
+
+    const transitioned = await db.query(
+      `UPDATE users
+          SET lifecycle_state = 'retired',
+              retired_at = NOW(),
+              retirement_reason = $2,
+              retired_by_type = $3,
+              retired_by_control_admin_id = $4::uuid,
+              retired_by_desktop_user_id = $5::uuid,
+              retirement_request_id = $6,
+              retirement_operation_id = $7::uuid,
+              lifecycle_version = lifecycle_version + 1,
+              updated_at = NOW()
+        WHERE id = $1::uuid
+          AND lifecycle_state = 'active'
+          AND lifecycle_version = $8
+      RETURNING lifecycle_version`,
+      [
+        targetUserId,
+        reason,
+        actor.kind,
+        actor.kind === 'control_admin' ? actor.controlAdminId : null,
+        actor.kind === 'platform_user' ? actor.desktopUserId : null,
+        requestId,
+        operationId,
+        lifecycleVersion,
+      ]
+    )
+    if ((transitioned.rowCount ?? 0) !== 1) {
+      throw new DesktopUserRetirementError(
+        'retirement_conflict',
+        'Desktop user changed during retirement'
+      )
+    }
+    const nextLifecycleVersion = requireLifecycleVersion(
+      (transitioned.rows[0] as { lifecycle_version?: unknown } | undefined)?.lifecycle_version
+    )
+    const completed = await db.query(
+      `UPDATE desktop_user_retirement_operations
+          SET status = 'completed',
+              outcome = 'retired',
+              lifecycle_version = $2,
+              lifecycle_operation_id = $1::uuid,
+              completed_at = NOW()
+        WHERE id = $1::uuid
+          AND status = 'pending'`,
+      [operationId, nextLifecycleVersion]
+    )
+    if ((completed.rowCount ?? 0) !== 1) {
+      throw new DesktopUserRetirementError(
+        'retirement_conflict',
+        'retirement operation changed before completion'
+      )
+    }
+    return {
+      id: targetUserId,
+      outcome: 'retired',
+      operationId,
+      lifecycleVersion: nextLifecycleVersion,
+      replayed: false,
+    }
+  }
+  return options.db ? work(options.db) : withTransaction(work)
+}
+
+/**
+ * Retire a user account through the existing account-management contract.
+ * Teams are retained even when this leaves them with zero active members.
+ * Accounts with retained operator-link history are intentionally not purged.
  */
 export async function adminDeleteUserInTransaction(
   db: DbClient,
@@ -202,6 +638,20 @@ export async function adminDeleteUserInTransaction(
   const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [userId])
   if ((exists.rowCount ?? 0) === 0) {
     return { error: 'not_found' }
+  }
+
+  // Operator-link generations are retained for audit and are protected by
+  // ON DELETE RESTRICT. Refuse the legacy hard-delete operation explicitly
+  // rather than relying on a late FK error or silently erasing lifecycle history.
+  const operatorLinkHistory = await db.query(
+    `SELECT 1
+       FROM gfs_desktop_operator_links
+      WHERE user_id = $1
+      LIMIT 1`,
+    [userId]
+  )
+  if ((operatorLinkHistory.rowCount ?? 0) > 0) {
+    return { error: 'gfs_operator_link_history_retained' }
   }
 
   await db.query(

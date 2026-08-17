@@ -44,6 +44,8 @@ export type AuthClaims = {
   email: string
   teamId: string | null
   role: TeamRole
+  /** Legacy-v1 lifecycle snapshot; v2 authority remains server-side. */
+  authGeneration?: number
   exp: number
   iat?: number
   sessionContract?: 'v2'

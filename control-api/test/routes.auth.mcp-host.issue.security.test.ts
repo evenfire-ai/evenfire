@@ -41,9 +41,20 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
     /external_v1_session_revocations/i.test(text)
   ) {
     return {
-      rows: [{ id: String(params?.[0] ?? ''), valid_after: null, token_revoked: false }],
+      rows: [
+        {
+          id: String(params?.[0] ?? ''),
+          lifecycle_state: 'active',
+          lifecycle_version: 1,
+          valid_after: null,
+          token_revoked: false,
+        },
+      ],
       rowCount: 1,
     }
+  }
+  if (/lifecycle_state/i.test(text)) {
+    return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
   }
   return mockPoolQuery(text, params)
 })
@@ -98,6 +109,7 @@ describe('Security: External /decide endpoint', () => {
       email: 'test@example.com',
       teamId: TEAM_ID,
       role: 'admin',
+      authGeneration: 1,
     })
   })
 

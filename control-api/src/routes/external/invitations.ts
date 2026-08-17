@@ -1,6 +1,8 @@
 import { Router } from 'express'
 import { randomBytes } from 'node:crypto'
+import { config } from '../../config.js'
 import { withTransaction } from '../../db.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -41,9 +43,15 @@ function invitationLookupIpKey(req: {
 
 export function createExternalInvitationsRouter(): Router {
   const router = Router()
+  const externalInvitationsEdgeRateLimits = createExternalClientRateLimiters(
+    'invitations',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
 
   router.get(
     '/external/invitations/token/:token',
+    ...externalInvitationsEdgeRateLimits,
     rateLimitMiddleware({
       bucketType: 'external_invitation_lookup',
       maxPerMinute: 30,
@@ -76,6 +84,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/password-token',
+    ...externalInvitationsEdgeRateLimits,
     rateLimitMiddleware({
       bucketType: 'external_invitation_password_token',
       maxPerMinute: 10,
@@ -125,6 +134,14 @@ export function createExternalInvitationsRouter(): Router {
         if (!result.data.userId) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
+        const authGeneration = Number(result.data.authGeneration)
+        if (
+          result.data.lifecycleState !== 'active' ||
+          !Number.isSafeInteger(authGeneration) ||
+          authGeneration < 1
+        ) {
+          return res.status(409).json({ error: 'invitation_not_ready' })
+        }
 
         return res.status(200).json({
           ...result.data,
@@ -138,6 +155,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/password',
+    ...externalInvitationsEdgeRateLimits,
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     requireAuthenticatedExternalUserRateLimitContext,
@@ -182,6 +200,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/desktop-authorization',
+    ...externalInvitationsEdgeRateLimits,
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     requireAuthenticatedExternalUserRateLimitContext,
@@ -227,6 +246,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.get(
     '/external/invitations/pending',
+    ...externalInvitationsEdgeRateLimits,
     requireValidExternalSessionToken,
     requireAuthenticatedExternalUserRateLimitContext,
     rateLimitMiddleware(externalUserRateLimitOptions('invitation_read', 'authenticated')),
@@ -243,81 +263,86 @@ export function createExternalInvitationsRouter(): Router {
     }
   )
 
-  router.post('/external/invitations/accept', async (req: ExternalAuthedRequest, res, next) => {
-    try {
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const token = String(req.body?.token || '').trim()
-      if (!email || !token) return res.status(400).json({ error: 'invalid payload' })
-
-      let validation: { email: string; invitationUuid: string }
+  router.post(
+    '/external/invitations/accept',
+    ...externalInvitationsEdgeRateLimits,
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
-        validation = await validateInvitationFlowToken(token, email)
-      } catch (error) {
-        if (memberRegistrationErrorResponse(error)) throw error
-        return res.status(400).json({ error: 'invalid_invitation' })
-      }
-      const policy = await resolveEffectiveUserAccessPolicy()
-      const selection = selectExternalSessionRepresentation(
-        {
-          version: String(req.header('x-evenfire-client-version') || '').trim() || undefined,
-          requestedContract:
-            req.body?.sessionContract === 'v1' || req.body?.sessionContract === 'v2'
-              ? req.body.sessionContract
-              : undefined,
-        },
-        policy
-      )
-      if (selection.status !== 'selected') {
-        return res.status(426).json({ error: 'upgrade_required' })
-      }
-      const accepted = await withTransaction(async db => {
-        const result = await acceptInvitationForEmailInTransaction(
-          db,
-          validation.email,
-          validation.invitationUuid
-        )
-        if ('error' in result && result.error) return { error: result.error }
-        const lockedUser = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
-          result.data.userId,
-        ])
-        if ((lockedUser.rowCount ?? 0) === 0) return { error: 'not_found' as const }
-        const issued = await issueExternalUserSession(
-          {
-            contract: selection.contract,
-            userId: result.data.userId,
-            email: result.data.email,
-            teamId: result.data.teamId,
-            role: result.data.role,
-            authenticationMethods: ['invitation'],
-          },
-          { db, policy }
-        )
-        return { data: result.data, issued }
-      })
-      if ('error' in accepted && accepted.error) {
-        if (accepted.error === 'not_found') {
-          return res.status(404).json({ error: 'not_found' })
-        }
-        if (accepted.error === 'forbidden') {
-          return res.status(403).json({ error: 'forbidden' })
-        }
-        if (accepted.error === 'expired') {
-          return res.status(410).json({ error: 'expired' })
-        }
-        return res.status(400).json({ error: 'not_pending' })
-      }
+        const email = String(req.body?.email || '')
+          .trim()
+          .toLowerCase()
+        const token = String(req.body?.token || '').trim()
+        if (!email || !token) return res.status(400).json({ error: 'invalid payload' })
 
-      return res.status(200).json({
-        ...accepted.data,
-        token: accepted.issued.token,
-        sessionContract: accepted.issued.contract,
-      })
-    } catch (error) {
-      return next(error)
+        let validation: { email: string; invitationUuid: string }
+        try {
+          validation = await validateInvitationFlowToken(token, email)
+        } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
+          return res.status(400).json({ error: 'invalid_invitation' })
+        }
+        const policy = await resolveEffectiveUserAccessPolicy()
+        const selection = selectExternalSessionRepresentation(
+          {
+            version: String(req.header('x-evenfire-client-version') || '').trim() || undefined,
+            requestedContract:
+              req.body?.sessionContract === 'v1' || req.body?.sessionContract === 'v2'
+                ? req.body.sessionContract
+                : undefined,
+          },
+          policy
+        )
+        if (selection.status !== 'selected') {
+          return res.status(426).json({ error: 'upgrade_required' })
+        }
+        const accepted = await withTransaction(async db => {
+          const result = await acceptInvitationForEmailInTransaction(
+            db,
+            validation.email,
+            validation.invitationUuid
+          )
+          if ('error' in result && result.error) return { error: result.error }
+          const lockedUser = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+            result.data.userId,
+          ])
+          if ((lockedUser.rowCount ?? 0) === 0) return { error: 'not_found' as const }
+          const issued = await issueExternalUserSession(
+            {
+              contract: selection.contract,
+              userId: result.data.userId,
+              email: result.data.email,
+              teamId: result.data.teamId,
+              role: result.data.role,
+              authGeneration: Number(result.data.authGeneration),
+              authenticationMethods: ['invitation'],
+            },
+            { db, policy }
+          )
+          return { data: result.data, issued }
+        })
+        if ('error' in accepted && accepted.error) {
+          if (accepted.error === 'not_found') {
+            return res.status(404).json({ error: 'not_found' })
+          }
+          if (accepted.error === 'forbidden') {
+            return res.status(403).json({ error: 'forbidden' })
+          }
+          if (accepted.error === 'expired') {
+            return res.status(410).json({ error: 'expired' })
+          }
+          return res.status(400).json({ error: 'not_pending' })
+        }
+
+        return res.status(200).json({
+          ...accepted.data,
+          token: accepted.issued.token,
+          sessionContract: accepted.issued.contract,
+        })
+      } catch (error) {
+        return next(error)
+      }
     }
-  })
+  )
 
   return router
 }

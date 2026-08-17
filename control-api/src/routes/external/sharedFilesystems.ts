@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
@@ -206,10 +207,19 @@ function curatedSfsMessage(phase: string | null | undefined): string | null {
 
 export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Router {
   const router = Router()
+  const externalSharedFilesystemsRateLimits = createExternalClientRateLimiters(
+    'shared-filesystems',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
   const sfsNs = config.sharedFilesystemsNamespace
   const ctxNs = config.contextsNamespace
 
-  router.use('/external/contexts/:contextId/shared-filesystems', requireValidExternalSessionToken)
+  router.use(
+    '/external/contexts/:contextId/shared-filesystems',
+    ...externalSharedFilesystemsRateLimits,
+    requireValidExternalSessionToken
+  )
 
   // Reject anything but GET/HEAD up-front so the proxy below can never be
   // coerced into forwarding a write to wfc.

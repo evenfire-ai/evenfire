@@ -52,3 +52,13 @@ export interface GfsGrantListItem {
   permissions: string[]
   inherit: boolean
 }
+
+/** A direct URI-share row from `window.clerum.gfs.listShares()`. */
+export interface GfsShareListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  includeDescendants: boolean
+}

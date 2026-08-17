@@ -7,6 +7,7 @@ import { createAuthRouter } from '../src/routes/auth.js'
 const authServiceMock = vi.hoisted(() => ({
   loginWithGoogle: vi.fn(),
   loginWithPassword: vi.fn(),
+  requestPasswordReset: vi.fn(),
 }))
 
 vi.mock('../src/services/authService.js', () => authServiceMock)
@@ -29,6 +30,7 @@ function buildApp() {
 describe('routes/auth password-login', () => {
   beforeEach(() => {
     authServiceMock.loginWithPassword.mockReset()
+    authServiceMock.requestPasswordReset.mockReset()
   })
 
   it('propagates invalid credentials as a 401 instead of a 500', async () => {
@@ -114,5 +116,31 @@ describe('routes/auth password-login', () => {
       { idToken: 'opaque-google-token' },
       '198.51.100.52'
     )
+  })
+
+  it('documents the password-reset limiter headers and client-IP contract', async () => {
+    authServiceMock.requestPasswordReset.mockResolvedValue({ requested: true })
+    const app = buildApp()
+    const email = 'rate-limit-contract@example.invalid'
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const res = await request(app)
+        .post('/api/v1/auth/password-reset/request')
+        .set('x-forwarded-for', '198.51.100.44')
+        .send({ email })
+        .expect(200)
+      expect(res.headers['x-ratelimit-limit']).toBe('5')
+      expect(res.headers['x-ratelimit-remaining']).toBe(String(4 - attempt))
+    }
+
+    const limited = await request(app)
+      .post('/api/v1/auth/password-reset/request')
+      .set('x-forwarded-for', '198.51.100.44')
+      .send({ email })
+      .expect(429)
+    expect(limited.headers['retry-after']).toMatch(/^\d+$/)
+    expect(limited.headers['x-ratelimit-limit']).toBe('5')
+    expect(limited.headers['x-ratelimit-remaining']).toBe('0')
+    expect(limited.body).toMatchObject({ retryAfterSeconds: expect.any(Number) })
   })
 })

@@ -18,15 +18,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<ToastRecord[]>([])
   const timersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
-  // Clear any pending auto-dismiss timers when the provider unmounts, so a
-  // scheduled setTimeout can never fire setItems after teardown (leaks a
-  // "window is not defined" / setState-after-unmount error under test).
   useEffect(() => {
-    const timers = timersRef.current
     return () => {
-      for (const timer of Object.values(timers)) {
-        clearTimeout(timer)
-      }
+      for (const timer of Object.values(timersRef.current)) clearTimeout(timer)
+      timersRef.current = {}
     }
   }, [])
 

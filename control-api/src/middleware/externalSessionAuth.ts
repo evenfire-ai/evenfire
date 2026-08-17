@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { pool } from '../db.js'
 import { sendPublicApiError } from '../http/publicApiError.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import type { AccessExecutionBudget } from '../services/access/accessExecutionBudget.js'
@@ -22,6 +23,40 @@ export type ExternalAuthedRequest = Request & {
   externalTeamAuth?: {
     teamId: string
     role: TeamRole
+  }
+}
+
+/**
+ * The session JWT is only a signed locator. The user row remains authoritative
+ * for lifecycle and generation, so retirement takes effect before the token's
+ * nominal expiry. A missing row and an inactive row intentionally share the
+ * same denial to avoid user enumeration.
+ */
+export async function isCurrentExternalSession(claims: AuthClaims): Promise<boolean> {
+  const authGeneration = claims.authGeneration
+  if (
+    typeof authGeneration !== 'number' ||
+    !Number.isSafeInteger(authGeneration) ||
+    authGeneration < 1
+  )
+    return false
+  const result = await pool.query(
+    `SELECT lifecycle_state, lifecycle_version
+       FROM users
+      WHERE id = $1
+      LIMIT 1`,
+    [claims.userId]
+  )
+  const row = result.rows[0] as
+    | { lifecycle_state?: unknown; lifecycle_version?: unknown }
+    | undefined
+  if (row?.lifecycle_state !== 'active') return false
+  return Number(row.lifecycle_version) === authGeneration
+}
+
+export async function assertCurrentExternalSession(claims: AuthClaims): Promise<void> {
+  if (!(await isCurrentExternalSession(claims))) {
+    throw new Error('external session is inactive or stale')
   }
 }
 

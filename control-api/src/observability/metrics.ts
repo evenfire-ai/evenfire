@@ -266,6 +266,60 @@ export const aggregateAccessShadowDifferencesTotal = getOrCreateCounter({
   labelNames: ['family', 'direction'] as const as Array<'family' | 'direction'>,
 })
 
+export const gfsUploadAdmissionRequestsTotal = getOrCreateCounter({
+  name: 'gfs_upload_admission_requests_total',
+  help: 'Upload-v2 edge admission decisions by bounded limit family and result.',
+  labelNames: ['limit', 'result'] as const as Array<'limit' | 'result'>,
+})
+
+export const gfsUploadAdmissionBytesTotal = getOrCreateCounter({
+  name: 'gfs_upload_admission_bytes_total',
+  help: 'Declared upload-v2 part bytes admitted or rejected before GFSC forwarding.',
+  labelNames: ['result'] as const as Array<'result'>,
+})
+
+export const gfsUploadAdmissionActiveRequests = getOrCreateGauge({
+  name: 'gfs_upload_admission_active_requests',
+  help: 'Current upload-v2 requests holding replica-safe PostgreSQL admission slots.',
+  labelNames: [] as string[],
+})
+
+// ─── External GFS rate-boundary metrics ────────────────────────────────────
+//
+// The rate-limit bucket key is deliberately *not* a Prometheus label: even a
+// one-way digest is unbounded cardinality and would turn the metrics endpoint
+// into a durable identity side channel. The middleware emits the digest in its
+// structured event instead, while these metrics retain the bounded route and
+// operation dimensions needed for alerting.
+export const externalGfsRateLimitRequestsTotal = getOrCreateCounter({
+  name: 'external_gfs_rate_limit_requests_total',
+  help: 'External GFS rate-boundary decisions by operation class, route, phase, and outcome.',
+  labelNames: [
+    'operation_class',
+    'route',
+    'outcome',
+    'phase',
+    'authority_resolution_avoided',
+  ] as const as Array<
+    'operation_class' | 'route' | 'outcome' | 'phase' | 'authority_resolution_avoided'
+  >,
+})
+
+export const externalGfsRateLimitDurationSeconds = getOrCreateHistogram({
+  name: 'external_gfs_rate_limit_duration_seconds',
+  help: 'External GFS rate-boundary decision latency by bounded operation dimensions.',
+  labelNames: [
+    'operation_class',
+    'route',
+    'outcome',
+    'phase',
+    'authority_resolution_avoided',
+  ] as const as Array<
+    'operation_class' | 'route' | 'outcome' | 'phase' | 'authority_resolution_avoided'
+  >,
+  buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+})
+
 // ─── Workflow-run archival cron metrics (DB-first, replaces CRD reaper) ──
 export const workflowRunsArchiveRunsTotal = getOrCreateCounter({
   name: 'workflow_runs_archive_runs_total',

@@ -27,6 +27,7 @@ describe('routes/invitations', () => {
 
   function makeApp() {
     const app = express()
+    app.set('trust proxy', 1)
     app.use(express.json())
     app.use(createInvitationsRouter())
     return app
@@ -183,10 +184,14 @@ describe('routes/invitations', () => {
         .expect(400)
     }
 
-    await request(app)
+    const limited = await request(app)
       .post('/invitations/password')
       .set('x-forwarded-for', '198.51.100.10')
       .send({})
       .expect(429)
+
+    expect(limited.headers['retry-after']).toMatch(/^\d+$/)
+    expect(limited.headers['x-ratelimit-limit']).toBe('10')
+    expect(limited.headers['x-ratelimit-remaining']).toBe('0')
   })
 })

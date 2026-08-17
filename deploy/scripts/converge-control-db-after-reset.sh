@@ -10,6 +10,10 @@ JOB_NAME="control-api-db-migrate-reset"
 NAMESPACE=control-plane
 PVC=control-postgres-data
 RESET_STATE=control-db-reset-state
+# Migration Jobs intentionally share app=control-api for NetworkPolicy access.
+# Fence only the unlabeled runtime Deployment Pods; completed Job Pods can
+# remain until their TTL expires and must not block writer quiescence.
+CONTROL_API_POD_SELECTOR='app=control-api,!clerum.io/component'
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -119,15 +123,23 @@ delete_reset_state() {
 
 CONVERGED=false
 fail_closed() {
-  local rc=$? scale_rc
+  local rc=$? scale_rc control_api_pods
   if [ "$CONVERGED" != true ]; then
     set +e
     scale_rc=0
+    control_api_pods=""
+    kc -n control-plane scale deployment/control-api --replicas=0 >/dev/null || scale_rc=1
     kc -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null || scale_rc=1
     kc -n control-plane scale deployment/workflow-recipes deployment/trace-maintenance-worker --replicas=0 >/dev/null || scale_rc=1
     kc -n gfs scale deployment/gfsc-writer deployment/gfsc-reader --replicas=0 >/dev/null || scale_rc=1
+    if ! control_api_pods="$(kc -n control-plane get pods -l "$CONTROL_API_POD_SELECTOR" -o name)"; then
+      scale_rc=1
+    elif [ -n "$control_api_pods" ]; then
+      kc -n control-plane wait --for=delete pod \
+        -l "$CONTROL_API_POD_SELECTOR" --timeout=180s >/dev/null || scale_rc=1
+    fi
     printf '[converge-control-db-after-reset] ERROR: convergence failed; DB-dependent controllers remain scaled to zero' >&2
-    [ "$scale_rc" -eq 0 ] || printf ' (failed to confirm fail-closed scale)' >&2
+    [ "$scale_rc" -eq 0 ] || printf ' (failed to confirm fail-closed quiescence)' >&2
     printf '\n' >&2
   fi
   trap - EXIT
@@ -154,6 +166,8 @@ esac
 # Revalidate the bound replacement and exact runtime, then retry cleanup without
 # rerunning migrations or rotating credentials.
 if [ "$STATE_PHASE" = converged ]; then
+  kc -n control-plane scale deployment/control-api --replicas="$CONTROL_API_REPLICAS" >/dev/null
+  kc -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null
   kc -n gfs scale deployment/gfsc-writer --replicas="$WRITER_REPLICAS" >/dev/null
   kc -n gfs scale deployment/gfsc-reader --replicas="$READER_REPLICAS" >/dev/null
   kc -n gfs rollout status deployment/gfsc-writer --timeout=180s >/dev/null
@@ -178,6 +192,16 @@ if [ "$STATE_PHASE" = converged ]; then
   exit 0
 fi
 
+# Secret-backed environment variables are captured when a Pod is created; a
+# Secret patch does not update an existing container. Reassert this fence on
+# every replacement-bound retry, not only in the destructive reset process, so
+# no stale control-api Pod can survive runtime-role credential reconciliation.
+kc -n control-plane scale deployment/control-api --replicas=0 >/dev/null
+CONTROL_API_PODS="$(kc -n control-plane get pods -l "$CONTROL_API_POD_SELECTOR" -o name)"
+if [ -n "$CONTROL_API_PODS" ]; then
+  kc -n control-plane wait --for=delete pod \
+    -l "$CONTROL_API_POD_SELECTOR" --timeout=180s >/dev/null
+fi
 kc -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null
 HCC_PODS="$(kc -n control-plane get pods -l app=host-context-controller -o name)"
 if [ -n "$HCC_PODS" ]; then
@@ -209,6 +233,12 @@ env CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" \
 
 kc -n control-plane scale deployment/control-api --replicas="$CONTROL_API_REPLICAS" >/dev/null
 kc -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null
+
+# The base gfs-config intentionally carries no real key. Reset recovery is a
+# complete serving restoration boundary, so materialize the canonical platform
+# public key while GFSC remains at zero; missing authority inputs fail closed.
+bash "$ROOT/scripts/minikube/sync-auth-key.sh" \
+  --context "$CONTEXT" --require-gfs
 
 GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$CONTEXT" \
   bash "$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"

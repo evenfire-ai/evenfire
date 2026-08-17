@@ -24,6 +24,9 @@ source "$ROOT/deploy/scripts/lib/gfs-dsn-probe.sh"
 grep -q 'error.code === "28P01".*error.code === "28000"' \
   "$ROOT/deploy/scripts/lib/gfs-dsn-probe.sh" \
   || { printf 'FAIL: probe does not limit rejection to PostgreSQL authentication SQLSTATEs\n' >&2; exit 1; }
+grep -q 'exec -i "\$PG_PROBE_DEPLOY" -c "\$probe_container" -- node -e' \
+  "$ROOT/deploy/scripts/lib/gfs-dsn-probe.sh" \
+  || { printf 'FAIL: probe does not select the control-api container explicitly\n' >&2; exit 1; }
 
 gfs_dsn_authenticates_as "$DSN" gfs_controller \
   || { printf 'FAIL: authenticated DSN was rejected\n' >&2; exit 1; }
