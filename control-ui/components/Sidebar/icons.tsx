@@ -1,5 +1,26 @@
 import React from 'react'
 
+type RelationshipRoleIconProps = {
+  createBadge?: boolean
+  relationshipRole?: 'admin' | 'member'
+}
+
+function IconCreateBadge() {
+  return (
+    <g aria-hidden="true">
+      <circle
+        cx="18"
+        cy="18"
+        r="4.25"
+        fill="var(--cu-bg-elevated)"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path d="M18 15.75v4.5M15.75 18h4.5" />
+    </g>
+  )
+}
+
 export function IconWorkflow() {
   return (
     <svg
@@ -351,7 +372,10 @@ export function IconBroadcast() {
   )
 }
 
-export function IconUsers() {
+export function IconUsers({
+  createBadge = false,
+  relationshipRole,
+}: RelationshipRoleIconProps = {}) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -363,15 +387,22 @@ export function IconUsers() {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={relationshipRole ? true : undefined}
+      data-relationship-role={relationshipRole}
+      data-create-badge={createBadge ? 'true' : undefined}
     >
       <path d="M18 21a8 8 0 0 0-16 0" />
       <circle cx="10" cy="8" r="5" />
       <path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3" />
+      {createBadge ? <IconCreateBadge /> : null}
     </svg>
   )
 }
 
-export function IconSettings() {
+export function IconSettings({
+  createBadge = false,
+  relationshipRole,
+}: RelationshipRoleIconProps = {}) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -383,9 +414,13 @@ export function IconSettings() {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={relationshipRole ? true : undefined}
+      data-relationship-role={relationshipRole}
+      data-create-badge={createBadge ? 'true' : undefined}
     >
       <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z" />
       <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.35a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.65 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.65a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.35 9c.22.48.8.97 1.56.97H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z" />
+      {createBadge ? <IconCreateBadge /> : null}
     </svg>
   )
 }

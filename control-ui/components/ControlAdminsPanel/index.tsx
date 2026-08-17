@@ -31,6 +31,13 @@ function formatAdminStatus(status: ControlAdminListItem['status']): string {
   return status
 }
 
+function memberAccessActionLabel(admin: ControlAdminListItem): string {
+  if (admin.memberId) return 'View member'
+  if (!admin.email) return 'Email required to create member'
+  if (admin.passwordPending) return 'Complete password setup to create member'
+  return 'Create member'
+}
+
 export function ControlAdminsPanel({
   highlightedAdminId = '',
   onCountsChange,
@@ -436,24 +443,12 @@ export function ControlAdminsPanel({
                         <button
                           type="button"
                           className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          disabled={!admin.email || admin.passwordPending}
+                          disabled={!admin.memberId && (!admin.email || admin.passwordPending)}
                           onClick={() => openMemberAccess(admin)}
-                          aria-label={
-                            admin.memberId
-                              ? `Open member for admin ${label}`
-                              : `Create member for admin ${label}`
-                          }
-                          title={
-                            admin.passwordPending
-                              ? 'Admin must finish password setup before member access can be created'
-                              : admin.memberId
-                                ? 'Open matching member'
-                                : admin.email
-                                  ? 'Create member from admin'
-                                  : 'Admin needs an email before member access can be created'
-                          }
+                          aria-label={memberAccessActionLabel(admin)}
+                          title={memberAccessActionLabel(admin)}
                         >
-                          <IconUsers />
+                          <IconUsers createBadge={!admin.memberId} relationshipRole="member" />
                         </button>
                         {admin.gfsOperatorLink?.status === 'active' ? (
                           <button

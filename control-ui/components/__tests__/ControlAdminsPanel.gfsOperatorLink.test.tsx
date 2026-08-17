@@ -9,9 +9,10 @@ import { ControlAdminsPanel } from '../ControlAdminsPanel'
 
 const confirmMock = vi.hoisted(() => vi.fn())
 const showToastMock = vi.hoisted(() => vi.fn())
+const mockPush = vi.hoisted(() => vi.fn())
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: mockPush }),
 }))
 
 vi.mock('@components/AuthContext', () => ({
@@ -57,6 +58,7 @@ const LINK = {
 
 describe('ControlAdminsPanel GFS operator link lifecycle', () => {
   beforeEach(() => {
+    mockPush.mockClear()
     confirmMock.mockResolvedValue(true)
     vi.mocked(getControlAdmins).mockResolvedValue({
       admins: [
@@ -159,6 +161,84 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
 
     render(<ControlAdminsPanel />)
     expect(await screen.findByTestId('gfs-operator-link-admin-2')).toHaveTextContent('Not linked')
+  })
+
+  it('views the matching member from an admin with the destination-role SVG', async () => {
+    render(<ControlAdminsPanel />)
+
+    const viewMemberButton = await screen.findByRole('button', { name: 'View member' })
+    expect(viewMemberButton).toHaveAttribute('title', 'View member')
+    expect(viewMemberButton.querySelector('svg')).toHaveAttribute(
+      'data-relationship-role',
+      'member'
+    )
+    expect(viewMemberButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
+
+    fireEvent.click(viewMemberButton)
+
+    expect(mockPush).toHaveBeenCalledWith(
+      '/users-and-teams/users/11111111-1111-4111-8111-111111111111'
+    )
+  })
+
+  it('creates a member from an admin without a matching member', async () => {
+    vi.mocked(getControlAdmins).mockResolvedValueOnce({
+      admins: [
+        {
+          id: 'admin-2',
+          username: 'create-member',
+          email: 'create-member@example.com',
+          memberId: null,
+          status: 'active',
+          lastLoginAt: null,
+          createdAt: '2026-08-10T11:00:00.000Z',
+        },
+      ],
+      invitations: [],
+    })
+    render(<ControlAdminsPanel />)
+
+    const createMemberButton = await screen.findByRole('button', { name: 'Create member' })
+    expect(createMemberButton).toHaveAttribute('title', 'Create member')
+    expect(createMemberButton.querySelector('svg')).toHaveAttribute(
+      'data-relationship-role',
+      'member'
+    )
+    expect(createMemberButton.querySelector('svg')).toHaveAttribute('data-create-badge', 'true')
+
+    fireEvent.click(createMemberButton)
+
+    expect(mockPush).toHaveBeenCalledWith(
+      '/users-and-teams/users/new?adminId=admin-2&email=create-member%40example.com&name=create-member'
+    )
+  })
+
+  it('disables member creation for an admin without an email', async () => {
+    vi.mocked(getControlAdmins).mockResolvedValueOnce({
+      admins: [
+        {
+          id: 'admin-3',
+          username: 'email-missing',
+          email: null,
+          memberId: null,
+          status: 'active',
+          lastLoginAt: null,
+          createdAt: '2026-08-10T11:00:00.000Z',
+        },
+      ],
+      invitations: [],
+    })
+    render(<ControlAdminsPanel />)
+
+    const createMemberButton = await screen.findByRole('button', {
+      name: 'Email required to create member',
+    })
+    expect(createMemberButton).toBeDisabled()
+    expect(createMemberButton).toHaveAttribute('title', 'Email required to create member')
+    expect(createMemberButton.querySelector('svg')).toHaveAttribute('data-create-badge', 'true')
+
+    fireEvent.click(createMemberButton)
+    expect(mockPush).not.toHaveBeenCalled()
   })
 
   it('keeps disabled admin tombstones out of the operational action list after refresh', async () => {

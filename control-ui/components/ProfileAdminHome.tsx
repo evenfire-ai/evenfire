@@ -927,18 +927,13 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                     }}
                                     onKeyDown={event => event.stopPropagation()}
                                     disabled={busy && !loaded}
-                                    aria-label={
-                                      user.controlAdminId
-                                        ? `Open admin for member ${user.name || user.email}`
-                                        : `Create admin for member ${user.name || user.email}`
-                                    }
-                                    title={
-                                      user.controlAdminId
-                                        ? 'Open matching admin'
-                                        : 'Create admin from member'
-                                    }
+                                    aria-label={user.controlAdminId ? 'View admin' : 'Create admin'}
+                                    title={user.controlAdminId ? 'View admin' : 'Create admin'}
                                   >
-                                    <IconSettings />
+                                    <IconSettings
+                                      createBadge={!user.controlAdminId}
+                                      relationshipRole="admin"
+                                    />
                                   </button>
                                   <button
                                     type="button"
