@@ -142,6 +142,7 @@ export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
   'registry-catalog',
   'mcp-servers',
   'workflow-recipes',
+  'guardrails',
   'directories',
   'communication-channels',
   'llm-models',
