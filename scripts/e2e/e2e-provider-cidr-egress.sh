@@ -580,12 +580,17 @@ else
   die "expected out-of-range resolved IPs to ride the /32 window alongside ${TEST_CIDR} (availability guarantee)"
 fi
 
-# Warning log emitted for the drift (Phase-2 H7 canary log).
+# Warning log emitted for the drift (Phase-2 H7 canary log). DIAGNOSTIC ONLY — NOT a
+# counted assertion: the drift invariant is already proven fail-loud by the metric
+# assertion above (`die` on absence). The H7 log is throttled (1h) and read from the
+# last 400 lines, so its presence is timing-dependent; gating `ok`/PASS_COUNT on it
+# made the total non-deterministic (32↔33) for the SAME correct state. Keep it as
+# information only so PASS_COUNT counts deterministic assertions exclusively.
 if kc -n "$CONTROL_NS" logs "deploy/${HCC_DEPLOY}" --tail=400 2>/dev/null \
      | grep -qF "provider-range drift for \"${PROVIDER_DNS}\""; then
-  ok "HCC emitted the provider-range drift Warning log for '${PROVIDER_DNS}'"
+  log "diagnostic: HCC drift Warning log present for '${PROVIDER_DNS}' (H7 canary)"
 else
-  warn "drift Warning log not found in the last 400 lines (metric already proved drift — throttled log may have rotated)"
+  log "diagnostic: HCC drift Warning log not in the last 400 lines for '${PROVIDER_DNS}' (throttled/rotated; the metric assertion above already proved drift fail-loud)"
 fi
 
 # ─── Phase 6 — H3-live guard (catalog problem → LKG, never egress loss) ──
