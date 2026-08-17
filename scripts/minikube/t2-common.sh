@@ -331,7 +331,7 @@ if source == "local":
     import re
     if not isinstance(images, dict) or not images:
         raise SystemExit("local-images")
-    digest = re.compile(r"^sha256:[0-9a-fA-F]{32,64}$")
+    digest = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
     if any(not isinstance(name, str) or not name or not isinstance(value, str) or not digest.fullmatch(value) for name, value in images.items()):
         raise SystemExit("local-digests")
 print(source + "\t" + tag)

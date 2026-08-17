@@ -67,11 +67,19 @@ dotenv_canonical_root() {
     # worktree-local file would reintroduce per-lane credential drift.
     return 0
   fi
-  [[ -f "${repo_root}/.env" ]] && printf '%s\n' "${repo_root}/.env"
+  if [[ -f "${repo_root}/.env" ]]; then
+    printf '%s\n' "${repo_root}/.env"
+  fi
+  return 0
 }
 
 dotenv_load_canonical_root() {
   local repo_root="${1:?repository root is required}" env_file
   env_file="$(dotenv_canonical_root "${repo_root}")"
-  [[ -n "${env_file}" ]] && dotenv_load_file "${env_file}"
+  if [[ -n "${env_file}" ]]; then
+    dotenv_load_file "${env_file}"
+  fi
+  # A canonical .env is optional. Callers run with set -e and should continue
+  # with their documented defaults when the checkout has no local credentials.
+  return 0
 }

@@ -10,6 +10,7 @@
     "build": "npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.json",
     "build:renderer": "vite build --config ui/vite.config.ts",
+    "verify:electron": "node ./scripts/verify-electron-runtime.mjs",
     "icons:generate": "node ./scripts/generate-adaptive-icons.mjs",
     "test": "vitest run",
     "test:e2e": "vitest run --config test/e2e/vitest.config.ts",

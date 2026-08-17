@@ -525,7 +525,7 @@ assert_minimal_seed_is_setup_first_and_link_fail_closed() {
   if printf '%s\n' "$minimal_block" | grep -Fq 'perform_initial_setup' && \
      printf '%s\n' "$minimal_block" | grep -Fq 'login_admin_only' && \
      printf '%s\n' "$minimal_block" | grep -Fq 'verify_minimal_operator_bootstrap' && \
-     grep -Fq 'clerum_initial_setup_link_is_active' "$seed" && \
+     grep -Fq 'clerum_initial_setup_link_matches' "$seed" && \
      grep -Fq 'refusing ordinary-user fallback' "$seed"; then
     pass "minimal seed consumes setup before login and fails closed without an active initial_setup link"
   else
@@ -544,7 +544,15 @@ assert_minimal_bootstrap_contract_runs_on_system_bash() {
     set -e
     source "$1"
     [ "$(clerum_canonical_email "Admin@EvenFire.Local")" = "admin@evenfire.local" ]
+    [ "$(clerum_minimal_desktop_email "Admin@EvenFire.Local" "" false)" = "admin@evenfire.local" ]
+    [ "$(clerum_minimal_desktop_email "Admin@EvenFire.Local" "Desktop@Example.Local" true)" = "desktop@example.local" ]
     clerum_initial_setup_link_is_active active initial_setup desktop-id true
+    clerum_initial_setup_link_matches active initial_setup desktop-id admin-id admin-id
+    ! clerum_initial_setup_link_matches active initial_setup desktop-id "" admin-id
+    ! clerum_initial_setup_link_matches active initial_setup "" admin-id admin-id
+    [ "$(clerum_minimal_setup_outcome 201)" = setup_succeeded ]
+    [ "$(clerum_minimal_setup_outcome 409)" = setup_already_consumed ]
+    [ "$(clerum_minimal_setup_outcome 401)" = setup_failed ]
     ! clerum_initial_setup_link_is_active revoked initial_setup desktop-id true
     ! clerum_initial_setup_link_is_active active revoked desktop-id true
     ! clerum_initial_setup_link_is_active active initial_setup "" true

@@ -100,8 +100,7 @@ jobs:
       - name: Verify Electron runtime
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app
-        run: |
-          node -e "const p=require('electron'); if(typeof p !== 'string') process.exit(1); console.log(p)"
+        run: npm run verify:electron
 
       - name: Build
         working-directory: ${{ matrix.service }}

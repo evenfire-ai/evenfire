@@ -36,8 +36,8 @@ without its downloaded runtime while `npm ci` still exits successfully. The
 pinned Electron package is explicitly approved in `desktop-app/package.json`.
 Desktop validation must use Node 24 (Node 26 is not a supported validation
 runtime), run `npm ci` without `--ignore-scripts`, and verify
-`require('electron')` resolves to an executable before any test/build result is
-counted. If the check reports `Electron failed to install correctly`, switch to
+`npm run verify:electron` confirms that `require('electron')` resolves to an
+executable before any test/build result is counted. If the check reports `Electron failed to install correctly`, switch to
 Node 24, repair the generated dependency directory, and rerun the install;
 never bypass the postinstall with `ELECTRON_SKIP_BINARY_DOWNLOAD`, use an
 unverified override, or treat the resulting test failure as a product

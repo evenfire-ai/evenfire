@@ -111,7 +111,11 @@ if [ -z "${ADMIN_EMAIL:-}" ]; then
 fi
 if [ "$SEED_PROFILE" = "minimal" ]; then
   ADMIN_EMAIL="$(clerum_canonical_email "$ADMIN_EMAIL")"
-  DEV_EMAIL="$(clerum_canonical_email "$DEV_EMAIL")"
+  if [ -n "${E2E_DEV_LOGIN_EMAIL+x}" ]; then
+    DEV_EMAIL="$(clerum_minimal_desktop_email "$ADMIN_EMAIL" "$DEV_EMAIL" true)"
+  else
+    DEV_EMAIL="$(clerum_minimal_desktop_email "$ADMIN_EMAIL" "" false)"
+  fi
   if [ "$DEV_EMAIL" != "$ADMIN_EMAIL" ]; then
     printf '%s\n' "  ERROR — SEED_PROFILE=minimal requires the Desktop identity email (${DEV_EMAIL}) to equal the bootstrap admin email (${ADMIN_EMAIL}); refusing to create an unlinked ordinary member" >&2
     exit 1
@@ -533,7 +537,7 @@ verify_minimal_operator_bootstrap() {
     '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.desktopUserId // empty')"
   link_admin_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
     '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.controlAdminId // empty')"
-  if ! clerum_initial_setup_link_is_active "$status" "$source" "$desktop_user_id" "$([ "$link_admin_id" = "$admin_id" ] && printf true || printf false)"; then
+  if ! clerum_initial_setup_link_matches "$status" "$source" "$desktop_user_id" "$link_admin_id" "$admin_id"; then
     die "Minimal bootstrap is incomplete: expected one active initial_setup Desktop link for '$ADMIN_EMAIL' (status=$status source=$source desktopUserId=${desktop_user_id:-missing} controlAdminId=${link_admin_id:-missing}); refusing ordinary-user fallback"
   fi
   ok "Initial admin '$ADMIN_USERNAME' has active initial_setup Desktop operator link (desktopUserId=${desktop_user_id:0:8}…)"
@@ -580,10 +584,11 @@ login_first_legacy() {
 if [ "$SEED_PROFILE" = "minimal" ]; then
   log "Minimal self-hosted bootstrap: attempting /admin/auth/setup before any admin login"
   perform_initial_setup
-  if [[ "$SETUP_CODE" =~ ^2 ]]; then
+  setup_outcome="$(clerum_minimal_setup_outcome "$SETUP_CODE")"
+  if [ "$setup_outcome" = "setup_succeeded" ]; then
     capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
     ok "Bootstrapped initial admin '$ADMIN_USERNAME' with Desktop workspace"
-  elif [ "$SETUP_CODE" = "409" ]; then
+  elif [ "$setup_outcome" = "setup_already_consumed" ]; then
     log "Initial setup already consumed; validating the existing governed link after login"
     login_admin_only
   else

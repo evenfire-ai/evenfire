@@ -97,7 +97,7 @@ checks succeed from `desktop-app`:
 
 ```bash
 node --version  # must report v24.x
-node -e "const p=require('electron'); if(typeof p !== 'string') process.exit(1); console.log(p)"
+npm run verify:electron
 ```
 
 If it fails with `Electron failed to install correctly`, the dependency install

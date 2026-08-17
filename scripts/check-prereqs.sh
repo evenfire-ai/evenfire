@@ -91,18 +91,19 @@ else
   MISSING=$((MISSING + 1))
 fi
 
-# ── Node.js (>= 24) ────────────────────────────────────────────────────
+# ── Node.js 24.x (Desktop/Electron validation contract) ───────────────
 if command -v node >/dev/null 2>&1; then
   NODE_VER="$(node --version | sed 's/^v//')"
-  if version_ge "$NODE_VER" "24.0.0"; then
+  NODE_MAJOR="${NODE_VER%%.*}"
+  if [ "$NODE_MAJOR" = "24" ]; then
     ok "node     v${NODE_VER}"
   else
-    err "node     v${NODE_VER} (need >= 24)"
+    err "node     v${NODE_VER} (need 24.x for Desktop/Electron validation)"
     hint "brew install node@24" "curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
     MISSING=$((MISSING + 1))
   fi
 else
-  err "node     not found (need >= 24)"
+  err "node     not found (need 24.x for Desktop/Electron validation)"
   hint "brew install node@24" "curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
   MISSING=$((MISSING + 1))
 fi
