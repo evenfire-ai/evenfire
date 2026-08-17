@@ -134,10 +134,16 @@ expect_code IMAGE_MANIFEST_MISMATCH stale-image stale-image \
   bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=old; t2_image_check' bash "$COMMON"
 
 invalid_manifest="$tmp/invalid-image-manifest.json"
-printf '{"imageSource":"local","imageTag":""}\n' >"$invalid_manifest"
+printf '{"imageSource":"ghcr","imageTag":""}\n' >"$invalid_manifest"
 bootstrap_manifest_state="$(env "${repo_env[@]}" T2_IMAGE_MANIFEST="$invalid_manifest" T2_BOOTSTRAP_REQUIRED=true \
   bash -c 'source "$1"; T2_BOOTSTRAP_REQUIRED=true; t2_image_check; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
 [ "$bootstrap_manifest_state" = full-bootstrap ] || fail "invalid bootstrap manifest selected $bootstrap_manifest_state instead of full-bootstrap"
+
+local_manifest="$tmp/local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":""}\n' >"$local_manifest"
+local_manifest_state="$(env "${repo_env[@]}" T2_IMAGE_MANIFEST="$local_manifest" T2_BOOTSTRAP_REQUIRED=false \
+  bash -c 'source "$1"; t2_image_check; printf "%s\t%s" "$T2_IMAGE_SOURCE" "$T2_IMAGE_TAG"' bash "$COMMON")"
+[ "$local_manifest_state" = $'local\t' ] || fail "local manifest with an empty tag was rejected: $local_manifest_state"
 
 expect_code SECRET_MISSING missing-secret missing-secret \
   env "${repo_env[@]}" T2_BOOTSTRAP_REQUIRED=false T2_REQUIRED_NAMESPACES=control-plane \

@@ -322,7 +322,10 @@ except (OSError, ValueError):
     raise SystemExit("invalid")
 source = payload.get("imageSource") or payload.get("source") or payload.get("mode") or ""
 tag = payload.get("imageTag") or payload.get("tag") or ""
-if not source or not tag:
+# Local images deliberately have no registry tag; build-images.sh records an
+# empty imageTag and image-mode.sh treats that as the local coordinate. A tag
+# is mandatory only for the ghcr acquisition mode.
+if not source or (source == "ghcr" and not tag):
     raise SystemExit("missing")
 print(source + "\t" + tag)
 PY
