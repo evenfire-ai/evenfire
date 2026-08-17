@@ -30,7 +30,6 @@ import {
 import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
-import { hostDeleteCleanupTotal, hostFleetRequestsTotal, hostWatchRecoverySeconds } from './metrics'
 import type {
   AuthorityContext,
   AuthorityHost,
@@ -39,6 +38,7 @@ import type {
   AuthoritySecretMetadata,
   McpAuthorizationStore,
 } from './mcpAuthorization'
+import { hostDeleteCleanupTotal, hostFleetRequestsTotal, hostWatchRecoverySeconds } from './metrics'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'
@@ -56,6 +56,7 @@ import {
   SharedFileSystemCRD,
   SharedFileSystemSpec,
 } from './types'
+import { getErrorCode } from './utils'
 
 // Only initialize K8s client if not in dev mode
 let customObjectsApi: k8s.CustomObjectsApi | null = null
@@ -506,15 +507,12 @@ export async function getContext(contextId: string): Promise<ContextCRD | null> 
       spec: obj.spec,
     }
   } catch (error) {
-    const code =
-      (error as { code?: number; response?: { statusCode?: number } }).code ??
-      (error as { response?: { statusCode?: number } }).response?.statusCode
-    if (code === 404) {
+    if (getErrorCode(error) === 404) {
       console.warn(`[K8s] Context CRD not found: ${contextId}`)
       return null
     }
     console.error(`[K8s] Failed to read Context CRD:`, error)
-    return null
+    throw error
   }
 }
 
