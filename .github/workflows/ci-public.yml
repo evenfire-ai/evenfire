@@ -390,6 +390,21 @@ jobs:
       - name: Test HCC watch-recovery gate coordination
         run: bash scripts/tests/test-hcc-watch-recovery-gate.sh
 
+      - name: Test HCC API gateway readiness separation
+        run: bash scripts/tests/test-hcc-api-gateway-readiness.sh
+
+      - name: Test host-storm metric adjudication
+        run: bash scripts/tests/test-host-storm-metric-gate.sh
+
+      - name: Test WRC-to-HCC contracts
+        run: bash scripts/tests/test-wrc-hcc-contracts-gate.sh
+
+      - name: Test WRC internal dependency NetworkPolicy contracts
+        run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
+
+      - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
+        run: bash scripts/tests/test-lint-networkpolicies.sh
+
       - name: Test Plugin Workload SDK auth bootstrap policy
         run: bash scripts/tests/test-plugin-workload-sdk-auth-bootstrap.sh
 
@@ -398,6 +413,24 @@ jobs:
 
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
+
+      - name: Validate single-writer rollout invariant on rendered overlays
+        run: |
+          # The k8s-api-ip patch is rendered from a gitignored template at setup
+          # time; render it with a dummy IP so `kubectl kustomize` can build the
+          # minikube overlay here. The gcp-* overlays live in evenfire-infra, so
+          # this repo validates only the minikube overlay it actually ships.
+          sed 's#__K8S_API_IP__#10.96.0.1#g' \
+            deploy/overlays/minikube/patches/k8s-api-ip.yaml.template \
+            > deploy/overlays/minikube/patches/k8s-api-ip.yaml
+          SINGLE_WRITER_OVERLAYS="deploy/overlays/minikube" \
+            bash deploy/scripts/validate-postgres-single-writer-strategy.sh
+
+      - name: Test single-writer validator fails loud on an absent local deploy
+        run: bash scripts/tests/test-postgres-single-writer-strategy.sh
+
+      - name: Test post-reset convergence isolates DB-dependent controllers
+        run: bash scripts/tests/test-converge-control-db-after-reset.sh
 
       - name: Test release coordinates (writer, checker, floor decoupling)
         run: bash scripts/tests/test-release-coordinates.sh

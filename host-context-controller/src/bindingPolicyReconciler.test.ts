@@ -2,6 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { BindingDef, BindingPolicyReconciler } from './bindingPolicyReconciler'
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>(res => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 function makeMockNetworkingApi() {
   return {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
@@ -40,7 +48,9 @@ describe('BindingPolicyReconciler', () => {
   const singleBinding: BindingDef[] = [{ from: 'redis-mcp', to: 'redis', port: 6379 }]
 
   it('creates egress + ingress policies for a binding', async () => {
-    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp')
+    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp', 'redis-mcp', {
+      isCurrent: () => true,
+    })
 
     // 2 calls: 1 egress + 1 ingress
     expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
@@ -75,7 +85,9 @@ describe('BindingPolicyReconciler', () => {
   })
 
   it('applies binding-allow labels to all policies', async () => {
-    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp')
+    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp', 'redis-mcp', {
+      isCurrent: () => true,
+    })
 
     for (const call of mockApi.createNamespacedNetworkPolicy.mock.calls) {
       const labels = (call[0] as { body: { metadata: { labels: Record<string, string> } } }).body
@@ -89,10 +101,41 @@ describe('BindingPolicyReconciler', () => {
   it('handles 409 conflict with create-or-replace pattern', async () => {
     mockApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
 
-    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp')
+    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp', 'redis-mcp', {
+      isCurrent: () => true,
+    })
 
     expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
     expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalled()
+  })
+
+  it('does not replace or start another apply after its authority lease is retired', async () => {
+    const readStarted = deferred()
+    const releaseRead = deferred<{ metadata: { resourceVersion: string } }>()
+    mockApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+    mockApi.readNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+      readStarted.resolve()
+      return releaseRead.promise
+    })
+    let current = true
+
+    const reconcile = reconciler.reconcileBindings(
+      'my-recipe',
+      singleBinding,
+      'redis-mcp',
+      'redis-mcp',
+      { isCurrent: () => current }
+    )
+    await readStarted.promise
+
+    current = false
+    releaseRead.resolve({ metadata: { resourceVersion: '1' } })
+    await reconcile
+
+    // The first create was authorized and returned 409 without mutating. Once
+    // the lease is retired, no replacement or second policy apply may start.
+    expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 
   it('cleanupBindings deletes policies in both namespaces', async () => {
@@ -108,8 +151,65 @@ describe('BindingPolicyReconciler', () => {
     expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalled()
   })
 
+  it('does not delete listed policies when a same-name recipe is recreated during LIST', async () => {
+    const bothListsStarted = deferred()
+    const releaseLists = deferred<{
+      items: Array<{ metadata: { name: string } }>
+    }>()
+    let listCalls = 0
+    mockApi.listNamespacedNetworkPolicy.mockImplementation(async () => {
+      listCalls += 1
+      if (listCalls === 2) bothListsStarted.resolve()
+      return releaseLists.promise
+    })
+    let recipeRecreated = false
+    const deleteAllowed = vi.fn(async () => !recipeRecreated)
+
+    const cleanup = reconciler.cleanupBindings('my-recipe', { deleteAllowed })
+    await bothListsStarted.promise
+
+    recipeRecreated = true
+    releaseLists.resolve({
+      items: [{ metadata: { name: 'bind-my-recipe-a-b-egress' } }],
+    })
+    await cleanup
+
+    expect(deleteAllowed).toHaveBeenCalledTimes(2)
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('rejects cleanup when listing binding policies fails', async () => {
+    mockApi.listNamespacedNetworkPolicy.mockRejectedValue(new Error('transient LIST failure'))
+
+    await expect(reconciler.cleanupBindings('my-recipe')).rejects.toThrow(
+      'Failed to clean up binding policies for recipe "my-recipe"'
+    )
+  })
+
+  it('rejects cleanup when deleting a binding policy fails with a non-404 error', async () => {
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+      items: [{ metadata: { name: 'bind-my-recipe-a-b-egress' } }],
+    })
+    mockApi.deleteNamespacedNetworkPolicy.mockRejectedValue(new Error('transient DELETE failure'))
+
+    await expect(reconciler.cleanupBindings('my-recipe')).rejects.toThrow(
+      'Failed to clean up binding policies for recipe "my-recipe"'
+    )
+  })
+
+  it('treats a 404 while deleting binding policies as successful cleanup', async () => {
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+      items: [{ metadata: { name: 'bind-my-recipe-a-b-egress' } }],
+    })
+    mockApi.deleteNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
+
+    await expect(reconciler.cleanupBindings('my-recipe')).resolves.toBeUndefined()
+  })
+
   it('uses _from for ingress rules (K8s client ObjectSerializer maps _from → from)', async () => {
-    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp')
+    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp', 'redis-mcp', {
+      isCurrent: () => true,
+    })
 
     const calls = mockApi.createNamespacedNetworkPolicy.mock.calls
     const ingressCall = calls.find(
@@ -126,7 +226,9 @@ describe('BindingPolicyReconciler', () => {
   })
 
   it('uses correct pod selectors and namespace-aware placement', async () => {
-    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp')
+    await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp', 'redis-mcp', {
+      isCurrent: () => true,
+    })
 
     const calls = mockApi.createNamespacedNetworkPolicy.mock.calls
     const egressCall = calls.find(
@@ -196,7 +298,8 @@ describe('BindingPolicyReconciler', () => {
       'my-recipe',
       singleBinding,
       'redis-mcp',
-      'my-recipe-redis-mcp'
+      'my-recipe-redis-mcp',
+      { isCurrent: () => true }
     )
 
     const calls = mockApi.createNamespacedNetworkPolicy.mock.calls

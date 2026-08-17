@@ -35,13 +35,15 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
   exit 1
 }
 kctl get nodes -o json | jq -e \
-  'any(.items[]; .metadata.labels["minikube.k8s.io/name"] != null)' >/dev/null || {
+  --arg context "$E2E_KUBECONTEXT" \
+  'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $context)' >/dev/null || {
   echo "Refusing HCC fault injection: target is not a minikube cluster." >&2
   exit 1
 }
 
 HCC_NS="${HCC_NS:-control-plane}"
 HCC_DEPLOY="${HCC_DEPLOY:-host-context-controller}"
+MCP_NS="${MCP_NS:-mcp-server}"
 SOURCE_HOST="${E2E_SOURCE_HOST_REF:-chatllm-stateless}"
 HOST_NS="${MCP_HOST_NS:-mcp-host}"
 CHANNEL_NS="${CHANNELS_NS:-channels}"
@@ -61,7 +63,7 @@ HCC_LOG_BUFFER="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-stream.XXXXXX")"
 NON_FIXTURE_BASELINE="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-baseline.XXXXXX")"
 NON_FIXTURE_AFTER="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-after.XXXXXX")"
 CLEANUP_KINDS="deployments,services,secrets,serviceaccounts,roles,rolebindings,networkpolicies,persistentvolumeclaims"
-START_TIME="" HCC_UID="" HCC_RESTARTS="" CONTROL_IDENTITY=""
+START_TIME="" HCC_UID="" HCC_RESTARTS="" CONTROL_IDENTITY="" ORIGINAL_REPLICAS=""
 HCC_LOG_STREAM_PID=""
 # Mirrors COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS in k8sClient.ts.
 CC_RECOVERY_RETRY_SECONDS=5
@@ -74,6 +76,35 @@ HCC_GATE_FINALIZATION_FAILURE=""
 
 die() { fail "$*"; exit 1; }
 now_rfc3339() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+# This gate deliberately changes only the HCC Kubernetes API path.  If its
+# rollout fails before the normal recovery log stream starts, preserve the
+# bounded pod state and both container log buffers that distinguish a proxy,
+# policy, or process-startup failure.  Cleanup still restores HCC afterwards.
+print_hcc_proxy_rollout_diagnostics() {
+  local pod
+
+  echo "HCC proxy rollout diagnostics (before restoration):" >&2
+  kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" -o json |
+    jq -r '
+      .items[] |
+      .metadata.name as $pod |
+      .status.phase as $phase |
+      .status.containerStatuses[]? |
+      "pod=\($pod) phase=\($phase // "unknown") ready=\(.ready) restarts=\(.restartCount) waiting=\(.state.waiting.reason // "none") terminated=\(.state.terminated.reason // "none") exitCode=\(.state.terminated.exitCode // "none") lastTerminated=\(.lastState.terminated.reason // "none") lastExitCode=\(.lastState.terminated.exitCode // "none")"
+    ' >&2 || true
+
+  while IFS= read -r pod; do
+    [ -n "$pod" ] || continue
+    echo "HCC proxy rollout previous logs for pod/${pod}:" >&2
+    kctl logs "pod/${pod}" -n "$HCC_NS" -c host-context-controller \
+      --previous --tail=120 >&2 || true
+    echo "HCC proxy rollout current logs for pod/${pod}:" >&2
+    kctl logs "pod/${pod}" -n "$HCC_NS" -c host-context-controller \
+      --tail=120 >&2 || true
+  done < <(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+}
 
 cleanup() {
   local status=$? cleanup_failed=0 restore_ok=1 host remaining
@@ -126,6 +157,8 @@ cleanup() {
   else
     cleanup_failed=1
     print_hcc_repair_instructions
+    echo "  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} scale deployment/${HCC_DEPLOY} --replicas=${ORIGINAL_REPLICAS:-1}" >&2
+    echo "  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} rollout status deployment/${HCC_DEPLOY} --timeout=180s" >&2
   fi
   finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok" || cleanup_failed=1
   rm -f "$HCC_LOG_BUFFER" "$NON_FIXTURE_BASELINE" "$NON_FIXTURE_AFTER"
@@ -143,19 +176,35 @@ header "HCC CommunicationChannel watch recovery"
 require_branch_owned_hcc_gate
 acquire_hcc_watch_gate_lock || die "another HCC watch-recovery gate owns this profile"
 kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" >/dev/null
+ORIGINAL_REPLICAS="$(
+  kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.replicas}'
+)"
+[ "$ORIGINAL_REPLICAS" = 1 ] ||
+  die "expected exactly one HCC replica, found ${ORIGINAL_REPLICAS:-unknown}"
 kctl get host "$SOURCE_HOST" -n "$HOST_NS" >/dev/null
 
 host_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="KUBERNETES_SERVICE_HOST")].name}')"
 port_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="KUBERNETES_SERVICE_PORT")].name}')"
-[ -z "$host_override$port_override" ] || die "HCC already has an explicit Kubernetes service override"
+api_cidrs_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="CONTEXT_MAPPER_K8S_API_CIDRS")].name}')"
+[ -z "$host_override$port_override$api_cidrs_override" ] ||
+  die "HCC already has an explicit Kubernetes service or API CIDR override"
 [ -z "$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.hostAliases}')" ] ||
   die "HCC already has hostAliases; refusing a non-restorable fault injection"
 
 HCC_IMAGE="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}')"
 [ -n "$HCC_IMAGE" ] || die "could not resolve the running HCC image"
+K8S_API_SERVICE_HOST="$(kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
+  -c host-context-controller -- printenv KUBERNETES_SERVICE_HOST)" ||
+  die "could not read the Kubernetes-injected API service IP"
+kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" -c host-context-controller -- \
+  node -e 'const { isIP } = require("node:net"); process.exit(isIP(process.argv[1]) === 4 ? 0 : 1)' \
+  "$K8S_API_SERVICE_HOST" >/dev/null ||
+  die "Kubernetes-injected API service host is not an IPv4 address"
+K8S_API_CIDR="${K8S_API_SERVICE_HOST}/32"
 
 log "Creating an isolated TCP proxy for the Kubernetes API"
 create_hcc_api_proxy
@@ -164,19 +213,27 @@ verify_hcc_proxy_network_policy
 PROXY_IP="$(kctl get service "$PROXY_NAME" -n "$HCC_NS" -o jsonpath='{.spec.clusterIP}')"
 [ -n "$PROXY_IP" ] || die "proxy Service has no ClusterIP"
 HCC_PATCHED=1
-hcc_proxy_patch="$(jq -cn --arg ip "$PROXY_IP" '{spec:{template:{spec:{
+hcc_proxy_patch="$(jq -cn --arg ip "$PROXY_IP" --arg api_cidr "$K8S_API_CIDR" '{spec:{template:{spec:{
   hostAliases:[{ip:$ip,hostnames:["kubernetes.default.svc"]}],
   containers:[{name:"host-context-controller",env:[
     {name:"KUBERNETES_SERVICE_HOST",value:"kubernetes.default.svc"},
-    {name:"KUBERNETES_SERVICE_PORT",value:"443"}
+    {name:"KUBERNETES_SERVICE_PORT",value:"443"},
+    {name:"CONTEXT_MAPPER_K8S_API_CIDRS",value:$api_cidr}
   ]}]
 }}}}')"
 kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic -p "$hcc_proxy_patch" >/dev/null
-kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null ||
+if ! kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null; then
+  print_hcc_proxy_rollout_diagnostics
   die "HCC did not become ready through the API proxy"
+fi
 initial_hcc_identity="$(wait_for_hcc_identity 30)" || die "could not capture HCC pod identity"
 read -r HCC_UID HCC_RESTARTS <<<"$initial_hcc_identity"
 [ -n "$HCC_UID" ] && [ "$HCC_UID" != invalid ] || die "could not capture HCC pod identity"
+proxy_policy_cidrs="$(kctl get networkpolicy "allow-k8s-api-egress-${MCP_NS}" -n "$MCP_NS" -o json |
+  jq -r '[.spec.egress[0].to[]?.ipBlock.cidr] | join(",")')" ||
+  die "could not read the proxy-run API egress policy"
+[ "$proxy_policy_cidrs" = "$K8S_API_CIDR" ] ||
+  die "proxy-run API egress policy did not retain the injected Kubernetes API CIDR"
 ok "HCC is healthy through the proxy (pod=${HCC_UID}, restarts=${HCC_RESTARTS})"
 
 log "Creating one stateful control and two stateless Host fixtures"
@@ -214,14 +271,13 @@ ok "isolated Host fleet reached its baseline"
 
 run_recovery_cycle() {
   local cycle=$1 cycle_logs recovery_logs outage_started outage_seconds max_retry_failures list_pattern
-  local host_list_pattern ended_before started_before recovered_before completed_before failed_before
+  local host_list_pattern ended_before started_before recovered_before failed_before
   local list_before host_list_before expected_host_count
   local failed_after retry_failures
   cycle_logs="$(hcc_recovery_logs)"
   ended_before="$(log_count_from "$cycle_logs" 'CommunicationChannel watch ended;')"
   started_before="$(log_count_from "$cycle_logs" 'Starting CommunicationChannel watch')"
   recovered_before="$(log_count_from "$cycle_logs" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache')"
-  completed_before="$(log_count_from "$cycle_logs" 'Completed Host reconciliation after CommunicationChannel recovery$')"
   failed_before="$(log_count_from "$cycle_logs" 'cache recovery failed;')"
   list_pattern="Listing all CommunicationChannels in namespace ${CHANNEL_NS}"
   host_list_pattern="Listing all Hosts in namespace ${HOST_NS}"
@@ -265,10 +321,7 @@ run_recovery_cycle() {
   max_retry_failures=$((
     (outage_seconds + CC_RECOVERY_RETRY_SECONDS - 1) / CC_RECOVERY_RETRY_SECONDS + 2
   ))
-  wait_log_count 'Completed Host reconciliation after CommunicationChannel recovery$' \
-    "$((completed_before + 1))" 180 ||
-    die "Host fleet did not converge after snapshot recovery in cycle ${cycle}"
-  recovery_cycle_used_fresh_host_inventory "$cycle" "$expected_host_count" ||
+  wait_recovery_cycle_fresh_host_inventory "$cycle" "$expected_host_count" 180 ||
     die "cycle ${cycle} did not reconcile the fresh ${expected_host_count}-Host inventory"
   recovery_logs="$(hcc_recovery_logs)"
   failed_after="$(log_count_from "$recovery_logs" 'cache recovery failed;')"
@@ -316,14 +369,18 @@ ended="$(log_count_from "$final_logs" 'CommunicationChannel watch ended;')"
 started="$(log_count_from "$final_logs" 'Starting CommunicationChannel watch')"
 recovered="$(log_count_from "$final_logs" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache')"
 failed="$(log_count_from "$final_logs" 'cache recovery failed;')"
-fleet_passes="$(log_count_from "$final_logs" 'Completed Host reconciliation after CommunicationChannel')"
+fleet_passes="$(
+  log_count_from "$final_logs" \
+    'Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)$'
+)"
 [ "$ended" = 2 ] && [ "$started" = 2 ] && [ "$recovered" = 2 ] && \
   [ "$failed" = "$TOTAL_RETRY_FAILURES" ] && [ "$failed" -le "$TOTAL_RETRY_FAILURE_LIMIT" ] ||
   die "unexpected watch lifecycle counts: ended=${ended}, started=${started}, recovered=${recovered}, failed=${failed}"
 [ "$fleet_passes" -ge 2 ] && [ "$fleet_passes" -le 4 ] ||
   die "unexpected successful fleet reconcile count ${fleet_passes}; expected 2..4 passes"
-# Each recovered snapshot requires one successful pass; at most one already
-# queued fail-closed pass may also finish per cycle. The deterministic
+# Each recovered snapshot requires one causally ordered successful pass; a
+# Host-watch recovery pass may cover the same fresh CC+Host inventories. At
+# most one already queued covering pass may also finish per cycle. The deterministic
 # max-concurrency=1 proof stays in k8sClient unit tests where overlapping passes
 # can be barrier-controlled.
 
