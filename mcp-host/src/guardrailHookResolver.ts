@@ -114,6 +114,28 @@ function endpointFor(cr: LlmHookCR, ns: string): ResolvedEndpoint | null {
 }
 
 /**
+ * §1.2 path-collision loser: two co-located hooks (same pod key) declaring the
+ * same `spec.path` share one handler, so a loser dialed at that path would
+ * inherit the winner's admin-granted capabilities. The host-context-controller
+ * flags losers with a `Ready=False / reason=DuplicatePath` condition ("fail
+ * closed"), but nothing enforced it — the resolver only ever read
+ * `observedDigest`. Honor the condition here.
+ */
+function isDuplicatePathLoser(cr: LlmHookCR): boolean {
+  const conditions = (
+    cr.status as
+      | { conditions?: Array<{ type?: string; status?: string; reason?: string }> }
+      | undefined
+  )?.conditions
+  return (
+    Array.isArray(conditions) &&
+    conditions.some(
+      c => c?.type === 'Ready' && c?.status === 'False' && c?.reason === 'DuplicatePath'
+    )
+  )
+}
+
+/**
  * Resolve every referenced hook into a `HookDescriptor`. Dangling refs, targets
  * with no resolvable endpoint, and (for image hooks) digest mismatches are
  * skipped with a warning rather than failing the whole boot.
@@ -188,14 +210,25 @@ export async function resolveGuardrailHookDescriptors(
     // /v1 call short-circuits to unavailable, so a `may_deny` (fail-closed) hook
     // DENIES and an advisory hook contributes nothing (§8.6/N11). Never a silent
     // allow for a deny-authoritative hook whose integrity check failed.
-    const quarantined =
+    const digestMismatch =
       ep.kind === 'image' &&
       !!refDigest &&
       !!cr.status?.observedDigest &&
       refDigest !== cr.status.observedDigest
-    if (quarantined) {
+    // A path-collision loser is fail-closed the same way: quarantine it so its
+    // /v1 calls short-circuit to unavailable (may_deny → deny; advisory →
+    // nothing) instead of hitting the co-located winner's handler and inheriting
+    // its capabilities.
+    const duplicatePathLoser = isDuplicatePathLoser(cr)
+    const quarantined = digestMismatch || duplicatePathLoser
+    if (digestMismatch) {
       console.warn(
         `[Guardrails] LlmHook ${id} digest mismatch (ref=${refDigest} observed=${cr.status?.observedDigest}); quarantining (fail-closed for may_deny)`
+      )
+    }
+    if (duplicatePathLoser) {
+      console.warn(
+        `[Guardrails] LlmHook ${id} is a DuplicatePath collision loser (Ready=False); quarantining (fail-closed for may_deny)`
       )
     }
 
@@ -213,7 +246,7 @@ export async function resolveGuardrailHookDescriptors(
       ...(quarantined ? { quarantined: true } : {}),
     })
     console.log(
-      `[Guardrails] resolved hook ${id} -> ${ep.endpoint}${path} points=[${points.join(',')}] caps=[${capabilities.join(',')}] failMode=${failMode}${external ? ' external=true(SSRF-guarded)' : ''}${quarantined ? ' quarantined=true(digest-mismatch)' : ''}`
+      `[Guardrails] resolved hook ${id} -> ${ep.endpoint}${path} points=[${points.join(',')}] caps=[${capabilities.join(',')}] failMode=${failMode}${external ? ' external=true(SSRF-guarded)' : ''}${quarantined ? ` quarantined=true(${duplicatePathLoser ? 'duplicate-path' : 'digest-mismatch'})` : ''}`
     )
   }
 

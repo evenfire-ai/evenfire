@@ -128,4 +128,40 @@ describe('post_call / on_error projection', () => {
     expect(req.systemPromptParts).toBeUndefined()
     expect((req.messages as ChatMessage[]).every(m => m.role !== 'system')).toBe(true)
   })
+
+  it('on_error projects ONLY {code,message,retryable}, dropping provider/cause/status, and redacts the message', () => {
+    const err = {
+      code: 'LLM_RATE_LIMITED',
+      message: 'rate limited; Authorization: Bearer sk-abc123secret',
+      retryable: true,
+      provider: 'openai',
+      status: 429,
+      cause: { headers: { 'x-request-id': 'req_leak' }, response: {} },
+    }
+    const body = projectForHook(desc(), 'on_error', { request: request(), error: err }) as Record<
+      string,
+      unknown
+    >
+    const e = body.error as Record<string, unknown>
+    expect(Object.keys(e).sort()).toEqual(['code', 'message', 'retryable'])
+    expect(e.code).toBe('LLM_RATE_LIMITED')
+    expect(e.retryable).toBe(true)
+    // provider / status / cause (→ headers/request metadata) are never forwarded.
+    expect(e.provider).toBeUndefined()
+    expect(e.status).toBeUndefined()
+    expect(e.cause).toBeUndefined()
+    // Secrets in the free-text message are redacted.
+    expect(e.message as string).not.toContain('sk-abc123secret')
+    expect(e.message as string).toContain('[redacted]')
+  })
+
+  it('on_error recovers a real Error message (Error.prototype.message is non-enumerable)', () => {
+    const err = Object.assign(new Error('upstream failed'), { code: 'X' })
+    const body = projectForHook(desc(), 'on_error', { request: request(), error: err }) as Record<
+      string,
+      unknown
+    >
+    // A naive {...err} spread would drop `message` entirely; projectError reads it by access.
+    expect((body.error as Record<string, unknown>).message).toBe('upstream failed')
+  })
 })

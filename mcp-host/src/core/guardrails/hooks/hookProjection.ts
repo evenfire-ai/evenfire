@@ -20,6 +20,7 @@
  * `metadata`-only shaper (§8.7). A `metadata` `pre_call` hook gets model + params +
  * tool schemas but no message bodies, which is what lets it egress at low trust.
  */
+import { redactDiagnosticField } from '../../redactDiagnostics.js'
 import type { ChatMessage, ToolCompletionRequest, ToolCompletionResponse } from '../../types'
 import type { HookDescriptor, LifecyclePoint } from './types'
 
@@ -55,6 +56,29 @@ export function preCallIncludesContent(descriptor: HookDescriptor): boolean {
   return descriptor.contentAccess !== 'metadata'
 }
 
+/**
+ * Project an error for an `on_error` hook to ONLY the §8.1 wire fields
+ * {code, message, retryable}. The raw error is never forwarded: an LlmError's
+ * enumerable own props (`provider`, and a `cause` chain to the provider SDK
+ * error carrying status / response headers / request metadata) would leak, and
+ * `Error.prototype.message` is non-enumerable so a straight pass-through drops
+ * the very message the hook exists to recover from. `message` is read by
+ * property access (so it's included) and run through the shared diagnostic
+ * redaction (+120-char cap); `code` is a fixed enum; everything else is dropped.
+ */
+function projectError(error: unknown): {
+  code?: string
+  message?: string
+  retryable?: boolean
+} {
+  const e = (error ?? {}) as { code?: unknown; message?: unknown; retryable?: unknown }
+  const out: { code?: string; message?: string; retryable?: boolean } = {}
+  if (typeof e.code === 'string') out.code = e.code
+  if (typeof e.message === 'string') out.message = redactDiagnosticField(e.message).slice(0, 120)
+  if (typeof e.retryable === 'boolean') out.retryable = e.retryable
+  return out
+}
+
 /** Build the `/v1/{point}` request body for a hook, per the §8.4 projection contract. */
 export function projectForHook(
   descriptor: HookDescriptor,
@@ -83,7 +107,7 @@ export function projectForHook(
     case 'on_error':
       return {
         request: projectRequest(ctx.request as ToolCompletionRequest, true),
-        error: ctx.error,
+        error: projectError(ctx.error),
       }
     default:
       return {}

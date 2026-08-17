@@ -137,6 +137,51 @@ describe('resolveGuardrailHookDescriptors', () => {
     expect(out[0].capabilities).toEqual(['may_deny'])
   })
 
+  it('quarantines a DuplicatePath collision loser (Ready=False/DuplicatePath), even with a matching digest', async () => {
+    const cr: LlmHookCR = {
+      metadata: { name: 'dup' },
+      spec: {
+        target: { image: { ref: 'repo/img@sha256:x', port: 8080 } },
+        lifecyclePoints: ['preCall'],
+        capabilities: ['may_rewrite'],
+      },
+      status: {
+        observedDigest: 'sha256:x',
+        conditions: [
+          { type: 'Ready', status: 'False', reason: 'DuplicatePath', message: 'path collides' },
+        ],
+      } as unknown as LlmHookCR['status'],
+    }
+    const out = await resolveGuardrailHookDescriptors(
+      guardrails({ preCall: [{ id: 'dup', digest: 'sha256:x' }] }),
+      deps({ dup: cr })
+    )
+    // The loser must not hit the winner's handler → quarantine, fail-closed.
+    expect(out).toHaveLength(1)
+    expect(out[0].quarantined).toBe(true)
+  })
+
+  it('does NOT quarantine a Ready hook (digest matches, no DuplicatePath condition)', async () => {
+    const cr: LlmHookCR = {
+      metadata: { name: 'ok' },
+      spec: {
+        target: { image: { ref: 'repo/img@sha256:x', port: 8080 } },
+        lifecyclePoints: ['preCall'],
+        capabilities: ['may_deny'],
+      },
+      status: {
+        observedDigest: 'sha256:x',
+        conditions: [{ type: 'Ready', status: 'True', reason: 'Ready' }],
+      } as unknown as LlmHookCR['status'],
+    }
+    const out = await resolveGuardrailHookDescriptors(
+      guardrails({ preCall: [{ id: 'ok', digest: 'sha256:x' }] }),
+      deps({ ok: cr })
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].quarantined).toBeUndefined()
+  })
+
   it('drops unknown capabilities and hooks with no known lifecycle points', async () => {
     const good: LlmHookCR = {
       spec: {
