@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, describe as vitestDescribe } from 'vitest'
 import { it } from 'vitest'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 
 /**
@@ -38,6 +38,11 @@ if (adminUrl && throwawayUrl) {
 
 const NS = 'sandbox-recipes'
 const RECIPE = 'notify-recipe'
+// upsertGrant records the acting operator as permission-event `operator_user_id`,
+// a UUID column with a FK to users(id). A real DB rejects a non-UUID like
+// 'operator-1' (22P02) and would reject a non-existent UUID (FK), so seed a real
+// users row and pass its id as the operatorSub.
+const OPERATOR_ID = randomUUID()
 
 describeRealPostgres(
   'Plugin Workload SDK grant-update NOTIFY on real PostgreSQL (issue #375)',
@@ -55,6 +60,14 @@ describeRealPostgres(
       db = await import('../src/db.js')
       await db.initDb()
       sdk = await import('../src/services/pluginWorkloadSdkDb.js')
+
+      // Seed the acting operator so upsertGrant's permission-event
+      // operator_user_id FK (→ users(id)) is satisfied on a real database.
+      await db.pool.query(`INSERT INTO users (id, email, name) VALUES ($1, $2, $3)`, [
+        OPERATOR_ID,
+        `sdk-notify-operator-${OPERATOR_ID}@example.test`,
+        'sdk-notify-operator',
+      ])
 
       received = []
       listenPool = new Pool({ connectionString: throwawayUrl })
@@ -115,7 +128,7 @@ describeRealPostgres(
           allowedModels: ['gpt-5'],
           allowedCallers: ['api'],
         },
-        'operator-1'
+        OPERATOR_ID
       )
 
       const payload = await waitForGrantNotification()
