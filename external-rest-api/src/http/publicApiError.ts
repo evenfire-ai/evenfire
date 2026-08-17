@@ -179,10 +179,16 @@ export function sanitizeControlApiPublicError(
           ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
         }
       : undefined
+  const safeHeaders = safePublicRateLimitHeaders(responseHeaders)
 
   return {
     status: error.status,
-    headers: code === 'rate_limited' ? safePublicRateLimitHeaders(responseHeaders) : {},
+    headers:
+      code === 'rate_limited'
+        ? safeHeaders
+        : retryable && safeHeaders['retry-after']
+          ? { 'retry-after': safeHeaders['retry-after'] }
+          : {},
     body: {
       error: {
         code,
