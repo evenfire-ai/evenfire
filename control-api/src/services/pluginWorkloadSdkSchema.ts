@@ -123,6 +123,10 @@ export async function applyPluginWorkloadSdkSchema(db: DbClient): Promise<void> 
     CREATE INDEX IF NOT EXISTS plugin_workload_sdk_invocations_recipe_created
       ON plugin_workload_sdk_invocations (recipe_namespace, recipe_name, created_at DESC);
 
+    -- Historical-only since issue #348: per-run/period enforcement was removed
+    -- and nothing writes this table anymore (admin read path only). Retained so
+    -- existing rows stay queryable; hard removal is a separate follow-up. See the
+    -- note above getQuotaCounters in pluginWorkloadSdkDb.ts.
     CREATE TABLE IF NOT EXISTS plugin_workload_sdk_quota_counters (
       recipe_namespace TEXT NOT NULL,
       recipe_name TEXT NOT NULL,

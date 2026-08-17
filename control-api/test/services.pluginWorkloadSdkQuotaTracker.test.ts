@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
-import { consumeQuota } from '../src/services/pluginWorkloadSdkQuotaTracker.js'
+import { checkRateLimit } from '../src/services/pluginWorkloadSdkQuotaTracker.js'
 
 vi.mock('../src/db.js', () => ({
   pool: {
@@ -16,12 +16,9 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   )
   return {
     ...actual,
-    resolveQuotaPeriodStart: vi.fn(),
-    consumePeriodQuota: vi.fn(),
+    countRecentInvocations: vi.fn(),
   }
 })
-
-const runPeriod = new Date('2026-06-10T12:00:00.000Z')
 
 const grant = (
   overrides: Partial<sdkDb.PluginWorkloadSdkGrant> = {}
@@ -42,76 +39,123 @@ const grant = (
   defaultTargetRef: null,
   policyState: 'active',
   policyRevision: 0,
+  revocationId: null,
   createdAt: '',
   updatedAt: '',
   ...overrides,
 })
 
-describe('consumeQuota', () => {
+// The former `consumeQuota` describe block was removed with the function
+// itself (issue #348, plan §1.5 — deleted outright, not stubbed, so any
+// missed production caller is a compile error).
+
+// ─── Issue #348 (plan D3) — platform per-minute defaults ─────────────────
+//
+// RED-FIRST (plan §6.6): these tests assert the POST-change ceilings
+// (promptBridge 120/min, clientNotifications 150/min, sourced from
+// config.pluginSdkPromptBridgeRlPerMin / config.pluginSdkNotificationsRlPerMin).
+// Each case is POSITIVE (at the ceiling → allowed) AND NEGATIVE (one over → denied
+// with quota_exceeded). Against pre-change code the hardcoded defaults are 60/120,
+// so the exactly-at-the-ceiling cases FAIL until Phase 1 step 1.4 lands. Do not
+// weaken them to pass early.
+//
+// Plan D3.3 (per-run leg inert): after Phase 1, `consumeQuota` is DELETED
+// (decision §3.2 — delete, don't stub), so a mocked-db assertion here would
+// have no symbol to call. The per-run-inert behavior is asserted end-to-end
+// in the real-Postgres regression suite instead
+// (test/pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts,
+// plan D4 Tests 1 and 3), where the enforcement path itself — not a mock —
+// proves the per-run cap never denies and never resets anything.
+describe('checkRateLimit — platform per-minute rate limits (issue #348)', () => {
   beforeEach(() => {
-    vi.mocked(sdkDb.resolveQuotaPeriodStart).mockReset()
-    vi.mocked(sdkDb.consumePeriodQuota).mockReset()
+    vi.mocked(sdkDb.countRecentInvocations).mockReset()
   })
 
-  it('folds eager-period usage into the atomic run-cap consume (no TOCTOU read)', async () => {
-    // For an active run period, the eager subtraction is now resolved INSIDE
-    // consumePeriodQuota (foldEagerUsage=true) — a single atomic statement,
-    // not a separate read-then-consume.
-    vi.mocked(sdkDb.resolveQuotaPeriodStart).mockResolvedValue(runPeriod)
-    vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(true)
+  it('allows promptBridge at exactly 120/minute (positive) and denies at 121 (negative, platform default)', async () => {
+    const noOverrides = grant({ quotaLimits: {} })
 
-    const result = await consumeQuota('sandbox-recipes', 'sdk-recipe', 'promptBridge', grant())
+    // POSITIVE: at the ceiling → allowed.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(120)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
+    ).resolves.toEqual({ ok: true })
 
-    expect(result).toEqual({ ok: true })
-    expect(sdkDb.consumePeriodQuota).toHaveBeenCalledWith(
+    // NEGATIVE: one over the ceiling → denied.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(121)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: 'quota_exceeded',
+      retryable: false,
+      message: expect.stringContaining('120/minute'),
+    })
+  })
+
+  it('allows clientNotifications at exactly 150/minute (positive) and denies at 151 (negative), narrowed to the eventType', async () => {
+    const noOverrides = grant({ capabilityFamily: 'clientNotifications', quotaLimits: {} })
+
+    // POSITIVE: at the ceiling → allowed.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(150)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'clientNotifications', noOverrides, {
+        eventType: 'lead.followup.due',
+      })
+    ).resolves.toEqual({ ok: true })
+    expect(sdkDb.countRecentInvocations).toHaveBeenCalledWith(
       'sandbox-recipes',
       'sdk-recipe',
-      'promptBridge',
-      10,
-      runPeriod,
-      true
+      'clientNotifications',
+      { detail: 'lead.followup.due' }
     )
+
+    // NEGATIVE: one over the ceiling → denied.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(151)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'clientNotifications', noOverrides, {
+        eventType: 'lead.followup.due',
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      error: 'quota_exceeded',
+      retryable: false,
+      message: expect.stringContaining('150/minute'),
+    })
   })
 
-  it('does not fold eager usage when consuming the eager sentinel period itself', async () => {
-    vi.mocked(sdkDb.resolveQuotaPeriodStart).mockResolvedValue(
-      sdkDb.PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD
-    )
-    vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(true)
+  it('frees the recipe once the trailing window drains (deny at 121, allow at 0)', async () => {
+    const noOverrides = grant({ quotaLimits: {} })
 
-    const result = await consumeQuota('sandbox-recipes', 'sdk-recipe', 'promptBridge', grant())
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(121)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
+    ).resolves.toMatchObject({ ok: false, error: 'quota_exceeded' })
 
-    expect(result).toEqual({ ok: true })
-    expect(sdkDb.consumePeriodQuota).toHaveBeenCalledWith(
-      'sandbox-recipes',
-      'sdk-recipe',
-      'promptBridge',
-      10,
-      sdkDb.PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD,
-      false
-    )
+    // The window is derived from the invocation audit trail (Postgres now()),
+    // so a drained window is simply a lower count — no counter to reset.
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(0)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
+    ).resolves.toEqual({ ok: true })
   })
 
-  it('denies when the atomic consume reports the run cap is exhausted', async () => {
-    // The DB statement returns false when runCount+1+eagerUsed > limit. The
-    // exhaustion decision now lives entirely in the single atomic statement,
-    // so concurrent callers cannot both pass a remaining-1 budget.
-    vi.mocked(sdkDb.resolveQuotaPeriodStart).mockResolvedValue(runPeriod)
-    vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(false)
+  it('lets a grant-level maxInvocationsPerMinute override win over the platform default', async () => {
+    // Decision §3.1: ENV replaces only the hardcoded fallback constants — a
+    // grant override still wins (`grant value ?? config default`).
+    const withOverride = grant({ quotaLimits: { maxInvocationsPerMinute: 5 } })
 
-    const result = await consumeQuota('sandbox-recipes', 'sdk-recipe', 'promptBridge', grant())
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(5)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', withOverride)
+    ).resolves.toEqual({ ok: true })
 
-    expect(result).toMatchObject({ ok: false, error: 'quota_exceeded' })
-  })
-
-  it('is a no-op success when the grant declares no per-run cap', async () => {
-    const result = await consumeQuota(
-      'sandbox-recipes',
-      'sdk-recipe',
-      'promptBridge',
-      grant({ quotaLimits: {} })
-    )
-    expect(result).toEqual({ ok: true })
-    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(6)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', withOverride)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: 'quota_exceeded',
+      message: expect.stringContaining('5/minute'),
+    })
   })
 })
