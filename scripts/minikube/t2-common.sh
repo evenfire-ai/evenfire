@@ -531,7 +531,7 @@ t2_lock_acquire() {
     local existing_pid
     existing_pid="$(sed -n 's/^PID=//p' "$T2_LOCK_DIR/owner.env" 2>/dev/null | head -1 || true)"
     if [[ ! "$existing_pid" =~ ^[0-9]+$ ]]; then
-      T2_NEXT_COMMAND='inspect the profile lock owner metadata and retry only after the lock is released'
+      T2_NEXT_COMMAND='verify no T2 process owns the lock, then follow the orphaned-lock recovery steps in docs/testing/minikube-t2-runbook.md'
       t2_fail PROFILE_BUSY "profile $T2_PROFILE has a lock without a valid owner PID"
     fi
     if [ -n "$existing_pid" ] && kill -0 "$existing_pid" >/dev/null 2>&1; then

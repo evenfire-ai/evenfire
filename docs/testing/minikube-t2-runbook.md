@@ -67,6 +67,18 @@ The pre-gate marker must contain the current worktree identifier, exact `HEAD`,
 cluster fingerprint, and image coordinate. A mismatch stops with a stable
 error code instead of allowing a mixed-commit run.
 
+### Orphaned lock recovery
+
+If `PROFILE_BUSY` reports that the lock has no valid owner PID, first verify
+that no T2 process owns the profile. After that check, remove only the exact
+profile lock directory and retry the same command:
+
+```bash
+rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"
+```
+
+Never remove a lock with a live owner, and never remove the whole lock root.
+
 ## Preconditions and secrets
 
 The runner checks required namespaces, Services, Secret names, ConfigMap names,

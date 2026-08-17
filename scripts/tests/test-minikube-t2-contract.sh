@@ -116,6 +116,7 @@ if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=empty-profile T2_CONTEXT=empty-pro
   exit 1
 fi
 grep -Fq 'PROFILE_BUSY' "$tmp/empty.err"
+grep -Fq 'orphaned' "$tmp/empty.err"
 
 redaction_file="$tmp/t1-redaction.log"
 redaction_secret='super-secret'
