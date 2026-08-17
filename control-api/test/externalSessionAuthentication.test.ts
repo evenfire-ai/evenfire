@@ -65,6 +65,7 @@ function v1Token(): string {
     email: 'user@example.com',
     teamId: '22222222-2222-4222-8222-222222222222',
     role: 'member',
+    authGeneration: 1,
   })
 }
 

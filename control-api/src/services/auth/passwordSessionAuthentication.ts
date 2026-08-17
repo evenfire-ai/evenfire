@@ -19,6 +19,7 @@ type PasswordLoginSuccess = {
     team_name: string | null
   }
   credentialHash: string
+  authGeneration: number
 }
 
 export async function authenticatePasswordAndIssueSession(input: {
@@ -50,6 +51,7 @@ export async function authenticatePasswordAndIssueSession(input: {
         email: authenticatedLogin.user.email,
         teamId: authenticatedLogin.membership.team_id,
         role: authenticatedLogin.membership.role,
+        authGeneration: authenticatedLogin.authGeneration,
         authenticationMethods: ['pwd'],
       },
       { db, policy: input.policy }

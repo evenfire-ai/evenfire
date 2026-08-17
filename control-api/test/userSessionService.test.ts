@@ -180,12 +180,21 @@ describe('user session state machine', () => {
       email: 'user@example.com',
       teamId: null,
       role: 'member' as const,
+      authGeneration: 1,
       exp: Math.floor(now.getTime() / 1000) + 3600,
       iat: Math.floor(now.getTime() / 1000),
     }
     const epochDb = {
       query: vi.fn().mockResolvedValue({
-        rows: [{ id: userId, valid_after: now, token_revoked: false }],
+        rows: [
+          {
+            id: userId,
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+            valid_after: now,
+            token_revoked: false,
+          },
+        ],
         rowCount: 1,
       }),
     }

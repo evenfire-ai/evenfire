@@ -10,7 +10,7 @@ vi.mock('../src/config.js', () => ({
 async function migrationSql(): Promise<string> {
   const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
   const migration = CONTROL_API_MIGRATIONS.find(
-    candidate => candidate.version === '0091_user_access_foundation'
+    candidate => candidate.version === '0100_user_access_foundation'
   )
   expect(migration).toBeDefined()
 
