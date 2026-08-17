@@ -3,3 +3,6 @@
 - exclude:
     id: js/missing-rate-limiting
 - query: EvenfireMissingRateLimiting.ql
+- exclude:
+    id: js/user-controlled-bypass
+- query: EvenfireUserControlledBypass.ql
