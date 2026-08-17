@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
+import { ChatListProvider } from '@contexts/ChatListContext'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
 import { ChatTabs } from '.'
 
 afterEach(cleanup)
@@ -56,5 +59,71 @@ describe('ChatTabs', () => {
     expect(styles).toMatch(/\.chat-view-tabs__list\s*\{[^}]*width:\s*100%;/s)
     expect(styles).toMatch(/\.chat-view-tab__select\s*\{[^}]*flex:\s*1 1 auto;/s)
     expect(styles).toMatch(/\.chat-view-tab__label\s*\{[^}]*text-overflow:\s*ellipsis;/s)
+  })
+
+  it('shows existing running and approval indicators before their tab names', () => {
+    const runningKey = makeTaskKey('alpha', 'chat-running')
+    const approvalKey = makeTaskKey('beta', 'chat-approval')
+    const fsm = createSessionFsmStore()
+    fsm.dispatch(runningKey, { type: 'SEND_STARTED', taskId: 'task-running' })
+    fsm.dispatch(runningKey, { type: 'TASK_CREATED', taskId: 'task-running' })
+    fsm.dispatch(approvalKey, { type: 'SEND_STARTED', taskId: 'task-approval' })
+    fsm.dispatch(approvalKey, { type: 'TASK_CREATED', taskId: 'task-approval' })
+    fsm.dispatch(approvalKey, {
+      type: 'STREAM_SUSPENDED',
+      taskId: 'task-approval',
+      approval: { requestId: 'request-1', displayName: 'Run shell' },
+    })
+    const sessionStateByChatKey = Object.fromEntries(
+      Object.entries(fsm.getSnapshot()).map(([key, state]) => [key, projectSessionState(state)])
+    )
+
+    render(
+      <ChatListProvider
+        value={{
+          activeChatId: 'chat-running',
+          chatList: [],
+          chatListLoading: false,
+          latestChatSessions: [],
+          latestChatSessionsLoading: false,
+          sessionStateByChatId: {},
+          sessionStateByChatKey,
+        }}
+      >
+        <ChatTabs
+          tabs={[
+            {
+              id: 'running',
+              agentRef: 'alpha',
+              chatId: 'chat-running',
+              title: 'Running chat',
+            },
+            {
+              id: 'approval',
+              agentRef: 'beta',
+              chatId: 'chat-approval',
+              title: 'Approval chat',
+            },
+            { id: 'blank', agentRef: 'alpha', chatId: null, title: 'New chat' },
+          ]}
+          activeTabId="running"
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+        />
+      </ChatListProvider>
+    )
+
+    const running = screen.getByLabelText('Running')
+    const awaitingApproval = screen.getByLabelText('Awaiting approval')
+    const runningLabel = screen.getByText('Running chat')
+    const approvalLabel = screen.getByText('Approval chat')
+
+    expect(screen.getByRole('button', { name: 'Running chat' }).contains(running)).toBe(true)
+    expect(screen.getByRole('button', { name: 'Approval chat' }).contains(awaitingApproval)).toBe(
+      true
+    )
+    expect(running.nextElementSibling).toBe(runningLabel)
+    expect(awaitingApproval.nextElementSibling).toBe(approvalLabel)
+    expect(screen.getAllByRole('status')).toHaveLength(2)
   })
 })
