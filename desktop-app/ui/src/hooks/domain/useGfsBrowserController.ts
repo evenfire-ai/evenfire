@@ -77,6 +77,29 @@ export interface GfsBrowserControllerOptions {
   grantsListEnabled?: boolean
 }
 
+export interface GfsUploadSnapshot {
+  state:
+    | 'initiated'
+    | 'uploading'
+    | 'paused'
+    | 'suspended_auth'
+    | 'finalizing'
+    | 'canceling'
+    | 'completed'
+    | 'aborted'
+    | 'failed'
+  session: {
+    uploadId: string
+    state: string
+    expectedBytes: number
+    committedBytes: number
+    resultResourceId?: string
+    resultVersion?: number
+  } | null
+  uploadedBytes: number
+  totalBytes: number
+}
+
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -210,6 +233,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
+  const [uploadSnapshot, setUploadSnapshot] = useState<GfsUploadSnapshot | null>(null)
+  const uploadIdRef = useRef<string | null>(null)
+  const uploadRehydrateGenerationRef = useRef(0)
   // This is deliberately session-local. A 403 never becomes a persisted client
   // capability decision: a later server-backed request is the only way out.
   const [accessState, setAccessState] = useState<GfsBrowserAccessState>('active')
@@ -490,21 +516,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onSuccess: refreshGfs,
   })
   const createFileMutation = useMutation({
-    mutationFn: (input: { parentResourceId: string; name: string; encodedData: string }) =>
-      window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
+    mutationFn: (input: { parentResourceId: string; name: string; filePath: string }) =>
+      window.clerum.gfs.createFileFromPath(
+        input.parentResourceId,
+        input.name,
+        input.filePath,
+        DRIVE
+      ),
     onSuccess: refreshGfs,
   })
   const replaceFileMutation = useMutation({
-    mutationFn: (input: { resourceId: string; encodedData: string; ifMatch?: number }) =>
-      window.clerum.gfs.replaceFile(input.resourceId, input.encodedData, DRIVE, input.ifMatch),
-    onSuccess: async resource => {
-      setCrumbs(prev =>
-        prev.map(crumb =>
-          crumb.resourceId === resource.resourceId
-            ? { ...crumb, name: resource.name, version: resource.version }
-            : crumb
+    mutationFn: (input: { resourceId: string; filePath: string; ifMatch?: number }) =>
+      window.clerum.gfs.replaceFileFromPath(input.resourceId, input.filePath, DRIVE, input.ifMatch),
+    onSuccess: async receipt => {
+      const legacyResource = receipt as unknown as { resourceId?: string; version?: number }
+      const resourceId = receipt.resultResourceId ?? legacyResource.resourceId
+      const version = receipt.resultVersion ?? legacyResource.version
+      if (resourceId && version !== undefined) {
+        setCrumbs(prev =>
+          prev.map(crumb => (crumb.resourceId === resourceId ? { ...crumb, version } : crumb))
         )
-      )
+      }
       await refreshGfs()
     },
   })
@@ -530,6 +562,162 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       await refreshGfs()
     },
   })
+
+  const waitForUpload = useCallback(async (uploadId: string): Promise<GfsUploadSnapshot> => {
+    const deadline = Date.now() + 24 * 60 * 60 * 1000
+    for (;;) {
+      if (Date.now() > deadline)
+        throw new Error(
+          'GFS upload status polling timed out; the upload can be resumed from the Files page.'
+        )
+      const snapshot = await window.clerum.gfs.getUploadSnapshot(uploadId, DRIVE)
+      if (!snapshot) throw new Error('GFS upload is no longer available in this desktop session')
+      setUploadSnapshot(snapshot)
+      if (
+        snapshot.state === 'paused' ||
+        snapshot.state === 'suspended_auth' ||
+        snapshot.state === 'completed' ||
+        snapshot.state === 'aborted' ||
+        snapshot.state === 'failed'
+      )
+        return snapshot
+      await new Promise(resolve => window.setTimeout(resolve, 500))
+    }
+  }, [])
+
+  // Persisted Desktop sessions are the source of truth after an app restart.
+  // Rehydrate one scoped session on mount/scope change so FilesPage can render
+  // the same progress and pause/resume/cancel controls it renders for a live
+  // upload. The IPC list is already owner/team/environment/drive scoped; the
+  // second snapshot read supplies the durable byte counters and state.
+  useEffect(() => {
+    const generation = uploadRehydrateGenerationRef.current + 1
+    uploadRehydrateGenerationRef.current = generation
+    if (!sessionScope) {
+      uploadIdRef.current = null
+      setUploadSnapshot(null)
+      return
+    }
+    const listUploadSessions = window.clerum?.gfs?.listUploadSessions
+    if (typeof listUploadSessions !== 'function') return
+    let disposed = false
+    void (async () => {
+      try {
+        const sessions = await listUploadSessions(DRIVE)
+        if (disposed || uploadRehydrateGenerationRef.current !== generation) return
+        const persisted = sessions.find(
+          session =>
+            session.drive === DRIVE &&
+            (session.status === 'active' ||
+              session.status === 'paused' ||
+              session.status === 'suspended_auth')
+        )
+        if (!persisted) return
+        uploadIdRef.current = persisted.uploadId
+        await waitForUpload(persisted.uploadId)
+      } catch (error) {
+        if (!disposed && uploadRehydrateGenerationRef.current === generation) {
+          setOpenError(toMessage(error))
+        }
+      }
+    })()
+    return () => {
+      disposed = true
+    }
+  }, [sessionScope, waitForUpload])
+
+  const startFileUpload = useCallback(
+    async (input: {
+      parentResourceId: string
+      name: string
+      filePath: string
+      resumeUploadId?: string
+    }): Promise<GfsUploadSnapshot> => {
+      const session = await window.clerum.gfs.startFileUpload(
+        input.parentResourceId,
+        input.name,
+        input.filePath,
+        DRIVE,
+        input.resumeUploadId
+      )
+      uploadIdRef.current = session.uploadId
+      const initialSnapshot: GfsUploadSnapshot = {
+        state: session.state as GfsUploadSnapshot['state'],
+        session,
+        uploadedBytes: session.committedBytes,
+        totalBytes: session.expectedBytes,
+      }
+      setUploadSnapshot(initialSnapshot)
+      // The legacy compatibility path returns a completed resource receipt,
+      // not a resumable upload session. There is no v2 snapshot to poll under
+      // that resource id; refresh the folder and finish immediately.
+      if (session.state === 'completed') {
+        await refreshGfs()
+        return initialSnapshot
+      }
+      const snapshot = await waitForUpload(session.uploadId)
+      if (snapshot.state === 'completed') await refreshGfs()
+      return snapshot
+    },
+    [refreshGfs, waitForUpload]
+  )
+
+  const startFileReplace = useCallback(
+    async (input: {
+      resourceId: string
+      filePath: string
+      ifMatch?: number
+      resumeUploadId?: string
+    }): Promise<GfsUploadSnapshot> => {
+      const session = await window.clerum.gfs.startFileReplace(
+        input.resourceId,
+        input.filePath,
+        DRIVE,
+        input.ifMatch,
+        input.resumeUploadId
+      )
+      uploadIdRef.current = session.uploadId
+      const initialSnapshot: GfsUploadSnapshot = {
+        state: session.state as GfsUploadSnapshot['state'],
+        session,
+        uploadedBytes: session.committedBytes,
+        totalBytes: session.expectedBytes,
+      }
+      setUploadSnapshot(initialSnapshot)
+      if (session.state === 'completed') {
+        await refreshGfs()
+        return initialSnapshot
+      }
+      const snapshot = await waitForUpload(session.uploadId)
+      if (snapshot.state === 'completed') await refreshGfs()
+      return snapshot
+    },
+    [refreshGfs, waitForUpload]
+  )
+
+  const pauseUpload = useCallback(async (): Promise<GfsUploadSnapshot> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) throw new Error('No active GFS upload')
+    await window.clerum.gfs.pauseUpload(uploadId, DRIVE)
+    return waitForUpload(uploadId)
+  }, [waitForUpload])
+
+  const resumeUpload = useCallback(async (): Promise<GfsUploadSnapshot> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) throw new Error('No paused GFS upload')
+    await window.clerum.gfs.resumeUpload(uploadId, DRIVE)
+    const snapshot = await waitForUpload(uploadId)
+    if (snapshot.state === 'completed') await refreshGfs()
+    return snapshot
+  }, [refreshGfs, waitForUpload])
+
+  const cancelUpload = useCallback(async (): Promise<void> => {
+    const uploadId = uploadIdRef.current
+    if (!uploadId) return
+    await window.clerum.gfs.cancelUpload(uploadId, DRIVE)
+    setUploadSnapshot(previous => (previous ? { ...previous, state: 'aborted' } : null))
+    uploadIdRef.current = null
+  }, [])
 
   const items = useMemo<GfsBrowserChild[]>(
     () => (childrenQuery.data?.pages ?? []).flatMap(page => page.items),
@@ -745,10 +933,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     revokingShare: revokeShareMutation.isPending,
     createShare,
     createFolder: (name: string) => createFolderMutation.mutateAsync(name),
-    createFile: (parentResourceId: string, name: string, encodedData: string) =>
-      createFileMutation.mutateAsync({ parentResourceId, name, encodedData }),
-    replaceFile: (resourceId: string, encodedData: string, ifMatch?: number) =>
-      replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
+    createFile: (parentResourceId: string, name: string, filePath: string) =>
+      createFileMutation.mutateAsync({ parentResourceId, name, filePath }),
+    replaceFile: (resourceId: string, filePath: string, ifMatch?: number) =>
+      replaceFileMutation.mutateAsync({ resourceId, filePath, ifMatch }),
+    uploadSnapshot,
+    startFileUpload,
+    startFileReplace,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
     deleteResource: (resourceId: string, ifMatch?: number) =>

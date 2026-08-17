@@ -70,6 +70,32 @@ export function externalGfsOperationFor(
   if (path === '/resolve' && method === 'GET') {
     return { operationClass: 'resource', route: `${GFS_PREFIX}/resolve` }
   }
+  // Indexed resumable-upload routes are part of the same public GFS boundary.
+  // Keep capability/status probes in the read budget and create/part/lifecycle
+  // mutations in the operation budget so the pre-resolution gate cannot turn a
+  // newly added upload handler into an unmetered path.
+  if (path === '/capabilities' && method === 'GET') {
+    return { operationClass: 'resource', route: `${GFS_PREFIX}/capabilities` }
+  }
+  if (path === '/uploads' && method === 'POST') {
+    return { operationClass: 'resource-mutation', route: `${GFS_PREFIX}/uploads` }
+  }
+  if (/^\/uploads\/[^/]+$/.test(path)) {
+    return method === 'HEAD'
+      ? { operationClass: 'resource', route: `${GFS_PREFIX}/uploads/:id` }
+      : method === 'DELETE'
+        ? { operationClass: 'resource-mutation', route: `${GFS_PREFIX}/uploads/:id` }
+        : null
+  }
+  if (/^\/uploads\/[^/]+\/status$/.test(path) && method === 'GET') {
+    return { operationClass: 'resource', route: `${GFS_PREFIX}/uploads/:id/status` }
+  }
+  if (/^\/uploads\/[^/]+\/parts\/[0-9]+$/.test(path) && method === 'PUT') {
+    return { operationClass: 'resource-mutation', route: `${GFS_PREFIX}/uploads/:id/parts/:part` }
+  }
+  if (/^\/uploads\/[^/]+\/(pause|resume|complete)$/.test(path) && method === 'POST') {
+    return { operationClass: 'resource-mutation', route: `${GFS_PREFIX}/uploads/:id/:action` }
+  }
   if (path === '/resources' && method === 'GET') {
     return { operationClass: 'resource', route: `${GFS_PREFIX}/resources` }
   }

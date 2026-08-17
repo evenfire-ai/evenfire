@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GFS_FILE_UPLOAD_MAX_BYTES } from '@constants/gfsFileUpload'
@@ -112,6 +112,23 @@ async function chooseManageAction(resourceName: string, actionName: string) {
 }
 
 describe('FilesPage', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getPathForFile: vi.fn((file: File) => file.name),
+        },
+        team: {
+          directory: vi.fn(async () => ({ items: [] })),
+        },
+        agents: {
+          listMine: vi.fn(async () => []),
+        },
+      },
+    })
+  })
+
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
@@ -237,7 +254,7 @@ describe('FilesPage', () => {
       target: { files: [new File(['root upload'], 'root.md', { type: 'text/markdown' })] },
     })
     await waitFor(() =>
-      expect(createFile).toHaveBeenCalledWith(rootResourceId, 'root.md', 'cm9vdCB1cGxvYWQ=')
+      expect(createFile).toHaveBeenCalledWith(rootResourceId, 'root.md', 'root.md')
     )
   })
 
@@ -491,7 +508,7 @@ describe('FilesPage', () => {
 
   it('shortens oversized file names before uploading through Desktop GFS', async () => {
     const createFile = vi.fn(
-      async (_parentResourceId: string, _name: string, _encodedData: string) => undefined
+      async (_parentResourceId: string, _name: string, _filePath: string) => undefined
     )
     const pushToast = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -528,18 +545,18 @@ describe('FilesPage', () => {
     await waitFor(() => expect(createFile).toHaveBeenCalled())
     const uploadCall = createFile.mock.calls[0]
     expect(uploadCall).toBeTruthy()
-    const [parentResourceId, uploadedName, encodedData] = uploadCall!
+    const [parentResourceId, uploadedName, filePath] = uploadCall!
     expect(parentResourceId).toBe('folder-1')
     expect(uploadedName).not.toBe(rawName)
     expect(uploadedName).toHaveLength(255)
     expect(uploadedName).toMatch(/-[0-9a-f]{12}\.txt$/)
-    expect(encodedData).toBe('ZGVza3RvcCB1cGxvYWQ=')
+    expect(filePath).toBe(rawName)
     expect(pushToast).toHaveBeenCalledWith(`Uploaded ${uploadedName}`, 'success')
   })
 
   it('uploads dropped images and Markdown files into the open writable folder', async () => {
     const createFile = vi.fn(
-      async (_parentResourceId: string, _name: string, _encodedData: string) => undefined
+      async (_parentResourceId: string, _name: string, _filePath: string) => undefined
     )
     const pushToast = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -568,9 +585,7 @@ describe('FilesPage', () => {
 
     fireEvent.dragEnter(browser, { dataTransfer })
     const dropStatus = screen.getByRole('status')
-    expect(dropStatus.textContent).toContain(
-      'Drop images or Markdown files to upload to Team folder'
-    )
+    expect(dropStatus.textContent).toContain('Drop files to upload to Team folder')
     expect(dropStatus.className).toContain('composer-drop-overlay')
 
     await act(async () => {
@@ -579,9 +594,9 @@ describe('FilesPage', () => {
     })
 
     await waitFor(() =>
-      expect(createFile).toHaveBeenCalledWith('folder-1', 'diagram.png', 'ZGVza3RvcCBpbWFnZQ==')
+      expect(createFile).toHaveBeenCalledWith('folder-1', 'diagram.png', 'diagram.png')
     )
-    expect(createFile).toHaveBeenCalledWith('folder-1', 'notes.markdown', 'IyBEZXNrdG9wIG5vdGVz')
+    expect(createFile).toHaveBeenCalledWith('folder-1', 'notes.markdown', 'notes.markdown')
     expect(pushToast).toHaveBeenCalledWith('Uploaded diagram.png', 'success')
     expect(pushToast).toHaveBeenCalledWith('Uploaded notes.markdown', 'success')
   })
@@ -635,7 +650,7 @@ describe('FilesPage', () => {
     })
 
     await waitFor(() => expect(createFile).toHaveBeenCalledTimes(2))
-    expect(createFile).toHaveBeenLastCalledWith('folder-1', 'retry.md', 'IyBSZXRyeQ==')
+    expect(createFile).toHaveBeenLastCalledWith('folder-1', 'retry.md', 'retry.md')
     expect(pushToast).toHaveBeenCalledWith('Uploaded retry.md', 'success')
   })
 
@@ -661,7 +676,7 @@ describe('FilesPage', () => {
       path: '/shared',
     }
     let releaseFirstUpload: (() => void) | undefined
-    const createFile = vi.fn((_parentResourceId: string, _name: string, _encodedData: string) =>
+    const createFile = vi.fn((_parentResourceId: string, _name: string, _filePath: string) =>
       createFile.mock.calls.length === 1
         ? new Promise<void>(resolve => {
             releaseFirstUpload = resolve
@@ -737,7 +752,7 @@ describe('FilesPage', () => {
     })
 
     await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith('GFS uploads are limited to 16 MB per file.', 'error')
+      expect(pushToast).toHaveBeenCalledWith('GFS uploads are limited to 200 MB per file.', 'error')
     )
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(createFile).not.toHaveBeenCalled()
@@ -773,13 +788,46 @@ describe('FilesPage', () => {
     }
     fireEvent.dragEnter(browser, { dataTransfer })
 
-    expect(screen.getByRole('status').textContent).toContain(
-      'Drop images or Markdown files to upload to Team folder'
-    )
+    expect(screen.getByRole('status').textContent).toContain('Drop files to upload to Team folder')
     fireEvent.drop(browser, { dataTransfer })
-    await waitFor(() =>
-      expect(createFile).toHaveBeenCalledWith('folder-1', 'notes.md', 'IyBOb3Rlcw==')
-    )
+    await waitFor(() => expect(createFile).toHaveBeenCalledWith('folder-1', 'notes.md', 'notes.md'))
+  })
+
+  it('renders byte progress and wires visible pause/resume/cancel actions', async () => {
+    const pauseUpload = vi.fn()
+    const cancelUpload = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Team folder',
+        kind: 'directory',
+        version: 7,
+      },
+      affordances: {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      uploadSnapshot: {
+        state: 'uploading',
+        session: { uploadId: 'upload-1', state: 'uploading', expectedBytes: 4, committedBytes: 2 },
+        uploadedBytes: 2,
+        totalBytes: 4,
+      },
+      pauseUpload,
+      cancelUpload,
+    })
+
+    renderFilesPage()
+    const progress = screen.getByRole('progressbar', { name: 'GFS upload progress' })
+    expect(progress.getAttribute('value')).toBe('2')
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel upload' }))
+    expect(pauseUpload).toHaveBeenCalledTimes(1)
+    expect(cancelUpload).toHaveBeenCalledTimes(1)
   })
 
   it('explains why dropped preview files cannot be uploaded without folder write permission', () => {
@@ -904,7 +952,7 @@ describe('FilesPage', () => {
       await Promise.resolve()
     })
 
-    expect(replaceFile).toHaveBeenCalledWith('file-1', 'cmVwbGFjZW1lbnQ=', 7)
+    expect(replaceFile).toHaveBeenCalledWith('file-1', 'report.txt', 7)
     expect(renameResource).toHaveBeenCalledWith('file-1', 'report-renamed.txt', 7)
     expect(pushToast).toHaveBeenCalledWith('precondition_failed: stale file version', 'error')
     expect(pushToast).toHaveBeenCalledWith('precondition_failed: stale resource version', 'error')
