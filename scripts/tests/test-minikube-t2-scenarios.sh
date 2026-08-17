@@ -193,4 +193,17 @@ grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
 
+forward_tmp="$tmp/port-forward-check"
+mkdir -p "$forward_tmp/bin" "$forward_tmp/profile-cache/profile-a/pids"
+cat >"$forward_tmp/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'root 4242 1 0 00:00 ? 00:00:00 kubectl --context=profile-a -n control-plane port-forward svc/control-api 30100:8090'
+EOF
+chmod +x "$forward_tmp/bin/ps"
+printf '4242\n' >"/tmp/pf-profile-a-control-api.pid"
+forward_check="$(env PATH="$forward_tmp/bin:$PATH" T2_PROFILE=profile-a T2_CONTEXT=profile-a \
+  T2_PROFILE_ROOT="$forward_tmp/profile-cache" bash -c 'source "$1"; t2_process_check; printf PASS' bash "$COMMON")"
+rm -f "/tmp/pf-profile-a-control-api.pid"
+[ "$forward_check" = PASS ] || fail "canonical /tmp port-forward ownership was rejected: $forward_check"
+
 printf 'PASS: local Minikube T0/T1/T2 scenario checks\n'

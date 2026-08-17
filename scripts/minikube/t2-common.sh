@@ -486,14 +486,23 @@ PY
 }
 
 t2_process_check() {
-  local process_lines allowed pid command_line pid_file
+  local process_lines allowed pid command_line pid_file profile_safe
   process_lines="$(ps -ef 2>/dev/null | awk '/[p]ort-forward/ && /kubectl/ {print}' || true)"
   [ -z "$process_lines" ] && return 0
+  profile_safe="${T2_PROFILE//[^A-Za-z0-9_.-]/_}"
   while IFS= read -r command_line; do
     [ -z "$command_line" ] && continue
     [[ "$command_line" == *"$T2_PROFILE"* || "$command_line" == *"$T2_CONTEXT"* ]] || continue
     allowed=false
     for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid; do
+      [ -f "$pid_file" ] || continue
+      pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+      [[ -n "$pid" && "$command_line" == *" $pid "* ]] && allowed=true
+    done
+    # pf-all-stack.sh is the canonical gate forwarder and records its child
+    # PIDs in /tmp/pf-<profile>-*.pid. Accept those PIDs as profile-owned too;
+    # otherwise T1 rejects the forwards that pre-gate-sync just started.
+    for pid_file in "/tmp/pf-${profile_safe}-"*.pid; do
       [ -f "$pid_file" ] || continue
       pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
       [[ -n "$pid" && "$command_line" == *" $pid "* ]] && allowed=true
