@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  acquireRateLimitConcurrencyLease,
   checkAndIncrement,
   cleanupExpiredBuckets,
   currentWindowStartMs,
@@ -10,6 +11,27 @@ import {
 // In-memory simulation of (bucket_key, window_start_ms) → count, matching the
 // real rate_limit_buckets unique index semantics.
 const buckets = new Map<string, number>()
+const advisoryLocks = new Set<string>()
+const mockClientQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
+  const text = String(sql)
+  const identity = `${String(params?.[0])}:${String(params?.[1])}`
+  if (text.includes('pg_try_advisory_lock')) {
+    if (advisoryLocks.has(identity)) return { rows: [{ acquired: false }] }
+    advisoryLocks.add(identity)
+    return { rows: [{ acquired: true }] }
+  }
+  if (text.includes('pg_advisory_unlock')) {
+    const unlocked = advisoryLocks.delete(identity)
+    return { rows: [{ pg_advisory_unlock: unlocked }] }
+  }
+  return { rows: [] }
+})
+const mockConcurrencyClient = {
+  query: mockClientQuery,
+  once: vi.fn(),
+  release: vi.fn(),
+}
+const mockPoolConnect = vi.fn(async () => mockConcurrencyClient)
 
 const mockPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
   const text = typeof sql === 'string' ? sql : ''
@@ -17,7 +39,7 @@ const mockPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
     const bucketKey = String(params?.[0] ?? '')
     const windowStart = Number(params?.[1] ?? 0)
     const mapKey = `${bucketKey}|${windowStart}`
-    const next = (buckets.get(mapKey) ?? 0) + 1
+    const next = (buckets.get(mapKey) ?? 0) + Number(params?.[2] ?? 1)
     buckets.set(mapKey, next)
     return { rows: [{ count: next }], rowCount: 1 }
   }
@@ -39,7 +61,7 @@ const mockPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
 vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(args[0], args[1] as unknown[] | undefined),
-    connect: vi.fn(),
+    connect: (...args: unknown[]) => mockPoolConnect(...args),
   },
   withTransaction: vi.fn(),
 }))
@@ -47,7 +69,9 @@ vi.mock('../src/db.js', () => ({
 describe('rateLimiterService', () => {
   beforeEach(() => {
     buckets.clear()
+    advisoryLocks.clear()
     mockPoolQuery.mockClear()
+    mockClientQuery.mockClear()
   })
 
   it('allows requests up to the limit and denies the (limit+1)-th in the same window', async () => {
@@ -100,12 +124,65 @@ describe('rateLimiterService', () => {
     expect(results.every(r => r.allowed)).toBe(true)
   })
 
+  it('atomically charges a weighted cost in the existing PostgreSQL bucket', async () => {
+    const first = await checkAndIncrement('test:bucket:weighted', 16, 1_700_000_000_000, 7)
+    const second = await checkAndIncrement('test:bucket:weighted', 16, 1_700_000_000_000, 10)
+    expect(first).toMatchObject({ allowed: true, count: 7, remaining: 9 })
+    expect(second).toMatchObject({ allowed: false, count: 17, remaining: 0 })
+    expect(mockPoolQuery).toHaveBeenLastCalledWith(expect.any(String), [
+      'test:bucket:weighted',
+      currentWindowStartMs(1_700_000_000_000),
+      10,
+    ])
+  })
+
+  it('holds replica-safe advisory slots until release and then admits the next request', async () => {
+    const requirements = [{ bucketKey: 'gfs-upload:test-active', maxConcurrent: 2 }]
+    const [first, second, denied] = await Promise.all([
+      acquireRateLimitConcurrencyLease(requirements),
+      acquireRateLimitConcurrencyLease(requirements),
+      acquireRateLimitConcurrencyLease(requirements),
+    ])
+    expect(first).toMatchObject({ allowed: true, backendAvailable: true })
+    expect(second).toMatchObject({ allowed: true, backendAvailable: true })
+    expect(denied).toMatchObject({ allowed: false, backendAvailable: true })
+
+    await first.release()
+    const admittedAfterRelease = await acquireRateLimitConcurrencyLease(requirements)
+    expect(admittedAfterRelease).toMatchObject({ allowed: true, backendAvailable: true })
+    await second.release()
+    await admittedAfterRelease.release()
+    expect(advisoryLocks.size).toBe(0)
+    expect(mockPoolConnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('destroys the dedicated connection when an advisory unlock outcome is unknown', async () => {
+    const lease = await acquireRateLimitConcurrencyLease([
+      { bucketKey: 'gfs-upload:unlock-failure', maxConcurrent: 1 },
+    ])
+    expect(lease.allowed).toBe(true)
+    mockClientQuery.mockRejectedValueOnce(new Error('connection lost during unlock'))
+
+    await lease.release()
+
+    expect(mockConcurrencyClient.release).toHaveBeenCalledWith(true)
+    // The fake client does not emulate PostgreSQL's session teardown; model
+    // the advisory lock release that the destroyed real connection provides.
+    advisoryLocks.clear()
+    const replacement = await acquireRateLimitConcurrencyLease([
+      { bucketKey: 'gfs-upload:unlock-failure', maxConcurrent: 1 },
+    ])
+    expect(replacement).toMatchObject({ allowed: true, backendAvailable: true })
+    await replacement.release()
+  })
+
   it('fails open when pool.query throws (DB error)', async () => {
     mockPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
     const r = await checkAndIncrement('test:bucket:failopen', 5)
     expect(r.allowed).toBe(true)
     expect(r.count).toBe(0)
     expect(r.remaining).toBe(5)
+    expect(r.backendAvailable).toBe(false)
   })
 
   it('fails open when pool.query returns empty rows', async () => {
@@ -113,6 +190,7 @@ describe('rateLimiterService', () => {
     const r = await checkAndIncrement('test:bucket:emptyrows', 5)
     expect(r.allowed).toBe(true)
     expect(r.count).toBe(0)
+    expect(r.backendAvailable).toBe(false)
   })
 
   it('cleanupExpiredBuckets removes rows older than 5 minutes', async () => {

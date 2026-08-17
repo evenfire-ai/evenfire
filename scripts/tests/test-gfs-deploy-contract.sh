@@ -2,6 +2,19 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+external_rest_manifest="$(cat deploy/base/profiles/external-rest-api.yaml)"
+profiles_network_policy="$(cat deploy/base/profiles/networkpolicies.yaml)"
+ingress_network_policy="$(cat deploy/base/ingress/networkpolicies.yaml)"
+[[ "$external_rest_manifest" == *'type: ClusterIP'* ]] \
+  || fail 'external-rest-api must remain an internal ClusterIP, not a directly exposed service'
+[[ "$profiles_network_policy" == *'name: allow-ingress-profiles'* && \
+   "$profiles_network_policy" == *'app: cloudflared'* && \
+   "$profiles_network_policy" == *'values: [external-rest-api, profile-ui]'* && \
+   "$profiles_network_policy" == *'name: external-rest-api-from-profile-ui'* ]] \
+  || fail 'profiles ingress policy does not document the trusted Cloudflare/profile-ui paths'
+[[ "$ingress_network_policy" == *'app: external-rest-api'* && \
+   "$ingress_network_policy" == *'kubernetes.io/metadata.name: profiles'* ]] \
+  || fail 'ingress namespace policy does not restrict cloudflared egress to profiles services'
 # Scope: OSS-resident GFS deploy invariants only. The GCP deploy invariants
 # (deploy-dev/deploy-prod workflow ordering, gcp-* Makefile targets, gcp-prod
 # overlay render, and the HCC rollback contract) live in evenfire-infra after
@@ -56,17 +69,24 @@ grep -q 'claim.get("namespace") == "control-plane"' deploy/scripts/reset-control
 grep -q 'claim.get("uid") == expected_uid' deploy/scripts/reset-control-db-storage.sh || fail 'released PV cleanup is not claim-UID-scoped'
 ! grep -q 'ensure_pvc "control-postgres-data"' scripts/minikube/ensure-pvcs.sh || fail 'generic PVC reconciler can still delete the control database'
 reset_convergence="$(cat deploy/scripts/converge-control-db-after-reset.sh)"
-for required in run-control-api-db-migration.sh provision-control-api-runtime-roles.sh 'rollout status deployment/control-api' 'GFS_RESTORE_ACTIVE_NOLOGIN=true' reconcile-gfs-deploy-credentials.sh verify-gfs.sh; do
+for required in run-control-api-db-migration.sh provision-control-api-runtime-roles.sh 'scale deployment/control-api --replicas=0' "CONTROL_API_POD_SELECTOR='app=control-api,!clerum.io/component'" 'wait --for=delete pod' 'rollout status deployment/control-api' 'sync-auth-key.sh' '--require-gfs' 'GFS_RESTORE_ACTIVE_NOLOGIN=true' reconcile-gfs-deploy-credentials.sh verify-gfs.sh; do
   [[ "$reset_convergence" == *"$required"* ]] || fail "reset convergence omits $required"
 done
 migration="$(grep -n 'run-control-api-db-migration.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 roles="$(grep -n 'provision-control-api-runtime-roles.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
-scale="$(grep -n 'scale deployment/control-api' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
-ready="$(grep -n 'rollout status deployment/control-api' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
+control_zero="$(grep -n 'scale deployment/control-api --replicas=0' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+control_wait="$(grep -n -- '-l "$CONTROL_API_POD_SELECTOR" --timeout=180s' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+control_restore="$(grep -n 'scale deployment/control-api --replicas="\$CONTROL_API_REPLICAS"' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+ready="$(grep -n 'rollout status deployment/control-api' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+auth_sync="$(grep -n 'sync-auth-key.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 restore="$(grep -n 'GFS_RESTORE_ACTIVE_NOLOGIN=true' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 verify="$(grep -n 'verify-gfs.sh' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
 success="$(grep -n 'migrations, runtime roles, GFS restore, and verification complete' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
-[[ "$migration" -lt "$roles" && "$roles" -lt "$scale" && "$scale" -lt "$ready" && "$ready" -lt "$restore" && "$restore" -lt "$verify" && "$verify" -lt "$success" ]] \
+[[ "$control_zero" -lt "$control_wait" && "$control_wait" -lt "$migration" && \
+   "$migration" -lt "$roles" && "$roles" -lt "$control_restore" && \
+   "$control_restore" -lt "$ready" && "$ready" -lt "$auth_sync" && \
+   "$auth_sync" -lt "$restore" && \
+   "$restore" -lt "$verify" && "$verify" -lt "$success" ]] \
   || fail 'reset convergence ordering is incomplete'
 ! grep -q '|| true' deploy/scripts/converge-control-db-after-reset.sh || fail 'reset convergence suppresses a critical failure'
 for upgrade_path in Makefile scripts/minikube/pre-gate-sync.sh scripts/minikube/full-setup.sh; do

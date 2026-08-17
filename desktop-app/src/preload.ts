@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   HostMessageRequest,
@@ -82,8 +82,54 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('gfs:createFolder', { parentResourceId, name, drive }),
     createFile: (parentResourceId: string, name: string, encodedData: string, drive?: string) =>
       ipcRenderer.invoke('gfs:createFile', { parentResourceId, name, encodedData, drive }),
+    createFileFromPath: (
+      parentResourceId: string,
+      name: string,
+      filePath: string,
+      drive?: string
+    ) => ipcRenderer.invoke('gfs:createFileFromPath', { parentResourceId, name, filePath, drive }),
+    startFileUpload: (
+      parentResourceId: string,
+      name: string,
+      filePath: string,
+      drive?: string,
+      resumeUploadId?: string
+    ) =>
+      ipcRenderer.invoke('gfs:startFileUpload', {
+        parentResourceId,
+        name,
+        filePath,
+        drive,
+        resumeUploadId,
+      }),
+    startFileReplace: (
+      resourceId: string,
+      filePath: string,
+      drive?: string,
+      ifMatch?: number,
+      resumeUploadId?: string
+    ) =>
+      ipcRenderer.invoke('gfs:startFileReplace', {
+        resourceId,
+        filePath,
+        drive,
+        ifMatch,
+        resumeUploadId,
+      }),
+    getUploadSnapshot: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
+    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
+    pauseUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
+    resumeUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
+    cancelUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
+    replaceFileFromPath: (resourceId: string, filePath: string, drive?: string, ifMatch?: number) =>
+      ipcRenderer.invoke('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
+    getPathForFile: (file: File) => webUtils.getPathForFile(file),
     renameResource: (resourceId: string, newName: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
