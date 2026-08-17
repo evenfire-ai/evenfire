@@ -78,6 +78,7 @@ dotenv_load_canonical_root() {
   env_file="$(dotenv_canonical_root "${repo_root}")"
   if [[ -n "${env_file}" ]]; then
     dotenv_load_file "${env_file}"
+    return $?
   fi
   # A canonical .env is optional. Callers run with set -e and should continue
   # with their documented defaults when the checkout has no local credentials.
