@@ -596,8 +596,8 @@ describe('unresolved notice link', () => {
     await deliver('C1', 'U1')
     const text = sendEphemeral.mock.calls[0][2]
     expect(text).toBe(
-      "I can't accept messages from this Slack account. If you haven't linked it yet, open " +
-        'Settings > Social channels > Slack and choose Connect Slack. ' +
+      "I can't accept messages from this Slack account. If you haven't linked it yet on the " +
+        'profile UI, open Settings > Social channels > Slack and choose Connect Slack. ' +
         'If you think you should already have access, contact your admin.'
     )
     expect(text).not.toContain('undefined')

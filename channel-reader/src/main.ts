@@ -100,12 +100,12 @@ const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 /** One "you are not linked" notice per Slack user per conversation per day. */
 const UNRESOLVED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const UNRESOLVED_NOTICE_COPY =
-  "I can't accept messages from this Slack account. If you haven't linked it yet, open " +
-  'Settings > Social channels > Slack and choose Connect Slack. ' +
+  "I can't accept messages from this Slack account. If you haven't linked it yet on the " +
+  'profile UI, open Settings > Social channels > Slack and choose Connect Slack. ' +
   'If you think you should already have access, contact your admin.'
 const UNRESOLVED_NOTICE_COPY_TEAMS =
-  "I can't accept messages from this Teams account. If you haven't linked it yet, open " +
-  'Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+  "I can't accept messages from this Teams account. If you haven't linked it yet on the " +
+  'profile UI, open Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
   'If you think you should already have access, contact your admin.'
 
 /**
