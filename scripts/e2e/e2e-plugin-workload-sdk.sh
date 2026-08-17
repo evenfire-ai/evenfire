@@ -173,6 +173,10 @@ E2E_WAIT_STATUS_VALIDATED="${E2E_WAIT_STATUS_VALIDATED:-120}"
 E2E_WAIT_CALLER_MARKER="${E2E_WAIT_CALLER_MARKER:-180}"
 E2E_WAIT_CALLER_DONE="${E2E_WAIT_CALLER_DONE:-180}"
 E2E_WAIT_NOTIFICATION_ROW="${E2E_WAIT_NOTIFICATION_ROW:-60}"
+# issue #375 (P3): event-driven grant→WRC nudge target latency. A grant change
+# must re-reconcile the recipe via Postgres LISTEN/NOTIFY in ≤10s WITHOUT a WRC
+# restart (the ≤30s watchdog is the backstop, not the mechanism under test).
+E2E_WAIT_NUDGE_VALIDATED="${E2E_WAIT_NUDGE_VALIDATED:-10}"
 
 # Fail closed before creating any fixture if a caller or inherited shell
 # environment asks this gate to wait for an unbounded or human-scale interval.
@@ -197,6 +201,7 @@ validate_bounded_seconds E2E_WAIT_STATUS_VALIDATED "$E2E_WAIT_STATUS_VALIDATED" 
 validate_bounded_seconds E2E_WAIT_CALLER_MARKER "$E2E_WAIT_CALLER_MARKER" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
 validate_bounded_seconds E2E_WAIT_CALLER_DONE "$E2E_WAIT_CALLER_DONE" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
 validate_bounded_seconds E2E_WAIT_NOTIFICATION_ROW "$E2E_WAIT_NOTIFICATION_ROW" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_NUDGE_VALIDATED "$E2E_WAIT_NUDGE_VALIDATED" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
 validate_bounded_seconds POLL_INTERVAL "$POLL_INTERVAL" "$E2E_HARD_MAX_POLL_INTERVAL_SECONDS"
 
 require_write_confirmation() {
@@ -1382,6 +1387,76 @@ if printf "%s" "$logs" | grep -q E2E_SDK_QUOTA_EXCEEDED_OK; then
   ok "per-minute rate limit rejected the 5th call after 4/4 invocations in the window"
 else
   fail "per-minute rate limit did not reject the 5th call (fixture marker missing; caller logs redacted). If the caller logged E2E_SDK_QUOTA_EXCEEDED_FAIL=*:possible_window_ageout or *:window_overcount, this is the known per-minute 60s-window timing race (issue #348 fixture caveat), not a real enforcement regression — retry on a less loaded cluster or apply the coordinated gate+fixture reset fix."
+  exit 1
+fi
+
+# ─── issue #375 (P3): event-driven grant→WRC nudge ───────────────────────
+# The recipe is validated by now. Prove the grant→WRC nudge accelerates
+# convergence: a grant change must re-reconcile the recipe (bump the published
+# policyRevision, state stays validated) within ≤10s via Postgres LISTEN/NOTIFY,
+# WITHOUT restarting the WRC (the ≤30s watchdog is the backstop, not the path
+# under test). This is an ADDITIVE phase; it does not touch #351's phases.
+header "Plugin Workload SDK grant→WRC event-driven nudge (issue #375 P3)"
+
+# Capture the WRC pod set (by name) so we can assert NO restart drove convergence.
+wrc_pods_before="$(kctl get pods -n "$CONTROL_NS" -o name 2>/dev/null \
+  | grep -E '^pod/workflow-recipes-' | sort | tr '\n' ',' || true)"
+if [ -z "$wrc_pods_before" ]; then
+  fail "could not enumerate workflow-recipes pods before the nudge (selector empty)"
+  exit 1
+fi
+
+nudge_rev_before="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+  -o jsonpath='{.status.pluginWorkloadSdk.policyRevision}' 2>/dev/null || true)"
+nudge_rev_before="${nudge_rev_before:-0}"
+
+# Re-upsert the promptBridge grant. The admin upsert increments policy_revision
+# and (issue #375 P3) emits the transactional grant-update NOTIFY on COMMIT.
+nudge_started_at="$SECONDS"
+# issue #375 (R5): fail LOUD on a grant re-upsert failure. `|| true` here only
+# guards `set -e` so we can read ADMIN_CURL_HTTP_STATUS; the explicit assert
+# below is the real gate. Without it, an admin-API failure (expired token,
+# control-api 5xx) would fall through to the poll and be misattributed to the
+# nudge under test ("did not accelerate convergence"), hiding the real cause.
+create_grant promptBridge >/dev/null 2>&1 || true
+if [ "$ADMIN_CURL_HTTP_STATUS" != "200" ]; then
+  fail "grant re-upsert failed (admin API HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}) — cannot test the event-driven nudge"
+  exit 1
+fi
+
+nudge_found=0
+nudge_state=""
+nudge_rev_after=""
+nudge_deadline=$((SECONDS + E2E_WAIT_NUDGE_VALIDATED))
+while [ "$SECONDS" -lt "$nudge_deadline" ]; do
+  gate_assert_deadline "waiting for event-driven policyRevision bump (issue #375 P3)"
+  nudge_state="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+    -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)"
+  nudge_rev_after="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+    -o jsonpath='{.status.pluginWorkloadSdk.policyRevision}' 2>/dev/null || true)"
+  if [ "$nudge_state" = "validated" ] && [ -n "$nudge_rev_after" ] &&
+     [ "$nudge_rev_after" -gt "$nudge_rev_before" ] 2>/dev/null; then
+    nudge_found=1
+    break
+  fi
+  sleep "$POLL_INTERVAL"
+done
+
+nudge_elapsed=$((SECONDS - nudge_started_at))
+if [ "$nudge_found" -eq 1 ]; then
+  ok "grant change re-published (policyRevision ${nudge_rev_before}→${nudge_rev_after}, state=validated) in ~${nudge_elapsed}s via the event-driven nudge (≤${E2E_WAIT_NUDGE_VALIDATED}s)"
+else
+  fail "grant change was NOT re-published within ${E2E_WAIT_NUDGE_VALIDATED}s (state='${nudge_state:-<empty>}', policyRevision '${nudge_rev_before}'→'${nudge_rev_after:-<empty>}'); the LISTEN/NOTIFY nudge did not accelerate convergence"
+  exit 1
+fi
+
+# The acceleration must come from the NOTIFY-driven reconcile, NOT a WRC restart.
+wrc_pods_after="$(kctl get pods -n "$CONTROL_NS" -o name 2>/dev/null \
+  | grep -E '^pod/workflow-recipes-' | sort | tr '\n' ',' || true)"
+if [ "$wrc_pods_after" = "$wrc_pods_before" ]; then
+  ok "WRC was NOT restarted during convergence (pod set unchanged) — convergence was event-driven"
+else
+  fail "WRC pod set changed during the nudge phase (before='${wrc_pods_before}' after='${wrc_pods_after}'); convergence must not depend on a restart"
   exit 1
 fi
 

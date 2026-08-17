@@ -18,6 +18,57 @@ import {
 export const PLUGIN_WORKLOAD_SDK_FAMILIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkFamily = (typeof PLUGIN_WORKLOAD_SDK_FAMILIES)[number]
 
+// ─── Grant-update NOTIFY (issue #375, P3) ────────────────────────────────
+// CROSS-SERVICE CONTRACT: a transactional `pg_notify` fired inside the
+// grant-mutation transactions (upsert / delete / revoke) so the Workflow
+// Recipes Controller re-reconciles the affected recipe immediately (~1–5s)
+// instead of waiting for its ≤30s level-triggered watchdog. The WRC LISTEN side
+// lives in `workflow-recipes/src/reconciler/grantUpdateListener.ts` — the
+// channel name and payload shape below MUST stay in sync with it.
+//
+// This is an app-level NOTIFY (not a DDL trigger) so the payload stays typed and
+// the change is fully revertible. Being inside the transaction, it is delivered
+// on COMMIT and discarded on ROLLBACK. Semantics are best-effort: a dropped
+// notification degrades to the existing polling backstop, never worse.
+export const PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL = 'plugin_workload_sdk_grant_update'
+
+export interface GrantUpdateNotifyInput {
+  recipeNamespace: string
+  recipeName: string
+  /** Omitted for a whole-recipe revoke that spans multiple families. */
+  capabilityFamily?: string
+}
+
+/**
+ * Build the JSON payload for a grant-update NOTIFY. Pure and exported so the
+ * exact wire shape can be unit-tested without a live Postgres.
+ */
+export function buildGrantUpdateNotifyPayload(input: GrantUpdateNotifyInput): string {
+  return JSON.stringify({
+    recipeNamespace: input.recipeNamespace,
+    recipeName: input.recipeName,
+    ...(input.capabilityFamily ? { capabilityFamily: input.capabilityFamily } : {}),
+  })
+}
+
+/**
+ * Emit the grant-update NOTIFY on the shared channel. MUST be called with the
+ * in-transaction `db` client so the signal is delivered on COMMIT (and dropped
+ * on ROLLBACK), never as a separate connection.
+ *
+ * A `pg_notify` inside the transaction would roll the whole grant mutation back
+ * if it threw — but the only failure mode is a payload over Postgres' 8000-byte
+ * NOTIFY limit, and this payload is just a recipe namespace/name (+ optional
+ * short family), which cannot approach that bound. So the mutation is never at
+ * risk from the notify, and the transactional coupling is intentional.
+ */
+async function notifyGrantUpdate(db: DbClient, input: GrantUpdateNotifyInput): Promise<void> {
+  await db.query('SELECT pg_notify($1, $2)', [
+    PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL,
+    buildGrantUpdateNotifyPayload(input),
+  ])
+}
+
 export const PLUGIN_WORKLOAD_SDK_INVOCATION_STATUSES = [
   'in_progress',
   'complete',
@@ -614,6 +665,12 @@ export async function upsertGrant(
         })),
     ]
     await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    // issue #375 (P3): nudge the WRC to re-reconcile now that the grant changed.
+    await notifyGrantUpdate(db, {
+      recipeNamespace: params.recipeNamespace,
+      recipeName: params.recipeName,
+      capabilityFamily: params.capabilityFamily,
+    })
     return grant
   })
 }
@@ -880,6 +937,17 @@ export async function revokePluginWorkloadSdkForRecipe(
         changes,
       })
     }
+    // issue #375 (P3): a whole-recipe revoke spans every family, so omit the
+    // capabilityFamily — the WRC only needs the recipe coordinates to re-reconcile.
+    // issue #375 (B2): notify ONLY on an actual transition (rows moved to
+    // 'revoking', or permission changes emitted). A no-op revoke — every grant
+    // already revoking/disabled — must stay silent, otherwise the WRC would
+    // force-reconcile the still-cached recipe, which can re-enter revoke and
+    // NOTIFY again: a reconcile+pg_notify spin. Matches upsert/delete "notify
+    // only on a real mutation" semantics.
+    if ((revoked.rowCount ?? 0) > 0 || changes.length > 0) {
+      await notifyGrantUpdate(db, { recipeNamespace, recipeName })
+    }
     return {
       state:
         hasActivePolicy || hasRevokingPolicy || (revoked.rowCount ?? 0) > 0
@@ -1044,6 +1112,13 @@ export async function deleteGrant(
         })),
     ]
     await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    // issue #375 (P3): nudge the WRC to re-reconcile after the grant is removed
+    // so the capability projection transitions back to awaiting_policy/degraded.
+    await notifyGrantUpdate(db, {
+      recipeNamespace: grant.recipeNamespace,
+      recipeName: grant.recipeName,
+      capabilityFamily: grant.capabilityFamily,
+    })
     return true
   })
 }

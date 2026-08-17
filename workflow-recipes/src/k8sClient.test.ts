@@ -383,6 +383,221 @@ describe('shouldPatchRecipeStatus', () => {
       )
     ).toBe(false)
   })
+
+  // ── issue #375: publish computed Plugin Workload SDK state transitions ──
+  // The dominant failure mode: the reconciler computes awaiting_policy→validated
+  // but no OTHER observable diff (phase, top-level message, workloads, owned
+  // conditions) changes, so the old shouldPatchRecipeStatus returned false and
+  // the transition was never published — status stayed awaiting_policy for ~40
+  // min. shouldPatchRecipeStatus must now compare the SDK capability projection
+  // carried on result.pluginWorkloadSdkProjection.
+  function validatedProjection() {
+    return {
+      conditions: [],
+      capability: {
+        state: 'validated' as const,
+        promptBridge: true,
+        clientNotifications: false,
+        message: 'Capability validated (promptBridge)',
+        bootstrapPodUid: 'pod-abc',
+        policyRevision: 3,
+        defaultTargetRef: 'primary-openai',
+        validatedAt: new Date().toISOString(),
+        verifiedAt: new Date().toISOString(),
+      },
+    }
+  }
+
+  function sdkRecipe(persistedSdk: Record<string, unknown>): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+      status: {
+        phase: 'active',
+        message: 'All workloads deployed',
+        // No PluginWorkloadSdkCapability condition, so the pre-existing
+        // message-vs-condition guard stays inert and this asserts ONLY the new
+        // projection comparison.
+        pluginWorkloadSdk: persistedSdk as never,
+      },
+    })
+  }
+
+  it('patches a computed awaiting_policy → validated transition (issue #375 incident replica)', () => {
+    // The exact incident shape: phase and top-level message are unchanged, the
+    // ONLY change is the SDK capability state. Before the fix this returned
+    // false and the validated state was never published.
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'awaiting_policy',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
+          verifiedAt: '2026-08-17T17:24:50.000Z',
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: validatedProjection(),
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('refreshes a stale verifiedAt on an otherwise-identical validated projection (throttle open)', () => {
+    const staleVerifiedAt = new Date(Date.now() - 6 * 60_000).toISOString()
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: staleVerifiedAt,
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: validatedProjection(),
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('does not patch a fresh verifiedAt on an identical validated projection (throttle closed / anti-loop)', () => {
+    const freshVerifiedAt = new Date(Date.now() - 10_000).toISOString()
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: freshVerifiedAt,
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: validatedProjection(),
+        }
+      )
+    ).toBe(false)
+  })
+
+  it('patches a computed validated → awaiting_policy transition (revocation symmetry)', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: new Date(Date.now() - 10_000).toISOString(),
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: {
+            conditions: [],
+            capability: {
+              state: 'awaiting_policy' as const,
+              promptBridge: true,
+              clientNotifications: false,
+              message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
+              bootstrapPodUid: 'pod-abc',
+              verifiedAt: new Date().toISOString(),
+            },
+          },
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('does not patch when the SDK projection is semantically unchanged and verifiedAt is fresh', () => {
+    // Anti-loop guard: two back-to-back reconciles with the same computed state
+    // and a still-fresh verifiedAt must NOT keep emitting patches.
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: new Date(Date.now() - 5_000).toISOString(),
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: validatedProjection(),
+        }
+      )
+    ).toBe(false)
+  })
+
+  it('patches an in-place re-bootstrap that only changes bootstrapModel/provider/contractVersion (issue #375 B1)', () => {
+    // A validated promptBridge recipe re-bootstraps in place (SAME pod, same
+    // policyRevision) against a DIFFERENT model/provider — e.g. the operator
+    // corrects the target model. state stays 'validated', message is
+    // families-only, pod/policyRevision unchanged, verifiedAt is fresh (throttle
+    // closed). Only bootstrapModel/provider/contractVersion move — persisted
+    // semantic fields read by control-api at runtime. They MUST force a patch.
+    const freshVerifiedAt = new Date(Date.now() - 10_000).toISOString()
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          bootstrapContractVersion: 2,
+          bootstrapProvider: 'openai',
+          bootstrapModel: 'gpt-5.4-mini',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: freshVerifiedAt,
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: {
+            conditions: [],
+            capability: {
+              state: 'validated' as const,
+              promptBridge: true,
+              clientNotifications: false,
+              message: 'Capability validated (promptBridge)',
+              bootstrapPodUid: 'pod-abc',
+              bootstrapContractVersion: 2,
+              bootstrapProvider: 'anthropic',
+              bootstrapModel: 'claude-sonnet-4-6',
+              policyRevision: 3,
+              defaultTargetRef: 'primary-openai',
+              verifiedAt: freshVerifiedAt,
+            },
+          },
+        }
+      )
+    ).toBe(true)
+  })
 })
 
 describe('infrastructure telemetry projections', () => {
@@ -1715,6 +1930,293 @@ describe('transient-result requeue (scheduleTransientRetry)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('reconcile failure re-schedules the transient retry chain (issue #375 P2)', () => {
+  // A transient (non-404) throw inside handleRecipeEvent used to log the failure
+  // and return WITHOUT re-arming the per-recipe retry chain, so the 5s self-heal
+  // died on the first error and only the 30s watchdog could recover it. The fix
+  // keeps the loud error log AND re-schedules the bounded backoff retry; the 404
+  // "already gone" branch must still clear and return without a retry.
+  type InternalWatcher = {
+    recipes: Map<string, WorkflowRecipeCRD>
+    transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+    stopped: boolean
+    traceReporter: null
+    dbRunProcessor: null
+    eventQueue: { enqueue: (key: string, task: () => Promise<void>) => Promise<void> }
+    reconciler: {
+      reconcile: ReturnType<typeof vi.fn>
+      isRecipeStillActive: ReturnType<typeof vi.fn>
+      ensureFinalizer: ReturnType<typeof vi.fn>
+      patchStatus: ReturnType<typeof vi.fn>
+    }
+    handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+  }
+
+  function makeInternal(recipe: WorkflowRecipeCRD, reconcileError: unknown): InternalWatcher {
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[recipe.metadata.name, recipe]])
+    internal.transientRetries = new Map()
+    internal.stopped = false
+    internal.traceReporter = null
+    internal.dbRunProcessor = null
+    internal.eventQueue = { enqueue: vi.fn((_key: string, task: () => Promise<void>) => task()) }
+    internal.reconciler = {
+      reconcile: vi.fn().mockRejectedValue(reconcileError),
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      patchStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    return internal
+  }
+
+  function clearRetries(internal: InternalWatcher): void {
+    for (const { timer } of internal.transientRetries.values()) clearTimeout(timer)
+  }
+
+  it('re-arms the transient retry after a non-404 reconcile failure (keeps the loud log)', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const recipe = makeWorkflowRecipe({ metadata: { name: 'flaky', namespace: 'sandbox-recipes' } })
+    const internal = makeInternal(recipe, new Error('control-api unreachable'))
+    try {
+      await internal.handleRecipeEvent('ADDED', recipe)
+
+      // fail-loud preserved: the reconciliation-failed error is still logged.
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Reconciliation failed for "flaky"'),
+        expect.anything()
+      )
+      // NEW: the 5s self-heal chain is re-armed instead of dying on first error.
+      expect(internal.transientRetries.has('flaky')).toBe(true)
+    } finally {
+      clearRetries(internal)
+      errSpy.mockRestore()
+    }
+  })
+
+  it('does not re-arm a retry when the recipe is already gone (404)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const recipe = makeWorkflowRecipe({ metadata: { name: 'gone', namespace: 'sandbox-recipes' } })
+    const internal = makeInternal(recipe, { code: 404 })
+    try {
+      await internal.handleRecipeEvent('ADDED', recipe)
+
+      expect(internal.transientRetries.has('gone')).toBe(false)
+      expect(internal.recipes.has('gone')).toBe(false)
+    } finally {
+      clearRetries(internal)
+      warnSpy.mockRestore()
+    }
+  })
+})
+
+describe('Plugin Workload SDK computed-vs-published state divergence log (issue #375 P4)', () => {
+  // Forensic observability: when the reconciler COMPUTES an SDK capability state
+  // that differs from what is currently published, log old→new and whether a
+  // patch was emitted. This one line would have discriminated H1 (transition
+  // computed but not published) from H2 in minutes during the incident.
+  type InternalWatcher = {
+    recipes: Map<string, WorkflowRecipeCRD>
+    transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+    stopped: boolean
+    traceReporter: null
+    dbRunProcessor: null
+    reconciler: {
+      reconcile: ReturnType<typeof vi.fn>
+      isRecipeStillActive: ReturnType<typeof vi.fn>
+      ensureFinalizer: ReturnType<typeof vi.fn>
+      patchStatus: ReturnType<typeof vi.fn>
+    }
+    handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+  }
+
+  function makeInternal(recipe: WorkflowRecipeCRD, result: unknown): InternalWatcher {
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[recipe.metadata.name, recipe]])
+    internal.transientRetries = new Map()
+    internal.stopped = false
+    internal.traceReporter = null
+    internal.dbRunProcessor = null
+    internal.reconciler = {
+      reconcile: vi.fn().mockResolvedValue(result),
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      patchStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    return internal
+  }
+
+  function sdkRecipe(persistedState: 'awaiting_policy' | 'validated'): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
+      spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+      status: {
+        phase: 'active',
+        message: 'All workloads deployed',
+        pluginWorkloadSdk: {
+          state: persistedState,
+          promptBridge: true,
+          clientNotifications: false,
+        },
+      },
+    })
+  }
+
+  it('logs the old→new SDK state and patchEmitted when the computed state diverges', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const recipe = sdkRecipe('awaiting_policy')
+    const internal = makeInternal(recipe, {
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+      pluginWorkloadSdkProjection: {
+        conditions: [],
+        capability: {
+          state: 'validated' as const,
+          promptBridge: true,
+          clientNotifications: false,
+          verifiedAt: new Date().toISOString(),
+        },
+      },
+    })
+    try {
+      await internal.handleRecipeEvent('ADDED', recipe)
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /Plugin Workload SDK state.*sdk-recipe.*awaiting_policy -> validated.*patchEmitted=true/
+        )
+      )
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  it('does not log a transition when the computed SDK state is unchanged', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const recipe = sdkRecipe('validated')
+    const internal = makeInternal(recipe, {
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+      pluginWorkloadSdkProjection: {
+        conditions: [],
+        capability: {
+          state: 'validated' as const,
+          promptBridge: true,
+          clientNotifications: false,
+          verifiedAt: new Date().toISOString(),
+        },
+      },
+    })
+    try {
+      await internal.handleRecipeEvent('ADDED', recipe)
+      const transitionLogs = logSpy.mock.calls.filter(([msg]) =>
+        String(msg).includes('Plugin Workload SDK state')
+      )
+      expect(transitionLogs).toHaveLength(0)
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+})
+
+describe('grant-update NOTIFY dispatch (issue #375 P3 wiring, H4/H5)', () => {
+  type InternalWatcher = {
+    recipes: Map<string, WorkflowRecipeCRD>
+    eventQueue: { enqueue: ReturnType<typeof vi.fn> }
+    handleRecipeEvent: ReturnType<typeof vi.fn>
+    handleGrantUpdateNotification: (recipeNamespace: string, recipeName: string) => void
+  }
+
+  function makeInternal(recipes: WorkflowRecipeCRD[]): {
+    internal: InternalWatcher
+    tasks: Array<() => Promise<void>>
+  } {
+    const tasks: Array<() => Promise<void>> = []
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map(recipes.map(r => [r.metadata.name, r]))
+    internal.eventQueue = {
+      enqueue: vi.fn((_key: string, task: () => Promise<void>) => {
+        tasks.push(task)
+        return Promise.resolve()
+      }),
+    }
+    internal.handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    return { internal, tasks }
+  }
+
+  it('enqueues a forceReconcile for a matching recipe and reconciles the CURRENT cached recipe (H5)', async () => {
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes', generation: 1 },
+    })
+    const { internal, tasks } = makeInternal([recipe])
+
+    internal.handleGrantUpdateNotification('sandbox-recipes', 'sdk-recipe')
+
+    expect(internal.eventQueue.enqueue).toHaveBeenCalledWith('sdk-recipe', expect.any(Function))
+    expect(tasks).toHaveLength(1)
+
+    // H5: a newer MODIFIED lands before the queued job runs. The job must
+    // reconcile the FRESH cached recipe, not the snapshot captured at NOTIFY time.
+    const fresher = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes', generation: 2 },
+    })
+    internal.recipes.set('sdk-recipe', fresher)
+
+    await tasks[0]()
+
+    expect(internal.handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', fresher, {
+      forceReconcile: true,
+    })
+    expect(internal.handleRecipeEvent).not.toHaveBeenCalledWith('MODIFIED', recipe, {
+      forceReconcile: true,
+    })
+  })
+
+  it('discards and warns on a namespace mismatch — no enqueue (H4)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
+    })
+    const { internal } = makeInternal([recipe])
+    try {
+      internal.handleGrantUpdateNotification('other-namespace', 'sdk-recipe')
+      expect(internal.eventQueue.enqueue).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Discarding grant-update NOTIFY for "other-namespace/sdk-recipe"')
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('discards and warns on an unknown recipe — no enqueue (H4)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { internal } = makeInternal([])
+    try {
+      internal.handleGrantUpdateNotification('sandbox-recipes', 'nope')
+      expect(internal.eventQueue.enqueue).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('unknown recipe'))
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('the queued job re-checks the guard and does nothing if the recipe vanished while queued (H5)', async () => {
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
+    })
+    const { internal, tasks } = makeInternal([recipe])
+
+    internal.handleGrantUpdateNotification('sandbox-recipes', 'sdk-recipe')
+    // Recipe deleted between NOTIFY and job execution.
+    internal.recipes.delete('sdk-recipe')
+
+    await tasks[0]()
+
+    expect(internal.handleRecipeEvent).not.toHaveBeenCalled()
   })
 })
 
