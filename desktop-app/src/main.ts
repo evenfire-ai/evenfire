@@ -2,6 +2,7 @@ import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron
 import path from 'node:path'
 import { AppService } from './appService.js'
 import { config } from './config.js'
+import { installDesktopTextContextMenus } from './desktopTextContextMenu.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
@@ -364,6 +365,7 @@ if (gotSingleInstanceLock) {
   app
     .whenReady()
     .then(async () => {
+      installDesktopTextContextMenus()
       wireAdaptiveSystemIcon()
       // Must precede registerIpcHandlers: the SDK IPC handlers resolve the
       // runtime eagerly on first call, and a plugin can be mounted the moment
