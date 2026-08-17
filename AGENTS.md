@@ -84,6 +84,31 @@ does not stand in for another. Private operational state, generated ports,
 profile metadata, logs, and evidence belong under the ignored
 `.local-notes/infra/runs/` path and must never be committed.
 
+## Desktop Electron installation invariant
+
+Node 24 ships npm 11, which blocks dependency lifecycle scripts unless they
+are explicitly approved. The Desktop app's pinned Electron package is approved
+in `desktop-app/package.json` because its `postinstall` downloads the Electron
+runtime used by Desktop tests and the local T2 gate. Desktop validation must
+use Node 24 (the CI/runtime contract); Node 26 is not a supported validation
+runtime for this dependency. Do not install `desktop-app` with
+`--ignore-scripts`, and do not count a Desktop test/build result until these
+checks succeed from `desktop-app`:
+
+```bash
+node --version  # must report v24.x
+node -e "const p=require('electron'); if(typeof p !== 'string') process.exit(1); console.log(p)"
+```
+
+If it fails with `Electron failed to install correctly`, the dependency install
+is incomplete, not a product failure. Stop the gate, switch to Node 24, remove
+only the generated `desktop-app/node_modules/electron` directory, rerun `npm
+ci` with lifecycle scripts enabled, and rerun the checks. Do not add broad
+script approvals, set `ELECTRON_SKIP_BINARY_DOWNLOAD`, point
+`ELECTRON_OVERRIDE_DIST_PATH` at an unverified binary, or report green evidence
+from a missing runtime. A verified local cache may be used only when its
+version and checksum are recorded in the run evidence.
+
 ## Branch naming
 
 Do not create new branches with agent/vendor prefixes such as `codex/*`,
