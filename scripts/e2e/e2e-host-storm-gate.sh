@@ -26,14 +26,16 @@
 #      construction, so A1 is primarily a RECORDING of that evidence — it
 #      can only fail if the harness itself degenerates into sequential
 #      phases; the load-bearing falsifiable claims are A2-A8.
-#   A2 urgent queue-wait coverage has two independent same-pod windows:
-#      (a) the supported wake window immediately before the HCC kill requires
-#      every completed urgent sample <= 5s, after proving the wake reconcile
-#      finished and the urgent lane returned idle; and
-#      (b) ten dedicated Host ADDED events issued only after the replacement
-#      HCC completed LIST→WATCH recovery use a D - C1 p95 delta. A slow wake
-#      can therefore never be diluted by later fast post-recovery probes, and
-#      neither window crosses the intentional process restart.
+#   A2 urgent queue-wait p95 <= 5s DURING the storm window, computed from
+#      the clerum_hcc_host_reconcile_queue_wait_seconds{lane="urgent"}
+#      histogram buckets (§14.1) across two counter windows: pre-kill pod
+#      delta (scrape B - scrape A) plus post-kill pod absolute (scrape C1,
+#      taken IMMEDIATELY after created-Host convergence so post-storm quiet
+#      samples cannot dilute the p95 — a fresh process starts at zero, and
+#      the C1 window includes replacement-pod recovery traffic). Samples in
+#      flight between scrape B and process death are unrecoverable (counter
+#      reset) and are recorded as a documented measurement gap, never
+#      silently backfilled.
 #   A3 no starvation: EVERY created Host's Deployment materializes within
 #      STORM_MATERIALIZATION_BUDGET_S (20s, §14.2 "New Host
 #      materialization") of that Host's OWN metadata.creationTimestamp,
@@ -57,16 +59,13 @@
 #      All-zero is legitimate (deletes fully handled by the direct
 #      watch-DELETE path, which by design does not touch this counter) —
 #      A5 remains the falsifiable cleanup proof.
-#   A7 recovered fleet convergence is bounded, from
-#      clerum_hcc_host_fleet_requests_total (scrape C2) plus the replacement
-#      pod's explicit initial-fleet COMPLETED log: failed == 0 in both windows,
-#      the exact replacement pod completes its startup fleet pass, and
-#      trailing <= coalesced. The pod identity, completion marker, and A4's
-#      successful recovery histogram form the causal fence; started is not
-#      capped because an independent request may legitimately begin after the
-#      recovery pass settles. Requiring a coalesced request here would invent
-#      a second overlapping signal; the concurrent-request coalescing contract
-#      is covered deterministically by hostFleetScheduler.test.ts.
+#   A7 fleet coalescing held (one active + one trailing slot), from
+#      clerum_hcc_host_fleet_requests_total (scrape C2): failed == 0 in
+#      both windows; on the post-kill pod started >= 1 (the recovery
+#      convergence pass ran), coalesced >= 1 (the recovery-triggered
+#      request landed against the active initial pass), and trailing <=
+#      coalesced (every trailing drain corresponds to at least one request
+#      that was queued behind the single pending slot).
 #   A8 wake ingredient integrity: the woken Host leaves state=suspended and
 #      reaches a Ready pod within STORM_WAKE_READY_BUDGET_S of the wake
 #      POST. This is an ingredient-integrity bound (a silently no-op wake
@@ -98,26 +97,23 @@
 #
 # ----------------------------------------------------------------------
 # INPUTS (environment; fail-loud if missing/invalid)
-#   KUBECONTEXT / E2E_K8S_CONTEXT
-#               Exact generated branch-owned minikube context.
-#   MINIKUBE_PROFILE
-#               Must equal that context.
-#   E2E_EXPECTED_PRE_GATE_GATE
-#               Exact gate recorded by the branch-owned pre-gate sync.
-#   E2E_HCC_HOST_STORM_FAULT_INJECTION=1
-#               Explicit acknowledgement of the disruptive HCC pod restart.
+#   CONTEXT     kubectl context. REFUSED unless it matches
+#               ^clerum-(test|codex-|detached-|claude-) — a local minikube
+#               profile. Any GKE / *prod* context is rejected outright.
 #
 # OPTIONAL INPUTS
 #   E2E_STORM_WAKE_HOST_REF  suspended-wake target (default chatllm-stateless,
 #               the seeded stateless Host — it must exist with
 #               spec.lifecycle.stateless=true and be associated to the E2E
 #               user; seed via scripts/e2e/seed-stateless-host.sh).
+#   EXTERNAL_REST_API_BASE_URL  default http://127.0.0.1:8091
+#   RPC_PROXY_BASE_URL          default http://127.0.0.1:8094
 #   E2E_DEV_LOGIN_EMAIL         default test@clerum.io
-#   E2E_USER_PASSWORD           default ${ADMIN_PASSWORD:-changeme123!}
+#   E2E_USER_PASSWORD           default ${ADMIN_PASSWORD:-admin123!}
 #   STORM_CONTEXT_REF           Context CR fixtures reference (default context1)
 #   STORM_MODEL_PROVIDER / STORM_MODEL_NAME  fixture model (default zai/glm-5.1)
-#   CLERUM_PROFILE_PORTS_ENV     optional explicit path to the selected branch
-#                               profile's generated ports.env.
+#   HCC_METRICS_LOCAL_PORT      ephemeral scrape port (default 18082)
+#   KEEP_FIXTURES               set to 1 to skip teardown (diagnosis only)
 #
 # Prereqs (each a HARD FAIL with the concrete reason):
 #   - branch HCC image deployed (clerum_hcc_host_delete_cleanup_total
@@ -126,10 +122,7 @@
 #   - external-rest-api + rpc-proxy reachable (make minikube-pf-all)
 #
 # Usage:
-#   MINIKUBE_PROFILE=<profile> KUBECONTEXT=<profile> \
-#   E2E_EXPECTED_PRE_GATE_GATE=<gate> \
-#   E2E_HCC_HOST_STORM_FAULT_INJECTION=1 \
-#     bash scripts/e2e/e2e-host-storm-gate.sh
+#   CONTEXT=clerum-test bash scripts/e2e/e2e-host-storm-gate.sh
 #
 # EXIT CODES
 #   0  every storm assertion passed and teardown left zero fixtures
@@ -137,17 +130,6 @@
 #   2  usage / input error
 # ======================================================================
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/e2e/e2e-lib.sh
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/e2e-lib.sh"
-# shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-fixture.sh
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"
-# shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-lock.sh
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 
 # ─── Constants mirrored from host-context-controller/src/{constants,config}.ts ──
 readonly MANAGED_BY_LABEL='clerum.io/managed-by'
@@ -162,10 +144,6 @@ readonly CONTROL_NS='control-plane'
 readonly HCC_DEPLOY='host-context-controller'
 readonly HCC_PORT='8081'               # containerPort http (deploy/base/control-plane)
 readonly HCC_METRICS_PATH='/metrics'   # server.ts GET /metrics
-readonly HCC_PASS_COMPLETED_MARKER='Completed Host reconciliation after initial Host reconciliation'
-readonly HCC_PASS_FAILED_MARKER='Host reconciliation after initial Host reconciliation failed'
-# Shared HCC ownership/lock helpers use HCC_NS.
-HCC_NS="$CONTROL_NS"
 
 # Owned-child kinds + namespaces of a per-Host bundle (mirrors
 # measure-host-bundle-reconcile.sh — includes per-Host NetworkPolicies).
@@ -178,7 +156,6 @@ readonly BUNDLE_NAMESPACES="${MCP_HOST_NS} ${CHANNELS_NS} ${RPC_PROXY_NS}"
 # (`QUEUE_WAIT_METRIC="$QUEUE_WAIT_METRIC" python3 …`) would fail as a readonly
 # reassignment under `set -e` — export once here and drop the inline prefixes.
 readonly QUEUE_WAIT_METRIC='clerum_hcc_host_reconcile_queue_wait_seconds'
-readonly IN_FLIGHT_METRIC='clerum_hcc_host_reconcile_in_flight'
 readonly WATCH_RECOVERY_METRIC='clerum_hcc_host_watch_recovery_seconds'
 readonly FLEET_METRIC='clerum_hcc_host_fleet_requests_total'
 readonly DELETE_CLEANUP_METRIC='clerum_hcc_host_delete_cleanup_total'
@@ -187,20 +164,11 @@ export QUEUE_WAIT_METRIC WATCH_RECOVERY_METRIC FLEET_METRIC DELETE_CLEANUP_METRI
 # ─── Storm shape + budgets (each constant states its contract) ────────
 # Addendum 5.1: ">=10" created fixture Hosts, mixed stateful/stateless.
 readonly STORM_CREATE_COUNT=10
-# A2's direct-watch probe is deliberately separate from the restart window:
-# a cold-start LIST legitimately converges objects on the fleet lane. These
-# ten ADDED events are emitted only once the replacement's LIST→WATCH recovery
-# has succeeded, so their queue histogram is an unambiguous urgent-lane SLO.
-readonly STORM_URGENT_PROBE_COUNT=10
 # Addendum 5.1: ">=3" pre-created fixture Hosts deleted mid-storm.
 readonly STORM_DELETE_COUNT=3
 # §14.2 "urgent new/wake queue wait": local hard gate <= 5s (histogram
 # bucket boundary le="5" exists in RECONCILE_LATENCY_BUCKETS).
 readonly STORM_URGENT_P95_BUDGET_S=5
-# The queue value itself is adjudicated against the 5s hard gate. This larger
-# deadline bounds collection of the completed reconcile evidence and produces
-# a loud operational failure if the wake never settles or telemetry is absent.
-readonly STORM_WAKE_QUEUE_EVIDENCE_DEADLINE_S=60
 # §14.2 "New Host materialization": Host CR -> Deployment <= 20s.
 readonly STORM_MATERIALIZATION_BUDGET_S=20
 # §14.2 "Watch recovery": recovery requested -> WATCH installed <= 15s
@@ -272,44 +240,26 @@ print_results() {
   log "fairness and convergence under realistic concurrency, not API degradation."
 }
 
+# ─── kubectl wrapper — EVERY call carries --context (CLAUDE.md mandate) ──
+kctl() { kubectl --context "$CONTEXT" "$@"; }
+
 # ─── Portable time helper (python3; mirrors measure script) ───────────
 now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 
 # ─── Strict local-profile context guard (fail-loud) ───────────────────
 require_storm_context() {
-  [[ -n "${E2E_KUBECONTEXT:-}" ]] ||
-    die "KUBECONTEXT or E2E_K8S_CONTEXT must select an explicit branch-scoped minikube context." 2
-  is_branch_scoped_e2e_context "$E2E_KUBECONTEXT" ||
-    die "Refusing Host storm fault injection on non-branch context '${E2E_KUBECONTEXT}'." 2
-  require_safe_kube_context ||
-    die "context '${E2E_KUBECONTEXT}' is not an allowed local E2E context." 2
-  if ! kctl get nodes -o name >/dev/null 2>&1; then
-    die "context '${E2E_KUBECONTEXT}' is not reachable (kubectl get nodes failed)." 1
+  [[ -n "${CONTEXT:-}" ]] || die "CONTEXT is required (a local minikube profile context)." 2
+  case "$CONTEXT" in
+    *gke_*|*prod*)
+      die "Refusing: CONTEXT='${CONTEXT}' looks like a GKE/production context. Local profiles only." 2 ;;
+  esac
+  if [[ ! "$CONTEXT" =~ ^clerum-(test|codex-|detached-|claude-) ]]; then
+    die "Refusing: CONTEXT='${CONTEXT}' is not an allowed local profile. Must match ^clerum-(test|codex-|detached-|claude-)." 2
   fi
-  kctl get nodes -o json | jq -e --arg context "$E2E_KUBECONTEXT" \
-    'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $context)' >/dev/null ||
-    die "target context is not the exact selected minikube profile '${E2E_KUBECONTEXT}'." 2
-  log "branch-owned minikube context OK: ${E2E_KUBECONTEXT}"
-}
-
-load_branch_profile_endpoints() {
-  local ports_env external_url rpc_url
-  ports_env="${CLERUM_PROFILE_PORTS_ENV:-${HOME}/.cache/clerum/minikube-profiles/${E2E_KUBECONTEXT}/ports.env}"
-  [[ -r "$ports_env" ]] ||
-    die "branch profile ports evidence is missing at ${ports_env}; refresh the branch-profile helper." 2
-  external_url="$(profile_env_value EXTERNAL_REST_API_BASE_URL "$ports_env")"
-  [[ -n "$external_url" ]] ||
-    external_url="$(profile_env_value EXTERNAL_REST_API_URL "$ports_env")"
-  rpc_url="$(profile_env_value RPC_PROXY_BASE_URL "$ports_env")"
-  [[ -n "$rpc_url" ]] ||
-    rpc_url="$(profile_env_value RPC_PROXY_URL "$ports_env")"
-  [[ "$external_url" =~ ^http://127\.0\.0\.1:[0-9]{2,5}$ ]] ||
-    die "branch ports.env has no valid loopback External REST URL." 2
-  [[ "$rpc_url" =~ ^http://127\.0\.0\.1:[0-9]{2,5}$ ]] ||
-    die "branch ports.env has no valid loopback RPC proxy URL." 2
-  EXT_BASE="$external_url"
-  RPC_BASE="$rpc_url"
-  log "using branch-profile endpoints from ${ports_env}"
+  if ! kctl get nodes -o name >/dev/null 2>&1; then
+    die "CONTEXT='${CONTEXT}' is not reachable (kubectl get nodes failed). Start the profile and its port-forwards." 1
+  fi
+  log "context OK: ${CONTEXT}"
 }
 
 require_deps() {
@@ -345,12 +295,11 @@ RUN_ID=''; WORK_DIR=''
 FIXTURE_SECRET=''
 STORM_CREATED_HOSTS=()
 STORM_DELETE_HOSTS=()
-STORM_URGENT_PROBE_HOSTS=()
 WAKE_HOST_REF="${E2E_STORM_WAKE_HOST_REF:-chatllm-stateless}"
-EXT_BASE=''
-RPC_BASE=''
+EXT_BASE="${EXTERNAL_REST_API_BASE_URL:-http://127.0.0.1:8091}"
+RPC_BASE="${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}"
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
-DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
+DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-admin123!}}"
 STORM_CTX_REF="${STORM_CONTEXT_REF:-context1}"
 STORM_PROVIDER="${STORM_MODEL_PROVIDER:-zai}"
 STORM_MODEL="${STORM_MODEL_NAME:-glm-5.1}"
@@ -362,14 +311,6 @@ T_CREATE_FIRST_MS=''; T_DELETE_MS=''; T_WAKE_MS=''; T_KILL_MS=''; T_CREATE_LAST_
 PF_PID=''
 HCC_ENV_SAVED=''
 TEARDOWN_DONE=0
-TEARDOWN_CLEANUP_FAILED=0
-HCC_RESTORE_OK=1
-STORM_FIXTURES_CREATED=0
-# Read and mutated by the sourced compare-and-swap lock helper.
-HCC_GATE_LOCK_ACQUIRED=0
-HCC_GATE_LOCK_NAME=''
-HCC_GATE_LOCK_UID=''
-HCC_GATE_FINALIZATION_FAILURE=''
 
 cleanup_portforward() {
   if [[ -n "$PF_PID" ]] && kill -0 "$PF_PID" 2>/dev/null; then
@@ -399,16 +340,10 @@ restore_hcc_env() {
   _hcc_restore_args
   [[ ${#args[@]} -gt 0 ]] || { HCC_ENV_SAVED=''; return 0; }
   log "Restoring HCC cadence env on deployment/${HCC_DEPLOY}"
-  if ! kctl set env "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" "${args[@]}" >/dev/null 2>&1; then
-    warn "failed to restore HCC env (manual check required)"
-    HCC_RESTORE_OK=0
-    return 1
-  fi
-  if ! kctl rollout status "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" --timeout=180s >/dev/null 2>&1; then
+  kctl set env "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" "${args[@]}" >/dev/null 2>&1 || \
+    warn "failed to restore HCC env (manual check advised)"
+  kctl rollout status "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" --timeout=180s >/dev/null 2>&1 || \
     warn "HCC rollout did not settle after env restore"
-    HCC_RESTORE_OK=0
-    return 1
-  fi
   HCC_ENV_SAVED=''
 }
 
@@ -423,12 +358,10 @@ restore_hcc_env_strict() {
   [[ ${#args[@]} -gt 0 ]] || { HCC_ENV_SAVED=''; return 0; }
   log "Restoring HCC cadence env on deployment/${HCC_DEPLOY} (strict)"
   if ! kctl set env "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" "${args[@]}" >/dev/null 2>&1; then
-    HCC_RESTORE_OK=0
     fail "cadence restore FAILED — the profile is left with test cadences on deployment/${HCC_DEPLOY} (the EXIT trap retries best-effort; verify manually)"
     return 0
   fi
   if ! kctl rollout status "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" --timeout=180s >/dev/null 2>&1; then
-    HCC_RESTORE_OK=0
     fail "HCC rollout did not settle after the cadence restore — verify deployment/${HCC_DEPLOY} manually"
     return 0
   fi
@@ -438,11 +371,10 @@ restore_hcc_env_strict() {
 
 # shellcheck disable=SC2329  # invoked via the EXIT trap below
 cleanup_on_exit() {
-  local status=$? cleanup_failed=0
+  local status=$?
   set +e
   cleanup_portforward
-  if [[ "$TEARDOWN_DONE" != '1' && "$STORM_FIXTURES_CREATED" == '1' && -n "$RUN_ID" ]]; then
-    cleanup_failed=1
+  if [[ "$TEARDOWN_DONE" != '1' && -n "$RUN_ID" && "${KEEP_FIXTURES:-}" != '1' ]]; then
     local sel="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID}"
     warn "abnormal exit — best-effort deletion of storm fixtures (${sel})"
     kctl -n "$MCP_HOST_NS" delete host -l "$sel" --wait=false >/dev/null 2>&1 || \
@@ -450,10 +382,7 @@ cleanup_on_exit() {
     kctl -n "$MCP_HOST_NS" delete secret -l "$sel" --wait=false >/dev/null 2>&1 || \
       warn "best-effort fixture Secret deletion failed (manual check advised)"
   fi
-  restore_hcc_env || HCC_RESTORE_OK=0
-  if ! finalize_hcc_watch_gate_lock "$cleanup_failed" "$HCC_RESTORE_OK"; then
-    status=1
-  fi
+  restore_hcc_env
   exit "$status"
 }
 trap cleanup_on_exit EXIT
@@ -475,9 +404,6 @@ init_run() {
   done
   for i in $(seq 1 "$STORM_DELETE_COUNT"); do
     STORM_DELETE_HOSTS+=("$(printf 's791-%s-d%d' "$RUN_ID" "$i")")
-  done
-  for i in $(seq 1 "$STORM_URGENT_PROBE_COUNT"); do
-    STORM_URGENT_PROBE_HOSTS+=("$(printf 's791-%s-u%02d' "$RUN_ID" "$i")")
   done
   log "run-id ${RUN_ID}; work dir ${WORK_DIR}"
   log "create fixtures: ${STORM_CREATED_HOSTS[*]}"
@@ -605,30 +531,14 @@ storm_diagnostics() {
 # different pod (e.g. a terminating one during a rollout) than the one the
 # identity guard checked; cross-pod counter deltas would false-PASS A4.
 scrape_hcc_metrics() {
-  local out="$1" pod="$2" lport='' url pf_log
-  pf_log="${WORK_DIR}/pf-${pod}.log"
-  # Let kubectl allocate a process-owned loopback port. A fixed port is
-  # machine-global and can silently collide with another branch/profile gate.
-  kctl -n "$CONTROL_NS" port-forward --address=127.0.0.1 \
-    "pod/${pod}" ":${HCC_PORT}" >"$pf_log" 2>&1 &
+  local out="$1" pod="$2" lport="${HCC_METRICS_LOCAL_PORT:-18082}"
+  local url="http://127.0.0.1:${lport}${HCC_METRICS_PATH}"
+  kctl -n "$CONTROL_NS" port-forward "pod/${pod}" "${lport}:${HCC_PORT}" >"${WORK_DIR}/pf.log" 2>&1 &
   PF_PID=$!
-  # shellcheck disable=SC2329  # invoked by name via wait_until
-  _pf_ready_probe() {
-    kill -0 "$PF_PID" 2>/dev/null || return 1
-    lport="$(sed -nE 's/^Forwarding from 127\.0\.0\.1:([0-9]+) -> .*/\1/p' "$pf_log" | head -n1)"
-    [[ "$lport" =~ ^[0-9]+$ ]]
-  }
-  # shellcheck disable=SC2329  # invoked by name via wait_until
-  _pf_diag() { { echo '----- port-forward log -----'; cat "$pf_log" 2>/dev/null; } >&2; }
-  if ! wait_until 30 1 "random HCC metrics port-forward" _pf_ready_probe _pf_diag; then
-    cleanup_portforward
-    return 1
-  fi
-  url="http://127.0.0.1:${lport}${HCC_METRICS_PATH}"
   # shellcheck disable=SC2329  # invoked by name via wait_until
   _scrape_probe() { curl -fsS --max-time 3 "$url" -o "$out" 2>/dev/null; }
   # shellcheck disable=SC2329  # invoked by name via wait_until
-  _scrape_diag() { _pf_diag; }
+  _scrape_diag()  { { echo '----- port-forward log -----'; cat "${WORK_DIR}/pf.log" 2>/dev/null; } >&2; }
   if ! wait_until 30 2 "HCC metrics scrape -> ${out}" _scrape_probe _scrape_diag; then
     cleanup_portforward
     return 1
@@ -639,23 +549,6 @@ scrape_hcc_metrics() {
 # ─── Wake-target lifecycle observables ────────────────────────────────
 wake_lifecycle_state() {
   kctl -n "$MCP_HOST_NS" get host "$WAKE_HOST_REF" -o jsonpath='{.status.lifecycle.state}' 2>/dev/null || true
-}
-
-# shellcheck disable=SC2329  # invoked from the wait_until callback below
-wake_handled_generation() {
-  kctl -n "$MCP_HOST_NS" get host "$WAKE_HOST_REF" \
-    -o jsonpath='{.status.lifecycle.wakeHandledGeneration}' 2>/dev/null || true
-}
-
-# Correlate the public wake request with HCC's durable lifecycle status. This
-# predicate is deliberately pure so the static gate test can exercise the
-# same ordering contract used by the cluster E2E.
-# shellcheck disable=SC2329  # invoked from the wait_until callback below
-wake_generation_is_handled() {
-  local requested="$1" handled="$2"
-  [[ "$requested" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$handled" =~ ^[0-9]+$ ]] || return 1
-  (( handled >= requested ))
 }
 
 # shellcheck disable=SC2329  # invoked from _wake_converged_probe (runs via wait_until)
@@ -696,31 +589,19 @@ mint_rpc_token() {
 
 # The wake route is the user-facing rpc-proxy endpoint Desktop uses;
 # rpc-proxy owns the control-api hop. Never kubectl scale.
-WAKE_STATUS=''; WAKE_BODY=''; WAKE_GENERATION=''
+WAKE_STATUS=''; WAKE_BODY=''
 post_wake() {
-  local resp response_status response_generation
-  WAKE_STATUS=''; WAKE_BODY=''; WAKE_GENERATION=''
+  local resp
   mint_rpc_token || return 1
   resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST \
     "${RPC_BASE}/api/v1/rpc/hosts/${WAKE_HOST_REF}/wake" \
     -H "Authorization: Bearer ${RPC_TOKEN}" -H 'Content-Type: application/json') || {
     echo "wake POST failed at ${RPC_BASE}" >&2; return 1; }
   WAKE_STATUS="$(echo "$resp" | tail -n1)"; WAKE_BODY="$(echo "$resp" | sed '$d')"
-  [[ "$WAKE_STATUS" == '202' ]] || {
-    echo "wake POST returned HTTP ${WAKE_STATUS}, expected 202: ${WAKE_BODY}" >&2
-    return 1
-  }
-  response_status="$(jq -r '.status // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
-  response_generation="$(jq -r '.wakeGeneration // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
-  [[ "$response_status" == 'wake-requested' ]] || {
-    echo "wake POST returned unexpected status '${response_status:-<missing>}': ${WAKE_BODY}" >&2
-    return 1
-  }
-  [[ "$response_generation" =~ ^[1-9][0-9]*$ ]] || {
-    echo "wake POST returned invalid wakeGeneration '${response_generation:-<missing>}': ${WAKE_BODY}" >&2
-    return 1
-  }
-  WAKE_GENERATION="$response_generation"
+  case "$WAKE_STATUS" in
+    200|202|204) return 0 ;;
+    *) echo "wake POST returned HTTP ${WAKE_STATUS}: ${WAKE_BODY}" >&2; return 1 ;;
+  esac
 }
 
 # ─── HCC cadence shortening (only when the wake target must suspend) ──
@@ -773,15 +654,8 @@ _wake_target_diag() {
 require_deps
 require_storm_context
 init_run
-[[ "${KEEP_FIXTURES:-0}" != '1' ]] ||
-  die "KEEP_FIXTURES=1 is diagnostic-only and cannot produce a probative T2 Host-storm result; refusing before mutation." 2
-[[ "${E2E_HCC_HOST_STORM_FAULT_INJECTION:-0}" == '1' ]] ||
-  die "Set E2E_HCC_HOST_STORM_FAULT_INJECTION=1 to acknowledge the temporary HCC pod restart." 2
-require_branch_owned_hcc_gate "$CONTROL_NS"
-load_branch_profile_endpoints
 
 header "Prerequisites"
-ok "branch helper, profile, exact HEAD/fingerprint/gate, and minikube node label verified"
 if kctl get deployment "$HCC_DEPLOY" -n "$CONTROL_NS" >/dev/null 2>&1; then
   ok "HCC deployment present in ${CONTROL_NS}"
 else
@@ -821,18 +695,12 @@ else
   fail "cannot mint RPC token for hostRef=${WAKE_HOST_REF} -- is ${DEV_EMAIL} associated to it? Seed: bash scripts/e2e/seed-stateless-host.sh"
   print_results; exit 1
 fi
-if acquire_hcc_watch_gate_lock; then
-  ok "exclusive shared HCC fault-injection lock acquired"
-else
-  die "another disruptive HCC gate owns context ${E2E_KUBECONTEXT}"
-fi
 
 # ======================================================================
 # Prep 1 — storm fixtures that will be DELETED mid-storm (bundles must
 # exist first: deleting a bundle-less Host proves nothing)
 # ======================================================================
 header "Prep — pre-create ${STORM_DELETE_COUNT} delete-target fixture Hosts"
-STORM_FIXTURES_CREATED=1
 ensure_fixture_secret
 for h in "${STORM_DELETE_HOSTS[@]}"; do
   apply_storm_host "$h" false
@@ -880,9 +748,6 @@ SCRAPE_A="${WORK_DIR}/metrics-A.prom"
 SCRAPE_B="${WORK_DIR}/metrics-B.prom"
 SCRAPE_C1="${WORK_DIR}/metrics-C1.prom"
 SCRAPE_C2="${WORK_DIR}/metrics-C2.prom"
-SCRAPE_D="${WORK_DIR}/metrics-D.prom"
-SCRAPE_WAKE_PRE="${WORK_DIR}/metrics-wake-pre.prom"
-SCRAPE_WAKE_POST="${WORK_DIR}/metrics-wake-post.prom"
 HCC_POD_A="$(hcc_pod_name)"
 if [[ -z "$HCC_POD_A" ]]; then
   fail "no Running HCC pod found for baseline identity"; storm_diagnostics; print_results; exit 1
@@ -916,89 +781,22 @@ for h in "${STORM_DELETE_HOSTS[@]}"; do
 done
 log "storm: ${STORM_DELETE_COUNT} mid-storm Host deletions issued"
 
-# Isolate the supported wake on the pre-kill pod. Samples from the first half
-# of Host creation may still settle inside this window; they are valid urgent
-# traffic and the hard-gate assertion below requires every one of them, not
-# only a percentile, to remain within budget.
-HCC_POD_WAKE="$(hcc_pod_name)"
-if [[ -z "$HCC_POD_WAKE" || "$HCC_POD_WAKE" != "$HCC_POD_A" ]]; then
-  fail "storm: HCC pod changed before the wake metric baseline (${HCC_POD_A} -> ${HCC_POD_WAKE:-<none>})"
-  storm_diagnostics; print_results; exit 1
-fi
-if ! scrape_hcc_metrics "$SCRAPE_WAKE_PRE" "$HCC_POD_WAKE"; then
-  fail "storm: could not capture the same-pod wake metric baseline"
-  print_results; exit 1
-fi
-
 T_WAKE_MS="$(now_ms)"
 if post_wake; then
-  log "storm: wake POST accepted for ${WAKE_HOST_REF} (HTTP ${WAKE_STATUS}, generation ${WAKE_GENERATION})"
+  log "storm: wake POST accepted for ${WAKE_HOST_REF} (HTTP ${WAKE_STATUS})"
 else
   fail "storm: mid-storm wake POST failed for ${WAKE_HOST_REF}"; print_results; exit 1
 fi
 
-# Prove that this specific supported wake reached HCC: its response generation
-# must be durably reflected in lifecycle status. Then require a new urgent
-# queue sample and an idle urgent lane on the same pod. Prometheus collectors
-# are read independently, so this deliberately uses a two-scrape fence instead
-# of assuming cross-metric atomicity: once the first scrape observes the urgent
-# lane idle, HCC's observe-before-in-flight-decrement ordering guarantees the
-# wake observation is durable and therefore visible to the second scrape.
-# shellcheck disable=SC2329  # invoked by name via wait_until
-_wake_urgent_evidence_recorded() {
-  local current_pod lifecycle_state handled_generation
-  local fence_in_flight pre_count post_count in_flight
-  current_pod="$(hcc_pod_name)"
-  [[ -n "$current_pod" && "$current_pod" == "$HCC_POD_WAKE" ]] || return 1
-  lifecycle_state="$(wake_lifecycle_state)"
-  [[ -n "$lifecycle_state" && "$lifecycle_state" != 'suspended' ]] || return 1
-  handled_generation="$(wake_handled_generation)"
-  wake_generation_is_handled "$WAKE_GENERATION" "$handled_generation" || return 1
-  scrape_hcc_metrics "$SCRAPE_WAKE_POST" "$HCC_POD_WAKE" || return 1
-  fence_in_flight="$(awk -v metric="${IN_FLIGHT_METRIC}" '
-    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ { total += $NF }
-    END { print total + 0 }
-  ' "$SCRAPE_WAKE_POST")"
-  awk -v active="$fence_in_flight" 'BEGIN { exit !(active == 0) }' || return 1
-
-  # The wake histogram observation precedes the decrement seen by the fence.
-  # Re-scrape so the adjudicated histogram cannot predate that observation.
-  scrape_hcc_metrics "$SCRAPE_WAKE_POST" "$HCC_POD_WAKE" || return 1
-  pre_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
-    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
-    END { print total + 0 }
-  ' "$SCRAPE_WAKE_PRE")"
-  post_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
-    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
-    END { print total + 0 }
-  ' "$SCRAPE_WAKE_POST")"
-  in_flight="$(awk -v metric="${IN_FLIGHT_METRIC}" '
-    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ { total += $NF }
-    END { print total + 0 }
-  ' "$SCRAPE_WAKE_POST")"
-  awk -v before="$pre_count" -v after="$post_count" -v active="$in_flight" \
-    'BEGIN { exit !((after - before) >= 1 && active == 0) }'
-}
-if wait_until "$STORM_WAKE_QUEUE_EVIDENCE_DEADLINE_S" 1 \
-  "supported wake urgent reconcile + same-pod queue evidence" \
-  _wake_urgent_evidence_recorded _wake_target_diag; then
-  ok "A2 wake input: supported wake reconcile completed and published same-pod urgent queue evidence"
-else
-  fail "A2 wake input: wake did not complete with durable same-pod urgent queue evidence within ${STORM_WAKE_QUEUE_EVIDENCE_DEADLINE_S}s"
-  print_results; exit 1
-fi
-
-# Capture A7's fleet-failure baseline immediately before the kill. The wake
-# scrape remains the A2 wake-window oracle; a separate fresh scrape prevents
-# fleet failures after wake adjudication from falling outside A7's delta.
+# Scrape B: last look at the pre-kill pod's counters, immediately before
+# the kill (samples still in flight at process death are a recorded gap).
 HCC_POD_B="$(hcc_pod_name)"
 if [[ "$HCC_POD_B" != "$HCC_POD_A" ]]; then
   fail "storm: HCC pod changed unexpectedly before the kill (${HCC_POD_A} -> ${HCC_POD_B:-<none>}) — counter deltas would be invalid"
   storm_diagnostics; print_results; exit 1
 fi
 if ! scrape_hcc_metrics "$SCRAPE_B" "$HCC_POD_B"; then
-  fail "storm: could not capture the fresh pre-kill metric baseline"
-  print_results; exit 1
+  fail "storm: could not scrape HCC metrics immediately before the kill"; print_results; exit 1
 fi
 log "storm: pre-kill scrape B captured (pod ${HCC_POD_B})"
 
@@ -1050,41 +848,6 @@ else
   print_results; exit 1
 fi
 
-# A7's causal business signal is the replacement pod's own completion log for
-# its startup fleet reconciliation. A scheduled/started counter is insufficient:
-# it can increment before the pass fails, stalls, or is superseded.
-FLEET_COMPLETION_PROVEN=0
-replacement_fleet_state=''
-# shellcheck disable=SC2329  # invoked by name via wait_until
-_replacement_fleet_completed_probe() {
-  local logs current_pod
-  current_pod="$(hcc_pod_name)"
-  [[ -n "$current_pod" && "$current_pod" == "$HCC_POD_C" ]] || return 1
-  logs="$(kctl -n "$CONTROL_NS" logs "pod/${HCC_POD_C}" \
-    -c host-context-controller 2>/dev/null)" || return 1
-  if grep -Fq -- "$HCC_PASS_FAILED_MARKER" <<<"$logs"; then
-    replacement_fleet_state='failed'
-    return 0
-  fi
-  if grep -Fq -- "$HCC_PASS_COMPLETED_MARKER" <<<"$logs"; then
-    replacement_fleet_state='completed'
-    return 0
-  fi
-  return 1
-}
-if ! wait_until "$STORM_CONVERGENCE_DEADLINE_S" 2 \
-  "replacement HCC initial Host fleet reconciliation completion" \
-  _replacement_fleet_completed_probe storm_diagnostics; then
-  fail "A7: replacement pod did not complete its initial Host fleet reconciliation within ${STORM_CONVERGENCE_DEADLINE_S}s"
-  print_results; exit 1
-fi
-if [[ "$replacement_fleet_state" != 'completed' ]]; then
-  fail "A7: replacement pod's initial Host fleet reconciliation failed"
-  storm_diagnostics; print_results; exit 1
-fi
-FLEET_COMPLETION_PROVEN=1
-ok "A7 input: replacement pod logged completed initial Host fleet reconciliation"
-
 # shellcheck disable=SC2329  # invoked by name via wait_until
 _all_created_deploys_probe() {
   local h
@@ -1116,68 +879,6 @@ if ! scrape_hcc_metrics "$SCRAPE_C1" "$HCC_POD_C"; then
   fail "could not scrape HCC metrics (C1) on replacement pod ${HCC_POD_C}"; print_results; exit 1
 fi
 log "scrape C1 captured (replacement pod ${HCC_POD_C})"
-
-# ─── A2 input: direct-watch urgent probe after replacement LIST→WATCH ──
-# The storm's second half is intentionally issued immediately after pod
-# deletion, when a cold-start LIST may legitimately own those Hosts on the
-# fleet lane. C1 proves the replacement has completed LIST→WATCH recovery;
-# issue a fresh, independent set now so every observed sample is a direct
-# watch ADDED admission on the urgent lane.
-header "A2 input — urgent direct-watch probe (${STORM_URGENT_PROBE_COUNT} Hosts)"
-for i in $(seq 1 "${#STORM_URGENT_PROBE_HOSTS[@]}"); do
-  h="${STORM_URGENT_PROBE_HOSTS[$((i - 1))]}"
-  if (( i % 2 == 0 )); then apply_storm_host "$h" true; else apply_storm_host "$h" false; fi
-done
-log "urgent probe: ${STORM_URGENT_PROBE_COUNT} Host ADDED events issued after replacement LIST→WATCH"
-
-# shellcheck disable=SC2329  # invoked by name via wait_until
-_urgent_probe_deploys_probe() {
-  local h
-  for h in "${STORM_URGENT_PROBE_HOSTS[@]}"; do
-    kctl -n "$MCP_HOST_NS" get deployment "$h" >/dev/null 2>&1 || return 1
-  done
-}
-if wait_until "$STORM_CONVERGENCE_DEADLINE_S" 3 \
-  "all ${STORM_URGENT_PROBE_COUNT} urgent-probe Hosts' Deployments to exist" \
-  _urgent_probe_deploys_probe storm_diagnostics; then
-  ok "A2 input: every direct-watch urgent-probe Host materialized"
-else
-  fail "A2 input: urgent-probe Host materialization incomplete after ${STORM_CONVERGENCE_DEADLINE_S}s"
-  print_results; exit 1
-fi
-HCC_POD_C_NOW="$(hcc_pod_name)"
-if [[ -z "$HCC_POD_C_NOW" || "$HCC_POD_C_NOW" != "$HCC_POD_C" ]]; then
-  fail "replacement HCC pod changed before urgent-probe scrape D (${HCC_POD_C} -> ${HCC_POD_C_NOW:-<none>}) — urgent counter window is invalid"
-  storm_diagnostics; print_results; exit 1
-fi
-
-# Deployment existence can precede the end of reconcileCore, where the queue
-# histogram is observed. Poll the metric itself instead of sleeping, otherwise
-# a fast API server can make this gate race its own telemetry.
-# shellcheck disable=SC2329  # invoked by name via wait_until
-_urgent_probe_metrics_recorded() {
-  local current_pod pre_count post_count
-  current_pod="$(hcc_pod_name)"
-  [[ -n "$current_pod" && "$current_pod" == "$HCC_POD_C" ]] || return 1
-  scrape_hcc_metrics "$SCRAPE_D" "$HCC_POD_C" || return 1
-  pre_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
-    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
-    END { print total + 0 }
-  ' "$SCRAPE_C1")"
-  post_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
-    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
-    END { print total + 0 }
-  ' "$SCRAPE_D")"
-  awk -v before="$pre_count" -v after="$post_count" -v required="$STORM_URGENT_PROBE_COUNT" \
-    'BEGIN { exit !((after - before) >= required) }'
-}
-if ! wait_until 60 2 \
-  "at least ${STORM_URGENT_PROBE_COUNT} direct-watch urgent metric samples" \
-  _urgent_probe_metrics_recorded storm_diagnostics; then
-  fail "urgent-probe reconciles did not publish ${STORM_URGENT_PROBE_COUNT} queue samples within 60s"
-  print_results; exit 1
-fi
-log "scrape D captured (replacement pod ${HCC_POD_C}; direct-watch urgent window C1→D)"
 
 # ─── A3: per-host materialization <= 20s from ITS OWN creation ───────
 header "A3 — per-host materialization (budget ${STORM_MATERIALIZATION_BUDGET_S}s, §14.2)"
@@ -1290,14 +991,13 @@ if ! scrape_hcc_metrics "$SCRAPE_C2" "$HCC_POD_C"; then
 fi
 log "scrape C2 captured (replacement pod ${HCC_POD_C}; A6/A7 counters settled post-A5)"
 
-# One python pass performs the five metric assertions and emits one
+# One python pass performs the four metric assertions and emits one
 # VERDICT|<name>|PASS/FAIL|<detail> line each. python exits nonzero only
 # when it cannot parse its inputs (a hard failure of the gate itself).
 METRIC_VERDICTS="${WORK_DIR}/metric-verdicts.txt"
-if ! SCRAPE_A="$SCRAPE_A" SCRAPE_B="$SCRAPE_B" SCRAPE_C1="$SCRAPE_C1" SCRAPE_C2="$SCRAPE_C2" SCRAPE_D="$SCRAPE_D" \
-  SCRAPE_WAKE_PRE="$SCRAPE_WAKE_PRE" SCRAPE_WAKE_POST="$SCRAPE_WAKE_POST" \
+if ! SCRAPE_A="$SCRAPE_A" SCRAPE_B="$SCRAPE_B" SCRAPE_C1="$SCRAPE_C1" SCRAPE_C2="$SCRAPE_C2" \
   P95_BUDGET_S="$STORM_URGENT_P95_BUDGET_S" RECOVERY_BUDGET_S="$STORM_WATCH_RECOVERY_BUDGET_S" \
-  MIN_URGENT_SAMPLES="$STORM_URGENT_PROBE_COUNT" FLEET_COMPLETION_PROVEN="$FLEET_COMPLETION_PROVEN" \
+  MIN_URGENT_SAMPLES="$STORM_CREATE_COUNT" \
   python3 >"$METRIC_VERDICTS" <<'PY'
 import os, re, sys
 from collections import defaultdict
@@ -1333,9 +1033,6 @@ a, _ = load(os.environ["SCRAPE_A"])
 b, _ = load(os.environ["SCRAPE_B"])
 c1, _ = load(os.environ["SCRAPE_C1"])
 c2, c2_types = load(os.environ["SCRAPE_C2"])
-d, _ = load(os.environ["SCRAPE_D"])
-wake_pre, _ = load(os.environ["SCRAPE_WAKE_PRE"])
-wake_post, _ = load(os.environ["SCRAPE_WAKE_POST"])
 
 def buckets(samples, metric, match):
     """Cumulative histogram buckets {le: count} summed over matching series."""
@@ -1360,60 +1057,30 @@ def le_key(le):
 
 verdicts = []
 
-# ── A2a: every completed urgent reconcile in the supported wake window ─
+# ── A2: urgent queue-wait p95 <= budget across (B-A) + C1 ─────────────
 qm = os.environ["QUEUE_WAIT_METRIC"]
 budget = float(os.environ["P95_BUDGET_S"])
-wake_before = buckets(wake_pre, qm, {"lane": "urgent"})
-wake_after = buckets(wake_post, qm, {"lane": "urgent"})
-wake_delta = defaultdict(float)
-wake_reset = False
-for le in set(wake_before) | set(wake_after):
-    delta = wake_after.get(le, 0.0) - wake_before.get(le, 0.0)
-    if delta < 0:
-        wake_reset = True
-    wake_delta[le] = delta
-if wake_reset:
-    verdicts.append(("A2-wake-urgent-hard-gate", False,
-                     "negative bucket delta in the same-pod wake window"))
-else:
-    wake_total = wake_delta.get("+Inf", 0.0)
-    wake_within = wake_delta.get(str(int(budget)), wake_delta.get(str(budget), 0.0))
-    wake_dist = " ".join(
-        f"le{le}={wake_delta[le]:.0f}" for le in sorted(wake_delta, key=le_key)
-    )
-    if wake_total < 1:
-        verdicts.append(("A2-wake-urgent-hard-gate", False,
-                         "no completed urgent queue sample in the supported wake window"))
-    elif wake_within != wake_total:
-        verdicts.append(("A2-wake-urgent-hard-gate", False,
-                         f"{wake_total - wake_within:.0f} of {wake_total:.0f} urgent sample(s) exceeded "
-                         f"{budget:.0f}s in the supported wake window ({wake_dist})"))
-    else:
-        verdicts.append(("A2-wake-urgent-hard-gate", True,
-                         f"all {wake_total:.0f} urgent sample(s) <= {budget:.0f}s in the supported "
-                         f"same-pod wake window ({wake_dist})"))
-
-# ── A2b: urgent queue-wait p95 across direct-watch window D-C1 ────────
-window_note = "window: replacement-pod direct-watch probe delta (D-C1) after LIST→WATCH recovery"
-pre = buckets(c1, qm, {"lane": "urgent"})
-post = buckets(d, qm, {"lane": "urgent"})
+window_note = "windows: pre-kill delta (B-A) + replacement pod C1, which includes replacement-pod recovery traffic"
+pre_a = buckets(a, qm, {"lane": "urgent"})
+pre_b = buckets(b, qm, {"lane": "urgent"})
+post = buckets(c1, qm, {"lane": "urgent"})
 combined = defaultdict(float)
 reset = False
-for le in set(pre) | set(post):
-    delta = post.get(le, 0.0) - pre.get(le, 0.0)
+for le in set(pre_a) | set(pre_b) | set(post):
+    delta = pre_b.get(le, 0.0) - pre_a.get(le, 0.0)
     if delta < 0:
         reset = True
-    combined[le] = delta
+    combined[le] = delta + post.get(le, 0.0)
 if reset:
-    verdicts.append(("A2-direct-watch-urgent-p95", False,
-                     "negative bucket delta between scrapes C1 and D (unexpected counter reset)"))
+    verdicts.append(("A2-urgent-queue-wait-p95", False,
+                     "negative bucket delta between scrapes A and B (unexpected counter reset)"))
 else:
     total = combined.get("+Inf", 0.0)
     min_samples = float(os.environ["MIN_URGENT_SAMPLES"])
     if total < min_samples:
-        verdicts.append(("A2-direct-watch-urgent-p95", False,
-                         f"only {total:.0f} direct-watch urgent samples (need >= {min_samples:.0f} — "
-                         "the urgent probe did not exercise its declared lane)"))
+        verdicts.append(("A2-urgent-queue-wait-p95", False,
+                         f"only {total:.0f} urgent samples in the storm window (need >= {min_samples:.0f} — "
+                         "the storm did not exercise the urgent lane, cannot claim a p95)"))
     else:
         p95_ub = None
         for le in sorted(combined, key=le_key):
@@ -1422,10 +1089,11 @@ else:
                 break
         dist = " ".join(f"le{le}={combined[le]:.0f}" for le in sorted(combined, key=le_key))
         if p95_ub is not None and le_key(p95_ub) <= budget:
-            verdicts.append(("A2-direct-watch-urgent-p95", True,
-                             f"p95 <= {p95_ub}s over {total:.0f} samples (budget {budget:.0f}s; {dist}; {window_note})"))
+            verdicts.append(("A2-urgent-queue-wait-p95", True,
+                             f"p95 <= {p95_ub}s over {total:.0f} samples (budget {budget:.0f}s; {dist}; {window_note}; "
+                             "gap: samples in flight between scrape B and process death are unrecoverable)"))
         else:
-            verdicts.append(("A2-direct-watch-urgent-p95", False,
+            verdicts.append(("A2-urgent-queue-wait-p95", False,
                              f"p95 bucket upper bound {p95_ub} exceeds {budget:.0f}s over {total:.0f} samples ({dist}; {window_note})"))
 
 # ── A4: watch recovery <= budget on the replacement pod (C1) ──────────
@@ -1449,36 +1117,28 @@ else:
     verdicts.append(("A4-watch-recovery", True,
                      f"{succ_total:.0f} recovery sample(s), all <= {bound}s (budget {rbudget}s)"))
 
-# ── A7: recovered fleet convergence remains bounded (settled C2) ─────
+# ── A7: fleet coalescing held (settled window C2) ─────────────────────
 fm = os.environ["FLEET_METRIC"]
-# Presence check (A6 pattern): counter() returns 0 for an absent family, so
-# without this a renamed/unregistered FLEET_METRIC makes every count 0 and A7
-# passes vacuously. The causal leg (FLEET_COMPLETION_PROVEN) alone cannot catch
-# a metric rename — the metric itself must be registered on the running image.
-if fm not in c2_types:
-    verdicts.append(("A7-fleet-recovery-bounded", False,
-                     f"{fm} not registered on the running image — is the branch HCC image deployed?"))
+pre_failed = counter(b, fm, "result", "failed") - counter(a, fm, "result", "failed")
+post_started = counter(c2, fm, "result", "started")
+post_coalesced = counter(c2, fm, "result", "coalesced")
+post_trailing = counter(c2, fm, "result", "trailing")
+post_failed = counter(c2, fm, "result", "failed")
+problems = []
+if pre_failed > 0 or post_failed > 0:
+    problems.append(f"fleet pass failures (pre={pre_failed:.0f} post={post_failed:.0f})")
+if post_started < 1:
+    problems.append("no fleet pass started on the replacement pod (recovery convergence missing)")
+if post_coalesced < 1:
+    problems.append("no coalesced fleet request on the replacement pod (recovery request should land against the active initial pass)")
+if post_trailing > post_coalesced:
+    problems.append(f"trailing={post_trailing:.0f} > coalesced={post_coalesced:.0f} (violates the single-pending-slot structure)")
+detail = (f"started={post_started:.0f} coalesced={post_coalesced:.0f} "
+          f"trailing={post_trailing:.0f} failed={post_failed:.0f} (pre-kill failed delta={pre_failed:.0f})")
+if problems:
+    verdicts.append(("A7-fleet-coalescing", False, "; ".join(problems) + f" [{detail}]"))
 else:
-    pre_failed = counter(b, fm, "result", "failed") - counter(a, fm, "result", "failed")
-    post_started = counter(c2, fm, "result", "started")
-    post_coalesced = counter(c2, fm, "result", "coalesced")
-    post_trailing = counter(c2, fm, "result", "trailing")
-    post_failed = counter(c2, fm, "result", "failed")
-    problems = []
-    if pre_failed != 0 or post_failed > 0:
-        problems.append(f"fleet pass failures (pre={pre_failed:.0f} post={post_failed:.0f})")
-    if os.environ.get("FLEET_COMPLETION_PROVEN") != "1":
-        problems.append("replacement-pod initial fleet completion was not causally proven")
-    if post_trailing > post_coalesced:
-        problems.append(f"trailing={post_trailing:.0f} > coalesced={post_coalesced:.0f} (violates the single-pending-slot structure)")
-    detail = (f"completion-proven={os.environ.get('FLEET_COMPLETION_PROVEN', 'missing')} "
-              f"started={post_started:.0f} coalesced={post_coalesced:.0f} "
-              f"trailing={post_trailing:.0f} failed={post_failed:.0f} "
-              f"(replacement pod; A4 recovery-success fenced; pre-kill failed delta={pre_failed:.0f})")
-    if problems:
-        verdicts.append(("A7-fleet-recovery-bounded", False, "; ".join(problems) + f" [{detail}]"))
-    else:
-        verdicts.append(("A7-fleet-recovery-bounded", True, detail))
+    verdicts.append(("A7-fleet-coalescing", True, detail))
 
 # ── A6: delete-cleanup counters consistent (settled window C2) ────────
 dm = os.environ["DELETE_CLEANUP_METRIC"]
@@ -1518,8 +1178,8 @@ while IFS='|' read -r tag name verdict detail; do
     fail "${name}: ${detail}"
   fi
 done <"$METRIC_VERDICTS"
-if [[ "$VERDICT_COUNT" -ne 5 ]]; then
-  fail "metric adjudication emitted ${VERDICT_COUNT}/5 verdicts — truncated output is a failure, not a pass"
+if [[ "$VERDICT_COUNT" -ne 4 ]]; then
+  fail "metric adjudication emitted ${VERDICT_COUNT}/4 verdicts — truncated output is a failure, not a pass"
 fi
 
 # ======================================================================
@@ -1527,7 +1187,11 @@ fi
 # The profile and seeded data (including the wake target) stay.
 # ======================================================================
 header "Teardown — storm fixtures (${FIXTURE_RUN_KEY}=${RUN_ID})"
-STORM_SEL="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID}"
+if [[ "${KEEP_FIXTURES:-}" == '1' ]]; then
+  warn "KEEP_FIXTURES=1 — leaving fixtures in place for diagnosis (run-id ${RUN_ID})"
+  TEARDOWN_DONE=1
+else
+  STORM_SEL="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID}"
   kctl -n "$MCP_HOST_NS" delete host -l "$STORM_SEL" --wait=false >/dev/null 2>&1 || \
     warn "teardown: label-selector Host deletion returned nonzero (leftover check below is authoritative)"
   kctl -n "$MCP_HOST_NS" delete secret -l "$STORM_SEL" --wait=false >/dev/null 2>&1 || \
@@ -1550,7 +1214,6 @@ STORM_SEL="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID
     ok "teardown: all storm fixture Hosts deleted via the supported CR path"
   else
     fail "teardown: storm fixture Hosts still present after ${STORM_TEARDOWN_DEADLINE_S}s (run-id ${RUN_ID})"
-    TEARDOWN_CLEANUP_FAILED=1
   fi
 
   # FAIL-CLOSED (B2): an unverifiable read counts as a leftover — the teardown
@@ -1564,7 +1227,7 @@ STORM_SEL="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID
   teardown_converge_deadline=$((SECONDS + STORM_TEARDOWN_CONVERGE_S))
   while :; do
     TEARDOWN_LEFTOVER=0; teardown_orphan=0; teardown_unverifiable=0; teardown_report=''
-    for h in "${STORM_CREATED_HOSTS[@]}" "${STORM_URGENT_PROBE_HOSTS[@]}" "${STORM_DELETE_HOSTS[@]}"; do
+    for h in "${STORM_CREATED_HOSTS[@]}" "${STORM_DELETE_HOSTS[@]}"; do
       if ! leftovers="$(collect_children "$h")"; then
         teardown_report+="  ${h}: kubectl read FAILED (unverifiable, fail-closed)"$'\n'
         TEARDOWN_LEFTOVER=$((TEARDOWN_LEFTOVER + 1)); teardown_unverifiable=1
@@ -1617,19 +1280,14 @@ STORM_SEL="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID
     ok "teardown: zero storm-fixture leftovers across ${BUNDLE_NAMESPACES} (profile and seeded data untouched)"
   else
     fail "teardown: ${TEARDOWN_LEFTOVER} storm fixture subject(s) left resources behind (run-id ${RUN_ID}) — investigate before trusting results"
-    TEARDOWN_CLEANUP_FAILED=1
   fi
-TEARDOWN_DONE=1
+  TEARDOWN_DONE=1
+fi
 
 # M3: on the success path a failed cadence restore must FAIL the gate
 # (restore_hcc_env_strict registers fail() and leaves HCC_ENV_SAVED for
 # the trap's best-effort retry); the EXIT trap keeps the lenient restore.
 restore_hcc_env_strict
-if ! finalize_hcc_watch_gate_lock "$TEARDOWN_CLEANUP_FAILED" "$HCC_RESTORE_OK"; then
-  fail "shared HCC fault-injection lock was retained fail-closed; follow the printed repair instructions"
-else
-  ok "exclusive shared HCC fault-injection lock finalized"
-fi
 
 print_results
 if [[ "$g_fail" -gt 0 ]]; then

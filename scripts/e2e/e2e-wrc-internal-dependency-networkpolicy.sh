@@ -18,8 +18,6 @@ BACKEND_ID="${E2E_BACKEND_ID:-be-${RUN_ID}}"
 DENIED_POD="${E2E_DENIED_POD:-deny-${RUN_ID}}"
 BACKEND_PORT="${E2E_BACKEND_PORT:-8080}"
 CONNECT_TIMEOUT="${E2E_CONNECT_TIMEOUT:-6}"
-SOURCE_DEPLOYMENT="$SOURCE_ID"
-BACKEND_DEPLOYMENT="$BACKEND_ID"
 CREATED=0
 
 cleanup() {
@@ -30,9 +28,9 @@ cleanup() {
     --ignore-not-found --wait=false >/dev/null 2>&1 || status=1
   wait_for_workflowrecipe_deleted "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" "$TIMEOUT_DELETE" \
     >/dev/null 2>&1 || status=1
-  kctl delete deployment "$SOURCE_DEPLOYMENT" "$BACKEND_DEPLOYMENT" -n "$SANDBOX_NS" \
+  kctl delete deployment "$SOURCE_ID" "$BACKEND_ID" -n "$SANDBOX_NS" \
     --ignore-not-found --wait=false >/dev/null 2>&1 || status=1
-  kctl delete service "$SOURCE_DEPLOYMENT" "$BACKEND_DEPLOYMENT" -n "$SANDBOX_NS" \
+  kctl delete service "$SOURCE_ID" "$BACKEND_ID" -n "$SANDBOX_NS" \
     --ignore-not-found >/dev/null 2>&1 || status=1
   kctl delete networkpolicy -n "$SANDBOX_NS" \
     -l "clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=${RECIPE_NAME}" \
@@ -84,21 +82,6 @@ wait_internal_ready() {
     elapsed=$((elapsed + POLL_INTERVAL))
   done
   fail "Timed out waiting for InternalDependenciesReady=True"
-  return 1
-}
-
-wait_for_workload_instance() {
-  local workload_id=$1 timeout=${2:-$TIMEOUT_POD} elapsed=0 instance
-  while [ "$elapsed" -lt "$timeout" ]; do
-    instance="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-      -o "jsonpath={.status.workloadInstances.${workload_id}}" 2>/dev/null || true)"
-    if [ -n "$instance" ]; then
-      printf '%s\n' "$instance"
-      return 0
-    fi
-    sleep "$POLL_INTERVAL"
-    elapsed=$((elapsed + POLL_INTERVAL))
-  done
   return 1
 }
 
@@ -231,26 +214,18 @@ fi
 ok "Fixture has no egressBindings shortcut"
 
 header "Phase 2 - WRC reconciliation"
-SOURCE_DEPLOYMENT="$(wait_for_workload_instance "$SOURCE_ID" "$TIMEOUT_POD")" || {
-  fail "Source workload instance was not assigned"
-  exit 1
-}
-BACKEND_DEPLOYMENT="$(wait_for_workload_instance "$BACKEND_ID" "$TIMEOUT_POD")" || {
-  fail "Backend workload instance was not assigned"
-  exit 1
-}
-wait_for_deployment "$SANDBOX_NS" "$SOURCE_DEPLOYMENT" "$TIMEOUT_POD" && ok "Source deployment ready" || {
+wait_for_deployment "$SANDBOX_NS" "$SOURCE_ID" "$TIMEOUT_POD" && ok "Source deployment ready" || {
   fail "Source deployment not ready"
   exit 1
 }
-wait_for_deployment "$SANDBOX_NS" "$BACKEND_DEPLOYMENT" "$TIMEOUT_POD" && ok "Backend deployment ready" || {
+wait_for_deployment "$SANDBOX_NS" "$BACKEND_ID" "$TIMEOUT_POD" && ok "Backend deployment ready" || {
   fail "Backend deployment not ready"
   exit 1
 }
 wait_internal_ready "$TIMEOUT_POD"
 
-resolved_target="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- printenv TARGET_URL 2>/dev/null || true)"
-expected_target="http://${BACKEND_DEPLOYMENT}.${SANDBOX_NS}.svc.cluster.local:${BACKEND_PORT}/"
+resolved_target="$(kctl exec "deploy/${SOURCE_ID}" -n "$SANDBOX_NS" -- printenv TARGET_URL 2>/dev/null || true)"
+expected_target="http://${BACKEND_ID}.${SANDBOX_NS}.svc.cluster.local:${BACKEND_PORT}/"
 [ "$resolved_target" = "$expected_target" ] && ok "TARGET_URL resolved to ${resolved_target}" || {
   fail "TARGET_URL resolved to '${resolved_target}', expected '${expected_target}'"
   exit 1
@@ -265,7 +240,7 @@ assert_policy "$egress_ref" "egress" "$SOURCE_ID" "$BACKEND_ID"
 assert_policy "$ingress_ref" "ingress" "$BACKEND_ID" "$SOURCE_ID"
 
 header "Phase 4 - Positive packet flow"
-positive_output="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- \
+positive_output="$(kctl exec "deploy/${SOURCE_ID}" -n "$SANDBOX_NS" -- \
   sh -c 'wget -qO- --timeout='"$CONNECT_TIMEOUT"' --tries=1 "$TARGET_URL"' 2>/dev/null || true)"
 printf "%s" "$positive_output" | grep -Fq "issue485-ok" && \
   ok "WRC source reached backend through inferred internal dependency" || {
@@ -307,7 +282,7 @@ wait_for_pod "$SANDBOX_NS" "run=${DENIED_POD}" 60 && ok "Unlabeled negative pod 
 }
 if kctl exec "$DENIED_POD" -n "$SANDBOX_NS" -- wget -qO- \
   --timeout="$CONNECT_TIMEOUT" --tries=1 \
-  "http://${BACKEND_DEPLOYMENT}.${SANDBOX_NS}.svc.cluster.local:${BACKEND_PORT}/" >/dev/null 2>&1; then
+  "http://${BACKEND_ID}.${SANDBOX_NS}.svc.cluster.local:${BACKEND_PORT}/" >/dev/null 2>&1; then
   fail "Unlabeled pod reached backend; policy is too broad or NetworkPolicy is not enforced"
   exit 1
 fi

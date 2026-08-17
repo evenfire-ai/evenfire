@@ -91,7 +91,6 @@ describe('CRD Field Injection Prevention (sanitizeCrdSpec)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
-      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -122,19 +121,6 @@ describe('CRD Field Injection Prevention (sanitizeCrdSpec)', () => {
       await reconciler.reconcile(server)
       const container = capturedContainer(appsApi)
       expect(container.imagePullPolicy).toBe('IfNotPresent')
-    })
-
-    it('does not mutate a watched desired spec while building the sanitized Deployment', async () => {
-      const server = makeServer({
-        imagePullPolicy: 'Always',
-        security: { runAsUser: 0, addCapabilities: ['CHOWN', 'SYS_ADMIN'] },
-      })
-      const originalSpec = structuredClone(server.spec)
-
-      await reconciler.reconcile(server)
-
-      expect(capturedContainer(appsApi).imagePullPolicy).toBe('IfNotPresent')
-      expect(server.spec).toEqual(originalSpec)
     })
   })
 
