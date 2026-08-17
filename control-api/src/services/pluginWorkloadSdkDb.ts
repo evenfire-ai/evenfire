@@ -12,7 +12,8 @@ import {
 // Owns the three SDK tables:
 //   - plugin_workload_sdk_grants          per-recipe capability grants
 //   - plugin_workload_sdk_invocations     invocation audit trail
-//   - plugin_workload_sdk_quota_counters  per-recipe+period quota tracking
+//   - plugin_workload_sdk_quota_counters  historical-only counters (issue #348);
+//                                         admin read path only, no writers
 
 export const PLUGIN_WORKLOAD_SDK_FAMILIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkFamily = (typeof PLUGIN_WORKLOAD_SDK_FAMILIES)[number]
@@ -2028,37 +2029,14 @@ export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number
   })
 }
 
-// ─── Quota counters ──────────────────────────────────────────────────────
-
-/** Sentinel period for eager SDK traffic before any workflow run exists. */
-export const PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD = new Date(0)
-
-/**
- * Resolve the quota counter bucket for per-run limits. Uses the active
- * workflow run's start time when one exists; otherwise the eager sentinel.
- *
- * When a run is created concurrently with the first SDK call, the run row may
- * not be visible yet — callers fall back to the eager sentinel until the next
- * attempt sees the committed run.
- */
-export async function resolveQuotaPeriodStart(
-  recipeNamespace: string,
-  recipeName: string
-): Promise<Date> {
-  const result = await pool.query(
-    `SELECT COALESCE(started_at, created_at) AS period_start
-     FROM workflow_runs
-     WHERE recipe_namespace = $1
-       AND recipe_name = $2
-       AND phase NOT IN ('Succeeded', 'Failed', 'Canceled')
-     ORDER BY COALESCE(started_at, created_at) DESC
-     LIMIT 1`,
-    [recipeNamespace, recipeName]
-  )
-  const row = result.rows[0] as { period_start?: Date | string } | undefined
-  if (!row?.period_start) return PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD
-  return new Date(row.period_start)
-}
+// ─── Quota counters (historical-only, issue #348) ────────────────────────
+// Per-run/period quota enforcement was removed (issue #348): nothing writes
+// plugin_workload_sdk_quota_counters anymore (the enforcement writers
+// consumePeriodQuota / resolveQuotaPeriodStart / getPeriodQuotaUsage and the
+// eager epoch sentinel were deleted so a future re-wire cannot resurrect the
+// never-resetting epoch bucket). Existing rows — including stale epoch
+// sentinels — are inert historical data; getQuotaCounters keeps serving them
+// to the admin read path. Hard removal of the table is a separate follow-up.
 
 export interface QuotaCounterRow {
   recipeNamespace: string
@@ -2087,106 +2065,6 @@ export async function getQuotaCounters(
     notificationCount: Number(row.notification_count),
     lastUpdated: new Date(row.last_updated as string).toISOString(),
   }))
-}
-
-export async function getPeriodQuotaUsage(
-  recipeNamespace: string,
-  recipeName: string,
-  family: PluginWorkloadSdkFamily,
-  periodStart: Date
-): Promise<number> {
-  const column = family === 'promptBridge' ? 'prompt_bridge_count' : 'notification_count'
-  const result = await pool.query(
-    `SELECT ${column} AS usage_count
-     FROM plugin_workload_sdk_quota_counters
-     WHERE recipe_namespace = $1 AND recipe_name = $2 AND period_start = $3`,
-    [recipeNamespace, recipeName, periodStart]
-  )
-  const row = result.rows[0] as { usage_count?: number | string } | undefined
-  return Number(row?.usage_count ?? 0)
-}
-
-/**
- * Atomically consume one unit of period quota. The conditional UPDATE only
- * increments while the post-increment count stays within `limit`, so two
- * concurrent calls can never both pass a remaining-1 budget.
- *
- * `foldEagerUsage` (default `false`) folds the eager-sentinel usage into the
- * same atomic conditional — when set, the run-period decision becomes
- * `runCount + 1 + eagerUsage <= limit`, where `eagerUsage` is the count
- * already booked under the eager sentinel period
- * (`PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD`). That eager usage is read with a
- * correlated subquery INSIDE the same conditional-upsert statement, so there
- * is no TOCTOU window: two concurrent run-period consumers can never both pass
- * a budget the eager usage already exhausted.
- *
- * The eager-period `$6` bind is appended to the parameter array ONLY when
- * `foldEagerUsage` is `true`. When it is `false` the eager-usage SQL fragment
- * is the literal `'0'` and never references `$6`, so binding it would raise a
- * parameter-count mismatch; the conditional bind keeps both paths valid.
- *
- * Returns false when the limit is hit (caller maps to quota_exceeded,
- * retryable=false).
- */
-export async function consumePeriodQuota(
-  recipeNamespace: string,
-  recipeName: string,
-  family: PluginWorkloadSdkFamily,
-  limit: number,
-  periodStart: Date = PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD,
-  foldEagerUsage = false
-): Promise<boolean> {
-  const column = family === 'promptBridge' ? 'prompt_bridge_count' : 'notification_count'
-  // When `foldEagerUsage` is set, the run-period decision must account for
-  // usage already booked under the eager sentinel (so the run cap isn't
-  // doubled). We read that eager usage with a correlated subquery INSIDE the
-  // same conditional-upsert statement, eliminating the read-then-consume
-  // TOCTOU: two concurrent run-period consumers evaluate the gate against the
-  // committed counter row under the ON CONFLICT row lock, so they cannot both
-  // pass a budget the eager usage already exhausted.
-  const eagerUsageExpr = foldEagerUsage
-    ? `COALESCE((
-        SELECT eager.${column}
-          FROM plugin_workload_sdk_quota_counters eager
-         WHERE eager.recipe_namespace = $1
-           AND eager.recipe_name = $2
-           AND eager.period_start = $6
-      ), 0)`
-    : '0'
-  // Single conditional upsert. INSERT path (fresh run period → count becomes 1)
-  // is gated by the `SELECT ... WHERE`; UPDATE path (existing row) is gated by
-  // the `ON CONFLICT ... WHERE` on the post-increment count. Both fold in the
-  // live eager usage so the decision is atomic.
-  //
-  // The $6 (eager period) bind is appended ONLY when foldEagerUsage is set —
-  // otherwise eagerUsageExpr is the literal '0' and the SQL never references
-  // $6, so binding it would raise "bind message supplies 6 parameters, but
-  // prepared statement requires 5" and break every quota consumption.
-  const params: Array<string | number | Date> = [
-    recipeNamespace,
-    recipeName,
-    periodStart,
-    family,
-    limit,
-  ]
-  if (foldEagerUsage) {
-    params.push(PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD)
-  }
-  const result = await pool.query(
-    `INSERT INTO plugin_workload_sdk_quota_counters
-       (recipe_namespace, recipe_name, period_start, prompt_bridge_count, notification_count)
-     SELECT $1, $2, $3,
-            CASE WHEN $4 = 'promptBridge' THEN 1 ELSE 0 END,
-            CASE WHEN $4 = 'clientNotifications' THEN 1 ELSE 0 END
-      WHERE 1 + ${eagerUsageExpr} <= $5
-     ON CONFLICT (recipe_namespace, recipe_name, period_start)
-     DO UPDATE SET ${column} = plugin_workload_sdk_quota_counters.${column} + 1,
-                   last_updated = now()
-     WHERE plugin_workload_sdk_quota_counters.${column} + 1 + ${eagerUsageExpr} <= $5
-     RETURNING ${column}`,
-    params
-  )
-  return (result.rowCount ?? 0) > 0
 }
 
 /**

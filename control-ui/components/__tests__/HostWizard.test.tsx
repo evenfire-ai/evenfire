@@ -656,9 +656,7 @@ describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)
     expect(api.apiSend).toHaveBeenCalledWith('DELETE', '/api/v1/admin/secrets/coll-agent-llm')
     // The Host was never POSTed (the seam aborted before the boundary).
     expect(
-      vi
-        .mocked(api.apiSend)
-        .mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
+      vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
     ).toBe(false)
   })
 
@@ -709,9 +707,7 @@ describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)
     })
     // The host WAS created...
     expect(
-      vi
-        .mocked(api.apiSend)
-        .mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
+      vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
     ).toBe(true)
     // ...so NO compensation DELETE runs.
     expect(vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'DELETE')).toBe(false)
