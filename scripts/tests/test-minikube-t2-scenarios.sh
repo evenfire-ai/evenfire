@@ -88,6 +88,23 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED context-mismatch context-mismatch \
   env "${repo_env[@]}" CONTROL_API_REAL_PG_CONTEXT=another-context \
   bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
 
+fake_bin="$tmp/fake-bin"
+mkdir -p "$fake_bin"
+cat >"$fake_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"config current-context"*) exit 0 ;;
+  *"config view"*) printf '%s://%s:6443' https "${FAKE_ENDPOINT:-10.0.0.1}" ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$fake_bin/kubectl"
+expect_code DEVELOPMENT_SCOPE_REQUIRED remote-context remote-context \
+  env "${repo_env[@]}" PATH="$fake_bin:$PATH" \
+  bash -c 'source "$1"; t2_context_check' bash "$COMMON"
+env "${repo_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=127.0.0.1 \
+  bash -c 'source "$1"; t2_context_check' bash "$COMMON"
+
 missing_profile_state="$(env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_profile_status; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
 [ "$missing_profile_state" = full-bootstrap ] || fail "missing profile selected $missing_profile_state instead of full-bootstrap"
 

@@ -220,6 +220,23 @@ t2_context_check() {
     T2_NEXT_COMMAND='select the explicit Kubernetes context generated with the profile'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context is unavailable: $T2_CONTEXT"
   fi
+  local endpoint host
+  endpoint="$(t2_kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
+  if [ -z "$endpoint" ]; then
+    T2_NEXT_COMMAND='select a Kubernetes context with a resolvable local cluster endpoint'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is unavailable: $T2_CONTEXT"
+  fi
+  host="${endpoint#*://}"
+  host="${host%%/*}"
+  host="${host%%:*}"
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  case "$host" in
+    127.0.0.1|192.168.*|*.minikube) ;;
+    *)
+      T2_NEXT_COMMAND='select the generated branch-owned Minikube context, not a remote cluster context'
+      t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is not local: $host"
+      ;;
+  esac
 }
 
 t2_profile_status() {
@@ -513,6 +530,10 @@ t2_lock_acquire() {
   if ! mkdir "$T2_LOCK_DIR" 2>/dev/null; then
     local existing_pid
     existing_pid="$(sed -n 's/^PID=//p' "$T2_LOCK_DIR/owner.env" 2>/dev/null | head -1 || true)"
+    if [[ ! "$existing_pid" =~ ^[0-9]+$ ]]; then
+      T2_NEXT_COMMAND='inspect the profile lock owner metadata and retry only after the lock is released'
+      t2_fail PROFILE_BUSY "profile $T2_PROFILE has a lock without a valid owner PID"
+    fi
     if [ -n "$existing_pid" ] && kill -0 "$existing_pid" >/dev/null 2>&1; then
       T2_NEXT_COMMAND="wait for PID $existing_pid to finish, then retry the same profile"
       t2_fail PROFILE_BUSY "profile $T2_PROFILE is locked by PID $existing_pid"

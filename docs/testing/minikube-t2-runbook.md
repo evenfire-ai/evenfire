@@ -10,7 +10,8 @@ The contract is local-development-only. It requires a clean development
 branch descended from the current `origin/dev`, a generated profile owned by
 that worktree and `HEAD`, and an explicit Kubernetes context for that profile.
 It refuses protected branches, production/GKE/Cloudflare contexts, shared
-profiles, and ambiguous ownership.
+profiles, ambiguous ownership, and Kubernetes contexts whose cluster endpoint
+does not resolve to a local Minikube address.
 
 Run the read-only preflight first:
 
@@ -116,6 +117,10 @@ raw logs. Run the public-boundary contract before committing:
 ```bash
 make minikube-t2-public-boundary
 ```
+
+The boundary check fails if its base ref cannot be resolved, scans committed,
+staged, working-tree, and non-ignored untracked files, and rejects credentialed
+or private PostgreSQL URLs as well as other sensitive runtime artifacts.
 
 If ownership, scope, or redaction cannot be proved, stop and preserve the
 reported code; do not widen the command to another cluster.

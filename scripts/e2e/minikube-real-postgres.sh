@@ -21,6 +21,7 @@ ADMIN_DSN=""
 PG_USER=""
 PG_PASSWORD=""
 PG_DATABASE=""
+T1_REDACT_PASSWORD=""
 T1_STATUS=NOT_RUN
 T1_NEXT_COMMAND='repair the first reported Real PostgreSQL precondition, then re-run T1'
 T1_TOTAL_TESTS=0
@@ -102,7 +103,7 @@ PY
 sanitize_file() {
   local file="$1"
   [ -f "$file" ] || return 0
-  T1_REDACT_PASSWORD="$PG_PASSWORD" python3 - "$file" <<'PY'
+  T1_REDACT_PASSWORD="${T1_REDACT_PASSWORD:-${PG_PASSWORD:-}}" python3 - "$file" <<'PY'
 from pathlib import Path
 import os
 import re
@@ -139,7 +140,7 @@ run_suite() {
     cat "$log_file" >&2 || true
     cat "$json_file" >&2 || true
     T1_NEXT_COMMAND='repair the first failing Real PostgreSQL suite, then re-run T1 on the same HEAD'
-    die_t1 FAIL "Real PostgreSQL suite failed in $package"
+    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL suite failed in $package"
   fi
   sanitize_file "$log_file"
   sanitize_file "$json_file"
@@ -168,7 +169,7 @@ PY
   T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
   if [ "$success" -ne 1 ] || [ "$passed_files" -ne "$expected" ] || [ "$failed_tests" -ne 0 ]; then
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
-    die_t1 FAIL "Real PostgreSQL reporter did not pass every suite in $package"
+    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package"
   fi
   if [ "$total_tests" -le 0 ] || [ "$passed_tests" -le 0 ] || [ "$pending_files" -ne 0 ] || [ "$pending_tests" -ne 0 ]; then
     T1_NEXT_COMMAND='repair the test selection or database route; a T1 run cannot silently skip suites'
@@ -212,6 +213,7 @@ main() {
     T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres Secret is incomplete'
   fi
+  T1_REDACT_PASSWORD="$PG_PASSWORD"
 
   LOCAL_PORT="$(choose_local_port)"
   t2_kc -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
@@ -223,6 +225,12 @@ main() {
     T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward did not become reachable'
   fi
+  if ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    sanitize_file "$T1_TMP_DIR/port-forward.log"
+    cat "$T1_TMP_DIR/port-forward.log" >&2 || true
+    T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward exited before the T1 lane started'
+  fi
 
   ADMIN_DSN="$(printf '%s\0%s\0%s' "$PG_USER" "$PG_PASSWORD" "$LOCAL_PORT" | python3 -c '
 from urllib.parse import quote
@@ -230,9 +238,9 @@ import sys
 user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
 print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.decode(), safe="") + "@127.0.0.1:" + port.decode() + "/postgres", end="")
 ')"
-  unset PG_USER PG_PASSWORD PG_DATABASE
   run_suite control-api
   run_suite gfs-controller
+  unset PG_USER PG_PASSWORD PG_DATABASE T1_REDACT_PASSWORD
   unset ADMIN_DSN
   T1_STATUS=PASS
   t2_evidence_write T1 PASS "Real PostgreSQL suites passed; tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS"
@@ -244,4 +252,6 @@ print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.dec
   printf '[minikube-t1] T1 PASS: Real PostgreSQL executed against the verified local profile\n'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

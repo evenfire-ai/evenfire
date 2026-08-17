@@ -4,7 +4,7 @@ set -euo pipefail
 set +x
 set +u
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+ROOT="${T2_PUBLIC_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
 BASE="$T2_PUBLIC_BASE_REF"
 if [ -z "$BASE" ]; then BASE=origin/dev; fi
 TMP_ROOT="$TMPDIR"
@@ -14,11 +14,23 @@ tmp="$(mktemp "$TMP_ROOT/evenfire-public-boundary.XXXXXX")"
 cleanup() { rm -f "$tmp"; }
 trap cleanup EXIT
 
+if ! git -C "$ROOT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; then
+  printf 'PUBLIC_BOUNDARY_BASE_UNRESOLVED: %s\n' "$BASE" >&2
+  exit 1
+fi
+
 {
-  git -C "$ROOT" diff --no-color --unified=0 "$BASE...HEAD" 2>/dev/null || true
+  git -C "$ROOT" diff --no-color --unified=0 "$BASE...HEAD"
   git -C "$ROOT" diff --no-color --unified=0
   git -C "$ROOT" diff --cached --no-color --unified=0
 } >"$tmp"
+
+git -C "$ROOT" ls-files --others --exclude-standard -z |
+while IFS= read -r -d '' path; do
+  [ -f "$ROOT/$path" ] || continue
+  printf '+++ b/%s\n' "$path"
+  sed 's/^/+/' "$ROOT/$path"
+done >>"$tmp"
 
 python3 - "$tmp" <<'PY'
 from pathlib import Path
@@ -49,6 +61,7 @@ for line in diff.splitlines():
     value = line[1:]
     patterns = (
         (r"postgres(?:ql)?://[^\s\"'<>:]+:[^\s\"'<>@]+@", "credentialed PostgreSQL URL"),
+        (r"(?i)postgres(?:ql)?://(?:[^\s\"'<>@]+@)?(?:localhost|127\.0\.0\.1|10\.[0-9.]+|192\.168\.[0-9.]+|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9.]+|[A-Za-z0-9.-]*(?:private|internal|local|cluster|postgres)[A-Za-z0-9.-]*)(?::[0-9]+)?(?:/|$)", "private PostgreSQL URL"),
         (r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", "private key"),
         (r"(?i)\bBearer\s+[A-Za-z0-9._~-]{24,}", "bearer token"),
         (r"(?i)\b(?:api[_-]?key|password|secret|token|private[_-]?key)\s*[:=]\s*[\"']?(?![$<{`]|os\.environ|process\.env|secret_field|quote\()[^\s\"']{8,}", "credential assignment"),
