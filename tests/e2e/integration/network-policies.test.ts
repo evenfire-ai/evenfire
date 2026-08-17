@@ -325,7 +325,7 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       const podName = getChannelReaderPodName()
       if (!podName) {
         console.warn('SKIPPED: no running channel-reader pod in channels')
-        return
+        ctx.skip()
       }
 
       const result = testConnectivity(
@@ -430,7 +430,7 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       const podName = findExecPod('sandbox-recipes', 'app=db')
       if (!podName) {
         console.warn('SKIPPED: no running db pod in sandbox-recipes')
-        return
+        ctx.skip()
       }
       // sandbox-recipes has deny-all; only DNS + HCC API egress allowed
       const result = testConnectivity(
@@ -447,7 +447,7 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       const podName = findExecPod('sandbox-recipes', 'app=db')
       if (!podName) {
         console.warn('SKIPPED: no running db pod in sandbox-recipes')
-        return
+        ctx.skip()
       }
       const result = testConnectivity(
         'sandbox-recipes',
