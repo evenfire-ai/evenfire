@@ -42,6 +42,7 @@ export function SidebarNav({
   activeSandboxUiApp,
   availableSandboxUiApps,
   onCollapsedChange,
+  onNewChat,
   onOpenSandboxUiApp,
   onSettingsMenuOpenChange,
   onSelect,
@@ -365,7 +366,7 @@ export function SidebarNav({
                       data-testid="nav-new-chat"
                       onClick={event => {
                         event.stopPropagation()
-                        handleSelect(DESKTOP_ROUTES.chat)
+                        onNewChat()
                       }}
                       variant="ghost"
                     >

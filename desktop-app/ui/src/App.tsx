@@ -350,6 +350,7 @@ export function App() {
     const next = addBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), vm.selectedAgent)
     setChatViewTabs(next)
     revealChatViewTab(activeChatViewTab(next))
+    setComposerFocusRequestId(value => value + 1)
   }, [nextChatTabId, revealChatViewTab, vm.selectedAgent])
 
   const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {
@@ -1798,6 +1799,7 @@ export function App() {
                             availableSandboxUiApps={availableSandboxUiApps}
                             collapsed={sidebarCollapsed}
                             onCollapsedChange={setSidebarCollapsed}
+                            onNewChat={handleNewChatViewTab}
                             onOpenSandboxUiApp={handleOpenSandboxUiApp}
                             onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                             onSelect={handleSidebarNavSelect}

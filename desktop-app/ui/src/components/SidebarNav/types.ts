@@ -6,6 +6,7 @@ export type SidebarNavProps = {
   activeSandboxUiApp: ActiveSandboxUiApp | null
   availableSandboxUiApps: ActiveSandboxUiApp[]
   onCollapsedChange: (collapsed: boolean) => void
+  onNewChat: () => void
   onOpenSandboxUiApp: (app: ActiveSandboxUiApp) => void
   onSettingsMenuOpenChange?: (open: boolean) => void
   onSelect: (item: NavItem) => void
