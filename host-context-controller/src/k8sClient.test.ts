@@ -9154,3 +9154,125 @@ describe('externalEgressResyncDelayMs (issue #299 H2)', () => {
     expect(externalEgressResyncDelayMs(3, 5)).toBe(5_000)
   })
 })
+
+describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-close regime)', () => {
+  // Regression for the clerum-dev livelock. PR #205 coupled /ready to a safety
+  // certificate whose validity was pinned to the watch GENERATION. On GKE the
+  // apiserver closes long-lived watches ("Premature close") every few minutes;
+  // each reconnect re-LISTs and bumps the generation, so every certification
+  // pass aborted before it could persist and /ready stayed 503 forever — even
+  // though the re-listed inventory was byte-identical. minikube never reproduced
+  // this because its single local apiserver does not drop watches, which is
+  // exactly why T2 stayed green while dev broke. This test injects the sustained
+  // churn deterministically so the regression is caught in CI, not in production.
+  it('certifies readiness under sustained Context watch churn when every re-list returns identical inventory', async () => {
+    vi.useFakeTimers()
+
+    // Stable desired state: the same Context in every LIST. Models clerum-dev,
+    // where nothing changed — only the watch dropped and reconnected.
+    const stableContexts = [
+      {
+        metadata: {
+          name: 'churn-context',
+          namespace: 'mcp-server',
+          uid: 'churn-uid-1',
+          generation: 1,
+        },
+        spec: { contextId: 'churn-context', mcpServers: [] },
+      },
+    ]
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'contexts') {
+        return { metadata: { resourceVersion: 'ctx-rv-stable' }, items: stableContexts }
+      }
+      if (plural === 'mcpservers') {
+        return { metadata: { resourceVersion: 'mcp-rv-stable' }, items: [] }
+      }
+      if (plural === 'hosts') {
+        return { metadata: { resourceVersion: 'host-rv-stable' }, items: [] }
+      }
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'cc-rv-stable' }, items: [] }
+      }
+      return { items: [] }
+    })
+
+    // Capture the real Context watch doneCallback so we can drive a Premature
+    // close through the exact production path (retireContextWatch bumps the
+    // generation synchronously, then schedules recovery).
+    let contextDone: ((err: Error | null) => void) | null = null
+    mocks.watch.mockImplementation(
+      async (path: string, _opts: unknown, _cb: unknown, done: (err: Error | null) => void) => {
+        if (path.endsWith('/contexts')) contextDone = done
+        return { abort: vi.fn() }
+      }
+    )
+
+    // Every authoritative revocation pass takes a Premature close of the Context
+    // watch BEFORE it certifies — the production race, made deterministic.
+    let passes = 0
+    let prematureCloses = 0
+    mocks.netPolFullReconcile.mockImplementation(
+      async (
+        _ctxs: unknown,
+        _servers: unknown,
+        options: { onAuthoritativeRevocationComplete?: () => void } | undefined
+      ) => {
+        passes += 1
+        if (contextDone) {
+          contextDone(new Error('Premature close'))
+          prematureCloses += 1
+        }
+        // Old code: record refuses (generation moved). Fixed code: record
+        // accepts (content revision is unchanged — identical re-LIST).
+        options?.onAuthoritativeRevocationComplete?.()
+      }
+    )
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+
+    try {
+      await watcher.start()
+      server.setReady(true)
+      await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalled())
+
+      // Sustain the churn: each recovery cycle reinstates the watch and fires a
+      // fresh pass, which takes another Premature close. Bounded by MAX_PASSES so
+      // a livelock fails loudly by count instead of hanging.
+      const MAX_PASSES = 8
+      for (let i = 0; i < MAX_PASSES; i += 1) {
+        if (watcher.isReadinessInventoryAuthoritative()) break
+        // INVENTORY_CACHE_RECOVERY_RETRY_MS (production constant) is 5000ms.
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushMicrotasks()
+      }
+
+      // The adverse regime actually ran (zero-tests-is-never-success).
+      expect(passes).toBeGreaterThanOrEqual(3)
+      expect(prematureCloses).toBeGreaterThanOrEqual(3)
+      // The livelock assertion: identical re-LIST must not keep readiness down.
+      expect(
+        watcher.isReadinessInventoryAuthoritative(),
+        `livelock: ${passes} authoritative passes completed under sustained churn ` +
+          `(${prematureCloses} Premature close, identical inventory on every re-LIST) ` +
+          `and none certified the safety inventory`
+      ).toBe(true)
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+    } finally {
+      await server.stop()
+      await watcher.stop()
+      errorSpy.mockRestore()
+      warnSpy.mockRestore()
+      logSpy.mockRestore()
+    }
+  })
+})
