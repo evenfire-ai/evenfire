@@ -9,6 +9,7 @@ import {
   within,
 } from '@testing-library/react'
 import { apiSend, getMcpServers, getRecipeSecrets, getRecipes } from '../../lib/api'
+import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { SecretsTable } from '../SecretsTable'
 import { ToastProvider } from '../Toast'
 
@@ -77,7 +78,7 @@ describe('SecretsTable — LLM secret update payload', () => {
       <ToastProvider>
         <SecretsTable
           activeScope="llm"
-          items={[{ name: SECRET, keys }]}
+          items={[buildSecretSummary({ name: SECRET, keys })]}
           onChanged={async () => {}}
           onCreateLlmSecret={() => {}}
           onCreateMcpSecret={() => {}}
@@ -92,6 +93,14 @@ describe('SecretsTable — LLM secret update payload', () => {
     renderLlmTable(keys)
     fireEvent.click(screen.getByRole('button', { name: `Update LLM secret ${SECRET}` }))
   }
+
+  it('shows the providers whose complete credentials are stored in each secret', () => {
+    renderLlmTable(['openai-api-key', 'claude-api-key'])
+
+    const providers = screen.getByLabelText(`Providers for ${SECRET}`)
+    expect(within(providers).getByText('OpenAI')).toBeInTheDocument()
+    expect(within(providers).getByText('Anthropic')).toBeInTheDocument()
+  })
 
   const sectionFor = (label: string) =>
     screen.getByText(label, { selector: '.cu-llm-cred-group__title' }).closest('section')!

@@ -4,30 +4,18 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
-import { SelectionDropdown } from '@components/SelectionDropdown'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { HostApprovalSection } from '../../../components/HostApprovalSection'
-import { HostEnvTable } from '../../../components/HostEnvTable'
+import { HostAccessTab } from '../../../components/HostAccessTab'
+import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import { HostGuardrailsSection } from '../../../components/HostGuardrailsSection'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconPencil, IconX } from '../../../components/icons'
-import {
-  apiGet,
-  apiSend,
-  getAdminTeamAgents,
-  getAdminUserAgents,
-  getAgentTeams,
-  getAgentUsers,
-  getHost,
-  getHostDetailBundle,
-  updateAdminTeamAgents,
-  updateAdminUserAgents,
-} from '../../../lib/api'
+import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
@@ -48,29 +36,23 @@ import {
   validateLlmPolicy,
   validateLlmSecretData,
 } from '../../../lib/llm'
-import type { ChannelResource, HostTab } from './types'
+import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
   model: 'Models & creds',
-  approvals: 'Per-tool approval',
-  guardrails: 'Guardrails',
+  advanced: 'Advanced',
   contexts: 'Context',
-  env: 'Env vars',
-  users: 'Member access',
-  teams: 'Team access',
+  access: 'Access',
   identity: 'Identity',
 }
 
 const TAB_SLUGS: Record<HostTab, string> = {
   details: 'overview',
   model: 'model',
-  approvals: 'approvals',
-  guardrails: 'guardrails',
+  advanced: 'advanced',
   contexts: 'contexts',
-  env: 'env-vars',
-  users: 'member-access',
-  teams: 'team-access',
+  access: 'access',
   identity: 'identity',
 }
 
@@ -110,8 +92,6 @@ export default function HostDetailsPage() {
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
 
-  const [showAddUser, setShowAddUser] = useState(false)
-  const [showAddTeam, setShowAddTeam] = useState(false)
   const [editingOverview, setEditingOverview] = useState(false)
   const [editingModel, setEditingModel] = useState(false)
   const [editingContext, setEditingContext] = useState(false)
@@ -122,6 +102,17 @@ export default function HostDetailsPage() {
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
+  // Last server-backed snapshot of the Overview-owned fields, captured at every
+  // (re)load. Cancel (and re-opening Edit) reverts the whole class of Overview
+  // drafts to THIS — the last SAVED state — so a discarded edit (e.g. a Display
+  // name typed then cancelled) can never leak into a later saveHost PUT.
+  const savedOverviewRef = useRef({
+    hostName: routeName,
+    hostDisplay: '',
+    contextRef: '',
+    channels: [] as string[],
+    stateless: false,
+  })
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
   // model is always kept selectable even if it fell out of the allowlist
@@ -162,50 +153,7 @@ export default function HostDetailsPage() {
 
   const [availableContexts, setAvailableContexts] = useState<string[]>([])
   const [availableSecrets, setAvailableSecrets] = useState<string[]>([])
-  const [allUsers, setAllUsers] = useState<
-    Array<{ id: string; email: string; name: string | null; displayName: string | null }>
-  >([])
-  const [allTeams, setAllTeams] = useState<
-    Array<{ id: string; name: string; memberCount: number }>
-  >([])
-  const [usersWithAccess, setUsersWithAccess] = useState<
-    Array<{ id: string; email: string; name: string | null; displayName: string | null }>
-  >([])
-  const [teamsWithAccess, setTeamsWithAccess] = useState<Array<{ id: string; name: string }>>([])
-  const [selectedUserIdsToGrant, setSelectedUserIdsToGrant] = useState<string[]>([])
-  const [selectedTeamIdsToGrant, setSelectedTeamIdsToGrant] = useState<string[]>([])
 
-  const userIdsWithAccess = useMemo(
-    () => new Set(usersWithAccess.map(u => u.id)),
-    [usersWithAccess]
-  )
-  const teamIdsWithAccess = useMemo(
-    () => new Set(teamsWithAccess.map(t => t.id)),
-    [teamsWithAccess]
-  )
-  const memberGrantOptions = useMemo(
-    () =>
-      allUsers
-        .filter(user => !userIdsWithAccess.has(user.id))
-        .map(user => ({
-          value: user.id,
-          label: user.displayName || user.name || user.email || user.id,
-          description: user.email || user.id,
-        })),
-    [allUsers, userIdsWithAccess]
-  )
-  const teamGrantOptions = useMemo(
-    () =>
-      allTeams
-        .filter(team => !teamIdsWithAccess.has(team.id))
-        .map(team => ({
-          value: team.id,
-          label: team.name,
-          badge: team.memberCount === 1 ? '1 member' : `${team.memberCount} members`,
-        })),
-    [allTeams, teamIdsWithAccess]
-  )
-  const hasPendingRename = hostNameDraft.trim() && hostNameDraft.trim() !== routeName
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, providerDraft),
     [allowedCatalog, providerDraft]
@@ -275,28 +223,27 @@ export default function HostDetailsPage() {
     setError('')
     try {
       const detail = await getHostDetailBundle(routeName)
-      const {
-        host,
-        contexts: contextsList,
-        secrets: secretsList,
-        users,
-        teams,
-        agentUsers,
-        agentTeams,
-      } = detail
+      const { host, contexts: contextsList, secrets: secretsList } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
       if (resetDrafts === 'all' || resetDrafts === 'overview') {
-        setHostNameDraft(String(host.metadata?.name || routeName))
-        setHostDisplayDraft(String(spec.host || host.metadata?.name || routeName))
-        setContextRefDraft(String(spec.contextRef || ''))
-        setChannelsDraft(
-          Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : []
-        )
-        setStatelessDraft(spec.lifecycle?.stateless === true)
+        // Snapshot the saved Overview state so Cancel/Edit can revert to it.
+        const overview = {
+          hostName: String(host.metadata?.name || routeName),
+          hostDisplay: String(spec.host || host.metadata?.name || routeName),
+          contextRef: String(spec.contextRef || ''),
+          channels: Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : [],
+          stateless: spec.lifecycle?.stateless === true,
+        }
+        savedOverviewRef.current = overview
+        setHostNameDraft(overview.hostName)
+        setHostDisplayDraft(overview.hostDisplay)
+        setContextRefDraft(overview.contextRef)
+        setChannelsDraft(overview.channels)
+        setStatelessDraft(overview.stateless)
       }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
@@ -360,10 +307,6 @@ export default function HostDetailsPage() {
         if (name) keysMap[name] = Array.isArray(item.keys) ? item.keys : []
       }
       setSecretKeysByName(keysMap)
-      setAllUsers(Array.isArray(users) ? users : [])
-      setAllTeams(Array.isArray(teams) ? teams : [])
-      setUsersWithAccess(Array.isArray(agentUsers) ? agentUsers : [])
-      setTeamsWithAccess(Array.isArray(agentTeams) ? agentTeams : [])
     } catch (e) {
       if (!mountedRef.current) return
       setError(e instanceof Error ? e.message : 'Failed to load agent details')
@@ -403,6 +346,23 @@ export default function HostDetailsPage() {
     setLlmPolicyDraft(next)
   }
 
+  // Revert every Overview-owned draft to the last SAVED snapshot. Used by Cancel
+  // and by Edit-open so an edit session always starts from server-backed values
+  // — never a stale draft left behind by a prior discarded edit (any Overview
+  // field, not just Display name: the whole class shares this reset).
+  function resetOverviewDrafts() {
+    const saved = savedOverviewRef.current
+    setHostNameDraft(saved.hostName)
+    setHostDisplayDraft(saved.hostDisplay)
+    // contextRef is written by the Overview save (saveHost), so reset it here to
+    // block a stale leak — EXCEPT while the Context tab has a live edit open: it
+    // is a legitimate concurrent writer of contextRefDraft (its editingContext
+    // session), and reverting an in-progress selection would silently discard it.
+    if (!editingContext) setContextRefDraft(saved.contextRef)
+    setChannelsDraft(saved.channels)
+    setStatelessDraft(saved.stateless)
+  }
+
   async function saveHost(): Promise<boolean> {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
@@ -433,142 +393,6 @@ export default function HostDetailsPage() {
         ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
           ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
           : {}),
-      }
-
-      if (nextHostName !== routeName) {
-        let createdNewHost = false
-        const updatedChannels: Array<{ name: string; previousSpec: ChannelResource['spec'] }> = []
-        const previousUserAgentNamesById = new Map<string, string[]>()
-        const previousTeamAgentNamesById = new Map<string, string[]>()
-        try {
-          await apiSend('POST', '/api/v1/admin/hosts', {
-            metadata: { name: nextHostName },
-            spec: nextSpec,
-          })
-          createdNewHost = true
-
-          const channels = (await apiGet('/api/v1/admin/communication-channels')) as {
-            items?: ChannelResource[]
-          }
-          for (const channel of channels.items || []) {
-            if (String(channel.spec?.hostRef || '').trim() !== routeName) continue
-            const channelName = String(channel.metadata?.name || '').trim()
-            if (!channelName) continue
-            await apiSend(
-              'PUT',
-              `/api/v1/admin/communication-channels/${encodeURIComponent(channelName)}`,
-              {
-                spec: {
-                  ...(channel.spec || {}),
-                  hostRef: nextHostName,
-                },
-              }
-            )
-            updatedChannels.push({ name: channelName, previousSpec: channel.spec })
-          }
-
-          for (const user of usersWithAccess) {
-            const userAccess = await getAdminUserAgents(user.id)
-            const previousAgentNames = (userAccess.agentNames || [])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-            previousUserAgentNamesById.set(user.id, previousAgentNames)
-            const nextAgentNames = Array.from(
-              new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
-            )
-            await updateAdminUserAgents(user.id, nextAgentNames, [
-              ...(userAccess.agentNames || []),
-              ...(userAccess.deletedAgentNames || []),
-            ])
-          }
-
-          for (const team of teamsWithAccess) {
-            const teamAccess = await getAdminTeamAgents(team.id)
-            const previousAgentNames = (teamAccess.agentNames || [])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-            previousTeamAgentNamesById.set(team.id, previousAgentNames)
-            const nextAgentNames = Array.from(
-              new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
-            )
-            await updateAdminTeamAgents(team.id, nextAgentNames, [
-              ...(teamAccess.agentNames || []),
-              ...(teamAccess.deletedAgentNames || []),
-            ])
-          }
-
-          await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
-          showToast('Agent renamed and updated.', { tone: 'success' })
-          router.replace(CONTROL_ROUTES.agents.detail(nextHostName))
-          return true
-        } catch (renameError) {
-          const rollbackErrors: string[] = []
-          if (createdNewHost) {
-            for (const [teamId, previousAgentNames] of Array.from(
-              previousTeamAgentNamesById.entries()
-            ).reverse()) {
-              try {
-                const current = await getAdminTeamAgents(teamId)
-                await updateAdminTeamAgents(teamId, previousAgentNames, [
-                  ...(current.agentNames || []),
-                  ...(current.deletedAgentNames || []),
-                ])
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`team ${teamId}: ${rollbackMessage}`)
-              }
-            }
-            for (const [userId, previousAgentNames] of Array.from(
-              previousUserAgentNamesById.entries()
-            ).reverse()) {
-              try {
-                const current = await getAdminUserAgents(userId)
-                await updateAdminUserAgents(userId, previousAgentNames, [
-                  ...(current.agentNames || []),
-                  ...(current.deletedAgentNames || []),
-                ])
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`member ${userId}: ${rollbackMessage}`)
-              }
-            }
-            for (const channel of [...updatedChannels].reverse()) {
-              try {
-                await apiSend(
-                  'PUT',
-                  `/api/v1/admin/communication-channels/${encodeURIComponent(channel.name)}`,
-                  {
-                    spec: {
-                      ...(channel.previousSpec || {}),
-                      hostRef: routeName,
-                    },
-                  }
-                )
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`channel ${channel.name}: ${rollbackMessage}`)
-              }
-            }
-            try {
-              await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(nextHostName)}`)
-            } catch (rollbackError) {
-              const rollbackMessage =
-                rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-              rollbackErrors.push(`agent ${nextHostName}: ${rollbackMessage}`)
-            }
-          }
-          if (rollbackErrors.length > 0) {
-            const renameMessage =
-              renameError instanceof Error ? renameError.message : 'Failed to rename agent'
-            throw new Error(`${renameMessage} (rollback issues: ${rollbackErrors.join('; ')})`)
-          }
-          throw renameError
-        }
       }
 
       const formResourceVersion = formResourceVersionRef.current
@@ -829,137 +653,6 @@ export default function HostDetailsPage() {
     [routeName]
   )
 
-  async function grantUserAccess() {
-    if (selectedUserIdsToGrant.length === 0 || hasPendingRename) return
-    setBusy(true)
-    setError('')
-    try {
-      await Promise.all(
-        selectedUserIdsToGrant.map(async userId => {
-          const current = await getAdminUserAgents(userId)
-          const next = Array.from(new Set([...(current.agentNames || []), routeName]))
-          await updateAdminUserAgents(userId, next, [
-            ...(current.agentNames || []),
-            ...(current.deletedAgentNames || []),
-          ])
-        })
-      )
-      const grantedUserIds = selectedUserIdsToGrant
-      const grantedUser = allUsers.find(u => u.id === grantedUserIds[0])
-      setSelectedUserIdsToGrant([])
-      const refreshed = await getAgentUsers(routeName)
-      setUsersWithAccess(Array.isArray(refreshed.items) ? refreshed.items : [])
-      showToast(
-        grantedUserIds.length === 1
-          ? `${grantedUser?.displayName || grantedUser?.name || grantedUserIds[0]} can now use this agent.`
-          : `${grantedUserIds.length} members can now use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to grant member access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function revokeUserAccess(userId: string) {
-    if (hasPendingRename) return
-    const user = usersWithAccess.find(item => item.id === userId)
-    const shouldRevoke = await confirm({
-      title: 'Revoke Member Access',
-      message: `Revoke ${user?.displayName || user?.name || user?.email || 'this member'}'s access to ${routeName}?`,
-      confirmLabel: 'Revoke',
-      tone: 'danger',
-    })
-    if (!shouldRevoke) return
-
-    setBusy(true)
-    setError('')
-    try {
-      const current = await getAdminUserAgents(userId)
-      const next = (current.agentNames || []).filter(name => name !== routeName)
-      await updateAdminUserAgents(userId, next, [
-        ...(current.agentNames || []),
-        ...(current.deletedAgentNames || []),
-      ])
-      const removedUser = usersWithAccess.find(u => u.id === userId)
-      setUsersWithAccess(prev => prev.filter(u => u.id !== userId))
-      showToast(
-        `${removedUser?.displayName || removedUser?.name || userId} can no longer use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to revoke member access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function grantTeamAccess() {
-    if (selectedTeamIdsToGrant.length === 0 || hasPendingRename) return
-    setBusy(true)
-    setError('')
-    try {
-      await Promise.all(
-        selectedTeamIdsToGrant.map(async teamId => {
-          const current = await getAdminTeamAgents(teamId)
-          const next = Array.from(new Set([...(current.agentNames || []), routeName]))
-          await updateAdminTeamAgents(teamId, next, [
-            ...(current.agentNames || []),
-            ...(current.deletedAgentNames || []),
-          ])
-        })
-      )
-      const grantedTeamIds = selectedTeamIdsToGrant
-      const grantedTeam = allTeams.find(t => t.id === grantedTeamIds[0])
-      setSelectedTeamIdsToGrant([])
-      const refreshed = await getAgentTeams(routeName)
-      setTeamsWithAccess(Array.isArray(refreshed.items) ? refreshed.items : [])
-      showToast(
-        grantedTeamIds.length === 1
-          ? `${grantedTeam?.name || grantedTeamIds[0]} can now use this agent.`
-          : `${grantedTeamIds.length} teams can now use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to grant team access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function revokeTeamAccess(teamId: string) {
-    if (hasPendingRename) return
-    const team = teamsWithAccess.find(item => item.id === teamId)
-    const shouldRevoke = await confirm({
-      title: 'Revoke Team Access',
-      message: `Revoke ${team?.name || 'this team'}'s access to ${routeName}?`,
-      confirmLabel: 'Revoke',
-      tone: 'danger',
-    })
-    if (!shouldRevoke) return
-
-    setBusy(true)
-    setError('')
-    try {
-      const current = await getAdminTeamAgents(teamId)
-      const next = (current.agentNames || []).filter(name => name !== routeName)
-      await updateAdminTeamAgents(teamId, next, [
-        ...(current.agentNames || []),
-        ...(current.deletedAgentNames || []),
-      ])
-      const removedTeam = teamsWithAccess.find(t => t.id === teamId)
-      setTeamsWithAccess(prev => prev.filter(team => team.id !== teamId))
-      showToast(`${removedTeam?.name || teamId} can no longer use this agent.`, {
-        tone: 'success',
-      })
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to revoke team access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   async function deleteAgentPermanently() {
     setDeletingAgent(true)
     setDeleteAgentDialogError('')
@@ -982,22 +675,13 @@ export default function HostDetailsPage() {
       backLabel="Back to agents"
       error={error}
       icon={<IconRobot />}
-      notice={
-        hasPendingRename ? (
-          <div className="cu-banner cu-banner--warning">
-            Save agent rename before changing user or team access.
-          </div>
-        ) : null
-      }
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
       subtitle="Configuration and access for this agent."
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
       contentClassName={
-        activeTab === 'approvals' ||
-        activeTab === 'guardrails' ||
-        (activeTab === 'model' && editingModel)
+        activeTab === 'advanced' || (activeTab === 'model' && editingModel)
           ? 'cu-agent-detail-card'
           : undefined
       }
@@ -1037,7 +721,13 @@ export default function HostDetailsPage() {
                     <button
                       type="button"
                       className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => setEditingOverview(false)}
+                      onClick={() => {
+                        // Discard any unsaved Overview edits before leaving edit
+                        // mode, so the read-only view and the next save reflect
+                        // the last SAVED state — not the abandoned draft.
+                        resetOverviewDrafts()
+                        setEditingOverview(false)
+                      }}
                       disabled={busy}
                     >
                       Cancel
@@ -1061,7 +751,16 @@ export default function HostDetailsPage() {
                   <button
                     type="button"
                     className="cu-btn cu-btn--ghost cu-btn--sm"
-                    onClick={() => setEditingOverview(true)}
+                    onClick={() => {
+                      // Defensive: start every edit session from the last SAVED
+                      // snapshot, so a stale draft never leaks into this Overview
+                      // save. resetOverviewDrafts deliberately leaves contextRef
+                      // untouched while the Context tab is mid-edit — that tab is a
+                      // legitimate live writer of contextRefDraft, not a stale
+                      // leftover, so its in-progress selection must be preserved.
+                      resetOverviewDrafts()
+                      setEditingOverview(true)
+                    }}
                     disabled={busy}
                   >
                     Edit
@@ -1073,15 +772,28 @@ export default function HostDetailsPage() {
               <div className="cu-field">
                 <label htmlFor="host-name">Name</label>
                 {editingOverview ? (
+                  <>
+                    <input id="host-name" value={hostNameDraft} readOnly />
+                    <span className="cu-field__hint">
+                      This is the agent identifier, not editable.
+                    </span>
+                  </>
+                ) : (
+                  <div className="cu-field__readonly">{hostNameDraft}</div>
+                )}
+              </div>
+              <div className="cu-field">
+                <label htmlFor="host-display">Display name</label>
+                {editingOverview ? (
                   <input
-                    id="host-name"
-                    value={hostNameDraft}
-                    onChange={e => setHostNameDraft(e.target.value)}
+                    id="host-display"
+                    value={hostDisplayDraft}
+                    onChange={e => setHostDisplayDraft(e.target.value)}
                     disabled={busy}
                     autoFocus
                   />
                 ) : (
-                  <div className="cu-field__readonly">{hostNameDraft}</div>
+                  <div className="cu-field__readonly">{hostDisplayDraft}</div>
                 )}
               </div>
               <div className="cu-field" style={{ marginBottom: 0 }}>
@@ -1304,23 +1016,26 @@ export default function HostDetailsPage() {
           </>
         )}
 
-        {activeTab === 'approvals' && !initialLoading && (
-          <HostApprovalSection
-            initialTools={approvalToolsData}
-            onSave={persistApprovalTools}
-            busy={busy}
-            canWrite={true /* TODO: wire to actual host:write check if/when per-field RBAC lands */}
-            defaultEditing
-          />
-        )}
-
-        {activeTab === 'guardrails' && !initialLoading && (
-          <HostGuardrailsSection
-            initialGuardrails={guardrailsData}
-            onSave={persistGuardrails}
-            busy={busy}
-            canWrite={true /* TODO: wire to actual host:write check if/when per-field RBAC lands */}
-          />
+        {activeTab === 'advanced' && (
+          <>
+            <HostAdvancedTab
+              busy={busy}
+              hostName={routeName}
+              initialLoading={initialLoading}
+              initialTools={approvalToolsData}
+              onSaveApprovalTools={persistApprovalTools}
+            />
+            {!initialLoading && (
+              <HostGuardrailsSection
+                initialGuardrails={guardrailsData}
+                onSave={persistGuardrails}
+                busy={busy}
+                canWrite={
+                  true /* TODO: wire to actual host:write check if/when per-field RBAC lands */
+                }
+              />
+            )}
+          </>
         )}
 
         {activeTab === 'contexts' && (
@@ -1417,340 +1132,10 @@ export default function HostDetailsPage() {
           </>
         )}
 
-        {activeTab === 'env' && <HostEnvTable hostRef={routeName} />}
-
         {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
 
-        {activeTab === 'users' && (
-          <>
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: '0.5rem',
-                marginBottom: '1rem',
-              }}
-            >
-              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                Grant or revoke which members can use this agent.
-              </p>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => setShowAddUser(true)}
-                disabled={busy || hasPendingRename}
-              >
-                Add member
-              </button>
-            </div>
-            <div className="cu-table-wrap">
-              <table className="cu-table cu-table--header-band">
-                <thead>
-                  <tr>
-                    <th>Member</th>
-                    <th className="cu-table__col-actions">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {initialLoading ? (
-                    [1, 2, 3].map(i => (
-                      <tr key={i}>
-                        <td>
-                          <div
-                            className="cu-skeleton cu-skeleton--cell"
-                            style={{ width: '10rem' }}
-                          ></div>
-                        </td>
-                        <td></td>
-                      </tr>
-                    ))
-                  ) : usersWithAccess.length === 0 ? (
-                    <tr>
-                      <td colSpan={2} className="cu-empty">
-                        No members have access yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    usersWithAccess.map(user => (
-                      <tr key={user.id}>
-                        <td>
-                          <button
-                            type="button"
-                            className="cu-link"
-                            onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.user(user.id))}
-                          >
-                            {user.displayName || user.name || user.email}
-                          </button>
-                        </td>
-                        <td className="cu-table__cell-actions">
-                          <div className="cu-row-actions">
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void revokeUserAccess(user.id)}
-                              disabled={busy || hasPendingRename}
-                              title="Revoke"
-                              aria-label="Revoke member access"
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-
-        {activeTab === 'teams' && (
-          <>
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: '0.5rem',
-                marginBottom: '1rem',
-              }}
-            >
-              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                Grant or revoke team-level access to this agent.
-              </p>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => setShowAddTeam(true)}
-                disabled={busy || hasPendingRename}
-              >
-                Add team
-              </button>
-            </div>
-            <div className="cu-table-wrap">
-              <table className="cu-table cu-table--header-band">
-                <thead>
-                  <tr>
-                    <th>Team</th>
-                    <th className="cu-table__col-actions">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {initialLoading ? (
-                    [1, 2, 3].map(i => (
-                      <tr key={i}>
-                        <td>
-                          <div
-                            className="cu-skeleton cu-skeleton--cell"
-                            style={{ width: '10rem' }}
-                          ></div>
-                        </td>
-                        <td></td>
-                      </tr>
-                    ))
-                  ) : teamsWithAccess.length === 0 ? (
-                    <tr>
-                      <td colSpan={2} className="cu-empty">
-                        No teams have access yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    teamsWithAccess.map(team => (
-                      <tr key={team.id}>
-                        <td>
-                          <button
-                            type="button"
-                            className="cu-link"
-                            onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.team(team.id))}
-                          >
-                            {team.name}
-                          </button>
-                        </td>
-                        <td className="cu-table__cell-actions">
-                          <div className="cu-row-actions">
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void revokeTeamAccess(team.id)}
-                              disabled={busy || hasPendingRename}
-                              title="Revoke"
-                              aria-label="Revoke team access"
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
+        {activeTab === 'access' && <HostAccessTab hostName={routeName} />}
       </div>
-      {showAddUser && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddUser(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-user-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-user-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add member
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddUser(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="agent-member-picker">Members</label>
-              <SelectionDropdown
-                id="agent-member-picker"
-                inline
-                value={selectedUserIdsToGrant}
-                onChange={setSelectedUserIdsToGrant}
-                options={memberGrantOptions}
-                placeholder="Select members"
-                searchPlaceholder="Search members..."
-                selectionLabel="Selected members"
-                emptyLabel="No available members."
-                disabled={busy || hasPendingRename}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddUser(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  await grantUserAccess()
-                  setShowAddUser(false)
-                }}
-                disabled={busy || selectedUserIdsToGrant.length === 0 || hasPendingRename}
-              >
-                {selectedUserIdsToGrant.length > 1 ? 'Add members' : 'Add member'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showAddTeam && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddTeam(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-team-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-team-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add team
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="agent-team-picker">Teams</label>
-              <SelectionDropdown
-                id="agent-team-picker"
-                inline
-                value={selectedTeamIdsToGrant}
-                onChange={setSelectedTeamIdsToGrant}
-                options={teamGrantOptions}
-                placeholder="Select teams"
-                searchPlaceholder="Search teams..."
-                selectionLabel="Selected teams"
-                emptyLabel="No available teams."
-                disabled={busy || hasPendingRename}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  await grantTeamAccess()
-                  setShowAddTeam(false)
-                }}
-                disabled={busy || selectedTeamIdsToGrant.length === 0 || hasPendingRename}
-              >
-                {selectedTeamIdsToGrant.length > 1 ? 'Add teams' : 'Add team'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {showDeleteAgentConfirm && (
         <div
           style={{

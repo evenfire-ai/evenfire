@@ -330,7 +330,7 @@ export type ProviderWorkflowResultRequestHandler = (
 ) => Promise<MessageResponse>
 export type ProviderMessageAuthorizationHandler = (
   input: ProviderMessageAuthorization
-) => Promise<{ authorized: boolean }>
+) => Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }>
 export type WorkflowApprovalNotificationClaimHandler = (
   input: WorkflowApprovalNotificationClaim
 ) => Promise<{ deliveries: WorkflowApprovalNotificationDelivery[] } | { error: string }>

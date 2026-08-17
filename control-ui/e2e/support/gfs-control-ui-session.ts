@@ -56,15 +56,27 @@ export async function loginControlUi(page: Page): Promise<void> {
     .poll(() => page.evaluate(() => window.localStorage.getItem('controlUiAdminToken')))
     .toBeNull()
 
-  const remindLater = page.getByRole('button', { name: 'Remind me later' })
-  if (await remindLater.isVisible({ timeout: 3_000 }).catch(() => false)) {
+  const accountAlert = page
+    .getByRole('status')
+    .filter({ hasText: /Set up your admin email|Confirm your admin email/ })
+  const remindLater = accountAlert.getByRole('button', {
+    name: 'Remind me later',
+    exact: true,
+  })
+
+  // The account reminder is allowed to arrive after the shell becomes ready.
+  // Dismiss it explicitly when it is present. A locator handler is deliberately
+  // not used here: Playwright invokes handlers before actions on matching
+  // descendants, so a handler that clicks `remindLater` can intercept its own
+  // dismissal and wait forever for the alert to disappear.
+  if (await accountAlert.isVisible({ timeout: 3_000 }).catch(() => false)) {
     await remindLater.click()
-    await expect(remindLater).toBeHidden({ timeout: 10_000 })
+    await expect(accountAlert).toBeHidden({ timeout: 10_000 })
   }
 }
 
 export async function openGlobalFileSystemFromSidebar(page: Page): Promise<void> {
-  const directoriesSection = page.getByRole('button', { name: 'Directories', exact: true })
+  const directoriesSection = page.getByRole('button', { name: 'Files', exact: true })
   await expect(directoriesSection).toBeVisible()
   await directoriesSection.click()
   const globalFileSystem = page.getByRole('link', {

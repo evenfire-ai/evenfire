@@ -8,6 +8,7 @@ import { useMcpServersDataController } from '../hooks/domain/useMcpServersDataCo
 export function McpServersPage() {
   const {
     agentNames,
+    agentDisplayByName,
     mcpServersByAgent,
     agentContextByName,
     globalMcpServers,
@@ -154,7 +155,9 @@ export function McpServersPage() {
                             title={agentName}
                             aria-label={`Open agent ${agentName}`}
                           >
-                            {agentName}
+                            {/* Visible agent name (spec.host) read directly from
+                                the producer-total map — no fallback (Decision #6). */}
+                            {agentDisplayByName[agentName]}
                           </ReferenceTag>
                         ))}
                       </span>

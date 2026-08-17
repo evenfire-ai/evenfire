@@ -108,25 +108,29 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
     }
   }, [activeTab, authState.isLoggedIn, authState.isLoading])
 
+  const discoveryReviewCount = useMemo(
+    () =>
+      models.filter(model => model.source === 'discovery' && !model.enabled && !model.stale).length,
+    [models]
+  )
+
   const tabs = [
     {
       value: 'catalog' as const,
       href: CONTROL_ROUTES.llmModels.root,
-      label: 'Catalog',
+      label: models.length > 0 ? `Catalog (${models.length})` : 'Catalog',
     },
     {
       value: 'discovery' as const,
       href: CONTROL_ROUTES.llmModels.discovery,
-      label: 'Discovery review',
+      label:
+        discoveryReviewCount > 0
+          ? `Discovery review (${discoveryReviewCount})`
+          : 'Discovery review',
     },
   ]
   const navigation = (
-    <TabBar<LlmModelsTab>
-      activeValue={activeTab}
-      ariaLabel="LLM model management"
-      className="cu-tabs--flush-top"
-      options={tabs}
-    />
+    <TabBar<LlmModelsTab> activeValue={activeTab} ariaLabel="LLM model management" options={tabs} />
   )
 
   return (

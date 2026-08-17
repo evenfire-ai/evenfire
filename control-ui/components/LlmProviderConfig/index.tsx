@@ -1,12 +1,13 @@
 'use client'
 
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { LlmPolicyEditor } from '@/components/LlmPolicyEditor'
 import { LlmProviderIcon } from '@/components/LlmProviderIcon'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import type { SelectionDropdownOption } from '@/components/SelectionDropdown/types'
+import { IconChevronRight } from '@/components/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
@@ -98,8 +99,12 @@ export function LlmProviderConfig({
   replacePrimaryModelWithAllowedModels = false,
   credentials,
   secretKeys = [],
+  fallbackProvidersInitiallyCollapsed = false,
   disabled = false,
 }: LlmProviderConfigProps) {
+  const [fallbackProvidersOpen, setFallbackProvidersOpen] = useState(
+    !fallbackProvidersInitiallyCollapsed
+  )
   const fallbacks = policy?.fallbacks ?? []
   const existingKeySet = useMemo(
     () => new Set(credentials?.existingKeys ?? []),
@@ -332,19 +337,36 @@ export function LlmProviderConfig({
       </div>
 
       <div className="cu-llm-config__block">
-        <div className="cu-llm-config__block-head">
-          <span className="cu-llm-config__block-title">Fallback providers</span>
+        <button
+          type="button"
+          className="cu-llm-config__block-head cu-llm-config__block-toggle"
+          onClick={() => setFallbackProvidersOpen(open => !open)}
+          aria-expanded={fallbackProvidersOpen}
+          aria-controls="llm-fallback-providers"
+        >
+          <span className="cu-llm-config__block-toggle-title">
+            <IconChevronRight
+              className={fallbackProvidersOpen ? 'is-expanded' : undefined}
+              width={18}
+              height={18}
+            />
+            <span className="cu-llm-config__block-title">Fallback providers</span>
+          </span>
           <span className="cu-llm-config__block-tag cu-llm-config__block-tag--muted">Optional</span>
-        </div>
-        <LlmPolicyEditor
-          value={policy}
-          onChange={onPolicyChange}
-          catalog={catalog}
-          allowedModels={allowedModels}
-          secretKeys={secretKeys}
-          defaultProvider={provider}
-          disabled={disabled}
-        />
+        </button>
+        {fallbackProvidersOpen ? (
+          <div id="llm-fallback-providers">
+            <LlmPolicyEditor
+              value={policy}
+              onChange={onPolicyChange}
+              catalog={catalog}
+              allowedModels={allowedModels}
+              secretKeys={secretKeys}
+              defaultProvider={provider}
+              disabled={disabled}
+            />
+          </div>
+        ) : null}
       </div>
 
       {showAllowedModels && fallbackAllowedProviders.length > 0 ? (

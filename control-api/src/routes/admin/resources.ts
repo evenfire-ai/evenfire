@@ -6,7 +6,12 @@ import { validateCommunicationChannelSpec } from '../../http/validateCommunicati
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
-import { K8sConflictError } from '../../services/resourceService.js'
+import {
+  K8sConflictError,
+  K8sNotFoundError,
+  type MutableResourceSnapshot,
+} from '../../services/resourceService.js'
+import { secretKeyNames } from '../../services/secretKeyNames.js'
 import { ClerumResourceType } from '../../types.js'
 import {
   registerCommunicationChannelCredentialsRoutes,
@@ -19,6 +24,7 @@ import {
 } from './communicationChannelSpecHelpers.js'
 import { validateHostSecretRef } from './hostSecrets.js'
 import { validateHostSpec } from './hostSpecValidation.js'
+import { collectResourceSpecFieldIssues, validateResourceName } from './resourceFieldValidation.js'
 
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
   telegramSettings: ['botHandle', 'replyOnlyWhenMentioned'],
@@ -147,6 +153,74 @@ async function rollbackPrunedCommunicationChannelUpdate(
 }
 
 /**
+ * Deploy-order guard for the additive context `spec.displayName` field (PR #304).
+ *
+ * `spec.displayName` is a new, optional, additive field on the context CRD. If a
+ * create/update carries a non-empty `spec.displayName` but the CRD applied to
+ * the cluster does NOT yet declare the field (deploy-order skew: control-ui
+ * writes the field before the CRD update lands), the apiserver PRUNES the
+ * unknown field SILENTLY and returns success — the display name is lost with no
+ * error surfaced to the operator.
+ *
+ * This is a pure read-after-write check: it compares the value the caller sent
+ * against the object the apiserver actually persisted. A create/replace returns
+ * the persisted object AFTER pruning, so this reuses that response with NO extra
+ * apiserver read (preserving the N1 single-read-per-PUT optimization).
+ *
+ * STRICTLY SCOPED to `contexts` + `spec.displayName` — the only additive field
+ * at pruning risk in this PR. Do NOT generalize to other fields or resources:
+ * that would be a decision module (which fields, precedence) requiring its own
+ * mini-spec, not a one-field hardening net.
+ */
+function contextDisplayNameNotPersisted(
+  requestedSpec: Record<string, unknown>,
+  persisted: unknown
+): boolean {
+  const requested = requestedSpec.displayName
+  // Only fire when the caller actually asked for a non-empty display name.
+  if (typeof requested !== 'string' || requested.trim() === '') return false
+  const persistedSpec = recordValue((persisted as { spec?: unknown } | null)?.spec) || {}
+  // Missing (pruned) OR differs from what was sent — either way it did not
+  // round-trip. displayName is stored verbatim (free text, no server-side
+  // normalization), so a mismatch here means loss, not transformation.
+  return persistedSpec.displayName !== requested
+}
+
+function sendPrunedDisplayNameError(res: Response): void {
+  console.warn('[Admin] Context spec.displayName was pruned by the apiserver (CRD outdated)')
+  res.status(409).json({
+    code: 'context_crd_outdated',
+    error:
+      'Context spec.displayName was not persisted by Kubernetes; the context CRD does not ' +
+      'support spec.displayName. Apply the latest clerum-crds (which add spec.displayName) ' +
+      'before setting a display name.',
+  })
+}
+
+/**
+ * Best-effort rollback of a context whose create silently dropped
+ * `spec.displayName`. Unlike the update path, a POST is NOT idempotent: leaving
+ * the pruned context in place would make the operator's retry (after applying
+ * the CRD) collide with a 409 AlreadyExists. Deleting it restores a clean retry
+ * path. Mirrors rollbackPrunedCommunicationChannelCreate.
+ */
+async function rollbackPrunedContextCreate(
+  gateway: K8sGateway,
+  name: string,
+  namespace: string
+): Promise<void> {
+  try {
+    await gateway.deleteResource('contexts', name, namespace)
+  } catch (err) {
+    const safeName = String(name).replace(/[\r\n]/g, '')
+    const safeErrMsg = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]/g, '')
+    console.warn(
+      `[Admin] context pruned-displayName rollback failed for "${safeName}": ${safeErrMsg}`
+    )
+  }
+}
+
+/**
  * Return true if the CC spec has at least one non-empty provider array
  * (telegram, slack, teams, or email). These are the providers that require a
  * credentials Secret to function; a CC without any provider is valid
@@ -208,6 +282,77 @@ function missingCreateCredentialKey(
   }
   if (ccSpecHasTeamsProvider(spec) && !credentials['teams-app-password']) {
     return 'teams-app-password'
+  }
+  return null
+}
+
+const PROVIDER_REQUIRED_KEYS: Record<string, string[]> = {
+  telegram: ['telegram-bot-token'],
+  slack: ['slack-bot-token', 'slack-signing-secret'],
+  teams: ['teams-app-password'],
+  email: ['email-username', 'email-password'],
+}
+
+function providersEnabled(spec: Record<string, unknown> | null): Set<string> {
+  const enabled = new Set<string>()
+  if (!spec) return enabled
+  if (ccSpecHasTelegramProvider(spec)) enabled.add('telegram')
+  if (ccSpecHasSlackProvider(spec)) enabled.add('slack')
+  if (ccSpecHasTeamsProvider(spec)) enabled.add('teams')
+  if (Array.isArray(spec.email) && spec.email.length > 0) enabled.add('email')
+  return enabled
+}
+
+/**
+ * Validate providers that go absent -> present. Returns an error message, or null.
+ *
+ * Deliberately scoped to the transition: a channel already missing keys in a
+ * cluster stays editable, and enabling a NEW provider without its credentials is
+ * refused. Presence of `credentialsSecretRef` proves nothing, which is why the
+ * pre-existing POST guard missed this entirely — the channel that motivated this
+ * (#312) already had a ref, holding only its Telegram token, and still accepted a
+ * Slack App Name.
+ *
+ * Fails CLOSED: an unreadable Secret rejects the write. Refusing a write on a
+ * read failure is safe; assuming the keys are there is how a channel ends up
+ * advertising a provider it cannot serve.
+ */
+async function providerTransitionError(
+  gateway: K8sGateway,
+  nextSpec: Record<string, unknown>,
+  previousSpec: Record<string, unknown> | null,
+  credentials: Record<string, string> | undefined,
+  namespace: string
+): Promise<string | null> {
+  const previouslyEnabled = providersEnabled(previousSpec)
+  const added = [...providersEnabled(nextSpec)].filter(p => !previouslyEnabled.has(p))
+  if (added.length === 0) return null
+
+  const secretName = (nextSpec.credentialsSecretRef as { name?: string } | undefined)?.name?.trim()
+  let existingKeys: string[] = []
+  if (secretName) {
+    try {
+      existingKeys = await secretKeyNames(gateway, secretName, namespace)
+    } catch {
+      return `Cannot read the credentials Secret "${secretName}" to validate the new provider. Fix access to that Secret, or supply the credentials with this request.`
+    }
+  }
+
+  for (const provider of added) {
+    for (const key of PROVIDER_REQUIRED_KEYS[provider] || []) {
+      // Trimmed, because this reads the RAW envelope while the Secret is written
+      // from the CLEANED values: `validateCommunicationChannelCredentials` drops
+      // whitespace-only entries, so a truthy "   " here would satisfy the guard
+      // and then never reach the Secret. A present-but-non-string value (e.g. a
+      // number) is NOT "missing" though: it's `validateCommunicationChannelCredentials`
+      // below that owns rejecting the wrong type with its own 400, so this only
+      // calls `.trim()` once `typeof` has confirmed there's a string to trim.
+      const rawValue = credentials?.[key]
+      const isMissing = rawValue === undefined || (typeof rawValue === 'string' && !rawValue.trim())
+      if (isMissing && !existingKeys.includes(key)) {
+        return `credentials["${key}"] is required to enable the ${provider} provider on this CommunicationChannel`
+      }
+    }
   }
   return null
 }
@@ -323,6 +468,25 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         credentials?: Record<string, string>
       }
 
+      // FIX-A1: validate metadata.name (RFC1123) for ALL plurals BEFORE any spec
+      // validation or side effect (e.g. CC credentials Secret creation). An
+      // invalid name would otherwise reach K8s and its 422 would collapse to 500.
+      const nameIssue = validateResourceName(body.metadata?.name)
+      if (nameIssue) {
+        res.status(422).json(nameIssue)
+        return
+      }
+
+      // F0.3: identifier/display field validation for hosts + contexts (create =
+      // no ratchet; every present field is validated).
+      if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
+        const fieldIssues = collectResourceSpecFieldIssues(plural, body.spec, null)
+        if (fieldIssues.length > 0) {
+          res.status(422).json({ errors: fieldIssues })
+          return
+        }
+      }
+
       if (plural === 'communicationchannels' && body.spec) {
         const errors = validateCommunicationChannelSpec(body.spec)
         if (errors.length > 0) {
@@ -340,6 +504,21 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
               'credentials. Supply a "credentials" envelope on the request, or set ' +
               '"spec.credentialsSecretRef" to an existing Secret.',
           })
+          return
+        }
+
+        // Every declared provider is new on create, so the whole spec is the
+        // transition. A credentialsSecretRef satisfies the guard above without
+        // proving the Secret behind it holds this provider's keys.
+        const transitionError = await providerTransitionError(
+          gateway,
+          body.spec,
+          null,
+          body.credentials,
+          ns
+        )
+        if (transitionError) {
+          res.status(400).json({ error: transitionError })
           return
         }
       }
@@ -447,6 +626,15 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           return
         }
       }
+      if (
+        plural === 'contexts' &&
+        body.spec &&
+        contextDisplayNameNotPersisted(body.spec, created)
+      ) {
+        await rollbackPrunedContextCreate(gateway, body.metadata.name, ns)
+        sendPrunedDisplayNameError(res)
+        return
+      }
       res.status(201).json(created)
     })
   )
@@ -471,6 +659,38 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           resourceVersion?: string
         }
         spec: Record<string, unknown>
+      }
+
+      // N1 — the CR read by the ratchet below is handed to updateResource so a
+      // hosts/contexts PUT reads the apiserver ONCE, not twice (updateResource
+      // already reads `current` internally). Undefined for non hosts/contexts
+      // plurals and on the 404 path, where updateResource reads afresh and
+      // surfaces the real 404.
+      let ratchetCurrent: MutableResourceSnapshot | undefined
+
+      // F0.3 RATCHET: for hosts + contexts, validate an identifier/display field
+      // ONLY IF its value changed vs the current CR, so a legacy resource whose
+      // spec.host / contextId is out of norm is never blocked for other edits.
+      if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
+        let currentSpec: Record<string, unknown> | null = null
+        try {
+          const current = (await gateway.getResource(plural, req.params.name, ns)) as
+            | (MutableResourceSnapshot & { spec?: Record<string, unknown> })
+            | null
+          currentSpec = recordValue(current?.spec)
+          ratchetCurrent = current ?? undefined
+        } catch (err) {
+          // Missing resource: fall through with currentSpec=null (validate every
+          // present field). The subsequent updateResource surfaces the real 404.
+          // getResource wraps a namespaced 404 as K8sNotFoundError (httpStatus),
+          // which extractK8sStatusCode does not read, so check both.
+          if (!(err instanceof K8sNotFoundError) && extractK8sStatusCode(err) !== 404) throw err
+        }
+        const fieldIssues = collectResourceSpecFieldIssues(plural, body.spec, currentSpec)
+        if (fieldIssues.length > 0) {
+          res.status(422).json({ errors: fieldIssues })
+          return
+        }
       }
 
       if (plural === 'communicationchannels' && body.spec) {
@@ -529,8 +749,36 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             ),
           }
         : body
+      // A null snapshot means the channel does not exist (loadCommunicationChannelSpecSnapshot
+      // returns null only on 404). Skipping the guard here is what makes the response
+      // honest: with no previous spec every provider reads as newly added, so the guard
+      // would answer a PUT to a missing channel with `credentials[...] is required`
+      // instead of the 404 updateResource is about to produce.
+      if (isCommunicationChannelUpdate && previousCommunicationChannelSpec) {
+        // updateBody.spec, not body.spec: the ref the write will actually carry
+        // is the preserved one, and that is the Secret whose keys decide whether
+        // a newly enabled provider can work. Reuses the snapshot already loaded
+        // above — no second fetch.
+        const transitionError = await providerTransitionError(
+          gateway,
+          updateBody.spec,
+          previousCommunicationChannelSpec?.spec ?? null,
+          undefined,
+          ns
+        )
+        if (transitionError) {
+          res.status(400).json({ error: transitionError })
+          return
+        }
+      }
       try {
-        const updated = await gateway.updateResource(plural, req.params.name, updateBody, ns)
+        // Only the ratchet path (hosts/contexts) has a pre-read to hand off; the
+        // CC/mcpservers paths call with the original 4-arg arity untouched.
+        const updated = ratchetCurrent
+          ? await gateway.updateResource(plural, req.params.name, updateBody, ns, {
+              preReadCurrent: ratchetCurrent,
+            })
+          : await gateway.updateResource(plural, req.params.name, updateBody, ns)
         if (plural === 'communicationchannels' && body.spec) {
           const missingField = missingPersistedProviderSetting(updateBody.spec, updated)
           if (missingField) {
@@ -544,6 +792,20 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             sendPrunedProviderSettingError(res, missingField)
             return
           }
+        }
+        if (
+          plural === 'contexts' &&
+          body.spec &&
+          contextDisplayNameNotPersisted(body.spec, updated)
+        ) {
+          // Deliberately NO spec restore (unlike the CC update rollback): the
+          // context's other spec fields persisted legitimately, and a PUT is
+          // idempotent — once the operator applies the CRD and replays the same
+          // request, spec.displayName round-trips and the whole spec converges.
+          // Restoring the prior spec would instead discard those legitimate
+          // edits. The loud 409 is the recovery signal.
+          sendPrunedDisplayNameError(res)
+          return
         }
         res.status(200).json(updated)
       } catch (err) {
@@ -622,7 +884,11 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         try {
           const ctxList = (await gateway.listResource('contexts', contextsNs)) as Array<{
             metadata?: { name?: string }
-            spec?: { contextId?: string; description?: string; mcpServers?: string[] }
+            spec?: Record<string, unknown> & {
+              contextId?: string
+              description?: string
+              mcpServers?: string[]
+            }
           }>
           for (const ctx of ctxList) {
             const ctxName = ctx.metadata?.name
@@ -633,8 +899,8 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
                 ctxName,
                 {
                   spec: {
+                    ...ctx.spec,
                     contextId: ctx.spec?.contextId ?? ctxName,
-                    description: ctx.spec?.description,
                     mcpServers: servers.filter(s => s !== name),
                   } as Record<string, unknown>,
                 },

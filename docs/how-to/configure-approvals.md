@@ -104,7 +104,8 @@ stay approval-required by default regardless of what is set here. See
 | Control plane APIs | Automation and integration tests |
 
 Channel callbacks are signature-verified; unauthorized actors cannot mint
-approvals by replaying chat.
+approvals by replaying chat. Wiring a chat surface up:
+[Connect Telegram](connect-telegram.md), [Connect Slack](connect-slack.md).
 
 ## Verify
 

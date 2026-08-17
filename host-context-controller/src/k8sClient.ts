@@ -90,6 +90,25 @@ const PLURAL_LLMHOOKS = 'llmhooks'
 const EXTERNAL_EGRESS_RETRY_DELAYS_MS = [5000, 15000, 30000]
 const EXTERNAL_EGRESS_RESYNC_MAX_CONCURRENCY = 10
 const EXTERNAL_EGRESS_RESYNC_JITTER_MS = 5000
+
+/**
+ * External-egress resync delay (ms), H2 (issue #299). The configured interval is
+ * the backstop; a finite observed DNS TTL advances the delay to <= TTL/2 so a
+ * rotating low-TTL host is sampled every rotation. The floor is the hard lower
+ * bound to avoid a hot-loop. Pure and unit-testable.
+ */
+export function externalEgressResyncDelayMs(
+  intervalSec: number,
+  floorSec: number,
+  minObservedTtlMs = Infinity
+): number {
+  const floorMs = floorSec * 1000
+  const configuredMs = intervalSec * 1000
+  const ttlAwareMs = Number.isFinite(minObservedTtlMs)
+    ? Math.min(configuredMs, minObservedTtlMs / 2)
+    : configuredMs
+  return Math.max(ttlAwareMs, floorMs)
+}
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
 const COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
 const HOST_CACHE_RECOVERY_RETRY_MS = 5000
@@ -661,7 +680,7 @@ export class McpServerWatcher implements McpServerProvider {
   // rotation eventually catches up even after a missed MODIFIED event.
   // Disabled when interval <= 0 (tests).
   private resyncTimer: ReturnType<typeof setInterval> | null = null
-  private externalEgressResyncTimer: ReturnType<typeof setInterval> | null = null
+  private externalEgressResyncTimer: ReturnType<typeof setTimeout> | null = null
   // Periodic SharedFileSystem resync (#592): the SFS watch fires only on SFS CRD
   // changes, not on PVC binding / wfc pod readiness, so a SharedFileSystem that
   // reported Initializing/Degraded needs a periodic re-reconcile to converge to a
@@ -1943,11 +1962,33 @@ export class McpServerWatcher implements McpServerProvider {
 
     const externalEgressResyncSec = config.externalEgressResyncIntervalSec
     if (externalEgressResyncSec > 0) {
-      this.externalEgressResyncTimer = setInterval(() => {
-        void this.runExternalEgressResync()
-      }, externalEgressResyncSec * 1000)
+      // Self-rescheduling (not a fixed setInterval) so the delay can advance to
+      // <= observed TTL/2 (H2, issue #299) and rescheduling AFTER each pass
+      // completes guarantees no overlapping resyncs.
+      const scheduleNext = (): void => {
+        if (this.stopped) return
+        const delayMs = externalEgressResyncDelayMs(
+          externalEgressResyncSec,
+          config.externalEgressRefreshFloorSec,
+          this.netPolReconciler.externalEgressRefreshMinTtlMs
+        )
+        this.externalEgressResyncTimer = setTimeout(() => {
+          void this.runExternalEgressResync().finally(() => scheduleNext())
+        }, delayMs)
+        this.externalEgressResyncTimer.unref?.()
+      }
+      // Idempotency guard (audit F5): never arm a second self-rescheduling chain
+      // if one is already live (start() runs once today, but a future restart
+      // path must not double the cadence).
+      if (!this.externalEgressResyncTimer) scheduleNext()
       console.log(
-        `[K8s] External egress periodic DNS resync enabled (every ${externalEgressResyncSec}s)`
+        `[K8s] External egress periodic DNS resync enabled (every ${externalEgressResyncSec}s, advancing to <= TTL/2)`
+      )
+    } else {
+      console.warn(
+        '[K8s] External egress periodic DNS resync DISABLED (HCC_EXTERNAL_EGRESS_RESYNC_SEC=0); ' +
+          'exact-host FQDN egress will NOT converge on DNS rotation between McpServer events — ' +
+          'accumulated IPs can go stale and block workloads (issue #299). Enable it unless you have a specific reason.'
       )
     }
   }
@@ -2951,7 +2992,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.gfsResyncTimer = null
     }
     if (this.externalEgressResyncTimer) {
-      clearInterval(this.externalEgressResyncTimer)
+      clearTimeout(this.externalEgressResyncTimer)
       this.externalEgressResyncTimer = null
     }
     for (const timer of this.externalEgressRetryTimers.values()) {

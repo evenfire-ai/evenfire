@@ -32,6 +32,9 @@ data:
   CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL: 'http://127.0.0.1:8094'
   CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: 'http://127.0.0.1:3001'
   CONTROL_API_DESKTOP_APP_NAME: 'Evenfire'
+  # Self-hosted-only GFS operator parity. Managed/base deployments remain
+  # fail-closed because this narrow elevation flag is absent there.
+  CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED: 'true'
   CONTROL_API_CONTROL_UI_BASE_URL: 'http://127.0.0.1:3000'
   CONTROL_API_CONTROL_UI_APP_NAME: 'Evenfire'
   CONTROL_API_POLICY_AUTH_AUDIENCE: 'control-api'
@@ -53,6 +56,20 @@ data:
   WORKFLOW_APPROVAL_DEFAULT_TTL_SEC: '86400'
   WORKFLOW_APPROVAL_MAX_TTL_SEC: '172800'
   WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS: '60000'
+  # Plugin Workload SDK platform rate limits (issue #348). This file is a
+  # strategic-merge PATCH over the base ConfigMap (registered under patches:
+  # in the minikube kustomization). A key omitted here inherits the BASE value
+  # from deploy/base/control-plane/configmaps.yaml (the deploy-mirror test
+  # pins base to the code defaults). All four keys are set explicitly so
+  # minikube's effective values (150/120/600/600) are visible here. Per-run
+  # SDK quotas are deprecated and ignored; limits are enforced over a
+  # trailing 60s window (no fixed reset); once traffic slows below the limit
+  # the window drains within ~60s — stepless recipes are never permanently
+  # trapped.
+  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "150"
+  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "120"
+  CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: "600"
   # OSS default: point at the shared registry so a self-hoster browses the
   # public catalog out of the box and can run the connect flow (register →
   # approve → claim) against it. self-hosted is the only mode that fits an OSS

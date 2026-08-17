@@ -343,7 +343,7 @@ function RegistryRecipeInstallPreview({
 
               <div className="cu-card">
                 <div className="cu-card__body">
-                  <div className="cu-table-actions" style={{ justifyContent: 'flex-start' }}>
+                  <div className="cu-table-actions cu-registry-install-entry-heading">
                     <strong>
                       {entry.name} v{entry.version}
                     </strong>
@@ -355,7 +355,7 @@ function RegistryRecipeInstallPreview({
                       </span>
                     ) : null}
                   </div>
-                  <p className="cu-muted" style={{ margin: '6px 0 0' }}>
+                  <p className="cu-muted cu-registry-install-entry-description">
                     {entry.description}
                   </p>
                 </div>
@@ -421,7 +421,7 @@ function RegistryRecipeInstallPreview({
             {validationErrors.length > 0 ? (
               <div className="cu-banner cu-banner--error" role="alert">
                 This Marketplace recipe cannot be installed until its manifest validates.
-                <ul style={{ margin: '6px 0 0 18px' }}>
+                <ul className="cu-registry-install-validation-list">
                   {validationErrors.slice(0, 5).map(issue => (
                     <li key={`${issue.path}-${issue.message}`}>
                       {issue.path}: {issue.message}
@@ -498,11 +498,11 @@ function RegistryRecipeInstallPreview({
                     }
                   >
                     <strong>{finding.label}</strong>: {finding.message}
-                    <div style={{ marginTop: 4 }}>
+                    <div className="cu-registry-install-egress-detail">
                       Bindings: {finding.bindingCount}. Mode: {finding.mode}.
                     </div>
                     {finding.targets && finding.targets.length > 0 ? (
-                      <div style={{ marginTop: 4 }}>
+                      <div className="cu-registry-install-egress-detail">
                         Hosts: {finding.targets.join(', ')}
                         {finding.ports && finding.ports.length > 0
                           ? ` · Ports: ${finding.ports.join(', ')}`
@@ -669,7 +669,8 @@ function RegistryInstallPageContent() {
               <RegistryInstallForm
                 entry={entry}
                 onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
-                onInstalled={() => router.push(CONTROL_ROUTES.marketplace.root)}
+                onInstalled={() => undefined}
+                onViewConnectors={() => router.push(CONTROL_ROUTES.connectors.root)}
               />
             ) : null}
           </CreateFlowPanel>

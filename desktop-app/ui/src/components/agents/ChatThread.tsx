@@ -26,7 +26,11 @@ import {
   IconWorkflows,
 } from '@components/SidebarNav/icons'
 import { WorkflowRunArtifactActions } from '@components/WorkflowRunArtifactActions'
-import { AGENT_ERROR_CODE_LABELS, SESSION_PREVIEW_LIMIT } from '@constants/agents'
+import {
+  AGENT_ERROR_CODE_LABELS,
+  CHAT_NEAR_BOTTOM_THRESHOLD_PX,
+  SESSION_PREVIEW_LIMIT,
+} from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
 import type { ChatMessageAttachment } from '../../../../src/types'
 import {
@@ -49,8 +53,8 @@ import { NudgeArea } from './NudgeArea'
 
 type ChatThreadProps = {
   showAgentLabel?: boolean
+  onScrollPositionChange?: (isScrolledAwayFromBottom: boolean) => void
 }
-
 type RenderableChatMessage = AgentChatMessage & {
   messageKey: string
 }
@@ -211,7 +215,7 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
   )
 }
 
-export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
+export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
   const { decideApproval } = useNotificationsContext()
   const {
@@ -252,6 +256,7 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
   } | null>(null)
   const dedicatedSessionsRef = useRef<HTMLDivElement | null>(null)
   const sessionRenameInputRef = useRef<HTMLInputElement | null>(null)
+  const chatThreadRef = useRef<HTMLDivElement | null>(null)
   const sessionRenameClosedRef = useRef(false)
   const chatListRef = useRef(chatList)
   const copyResetTimeoutRef = useRef<number | null>(null)
@@ -300,6 +305,24 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
   useEffect(() => {
     chatListRef.current = chatList
   }, [chatList])
+
+  useEffect(() => {
+    const chatThread = chatThreadRef.current
+    if (!chatThread || !activeChatId) {
+      onScrollPositionChange?.(false)
+      return
+    }
+
+    const updateScrollPosition = () => {
+      const distanceFromBottom =
+        chatThread.scrollHeight - chatThread.scrollTop - chatThread.clientHeight
+      onScrollPositionChange?.(distanceFromBottom > CHAT_NEAR_BOTTOM_THRESHOLD_PX)
+    }
+
+    updateScrollPosition()
+    chatThread.addEventListener('scroll', updateScrollPosition, { passive: true })
+    return () => chatThread.removeEventListener('scroll', updateScrollPosition)
+  }, [activeChatId, chatMessagesLoading, groupedWithKeys, onScrollPositionChange])
 
   useEffect(() => {
     if (renamingSessionId && sessionRenameInputRef.current) {
@@ -514,6 +537,7 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
 
   return (
     <div
+      ref={chatThreadRef}
       data-testid="message-list"
       className={`chat-thread ${isDedicatedAgentView ? 'chat-thread-dedicated' : ''}`}
     >

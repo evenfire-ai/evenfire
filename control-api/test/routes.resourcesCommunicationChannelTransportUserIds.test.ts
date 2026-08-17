@@ -58,6 +58,12 @@ describe('routes/resources CommunicationChannel Telegram transport userIds', () 
       { metadata: { name: 'agent-a-telegram' }, spec: { hostRef: 'agent-a' } },
       'channels'
     )
+    // The PUT turns telegram on (the stored CC has no provider yet), which since
+    // #312 requires the provider's key to exist. Seeding the conventional Secret
+    // keeps this test about userIds, not credentials.
+    gateway.seedSecret('cc-agent-a-telegram-credentials', 'channels', {
+      data: { 'telegram-bot-token': 'dGc=' },
+    })
     const updateSpy = vi.spyOn(gateway, 'updateResource')
 
     const res = await request(makeApp(gateway))

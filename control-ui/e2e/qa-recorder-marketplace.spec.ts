@@ -34,16 +34,20 @@ test.describe('optional QA recorder: Control UI marketplace and plugins journey'
     // Shell proof: the TablePanelHeader subtitle renders regardless of catalog
     // size, filters, or empty state.
     await expect(
-      page.getByText('Discover and install connectors and plugins from the Marketplace.')
+      page.getByText('Discover and install connectors from the Marketplace.')
     ).toBeVisible({ timeout: 20_000 })
 
-    // Marketplace now presents a connector-only catalog. Scope to the named
-    // tablist so the locator is unambiguous and assert the retired tab is gone.
-    const entryTabs = page.getByRole('tablist', { name: 'Marketplace entry types' })
-    await expect(entryTabs.getByRole('tab', { name: 'Connectors', exact: true })).toBeVisible({
-      timeout: 20_000,
-    })
-    await expect(entryTabs.getByRole('tab', { name: 'Plugins', exact: true })).toHaveCount(0)
+    // Marketplace uses only its top-level Connectors tab; the nested entry-type
+    // tabs and their Plugins option stay hidden.
+    const marketplaceTabs = page.getByRole('tablist', { name: 'Marketplace sections' })
+    await expect(marketplaceTabs.getByRole('tab', { name: 'Connectors', exact: true })).toBeVisible(
+      {
+        timeout: 20_000,
+      }
+    )
+    await expect(page.getByRole('tab', { name: 'Connectors', exact: true })).toHaveCount(1)
+    await expect(page.getByRole('tab', { name: 'Plugins', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('tablist', { name: 'Marketplace entry types' })).toHaveCount(0)
 
     await screenshotAndLog(page, testInfo, 'control-ui-marketplace')
   })

@@ -69,7 +69,7 @@ function telegramMessage(overrides: Partial<Message> = {}): Message {
 describe('ChannelReader provider event idempotency', () => {
   it('does not forward a provider message when current access is denied', async () => {
     const rpc = rpcClient()
-    rpc.authorizeProviderMessage = vi.fn(async () => false)
+    rpc.authorizeProviderMessage = vi.fn(async () => ({ authorized: false }))
     const reader = new ChannelReader({
       rpcClient: rpc,
       notificationDeliveryClient: null,
@@ -84,7 +84,10 @@ describe('ChannelReader provider event idempotency', () => {
 
   it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
     const rpc = rpcClient()
-    rpc.authorizeProviderMessage = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    rpc.authorizeProviderMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ authorized: false })
+      .mockResolvedValueOnce({ authorized: true })
     const reader = new ChannelReader({
       rpcClient: rpc,
       notificationDeliveryClient: null,

@@ -4,6 +4,7 @@ import React, { useMemo, useState } from 'react'
 import type { LlmModelPrice, UnpricedModel } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import type { LlmPriceTableProps } from './LlmPriceTable.types'
+import { LlmProviderIcon } from './LlmProviderIcon'
 import { MissingPriceWarning } from './MissingPriceWarning'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconPrice } from './Sidebar/icons'
@@ -164,11 +165,17 @@ export function LlmPriceTable({
                 const isUnpriced = unpricedItems.some(
                   item =>
                     item.model === price.model &&
-                    (item.provider === null || item.provider === price.provider)
+                    (item.provider === null || price.provider === item.provider)
                 )
+                const providerLabel = getProviderDisplayLabel(price.provider)
                 return (
                   <tr key={price.id} className="cu-table__row">
-                    <td>{getProviderDisplayLabel(price.provider)}</td>
+                    <td>
+                      <span className="cu-px-provider">
+                        <LlmProviderIcon provider={price.provider} label={providerLabel} />
+                        {providerLabel}
+                      </span>
+                    </td>
                     <td className="cu-px-model">
                       <span className="cu-px-model-content">
                         {price.model}
@@ -233,7 +240,17 @@ export function LlmPriceTable({
                     className="cu-table__row cu-px-missing-row"
                   >
                     <td>
-                      {item.provider ? getProviderDisplayLabel(item.provider) : 'Any provider'}
+                      {item.provider ? (
+                        <span className="cu-px-provider">
+                          <LlmProviderIcon
+                            provider={item.provider}
+                            label={getProviderDisplayLabel(item.provider)}
+                          />
+                          {getProviderDisplayLabel(item.provider)}
+                        </span>
+                      ) : (
+                        'Any provider'
+                      )}
                     </td>
                     <td className="cu-px-model">
                       <span className="cu-px-model-content">

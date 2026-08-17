@@ -47,6 +47,7 @@ import { FsSpilloverResolver } from './core/spillover/fsResolver'
 import { isInternalGeneratedArtifactAttachment } from './core/tools/generatedArtifactAttachments'
 import { NativeToolRegistry } from './core/tools/nativeToolRegistry'
 import { WorkflowResultTool } from './core/tools/workflow'
+import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js'
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
@@ -256,11 +257,8 @@ const pendingCronResults = new ResultStore<PendingCronResult>(30 * 60 * 1000, en
  */
 const cronResultsInFlight = new Set<string>()
 
-function resolveHostRef(task?: Task): string {
-  return (
-    String(task?.sourceMessage?.hostRef || currentHost?.spec.host || config.hostName).trim() ||
-    'unknown'
-  )
+export function resolveHostRef(task?: Task, host: HostCRD | null = currentHost): string {
+  return String(task?.sourceMessage?.hostRef || host?.name || config.hostName).trim() || 'unknown'
 }
 
 function publishActivity(input: {
@@ -1832,9 +1830,40 @@ async function handleProviderWorkflowApprovalDecision(
   return submitProviderWorkflowApprovalDecision(decision, runtimeAuth)
 }
 
-async function handleProviderMessageAuthorization(
+/**
+ * Each code is bound to the ONE status control-api emits it with. A pair that
+ * does not match exactly (403 medium_account_not_found, 404
+ * communication_channel_access_denied) is 'error', so a code reused later under a
+ * different status with a different meaning cannot silently widen this whitelist.
+ */
+const UNRESOLVED_BROKER_CODE_STATUS = new Map<string, number>([
+  ['medium_account_not_found', 404],
+  ['communication_channel_access_denied', 403],
+])
+
+/**
+ * An unlinked or access-denied identity reaches us as a THROWN 404/403 from the
+ * broker, not as a null context. Only these map to 'unresolved'; everything else
+ * (5xx, timeouts, network failures, unrecognized codes) is 'error', which keeps
+ * channel-reader silent so a control-api outage never tells linked users they are
+ * unlinked.
+ */
+export function classifyAuthorizationFailure(error: unknown): 'unresolved' | 'error' {
+  if (error instanceof WorkflowBrokerRequestError && error.code) {
+    const expectedStatus = UNRESOLVED_BROKER_CODE_STATUS.get(error.code)
+    // `expectedStatus !== undefined` first: an unrecognized code lookup and a
+    // missing status would otherwise compare undefined === undefined and classify
+    // 'unresolved'.
+    if (expectedStatus !== undefined && expectedStatus === error.status) {
+      return 'unresolved'
+    }
+  }
+  return 'error'
+}
+
+export async function handleProviderMessageAuthorization(
   input: ProviderMessageAuthorization
-): Promise<{ authorized: boolean }> {
+): Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }> {
   const identity = input.providerIdentity
   try {
     const context = await resolveProviderWorkflowCallerContext(
@@ -1850,14 +1879,22 @@ async function handleProviderMessageAuthorization(
       },
       key => process.env[key]
     )
-    return { authorized: Boolean(context?.targetUserId) }
+    if (context?.targetUserId) {
+      return { authorized: true }
+    }
+    // A null context is unreachable for validated Slack traffic: channel-reader's
+    // handoff validation already rejects malformed provider identities before this
+    // runs. Treat it as 'error' (fail closed, stay silent) rather than invent a
+    // reason we cannot substantiate.
+    return { authorized: false, reason: 'error' }
   } catch (error) {
+    const reason = classifyAuthorizationFailure(error)
     console.warn(
-      `[Main] Provider message authorization failed closed: ${
+      `[Main] Provider message authorization failed closed (${reason}): ${
         error instanceof Error ? error.message : String(error)
       }`
     )
-    return { authorized: false }
+    return { authorized: false, reason }
   }
 }
 

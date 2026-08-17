@@ -11,6 +11,7 @@ import {
 } from '../PublisherView/dockerCredential'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
+import { TablePanelHeader } from '../TablePanelHeader'
 
 const COLUMNS: TableHeaderColumn[] = [
   { key: 'image', label: 'Image' },
@@ -64,70 +65,78 @@ export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
       : []
 
   return (
-    <div>
-      <p className="cu-field__hint">
-        Your connectors and plugins push container images to{' '}
-        <code>
-          {DEFAULT_REGISTRY_HOST}/{namespace}/
-        </code>
-        . Authenticate with a push credential from the{' '}
-        <a className="cu-link" href={CONTROL_ROUTES.marketplace.orgCredentials}>
-          API Keys
-        </a>{' '}
-        tab; each image&apos;s full coordinate is below.
-      </p>
+    <section>
+      <div className="cu-card cu-card--viewport-fill">
+        <TablePanelHeader
+          title="Images"
+          subtitle={
+            <>
+              Your connectors and plugins push container images to{' '}
+              <code>
+                {DEFAULT_REGISTRY_HOST}/{namespace}/
+              </code>
+              . Authenticate with a push credential from the{' '}
+              <a className="cu-link" href={CONTROL_ROUTES.marketplace.orgCredentials}>
+                API Keys
+              </a>{' '}
+              tab; each image&apos;s full coordinate is below.
+            </>
+          }
+        />
+        <div className="cu-card__body">
+          {view.kind === 'loading' ? <p>Loading your images…</p> : null}
+          {view.kind === 'error' ? (
+            <RetryBanner message="Could not load your images." onRetry={() => void load()} />
+          ) : null}
+          {view.kind === 'unavailable' ? (
+            <p className="cu-banner cu-banner--info">
+              Image listing isn’t available on this registry yet. Your pushed images still work —
+              the list will appear here once the registry exposes it.
+            </p>
+          ) : null}
 
-      {view.kind === 'loading' ? <p>Loading your images…</p> : null}
-      {view.kind === 'error' ? (
-        <RetryBanner message="Could not load your images." onRetry={() => void load()} />
-      ) : null}
-      {view.kind === 'unavailable' ? (
-        <p className="cu-banner cu-banner--info">
-          Image listing isn’t available on this registry yet. Your pushed images still work — the
-          list will appear here once the registry exposes it.
-        </p>
-      ) : null}
+          {view.kind === 'ready' && rows.length === 0 ? (
+            <p>
+              No images yet. Push a connector or plugin image under{' '}
+              <code>
+                {DEFAULT_REGISTRY_HOST}/{namespace}/
+              </code>{' '}
+              and it appears here.
+            </p>
+          ) : null}
 
-      {view.kind === 'ready' && rows.length === 0 ? (
-        <p>
-          No images yet. Push a connector or plugin image under{' '}
-          <code>
-            {DEFAULT_REGISTRY_HOST}/{namespace}/
-          </code>{' '}
-          and it appears here.
-        </p>
-      ) : null}
-
-      {view.kind === 'ready' && rows.length > 0 ? (
-        <>
-          <div className="cu-table-wrap">
-            <table className="cu-table">
-              <thead>
-                <TableHeaderRow columns={COLUMNS} />
-              </thead>
-              <tbody>
-                {rows.map(r => (
-                  <tr key={`${r.name}:${r.tag}`}>
-                    <td>
-                      <code>{r.name}</code>
-                    </td>
-                    <td>{r.tag}</td>
-                    <td>
-                      <code>
-                        {buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, r.name, r.tag)}
-                      </code>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="cu-muted-note">
-            A push can still be rejected if the credential lacks publish permission or the org has
-            reached its image quota — those surface at push time.
-          </p>
-        </>
-      ) : null}
-    </div>
+          {view.kind === 'ready' && rows.length > 0 ? (
+            <>
+              <div className="cu-table-wrap">
+                <table className="cu-table">
+                  <thead>
+                    <TableHeaderRow columns={COLUMNS} />
+                  </thead>
+                  <tbody>
+                    {rows.map(r => (
+                      <tr key={`${r.name}:${r.tag}`}>
+                        <td>
+                          <code>{r.name}</code>
+                        </td>
+                        <td>{r.tag}</td>
+                        <td>
+                          <code>
+                            {buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, r.name, r.tag)}
+                          </code>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="cu-muted-note cu-muted-note--spaced">
+                A push can still be rejected if the credential lacks publish permission or the org
+                has reached its image quota — those surface at push time.
+              </p>
+            </>
+          ) : null}
+        </div>
+      </div>
+    </section>
   )
 }

@@ -82,6 +82,18 @@ export interface OperatorConfig {
   runtimeTokenTtlSeconds: number
   runtimeTokenRefreshBeforeSeconds: number
   runtimeEgressDnsOverlapSeconds: number
+  // issue #299: external egress sliding-window accumulator (fqdnResolver +
+  // externalEgressAccumulator). `overlap` is the grace kept after the DNS TTL;
+  // `refreshInterval` is the periodic requeue backstop; `refreshFloor` clamps
+  // the TTL-aware advance so a TTL=0/1 cannot hot-loop; `maxEntries` is the
+  // per-policy alarm cap across ALL declared FQDNs of the recipe (evict, never
+  // reject) — HCC's identical knob is per-FQDN since HCC writes one policy per
+  // binding (R1-L2). Invariant enforced at startup: floor <= interval <=
+  // overlap/2 (the renewal-write window is only overlap/2 wide, R1-M6).
+  externalEgressOverlapSeconds: number
+  externalEgressRefreshIntervalSeconds: number
+  externalEgressRefreshFloorSeconds: number
+  externalEgressMaxEntries: number
   networkPolicyEnforcementMode: NetworkPolicyEnforcementMode
   networkPolicyEnforcementConfirmed: boolean
   workflowMaxSteps: number
@@ -111,6 +123,25 @@ export const DEFAULT_RUNTIME_TOKEN_REFRESH_BEFORE_SECONDS = 5 * 60
 export const DEFAULT_RUNTIME_EGRESS_DNS_OVERLAP_SECONDS = 5 * 60
 export const MIN_RUNTIME_EGRESS_DNS_OVERLAP_SECONDS = 30
 export const MAX_RUNTIME_EGRESS_DNS_OVERLAP_SECONDS = 60 * 60
+
+// issue #299: external egress accumulator knobs.
+export const DEFAULT_EXTERNAL_EGRESS_OVERLAP_SECONDS = 5 * 60
+export const MIN_EXTERNAL_EGRESS_OVERLAP_SECONDS = 30
+export const MAX_EXTERNAL_EGRESS_OVERLAP_SECONDS = 60 * 60
+export const DEFAULT_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = 60
+export const MIN_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = 1
+export const MAX_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = 60 * 60
+export const DEFAULT_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = 5
+export const MIN_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = 1
+export const MAX_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = 60 * 60
+export const DEFAULT_EXTERNAL_EGRESS_MAX_ENTRIES = 128
+export const MIN_EXTERNAL_EGRESS_MAX_ENTRIES = 8
+// Audit L2 + R1-M1: this is a coarse COUNT alarm cap (default 128). The real
+// bound on annotation size — STATE **and** TARGETS together under Kubernetes'
+// 256KB total-annotation limit — is enforced by the core's byte-aware eviction
+// (MAX_ANNOTATION_BYTES in network-policy-core), which trims long-FQDN sets well
+// before 1300. Kept equal to HCC's ceiling so the two controllers can't drift.
+export const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 1300
 
 function getEnvBool(key: string, defaultValue: boolean): boolean {
   const value = process.env[key]
@@ -278,6 +309,50 @@ export function loadConfig(): OperatorConfig {
     MAX_RUNTIME_EGRESS_DNS_OVERLAP_SECONDS
   )
 
+  // issue #299: external egress sliding-window accumulator knobs.
+  const externalEgressOverlapSeconds = getEnvBoundedIntRange(
+    'WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS',
+    DEFAULT_EXTERNAL_EGRESS_OVERLAP_SECONDS,
+    MIN_EXTERNAL_EGRESS_OVERLAP_SECONDS,
+    MAX_EXTERNAL_EGRESS_OVERLAP_SECONDS
+  )
+  const externalEgressRefreshIntervalSeconds = getEnvBoundedIntRange(
+    'WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS',
+    DEFAULT_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS,
+    MIN_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS,
+    MAX_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS
+  )
+  const externalEgressRefreshFloorSeconds = getEnvBoundedIntRange(
+    'WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS',
+    DEFAULT_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS,
+    MIN_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS,
+    MAX_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS
+  )
+  const externalEgressMaxEntries = getEnvBoundedIntRange(
+    'WRC_EXTERNAL_EGRESS_MAX_ENTRIES',
+    DEFAULT_EXTERNAL_EGRESS_MAX_ENTRIES,
+    MIN_EXTERNAL_EGRESS_MAX_ENTRIES,
+    MAX_EXTERNAL_EGRESS_MAX_ENTRIES
+  )
+  // Startup invariant (plan §5 + audit L2): floor <= interval <= overlap/2. The
+  // renewal-write window is only overlap/2 wide, so an interval above overlap/2
+  // lets the persisted window lapse before it is refreshed (reopening the drift
+  // window); a floor above the interval is incoherent. Fail loud rather than run
+  // with an unsafe window.
+  if (
+    !(
+      externalEgressRefreshFloorSeconds <= externalEgressRefreshIntervalSeconds &&
+      externalEgressRefreshIntervalSeconds * 2 <= externalEgressOverlapSeconds
+    )
+  ) {
+    throw new Error(
+      'Invalid external egress accumulator configuration: require floor <= interval <= overlap/2 ' +
+        `(got floor=${externalEgressRefreshFloorSeconds}s, interval=${externalEgressRefreshIntervalSeconds}s, ` +
+        `overlap=${externalEgressOverlapSeconds}s). Set WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS, ` +
+        'WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS, and WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS accordingly.'
+    )
+  }
+
   return {
     devMode: getEnvBool('CLERUM_DEV_MODE', false),
     port: getEnvInt('CLERUM_OPERATOR_PORT', 8082),
@@ -311,6 +386,10 @@ export function loadConfig(): OperatorConfig {
     runtimeTokenTtlSeconds,
     runtimeTokenRefreshBeforeSeconds,
     runtimeEgressDnsOverlapSeconds,
+    externalEgressOverlapSeconds,
+    externalEgressRefreshIntervalSeconds,
+    externalEgressRefreshFloorSeconds,
+    externalEgressMaxEntries,
     networkPolicyEnforcementMode: getNetworkPolicyEnforcementMode(),
     networkPolicyEnforcementConfirmed: getEnvBool(
       'CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED',

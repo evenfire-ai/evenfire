@@ -1,0 +1,20 @@
+{
+  "name": "@clerum/network-policy-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared sliding-window egress IP accumulation for FQDN NetworkPolicies (issue #299). Pure, no Kubernetes or DNS dependency; injectable clock.",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "node --check index.cjs",
+    "test": "node --test index.test.cjs"
+  },
+  "license": "MIT"
+}

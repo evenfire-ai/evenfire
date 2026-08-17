@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   WorkflowRecipeWatcher,
   controllerErrorTelemetryProjection,
+  externalEgressRefreshIntervalMs,
+  recipeHasExternalExactHostEgress,
   recipeReferencesNamedSecrets,
   reconcileOutcomeTelemetryProjection,
   rotateBrokerTokensOnce,
@@ -1710,6 +1712,411 @@ describe('transient-result requeue (scheduleTransientRetry)', () => {
       expect(internal.transientRetries.get('mixed')?.attempts).toBe(0)
       vi.advanceTimersByTime(5_000)
       expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// issue #299 §3.2/§5 — the periodic external-egress requeue timer. GitHub rotates
+// its api.github.com A record (~15s TTL over 140.82.112.0/20) WITHOUT bumping the
+// WorkflowRecipe CRD generation, so a generation-only reconcile trigger never
+// re-runs the accumulator and the sliding-window set never converges on a fresh
+// IP. This timer re-enqueues cached recipes that declare an exact-host EXTERNAL
+// egress on a fixed cadence so the accumulator folds each new snapshot.
+describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
+  function makeUiEgressRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [{ id: 'ui', type: 'deployment', image: 'clerum/ui:test' }],
+        ui: {
+          workloadRef: 'ui',
+          port: 8080,
+          egress: { external: [{ fqdn: 'api.github.com', port: 443 }] },
+        },
+      },
+    })
+  }
+
+  function makeWorkloadEgressRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [
+          {
+            id: 'api',
+            type: 'deployment',
+            image: 'clerum/api:test',
+            egressBindings: [{ dns: 'api.github.com', port: 443 }],
+          },
+        ],
+      },
+    })
+  }
+
+  function makeClusterLocalOnlyRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [
+          { id: 'db', type: 'deployment', image: 'clerum/db:test' },
+          {
+            id: 'api',
+            type: 'deployment',
+            image: 'clerum/api:test',
+            egressBindings: [{ dns: 'db.sandbox-recipes.svc.cluster.local', port: 5432 }],
+          },
+        ],
+      },
+    })
+  }
+
+  function makeTransportOnlyRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [
+          {
+            id: 'mcp',
+            type: 'deployment',
+            image: 'clerum/mcp:test',
+            transport: { type: 'streamableHttp' },
+            egressBindings: [{ egressClass: 'public-web' }],
+          },
+        ],
+      },
+    })
+  }
+
+  function makePlainRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
+      },
+    })
+  }
+
+  describe('recipeHasExternalExactHostEgress', () => {
+    it('is true for a UI external egress FQDN', () => {
+      expect(recipeHasExternalExactHostEgress(makeUiEgressRecipe('ui'))).toBe(true)
+    })
+
+    it('is true for a non-transport workload egressBinding with an external FQDN', () => {
+      expect(recipeHasExternalExactHostEgress(makeWorkloadEgressRecipe('wl'))).toBe(true)
+    })
+
+    it('is false when the only binding is a cluster-local sibling (not external)', () => {
+      expect(recipeHasExternalExactHostEgress(makeClusterLocalOnlyRecipe('cl'))).toBe(false)
+    })
+
+    it('is false for a transport-only (HCC-delegated) egress workload', () => {
+      // Transport egress is delegated to HCC/McpServer, NOT folded by the WRC
+      // accumulator, so the timer must not select it.
+      expect(recipeHasExternalExactHostEgress(makeTransportOnlyRecipe('tr'))).toBe(false)
+    })
+
+    it('is false for a recipe with no egress at all', () => {
+      expect(recipeHasExternalExactHostEgress(makePlainRecipe('plain'))).toBe(false)
+    })
+
+    it('is false while the recipe is being deleted', () => {
+      const recipe = makeUiEgressRecipe('deleting')
+      recipe.metadata.deletionTimestamp = '2026-08-08T00:00:00Z'
+      expect(recipeHasExternalExactHostEgress(recipe)).toBe(false)
+    })
+
+    it('excludes the UI workload id from the workload-binding scan (it is covered by ui.egress)', () => {
+      // A recipe whose ONLY external binding lives on the ui workload itself must
+      // still resolve true via ui.egress.external, never via the workload scan.
+      const recipe = makeUiEgressRecipe('ui-wl')
+      recipe.spec.workloads = [
+        {
+          id: 'ui',
+          type: 'deployment',
+          image: 'clerum/ui:test',
+          egressBindings: [{ dns: 'db.sandbox-recipes.svc.cluster.local', port: 5432 }],
+        },
+      ]
+      // ui.egress.external drives the true result; the ui workload's own binding
+      // (cluster-local here) is skipped.
+      expect(recipeHasExternalExactHostEgress(recipe)).toBe(true)
+    })
+  })
+
+  describe('externalEgressRefreshIntervalMs', () => {
+    it('returns the configured interval (seconds → ms) when above the floor', () => {
+      expect(
+        externalEgressRefreshIntervalMs({
+          externalEgressRefreshIntervalSeconds: 60,
+          externalEgressRefreshFloorSeconds: 5,
+        })
+      ).toBe(60_000)
+    })
+
+    it('clamps up to the floor when the interval is below it', () => {
+      expect(
+        externalEgressRefreshIntervalMs({
+          externalEgressRefreshIntervalSeconds: 3,
+          externalEgressRefreshFloorSeconds: 5,
+        })
+      ).toBe(5_000)
+    })
+
+    // H2 (issue #299): advance the refresh to <= observed TTL / 2 so a rotating
+    // low-TTL host (GitHub api, TTL ~15s) is sampled every rotation, not every 60s.
+    it('advances to TTL/2 when the observed TTL makes it faster than the configured interval', () => {
+      expect(
+        externalEgressRefreshIntervalMs(
+          { externalEgressRefreshIntervalSeconds: 60, externalEgressRefreshFloorSeconds: 5 },
+          15_000 // observed min TTL 15s → 7.5s refresh
+        )
+      ).toBe(7_500)
+    })
+
+    it('never drops below the floor even for a tiny TTL', () => {
+      expect(
+        externalEgressRefreshIntervalMs(
+          { externalEgressRefreshIntervalSeconds: 60, externalEgressRefreshFloorSeconds: 5 },
+          6_000 // TTL/2 = 3s < floor 5s → floor
+        )
+      ).toBe(5_000)
+    })
+
+    it('keeps the configured interval when the observed TTL is large', () => {
+      expect(
+        externalEgressRefreshIntervalMs(
+          { externalEgressRefreshIntervalSeconds: 60, externalEgressRefreshFloorSeconds: 5 },
+          600_000 // TTL/2 = 300s > interval 60s → interval wins
+        )
+      ).toBe(60_000)
+    })
+
+    it('ignores a non-finite/absent observed TTL (falls back to the configured interval)', () => {
+      expect(
+        externalEgressRefreshIntervalMs(
+          { externalEgressRefreshIntervalSeconds: 60, externalEgressRefreshFloorSeconds: 5 },
+          Infinity
+        )
+      ).toBe(60_000)
+    })
+  })
+
+  type InternalWatcher = {
+    recipes: Map<string, WorkflowRecipeCRD>
+    eventQueue: { enqueue: (key: string, task: () => Promise<void>) => Promise<void> }
+    handleRecipeEvent: (
+      type: string,
+      recipe: WorkflowRecipeCRD,
+      options?: { forceReconcile?: boolean }
+    ) => Promise<void>
+    stopped: boolean
+    config: {
+      externalEgressRefreshIntervalSeconds: number
+      externalEgressRefreshFloorSeconds: number
+    }
+    externalEgressRefreshTimer: ReturnType<typeof setInterval> | null
+    externalEgressRefreshRunning: boolean
+    // H2 (issue #299): the refresh loop reads the reconciler's observed min TTL.
+    reconciler: { externalEgressRefreshMinTtlMs: number }
+    refreshExternalEgressForActiveRecipes: () => Promise<void>
+    startExternalEgressRefreshLoop: () => void
+    stop: () => Promise<void>
+  }
+
+  function makeInternal(recipes: WorkflowRecipeCRD[]) {
+    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map(recipes.map(r => [r.metadata.name, r]))
+    internal.eventQueue = { enqueue }
+    internal.handleRecipeEvent = handleRecipeEvent
+    internal.stopped = false
+    internal.config = {
+      externalEgressRefreshIntervalSeconds: 60,
+      externalEgressRefreshFloorSeconds: 5,
+    }
+    internal.externalEgressRefreshTimer = null
+    internal.externalEgressRefreshRunning = false
+    internal.reconciler = { externalEgressRefreshMinTtlMs: Infinity }
+    return { internal, enqueue, handleRecipeEvent }
+  }
+
+  it('refreshExternalEgressForActiveRecipes re-enqueues ONLY recipes with external exact-host egress', async () => {
+    const { internal, enqueue, handleRecipeEvent } = makeInternal([
+      makeUiEgressRecipe('with-ui-egress'),
+      makeWorkloadEgressRecipe('with-wl-egress'),
+      makePlainRecipe('plain'),
+      makeClusterLocalOnlyRecipe('cluster-local'),
+      makeTransportOnlyRecipe('transport'),
+    ])
+
+    await internal.refreshExternalEgressForActiveRecipes()
+
+    expect(enqueue).toHaveBeenCalledWith('with-ui-egress', expect.any(Function))
+    expect(enqueue).toHaveBeenCalledWith('with-wl-egress', expect.any(Function))
+    expect(enqueue).not.toHaveBeenCalledWith('plain', expect.any(Function))
+    expect(enqueue).not.toHaveBeenCalledWith('cluster-local', expect.any(Function))
+    expect(enqueue).not.toHaveBeenCalledWith('transport', expect.any(Function))
+    expect(enqueue).toHaveBeenCalledTimes(2)
+
+    // A full reconcile is forced (generation is unchanged, so a plain MODIFIED
+    // would short-circuit before the accumulator runs).
+    for (const name of ['with-ui-egress', 'with-wl-egress']) {
+      expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', internal.recipes.get(name), {
+        forceReconcile: true,
+      })
+    }
+  })
+
+  it('refreshExternalEgressForActiveRecipes is a no-op while stopped', async () => {
+    const { internal, enqueue } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+    internal.stopped = true
+    await internal.refreshExternalEgressForActiveRecipes()
+    expect(enqueue).not.toHaveBeenCalled()
+  })
+
+  it('the timer re-enqueues external-egress recipes on each tick at the clamped interval', async () => {
+    vi.useFakeTimers()
+    try {
+      const { internal, handleRecipeEvent } = makeInternal([
+        makeUiEgressRecipe('with-ui-egress'),
+        makePlainRecipe('plain'),
+      ])
+
+      internal.startExternalEgressRefreshLoop()
+      expect(internal.externalEgressRefreshTimer).not.toBeNull()
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
+
+      // 1ms before the 60s interval: nothing has fired.
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(handleRecipeEvent).toHaveBeenCalledWith(
+        'MODIFIED',
+        internal.recipes.get('with-ui-egress'),
+        { forceReconcile: true }
+      )
+
+      // Second tick fires again — the requeue is periodic, not one-shot.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('advances the refresh to TTL/2 when the reconciler has observed a low TTL (H2 wiring)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { internal, handleRecipeEvent } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      // The reconciler observed GitHub's ~15s TTL → the loop must fire at 7.5s,
+      // not the 60s configured interval.
+      internal.reconciler = { externalEgressRefreshMinTtlMs: 15_000 }
+
+      internal.startExternalEgressRefreshLoop()
+      await vi.advanceTimersByTimeAsync(7_499)
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('startExternalEgressRefreshLoop is idempotent (does not create a second timer)', () => {
+    vi.useFakeTimers()
+    try {
+      const { internal } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      internal.startExternalEgressRefreshLoop()
+      const first = internal.externalEgressRefreshTimer
+      internal.startExternalEgressRefreshLoop()
+      expect(internal.externalEgressRefreshTimer).toBe(first)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not start a second refresh pass while one is still running (no concurrent duplicates)', async () => {
+    vi.useFakeTimers()
+    try {
+      // handleRecipeEvent returns a promise that stays pending until we release it,
+      // so the first pass is still in-flight when the second tick fires.
+      let release: (() => void) | undefined
+      const gate = new Promise<void>(resolve => {
+        release = resolve
+      })
+      const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+      const handleRecipeEvent = vi.fn().mockReturnValue(gate)
+      const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+      internal.recipes = new Map([['with-ui-egress', makeUiEgressRecipe('with-ui-egress')]])
+      internal.eventQueue = { enqueue }
+      internal.handleRecipeEvent = handleRecipeEvent
+      internal.stopped = false
+      internal.config = {
+        externalEgressRefreshIntervalSeconds: 60,
+        externalEgressRefreshFloorSeconds: 5,
+      }
+      internal.externalEgressRefreshTimer = null
+      internal.externalEgressRefreshRunning = false
+      internal.reconciler = { externalEgressRefreshMinTtlMs: Infinity }
+
+      internal.startExternalEgressRefreshLoop()
+      await vi.advanceTimersByTimeAsync(60_000) // first tick — pass starts, stays in-flight
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(internal.externalEgressRefreshRunning).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(60_000) // second tick — must be skipped
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+
+      release?.()
+      await gate
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stop() clears the refresh timer so no further ticks fire', async () => {
+    vi.useFakeTimers()
+    try {
+      const { internal, handleRecipeEvent } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      // Minimal shape for stop() — every other subsystem is absent in this fixture.
+      const stoppableInternal = internal as unknown as {
+        transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+        runtimeCredentialRefreshTimer: ReturnType<typeof setInterval> | null
+        workloadStatusRefreshTimer: ReturnType<typeof setInterval> | null
+        watchRequest: { abort: () => void } | null
+        secretWatchLoops: { stop: () => void }[]
+        brokerRotationTimer: ReturnType<typeof setInterval> | null
+        dbRunProcessor: { stop: () => Promise<void> } | null
+        traceReporter: null
+      }
+      stoppableInternal.transientRetries = new Map()
+      stoppableInternal.runtimeCredentialRefreshTimer = null
+      stoppableInternal.workloadStatusRefreshTimer = null
+      stoppableInternal.watchRequest = null
+      stoppableInternal.secretWatchLoops = []
+      stoppableInternal.brokerRotationTimer = null
+      stoppableInternal.dbRunProcessor = null
+      stoppableInternal.traceReporter = null
+
+      internal.startExternalEgressRefreshLoop()
+      expect(internal.externalEgressRefreshTimer).not.toBeNull()
+
+      await internal.stop()
+      expect(internal.externalEgressRefreshTimer).toBeNull()
+      expect(internal.stopped).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }
