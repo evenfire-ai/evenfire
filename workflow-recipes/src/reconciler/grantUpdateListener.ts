@@ -91,9 +91,14 @@ export function createGrantUpdateListener(opts: GrantUpdateListenerOptions): Gra
   // consumer has the same latent patterns this module hardens against —
   // (1) a LISTEN rejection AND an 'error' emission on the same drop can start two
   // reconnect loops, (2) stop() cannot cancel an attach already awaiting
-  // connect(), and (3) a LISTEN failure without an 'error' event leaks the
-  // checked-out client. Fixing dbRunProcessor is out of #375 scope; this listener
-  // intentionally improves on it and the guards below are the reference.
+  // connect(), (3) a LISTEN failure without an 'error' event leaks the
+  // checked-out client, and (4) a LATE error from a superseded generation drives
+  // a reconnect that orphans the live session (duplicate dispatch + monotonic
+  // pool leak under a sustained reconnect storm — the #205 blind-spot shape).
+  // Fixing dbRunProcessor is out of #375 scope; this listener intentionally
+  // improves on it and the guards below (esp. the identity gate on the 'error'
+  // handler + the non-overwrite guard before assigning `listenClient`) are the
+  // reference for the follow-up.
   let listenClient: PoolClient | null = null
   let stopped = true
   // H1: collapse concurrent reconnect triggers into ONE in-flight reconnect.
@@ -132,13 +137,27 @@ export function createGrantUpdateListener(opts: GrantUpdateListenerOptions): Gra
         }
       })
       attached.on('error', (err: Error) => {
-        log.warn('listen session error — will reconnect', { err: err.message })
         try {
           attached.release(err)
         } catch {
           /* idempotent */
         }
-        if (listenClient === attached) listenClient = null
+        // Finding 1 (#205-class): IDENTITY GATE. Only the CURRENT session's error
+        // may drive a reconnect. A LATE error from a superseded generation — its
+        // successor has already attached and become `listenClient` — must release
+        // ONLY itself and return. If it scheduled a reconnect it would spawn a
+        // second attach loop whose success overwrites the live session, orphaning
+        // it: still checked out from the shared pool with a live LISTEN handler →
+        // duplicate NOTIFY dispatch + one leaked connection per occurrence →
+        // monotonic pool exhaustion under a reconnect storm (GKE regime).
+        if (listenClient !== attached) {
+          log.debug('superseded listen session error — released self, no reconnect', {
+            err: err.message,
+          })
+          return
+        }
+        log.warn('listen session error — will reconnect', { err: err.message })
+        listenClient = null
         scheduleReconnect()
       })
       await attached.query(`LISTEN ${PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL}`)
@@ -151,6 +170,17 @@ export function createGrantUpdateListener(opts: GrantUpdateListenerOptions): Gra
           /* idempotent */
         }
         return
+      }
+      // Finding 1: never overwrite a live `listenClient` without releasing the
+      // prior one. Defense-in-depth alongside the identity gate above — a stray
+      // interleaving that reaches here with a different session still checked out
+      // must not leak it.
+      if (listenClient && listenClient !== attached) {
+        try {
+          listenClient.release()
+        } catch {
+          /* idempotent */
+        }
       }
       listenClient = attached
       log.info('LISTEN plugin_workload_sdk_grant_update attached')
