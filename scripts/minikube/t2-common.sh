@@ -500,6 +500,16 @@ t2_process_check() {
   while IFS= read -r command_line; do
     [ -z "$command_line" ] && continue
     [[ "$command_line" == *"$T2_PROFILE"* || "$command_line" == *"$T2_CONTEXT"* ]] || continue
+    # The T1 Real PostgreSQL lane and GFS provisioning open a short-lived,
+    # loopback-only control-postgres port-forward on a private random port using
+    # this profile's own context. It is inherently profile-owned and transient
+    # (never a cross-worktree conflict), but pf-all-stack.sh does not record its
+    # PID and it can outlive T1 by a teardown window (or an orphaned cleanup),
+    # which would fail the exact-head final preflight even though T1 passed.
+    # Every other (persistent, shareable) service forward is still enforced.
+    if [[ "$command_line" == *"port-forward"* && "$command_line" == *"svc/control-postgres"* ]]; then
+      continue
+    fi
     allowed=false
     for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid; do
       [ -f "$pid_file" ] || continue
