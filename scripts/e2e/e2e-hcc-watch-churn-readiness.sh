@@ -88,6 +88,8 @@ HCC_PATCHED=0
 HCC_LOG_BUFFER="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-churn-stream.XXXXXX")"
 HCC_LOG_STREAM_PID=""
 START_TIME=""
+# Verdict-evidence counters; assigned by recount_churn_evidence() before any read.
+cuts=0 gen_pattern=0 total_watch_cut_lines=0 stable=""
 # shellcheck disable=SC2034
 HCC_GATE_LOCK_ACQUIRED=0 HCC_GATE_LOCK_NAME="" HCC_GATE_LOCK_UID="" HCC_GATE_FINALIZATION_FAILURE=""
 
@@ -246,47 +248,90 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   fi
   sleep 3
 done
-cuts="$(hcc_recovery_logs | grep -Ec 'watch ended|authority changed|recovering authoritative inventory' || true)"
-gen_pattern="$(hcc_recovery_logs | grep -Ec 'authority changed before .* admission' || true)"
-{
-  echo "=== HCC deploy ==="
-  kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o wide
-  echo "=== last /ready: ${last_status}  cuts=${cuts}  gen-diverge=${gen_pattern}  first-ready=${first_ready:-never} ==="
-  hcc_recovery_logs | grep -E 'watch ended|authority changed|Recovered|inventory' | tail -60
-} >"$LOG_ARTIFACT" 2>&1
+# ── Churn accounting over the FULL raw stream ──
+# hcc_recovery_logs() pre-filters the buffer with the RECOVERY gate's patterns
+# (CommunicationChannel/Listing all Hosts/...). The McpServer, Context and Host
+# "watch ended" lines — and the "authority changed before ... admission"
+# divergence line — contain none of those tokens and were dropped before
+# counting. This gate counts on $HCC_LOG_BUFFER directly.
+count_buffer() { grep -Ec "$1" "$HCC_LOG_BUFFER" || true; }
+
+recount_churn_evidence() {
+  # One Context-watch line per proxy cut cycle: the Context watch generation is
+  # what pinned the pre-fix safety certificate, and a single proxy tick cuts
+  # ALL watches at once (a raw 'watch ended' line count would let ONE real cut
+  # satisfy CHURN_MIN_CUTS). cuts therefore counts churn CYCLES, not lines.
+  cuts="$(count_buffer '\[K8s\] Context watch ended; recovering authoritative inventory')"
+  total_watch_cut_lines="$(count_buffer 'watch ended')"
+  gen_pattern="$(count_buffer 'authority changed before .* admission')"
+}
+
+write_evidence_artifact() {
+  # Diagnostics ONLY — nothing here feeds the verdict (cuts/gen_pattern/
+  # first_ready/stable are computed before this runs), so every command is
+  # deliberately best-effort: under `set -euo pipefail`, an empty grep in this
+  # block aborted the whole gate BEFORE the verdict on the first live run.
+  {
+    echo "=== HCC deploy ==="
+    kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o wide || true
+    echo "=== last /ready: ${last_status}  cut-cycles=${cuts}  watch-cut-lines=${total_watch_cut_lines}  gen-diverge=${gen_pattern}  first-ready=${first_ready:-never} ==="
+    grep -E 'watch ended|authority changed|Recovered|inventory' "$HCC_LOG_BUFFER" | tail -60 || true
+  } >"$LOG_ARTIFACT" 2>&1 || true
+}
+
+# ── Stability window (fix mode only) — the churn keeps cutting while we hold ──
+if [ "$EXPECT_LIVELOCK" = 0 ] && [ -n "$first_ready" ]; then
+  stable=1
+  s_deadline=$(($(date +%s) + STABILITY_WINDOW_SEC))
+  while [ "$(date +%s)" -lt "$s_deadline" ]; do
+    pod="$(running_hcc_pod)" || { stable=0; break; }
+    [ -n "$pod" ] || { stable=0; break; }
+    [ "$(ready_status "$pod")" = 200 ] || { stable=0; break; }
+    sleep 3
+  done
+fi
+
+# Snapshot the buffer only AFTER the stability window: with first_ready≈6s the
+# readiness loop alone has seen ~1 cut; the window adds STABILITY_WINDOW_SEC of
+# further churn, which is what makes CHURN_MIN_CUTS satisfiable in fix mode.
+# In livelock mode the readiness loop already consumed READINESS_BUDGET_SEC.
+require_hcc_recovery_log_stream ||
+  warn "HCC log stream ended before the verdict; counting the frozen buffer (fail-closed: an undercount can only turn this gate RED)"
+stop_hcc_recovery_log_stream
+recount_churn_evidence
+write_evidence_artifact
 
 # ── Verdict ──
 if [ "$EXPECT_LIVELOCK" = 1 ]; then
-  [ "$cuts" -ge "$CHURN_MIN_CUTS" ] && ok "churn cut ${cuts} watch(es) (>= ${CHURN_MIN_CUTS})" ||
-    fail "churn cut only ${cuts} watch(es) — reproducer is VACUOUS"
-  [ "$gen_pattern" -ge 1 ] && ok "observed divergent-generation pattern ${gen_pattern}x" ||
+  [ "$cuts" -ge "$CHURN_MIN_CUTS" ] &&
+    ok "churn cut the Context watch ${cuts}x (>= ${CHURN_MIN_CUTS}; ${total_watch_cut_lines} watch-ended lines total)" ||
+    fail "churn cut the Context watch only ${cuts}x — reproducer is VACUOUS"
+  [ "$gen_pattern" -ge 1 ] && ok "observed divergent-generation admission pattern ${gen_pattern}x" ||
     fail "no divergent-generation pattern — bug mechanism NOT exercised"
-  [ -z "$first_ready" ] && ok "livelock reproduced: /ready stayed 503 for ${READINESS_BUDGET_SEC}s under churn" ||
-    fail "expected livelock but /ready reached 200 — reproducer does not exercise the bug"
+  if [ -z "$first_ready" ]; then
+    # Cross-check the exec probe against the kubelet's own view: a broken
+    # ready_status (wrong container/port) reports 503 forever and would fake
+    # the livelock. readyReplicas is omitted from status when it is 0.
+    ready_replicas="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    if [ -z "$ready_replicas" ] || [ "$ready_replicas" = 0 ]; then
+      ok "livelock reproduced: /ready stayed 503 for ${READINESS_BUDGET_SEC}s under churn (kubelet agrees: 0 ready replicas)"
+    else
+      fail "exec probe reported 503 but the Deployment shows ${ready_replicas} ready replica(s) — probe is broken, reproducer VACUOUS"
+    fi
+  else
+    fail "expected livelock but /ready reached 200 at ${first_ready}s — reproducer does not exercise the bug"
+  fi
 else
-  [ "$cuts" -ge "$CHURN_MIN_CUTS" ] && ok "fix validated UNDER churn (${cuts} cuts)" ||
-    fail "fix validated WITHOUT churn (${cuts} cuts) — result is worthless"
+  [ "$cuts" -ge "$CHURN_MIN_CUTS" ] &&
+    ok "churn was real: ${cuts} Context-watch cuts (${total_watch_cut_lines} watch-ended lines) across readiness+stability" ||
+    fail "fix validated WITHOUT churn (${cuts} Context-watch cuts) — result is worthless"
   if [ -n "$first_ready" ]; then
-    ok "fix converged to Ready under sustained Premature close (time-to-Ready=${first_ready}s, cuts=${cuts})"
-    stable=1
-    s_deadline=$(($(date +%s) + STABILITY_WINDOW_SEC))
-    while [ "$(date +%s)" -lt "$s_deadline" ]; do
-      pod="$(running_hcc_pod)" || {
-        stable=0
-        break
-      }
-      [ "$(ready_status "$pod")" = 200 ] || {
-        stable=0
-        break
-      }
-      sleep 3
-    done
+    ok "fix converged to Ready under sustained Premature close (time-to-Ready=${first_ready}s)"
     [ "$stable" = 1 ] && ok "readiness stable for ${STABILITY_WINDOW_SEC}s under continuous churn" ||
       fail "readiness oscillated 200->503 under churn — fix not stable"
   else
     fail "fix did NOT reach Ready under churn within ${READINESS_BUDGET_SEC}s — livelock regression (see ${LOG_ARTIFACT})"
   fi
 fi
-stop_hcc_recovery_log_stream
 log "Evidence artifact: ${LOG_ARTIFACT}"
 # cleanup() (EXIT trap) restores HCC, deletes the fleet, and runs print_results.
