@@ -113,6 +113,13 @@ const INVENTORY_CACHE_RECOVERY_RETRY_MS = 5000
 
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
 const HOST_CACHE_RECOVERY_RETRY_MS = 5000
+// Anti-busy-loop floor for IMMEDIATE watch-close recovery. The first re-LIST
+// after an isolated watch close runs immediately (sub-second readiness blip
+// instead of the old fixed ~5.5s), but a close arriving within this floor of
+// the last successful recovery is demoted onto the paced retry timer above so
+// a degraded apiserver churning its watches is never hammered with
+// back-to-back LISTs.
+const WATCH_CLOSE_RECOVERY_FLOOR_MS = 1000
 const HOST_WATCH_RECONCILE_RETRY_DELAYS_MS = [5000, 15000, 30000]
 // Wake-pending Hosts get immediate per-Host admission after watch recovery
 // (§10.2 step 7) rather than waiting for the background fleet pass.
@@ -661,6 +668,13 @@ export class McpServerWatcher implements McpServerProvider {
   private contextCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
   private mcpServerCacheRecoveryInFlight: Promise<boolean> | null = null
   private contextCacheRecoveryInFlight: Promise<boolean> | null = null
+  // Instant (Date.now) at which the last SUCCESSFUL recovery re-established
+  // each inventory watch. attempt*CacheRecovery compares against these to
+  // apply WATCH_CLOSE_RECOVERY_FLOOR_MS: a close spaced beyond the floor gets
+  // an immediate re-LIST; a burst close within it falls back to the timer.
+  private lastMcpServerWatchRecoveryAt = Number.NEGATIVE_INFINITY
+  private lastContextWatchRecoveryAt = Number.NEGATIVE_INFINITY
+  private lastHostWatchRecoveryAt = Number.NEGATIVE_INFINITY
   // A watch callback can still settle after its stream reports completion.
   // Host reconciles change the mcp-host pod template, so stale callbacks must
   // never replay an older Host spec after a replacement watch is active.
@@ -1323,6 +1337,7 @@ export class McpServerWatcher implements McpServerProvider {
         if (this.stopped) return false
         await this.restartMcpServerWatch(snapshot)
         if (this.stopped) return false
+        this.lastMcpServerWatchRecoveryAt = Date.now()
         this.changeCallback?.()
         if (this.contextCacheSynced) {
           void this.runInitialNetworkPolicyConvergence()
@@ -1354,6 +1369,7 @@ export class McpServerWatcher implements McpServerProvider {
         if (this.stopped) return false
         await this.restartContextWatch(snapshot)
         if (this.stopped) return false
+        this.lastContextWatchRecoveryAt = Date.now()
         this.hostFleetScheduler.bumpInputRevision()
         void this.runInitialNetworkPolicyConvergence()
         void this.runInitialSharedFileSystemConvergence()
@@ -1385,13 +1401,58 @@ export class McpServerWatcher implements McpServerProvider {
     return recovery
   }
 
+  /**
+   * One recovery attempt NOW (immediate re-LIST on watch close), with the 5s
+   * timer kept purely as retry-after-failure pacing. The anti-busy-loop floor
+   * demotes a close that arrives within WATCH_CLOSE_RECOVERY_FLOOR_MS of the
+   * last successful recovery back onto the paced timer. Dedup against
+   * concurrent attempts lives in recoverMcpServerInventoryAndWatch
+   * (mcpServerCacheRecoveryInFlight).
+   */
+  private attemptMcpServerCacheRecovery(): void {
+    if (this.stopped) return
+    if (Date.now() - this.lastMcpServerWatchRecoveryAt < WATCH_CLOSE_RECOVERY_FLOOR_MS) {
+      this.scheduleMcpServerCacheRecovery()
+      return
+    }
+    void this.recoverMcpServerInventoryAndWatch().then(recovered => {
+      if (!recovered) this.scheduleMcpServerCacheRecovery()
+    })
+  }
+
+  /** Context analogue of attemptMcpServerCacheRecovery. */
+  private attemptContextCacheRecovery(): void {
+    if (this.stopped) return
+    if (Date.now() - this.lastContextWatchRecoveryAt < WATCH_CLOSE_RECOVERY_FLOOR_MS) {
+      this.scheduleContextCacheRecovery()
+      return
+    }
+    void this.recoverContextInventoryAndWatch().then(recovered => {
+      if (!recovered) this.scheduleContextCacheRecovery()
+    })
+  }
+
+  /**
+   * Host analogue: one attempt NOW unless inside the floor. The retry re-arm
+   * on failure lives in performHostInventoryRecovery (scheduleHostCacheRecovery
+   * before rethrow) and the intent/in-flight merge lives in
+   * recoverHostInventoryAndWatch, so this helper only decides immediate vs
+   * paced.
+   */
+  private attemptHostCacheRecovery(): void {
+    if (this.stopped) return
+    if (Date.now() - this.lastHostWatchRecoveryAt < WATCH_CLOSE_RECOVERY_FLOOR_MS) {
+      this.scheduleHostCacheRecovery()
+      return
+    }
+    void this.recoverHostInventoryAndWatch().catch(() => undefined)
+  }
+
   private scheduleMcpServerCacheRecovery(): void {
     if (this.stopped || this.mcpServerCacheRecoveryTimer) return
     this.mcpServerCacheRecoveryTimer = setTimeout(() => {
       this.mcpServerCacheRecoveryTimer = null
-      void this.recoverMcpServerInventoryAndWatch().then(recovered => {
-        if (!recovered) this.scheduleMcpServerCacheRecovery()
-      })
+      this.attemptMcpServerCacheRecovery()
     }, INVENTORY_CACHE_RECOVERY_RETRY_MS)
   }
 
@@ -1399,9 +1460,7 @@ export class McpServerWatcher implements McpServerProvider {
     if (this.stopped || this.contextCacheRecoveryTimer) return
     this.contextCacheRecoveryTimer = setTimeout(() => {
       this.contextCacheRecoveryTimer = null
-      void this.recoverContextInventoryAndWatch().then(recovered => {
-        if (!recovered) this.scheduleContextCacheRecovery()
-      })
+      this.attemptContextCacheRecovery()
     }, INVENTORY_CACHE_RECOVERY_RETRY_MS)
   }
 
@@ -1616,6 +1675,7 @@ export class McpServerWatcher implements McpServerProvider {
       }
       // Authority is known ONLY after the WATCH is installed.
       this.hostCacheSynced = true
+      this.lastHostWatchRecoveryAt = Date.now()
       hostWatchRecoverySeconds.observe(
         { phase: 'watch', outcome: 'success' },
         (Date.now() - watchStartedAt) / 1000
@@ -3667,7 +3727,7 @@ export class McpServerWatcher implements McpServerProvider {
         console.error('[K8s] McpServer watch error:', err)
       }
       console.log('[K8s] McpServer watch ended; recovering authoritative inventory...')
-      this.scheduleMcpServerCacheRecovery()
+      this.attemptMcpServerCacheRecovery()
     }
 
     const request = await this.watch.watch(path, { resourceVersion }, watchCallback, doneCallback)
@@ -3920,7 +3980,7 @@ export class McpServerWatcher implements McpServerProvider {
         console.error('[K8s] Context watch error:', err)
       }
       console.log('[K8s] Context watch ended; recovering authoritative inventory...')
-      this.scheduleContextCacheRecovery()
+      this.attemptContextCacheRecovery()
     }
 
     const request = await this.watch.watch(path, { resourceVersion }, watchCallback, doneCallback)
@@ -4019,7 +4079,7 @@ export class McpServerWatcher implements McpServerProvider {
         console.error('[K8s] Host watch error:', err)
       }
       console.log('[K8s] Host watch ended; rebuilding the Host snapshot before watch recovery')
-      this.scheduleHostCacheRecovery()
+      this.attemptHostCacheRecovery()
     }
 
     const request = await this.watch.watch(path, { resourceVersion }, watchCallback, doneCallback)

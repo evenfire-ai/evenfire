@@ -8199,8 +8199,11 @@ describe('McpServerWatcher Host watch generation', () => {
     doneCallbacks[0](Object.assign(new Error('resource version expired'), { statusCode: 410 }))
 
     expect((watcher as any).hostCacheSynced).toBe(false)
-    expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
-    await vi.advanceTimersByTimeAsync(5000)
+    // Immediate-first-attempt contract: an isolated close (nothing recovered
+    // within the 1s floor) re-LISTs NOW in a microtask. The 5s timer stays
+    // disarmed and survives only as retry-after-failure pacing.
+    expect((watcher as any).hostCacheRecoveryTimer).toBeNull()
+    await flushMicrotasks(20)
     await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
 
     expect(
@@ -8211,6 +8214,11 @@ describe('McpServerWatcher Host watch generation', () => {
       { resourceVersion: 'host-recovery-rv' },
     ])
     expect((watcher as any).hostCacheSynced).toBe(true)
+    // The disarmed timer must not produce a duplicate re-LIST at +5s.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(
+      mocks.listNamespacedCustomObject.mock.calls.filter(([request]) => request.plural === 'hosts')
+    ).toHaveLength(1)
     watcher.stop()
   })
 
@@ -9421,5 +9429,373 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
     // A removal MUST bump.
     ;(watcher as any).installHostSnapshot({ hosts: [], resourceVersion: 'rv4' })
     expect((watcher as any).hostDesiredRevision).toBe(base + 2)
+  })
+})
+
+describe('McpServerWatcher watch-close recovery latency (immediate first attempt + floor)', () => {
+  // GKE closes long-lived watches ("Premature close") every few minutes. The
+  // old contract armed a FIXED 5s timer before the first re-LIST, so every
+  // isolated close cost ~5.5s of /ready 503. The hardened contract: the FIRST
+  // recovery attempt after a close is IMMEDIATE (microtask, no timer), the 5s
+  // timer survives only as the retry-after-failure pacing, and an anti-busy-loop
+  // FLOOR (1s) demotes a close that arrives <1s after the last successful
+  // recovery back onto the paced timer so a degraded apiserver is never
+  // hammered with back-to-back re-LISTs.
+  const inventoryLanes = [
+    {
+      kind: 'McpServer',
+      plural: 'mcpservers',
+      pathSuffix: '/mcpservers',
+      restartMethod: 'restartMcpServerWatch',
+      startSnapshot: { resourceVersion: 'mcp-start-rv', servers: [] },
+      startRv: 'mcp-start-rv',
+      recoveryRvPrefix: 'mcp-close-recovery-rv',
+      timerField: 'mcpServerCacheRecoveryTimer',
+      syncedField: 'mcpServerCacheSynced',
+      peerSyncedField: 'contextCacheSynced',
+    },
+    {
+      kind: 'Context',
+      plural: 'contexts',
+      pathSuffix: '/contexts',
+      restartMethod: 'restartContextWatch',
+      startSnapshot: { resourceVersion: 'context-start-rv', contexts: [] },
+      startRv: 'context-start-rv',
+      recoveryRvPrefix: 'context-close-recovery-rv',
+      timerField: 'contextCacheRecoveryTimer',
+      syncedField: 'contextCacheSynced',
+      peerSyncedField: 'mcpServerCacheSynced',
+    },
+  ] as const
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
+    mocks.listNamespacedCustomObject.mockReset().mockResolvedValue({ items: [] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it.each(inventoryLanes)(
+    're-LISTs the $kind inventory immediately (microtask, no 5s timer) when its watch closes',
+    async lane => {
+      const doneCallbacks: Array<(error: Error | null) => void> = []
+      const watchQueries: unknown[] = []
+      let listCalls = 0
+      mocks.watch.mockImplementation(async (path, options, _callback, done) => {
+        if (path.endsWith(lane.pathSuffix)) {
+          doneCallbacks.push(done)
+          watchQueries.push(options)
+        }
+        return { abort: vi.fn() }
+      })
+      mocks.listNamespacedCustomObject.mockImplementation(
+        async ({ plural }: { plural: string }) => {
+          if (plural === lane.plural) {
+            listCalls += 1
+            return {
+              metadata: { resourceVersion: `${lane.recoveryRvPrefix}-${listCalls}` },
+              items: [],
+            }
+          }
+          return { items: [] }
+        }
+      )
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+      const watcher = new McpServerWatcher()
+      ;(watcher as any)[lane.peerSyncedField] = true
+      await (watcher as any)[lane.restartMethod](lane.startSnapshot)
+      expect(watchQueries).toEqual([{ resourceVersion: lane.startRv }])
+
+      doneCallbacks[0](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+      await flushMicrotasks(20)
+
+      // Immediate first attempt: fresh LIST + fresh watch WITHOUT advancing
+      // any timer. Under the old contract this stayed at 0 until +5000ms.
+      expect(listCalls).toBe(1)
+      expect(watchQueries).toEqual([
+        { resourceVersion: lane.startRv },
+        { resourceVersion: `${lane.recoveryRvPrefix}-1` },
+      ])
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      expect((watcher as any)[lane.timerField]).toBeNull()
+
+      // No retry timer was armed: +5s must not produce a duplicate re-LIST.
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(listCalls).toBe(1)
+      logSpy.mockRestore()
+      await watcher.stop()
+    }
+  )
+
+  it('re-LISTs the Host inventory immediately (microtask, no 5s timer) when its watch closes', async () => {
+    const doneCallbacks: Array<(error: Error | null) => void> = []
+    const watchQueries: unknown[] = []
+    let hostListCalls = 0
+    mocks.watch.mockImplementation(async (path, options, _callback, done) => {
+      if (path.endsWith('/hosts')) {
+        doneCallbacks.push(done)
+        watchQueries.push(options)
+      }
+      return { abort: vi.fn() }
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') {
+        hostListCalls += 1
+        return {
+          metadata: { resourceVersion: `host-close-recovery-rv-${hostListCalls}` },
+          items: [],
+        }
+      }
+      return { items: [] }
+    })
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const watcher = newContextAuthoritativeWatcher()
+    const fleetRequest = vi
+      .spyOn(watcher as any, 'requestHostFleetReconcile')
+      .mockResolvedValue(undefined)
+    await (watcher as any).startHostWatch('host-initial-rv')
+    ;(watcher as any).hostCacheSynced = true
+
+    doneCallbacks[0](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+    expect((watcher as any).hostCacheSynced).toBe(false)
+    await flushMicrotasks(20)
+
+    // Immediate first attempt: fresh LIST + fresh watch WITHOUT advancing any
+    // timer. Under the old contract this stayed at 0 until +5000ms.
+    expect(hostListCalls).toBe(1)
+    expect(watchQueries).toEqual([
+      { resourceVersion: 'host-initial-rv' },
+      { resourceVersion: 'host-close-recovery-rv-1' },
+    ])
+    expect((watcher as any).hostCacheSynced).toBe(true)
+    expect((watcher as any).hostCacheRecoveryTimer).toBeNull()
+    expect(fleetRequest).toHaveBeenCalledOnce()
+
+    // No retry timer was armed: +5s must not produce a duplicate re-LIST.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(hostListCalls).toBe(1)
+    logSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it.each(inventoryLanes)(
+    'falls back to the 5s retry timer only after a failed immediate $kind recovery attempt',
+    async lane => {
+      const doneCallbacks: Array<(error: Error | null) => void> = []
+      let listCalls = 0
+      mocks.watch.mockImplementation(async (path, _options, _callback, done) => {
+        if (path.endsWith(lane.pathSuffix)) doneCallbacks.push(done)
+        return { abort: vi.fn() }
+      })
+      mocks.listNamespacedCustomObject.mockImplementation(
+        async ({ plural }: { plural: string }) => {
+          if (plural === lane.plural) {
+            listCalls += 1
+            if (listCalls === 1) throw new Error(`${lane.plural} re-LIST temporarily unavailable`)
+            return {
+              metadata: { resourceVersion: `${lane.recoveryRvPrefix}-${listCalls}` },
+              items: [],
+            }
+          }
+          return { items: [] }
+        }
+      )
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+      const watcher = new McpServerWatcher()
+      ;(watcher as any)[lane.peerSyncedField] = true
+      await (watcher as any)[lane.restartMethod](lane.startSnapshot)
+
+      doneCallbacks[0](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+      await flushMicrotasks(20)
+
+      // The immediate attempt ran (and failed): exactly one LIST, retry armed.
+      expect(listCalls).toBe(1)
+      expect((watcher as any)[lane.syncedField]).toBe(false)
+      expect((watcher as any)[lane.timerField]).not.toBeNull()
+
+      // Retry-after-failure keeps the 5s pacing: nothing before the deadline.
+      await vi.advanceTimersByTimeAsync(4999)
+      expect(listCalls).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushMicrotasks(20)
+      expect(listCalls).toBe(2)
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      expect((watcher as any)[lane.timerField]).toBeNull()
+      errorSpy.mockRestore()
+      logSpy.mockRestore()
+      await watcher.stop()
+    }
+  )
+
+  it('falls back to the 5s retry timer only after a failed immediate Host recovery attempt', async () => {
+    const doneCallbacks: Array<(error: Error | null) => void> = []
+    let hostListCalls = 0
+    mocks.watch.mockImplementation(async (path, _options, _callback, done) => {
+      if (path.endsWith('/hosts')) doneCallbacks.push(done)
+      return { abort: vi.fn() }
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') {
+        hostListCalls += 1
+        if (hostListCalls === 1) throw new Error('hosts re-LIST temporarily unavailable')
+        return {
+          metadata: { resourceVersion: `host-close-recovery-rv-${hostListCalls}` },
+          items: [],
+        }
+      }
+      return { items: [] }
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const watcher = newContextAuthoritativeWatcher()
+    const fleetRequest = vi
+      .spyOn(watcher as any, 'requestHostFleetReconcile')
+      .mockResolvedValue(undefined)
+    await (watcher as any).startHostWatch('host-initial-rv')
+    ;(watcher as any).hostCacheSynced = true
+
+    doneCallbacks[0](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+    await flushMicrotasks(20)
+
+    // The immediate attempt ran (and failed): exactly one LIST, retry armed
+    // by performHostInventoryRecovery's existing failure path.
+    expect(hostListCalls).toBe(1)
+    expect((watcher as any).hostCacheSynced).toBe(false)
+    expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
+
+    await vi.advanceTimersByTimeAsync(4999)
+    expect(hostListCalls).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await flushMicrotasks(20)
+    expect(hostListCalls).toBe(2)
+    expect((watcher as any).hostCacheSynced).toBe(true)
+    expect((watcher as any).hostCacheRecoveryTimer).toBeNull()
+    expect(fleetRequest).toHaveBeenCalled()
+    errorSpy.mockRestore()
+    logSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it.each(inventoryLanes)(
+    'demotes a $kind close arriving within the 1s floor of the last recovery onto the 5s timer',
+    async lane => {
+      const doneCallbacks: Array<(error: Error | null) => void> = []
+      let listCalls = 0
+      mocks.watch.mockImplementation(async (path, _options, _callback, done) => {
+        if (path.endsWith(lane.pathSuffix)) doneCallbacks.push(done)
+        return { abort: vi.fn() }
+      })
+      mocks.listNamespacedCustomObject.mockImplementation(
+        async ({ plural }: { plural: string }) => {
+          if (plural === lane.plural) {
+            listCalls += 1
+            return {
+              metadata: { resourceVersion: `${lane.recoveryRvPrefix}-${listCalls}` },
+              items: [],
+            }
+          }
+          return { items: [] }
+        }
+      )
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+      const watcher = new McpServerWatcher()
+      ;(watcher as any)[lane.peerSyncedField] = true
+      await (watcher as any)[lane.restartMethod](lane.startSnapshot)
+
+      // Isolated close: immediate recovery (LIST #1, watch #2).
+      doneCallbacks[0](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+      await flushMicrotasks(20)
+      expect(listCalls).toBe(1)
+      expect(doneCallbacks).toHaveLength(2)
+
+      // Burst close: the recovered watch dies again with ZERO fake-time
+      // elapsed since the recovery that established it (< 1s floor). The
+      // anti-busy-loop floor must demote this attempt onto the 5s timer
+      // instead of hammering the (visibly degraded) apiserver immediately.
+      doneCallbacks[1](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+      await flushMicrotasks(20)
+      expect(listCalls).toBe(1)
+      expect((watcher as any)[lane.timerField]).not.toBeNull()
+      expect((watcher as any)[lane.syncedField]).toBe(false)
+
+      // The paced retry recovers it at +5s.
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushMicrotasks(20)
+      expect(listCalls).toBe(2)
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      expect((watcher as any)[lane.timerField]).toBeNull()
+      expect(doneCallbacks).toHaveLength(3)
+
+      // Spaced close: once more than the 1s floor has elapsed since the last
+      // recovery, a new close is immediate again (no timer).
+      await vi.advanceTimersByTimeAsync(1500)
+      doneCallbacks[2](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+      await flushMicrotasks(20)
+      expect(listCalls).toBe(3)
+      expect((watcher as any)[lane.timerField]).toBeNull()
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      logSpy.mockRestore()
+      await watcher.stop()
+    }
+  )
+
+  it('demotes a Host close arriving within the 1s floor of the last recovery onto the 5s timer', async () => {
+    const doneCallbacks: Array<(error: Error | null) => void> = []
+    let hostListCalls = 0
+    mocks.watch.mockImplementation(async (path, _options, _callback, done) => {
+      if (path.endsWith('/hosts')) doneCallbacks.push(done)
+      return { abort: vi.fn() }
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') {
+        hostListCalls += 1
+        return {
+          metadata: { resourceVersion: `host-close-recovery-rv-${hostListCalls}` },
+          items: [],
+        }
+      }
+      return { items: [] }
+    })
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const watcher = newContextAuthoritativeWatcher()
+    vi.spyOn(watcher as any, 'requestHostFleetReconcile').mockResolvedValue(undefined)
+    await (watcher as any).startHostWatch('host-initial-rv')
+    ;(watcher as any).hostCacheSynced = true
+
+    // Isolated close: immediate recovery (LIST #1, watch #2).
+    doneCallbacks[0](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+    await flushMicrotasks(20)
+    expect(hostListCalls).toBe(1)
+    expect(doneCallbacks).toHaveLength(2)
+    expect((watcher as any).hostCacheSynced).toBe(true)
+
+    // Burst close within the 1s floor: demoted onto the paced 5s timer.
+    doneCallbacks[1](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+    await flushMicrotasks(20)
+    expect(hostListCalls).toBe(1)
+    expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
+    expect((watcher as any).hostCacheSynced).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushMicrotasks(20)
+    expect(hostListCalls).toBe(2)
+    expect((watcher as any).hostCacheSynced).toBe(true)
+    expect((watcher as any).hostCacheRecoveryTimer).toBeNull()
+    expect(doneCallbacks).toHaveLength(3)
+
+    // Spaced close beyond the floor: immediate again.
+    await vi.advanceTimersByTimeAsync(1500)
+    doneCallbacks[2](Object.assign(new Error('Premature close'), { statusCode: 500 }))
+    await flushMicrotasks(20)
+    expect(hostListCalls).toBe(3)
+    expect((watcher as any).hostCacheRecoveryTimer).toBeNull()
+    expect((watcher as any).hostCacheSynced).toBe(true)
+    logSpy.mockRestore()
+    await watcher.stop()
   })
 })
