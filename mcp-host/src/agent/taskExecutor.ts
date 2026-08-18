@@ -693,6 +693,8 @@ export class TaskExecutor {
         message: error.message,
         retryable: error.retryable,
         provider: error.provider,
+        httpStatus: error.httpStatus,
+        providerCode: error.providerCode,
       }
     }
     return {
