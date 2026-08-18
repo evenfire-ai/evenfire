@@ -116,8 +116,8 @@ if [ "$SEED_PROFILE" = "minimal" ]; then
   else
     DEV_EMAIL="$(clerum_minimal_desktop_email "$ADMIN_EMAIL" "" false)"
   fi
-  if [ "$DEV_EMAIL" != "$ADMIN_EMAIL" ]; then
-    printf '%s\n' "  ERROR — SEED_PROFILE=minimal requires the Desktop identity email (${DEV_EMAIL}) to equal the bootstrap admin email (${ADMIN_EMAIL}); refusing to create an unlinked ordinary member" >&2
+  if ! clerum_minimal_identity_matches "$ADMIN_EMAIL" "$DEV_EMAIL"; then
+    printf '  ERROR: %s\n' "$(clerum_minimal_identity_error "$DEV_EMAIL" "$ADMIN_EMAIL")" >&2
     exit 1
   fi
   if [ -z "${E2E_DEV_LOGIN_NAME:-}" ]; then

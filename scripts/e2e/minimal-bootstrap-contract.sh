@@ -27,6 +27,21 @@ clerum_initial_setup_link_matches() {
     [ "${4}" = "${5}" ]
 }
 
+# The Desktop identity must be the bootstrap admin identity. Any divergence
+# would mint an ordinary /admin/users member with no initial_setup operator
+# link. full-setup.sh and seed-e2e-data.sh both enforce this, so the decision
+# and its message live here once and stay testable without a cluster.
+clerum_minimal_identity_matches() {
+  local admin_email="${1-}" desktop_email="${2-}"
+  [ -n "$admin_email" ] && [ -n "$desktop_email" ] && [ "$admin_email" = "$desktop_email" ]
+}
+
+clerum_minimal_identity_error() {
+  local desktop_email="${1-}" admin_email="${2-}"
+  printf 'SEED_PROFILE=minimal requires the Desktop identity email (%s) to equal the bootstrap admin email (%s); refusing to create an unlinked ordinary member' \
+    "${desktop_email:-missing}" "${admin_email:-missing}"
+}
+
 clerum_minimal_setup_outcome() {
   case "${1:-}" in
     2[0-9][0-9]) printf '%s' setup_succeeded ;;

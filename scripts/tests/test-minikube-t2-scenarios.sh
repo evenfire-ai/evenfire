@@ -159,6 +159,16 @@ expect_code IMAGE_MANIFEST_MISMATCH not-built-local not-built-local \
   env "${repo_env[@]}" T2_IMAGE_MANIFEST="$not_built_local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
   bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
 
+# The multi-node writer records minikube_image_id output, which is NOT_FOUND
+# when an image is absent from the node. Single-node records docker inspect's
+# NOT_BUILT. Both sentinels must be rejected, so cover the multi-node one too.
+not_found_local_manifest="$tmp/not-found-local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"NOT_FOUND"}}
+' >"$not_found_local_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH not-found-local not-found-local \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$not_found_local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
 short_local_manifest="$tmp/short-local-image-manifest.json"
 printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef"}}\n' >"$short_local_manifest"
 expect_code IMAGE_MANIFEST_MISMATCH short-local short-local \

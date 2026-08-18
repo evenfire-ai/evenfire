@@ -570,18 +570,22 @@ assert_minimal_bootstrap_contract_runs_on_system_bash() {
     fail "minimal bootstrap scripts are not parseable by the system Bash"
     return
   fi
+  # `! cmd` is explicitly exempt from set -e, so a bare `! predicate` line can
+  # never fail this suite. refute() runs the predicate inside an `if` and exits
+  # non-zero on unexpected success, which set -e does propagate.
   output="$(/bin/bash -c '
     set -e
     source "$1"
+    refute() { if "$@"; then printf "unexpected success: %s\n" "$*" >&2; exit 1; fi; }
     [ "$(clerum_canonical_email "Admin@EvenFire.Local")" = "admin@evenfire.local" ]
     [ "$(clerum_minimal_desktop_email "Admin@EvenFire.Local" "" false)" = "admin@evenfire.local" ]
     [ "$(clerum_minimal_desktop_email "Admin@EvenFire.Local" "Desktop@Example.Local" true)" = "desktop@example.local" ]
     clerum_initial_setup_link_matches active initial_setup desktop-id admin-id admin-id
-    ! clerum_initial_setup_link_matches revoked initial_setup desktop-id admin-id admin-id
-    ! clerum_initial_setup_link_matches active revoked desktop-id admin-id admin-id
-    ! clerum_initial_setup_link_matches active initial_setup desktop-id "" admin-id
-    ! clerum_initial_setup_link_matches active initial_setup "" admin-id admin-id
-    ! clerum_initial_setup_link_matches active initial_setup desktop-id other-admin admin-id
+    refute clerum_initial_setup_link_matches revoked initial_setup desktop-id admin-id admin-id
+    refute clerum_initial_setup_link_matches active revoked desktop-id admin-id admin-id
+    refute clerum_initial_setup_link_matches active initial_setup desktop-id "" admin-id
+    refute clerum_initial_setup_link_matches active initial_setup "" admin-id admin-id
+    refute clerum_initial_setup_link_matches active initial_setup desktop-id other-admin admin-id
     [ "$(clerum_minimal_setup_outcome 201)" = setup_succeeded ]
     [ "$(clerum_minimal_setup_outcome 409)" = setup_already_consumed ]
     [ "$(clerum_minimal_setup_outcome 401)" = setup_failed ]
@@ -609,14 +613,44 @@ assert_minimal_seed_rejects_a_divergent_identity() {
 }
 
 assert_minimal_setup_requires_admin_identity_email() {
-  if grep -Fq 'SEED_PROFILE=minimal requires the Desktop identity email' \
-    "$REPO_ROOT/scripts/minikube/full-setup.sh" && \
-    grep -Fq 'SEED_USER_DEFAULT_EMAIL="$ADMIN_EMAIL"' \
-    "$REPO_ROOT/scripts/minikube/full-setup.sh"; then
-    pass "minimal setup refuses a second unlinked Desktop identity"
-  else
-    fail "minimal setup can still create a Desktop identity different from the bootstrap admin"
+  local contract="$REPO_ROOT/scripts/e2e/minimal-bootstrap-contract.sh"
+  local output
+
+  # Exercise the decision both call sites now share, rather than grepping for
+  # the source line that expresses it. A grep passes on any refactor that keeps
+  # the text and changes the meaning.
+  if ! output="$(/bin/bash -c '
+    set -e
+    source "$1"
+    refute() { if "$@"; then printf "unexpected success: %s\n" "$*" >&2; exit 1; fi; }
+    clerum_minimal_identity_matches admin@evenfire.local admin@evenfire.local
+    refute clerum_minimal_identity_matches admin@evenfire.local other@example.invalid
+    refute clerum_minimal_identity_matches admin@evenfire.local ""
+    refute clerum_minimal_identity_matches "" admin@evenfire.local
+    refute clerum_minimal_identity_matches "" ""
+    case "$(clerum_minimal_identity_error other@example.invalid admin@evenfire.local)" in
+      *"Desktop identity email (other@example.invalid)"*"bootstrap admin email (admin@evenfire.local)"*) ;;
+      *) exit 1 ;;
+    esac
+    printf ok
+  ' bash "$contract")"; then
+    fail "minimal identity guard does not accept the admin identity and reject every divergence"
+    return
   fi
+  if [ "$output" != "ok" ]; then
+    fail "minimal identity guard contract did not complete (output=$output)"
+    return
+  fi
+  # Both enforcement points must route through the shared guard, so a fix in
+  # one cannot silently leave the other permissive.
+  if ! grep -Fq 'clerum_minimal_identity_matches "$ADMIN_EMAIL" "$SEED_USER_EMAIL"' \
+      "$REPO_ROOT/scripts/minikube/full-setup.sh" ||
+    ! grep -Fq 'clerum_minimal_identity_matches "$ADMIN_EMAIL" "$DEV_EMAIL"' \
+      "$REPO_ROOT/scripts/e2e/seed-e2e-data.sh"; then
+    fail "a minimal enforcement point does not use the shared identity guard"
+    return
+  fi
+  pass "minimal setup refuses a second unlinked Desktop identity"
 }
 
 assert_an_unknown_image_source_is_a_hard_error() {

@@ -1445,8 +1445,9 @@ else
     SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
   fi
   SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
-  if [ "$SEED_PROFILE" = "minimal" ] && [ "$SEED_USER_EMAIL" != "$ADMIN_EMAIL" ]; then
-    err "SEED_PROFILE=minimal requires the Desktop identity email (${SEED_USER_EMAIL}) to equal the bootstrap admin email (${ADMIN_EMAIL}); refusing to create an unlinked ordinary member"
+  if [ "$SEED_PROFILE" = "minimal" ] \
+    && ! clerum_minimal_identity_matches "$ADMIN_EMAIL" "$SEED_USER_EMAIL"; then
+    err "$(clerum_minimal_identity_error "$SEED_USER_EMAIL" "$ADMIN_EMAIL")"
     exit 1
   fi
   log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"

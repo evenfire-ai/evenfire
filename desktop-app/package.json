@@ -82,6 +82,9 @@
     "vitest": "^3.2.4",
     "wait-on": "^8.0.5"
   },
+  "engines": {
+    "node": "24.x"
+  },
   "overrides": {
     "@tootallnate/once": "^3.0.1",
     "tmp": "^0.2.4",
