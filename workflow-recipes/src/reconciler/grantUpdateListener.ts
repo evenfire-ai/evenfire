@@ -12,7 +12,12 @@
  * (`PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL`). Keep them in sync.
  *
  * Semantics are deliberately best-effort: a lost NOTIFY (reconnect gap) degrades
- * to the existing polling backstop, never worse. The LISTEN session runs on its
+ * to the existing polling backstop, never worse. Concretely: the ≤30s
+ * level-triggered full reconcile driven by `workflowNeedsInfrastructureReconcile`
+ * (k8sClient.ts — unconditional for SDK recipes: stepless via the
+ * `!isWorkflow && spec.pluginWorkloadSdk` branch, steps>0 with no active run) on
+ * the runtime-credential refresh timer; NOT `workflowNeedsWorkloadStatusRefresh`,
+ * which explicitly excludes SDK recipes. The LISTEN session runs on its
  * own dedicated `pool.connect()` client (a pooled query would not keep the
  * session sticky for notifications), mirroring `dbRunProcessor.ts`. The payload
  * is untrusted DATA, not a command: an unparseable payload or unknown recipe is

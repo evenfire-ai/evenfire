@@ -1443,7 +1443,6 @@ nudge_rev_before="${nudge_rev_before:-0}"
 
 # Re-upsert the promptBridge grant. The admin upsert increments policy_revision
 # and (issue #375 P3) emits the transactional grant-update NOTIFY on COMMIT.
-nudge_started_at="$SECONDS"
 # issue #375 (R5): fail LOUD on a grant re-upsert failure. `|| true` here only
 # guards `set -e` so we can read ADMIN_CURL_HTTP_STATUS; the explicit assert
 # below is the real gate. Without it, an admin-API failure (expired token,
@@ -1458,6 +1457,9 @@ fi
 nudge_found=0
 nudge_state=""
 nudge_rev_after=""
+# issue #375 (R1-L4): measure the printed elapsed from the SAME origin as the
+# deadline (post-upsert), so the cosmetic "~Ns (≤Xs)" line cannot exceed the cap.
+nudge_started_at="$SECONDS"
 nudge_deadline=$((SECONDS + E2E_WAIT_NUDGE_VALIDATED))
 while [ "$SECONDS" -lt "$nudge_deadline" ]; do
   gate_assert_deadline "waiting for event-driven policyRevision bump (issue #375 P3)"

@@ -971,6 +971,11 @@ export async function revokePluginWorkloadSdkForRecipe(
  * that the recipe-bound SDK endpoint and credentials are gone. The state
  * transition is intentionally impossible from `active`, preventing callers
  * from declaring a kill-switch success without the teardown boundary.
+ *
+ * issue #375 (B2 counterpart): finalize (`revoking`→`disabled`) deliberately
+ * emits NO grant-update pg_notify — it is terminal cleanup reachable only after
+ * teardown is proven, its only caller/consumer is the WRC itself, and the
+ * visible `revoke` transition already notified.
  */
 export async function finalizePluginWorkloadSdkRevocation(
   recipeNamespace: string,

@@ -699,6 +699,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       this.grantUpdateListenerPool = createGrantUpdateListenerPool(this.config.db)
       this.grantUpdateListener = createGrantUpdateListener({
         pool: this.grantUpdateListenerPool,
+        // `capabilityFamily` is accepted for forward-compat and intentionally
+        // unused: the dispatch force-reconciles the whole recipe from the DB
+        // source of truth (all families recomputed), and authorization is
+        // per-invocation in control-api, never derived from the notification.
         onGrantUpdate: ({ recipeNamespace, recipeName }) =>
           this.handleGrantUpdateNotification(recipeNamespace, recipeName),
       })
@@ -1042,6 +1046,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         // tokens/secrets (sec-003).
         const projectedSdkState = result.pluginWorkloadSdkProjection?.capability?.state
         const persistedSdkState = recipe.status?.pluginWorkloadSdk?.state
+        // The `validated → capability:null` cleanup case is intentionally NOT
+        // forensically logged here (projectedSdkState is undefined for a cleared
+        // capability); its clearing PATCH is still emitted via
+        // `pluginWorkloadSdkProjectionChanged`, so the publish is covered.
         if (projectedSdkState !== undefined && projectedSdkState !== persistedSdkState) {
           console.log(
             `[WR-K8s] Plugin Workload SDK state for "${recipe.metadata.name}": ` +
