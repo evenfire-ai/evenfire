@@ -3,7 +3,8 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { type Readable, Transform } from 'node:stream'
 
-const GFS_UPLOAD_V2_PRODUCT_MAX_BYTES = 200 * 1024 * 1024
+const GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES = 200 * 1024 * 1024
+const GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES = 1024 * 1024 * 1024
 const GFS_UPLOAD_V2_PREFERRED_PART_BYTES = 8 * 1024 * 1024
 const GFS_UPLOAD_V2_MAX_PART_BYTES = 16 * 1024 * 1024
 const GFS_UPLOAD_V2_DEFAULT_CONCURRENCY = 4
@@ -126,6 +127,20 @@ export class DesktopUploadCapabilityError extends Error {
     super(message, options)
     this.name = 'DesktopUploadCapabilityError'
   }
+}
+
+export function normalizeUploadProductMaxBytes(value: unknown): number {
+  if (value === undefined) return GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
+  ) {
+    throw new DesktopUploadCapabilityError(
+      'GFS resumable capabilities advertised an invalid file ceiling'
+    )
+  }
+  return value as number
 }
 
 export const GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD = 3
@@ -1312,8 +1327,13 @@ export class DesktopGfsUploadJob {
     const identity = await sourceIdentity(this.input.filePath)
     const file = await stat(this.input.filePath)
     this.input.sourceIdentity = identity
-    if (!Number.isSafeInteger(file.size) || file.size > GFS_UPLOAD_V2_PRODUCT_MAX_BYTES)
-      throw new Error(`GFS files are limited to ${GFS_UPLOAD_V2_PRODUCT_MAX_BYTES} bytes`)
+    if (
+      !Number.isSafeInteger(file.size) ||
+      file.size < 0 ||
+      file.size > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
+    ) {
+      throw new Error('GFS files cannot exceed the 1 GiB Upload v2 protocol maximum')
+    }
     this.totalBytes = file.size
     let capabilities: UploadCapabilities
     try {
@@ -1347,14 +1367,7 @@ export class DesktopGfsUploadJob {
       throw new DesktopUploadCapabilityError(
         'Resumable GFS uploads are not enabled on this writer.'
       )
-    if (resumable.maxFileBytes !== undefined) {
-      if (!Number.isSafeInteger(resumable.maxFileBytes) || resumable.maxFileBytes < 0)
-        throw new DesktopUploadCapabilityError(
-          'GFS resumable capabilities advertised an invalid file ceiling'
-        )
-      if (file.size > resumable.maxFileBytes)
-        throw new Error(`GFS files are limited to ${resumable.maxFileBytes} bytes by the writer`)
-    }
+    const productMaxFileBytes = normalizeUploadProductMaxBytes(resumable.maxFileBytes)
     this.input.advertisedConcurrency = resumable.maxConcurrentPartsPerSession
     this.input.instabilityFailureThreshold = normalizeInstabilityFailureThreshold(
       resumable.instabilityFailureThreshold
@@ -1374,6 +1387,14 @@ export class DesktopGfsUploadJob {
           ? new Set<number>()
           : await validateResumedParts(this.input.filePath, session, parts)
       return { session, committed, resumable }
+    }
+    if (file.size > productMaxFileBytes) {
+      if (resumable.maxFileBytes === undefined) {
+        throw new Error(
+          'GFS files are limited to the 200 MiB compatibility limit because the writer omitted maxFileBytes'
+        )
+      }
+      throw new Error(`GFS files are limited to ${productMaxFileBytes} bytes by the writer`)
     }
     const target = this.input.operation === 'create' ? this.input.parentRid : this.input.resourceRid
     if (!target) throw new Error(`${this.input.operation} upload target is required`)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -41,6 +41,247 @@ describe('desktop GFS indexed uploader', () => {
     expect(isAmbiguousUploadStatus(413)).toBe(false)
     expect(isAmbiguousUploadStatus(429)).toBe(false)
     expect(isAmbiguousUploadStatus(507)).toBe(false)
+  })
+
+  it('reaches writer admission for a 250 MiB file under a 300 MiB capability', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-runtime-raise-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      const fileSize = 250 * 1024 * 1024
+      await writeFile(filePath, Buffer.alloc(0))
+      await truncate(filePath, fileSize)
+      let capabilityCalls = 0
+      let createSize: number | undefined
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'POST', url: string, options?: { body?: unknown }) {
+          if (method === 'GET' && requestPath(url).endsWith('/capabilities')) {
+            capabilityCalls += 1
+            return enabledCapabilities({ maxFileBytes: 300 * 1024 * 1024 }) as T
+          }
+          if (method === 'POST' && requestPath(url).endsWith('/uploads')) {
+            createSize = (options?.body as { sizeBytes?: number } | undefined)?.sizeBytes
+            throw new Error('writer admission reached')
+          }
+          throw new Error(`unexpected ${method} ${url}`)
+        },
+        async requestPart() {
+          throw new Error('part request was not expected')
+        },
+      }
+
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-runtime-raise',
+          transport,
+        }).start()
+      ).rejects.toThrow('writer admission reached')
+      expect(capabilityCalls).toBe(1)
+      expect(createSize).toBe(fileSize)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('enforces a lowered 100 MiB writer product limit before session creation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-runtime-lower-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.alloc(0))
+      await truncate(filePath, 100 * 1024 * 1024 + 1)
+      let createCalls = 0
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'POST') {
+          if (method === 'GET') return enabledCapabilities({ maxFileBytes: 100 * 1024 * 1024 }) as T
+          createCalls += 1
+          throw new Error('unexpected session creation')
+        },
+        async requestPart() {
+          throw new Error('part request was not expected')
+        },
+      }
+
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-runtime-lower',
+          transport,
+        }).start()
+      ).rejects.toThrow(`GFS files are limited to ${100 * 1024 * 1024} bytes by the writer`)
+      expect(createCalls).toBe(0)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('uses the 200 MiB compatibility limit when an enabled writer omits maxFileBytes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-missing-limit-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.alloc(0))
+      await truncate(filePath, 200 * 1024 * 1024 + 1)
+      let createCalls = 0
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'POST') {
+          if (method === 'GET') return enabledCapabilities() as T
+          createCalls += 1
+          throw new Error('unexpected session creation')
+        },
+        async requestPart() {
+          throw new Error('part request was not expected')
+        },
+      }
+
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-missing-limit',
+          transport,
+        }).start()
+      ).rejects.toThrow(/200 MiB compatibility limit/)
+      expect(createCalls).toBe(0)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each([0, -1, 1.5, 1024 * 1024 * 1024 + 1, Number.MAX_SAFE_INTEGER + 1, '314572800', null])(
+    'rejects malformed writer maxFileBytes %s as a capability failure',
+    async maxFileBytes => {
+      const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-invalid-limit-'))
+      try {
+        const filePath = join(root, 'payload.bin')
+        await writeFile(filePath, Buffer.from([1]))
+        let createCalls = 0
+        const transport = {
+          async requestJson<T>(method: 'GET' | 'POST') {
+            if (method === 'GET') return enabledCapabilities({ maxFileBytes }) as T
+            createCalls += 1
+            throw new Error('unexpected session creation')
+          },
+          async requestPart() {
+            throw new Error('part request was not expected')
+          },
+        }
+        await expect(
+          new DesktopGfsUploadJob({
+            baseUrl: 'https://api.example',
+            token: 'token',
+            filePath,
+            name: 'payload.bin',
+            drive: 'main',
+            operation: 'create',
+            parentRid: 'parent-invalid-limit',
+            transport,
+          }).start()
+        ).rejects.toMatchObject({ name: 'DesktopUploadCapabilityError' })
+        expect(createCalls).toBe(0)
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it('rejects above the 1 GiB protocol maximum before requesting capabilities', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-protocol-max-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.alloc(0))
+      await truncate(filePath, 1024 * 1024 * 1024 + 1)
+      let requestCalls = 0
+      const transport = {
+        async requestJson<T>() {
+          requestCalls += 1
+          return enabledCapabilities({ maxFileBytes: 1024 * 1024 * 1024 }) as T
+        },
+        async requestPart() {
+          throw new Error('part request was not expected')
+        },
+      }
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-protocol-max',
+          transport,
+        }).start()
+      ).rejects.toThrow(/1 GiB Upload v2 protocol maximum/)
+      expect(requestCalls).toBe(0)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('resumes an admitted session after the writer product limit is lowered', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-resume-lowered-limit-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.from([1, 2]))
+      const session = {
+        uploadId: '91919191-9191-4191-8191-919191919191',
+        drive: 'main',
+        operation: 'create' as const,
+        expectedBytes: 2,
+        partBytes: 1,
+        partCount: 2,
+        state: 'paused',
+        contiguousBytes: 0,
+        committedBytes: 0,
+        committedPartCount: 0,
+        activePartCount: 0,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }
+      let statusCalls = 0
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'HEAD', url: string) {
+          if (method === 'GET' && requestPath(url).endsWith('/capabilities'))
+            return enabledCapabilities({ maxFileBytes: 1 }) as T
+          if (method === 'HEAD') return {} as T
+          if (method === 'GET' && requestPath(url).endsWith('/status')) {
+            statusCalls += 1
+            return { ok: true, data: { session, parts: [] } } as T
+          }
+          throw new Error(`unexpected ${method} ${url}`)
+        },
+        async requestPart() {
+          throw new Error('part request was not expected')
+        },
+      }
+      const result = await new DesktopGfsUploadJob({
+        baseUrl: 'https://api.example',
+        token: 'token',
+        filePath,
+        name: 'payload.bin',
+        drive: 'main',
+        operation: 'create',
+        parentRid: 'parent-resume-lowered-limit',
+        resumeUploadId: session.uploadId,
+        transport,
+      }).start()
+      expect(result.state).toBe('paused')
+      expect(statusCalls).toBe(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('streams independent binary parts with base64 checksums and completes the session', async () => {
