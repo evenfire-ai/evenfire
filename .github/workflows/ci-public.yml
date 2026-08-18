@@ -390,6 +390,9 @@ jobs:
       - name: Test HCC watch-recovery gate coordination
         run: bash scripts/tests/test-hcc-watch-recovery-gate.sh
 
+      - name: Test HCC watch-churn readiness gate contract
+        run: bash scripts/tests/test-hcc-watch-churn-readiness-gate.sh
+
       - name: Test HCC API gateway readiness separation
         run: bash scripts/tests/test-hcc-api-gateway-readiness.sh
 
