@@ -17,6 +17,7 @@ describe('PR 2 runtime all-hops readiness', () => {
       'derived_session_transitions',
       'activity_session_search_resumable',
     ])
+    expect(allPr2RuntimeHopsReady(undefined)).toBe(false)
     expect(allPr2RuntimeHopsReady(unavailablePr2RuntimeHops)).toBe(false)
   })
 
