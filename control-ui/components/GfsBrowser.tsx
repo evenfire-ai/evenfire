@@ -1145,7 +1145,7 @@ export function GfsBrowser(): React.JSX.Element {
           fileSummary={
             uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined
           }
-          guidance="GFS uploads are limited to 200 MiB per file; each request is streamed in 8 MiB parts (16 MiB hard maximum)."
+          guidance="The writer advertises the Upload v2 file limit (up to the 1 GiB protocol maximum); each request is streamed in 8 MiB parts (16 MiB hard maximum)."
           progress={
             uploadSnapshot
               ? {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GFS_FILE_UPLOAD_MAX_BYTES } from '@constants/gfsFileUpload'
+import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import {
@@ -137,8 +137,8 @@ describe('GfsBrowser', () => {
     mockUploadGfsFile.mockReset()
     window.localStorage.clear()
     mockUploadGfsFile.mockImplementation(async ({ file }: { file: File }) => {
-      if (file.size > GFS_FILE_UPLOAD_MAX_BYTES) {
-        throw new Error('GFS uploads are limited to 200 MB per file.')
+      if (file.size > GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES) {
+        throw new Error('GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.')
       }
       return { state: 'completed' }
     })
@@ -250,7 +250,9 @@ describe('GfsBrowser', () => {
 
     fireEvent.click(newFile)
     const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
-    expect(within(uploadDialog).getByText(/limited to 200 MiB per file/i)).toBeTruthy()
+    expect(
+      within(uploadDialog).getByText(/writer advertises the Upload v2 file limit/i)
+    ).toBeTruthy()
     expect(within(uploadDialog).getByText(/drag and drop, or click to browse/i)).toBeTruthy()
     fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Cancel' }))
 
@@ -602,7 +604,7 @@ describe('GfsBrowser', () => {
     renderBrowser()
     await screen.findByText('No resources are visible in this folder.')
     const oversized = new File(['small fixture'], 'oversized.md', { type: 'text/markdown' })
-    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_MAX_BYTES + 1 })
+    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES + 1 })
     const arrayBuffer = vi.spyOn(oversized, 'arrayBuffer')
 
     const browser = screen.getByRole('region', { name: 'Global File System browser' })
@@ -610,7 +612,9 @@ describe('GfsBrowser', () => {
       dataTransfer: { dropEffect: 'none', files: [oversized], types: ['Files'] },
     })
 
-    expect(await screen.findByText('GFS uploads are limited to 200 MB per file.')).toBeTruthy()
+    expect(
+      await screen.findByText('GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.')
+    ).toBeTruthy()
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(mockApiSend).not.toHaveBeenCalled()
   })
