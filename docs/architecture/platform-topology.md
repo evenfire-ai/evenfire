@@ -875,7 +875,7 @@ WRC                                    McpServer CRD                          HC
 | Annotation                                   | Set by | Value                  | Meaning                                                                                                              |
 | -------------------------------------------- | ------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `clerum.io/pre-deploy`                       | WRC    | `"true"`               | McpServer CRD created before workload pods exist; HCC should apply NPs proactively                                   |
-| `clerum.io/network-ready`                    | HCC    | `"true"`               | L2/L3 NetworkPolicies applied; safe to start workload pods. Valid only together with a matching generation stamp     |
+| `clerum.io/network-ready`                    | HCC    | `"true"`               | L2/L3 NetworkPolicies applied; safe to start workload pods. Honored only when the generation stamp matches the current generation (a non-numeric generation is tolerated as fresh without a stamp — defensive; `metadata.generation` is always numeric in a real cluster) |
 | `clerum.io/network-ready-observed-generation` | HCC    | `"<metadata.generation>"` | Generation HCC observed when acking (Issue #408). WRC honors `network-ready` only when this equals the current generation, so a stale ack from a prior generation cannot satisfy the gate. HCC re-acks (re-stamps) when the generation advances |
 
 #### 11.4.4 Timeout and Graceful Degradation

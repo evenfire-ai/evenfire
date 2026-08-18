@@ -232,6 +232,39 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
     )
   })
 
+  it('Issue #408: re-acks when the ack predates the stamp (upgrade path: stamp absent)', async () => {
+    // A pre-#408 HCC set network-ready:'true' without an observed-generation stamp.
+    // The re-ack guard's stale-generation branch (typeof gen === 'number' && stamp !==
+    // String(gen), i.e. undefined !== '3') must fire so the ack gains a generation.
+    const server = {
+      ...makeServer({ name: 'stdio-mcp', managed: true }),
+      generation: 3,
+      annotations: {
+        'clerum.io/pre-deploy': 'true',
+        'clerum.io/network-ready': 'true',
+        // no clerum.io/network-ready-observed-generation
+      },
+    }
+
+    await reconciler.reconcile(server)
+
+    expect(customApi.patchNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plural: 'mcpservers',
+        name: 'stdio-mcp',
+        body: {
+          metadata: {
+            annotations: {
+              'clerum.io/network-ready': 'true',
+              'clerum.io/network-ready-observed-generation': '3',
+            },
+          },
+        },
+      }),
+      expect.objectContaining({ middleware: expect.any(Array) })
+    )
+  })
+
   it('should create Deployment when managed: undefined (default: true)', async () => {
     const server = makeServer({ name: 'mongo-mcp' })
     await reconciler.reconcile(server)
