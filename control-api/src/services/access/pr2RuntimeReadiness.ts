@@ -19,6 +19,8 @@ export const unavailablePr2RuntimeHops: Pr2RuntimeHopReadiness = Object.freeze(
   >
 )
 
-export function allPr2RuntimeHopsReady(readiness: Pr2RuntimeHopReadiness): boolean {
-  return PR2_RUNTIME_HOPS.every(hop => readiness[hop] === 'ready')
+export function allPr2RuntimeHopsReady(
+  readiness: Pr2RuntimeHopReadiness | null | undefined
+): boolean {
+  return Boolean(readiness) && PR2_RUNTIME_HOPS.every(hop => readiness?.[hop] === 'ready')
 }
