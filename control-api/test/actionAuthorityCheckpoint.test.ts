@@ -54,6 +54,41 @@ describe('action authority checkpoint wire parser', () => {
     })
   })
 
+  it('binds an mcp-host runtime caller to its exact permitted resource', () => {
+    const mcpCaller = Object.freeze({
+      service: 'mcp-host',
+      trustPlane: 'mcp_host_runtime_jwt',
+      permittedResource: { type: 'host', logicalId: 'default/chatllm' },
+    } as const)
+    const value = request()
+    value.domain.service = 'mcp-host'
+    expect(parseActionAuthorityCheckpointRequest(value, mcpCaller)).toMatchObject({
+      resource: { type: 'host', logicalId: 'default/chatllm' },
+    })
+
+    expect(() =>
+      parseActionAuthorityCheckpointRequest(
+        {
+          ...value,
+          resource: {
+            ...resource,
+            logicalId: 'default/other',
+            canonicalId: 'host:default/other',
+          },
+          domain: {
+            ...value.domain,
+            resource: {
+              ...resource,
+              logicalId: 'default/other',
+              canonicalId: 'host:default/other',
+            },
+          },
+        },
+        mcpCaller
+      )
+    ).toThrow('invalid_binding')
+  })
+
   it.each([
     ['service', value => ({ ...value, domain: { ...value.domain, service: 'mcp-host' } })],
     [

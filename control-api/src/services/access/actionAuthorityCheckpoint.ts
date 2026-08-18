@@ -93,7 +93,10 @@ export function parseActionAuthorityCheckpointRequest(
   const domainResource = parseResource(value.domain.resource)
   if (
     resourceIdentityKey(resource) !== resourceIdentityKey(domainResource) ||
-    JSON.stringify(resource) !== JSON.stringify(domainResource)
+    JSON.stringify(resource) !== JSON.stringify(domainResource) ||
+    (caller.permittedResource !== undefined &&
+      (resource.type !== caller.permittedResource.type ||
+        resource.logicalId !== caller.permittedResource.logicalId))
   ) {
     throw new Error('invalid_binding')
   }

@@ -24,9 +24,14 @@ export function validateRpcRequest(input: unknown): JsonRpcRequest | null {
 export async function forwardRpcToServer(
   server: ResolvedServerConnection,
   rpcRequest: JsonRpcRequest,
-  userId?: string
+  userId?: string,
+  options: {
+    authorityCacheKey?: string
+    beforeRetry?: () => Promise<void>
+  } = {}
 ): Promise<JsonRpcSuccess | JsonRpcError> {
-  const cacheKey = userId ? `${userId}::${server.url}` : server.url
+  const cacheIdentity = options.authorityCacheKey ?? userId
+  const cacheKey = cacheIdentity ? `${cacheIdentity}::${server.url}` : server.url
   function createBaseHeaders(): Record<string, string> {
     return {
       'content-type': 'application/json',
@@ -143,6 +148,7 @@ export async function forwardRpcToServer(
           mcpSessionByServerUrl.delete(cacheKey)
         }
         await initializeSessionIfNeeded(headers)
+        await options.beforeRetry?.()
         return doForward(false)
       }
       return {
