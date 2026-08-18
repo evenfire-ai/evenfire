@@ -22,6 +22,8 @@ export interface LlmLaneHookDeps {
   /** Per-point response caps (spec §5/§8.1). Defaults applied in `createHookFetcher`. */
   maxOutputBytes?: number
   maxRewriteBytes?: number
+  /** Per-call hook deadline (§5 `limits.maxHookTimeoutMs`). Default in `createHookFetcher`. */
+  timeoutMs?: number
 }
 
 export function buildLlmLaneHooks(
@@ -41,6 +43,7 @@ export function buildLlmLaneHooks(
         fetchImpl: deps.fetchImpl,
         maxOutputBytes: deps.maxOutputBytes,
         maxRewriteBytes: deps.maxRewriteBytes,
+        timeoutMs: deps.timeoutMs,
       })
     )
     if (d.lifecyclePoints.includes('pre_call')) preCall.push(hook)
