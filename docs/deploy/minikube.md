@@ -289,10 +289,18 @@ Desktop App
 
 The committed Minikube overlay enables GFS Upload v2 through
 `patches/gfs-upload-v2.yaml`. It patches the host-context-controller, which is
-the owner of generated GFSC workload configuration, with the exact release
-contract: 200 MiB files, preferred 8 MiB / maximum 16 MiB parts, four parts per
-session, sixteen global part streams, and the documented TTL, admission, and
-free-space limits. `minikube-ghcr`, `minikube-no-uis`, and
+the owner of generated GFSC workload configuration, with the release defaults:
+a 200 MiB product file limit, preferred 8 MiB / maximum 16 MiB parts, four parts
+per session, sixteen global part streams, and the documented TTL, admission,
+and free-space limits. Operators may set
+`CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES` from one byte through the
+compiled 1 GiB protocol maximum. HCC forwards the value as
+`GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES`; GFSC advertises and enforces that exact
+value for new sessions. Invalid, non-integer, or above-protocol values make
+GFSC fail startup rather than being clamped. The deprecated
+`CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES` alias may remain during rollout,
+but when both names are present they must carry the same value. `minikube-ghcr`,
+`minikube-no-uis`, and
 `minikube-no-uis-ghcr` inherit the same patch from the base Minikube overlay.
 
 The `GlobalFileSystem` resource intentionally does not carry
@@ -306,6 +314,14 @@ Validate the committed profile without touching a cluster:
 ```bash
 bash scripts/tests/test-minikube-gfs-upload-v2-profile.sh
 ```
+
+The opt-in packaged runtime journeys use the same built Desktop and deployed
+Control UI bundle while changing the owned HCC setting from 100 MiB to 300 MiB.
+They verify exact-cap acceptance, cap-plus-one rejection, and a 250 MiB upload
+after the increase. Set `GFS_UPLOAD_V2_RUNTIME_LIMIT_E2E=1` only after the
+branch-owned profile has passed pre-gate sync. The harness refuses an unowned,
+dirty, stale, or production-like context and restores the prior product limit
+in a `finally` block.
 
 ### Required Configuration Per Service
 

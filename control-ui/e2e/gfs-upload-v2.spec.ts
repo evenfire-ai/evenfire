@@ -15,8 +15,10 @@ import {
   removeDiskUploadFixture,
 } from '../../tests/e2e/gfsUploadV2Fixtures'
 import {
+  readGfsUploadProductMaxBytes,
   readGfsUploadV2Enabled,
   restartGfsWriter,
+  setGfsUploadProductMaxBytes,
   setGfsUploadV2Enabled,
 } from '../../tests/e2e/gfsUploadV2Runtime'
 import { loginControlUi, openGlobalFileSystemFromSidebar } from './support/gfs-control-ui-session'
@@ -110,6 +112,11 @@ function isSuccessfulResponse(response: import('@playwright/test').Response): bo
   return response.status() >= 200 && response.status() < 300
 }
 
+function formattedControlUiBytes(byteLength: number): string {
+  const mebibytes = byteLength / (1024 * 1024)
+  return `${mebibytes >= 10 ? mebibytes.toFixed(0) : mebibytes.toFixed(1)} MB`
+}
+
 function uploadIdFromEnvelope(body: unknown): string {
   if (!body || typeof body !== 'object' || Array.isArray(body))
     throw new Error('upload response is not an object')
@@ -168,7 +175,7 @@ async function exerciseCreate(
 
     const row = current.getByRole('listitem').filter({ hasText: source.fileName })
     await expect(row).toBeVisible({ timeout: 60_000 })
-    await expect(row).toContainText('200 MB')
+    await expect(row).toContainText(formattedControlUiBytes(byteLength))
     await expect
       .poll(
         () =>
@@ -250,7 +257,7 @@ async function exerciseReplace(
         version: (before?.version ?? 0) + 1,
         deleted: false,
       })
-    await expect(row).toContainText('200 MB')
+    await expect(row).toContainText(formattedControlUiBytes(byteLength))
     const downloadPromise = page.waitForEvent('download')
     await row.getByRole('button', { name: `Download ${fixture.fileName}` }).click()
     const downloaded = await hashDownload(await downloadPromise)
@@ -367,6 +374,58 @@ test.describe('GFS Upload v2 — Control UI large-upload project', () => {
   })
 })
 
+test.describe('GFS Upload v2 — Control UI runtime product policy', () => {
+  test.skip(
+    process.env.GFS_UPLOAD_V2_RUNTIME_LIMIT_E2E !== '1',
+    'Set GFS_UPLOAD_V2_RUNTIME_LIMIT_E2E=1 only on an owned non-production dev host.'
+  )
+  test.setTimeout(75 * 60_000)
+
+  test('uses 100 MiB then 300 MiB without rebuilding the deployed UI bundle', async ({ page }) => {
+    const previous = await readGfsUploadProductMaxBytes()
+    const lowerMax = 100 * 1024 * 1024
+    const raisedMax = 300 * 1024 * 1024
+    const rejectedFixtureName = uniqueGfsFixtureName('e2e-gfs-v2-runtime-cap-ui')
+    const rejectedFixture = seedGfsDirectoryFixture(rejectedFixtureName)
+    const rejectedSource = await createOversizedDiskUploadFixture(
+      '.parquet',
+      rejectedFixtureName,
+      lowerMax
+    )
+    try {
+      await setGfsUploadProductMaxBytes(lowerMax)
+      await exerciseCreate(page, lowerMax)
+
+      await openWritableFolder(page, rejectedFixture.name)
+      await page.getByRole('button', { name: 'Upload file', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Upload file' })
+      await dialog.getByLabel('Choose file to upload').setInputFiles(rejectedSource.filePath)
+      await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+      await expect(
+        page.getByRole('status').filter({ hasText: `GFS writer limit is ${lowerMax} bytes` })
+      ).toBeVisible({ timeout: 30_000 })
+      expect(
+        await getGfsChildResourceSummary({
+          parentResourceId: rejectedFixture.resourceId,
+          name: rejectedSource.fileName,
+        })
+      ).toBeNull()
+
+      await page.reload()
+      await setGfsUploadProductMaxBytes(raisedMax)
+      await exerciseCreate(page, 250 * 1024 * 1024)
+    } finally {
+      try {
+        await setGfsUploadProductMaxBytes(previous)
+      } finally {
+        await removeDiskUploadFixture(rejectedSource)
+        cleanupGfsFixture(rejectedFixtureName)
+        assertGfsFixtureCleaned(rejectedFixtureName)
+      }
+    }
+  })
+})
+
 test.describe('GFS Upload v2 — approved negative Control UI journeys', () => {
   test.skip(
     process.env.GFS_UPLOAD_V2_NEGATIVE_E2E !== '1',
@@ -385,7 +444,7 @@ test.describe('GFS Upload v2 — approved negative Control UI journeys', () => {
       await dialog.getByLabel('Choose file to upload').setInputFiles(source.filePath)
       await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
       await expect(
-        page.getByRole('status').filter({ hasText: 'GFS uploads are limited to 200 MB per file.' })
+        page.getByRole('status').filter({ hasText: 'GFS writer limit is 209715200 bytes' })
       ).toBeVisible({ timeout: 15_000 })
       await expect
         .poll(

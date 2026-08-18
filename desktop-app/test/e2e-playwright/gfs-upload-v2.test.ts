@@ -19,9 +19,11 @@ import {
 } from '../../../tests/e2e/gfsUploadV2Fixtures'
 import {
   countGfsCreateSessions,
+  readGfsUploadProductMaxBytes,
   readGfsUploadV2Enabled,
   restartGfsWriter,
   revokeGfsUserWriteGrant,
+  setGfsUploadProductMaxBytes,
   setGfsUploadV2Enabled,
 } from '../../../tests/e2e/gfsUploadV2Runtime'
 import { test } from './fixtures'
@@ -314,7 +316,8 @@ async function exerciseCreate(page: Page, byteLength: number): Promise<void> {
     await page.getByRole('button', { name: 'Close manage dialog' }).click()
     const resource = fileResourceControls(browser, source.fileName)
     await expect(resource.name).toBeVisible({ timeout: 60_000 })
-    await expect(browser.getByText(/^200\.0 MB · v\d+$/)).toBeVisible()
+    const displayedMebibytes = (byteLength / (1024 * 1024)).toFixed(1)
+    await expect(browser.getByText(new RegExp(`^${displayedMebibytes} MB · v\\d+$`))).toBeVisible()
     await expect
       .poll(
         () =>
@@ -388,7 +391,8 @@ async function exerciseReplace(page: Page, byteLength: number): Promise<void> {
         deleted: false,
       })
     await expect(resource.name).toBeVisible({ timeout: 60_000 })
-    await expect(browser.getByText(/^200\.0 MB · v\d+$/)).toBeVisible()
+    const displayedMebibytes = (byteLength / (1024 * 1024)).toFixed(1)
+    await expect(browser.getByText(new RegExp(`^${displayedMebibytes} MB · v\\d+$`))).toBeVisible()
     await expectGfsDownload(page, resource.download, fixture.fileName, {
       bytes: byteLength,
       sha256: source.sha256,
@@ -422,6 +426,63 @@ test.describe('GFS Upload v2 — packaged Desktop project', () => {
   }
 })
 
+test.describe('GFS Upload v2 — packaged Desktop runtime product policy', () => {
+  test.skip(
+    process.env.GFS_UPLOAD_V2_RUNTIME_LIMIT_E2E !== '1',
+    'Set GFS_UPLOAD_V2_RUNTIME_LIMIT_E2E=1 only on an owned non-production dev host.'
+  )
+  test.setTimeout(75 * 60_000)
+
+  test('uses 100 MiB then 300 MiB without rebuilding the packaged Desktop', async ({ appPage }) => {
+    const previous = await readGfsUploadProductMaxBytes()
+    const lowerMax = 100 * 1024 * 1024
+    const raisedMax = 300 * 1024 * 1024
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-runtime-cap-desktop')
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    await seedGfsGrant({
+      resourceId: fixture.resourceId,
+      subjectType: 'user',
+      subjectId: getE2EUserId(),
+      permissions: ['read', 'write', 'delete'],
+      inherit: true,
+      grantedBy: 'e2e:gfs-upload-v2-runtime-cap',
+    })
+    const rejectedSource = await createOversizedDiskUploadFixture('.parquet', fixtureName, lowerMax)
+    try {
+      await setGfsUploadProductMaxBytes(lowerMax)
+      await exerciseCreate(appPage, lowerMax)
+
+      const { browser, manageDialog } = await openFolder(appPage, fixture.name)
+      await selectFileThroughVisibleAction(
+        appPage,
+        manageDialog.getByRole('button').filter({ hasText: /^Upload file$/ }),
+        rejectedSource.filePath
+      )
+      await expect(
+        appPage.getByRole('alert').filter({ hasText: `GFS writer limit is ${lowerMax} bytes` })
+      ).toBeVisible({ timeout: 30_000 })
+      expect(
+        countGfsCreateSessions(fixture.resourceId, rejectedSource.fileName, getE2EUserId())
+      ).toBe(0)
+      await expect(
+        browser.getByRole('button', { name: rejectedSource.fileName, exact: true })
+      ).toHaveCount(0)
+
+      await appPage.reload()
+      await setGfsUploadProductMaxBytes(raisedMax)
+      await exerciseCreate(appPage, 250 * 1024 * 1024)
+    } finally {
+      try {
+        await setGfsUploadProductMaxBytes(previous)
+      } finally {
+        await removeDiskUploadFixture(rejectedSource)
+        cleanupGfsFixture(fixtureName)
+        assertGfsFixtureCleaned(fixtureName)
+      }
+    }
+  })
+})
+
 test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
   test.skip(
     process.env.GFS_UPLOAD_V2_NEGATIVE_E2E !== '1',
@@ -449,9 +510,7 @@ test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
         source.filePath
       )
       await expect(
-        appPage
-          .getByRole('alert')
-          .filter({ hasText: 'GFS uploads are limited to 200 MB per file.' })
+        appPage.getByRole('alert').filter({ hasText: 'GFS writer limit is 209715200 bytes' })
       ).toBeVisible({ timeout: 15_000 })
       await expect
         .poll(

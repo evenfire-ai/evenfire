@@ -5,6 +5,9 @@ import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { firstDataLine, kubectlContext, runControlPostgresSql, sqlLiteral } from './gfsFixtureCore'
+import { GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES } from './gfsUploadV2Fixtures'
+
+export { GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES } from './gfsUploadV2Fixtures'
 
 const execFileAsync = promisify(execFile)
 const HCC_NAMESPACE = 'control-plane'
@@ -14,6 +17,9 @@ const GFS_WRITER_DEPLOYMENT = 'gfsc-writer'
 const GFS_READER_DEPLOYMENT = 'gfsc-reader'
 const GFS_V2_HCC_ENV = 'CONTEXT_MAPPER_GFSC_UPLOAD_V2_ENABLED'
 const GFS_V2_WRITER_ENV = 'GFS_UPLOAD_V2_ENABLED'
+const GFS_PRODUCT_MAX_HCC_ENV = 'CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES'
+const GFS_PRODUCT_MAX_HCC_ALIAS_ENV = 'CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES'
+const GFS_PRODUCT_MAX_WRITER_ENV = 'GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES'
 const BRANCH_CONTEXT_RE = /^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/
 
 export interface GfsRuntimeImageMarker {
@@ -228,6 +234,19 @@ async function renderedWriterFlag(): Promise<string> {
   ).trim()
 }
 
+async function renderedWriterProductMax(): Promise<string> {
+  return (
+    await kubectl([
+      '-n',
+      GFS_NAMESPACE,
+      'get',
+      `deployment/${GFS_WRITER_DEPLOYMENT}`,
+      '-o',
+      `jsonpath={range .spec.template.spec.containers[*]}{range .env[?(@.name=="${GFS_PRODUCT_MAX_WRITER_ENV}")]}{.value}{end}{end}`,
+    ])
+  ).trim()
+}
+
 async function waitForRenderedWriterFlag(expected: boolean): Promise<void> {
   const expectedValue = String(expected)
   const deadline = Date.now() + 240_000
@@ -240,6 +259,33 @@ async function waitForRenderedWriterFlag(expected: boolean): Promise<void> {
   throw new Error(
     `GFS Upload v2 runtime flag did not converge to ${expectedValue}; observed ${lastValue || '<empty>'}`
   )
+}
+
+async function waitForRenderedWriterProductMax(expected: number): Promise<void> {
+  const expectedValue = String(expected)
+  const deadline = Date.now() + 240_000
+  let lastValue = ''
+  while (Date.now() < deadline) {
+    lastValue = await renderedWriterProductMax()
+    if (lastValue === expectedValue) return
+    await new Promise(resolve => setTimeout(resolve, 1_000))
+  }
+  throw new Error(
+    `GFS Upload v2 product maximum did not converge to ${expectedValue}; observed ${lastValue || '<empty>'}`
+  )
+}
+
+export function validateGfsUploadProductMaxBytes(value: unknown): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
+  ) {
+    throw new Error(
+      `invalid GFS Upload v2 product maximum; expected an integer from 1 through ${GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES}`
+    )
+  }
+  return value as number
 }
 
 async function waitForDeployment(deployment: string): Promise<void> {
@@ -288,6 +334,46 @@ export async function readGfsUploadV2Enabled(): Promise<boolean> {
     )
   }
   return value === 'true'
+}
+
+/**
+ * Changes the HCC-owned product policy and waits for the generated writer and
+ * reader to converge. The caller must restore the original value in a finally
+ * block. This changes policy only; the compiled protocol geometry is untouched.
+ */
+export async function setGfsUploadProductMaxBytes(productMaxBytes: number): Promise<void> {
+  const validated = validateGfsUploadProductMaxBytes(productMaxBytes)
+  await assertOwnedRuntimeContext()
+  await kubectl([
+    '-n',
+    HCC_NAMESPACE,
+    'set',
+    'env',
+    `deployment/${HCC_DEPLOYMENT}`,
+    `${GFS_PRODUCT_MAX_HCC_ENV}=${String(validated)}`,
+    `${GFS_PRODUCT_MAX_HCC_ALIAS_ENV}=${String(validated)}`,
+  ])
+  await kubectl([
+    '-n',
+    HCC_NAMESPACE,
+    'rollout',
+    'status',
+    `deployment/${HCC_DEPLOYMENT}`,
+    '--timeout=240s',
+  ])
+  await waitForRenderedWriterProductMax(validated)
+  await waitForDeployment(GFS_WRITER_DEPLOYMENT)
+  await waitForDeployment(GFS_READER_DEPLOYMENT)
+}
+
+export async function readGfsUploadProductMaxBytes(): Promise<number> {
+  const value = await renderedWriterProductMax()
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new Error(
+      `GFS writer rendered an invalid ${GFS_PRODUCT_MAX_WRITER_ENV} value: ${value || '<empty>'}`
+    )
+  }
+  return validateGfsUploadProductMaxBytes(Number(value))
 }
 
 export async function restartGfsWriter(): Promise<void> {
