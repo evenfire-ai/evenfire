@@ -908,6 +908,10 @@ export async function preDeployMcpServers(
  * pre-deployed McpServer CRDs.
  *
  * Polls each McpServer CR until the annotation appears or timeout.
+ * The ack is honored only when HCC's stamped
+ * `clerum.io/network-ready-observed-generation` matches the current
+ * `metadata.generation` (Issue #408) — a stale ack from a prior generation
+ * does not satisfy the gate. A non-numeric generation is tolerated as fresh.
  * Returns true if all are ready, false if timeout.
  */
 export async function waitForNetworkReady(
