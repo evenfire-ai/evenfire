@@ -418,6 +418,10 @@ export async function handleActivityRoute(
     const caller = getRuntimeCallerContext(req)
     const visibility =
       caller?.actionContextV2?.operationId === 'host.activity.read_all' ? 'host_all' : 'caller_path'
+    if (req.query.visibility === 'host_all' && visibility !== 'host_all') {
+      json(res, 403, { error: 'Host-wide activity requires explicit current path authority' })
+      return
+    }
     if (
       rejectV2TargetMismatch(req, res, {
         hostRef: caller?.actionContextV2?.target?.hostRef,
@@ -467,6 +471,10 @@ export async function handleActivityStreamRoute(
   const caller = getRuntimeCallerContext(req)
   const visibility =
     caller?.actionContextV2?.operationId === 'host.activity.read_all' ? 'host_all' : 'caller_path'
+  if (req.query.visibility === 'host_all' && visibility !== 'host_all') {
+    json(res, 403, { error: 'Host-wide activity requires explicit current path authority' })
+    return
+  }
   if (
     rejectV2TargetMismatch(req, res, {
       hostRef: caller?.actionContextV2?.target?.hostRef,
