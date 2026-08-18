@@ -129,6 +129,7 @@ describe('GFS_UPLOAD_V2 strict disabled contract', () => {
   })
 
   it.each([
+    ['one byte', 1],
     ['100 MiB', 100 * 1024 * 1024],
     ['200 MiB', 200 * 1024 * 1024],
     ['250 MiB', 250 * 1024 * 1024],
@@ -140,7 +141,21 @@ describe('GFS_UPLOAD_V2 strict disabled contract', () => {
     expect(loadConfig().uploadV2.productMaxFileBytes).toBe(bytes)
   })
 
-  it.each(['', '0', '-1', '1.5', 'NaN', 'Infinity', '1e3', '9007199254740992'])(
+  it.each([
+    '',
+    '0',
+    '-1',
+    '1.5',
+    'NaN',
+    'Infinity',
+    '1e3',
+    '01',
+    '+1',
+    ' 1',
+    '1 ',
+    '9007199254740992',
+    '1073741825',
+  ])(
     'rejects invalid runtime product limit %s',
     raw => {
       vi.stubEnv('GFS_DEV_MODE', 'true')
