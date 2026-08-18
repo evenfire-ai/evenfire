@@ -39,9 +39,11 @@ if (adminUrl && throwawayUrl) {
 const NS = 'sandbox-recipes'
 const RECIPE = 'notify-recipe'
 // upsertGrant records the acting operator as permission-event `operator_user_id`,
-// a UUID column with a FK to users(id). A real DB rejects a non-UUID like
-// 'operator-1' (22P02) and would reject a non-existent UUID (FK), so seed a real
-// users row and pass its id as the operatorSub.
+// a UUID column: a real DB rejects a non-UUID like 'operator-1' with 22P02
+// (invalid input syntax for type uuid) — the failure the mocked DB-less lane
+// never saw. Pass a real UUID. The write target here (administrative_events)
+// has no FK, but sibling operator columns on other audit tables do reference
+// users(id), so seed a real users row defensively and pass its id as operatorSub.
 const OPERATOR_ID = randomUUID()
 
 describeRealPostgres(
@@ -61,8 +63,8 @@ describeRealPostgres(
       await db.initDb()
       sdk = await import('../src/services/pluginWorkloadSdkDb.js')
 
-      // Seed the acting operator so upsertGrant's permission-event
-      // operator_user_id FK (→ users(id)) is satisfied on a real database.
+      // Seed the acting operator (defensive: keeps any FK'd operator_user_id
+      // column referencing users(id) satisfied on a real database).
       await db.pool.query(`INSERT INTO users (id, email, name) VALUES ($1, $2, $3)`, [
         OPERATOR_ID,
         `sdk-notify-operator-${OPERATOR_ID}@example.test`,
