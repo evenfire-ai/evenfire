@@ -149,6 +149,89 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
     )
   })
 
+  it('Issue #408: stamps the observed generation alongside the network-ready ack', async () => {
+    const server = {
+      ...makeServer({ name: 'stdio-mcp', managed: true }),
+      generation: 3,
+      annotations: { 'clerum.io/pre-deploy': 'true' },
+    }
+
+    await reconciler.reconcile(server)
+
+    expect(customApi.patchNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plural: 'mcpservers',
+        name: 'stdio-mcp',
+        body: {
+          metadata: {
+            annotations: {
+              'clerum.io/network-ready': 'true',
+              'clerum.io/network-ready-observed-generation': '3',
+            },
+          },
+        },
+      }),
+      expect.objectContaining({ middleware: expect.any(Array) })
+    )
+  })
+
+  it('Issue #408: re-acks when the stamped generation is stale (spec changed since last ack)', async () => {
+    const server = {
+      ...makeServer({ name: 'stdio-mcp', managed: true }),
+      generation: 3,
+      annotations: {
+        'clerum.io/pre-deploy': 'true',
+        'clerum.io/network-ready': 'true',
+        'clerum.io/network-ready-observed-generation': '2',
+      },
+    }
+
+    await reconciler.reconcile(server)
+
+    // Old guard (network-ready !== 'true') would skip the patch; the fix must re-ack
+    // for the current generation, re-stamping observed-generation to '3'.
+    expect(customApi.patchNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plural: 'mcpservers',
+        name: 'stdio-mcp',
+        body: {
+          metadata: {
+            annotations: {
+              'clerum.io/network-ready': 'true',
+              'clerum.io/network-ready-observed-generation': '3',
+            },
+          },
+        },
+      }),
+      expect.objectContaining({ middleware: expect.any(Array) })
+    )
+  })
+
+  it('Issue #408: does NOT re-ack when the stamped generation already matches (no write storm)', async () => {
+    const server = {
+      ...makeServer({ name: 'stdio-mcp', managed: true }),
+      generation: 3,
+      annotations: {
+        'clerum.io/pre-deploy': 'true',
+        'clerum.io/network-ready': 'true',
+        'clerum.io/network-ready-observed-generation': '3',
+      },
+    }
+
+    await reconciler.reconcile(server)
+
+    expect(customApi.patchNamespacedCustomObject).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({
+            annotations: expect.objectContaining({ 'clerum.io/network-ready': 'true' }),
+          }),
+        }),
+      }),
+      expect.anything()
+    )
+  })
+
   it('should create Deployment when managed: undefined (default: true)', async () => {
     const server = makeServer({ name: 'mongo-mcp' })
     await reconciler.reconcile(server)

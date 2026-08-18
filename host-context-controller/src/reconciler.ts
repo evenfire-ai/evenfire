@@ -74,6 +74,9 @@ type McpServerReconcilerDeps = {
 // G2: Pre-deploy handshake constants
 const PRE_DEPLOY_ANNOTATION = 'clerum.io/pre-deploy'
 const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
+// Issue #408: stamp the generation observed when acking so WRC can reject a stale
+// ack carried over from a previous generation.
+const NETWORK_READY_GENERATION_ANNOTATION = 'clerum.io/network-ready-observed-generation'
 
 // Issue #223: sha256 of the envSecret content, carried on the POD TEMPLATE (not
 // the Deployment object) so that changing it changes the pod template hash and
@@ -1499,6 +1502,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           metadata: {
             annotations: {
               [NETWORK_READY_ANNOTATION]: 'true',
+              // Issue #408: stamp the acked generation so WRC's waitForNetworkReady
+              // can reject a stale ack from a previous generation.
+              ...(typeof server.generation === 'number'
+                ? { [NETWORK_READY_GENERATION_ANNOTATION]: String(server.generation) }
+                : {}),
             },
           },
         },
@@ -1930,7 +1938,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // NetworkPolicies are in place and workload can proceed.
     if (
       server.annotations?.[PRE_DEPLOY_ANNOTATION] === 'true' &&
-      server.annotations?.[NETWORK_READY_ANNOTATION] !== 'true'
+      (server.annotations?.[NETWORK_READY_ANNOTATION] !== 'true' ||
+        // Issue #408: re-ack when the stamped generation is stale (spec changed since
+        // the last ack). A non-numeric generation keeps the legacy behavior.
+        (typeof server.generation === 'number' &&
+          server.annotations?.[NETWORK_READY_GENERATION_ANNOTATION] !== String(server.generation)))
     ) {
       try {
         await this.setNetworkReadyAnnotation(server)
