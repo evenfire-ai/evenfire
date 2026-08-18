@@ -86,7 +86,7 @@ import {
   ensureReporter,
   progressReporterRegistry,
 } from '../progress/sseProgressReporter.js'
-import type { Task, TaskError } from '../queue/types'
+import type { Task, TaskError, TaskSource } from '../queue/types'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
@@ -122,6 +122,24 @@ export function resolveTaskSessionKey(task: Task): string {
       threadId: msg?.threadId,
     }
   )
+}
+
+/**
+ * §6.3 — is there a human who can answer a guardrail `ask` in this run?
+ *
+ * Only `channel` tasks have one: a person is on the other end of the message that
+ * started them (including channelType `rpc`, the Desktop App). `cron` fires on a
+ * schedule and `internal` is a system-generated task with no requester, so an
+ * `ask` there would suspend into `pending_approval` with nobody able to respond —
+ * the task hangs. Unattended turns that into the fail-safe deny instead.
+ *
+ * Deliberately an allowlist of the attended source, not a denylist of the
+ * autonomous ones: a source added later defaults to "assume nobody is watching",
+ * which fails closed. The previous `source === 'cron' ? ... : 'interactive'` had
+ * the opposite default and already mislabelled `internal`.
+ */
+export function executionModeForSource(source: TaskSource): 'interactive' | 'unattended' {
+  return source === 'channel' ? 'interactive' : 'unattended'
 }
 
 export interface TaskExecutorDeps {
@@ -1198,9 +1216,8 @@ export class TaskExecutor {
     // Undefined when no rules are configured (no-config compatibility, §5); a
     // malformed set throws here (fail-closed admission, §3/§5).
     loopConfig.guardrails = buildToolLaneGuardrail(this.deps.guardrailsConfig)
-    // §6.3: cron/autonomous tasks have no human to answer an approval, so a
-    // guardrail `ask` there fails safe to deny.
-    loopConfig.executionMode = this.task.source === 'cron' ? 'unattended' : 'interactive'
+    // §6.3: a run with no human to answer an approval must fail safe to deny.
+    loopConfig.executionMode = executionModeForSource(this.task.source)
     loopConfig.skipContextManager =
       opts?.skipContextManager ?? this.conversation?.pending_approval !== undefined
     // T1.5 — pass the storage + taskId down so `executeSingleTool` can persist
