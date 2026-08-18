@@ -1,11 +1,17 @@
 import type { NextFunction, Request, Response } from 'express'
+import { config } from '../config.js'
 import { requireInternalToken } from './internalServiceAuth.js'
+import { requireMcpHostJwt } from './mcpHostJwtAuth.js'
 
-export type ActionCheckpointCallerService = 'rpc-proxy'
+export type ActionCheckpointCallerService = 'rpc-proxy' | 'mcp-host'
 
 export type ActionCheckpointCallerIdentity = Readonly<{
   service: ActionCheckpointCallerService
-  trustPlane: 'internal_service_token'
+  trustPlane: 'internal_service_token' | 'mcp_host_runtime_jwt'
+  permittedResource?: Readonly<{
+    type: 'host' | 'workflow_recipe'
+    logicalId: string
+  }>
 }>
 
 declare global {
@@ -18,13 +24,47 @@ declare global {
 
 type CallerAuthenticator = Readonly<{
   service: ActionCheckpointCallerService
+  matches(req: Request): boolean
   authenticate(req: Request, res: Response, next: NextFunction): void
+  identity(req: Request): ActionCheckpointCallerIdentity | null
 }>
 
 function rpcProxyAuthenticator(): CallerAuthenticator {
   return Object.freeze({
     service: 'rpc-proxy',
+    matches: req => String(req.header('x-service-token') || '').trim() === 'rpc-proxy',
     authenticate: requireInternalToken,
+    identity: req =>
+      req.internalService?.name === 'rpc-proxy'
+        ? Object.freeze({ service: 'rpc-proxy', trustPlane: 'internal_service_token' })
+        : null,
+  })
+}
+
+function mcpHostAuthenticator(): CallerAuthenticator {
+  return Object.freeze({
+    service: 'mcp-host',
+    matches: req => !String(req.header('x-service-token') || '').trim(),
+    authenticate: requireMcpHostJwt,
+    identity: req => {
+      const claims = req.mcpHostJwt
+      const hostRef = claims?.hostRefs[0]?.trim()
+      if (!claims || claims.hostRefs.length !== 1 || !hostRef) return null
+      const permittedResource =
+        claims.recipeNamespace === config.hostsNamespace
+          ? !hostRef.includes('/')
+            ? { type: 'host' as const, logicalId: `${config.hostsNamespace}/${hostRef}` }
+            : null
+          : hostRef === `${claims.recipeNamespace}/${claims.recipeName}`
+            ? { type: 'workflow_recipe' as const, logicalId: hostRef }
+            : null
+      if (!permittedResource) return null
+      return Object.freeze({
+        service: 'mcp-host',
+        trustPlane: 'mcp_host_runtime_jwt',
+        permittedResource: Object.freeze(permittedResource),
+      })
+    },
   })
 }
 
@@ -33,6 +73,7 @@ function rpcProxyAuthenticator(): CallerAuthenticator {
 // checkpoint-wide credential or treats service claims as user authority.
 const callerAuthenticators: readonly CallerAuthenticator[] = Object.freeze([
   rpcProxyAuthenticator(),
+  mcpHostAuthenticator(),
 ])
 
 export function requireActionCheckpointCaller(
@@ -40,21 +81,18 @@ export function requireActionCheckpointCaller(
   res: Response,
   next: NextFunction
 ): void {
-  const requestedService = String(req.header('x-service-token') || '').trim()
-  const authenticator = callerAuthenticators.find(item => item.service === requestedService)
+  const authenticator = callerAuthenticators.find(item => item.matches(req))
   if (!authenticator) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
   authenticator.authenticate(req, res, () => {
-    if (req.internalService?.name !== authenticator.service) {
+    const identity = authenticator.identity(req)
+    if (!identity) {
       res.status(401).json({ error: 'Unauthorized' })
       return
     }
-    req.actionCheckpointCaller = Object.freeze({
-      service: authenticator.service,
-      trustPlane: 'internal_service_token',
-    })
+    req.actionCheckpointCaller = identity
     next()
   })
 }

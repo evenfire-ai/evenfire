@@ -7,6 +7,7 @@ import {
   requireScope,
 } from '../middleware/auth.js'
 import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
+import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
 import {
   UpstreamHostError,
   forwardHostStatus,
@@ -93,11 +94,18 @@ export function createRpcHostStatusStreamRouter(): Router {
           return
         }
 
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 
