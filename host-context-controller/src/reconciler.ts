@@ -13,6 +13,11 @@ import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
 import { createHash } from 'crypto'
 import { classifyPluginImage } from '@clerum/image-policy'
+import {
+  NETWORK_READY_ANNOTATION,
+  NETWORK_READY_GENERATION_ANNOTATION,
+  PRE_DEPLOY_ANNOTATION,
+} from '@clerum/network-policy-core'
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
@@ -71,12 +76,10 @@ type McpServerReconcilerDeps = {
   networkingApi?: k8s.NetworkingV1Api
 }
 
-// G2: Pre-deploy handshake constants
-const PRE_DEPLOY_ANNOTATION = 'clerum.io/pre-deploy'
-const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
-// Issue #408: stamp the generation observed when acking so WRC can reject a stale
-// ack carried over from a previous generation.
-const NETWORK_READY_GENERATION_ANNOTATION = 'clerum.io/network-ready-observed-generation'
+// G2: Pre-deploy handshake constants — imported from @clerum/network-policy-core
+// (single source of truth shared with WRC; a divergence is a compile error rather
+// than a silent 30s fail-open timeout). clerum.io/network-ready-observed-generation
+// (Issue #408) is the generation HCC stamps when acking, so WRC can reject a stale ack.
 
 // Issue #223: sha256 of the envSecret content, carried on the POD TEMPLATE (not
 // the Deployment object) so that changing it changes the pod template hash and

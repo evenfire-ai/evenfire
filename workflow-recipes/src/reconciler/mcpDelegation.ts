@@ -11,6 +11,11 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import {
+  NETWORK_READY_ANNOTATION,
+  NETWORK_READY_GENERATION_ANNOTATION,
+  PRE_DEPLOY_ANNOTATION,
+} from '@clerum/network-policy-core'
+import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   isPlatformRegistryImage,
 } from '@clerum/workflow-runtime-core'
@@ -787,11 +792,12 @@ export async function ensureRecipeContext(
  *
  * See: PHASE-9-PRE-PRODUCTION-HARDENING.md §GAP 14, Option C
  */
-export const PRE_DEPLOY_ANNOTATION = 'clerum.io/pre-deploy'
-export const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
-// Issue #408: HCC stamps the McpServer generation it observed when acking network
-// readiness, so WRC can reject a stale ack carried over from a prior generation.
-export const NETWORK_READY_GENERATION_ANNOTATION = 'clerum.io/network-ready-observed-generation'
+// Handshake annotation keys now live in @clerum/network-policy-core (single source of
+// truth shared with HCC — a divergence is a compile error, not a silent 30s timeout).
+// Re-exported here so existing WRC consumers keep importing them from this module.
+// clerum.io/network-ready-observed-generation (Issue #408) is the generation HCC
+// stamps when acking, so WRC can reject a stale ack from a prior generation.
+export { PRE_DEPLOY_ANNOTATION, NETWORK_READY_ANNOTATION, NETWORK_READY_GENERATION_ANNOTATION }
 const NETWORK_READY_POLL_INTERVAL_MS = 1_000
 const NETWORK_READY_TIMEOUT_MS = 30_000
 

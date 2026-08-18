@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { PRE_DEPLOY_ANNOTATION } from '@clerum/network-policy-core'
 
 /**
  * Annotation that records a hash of the recipe-derived manifest WRC last applied
@@ -34,10 +35,11 @@ export const SPEC_HASH_ANNOTATION = 'clerum.io/spec-hash'
  * The annotation intentionally PERSISTS on the live object (the replace merge
  * keeps it): HCC's network-ready re-ack guard keys off `pre-deploy === "true"`
  * (host-context-controller/src/reconciler.ts), so it must not be stripped from
- * the object — only from the hash. Keep this in sync with
- * `PRE_DEPLOY_ANNOTATION` in ./mcpDelegation (asserted by specHash.test.ts).
+ * the object — only from the hash. The key comes from the shared
+ * `@clerum/network-policy-core` constant (the same one WRC and HCC use), so it
+ * cannot drift; specHash.test.ts still pins the exclusion-list membership.
  */
-export const HASH_EXCLUDED_ANNOTATIONS = ['clerum.io/pre-deploy'] as const
+export const HASH_EXCLUDED_ANNOTATIONS = [PRE_DEPLOY_ANNOTATION] as const
 
 // Loose, class-compatible shape: K8s client model classes (V1Deployment, …) have
 // `metadata?: V1ObjectMeta` with `annotations?: { [k]: string }`, so they satisfy
