@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createLlmModel,
   deleteLlmModel,
+  getAdminAttention,
   getLlmModel,
   getLlmModels,
+  getModelInUseImpact,
   isLlmModelConfigMapDeferred,
   updateLlmModel,
 } from '../api'
@@ -122,5 +124,152 @@ describe('llm allowed-models api helpers', () => {
     } catch (err) {
       expect(isLlmModelConfigMapDeferred(err)).toBe(false)
     }
+  })
+})
+
+describe('disable/delete impact gate (?force)', () => {
+  it('updateLlmModel appends ?force=true only when force is set', async () => {
+    // Fresh Response per call — a single mocked body can only be read once.
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => jsonResponse(SAMPLE))
+
+    await updateLlmModel(SAMPLE.id, { enabled: false }, { force: true })
+    const [forcedUrl, forcedInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(forcedInit.method).toBe('PUT')
+    expect(forcedUrl).toContain('force=true')
+
+    await updateLlmModel(SAMPLE.id, { enabled: false })
+    const [plainUrl] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(plainUrl).not.toContain('force')
+  })
+
+  it('deleteLlmModel appends ?force=true only when force is set', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response(null, { status: 204 }))
+
+    await deleteLlmModel(SAMPLE.id, { force: true })
+    const [forcedUrl, forcedInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(forcedInit.method).toBe('DELETE')
+    expect(forcedUrl).toContain('force=true')
+
+    await deleteLlmModel(SAMPLE.id)
+    const [plainUrl] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(plainUrl).not.toContain('force')
+  })
+
+  it('getModelInUseImpact extracts the impact from a 409 model_in_use', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse(
+        {
+          error: 'model_in_use',
+          message: 'still referenced',
+          impact: {
+            provider: 'claude',
+            model: 'claude-haiku-4-5',
+            hostsAffected: [{ namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] }],
+            grantsAffected: [
+              {
+                id: 'g1',
+                recipeNamespace: 'sandbox-recipes',
+                recipeName: 'nightly-summary',
+                capabilityFamily: 'promptBridge',
+              },
+            ],
+          },
+        },
+        409
+      )
+    )
+    try {
+      await deleteLlmModel(SAMPLE.id)
+      expect.unreachable('deleteLlmModel should reject on 409')
+    } catch (err) {
+      const impact = getModelInUseImpact(err)
+      expect(impact).not.toBeNull()
+      expect(impact?.hostsAffected).toEqual([
+        { namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] },
+      ])
+      expect(impact?.grantsAffected[0].capabilityFamily).toBe('promptBridge')
+    }
+  })
+
+  it('getModelInUseImpact returns null for an unrelated 409', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ error: 'conflict', message: 'already exists' }, 409)
+    )
+    try {
+      await deleteLlmModel(SAMPLE.id)
+      expect.unreachable('deleteLlmModel should reject on 409')
+    } catch (err) {
+      expect(getModelInUseImpact(err)).toBeNull()
+    }
+  })
+
+  it('getModelInUseImpact returns null when the impact carries no references', async () => {
+    // A model_in_use 409 whose impact resolves to zero Host/grant references
+    // must fall through to the generic error banner, not open a "still in use"
+    // confirm with an empty reference list (parity with the sibling helpers).
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse(
+        {
+          error: 'model_in_use',
+          message: 'still referenced',
+          impact: {
+            provider: 'claude',
+            model: 'claude-haiku-4-5',
+            hostsAffected: [],
+            grantsAffected: [],
+          },
+        },
+        409
+      )
+    )
+    try {
+      await deleteLlmModel(SAMPLE.id)
+      expect.unreachable('deleteLlmModel should reject on 409')
+    } catch (err) {
+      expect(getModelInUseImpact(err)).toBeNull()
+    }
+  })
+})
+
+describe('getAdminAttention', () => {
+  it('GETs the feed and normalizes items, keeping an unknown kind', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({
+        items: [
+          {
+            kind: 'stale_model_referenced',
+            provider: 'claude',
+            model: 'claude-haiku-4-5',
+            displayName: 'Claude Haiku',
+            hostsAffected: [{ namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] }],
+            grantsAffected: [],
+          },
+          // A kind the current UI does not know: it must survive normalization
+          // (the banner decides what to render) and never throw here.
+          { kind: 'future_kind', provider: 'openai', model: 'gpt-5' },
+          // Malformed item (no model) is dropped rather than tumbling the feed.
+          { kind: 'stale_model_referenced', provider: 'openai' },
+        ],
+        generatedAt: '2026-08-12T00:00:00.000Z',
+      })
+    )
+    const report = await getAdminAttention()
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/api/v1/admin/attention')
+    expect(report.items).toHaveLength(2)
+    expect(report.items[0].displayName).toBe('Claude Haiku')
+    expect(report.items[0].hostsAffected[0].name).toBe('agent-a')
+    expect(report.items[1].kind).toBe('future_kind')
+    expect(report.generatedAt).toBe('2026-08-12T00:00:00.000Z')
+  })
+
+  it('returns an empty feed when items is missing/empty', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ generatedAt: 'x' }))
+    const report = await getAdminAttention()
+    expect(report.items).toEqual([])
   })
 })
