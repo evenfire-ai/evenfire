@@ -2382,10 +2382,17 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      // Step 9a: MCP delegation — finalize (Context patch + remove pre-deploy annotation)
+      // Step 9a: MCP delegation — finalize (Context patch + ensure McpServer CRDs).
       // McpServer CRDs were already created in Step 7b (pre-deploy handshake).
       // This step patches the Context allowlist and ensures McpServer CRDs are up-to-date.
       // Same namespace invariant as Step 7b: MCP children live in mcp-server.
+      //
+      // NOTE: `pre-deploy` is deliberately NOT removed here. `buildMcpServerManifest`
+      // omits it, but the replace merge in `ensureMcpServer` carries the live object's
+      // `pre-deploy: "true"` over, so it persists — by design. HCC's network-ready
+      // re-ack guard keys off `pre-deploy === "true"`, so stripping it would break the
+      // stdio readiness handshake. The spec-hash gate excludes `pre-deploy` from the
+      // hash (see HASH_EXCLUDED_ANNOTATIONS) so 7b and 9a converge to a no-op write.
       if (hasTransportWorkloads) {
         if (!(await this.recipeStillActive(recipe))) {
           return this.staleRecipeResult(recipe, 'MCP delegation finalization')

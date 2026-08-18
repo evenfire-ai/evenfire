@@ -17,6 +17,28 @@ import { createHash } from 'node:crypto'
  */
 export const SPEC_HASH_ANNOTATION = 'clerum.io/spec-hash'
 
+/**
+ * Annotations that record cross-controller handshake state rather than the
+ * recipe-derived desired spec, and therefore MUST be excluded from the hash.
+ *
+ * `clerum.io/pre-deploy` is the load-bearing case: WRC builds two desired
+ * manifests for the SAME McpServer in a single reconcile pass — step 7b
+ * (`preDeployMcpServers`) injects `pre-deploy: "true"` before `ensureMcpServer`,
+ * while step 9a (`delegateTransportWorkloads`) builds the manifest via
+ * `buildMcpServerManifest` WITHOUT it. If the hash counted this annotation the
+ * two manifests would hash differently and the idempotency gate would fire a
+ * `replace` twice every pass forever (never converging, because the replace
+ * carries `pre-deploy` over via the annotation merge). Excluding it lets both
+ * paths hash identically so the gate holds (zero PUTs in steady state).
+ *
+ * The annotation intentionally PERSISTS on the live object (the replace merge
+ * keeps it): HCC's network-ready re-ack guard keys off `pre-deploy === "true"`
+ * (host-context-controller/src/reconciler.ts), so it must not be stripped from
+ * the object — only from the hash. Keep this in sync with
+ * `PRE_DEPLOY_ANNOTATION` in ./mcpDelegation (asserted by specHash.test.ts).
+ */
+export const HASH_EXCLUDED_ANNOTATIONS = ['clerum.io/pre-deploy'] as const
+
 // Loose, class-compatible shape: K8s client model classes (V1Deployment, …) have
 // `metadata?: V1ObjectMeta` with `annotations?: { [k]: string }`, so they satisfy
 // this without needing an index signature.
@@ -63,6 +85,12 @@ export function computeSpecHash(manifest: object): string {
     }
     if (clone.metadata.annotations && typeof clone.metadata.annotations === 'object') {
       delete clone.metadata.annotations[SPEC_HASH_ANNOTATION]
+      // Handshake-state annotations (e.g. pre-deploy) are cross-controller signals,
+      // not desired spec: excluding them lets WRC's 7b (with pre-deploy) and 9a
+      // (without) manifests hash identically so the idempotency gate converges.
+      for (const key of HASH_EXCLUDED_ANNOTATIONS) {
+        delete clone.metadata.annotations[key]
+      }
       // An empty annotations object must hash identically to an absent one, so that
       // a freshly-built (unstamped) manifest and the same manifest after stamping
       // produce the same hash (the gate's idempotency guarantee).
