@@ -531,7 +531,9 @@ export async function upsertGrant(
   // the model locks (global order: `llm-model:*` before `plugin_workload_sdk:*`)
   // and the enabled-ness revalidation + the write commit atomically. Every other
   // caller passes no `db` and gets its own transaction, exactly as before.
-  db?: DbClient
+  // The carrier MUST be a real transaction session (branded, issue #375 M3):
+  // it holds the advisory locks and `notifyGrantUpdate` refuses `pool`.
+  db?: DbTransactionClient
 ): Promise<PluginWorkloadSdkGrant> {
   if (db) return upsertGrantInTransaction(params, operatorSub, db)
   return withTransaction(inner => upsertGrantInTransaction(params, operatorSub, inner))
@@ -540,7 +542,7 @@ export async function upsertGrant(
 async function upsertGrantInTransaction(
   params: UpsertGrantParams,
   operatorSub: string,
-  db: DbClient
+  db: DbTransactionClient
 ): Promise<PluginWorkloadSdkGrant> {
   {
     // All capability families for a recipe share one lock. A family-scoped
