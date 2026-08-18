@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 # HCC readiness under SUSTAINED apiserver watch churn (Premature close regime).
 #
-# Reproduces the PR #205 GKE livelock in minikube — a regime minikube does NOT
-# exhibit by default (single stable apiserver, no balancer idle-timeout). A
-# clerum-dev-scale synthetic fleet widens each NetworkPolicy revocation pass; a
-# self-flapping API proxy resets the HCC watches mid-pass, bumping the watch
-# generation so a generation-pinned isReadinessInventoryAuthoritative() could
-# never certify. The content-identity fix must certify through the churn.
+# SCOPE — this e2e proves ONLY the POSITIVE case: the content-identity fix
+# (PR #382) certifies /ready THROUGH sustained watch churn in a REAL cluster,
+# plus anti-vacuity (the churn actually cut every watch, repeatedly). It does
+# NOT reproduce the pre-fix livelock as a NEGATIVE — that is STRUCTURALLY
+# impossible in minikube. The pre-fix's authoritative NetworkPolicy revocation
+# pass (where the watch generation matters) runs at connection age < the
+# flapper's min-age (~0.3s on a local apiserver), so it is never cut; and any
+# min-age small enough to cut it also kills the re-LIST/re-WATCH that BOTH the
+# fixed and pre-fix builds need to recover — so both would livelock (a false
+# positive), never a clean discrimination. Empirically confirmed: fix and
+# pre-fix converge identically under 7s AND 3s churn.
+#
+# The livelock RED lives, hermetically and MUTATION-VERIFIED, in
+#   host-context-controller/src/k8sClient.test.ts
+#   "McpServerWatcher readiness under sustained watch churn (GKE Premature-close
+#    regime)"
+# which bumps the generation DURING each authoritative pass — the interleaving
+# minikube cannot produce. RED there + GREEN here is the complete proof.
 #
 # The fail-closed contract means a cut watch drops /ready to 503 TRANSIENTLY
-# (~recovery-timer + re-LIST) and re-certifies with NO content change; under
-# sustained churn the correct regime is a bounded 503/200 duty cycle, NOT an
-# unbroken 200. The gate therefore measures streaks, not the absence of 503s:
-#
-#   EXPECT_LIVELOCK=1  -> proves the reproducer: an UNBROKEN 503 streak for the
-#                         whole budget (>> RECOVERY_BUDGET_SEC), kubelet
-#                         cross-check, plus the divergent-generation pattern
-#                         (guards against a vacuous test).
-#   EXPECT_LIVELOCK=0  -> proves the fix: /ready reaches 200 under churn, every
-#                         in-churn 503 streak closes within RECOVERY_BUDGET_SEC
-#                         with repeated 503->200 recoveries, and once the churn
-#                         is paused (flag file — no proxy or HCC restart) the
-#                         SAME pod re-certifies in <= POST_STOP_READY_SEC and
-#                         holds 200 for STABILITY_WINDOW_SEC with zero 503s.
+# (~recovery + re-LIST) and re-certifies with NO content change; under sustained
+# churn the correct regime is a bounded 503/200 duty cycle, NOT an unbroken 200.
+# The gate measures CONVERGENCE — bounded 503 streaks, repeated 503->200
+# recoveries, and post-churn re-certification of the SAME non-restarted pod —
+# never the absence of 503s. EXPECT_LIVELOCK=1 is refused (see the guard below).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/e2e-lib.sh
@@ -52,6 +55,15 @@ command -v jq >/dev/null 2>&1 || {
 }
 [ "${E2E_HCC_WATCH_FAULT_INJECTION:-0}" = 1 ] || {
   echo "Set E2E_HCC_WATCH_FAULT_INJECTION=1 to acknowledge fault injection." >&2
+  exit 1
+}
+# The NEGATIVE (pre-fix livelock) is not reproducible in minikube — see the SCOPE
+# note above. Refuse EXPECT_LIVELOCK=1 rather than pretend to reproduce it.
+[ "${EXPECT_LIVELOCK:-0}" != 1 ] || {
+  echo "EXPECT_LIVELOCK=1 is not supported: the pre-fix livelock cannot be reproduced" >&2
+  echo "in minikube (the authoritative pass is structurally uncuttable). The livelock" >&2
+  echo "RED lives in host-context-controller/src/k8sClient.test.ts ('McpServerWatcher" >&2
+  echo "readiness under sustained watch churn (GKE Premature-close regime)')." >&2
   exit 1
 }
 kctl get nodes -o json | jq -e --arg c "$E2E_KUBECONTEXT" \
@@ -85,12 +97,9 @@ WATCH_CUT_MIN_LINES="${WATCH_CUT_MIN_LINES:-6}"
 # Minimum distinct 503->200 transitions under churn: one recovery could be a
 # fluke; repeated recovery refutes the livelock.
 MIN_CHURN_RECOVERIES="${MIN_CHURN_RECOVERIES:-2}"
-# Livelock signature: an unbroken 503 streak at least this long (3x budget).
-LIVELOCK_MIN_STREAK_SEC="${LIVELOCK_MIN_STREAK_SEC:-45}"
 FLEET_CONTEXTS="${FLEET_CONTEXTS:-24}"
 FLEET_MCPSERVERS="${FLEET_MCPSERVERS:-115}"
 FLEET_HOSTS="${FLEET_HOSTS:-8}"
-EXPECT_LIVELOCK="${EXPECT_LIVELOCK:-0}"
 
 RUN_ID="$(date +%s)-$$"
 PROXY_NAME="$(truncate_rfc1123 "e2e-hcc-churn-proxy-${RUN_ID}")"
@@ -387,7 +396,7 @@ write_evidence_artifact() {
 # asserted a property the fail-closed contract deliberately violates: a cut
 # watch drops /ready to 503 transiently while it re-syncs, so "no 503 after
 # first 200" failed the CORRECT regime and measured the wrong thing.
-if [ "$EXPECT_LIVELOCK" = 0 ] && [ -n "$first_ready" ]; then
+if [ -n "$first_ready" ]; then
   log "Observing /ready at 1Hz for ${CHURN_OBSERVE_SEC}s under continuous churn"
   sample_ready_series "$CHURN_OBSERVE_SEC" churn 0
 fi
@@ -431,86 +440,59 @@ read -r churn_total churn_200 churn_503 churn_maxstreak churn_transitions <<<"$(
 read -r hold_total _ hold_503 _ _ <<<"$(series_metrics post-hold)"
 write_evidence_artifact
 
-# ── Verdict ──
-if [ "$EXPECT_LIVELOCK" = 1 ]; then
-  [ "$cuts" -ge "$CHURN_MIN_CUTS" ] &&
-    ok "churn cut the Context watch ${cuts}x (>= ${CHURN_MIN_CUTS}; ${total_watch_cut_lines} watch-ended lines total)" ||
-    fail "churn cut the Context watch only ${cuts}x — reproducer is VACUOUS"
-  [ "$gen_pattern" -ge 1 ] && ok "observed divergent-generation admission pattern ${gen_pattern}x" ||
-    fail "no divergent-generation pattern — bug mechanism NOT exercised"
-  [ "$churn_total" -gt 0 ] && ok "sampled /ready ${churn_total}x under churn" ||
-    fail "ZERO /ready samples under churn — the sampler never ran, and a zero-sample run must never pass"
-  if [ -z "$first_ready" ]; then
-    # Cross-check the exec probe against the kubelet's own view: a broken
-    # ready_status (wrong container/port) reports 503 forever and would fake
-    # the livelock. readyReplicas is omitted from status when it is 0.
-    ready_replicas="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-    if [ -z "$ready_replicas" ] || [ "$ready_replicas" = 0 ]; then
-      ok "livelock reproduced: /ready stayed 503 for ${READINESS_BUDGET_SEC}s under churn (kubelet agrees: 0 ready replicas)"
-    else
-      fail "exec probe reported 503 but the Deployment shows ${ready_replicas} ready replica(s) — probe is broken, reproducer VACUOUS"
-    fi
-    [ "$churn_maxstreak" -ge "$LIVELOCK_MIN_STREAK_SEC" ] &&
-      ok "the 503 streak never closed: ${churn_maxstreak}s continuous (>= ${LIVELOCK_MIN_STREAK_SEC}s; recovery budget is ${RECOVERY_BUDGET_SEC}s)" ||
-      fail "longest 503 streak was only ${churn_maxstreak}s — not a livelock signature"
-  else
-    fail "expected livelock but /ready reached 200 at ${first_ready}s — reproducer does not exercise the bug"
-  fi
-  # Post-churn behaviour is DIAGNOSTIC in this mode: the generation pin only
-  # livelocks WHILE the generation keeps bumping, so once the churn is paused
-  # the pre-fix code may legitimately certify. Asserting either outcome would
-  # turn an implementation detail of the pre-fix build into a gate verdict.
-  log "post-churn (diagnostic only): converged=${post_converged} ready-after=${post_ready_secs:-never}s hold-503s=${hold_503}"
+# ── Verdict — POSITIVE case only ──
+# EXPECT_LIVELOCK=1 is refused at the guard: the pre-fix livelock is not
+# reproducible in minikube (see the SCOPE note). Its RED lives, mutation-verified,
+# in host-context-controller/src/k8sClient.test.ts. This verdict proves the fix
+# CONVERGES under real churn, plus anti-vacuity that the churn was real.
+[ "$cuts" -ge "$CHURN_MIN_CUTS" ] &&
+  ok "churn was real: ${cuts} Context-watch cuts (${total_watch_cut_lines} watch-ended lines) across readiness+observation" ||
+  fail "fix validated WITHOUT churn (${cuts} Context-watch cuts) — result is worthless"
+[ "$total_watch_cut_lines" -ge "$WATCH_CUT_MIN_LINES" ] &&
+  ok "every informer was cut repeatedly: ${total_watch_cut_lines} watch-ended lines (>= ${WATCH_CUT_MIN_LINES} = 2 cycles x 3 watches)" ||
+  fail "only ${total_watch_cut_lines} watch-ended lines (< ${WATCH_CUT_MIN_LINES}) — churn did not cut all three informers at least twice"
+[ "$churn_total" -gt 0 ] && ok "sampled /ready ${churn_total}x under churn" ||
+  fail "ZERO /ready samples under churn — the sampler never ran, and a zero-sample run must never pass"
+if [ -n "$first_ready" ]; then
+  ok "fix converged to Ready under sustained Premature close (time-to-Ready=${first_ready}s)"
 else
-  [ "$cuts" -ge "$CHURN_MIN_CUTS" ] &&
-    ok "churn was real: ${cuts} Context-watch cuts (${total_watch_cut_lines} watch-ended lines) across readiness+observation" ||
-    fail "fix validated WITHOUT churn (${cuts} Context-watch cuts) — result is worthless"
-  [ "$total_watch_cut_lines" -ge "$WATCH_CUT_MIN_LINES" ] &&
-    ok "every informer was cut repeatedly: ${total_watch_cut_lines} watch-ended lines (>= ${WATCH_CUT_MIN_LINES} = 2 cycles x 3 watches)" ||
-    fail "only ${total_watch_cut_lines} watch-ended lines (< ${WATCH_CUT_MIN_LINES}) — churn did not cut all three informers at least twice"
-  [ "$churn_total" -gt 0 ] && ok "sampled /ready ${churn_total}x under churn" ||
-    fail "ZERO /ready samples under churn — the sampler never ran, and a zero-sample run must never pass"
-  if [ -n "$first_ready" ]; then
-    ok "fix converged to Ready under sustained Premature close (time-to-Ready=${first_ready}s)"
-  else
-    fail "fix did NOT reach Ready under churn within ${READINESS_BUDGET_SEC}s — livelock regression (see ${LOG_ARTIFACT})"
-  fi
-  # Anti-vacuity: the proxy must actually have bitten the readiness path. A
-  # transient 503 under churn is the fail-closed CONTRACT working, not a bug;
-  # an observation window with zero 503s means the cuts never reached the
-  # watches and the bounded-recovery claim below would be vacuously true.
-  [ "$churn_503" -ge 1 ] &&
-    ok "churn bit the readiness path: ${churn_503} sample(s) at 503 (transient fail-closed is the contract)" ||
-    fail "zero 503 samples under churn — the proxy never bit the watches; bounded-recovery evidence is VACUOUS"
-  [ "$churn_transitions" -ge "$MIN_CHURN_RECOVERIES" ] &&
-    ok "repeated in-churn recovery: ${churn_transitions} distinct 503->200 transitions (>= ${MIN_CHURN_RECOVERIES})" ||
-    fail "only ${churn_transitions} 503->200 transition(s) under churn — a livelock is not refuted by fewer than ${MIN_CHURN_RECOVERIES} recoveries"
-  [ "$churn_maxstreak" -le "$RECOVERY_BUDGET_SEC" ] &&
-    ok "every in-churn 503 outage closed within budget: max streak ${churn_maxstreak}s <= ${RECOVERY_BUDGET_SEC}s" ||
-    fail "a 503 streak lasted ${churn_maxstreak}s (> ${RECOVERY_BUDGET_SEC}s recovery budget) — recovery is not bounded under churn"
-  # Post-churn: absorbing-state detector (the decisive livelock/transient split).
-  if [ "$post_converged" = 1 ]; then
-    ok "post-churn: /ready re-certified in ${post_ready_secs}s with NO content change injected"
-    [ "$hold_total" -gt 0 ] && [ "$hold_503" -eq 0 ] &&
-      ok "post-churn hold: ${hold_total} samples over ${STABILITY_WINDOW_SEC}s, zero 503 — no absorbing state" ||
-      fail "post-churn hold saw ${hold_503} 503(s) across ${hold_total} sample(s) — readiness did not stabilize once the churn stopped"
-  else
-    fail "post-churn: /ready did NOT converge within ${POST_STOP_READY_SEC}s after the churn was paused — absorbing state (livelock signature)"
-  fi
-  # In-situ guarantee: the convergence above must belong to the SAME process
-  # that lived through the churn. A restarted or replaced pod proves fresh-boot
-  # readiness, which the bootstrap gate already covers — not in-situ recovery.
-  hcc_pod_now="$(running_hcc_pod || true)"
-  hcc_restarts_now=""
-  if [ -n "$hcc_pod_now" ]; then
-    hcc_restarts_now="$(hcc_restart_count "$hcc_pod_now" || true)"
-  fi
-  if [ -n "$hcc_pod_at_stop" ] && [ "$hcc_pod_now" = "$hcc_pod_at_stop" ] &&
-    [ -n "$hcc_restarts_at_stop" ] && [ "$hcc_restarts_now" = "$hcc_restarts_at_stop" ]; then
-    ok "post-churn recovery was in-situ: pod ${hcc_pod_at_stop} unchanged, restartCount ${hcc_restarts_now}"
-  else
-    fail "HCC pod changed or restarted across the post-churn phase (${hcc_pod_at_stop:-none}/restarts=${hcc_restarts_at_stop:-?} -> ${hcc_pod_now:-none}/restarts=${hcc_restarts_now:-?}) — convergence could be a fresh boot, not in-situ recovery"
-  fi
+  fail "fix did NOT reach Ready under churn within ${READINESS_BUDGET_SEC}s — livelock regression (see ${LOG_ARTIFACT})"
+fi
+# Anti-vacuity: the proxy must actually have bitten the readiness path. A
+# transient 503 under churn is the fail-closed CONTRACT working, not a bug;
+# an observation window with zero 503s means the cuts never reached the
+# watches and the bounded-recovery claim below would be vacuously true.
+[ "$churn_503" -ge 1 ] &&
+  ok "churn bit the readiness path: ${churn_503} sample(s) at 503 (transient fail-closed is the contract)" ||
+  fail "zero 503 samples under churn — the proxy never bit the watches; bounded-recovery evidence is VACUOUS"
+[ "$churn_transitions" -ge "$MIN_CHURN_RECOVERIES" ] &&
+  ok "repeated in-churn recovery: ${churn_transitions} distinct 503->200 transitions (>= ${MIN_CHURN_RECOVERIES})" ||
+  fail "only ${churn_transitions} 503->200 transition(s) under churn — a livelock is not refuted by fewer than ${MIN_CHURN_RECOVERIES} recoveries"
+[ "$churn_maxstreak" -le "$RECOVERY_BUDGET_SEC" ] &&
+  ok "every in-churn 503 outage closed within budget: max streak ${churn_maxstreak}s <= ${RECOVERY_BUDGET_SEC}s" ||
+  fail "a 503 streak lasted ${churn_maxstreak}s (> ${RECOVERY_BUDGET_SEC}s recovery budget) — recovery is not bounded under churn"
+# Post-churn: absorbing-state detector (the decisive livelock/transient split).
+if [ "$post_converged" = 1 ]; then
+  ok "post-churn: /ready re-certified in ${post_ready_secs}s with NO content change injected"
+  [ "$hold_total" -gt 0 ] && [ "$hold_503" -eq 0 ] &&
+    ok "post-churn hold: ${hold_total} samples over ${STABILITY_WINDOW_SEC}s, zero 503 — no absorbing state" ||
+    fail "post-churn hold saw ${hold_503} 503(s) across ${hold_total} sample(s) — readiness did not stabilize once the churn stopped"
+else
+  fail "post-churn: /ready did NOT converge within ${POST_STOP_READY_SEC}s after the churn was paused — absorbing state (livelock signature)"
+fi
+# In-situ guarantee: the convergence above must belong to the SAME process
+# that lived through the churn. A restarted or replaced pod proves fresh-boot
+# readiness, which the bootstrap gate already covers — not in-situ recovery.
+hcc_pod_now="$(running_hcc_pod || true)"
+hcc_restarts_now=""
+if [ -n "$hcc_pod_now" ]; then
+  hcc_restarts_now="$(hcc_restart_count "$hcc_pod_now" || true)"
+fi
+if [ -n "$hcc_pod_at_stop" ] && [ "$hcc_pod_now" = "$hcc_pod_at_stop" ] &&
+  [ -n "$hcc_restarts_at_stop" ] && [ "$hcc_restarts_now" = "$hcc_restarts_at_stop" ]; then
+  ok "post-churn recovery was in-situ: pod ${hcc_pod_at_stop} unchanged, restartCount ${hcc_restarts_now}"
+else
+  fail "HCC pod changed or restarted across the post-churn phase (${hcc_pod_at_stop:-none}/restarts=${hcc_restarts_at_stop:-?} -> ${hcc_pod_now:-none}/restarts=${hcc_restarts_now:-?}) — convergence could be a fresh boot, not in-situ recovery"
 fi
 log "Evidence artifact: ${LOG_ARTIFACT}"
 # cleanup() (EXIT trap) restores HCC, deletes the fleet, and runs print_results.

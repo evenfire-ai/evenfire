@@ -2,7 +2,9 @@
 # Offline contract gate for the HCC watch-churn readiness e2e. Runs in CI: no
 # cluster. Proves the gate keeps its fail-loud, branch-scoped, restorable shape
 # and its anti-vacuity assertions, so a refactor cannot quietly gut the one test
-# that reproduces the clerum-dev livelock under real watch churn.
+# that proves the fix converges under real watch churn. The livelock NEGATIVE is
+# not reproducible in minikube (see the gate's SCOPE note); its RED lives in
+# host-context-controller/src/k8sClient.test.ts, and check 2 pins that pointer.
 set -u
 FAIL=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -18,15 +20,18 @@ for s in "$GATE" "$FIXTURE"; do
   bash -n "$s" && pass "$(basename "$s") valid bash" || fail "$(basename "$s") invalid bash"
 done
 
-# 1. Anti-vacuity: both regimes assert a minimum number of real watch cuts.
-[ "$(grep -Ec 'cuts.*-ge.*CHURN_MIN_CUTS' "$GATE")" -ge 2 ] &&
-  pass "both livelock and fix regimes assert >= CHURN_MIN_CUTS real cuts" ||
-  fail "a regime can pass without proving churn actually cut the watches"
+# 1. Anti-vacuity: the fix regime asserts a minimum number of real watch cuts.
+[ "$(grep -Ec 'cuts.*-ge.*CHURN_MIN_CUTS' "$GATE")" -ge 1 ] &&
+  pass "fix regime asserts >= CHURN_MIN_CUTS real cuts" ||
+  fail "the gate can pass without proving churn actually cut the watches"
 
-# 2. Livelock regime demands the divergent-generation evidence.
-grep -Fq 'authority changed before .* admission' "$GATE" &&
-  pass "livelock regime keys on the real generation-divergence log" ||
-  fail "livelock regime does not check the generation-divergence signal"
+# 2. The gate must refuse EXPECT_LIVELOCK=1 and point at the hermetic test that
+#    owns the livelock RED, so nobody can wire an irreproducible NEGATIVE here or
+#    delete the pointer to where the NEGATIVE actually lives.
+grep -Eq 'EXPECT_LIVELOCK.*!=.*1' "$GATE" &&
+  grep -Fq 'k8sClient.test.ts' "$GATE" &&
+  pass "gate refuses EXPECT_LIVELOCK=1 and points at the hermetic livelock RED" ||
+  fail "gate does not refuse EXPECT_LIVELOCK=1 or lost the pointer to the hermetic RED"
 
 # 3. Fix regime bounds in-churn recovery instead of banning transient 503s.
 #    The fail-closed contract drops /ready to 503 TRANSIENTLY while a cut watch
