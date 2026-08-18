@@ -11,7 +11,11 @@ import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
-import { listHostsReferencingHook, syncHookRefsInHosts } from '../../services/hostGuardrailRefs.js'
+import {
+  addHookRefToHost,
+  listHostsReferencingHook,
+  syncHookRefsInHosts,
+} from '../../services/hostGuardrailRefs.js'
 import { createKey, listImages, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
 import type { RegistryEntry } from '../../services/registryClient.js'
 import {
@@ -2039,27 +2043,21 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // the CR (+ Secret) back rather than return a false success.
         const digest = image?.ref?.includes('@') ? image.ref.split('@')[1] : undefined
         try {
-          const freshHost = (await gateway.getResource(
-            'hosts',
+          // Atomic read→derive→write (shared with the uninstall/upgrade paths):
+          // re-reads the Host, derives the hooks map from THAT read, and sends its
+          // resourceVersion as the replace precondition. Deriving out here and
+          // writing with a plain `updateResource` sends no precondition and replays
+          // a stale map, so a concurrent install/uninstall on the same Host is
+          // silently clobbered — leaving this CR installed but unreferenced, which
+          // reads to the operator as an active guardrail that never runs
+          // (fail-OPEN). Exhausted retries throw into the rollback below rather
+          // than reporting a false success.
+          await addHookRefToHost(
+            gateway,
             body.hostRef,
-            config.hostsNamespace
-          )) as HostShape
-          const g: HostGuardrailsShape = { ...(freshHost.spec?.guardrails ?? {}) }
-          const hooks: Record<string, Array<{ id: string; digest?: string }>> = {
-            ...(g.hooks ?? {}),
-          }
-          for (const phase of hookMeta.lifecyclePoints) {
-            const arr = hooks[phase] ? [...hooks[phase]] : []
-            if (!arr.some(h => h.id === crName)) {
-              arr.push({ id: crName, ...(digest ? { digest } : {}) })
-            }
-            hooks[phase] = arr
-          }
-          g.hooks = hooks
-          await gateway.updateResource(
-            'hosts',
-            body.hostRef,
-            { spec: { ...freshHost.spec, guardrails: g } },
+            crName,
+            hookMeta.lifecyclePoints,
+            digest,
             config.hostsNamespace
           )
         } catch (err) {

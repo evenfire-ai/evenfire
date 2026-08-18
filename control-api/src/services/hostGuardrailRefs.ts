@@ -37,19 +37,33 @@ export async function listHostsReferencingHook(
   return (items ?? []).filter(h => referencesHook(h, hookId))
 }
 
-async function writeHostHooks(
+/**
+ * Atomic read→derive→write of one Host's `guardrails.hooks` map.
+ *
+ * `mutateResource` re-reads the Host, runs `derive` against THAT read, and uses
+ * its `resourceVersion` as the replace precondition (re-deriving on a 409).
+ * Deriving INSIDE the callback is the whole point: the Hosts here come from a
+ * single list read, so a map computed out here would be replayed against a Host
+ * that a concurrent install/uninstall has since changed — a full-spec replace
+ * with no precondition, i.e. a silent lost update. That leaves an LlmHook CR
+ * installed but unreferenced, which reads as an active guardrail that never
+ * runs (fail-OPEN).
+ */
+async function mutateHostHooks(
   gateway: K8sGateway,
-  host: HostResource,
-  hooks: Record<string, HookRef[]>,
-  hostsNamespace: string
+  name: string,
+  hostsNamespace: string,
+  derive: (hooks: Record<string, HookRef[]>) => Record<string, HookRef[]>
 ): Promise<void> {
-  const name = host.metadata?.name
-  if (!name) return
-  const guardrails = { ...(host.spec?.guardrails ?? {}), hooks }
-  await gateway.updateResource(
+  await gateway.mutateResource(
     'hosts',
     name,
-    { spec: { ...host.spec, guardrails } },
+    current => {
+      const spec = (current.spec ?? {}) as NonNullable<HostResource['spec']>
+      const guardrails: HostGuardrails = { ...(spec.guardrails ?? {}) }
+      guardrails.hooks = derive(guardrails.hooks ?? {})
+      return { spec: { ...spec, guardrails } }
+    },
     hostsNamespace
   )
 }
@@ -66,6 +80,33 @@ function withoutHook(hooks: Record<string, HookRef[]>, hookId: string): Record<s
 }
 
 /**
+ * Referential integrity on install: reference `hookId` from every phase in
+ * `lifecyclePoints` on ONE Host. Idempotent per phase (an existing ref is left
+ * alone), and atomic — refs another operation added after this request started
+ * are preserved rather than clobbered (see mutateHostHooks).
+ */
+export async function addHookRefToHost(
+  gateway: K8sGateway,
+  hostName: string,
+  hookId: string,
+  lifecyclePoints: string[],
+  digest: string | undefined,
+  hostsNamespace: string
+): Promise<void> {
+  await mutateHostHooks(gateway, hostName, hostsNamespace, current => {
+    const hooks: Record<string, HookRef[]> = { ...current }
+    for (const phase of lifecyclePoints) {
+      const arr = hooks[phase] ? [...hooks[phase]] : []
+      if (!arr.some(r => r.id === hookId)) {
+        arr.push({ id: hookId, ...(digest ? { digest } : {}) })
+      }
+      hooks[phase] = arr
+    }
+    return hooks
+  })
+}
+
+/**
  * Referential integrity on uninstall: remove every `{ id: hookId }` reference
  * from all referencing Hosts. Call this BEFORE deleting the LlmHook CR so a
  * dangling ref never exists. Returns the Host names touched.
@@ -78,13 +119,10 @@ export async function stripHookRefFromHosts(
   const hosts = await listHostsReferencingHook(gateway, hookId, hostsNamespace)
   const touched: string[] = []
   for (const host of hosts) {
-    await writeHostHooks(
-      gateway,
-      host,
-      withoutHook(host.spec?.guardrails?.hooks ?? {}, hookId),
-      hostsNamespace
-    )
-    if (host.metadata?.name) touched.push(host.metadata.name)
+    const name = host.metadata?.name
+    if (!name) continue
+    await mutateHostHooks(gateway, name, hostsNamespace, hooks => withoutHook(hooks, hookId))
+    touched.push(name)
   }
   return touched
 }
@@ -104,14 +142,18 @@ export async function syncHookRefsInHosts(
   const hosts = await listHostsReferencingHook(gateway, hookId, hostsNamespace)
   const touched: string[] = []
   for (const host of hosts) {
-    const hooks = withoutHook(host.spec?.guardrails?.hooks ?? {}, hookId)
-    for (const phase of lifecyclePoints) {
-      const arr = hooks[phase] ? [...hooks[phase]] : []
-      arr.push({ id: hookId, ...(digest ? { digest } : {}) })
-      hooks[phase] = arr
-    }
-    await writeHostHooks(gateway, host, hooks, hostsNamespace)
-    if (host.metadata?.name) touched.push(host.metadata.name)
+    const name = host.metadata?.name
+    if (!name) continue
+    await mutateHostHooks(gateway, name, hostsNamespace, current => {
+      const hooks = withoutHook(current, hookId)
+      for (const phase of lifecyclePoints) {
+        const arr = hooks[phase] ? [...hooks[phase]] : []
+        arr.push({ id: hookId, ...(digest ? { digest } : {}) })
+        hooks[phase] = arr
+      }
+      return hooks
+    })
+    touched.push(name)
   }
   return touched
 }
