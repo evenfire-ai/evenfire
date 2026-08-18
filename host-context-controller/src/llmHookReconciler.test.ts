@@ -811,7 +811,12 @@ describe('LlmHookReconciler', () => {
     expect(dns?.ports?.map(p => p.port)).toEqual([53, 53])
   })
 
-  it('grants NO egress (not even DNS) to a pure responder hook (no egressBindings)', async () => {
+  // Scoped to the per-pod-key policy this file owns. It deliberately does NOT
+  // claim the pod has no egress — that is the union of every policy selecting it,
+  // asserted in __tests__/llmHooksEffectiveEgress.test.ts. Titling this one
+  // "grants NO egress (not even DNS)" is what let namespace-wide DNS through
+  // while the suite stayed green.
+  it('declares no Egress in the per-pod-key policy for a pure responder (no egressBindings)', async () => {
     const responder = makeHook({ name: 'resp' }) // default image, no egressBindings
     hooks.set('resp', responder)
     await reconciler.reconcile(responder)
