@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from 'http'
+import { externalEgressResyncDelayMs } from './externalEgressConvergenceCoordinator'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
-import { externalEgressResyncDelayMs } from './externalEgressConvergenceCoordinator'
 import {
   McpServerWatcher,
   getContext,
@@ -9293,7 +9293,8 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
       }
       if (plural === 'mcpservers') return { metadata: { resourceVersion: 'mcp-rv' }, items: [] }
       if (plural === 'hosts') return { metadata: { resourceVersion: 'host-rv' }, items: [] }
-      if (plural === 'communicationchannels') return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
+      if (plural === 'communicationchannels')
+        return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
       return { items: [] }
     })
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
