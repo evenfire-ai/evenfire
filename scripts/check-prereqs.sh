@@ -91,19 +91,27 @@ else
   MISSING=$((MISSING + 1))
 fi
 
-# ── Node.js 24.x (Desktop/Electron validation contract) ───────────────
+# ── Node.js (>= 24; Desktop/Electron validation wants 24.x) ───────────
+# The platform itself runs in containers, so the quickstart only needs a
+# floor here. Pinning the whole install to 24.x would lock out newer runtimes
+# for a Desktop-only concern. Desktop validation is where 24.x is contractual:
+# CI pins node-version 24 and desktop-app/scripts/verify-electron-runtime.mjs
+# enforces it before any Desktop test/build result counts.
 if command -v node >/dev/null 2>&1; then
   NODE_VER="$(node --version | sed 's/^v//')"
   NODE_MAJOR="${NODE_VER%%.*}"
-  if [ "$NODE_MAJOR" = "24" ]; then
+  if version_ge "$NODE_VER" "24.0.0"; then
     ok "node     v${NODE_VER}"
+    if [ "$NODE_MAJOR" != "24" ]; then
+      warn "node     v${NODE_VER} runs the quickstart, but Desktop/Electron validation requires 24.x"
+    fi
   else
-    err "node     v${NODE_VER} (need 24.x for Desktop/Electron validation)"
+    err "node     v${NODE_VER} (need >= 24)"
     hint "brew install node@24" "curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
     MISSING=$((MISSING + 1))
   fi
 else
-  err "node     not found (need 24.x for Desktop/Electron validation)"
+  err "node     not found (need >= 24)"
   hint "brew install node@24" "curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
   MISSING=$((MISSING + 1))
 fi

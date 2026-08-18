@@ -86,14 +86,15 @@ profile metadata, logs, and evidence belong under the ignored
 
 ## Desktop Electron installation invariant
 
-Node 24 ships npm 11, which blocks dependency lifecycle scripts unless they
-are explicitly approved. The Desktop app's pinned Electron package is approved
-in `desktop-app/package.json` because its `postinstall` downloads the Electron
-runtime used by Desktop tests and the local T2 gate. Desktop validation must
-use Node 24 (the CI/runtime contract); Node 26 is not a supported validation
-runtime for this dependency. Do not install `desktop-app` with
-`--ignore-scripts`, and do not count a Desktop test/build result until these
-checks succeed from `desktop-app`:
+Electron's `postinstall` downloads the runtime used by Desktop tests and the
+local T2 gate. When that script does not run, `npm ci` still exits 0 and the
+missing runtime only surfaces later as a test failure that looks like a product
+bug. Nothing in `package.json` can force the script to run, so the invariant is
+enforced by verification rather than by configuration: `npm run verify:electron`
+resolves `require('electron')` and fails when the runtime is absent. Desktop
+validation must use Node 24, which is the CI and runtime contract. Do not
+install `desktop-app` with `--ignore-scripts`, and do not count a Desktop
+test/build result until these checks succeed from `desktop-app`:
 
 ```bash
 node --version  # must report v24.x
@@ -103,8 +104,8 @@ npm run verify:electron
 If it fails with `Electron failed to install correctly`, the dependency install
 is incomplete, not a product failure. Stop the gate, switch to Node 24, remove
 only the generated `desktop-app/node_modules/electron` directory, rerun `npm
-ci` with lifecycle scripts enabled, and rerun the checks. Do not add broad
-script approvals, set `ELECTRON_SKIP_BINARY_DOWNLOAD`, point
+ci` with lifecycle scripts enabled, and rerun the checks. Do not set
+`ELECTRON_SKIP_BINARY_DOWNLOAD`, point
 `ELECTRON_OVERRIDE_DIST_PATH` at an unverified binary, or report green evidence
 from a missing runtime. A verified local cache may be used only when its
 version and checksum are recorded in the run evidence.

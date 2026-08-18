@@ -538,7 +538,13 @@ verify_minimal_operator_bootstrap() {
   link_admin_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
     '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.controlAdminId // empty')"
   if ! clerum_initial_setup_link_matches "$status" "$source" "$desktop_user_id" "$link_admin_id" "$admin_id"; then
-    die "Minimal bootstrap is incomplete: expected one active initial_setup Desktop link for '$ADMIN_EMAIL' (status=$status source=$source desktopUserId=${desktop_user_id:-missing} controlAdminId=${link_admin_id:-missing}); refusing ordinary-user fallback"
+    # Recovery is only possible by rebuilding the control DB. control-api
+    # stamps last_login_at on every successful admin login and
+    # setupInitialAdminCredentials only matches a bootstrap row whose
+    # last_login_at is still NULL, so once a cluster has logged in without
+    # consuming setup the initial_setup link can never be created on that
+    # database. Say so instead of leaving the operator with a bare refusal.
+    die "Minimal bootstrap is incomplete: expected one active initial_setup Desktop link for '$ADMIN_EMAIL' (status=$status source=$source desktopUserId=${desktop_user_id:-missing} controlAdminId=${link_admin_id:-missing}); refusing ordinary-user fallback. This cluster consumed or bypassed /admin/auth/setup without creating the link, and it cannot be created on the existing database. Rebuild the control DB to recover: re-run 'make minikube-setup' without REUSE_DB/--keep-db (the default rebuilds the DB), passing CONTROL_DB_RESET_PVC_UID when the setup script asks for it."
   fi
   ok "Initial admin '$ADMIN_USERNAME' has active initial_setup Desktop operator link (desktopUserId=${desktop_user_id:0:8}…)"
 }

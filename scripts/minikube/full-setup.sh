@@ -1470,9 +1470,13 @@ else
       # from it on every fresh DB. If this step fails under the default
       # (minimal) profile, that publicly-known credential is still live — a
       # green summary would ship an install that is both unusable and insecure.
-      # Abort instead; setup is idempotent, so re-running after the underlying
-      # issue is fixed recovers cleanly.
-      err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
+      # Abort instead. Setup is idempotent, so re-running after the underlying
+      # issue is fixed recovers cleanly for every failure except a missing
+      # initial_setup link on a reused database: control-api stamps
+      # last_login_at on each admin login and setup only matches a bootstrap
+      # row whose last_login_at is NULL, so that one needs a DB rebuild. The
+      # seeder prints the exact recovery command for that case.
+      err "Test user seed failed under SEED_PROFILE=minimal, aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup. If the seeder reported a missing initial_setup Desktop link, re-run without REUSE_DB/--keep-db so the control DB is rebuilt."
       exit 1
     else
       warn "Test user seed encountered errors — check output above"

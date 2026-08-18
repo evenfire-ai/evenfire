@@ -520,17 +520,47 @@ assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes() {
 
 assert_minimal_seed_is_setup_first_and_link_fail_closed() {
   local seed="$REPO_ROOT/scripts/e2e/seed-e2e-data.sh"
-  local minimal_block
-  minimal_block="$(sed -n '/^if \[ "\$SEED_PROFILE" = "minimal" \]; then$/,/^else$/p' "$seed")"
-  if printf '%s\n' "$minimal_block" | grep -Fq 'perform_initial_setup' && \
-     printf '%s\n' "$minimal_block" | grep -Fq 'login_admin_only' && \
-     printf '%s\n' "$minimal_block" | grep -Fq 'verify_minimal_operator_bootstrap' && \
-     grep -Fq 'clerum_initial_setup_link_matches' "$seed" && \
-     grep -Fq 'refusing ordinary-user fallback' "$seed"; then
-    pass "minimal seed consumes setup before login and fails closed without an active initial_setup link"
-  else
-    fail "minimal seed does not prove setup-first ordering and fail-closed link verification"
+  local dispatch verify_body setup_line login_line verify_line
+
+  # Bound the dispatch and the verifier exactly. A range that ends at the first
+  # bare `else` runs past every nested block and swallows most of the file, so
+  # presence greps alone still pass when the ordering is reversed or the
+  # fail-closed abort is downgraded to a warning.
+  dispatch="$(awk '/^# ─── Step 1: Bootstrap before login/,/^fi$/' "$seed")"
+  verify_body="$(awk '/^verify_minimal_operator_bootstrap\(\) \{$/,/^\}$/' "$seed")"
+
+  setup_line="$(printf '%s\n' "$dispatch" | grep -n '^  perform_initial_setup$' | head -1 | cut -d: -f1)"
+  login_line="$(printf '%s\n' "$dispatch" | grep -n 'login_admin_only' | head -1 | cut -d: -f1)"
+  verify_line="$(printf '%s\n' "$dispatch" | grep -n '^  verify_minimal_operator_bootstrap$' | head -1 | cut -d: -f1)"
+
+  if [ -z "$setup_line" ] || [ -z "$login_line" ] || [ -z "$verify_line" ]; then
+    fail "minimal seed dispatch must call setup, the login fallback and link verification"
+    return
   fi
+  # control-api marks last_login_at on every successful admin login, and
+  # setupInitialAdminCredentials only matches a bootstrap row whose
+  # last_login_at is still NULL. Logging in first destroys setup eligibility
+  # permanently, so this ordering is the whole point of the minimal path.
+  if [ "$setup_line" -ge "$login_line" ]; then
+    fail "minimal seed logs in at line $login_line before consuming setup at line $setup_line; login sets last_login_at and permanently disqualifies /admin/auth/setup"
+    return
+  fi
+  if [ "$verify_line" -le "$login_line" ]; then
+    fail "minimal seed must verify the initial_setup link after the login fallback, not before it"
+    return
+  fi
+  if ! printf '%s\n' "$verify_body" | grep -Fq 'if ! clerum_initial_setup_link_matches '; then
+    fail "minimal link verification does not gate on the shared initial_setup link contract"
+    return
+  fi
+  # The missing-link branch must abort. Downgrading it to a log leaves the
+  # install running as an ordinary unlinked member, which is the exact
+  # regression this assertion exists to catch.
+  if ! printf '%s\n' "$verify_body" | grep -Eq '^ *die "Minimal bootstrap is incomplete'; then
+    fail "minimal link verification does not abort when the initial_setup link is absent"
+    return
+  fi
+  pass "minimal seed consumes setup before login and aborts without an active initial_setup link"
 }
 
 assert_minimal_bootstrap_contract_runs_on_system_bash() {
