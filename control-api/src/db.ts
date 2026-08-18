@@ -36,6 +36,20 @@ export type DbClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
 }
 
+// issue #375 M3 (jozer review): brand for clients that live INSIDE an open
+// transaction. `DbClient` is structural (`{ query }`), so `Pool` satisfies it
+// and a refactor from the in-transaction `db` to the module-level `pool` still
+// typechecks while silently breaking COMMIT/ROLLBACK coupling (e.g. a
+// transactional `pg_notify` becoming an autocommitted one). The unique-symbol
+// brand cannot be satisfied structurally, so any API that REQUIRES the
+// transaction session (like the grant-update NOTIFY) declares
+// `DbTransactionClient` and the pool no longer compiles there. It remains
+// assignable to `DbClient`, so passing it onward to ordinary helpers is free.
+declare const dbTransactionClientBrand: unique symbol
+export type DbTransactionClient = DbClient & {
+  readonly [dbTransactionClientBrand]: 'transaction'
+}
+
 type DbSessionClient = DbClient & {
   release: () => void
 }
@@ -63,6 +77,20 @@ const MIN_CONNECTION_TIMEOUT_MS = 100
 const MAX_CONNECTION_TIMEOUT_MS = 30_000
 const MIN_STATEMENT_TIMEOUT_MS = 100
 const MAX_STATEMENT_TIMEOUT_MS = 30_000
+
+// R1-H3 fase 1 (host↔model serialization). The reductor (llm-model disable/
+// delete) and the referencer (host create/update) both take a per-MODEL-NAME
+// advisory lock and HOLD it across the K8s write (Decisión A of
+// work-tracker/reviews/pr-339/minispec-R1-H3-concurrency.md). While the carrier
+// transaction awaits the K8s API it is idle-in-transaction, so neither
+// statement_timeout nor lock_timeout bounds the lock/connection tenancy — only
+// idle_in_transaction_session_timeout does (adenda A2). We set it per-carrier-
+// transaction (SET LOCAL) so a hung K8s call fails fast and releases the lock +
+// the scarce pool connection (core pool max defaults to 10) instead of pinning
+// them indefinitely.
+const MIN_CARRIER_IDLE_TIMEOUT_MS = 1_000
+const MAX_CARRIER_IDLE_TIMEOUT_MS = 60_000
+const DEFAULT_CARRIER_IDLE_TIMEOUT_MS = 15_000
 
 const DEFAULT_CORE_POOL_MAX = 10
 const DEFAULT_CORE_POOL_IDLE_TIMEOUT_MS = 30_000
@@ -6076,7 +6104,9 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
-export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Promise<T> {
+export async function withTransaction<T>(
+  work: (db: DbTransactionClient) => Promise<T>
+): Promise<T> {
   const client = (await pool.connect()) as PoolClient
   let transactionStarted = false
   let commitSent = false
@@ -6084,7 +6114,10 @@ export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Pr
   try {
     await client.query('BEGIN')
     transactionStarted = true
-    const result = await work(client)
+    // The brand is nominal-only (a declared unique symbol); the checked-out
+    // client IS the transaction session, so this cast is the single blessed
+    // point where the brand is minted (issue #375 M3).
+    const result = await work(client as unknown as DbTransactionClient)
     commitSent = true
     await client.query('COMMIT')
     return result
@@ -6102,4 +6135,72 @@ export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Pr
   } finally {
     client.release(releaseError)
   }
+}
+
+// ── R1-H3 fase 1: host↔model write serialization ────────────────────────────
+//
+// A single advisory-lock namespace for the LLM-model availability seam. EVERY
+// writer that can either reduce a model's availability (llm-model disable/delete,
+// the reductor) or create a live reference to it (Host CR create/update, the
+// referencer) takes THIS lock, so the impact enumeration and the mutation/write
+// cannot interleave and strand a reference (INV-1). The lock is derived from ONE
+// place (regla D4) so the two sides can never disagree on the key.
+//
+// GRANULARITY = MODEL NAME, not (provider, model): the impact enumeration matches
+// grants by model name only (`listGrantsReferencingModel`), and an
+// `allowed_models` entry may carry no derivable provider, so a per-pair key would
+// leave that seam unserialized (adenda A1). By name, a disable of (provA, M) and a
+// host-create of (provB, M) merely contend — harmless at admin QPS — while each
+// side's impact recompute is still per-pair, so independent pairs both win.
+const LLM_MODEL_LOCK_NAMESPACE = 'llm-model:'
+
+export const HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
+  'CONTROL_API_HOST_MODEL_WRITE_LOCK_IDLE_TIMEOUT_MS',
+  DEFAULT_CARRIER_IDLE_TIMEOUT_MS,
+  MIN_CARRIER_IDLE_TIMEOUT_MS,
+  MAX_CARRIER_IDLE_TIMEOUT_MS
+)
+
+/**
+ * Take the transaction-scoped advisory lock for one model NAME. Auto-released on
+ * COMMIT/ROLLBACK and on backend death, so it never orphans. Must be a statement
+ * inside an open transaction (`withTransaction`); the caller HOLDS it across the
+ * subsequent impact read + mutation / K8s write.
+ */
+export async function advisoryLockModelName(db: DbTransactionClient, model: string): Promise<void> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+    `${LLM_MODEL_LOCK_NAMESPACE}${model}`,
+  ])
+}
+
+/**
+ * Take the advisory locks for several model NAMES in one transaction. Dedups and
+ * acquires in a TOTAL (ascending) order to preclude deadlock when two operations
+ * reference an overlapping set (adenda A5). A host that references no allowlist
+ * pair acquires nothing (an empty set is a no-op). Key derivation stays in
+ * `advisoryLockModelName` (regla D4).
+ */
+export async function advisoryLockModelNames(
+  db: DbTransactionClient,
+  models: string[]
+): Promise<void> {
+  const ordered = Array.from(new Set(models)).sort()
+  for (const model of ordered) {
+    await advisoryLockModelName(db, model)
+  }
+}
+
+/**
+ * Bound the idle-in-transaction tenancy of a carrier transaction that HOLDS a
+ * model advisory lock across a Kubernetes write (Decisión A / adenda A2). While
+ * the transaction awaits the K8s API no statement runs, so this is the only
+ * timeout that can release the lock + connection if that call hangs. SET LOCAL
+ * scope: reverts on COMMIT/ROLLBACK. The value is milliseconds (the GUC's base
+ * unit) and comes from a bounded env, so it can never inject SQL.
+ */
+export async function boundCarrierTransactionIdleTimeout(
+  db: DbTransactionClient,
+  ms: number = HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS
+): Promise<void> {
+  await db.query(`SELECT set_config('idle_in_transaction_session_timeout', $1, true)`, [String(ms)])
 }

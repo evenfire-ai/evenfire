@@ -29,6 +29,14 @@ MINIKUBE_IMAGE_TAG=latest make minikube-setup   # first run ~15 min (pulling ima
 make minikube-status                            # wait for every deployment READY
 ```
 
+The default `minimal` seed is setup-first. Before it logs in as the technical
+bootstrap admin, it consumes `/api/v1/admin/auth/setup`, which atomically
+creates the `admin@evenfire.local` Desktop identity and its `initial_setup`
+GFS operator link when `CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED=true`.
+The seed then verifies that link through the Control API. A rerun may fall back
+to login only when the same active link is present; it fails closed instead of
+creating an unlinked ordinary Desktop member or recreating a revoked link.
+
 **You do not build images.** `make minikube-setup` pulls all 23 service images
 from `ghcr.io/evenfire-ai`, published for `linux/amd64` and `linux/arm64`, so an
 Apple Silicon Mac pulls a native image rather than compiling anything. MCP
@@ -55,8 +63,9 @@ make install-all && npm --prefix control-ui install
 npm run ui              # Control UI + Profile UI + Desktop App
 ```
 
-Log in as `admin@evenfire.local` using the `ADMIN_PASSWORD` you set in `.env`,
-message the `chatllm` agent, and ask it to run a command or generate a PDF —
+Log in as `admin@evenfire.local` using the `ADMIN_PASSWORD` you set in `.env`;
+the same account is the initial GFS operator on a fresh self-hosted install.
+Message the `chatllm` agent, and ask it to run a command or generate a PDF —
 then approve the tool call from the chat. The same password logs into the
 Control UI as `admin`. The Desktop App is the client you just used; Control UI
 is the admin console for the same fleet — both are toured in

@@ -11,7 +11,11 @@ import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
-import { listHostsReferencingHook, syncHookRefsInHosts } from '../../services/hostGuardrailRefs.js'
+import {
+  addHookRefToHost,
+  listHostsReferencingHook,
+  syncHookRefsInHosts,
+} from '../../services/hostGuardrailRefs.js'
 import { createKey, listImages, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
 import type { RegistryEntry } from '../../services/registryClient.js'
 import {
@@ -346,6 +350,17 @@ function looksLikeCredentialPlaceholder(value: string): boolean {
   ]).has(normalized)
 }
 
+/**
+ * Is a supplied credentials payload something other than a key→value object?
+ * A string passes `typeof x === 'object'`? No — but it DOES survive
+ * `Object.keys()`, which enumerates its character indices, so an unchecked
+ * `credentials: "abc"` reads as three credential names. Both install paths gate
+ * on this so they agree on what a payload is.
+ */
+export function isMalformedCredentialPayload(credentials: unknown): boolean {
+  return typeof credentials !== 'object' || Array.isArray(credentials)
+}
+
 function validateProvidedCredentialPayload(
   schema: RegistryCredentialSchema,
   credentials: RegistryInstallRequest['credentials']
@@ -353,7 +368,7 @@ function validateProvidedCredentialPayload(
   const requiredKeys = schema.keys?.map(k => k.name) ?? []
   if (!schema.required || requiredKeys.length === 0) return { ok: true, secretData: {} }
   if (credentials === undefined || credentials === null) return { ok: true, secretData: {} }
-  if (typeof credentials !== 'object' || Array.isArray(credentials)) {
+  if (isMalformedCredentialPayload(credentials)) {
     return {
       ok: false,
       body: {
@@ -1930,6 +1945,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryVersion
         ).catch(() => null)) as RegistryCredentialSchema | null
         const credRequired = !!credSchema?.required
+        // Reject a non-object payload before Object.keys() enumerates it. Unlike the
+        // McpServer path this cannot lean on validateProvidedCredentialPayload: that
+        // returns early when the schema is not `required`, so a malformed payload
+        // would reach createSecret as stringData. Same error shape as that path.
+        if (body.credentials !== undefined && body.credentials !== null) {
+          if (isMalformedCredentialPayload(body.credentials)) {
+            res.status(400).json({
+              error: 'credential.invalidPayload',
+              message: 'Credentials must be an object keyed by credential name.',
+            })
+            return
+          }
+        }
         const credentials = body.credentials ?? {}
         const secretName = `${crName}-creds`
         let secretCreated = false
@@ -2039,27 +2067,21 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // the CR (+ Secret) back rather than return a false success.
         const digest = image?.ref?.includes('@') ? image.ref.split('@')[1] : undefined
         try {
-          const freshHost = (await gateway.getResource(
-            'hosts',
+          // Atomic read→derive→write (shared with the uninstall/upgrade paths):
+          // re-reads the Host, derives the hooks map from THAT read, and sends its
+          // resourceVersion as the replace precondition. Deriving out here and
+          // writing with a plain `updateResource` sends no precondition and replays
+          // a stale map, so a concurrent install/uninstall on the same Host is
+          // silently clobbered — leaving this CR installed but unreferenced, which
+          // reads to the operator as an active guardrail that never runs
+          // (fail-OPEN). Exhausted retries throw into the rollback below rather
+          // than reporting a false success.
+          await addHookRefToHost(
+            gateway,
             body.hostRef,
-            config.hostsNamespace
-          )) as HostShape
-          const g: HostGuardrailsShape = { ...(freshHost.spec?.guardrails ?? {}) }
-          const hooks: Record<string, Array<{ id: string; digest?: string }>> = {
-            ...(g.hooks ?? {}),
-          }
-          for (const phase of hookMeta.lifecyclePoints) {
-            const arr = hooks[phase] ? [...hooks[phase]] : []
-            if (!arr.some(h => h.id === crName)) {
-              arr.push({ id: crName, ...(digest ? { digest } : {}) })
-            }
-            hooks[phase] = arr
-          }
-          g.hooks = hooks
-          await gateway.updateResource(
-            'hosts',
-            body.hostRef,
-            { spec: { ...freshHost.spec, guardrails: g } },
+            crName,
+            hookMeta.lifecyclePoints,
+            digest,
             config.hostsNamespace
           )
         } catch (err) {

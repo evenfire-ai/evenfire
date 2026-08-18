@@ -21,11 +21,11 @@ export interface ToolIdentity {
 }
 
 /**
- * Map a registry trace descriptor to a lane identity. `serverName` is passed in
- * from the manager (registry-authoritative), NOT parsed from the tool name.
- *
- * TODO(phase1): wire the real `serverName` source; today `descriptor.sourceRef`
- * for MCP tools is still `__`-derived (see file header).
+ * Map a registry trace descriptor to a lane identity. For MCP tools the server is
+ * `descriptor.sourceRef`, which `McpToolAdapter` fills from the registry's own
+ * `McpTool.serverName` — never parsed from the tool name. The optional
+ * `serverName` override exists for callers that resolved the server by another
+ * route (the dynamic bridge); it wins when supplied.
  */
 export function resolveToolIdentity(
   name: string,
@@ -44,8 +44,10 @@ export function resolveToolIdentity(
  * An unknown tool defaults to `native` (the composite registry resolves native
  * first; an unresolved name is treated as native for matching purposes).
  *
- * TODO(phase1): thread the registry-authoritative `serverName` from `McpManager`
- * so the MCP `server` is not the `__`-derived `sourceRef` (see `resolveToolIdentity`).
+ * The MCP `server` is registry-authoritative: `McpToolAdapter` stamps
+ * `McpTool.serverName` into `sourceRef` at registration. It is NOT parsed out of
+ * the display name — that guess truncates a server whose own name contains `__`,
+ * and a `server=` rule that fails to match is a deny that does not deny.
  */
 export function resolveToolIdentityFromRegistry(
   name: string,

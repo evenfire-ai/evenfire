@@ -4,10 +4,12 @@ import {
   createAllowedModel,
   createLlmAllowedModelSchema,
   deleteAllowedModel,
+  getModelAllowlistState,
   isModelAllowed,
   listAllowedModels,
   listEnabledGroupedByProvider,
   listEnabledModelNamesForProvider,
+  listEnabledModelsWithStaleForProvider,
   updateAllowedModel,
   updateLlmAllowedModelSchema,
 } from '../src/services/llmAllowedModels.js'
@@ -214,6 +216,59 @@ describe('llmAllowedModels service', () => {
         'glm-4.7',
         'glm-5',
       ])
+    })
+  })
+
+  describe('getModelAllowlistState (Fase 6)', () => {
+    it('returns {enabled, stale} for an existing row (enabled+stale)', async () => {
+      const query = vi
+        .fn()
+        .mockResolvedValue({ rows: [{ enabled: true, stale: true }], rowCount: 1 })
+      expect(await getModelAllowlistState('claude', 'M', fakeDb(query))).toEqual({
+        enabled: true,
+        stale: true,
+      })
+      // The gate MUST NOT filter on `enabled` here — it needs the state of both an
+      // enabled AND a disabled row so Fase 2 (disabled) and Fase 6 (stale) can be
+      // told apart. It also reads `stale`.
+      const [sql] = query.mock.calls[0]
+      expect(String(sql)).toMatch(/stale/)
+      expect(String(sql)).not.toMatch(/AND enabled\b/)
+    })
+
+    it('returns null when no row exists (unknown pair)', async () => {
+      const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+      expect(await getModelAllowlistState('claude', 'nope', fakeDb(query))).toBeNull()
+    })
+
+    it('coerces a disabled non-stale row correctly', async () => {
+      const query = vi
+        .fn()
+        .mockResolvedValue({ rows: [{ enabled: false, stale: false }], rowCount: 1 })
+      expect(await getModelAllowlistState('claude', 'D', fakeDb(query))).toEqual({
+        enabled: false,
+        stale: false,
+      })
+    })
+  })
+
+  describe('listEnabledModelsWithStaleForProvider (Fase 6)', () => {
+    it('returns enabled models with their stale flag', async () => {
+      const query = vi.fn().mockResolvedValue({
+        rows: [
+          { model: 'glm-4.7', stale: false },
+          { model: 'glm-legacy', stale: true },
+        ],
+        rowCount: 2,
+      })
+      expect(await listEnabledModelsWithStaleForProvider('zai', fakeDb(query))).toEqual([
+        { model: 'glm-4.7', stale: false },
+        { model: 'glm-legacy', stale: true },
+      ])
+      // Same enabled-only filter as the name variant — a stale model is still
+      // enabled and must still appear (quarantine warns, it does not de-list).
+      const [sql] = query.mock.calls[0]
+      expect(String(sql)).toMatch(/WHERE provider = \$1 AND enabled/)
     })
   })
 

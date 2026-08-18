@@ -554,12 +554,19 @@ export const config: Config = {
     },
   },
 
-  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply
+  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply.
+  //
+  // llm-hooks is deliberately NOT listed: this list is a package deal, and its
+  // L1 pass grants namespace-wide DNS (`ensureDnsEgress` uses podSelector: {})
+  // plus HCC-gateway egress to every pod carrying clerum.io/managed-by — which
+  // hook pod templates do. That would hand a pure `/v1` responder the implicit
+  // DNS N5 forbids. The llm-hooks baseline is static instead
+  // (deploy/base/llm-hooks/networkpolicies.yaml: deny-all ingress + egress),
+  // with per-pod-key ingress and scoped CoreDNS emitted by LlmHookReconciler
+  // only for hooks that declare egressBindings.
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
-    // llm-hooks is included so ensureDefaultPolicies lays down default-deny +
-    // infra (DNS/HCC API/K8s API) egress for guardrail hook pods (§5).
-    'mcp-server,mcp-host,sandbox-recipes,rpc-proxy,llm-hooks'
+    'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'
   )!.split(','),
 
   // DNS infrastructure CIDR for GKE NodeLocal DNSCache / kube-dns. Empty
