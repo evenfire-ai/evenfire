@@ -85,6 +85,7 @@ const clerum = Object.freeze({
     googleLogin: (idToken: string) => ipcRenderer.invoke('auth:googleLogin', { idToken }),
     passwordLogin: (email: string, password: string) =>
       ipcRenderer.invoke('auth:passwordLogin', { email, password }),
+    diagnoseLoginBackend: () => ipcRenderer.invoke('auth:diagnoseLoginBackend'),
     startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),
     openForgotPassword: (email?: string) =>
       ipcRenderer.invoke('auth:openForgotPassword', { email }),

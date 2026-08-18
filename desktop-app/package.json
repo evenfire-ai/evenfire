@@ -10,6 +10,7 @@
     "build": "npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.json",
     "build:renderer": "vite build --config ui/vite.config.ts",
+    "verify:electron": "node ./scripts/verify-electron-runtime.mjs",
     "icons:generate": "node ./scripts/generate-adaptive-icons.mjs",
     "test": "vitest run",
     "test:e2e": "vitest run --config test/e2e/vitest.config.ts",
@@ -87,6 +88,9 @@
     "vite": "^7.1.7",
     "vitest": "^3.2.4",
     "wait-on": "^8.0.5"
+  },
+  "engines": {
+    "node": "24.x"
   },
   "overrides": {
     "@tootallnate/once": "^3.0.1",
