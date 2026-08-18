@@ -1,5 +1,8 @@
-// Raw-file upload cap. base64 inflates this ×1.34 on the wire, so 16MiB → ~22.4MB
-// body, which must stay under gfsc's GFS_MAX_WRITE_BODY_BYTES (24MiB, set via the
-// host-context-controller gfsc template). Raise all three in step.
-export const GFS_FILE_UPLOAD_MAX_BYTES = 16 * 1024 * 1024
-export const GFS_FILE_UPLOAD_MAX_MEGABYTES = 16
+// Product hard ceiling. Upload v2 sends indexed binary parts, so the 200 MiB
+// file limit is independent of the 8 MiB preferred / 16 MiB hard part limit.
+export const GFS_FILE_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
+export const GFS_FILE_UPLOAD_MAX_MEGABYTES = 200
+export const GFS_FILE_UPLOAD_PREFERRED_PART_BYTES = 8 * 1024 * 1024
+export const GFS_FILE_UPLOAD_MAX_PART_BYTES = 16 * 1024 * 1024
+export const GFS_FILE_UPLOAD_DEFAULT_CONCURRENCY = 4
+export const GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY = 2

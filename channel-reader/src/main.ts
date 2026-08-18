@@ -100,11 +100,48 @@ const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 /** One "you are not linked" notice per Slack user per conversation per day. */
 const UNRESOLVED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const UNRESOLVED_NOTICE_COPY =
-  "I can't accept messages from this Slack account. If you haven't linked it yet, " +
-  'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+  "I can't accept messages from this Slack account. If you haven't linked it yet on the " +
+  'profile UI, open Settings > Social channels > Slack and choose Connect Slack. ' +
+  'If you think you should already have access, contact your admin.'
 const UNRESOLVED_NOTICE_COPY_TEAMS =
-  "I can't accept messages from this Teams account. If you haven't linked it yet, " +
-  'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+  "I can't accept messages from this Teams account. If you haven't linked it yet on the " +
+  'profile UI, open Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+  'If you think you should already have access, contact your admin.'
+
+/**
+ * Profile UI tab that owns the Connect button for a provider.
+ *
+ * The bare Profile UI root lands the user on their profile with no sign of
+ * where to go next, and the control they need is four levels in: Settings >
+ * Social channels > <provider> > Connect. These are real App Router segments
+ * (profile-ui/app/settings/social/[network]), not query params, so they are
+ * safe to link directly.
+ *
+ * The copy above still names the path in words. A deep link can be defeated by
+ * a sign-in redirect that drops the user at the root, and someone reading this
+ * from a phone needs to be able to find the screen without the link.
+ */
+const PROFILE_SOCIAL_CHANNEL_PATH: Partial<Record<ChannelType, string>> = {
+  slack: '/settings/social/slack',
+  teams: '/settings/social/teams',
+}
+
+/**
+ * Profile UI link for the tab where `channelType` is linked. Falls back to the
+ * configured base URL for a provider with no such tab, so a new channel type
+ * degrades to today's behaviour rather than emitting a 404 path.
+ */
+export function profileSocialChannelUrl(baseUrl: string, channelType: ChannelType): string {
+  const trimmed = baseUrl.trim()
+  // Trailing slashes are walked off by index rather than matched with /\/+$/.
+  // An end-anchored `+` over a run of the same character backtracks
+  // polynomially (CodeQL js/polynomial-redos), and profileUiUrl is deployment
+  // config that arrives here unvalidated. The walk is linear and needs no
+  // reasoning about the regex engine to stay that way.
+  let end = trimmed.length
+  while (end > 0 && trimmed.charCodeAt(end - 1) === 47 /* '/' */) end--
+  return `${trimmed.slice(0, end)}${PROFILE_SOCIAL_CHANNEL_PATH[channelType] ?? ''}`
+}
 // Telegram deliberately gets no Profile UI link and no product name: unlike Teams
 // and Slack, anyone who discovers the bot handle can message it, so a reply must
 // not confirm what the bot belongs to.
@@ -1260,9 +1297,33 @@ export class ChannelReader {
       const { spec } = channelCRD
 
       // Process Telegram private chats, groups, and supergroups. Personal identity is verified separately.
-      if (spec.telegram) {
+      //
+      // Two separate hazards are guarded here, and both used to cost the channel
+      // every provider declared after telegram.
+      //
+      // 1. Guard on length, not presence. Channels created before this release
+      //    carry `telegram: []` even when they are Teams or Slack channels, and
+      //    an empty array is truthy. An empty array means "no telegram groups to
+      //    poll", not "this is a telegram channel".
+      // 2. The exits below leave the LABELLED BLOCK, not the channel loop. A
+      //    `continue` here aborted the whole channel, so a channel with real
+      //    telegram groups but no telegram adapter (credentials absent) silently
+      //    stopped polling its email and everything else too.
+      //    charts/clerum-crds/examples/channels.yaml ships exactly that shape:
+      //    one CommunicationChannel carrying telegram + email + slack.
+      telegramGroups: if (spec.telegram?.length) {
         const adapter = this.adapterForChannel('telegram', channelCRD)
-        if (!adapter) continue
+        if (!adapter) {
+          // Previously silent, which is what made this hard to diagnose.
+          console.warn(
+            '[Main] Skipping Telegram groups for ' +
+              channelCRD.namespace +
+              '/' +
+              channelCRD.name +
+              ': no telegram adapter; other providers on this channel still poll'
+          )
+          break telegramGroups
+        }
         const providerTarget = providerTargetFromChannel(channelCRD)
         if (!providerTarget) {
           console.warn(
@@ -1272,7 +1333,7 @@ export class ChannelReader {
               channelCRD.name +
               ': provider target is incomplete'
           )
-          continue
+          break telegramGroups
         }
         const telegramPollGroups = new Map<
           string,
@@ -1341,10 +1402,12 @@ export class ChannelReader {
         }
       }
 
-      // Process Email groups
-      if (spec.email) {
+      // Process Email groups. Same two hazards as the telegram guard above: an
+      // empty array is not an email channel, and a missing adapter must not cost
+      // the channel its remaining providers.
+      emailGroups: if (spec.email?.length) {
         const adapter = this.adapterForChannel('email', channelCRD)
-        if (!adapter) continue
+        if (!adapter) break emailGroups
         for (const group of spec.email) {
           const allowedSenders = new Set(group.emails)
           const messages = await adapter.fetchMessages(group.channelId, allowedSenders)
@@ -1635,7 +1698,9 @@ export class ChannelReader {
       const profileUrl = config.profileUiUrl?.trim()
       const baseCopy =
         msg.channelType === 'teams' ? UNRESOLVED_NOTICE_COPY_TEAMS : UNRESOLVED_NOTICE_COPY
-      content = profileUrl ? `${baseCopy} ${profileUrl}` : baseCopy
+      content = profileUrl
+        ? `${baseCopy} ${profileSocialChannelUrl(profileUrl, msg.channelType)}`
+        : baseCopy
     }
     try {
       if (msg.channelType === 'teams') {

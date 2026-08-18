@@ -5384,6 +5384,29 @@ textarea.cu-input {
   line-height: 1.3;
 }
 
+.cu-upload-file-flow__progress {
+  display: grid;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-upload-file-flow__progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  color: var(--cu-text-muted);
+  font-size: 0.8125rem;
+}
+
+.cu-upload-file-flow__progress progress {
+  width: 100%;
+  height: 0.5rem;
+  accent-color: var(--cu-accent);
+}
+
 .cu-upload-file-flow__destination code {
   color: var(--cu-text);
   overflow-wrap: anywhere;
@@ -9857,11 +9880,25 @@ textarea.cu-input {
 
 .cu-teams-setup__instructions {
   display: grid;
+  /* minmax(0, 1fr) rather than the implicit 1fr: a grid column's default minimum
+     is its content, and these steps carry command blocks whose single-line
+     commands are far wider than the card. Without this the column grows to the
+     longest command and takes the card and its prose with it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--cu-space-1);
   margin: 0;
   padding-left: var(--cu-space-5);
   color: var(--cu-text-soft);
   font-size: 0.8125rem;
+}
+
+/* Same reason, one level down. A command block sitting directly in .cu-teams-setup
+   is a grid item whose overflow:hidden already zeroes its automatic minimum size;
+   nested in a list item, the li is the grid item and its overflow is visible, so
+   the minimum has to be set here for the block's own overflow-x to do the
+   scrolling. */
+.cu-teams-setup__instructions > li {
+  min-width: 0;
 }
 
 .cu-teams-setup__instructions code {
@@ -9871,6 +9908,80 @@ textarea.cu-input {
   background: var(--cu-bg);
   color: var(--cu-text);
   font-size: 0.78rem;
+}
+
+/* A step owns its command block, so the block needs to read as part of that step
+   rather than as a sibling of the list. */
+.cu-teams-setup__instructions .cu-command-block {
+  margin: var(--cu-space-2) 0;
+}
+
+/* The inline-code rule above is for prose chips. Inside a command block the code
+   already sits on the block's own surface, so re-applying the chip border,
+   background and smaller size would double-frame it. */
+.cu-teams-setup__instructions .cu-command-block__pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: inherit;
+}
+
+/* The install link is the step's control, not a phrase in the sentence above it.
+   A bare .cu-btn is inline-flex, so it lands mid-paragraph in button weight and
+   chrome and reads as a typographic accident. Block-level with a fitted width
+   puts it on its own line at its own size without stretching to the card. */
+.cu-teams-setup__instructions .cu-teams-setup__install {
+  display: flex;
+  width: fit-content;
+  margin: var(--cu-space-2) 0;
+  text-decoration: none;
+}
+
+/* The package fallback recovers from Teams' catalog lag, which usually resolves
+   on a retry of the link above. Collapsed, it stays available without reading as
+   a fifth step that everyone has to perform. */
+/* The catalog wait is the single most likely thing to happen right after the
+   link is clicked, so it is stated before the click rather than hidden in the
+   fallback below: a first-time operator who is not told to expect it reads
+   "app cannot be found" as a broken setup and goes looking for the wrong bug. */
+.cu-teams-setup__instructions .cu-teams-setup__install-note {
+  margin: 0 0 var(--cu-space-2);
+}
+
+.cu-teams-setup__instructions .cu-teams-setup__fallback {
+  margin-bottom: var(--cu-space-2);
+}
+
+/* .cu-advanced-details blanks the native ::marker and supplies nothing in its
+   place. A label like "Advanced options" survives that, but this summary is a
+   sentence: with no chevron it reads as an assertion that the link HAS failed
+   rather than a control you open if it does. The summary is an inline-flex row
+   with a gap, so the pseudo-element lands as its first item. */
+.cu-teams-setup__fallback summary::before {
+  content: '';
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: none;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--cu-control-transition) ease;
+}
+
+.cu-teams-setup__fallback[open] summary::before {
+  transform: rotate(45deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cu-teams-setup__fallback summary::before {
+    transition: none;
+  }
+}
+
+.cu-teams-setup__instructions .cu-teams-setup__pending {
+  display: block;
+  margin-top: var(--cu-space-1);
 }
 
 .cu-command-block {

@@ -6,7 +6,9 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,
   AdminUser,
+  DeleteAdminUserRequest,
   TeamListItem,
+  createDeleteAdminUserRequest,
   deleteAdminTeam,
   deleteAdminUser,
   getAdminTeams,
@@ -73,6 +75,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
   const isInitialLoad = busy && !loaded
   const isListRefreshing = busy && loaded
   const deleteUserTeamCheckIdRef = useRef(0)
+  const deleteUserRequestRef = useRef<DeleteAdminUserRequest | null>(null)
 
   function openUserTeams(user: AdminUser) {
     router.push(CONTROL_ROUTES.usersAndTeams.userTab(user.id, 'teams'))
@@ -355,6 +358,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
     setDeleteUserSoloTeams([])
     setDeleteEmptyTeamsWithUser(false)
     setDeleteUserTeamCheckLoading(false)
+    deleteUserRequestRef.current = createDeleteAdminUserRequest()
     setUserToDelete(user)
     if ((user.activeTeamCount || 0) === 0) return
 
@@ -389,7 +393,11 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
     setDeleteUserTeamCheckError('')
     const teamsToDelete = deleteEmptyTeamsWithUser ? deleteUserSoloTeams : []
     try {
-      await deleteAdminUser(userToDelete.id)
+      await deleteAdminUser(
+        userToDelete.id,
+        deleteUserRequestRef.current ??
+          (deleteUserRequestRef.current = createDeleteAdminUserRequest())
+      )
       const teamDeleteResults = await Promise.allSettled(
         teamsToDelete.map(team => deleteAdminTeam(team.id))
       )
@@ -398,6 +406,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
         return result?.status === 'rejected'
       })
       setUserToDelete(null)
+      deleteUserRequestRef.current = null
       setDeleteUserSoloTeams([])
       setDeleteEmptyTeamsWithUser(false)
       await loadData()

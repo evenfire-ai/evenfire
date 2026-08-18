@@ -50,13 +50,18 @@ print(value, end="")
 
 gfs_dsn_authenticates_as() {
   local dsn="$1" expected_role="$2" actual rc
+  # Explicitly select the application container.  `kubectl exec` can otherwise
+  # resolve a deployment's default container inconsistently while a rollout is
+  # replacing its pod, turning an authentication rejection into an
+  # "unavailable" probe and preventing safe NOLOGIN recovery.
+  local probe_container="${PG_PROBE_CONTAINER:-control-api}"
   printf '%s' "$dsn" | gfs_dsn_validate \
     "$expected_role" "$PG_HOST" "$PG_PORT" "$PG_DB" || return 1
 
   # Authenticate through the same Service DNS and SCRAM path used by GFSC.
   # The connection string stays on stdin; the fixed program emits only the
   # authenticated role and intentionally suppresses connection error details.
-  actual="$(printf '%s' "$dsn" | kc -n "$PG_NS" exec -i "$PG_PROBE_DEPLOY" -- node -e '
+  actual="$(printf '%s' "$dsn" | kc -n "$PG_NS" exec -i "$PG_PROBE_DEPLOY" -c "$probe_container" -- node -e '
 const { Client } = require("pg");
 let raw = "";
 process.stdin.on("data", chunk => { raw += chunk });
