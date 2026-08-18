@@ -32,7 +32,10 @@ vi.mock('./config', () => ({
     hostNamespace: 'mcp-host',
     llmHooksNamespace: 'llm-hooks',
     mcpServerImagePullPolicy: 'IfNotPresent',
-    runtimeNamespaces: ['mcp-server', 'mcp-host', 'llm-hooks'],
+    // Mirrors the real default: llm-hooks is NOT a runtime namespace, so the
+    // "no egress (not even DNS)" assertions below hold for the pod, not just
+    // for the per-pod-key policy this file inspects (N5).
+    runtimeNamespaces: ['mcp-server', 'mcp-host'],
     minimalInfraNamespaces: [],
   },
 }))
