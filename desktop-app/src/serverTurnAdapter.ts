@@ -3,6 +3,7 @@ import type {
   ChatMessageAttachment,
   MessageToolStep,
   SessionTokensLite,
+  TurnGuardrailsLite,
 } from './types'
 
 export interface ServerTurn {
@@ -13,6 +14,7 @@ export interface ServerTurn {
   completed_at?: string
   tokens?: SessionTokensLite
   tool_steps?: MessageToolStep[]
+  guardrails?: TurnGuardrailsLite
 }
 
 type UserMessageDisplay = {
@@ -53,6 +55,7 @@ export function turnsToChatMessages(
         serverTurnNumber: turn.number,
         ...(turn.tokens ? { tokens: turn.tokens } : {}),
         ...(turn.tool_steps?.length ? { toolSteps: turn.tool_steps } : {}),
+        ...(turn.guardrails ? { guardrails: turn.guardrails } : {}),
       })
     }
   }

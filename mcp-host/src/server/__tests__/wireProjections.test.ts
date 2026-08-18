@@ -9,8 +9,10 @@ import {
   decodeSessionsCursor,
   paginateSessionSummaries,
   projectContextBreakdown,
+  projectGuardrailActivity,
   projectMessageWindowBounds,
   projectSessionTokens,
+  projectTurnGuardrails,
   projectTurnTokens,
   projectTurnToolSteps,
 } from '../wireProjections'
@@ -390,5 +392,62 @@ describe('projectTurnToolSteps (#582)', () => {
     expect(json).not.toContain('TOPSECRET')
     expect(json).not.toContain('SENSITIVE_BODY')
     expect(json).not.toContain('parameters')
+  })
+})
+
+describe('projectGuardrailActivity / projectTurnGuardrails (spec §5.3/§8)', () => {
+  const activity = (over: Partial<import('../../core/types').TurnGuardrailActivity> = {}) => ({
+    tokensBefore: 100,
+    tokensAfter: 80,
+    llmCalls: 2,
+    changes: [
+      {
+        sourceId: 'token-trim',
+        kind: 'builtin' as const,
+        deltaTokens: -20,
+        changed: true,
+        calls: 2,
+      },
+    ],
+    ...over,
+  })
+
+  it('returns undefined when there is nothing to show', () => {
+    expect(projectGuardrailActivity(undefined)).toBeUndefined()
+    expect(projectGuardrailActivity(activity({ changes: [] }))).toBeUndefined()
+    expect(projectTurnGuardrails({} as Turn)).toBeUndefined()
+  })
+
+  it('projects counts + ids and length-caps sourceId (§8)', () => {
+    const longId = 'x'.repeat(300)
+    const wire = projectGuardrailActivity(
+      activity({
+        changes: [{ sourceId: longId, kind: 'hook', deltaTokens: -5, changed: true, calls: 1 }],
+      })
+    )
+    expect(wire).toMatchObject({ tokensBefore: 100, tokensAfter: 80, llmCalls: 2 })
+    expect(wire!.changes[0].sourceId.length).toBe(128)
+    expect(wire!.changes[0]).toMatchObject({
+      kind: 'hook',
+      deltaTokens: -5,
+      changed: true,
+      calls: 1,
+    })
+  })
+
+  it('projectContextBreakdown carries guardrails when the conversation has activity', () => {
+    const breakdown = {
+      buckets: { messages: 10, systemTools: 0, metaContext: 0, systemPrompt: 0 },
+      totalInputTokens: 10,
+      maxTokens: 100,
+      capturedAtTurn: 1,
+    }
+    const wire = projectContextBreakdown(
+      makeConversation({ contextBreakdown: breakdown, guardrailActivity: activity() })
+    )
+    expect(wire?.guardrails).toMatchObject({ tokensBefore: 100, tokensAfter: 80 })
+    // ...and omits it when no guardrail acted.
+    const quiet = projectContextBreakdown(makeConversation({ contextBreakdown: breakdown }))
+    expect(quiet?.guardrails).toBeUndefined()
   })
 })

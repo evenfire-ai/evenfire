@@ -907,6 +907,7 @@ export interface SessionMessagesResult {
     completed_at?: string
     tokens?: SessionTokensLite
     tool_steps?: MessageToolStep[]
+    guardrails?: TurnGuardrailsLite
   }>
 }
 
@@ -973,6 +974,25 @@ export interface SessionTokensLite {
 }
 
 /**
+ * Guardrail-input-transparency renderer types (spec §4/§6) — the `…Lite` aliases
+ * of the server `TurnGuardrailsWire`. Counts + admin-authored source ids only;
+ * never message content or hook-authored strings (§8).
+ */
+export interface GuardrailInputChangeLite {
+  sourceId: string
+  kind: 'builtin' | 'hook'
+  deltaTokens: number
+  changed: boolean
+  calls: number
+}
+export interface TurnGuardrailsLite {
+  tokensBefore: number
+  tokensAfter: number
+  changes: GuardrailInputChangeLite[]
+  llmCalls: number
+}
+
+/**
  * Snapshot of the composition of the prompt sent in the last turn — a per-bucket
  * breakdown of the CURRENT context window (not lifetime totals; that's
  * {@link SessionTokensLite}). Surfaced on-demand by
@@ -1001,6 +1021,8 @@ export interface ContextBreakdownLite {
   /** cache_read / (cache_read + input); only when the model reports cache (#11). */
   cacheHitRate?: number
   capturedAtTurn: number
+  /** Current-turn LLM-lane guardrail input activity; omitted when none acted. */
+  guardrails?: TurnGuardrailsLite
 }
 
 /** Wire alias kept identical to the server `ContextBreakdownWire` projection. */
@@ -1085,6 +1107,10 @@ export interface ChatMessage {
    *  SSE steps are renderer-only). Minimal, serializable shape (no raw args/output).
    *  Absent on user messages and on turns with no tool calls. */
   toolSteps?: MessageToolStep[]
+  /** LLM-lane guardrail input activity for the turn that produced this assistant
+   *  message (from /messages). Counts + admin-authored source ids only, never
+   *  content (spec §8). Absent on user messages and turns where no guardrail acted. */
+  guardrails?: TurnGuardrailsLite
 }
 
 /**

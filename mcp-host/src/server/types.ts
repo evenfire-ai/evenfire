@@ -549,6 +549,8 @@ export type SessionMessagesResult = {
     tokens?: SessionTokensWire
     /** Tools used in the turn; omitted when the turn made no tool calls. */
     tool_steps?: TurnToolStepWire[]
+    /** LLM-lane guardrail input activity; omitted when no guardrail acted (spec §5.3). */
+    guardrails?: TurnGuardrailsWire
   }>
 } & SessionStateWire
 
@@ -564,6 +566,24 @@ export type SessionMessagesHandler = (
   chatId: string,
   query: SessionMessagesQuery
 ) => SessionMessagesResult | null | Promise<SessionMessagesResult | null>
+
+/**
+ * Guardrail-input-transparency wire shapes (spec §4/§6). Counts + admin-authored
+ * source ids only — never message content, never hook-authored strings (§8).
+ */
+export interface GuardrailInputChangeWire {
+  sourceId: string
+  kind: 'builtin' | 'hook'
+  deltaTokens: number
+  changed: boolean
+  calls: number
+}
+export interface TurnGuardrailsWire {
+  tokensBefore: number
+  tokensAfter: number
+  changes: GuardrailInputChangeWire[]
+  llmCalls: number
+}
 
 /**
  * Snapshot of the prompt composition sent in the last turn, surfaced to the
@@ -586,6 +606,8 @@ export interface ContextBreakdownWire {
    * `ContextBreakdown.capturedAtTurn` in core/types.ts.
    */
   capturedAtTurn: number
+  /** Current-turn LLM-lane guardrail input activity; omitted when none acted (spec §5.3). */
+  guardrails?: TurnGuardrailsWire
 }
 
 /**

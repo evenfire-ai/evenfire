@@ -10,6 +10,7 @@ import {
   paginateSessionSummaries,
   projectMessageWindowBounds,
   projectSessionTokens,
+  projectTurnGuardrails,
   projectTurnTokens,
   projectTurnToolSteps,
   sessionsCursorScope,
@@ -138,6 +139,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
         completed_at: t.completed_at ? t.completed_at.toISOString() : undefined,
         tokens: projectTurnTokens(t),
         tool_steps: projectTurnToolSteps(t, redactToolError),
+        guardrails: projectTurnGuardrails(t),
       })),
     }
   }

@@ -4,6 +4,7 @@ import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   ApprovalDecisionResult,
   ContextBreakdownResult,
+  GuardrailInputChangeLite,
   HostActivitySnapshot,
   HostMessageRequest,
   HostMessageResponse,
@@ -21,6 +22,7 @@ import {
   SessionsListQuery,
   SessionsListResult,
   SetHostModelResult,
+  TurnGuardrailsLite,
 } from './types.js'
 
 export type { SandboxUiApp } from './types.js'
@@ -98,6 +100,33 @@ function parseTokens(value: unknown, label: string): SessionTokensLite | undefin
     ...(record.cacheWrite !== undefined
       ? { cacheWrite: wireSafeInteger(record.cacheWrite, `${label}.cacheWrite`, 0)! }
       : {}),
+  }
+}
+
+function parseGuardrails(value: unknown, label: string): TurnGuardrailsLite | undefined {
+  if (value === undefined || value === null) return undefined
+  const record = wireObject(value, label)
+  const rawChanges = Array.isArray(record.changes) ? record.changes : []
+  const changes: GuardrailInputChangeLite[] = rawChanges.map((c, i) => {
+    const cr = wireObject(c, `${label}.changes[${i}]`)
+    return {
+      sourceId: wireString(cr.sourceId, `${label}.changes[${i}].sourceId`),
+      kind: cr.kind === 'hook' ? 'hook' : 'builtin',
+      // deltaTokens is signed — a reduction is negative, so no lower bound.
+      deltaTokens: wireSafeInteger(
+        cr.deltaTokens,
+        `${label}.changes[${i}].deltaTokens`,
+        Number.MIN_SAFE_INTEGER
+      )!,
+      changed: optionalWireBoolean(cr.changed, `${label}.changes[${i}].changed`) ?? false,
+      calls: wireSafeInteger(cr.calls, `${label}.changes[${i}].calls`, 0)!,
+    }
+  })
+  return {
+    tokensBefore: wireSafeInteger(record.tokensBefore, `${label}.tokensBefore`, 0)!,
+    tokensAfter: wireSafeInteger(record.tokensAfter, `${label}.tokensAfter`, 0)!,
+    llmCalls: wireSafeInteger(record.llmCalls, `${label}.llmCalls`, 0)!,
+    changes,
   }
 }
 
@@ -324,6 +353,14 @@ function parseSessionMessagesResult(
               tool_steps: parseToolSteps(
                 entry.tool_steps,
                 `session messages response.turns[${index}].tool_steps`
+              ),
+            }
+          : {}),
+        ...(entry.guardrails != null
+          ? {
+              guardrails: parseGuardrails(
+                entry.guardrails,
+                `session messages response.turns[${index}].guardrails`
               ),
             }
           : {}),
