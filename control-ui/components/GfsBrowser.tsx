@@ -4,7 +4,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
-import { IconDocumentText, IconFolder, IconImage, IconServer } from '@components/Sidebar/icons'
+import {
+  IconDocumentText,
+  IconFolder,
+  IconImage,
+  IconServer,
+  IconVideo,
+} from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
 import { Button, TextInput } from '@components/ui'
@@ -14,6 +20,7 @@ import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
+import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { GfsGrantPanel } from './GfsGrantPanel'
 import { GfsResourceMenu } from './GfsResourceMenu'
 import { NewFolderModal } from './NewFolderModal'
@@ -608,6 +615,8 @@ export function GfsBrowser(): React.JSX.Element {
                           <IconFolder />
                         ) : gfsImagePreviewMimeType(child.name) ? (
                           <IconImage />
+                        ) : isGfsVideoFile(child.name) ? (
+                          <IconVideo />
                         ) : isGfsDocumentFile(child.name) ? (
                           <IconDocumentText />
                         ) : (
@@ -732,6 +741,8 @@ export function GfsBrowser(): React.JSX.Element {
                   <IconFolder />
                 ) : gfsImagePreviewMimeType(selected.name) ? (
                   <IconImage />
+                ) : isGfsVideoFile(selected.name) ? (
+                  <IconVideo />
                 ) : isGfsDocumentFile(selected.name) ? (
                   <IconDocumentText />
                 ) : (
