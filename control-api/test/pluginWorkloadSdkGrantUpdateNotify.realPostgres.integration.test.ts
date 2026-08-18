@@ -1,7 +1,31 @@
-import { afterAll, beforeAll, expect, describe as vitestDescribe } from 'vitest'
+import { afterAll, beforeAll, expect, vi, describe as vitestDescribe } from 'vitest'
 import { it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
+
+// issue #375 M3 (jozer review): controllable PASSTHROUGH seam. Everything stays
+// real (the actual append implementation runs) until a test arms `failNext`,
+// which makes the NEXT permission-event append inside a grant mutation throw —
+// forcing a REAL `upsertGrant` transaction to ROLLBACK so the rollback test
+// drives the actual producer instead of hand-writing pg_notify.
+const permissionEventsSeam = vi.hoisted(() => ({ failNext: null as Error | null }))
+vi.mock('../src/services/tracing/controlApiPermissionEvents.js', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../src/services/tracing/controlApiPermissionEvents.js')>()
+  return {
+    ...actual,
+    appendControlApiPermissionEventsInTransaction: async (
+      ...args: Parameters<typeof actual.appendControlApiPermissionEventsInTransaction>
+    ) => {
+      if (permissionEventsSeam.failNext) {
+        const err = permissionEventsSeam.failNext
+        permissionEventsSeam.failNext = null
+        throw err
+      }
+      return actual.appendControlApiPermissionEventsInTransaction(...args)
+    },
+  }
+})
 
 /**
  * issue #375 (P3) — grant-update NOTIFY on real PostgreSQL.
@@ -142,17 +166,18 @@ describeRealPostgres(
       })
     })
 
-    it('discards BOTH the mutation and the NOTIFY when a real mutation transaction ROLLBACKs', async () => {
-      // This proves the grant-update NOTIFY is transactionally coupled to the grant
-      // mutation (delivered on COMMIT, discarded on ROLLBACK).
-      //
-      // WHY not fail a real service call (upsert/delete/revoke) after its notify:
-      // `notifyGrantUpdate` is the TERMINAL statement of each of those functions —
-      // nothing in them can throw after it — so a "production mutation that fails
-      // after the notify" cannot be constructed. Instead we reproduce the exact
-      // production shape: a REAL mutation (UPDATE of the committed grant) plus the
-      // REAL notify (same channel + payload builder) inside the production
-      // `withTransaction` wrapper, then abort it — and assert BOTH are discarded.
+    it('discards BOTH the mutation and the NOTIFY when the REAL upsertGrant transaction ROLLBACKs', async () => {
+      // issue #375 M3 (jozer review): this drives the ACTUAL producer, not a
+      // hand-written pg_notify. `appendControlApiPermissionEventsInTransaction`
+      // runs inside the upsert transaction (before its terminal notify); the
+      // armed seam makes it throw, so the REAL `upsertGrant` — advisory lock,
+      // row mutation, audit append — rolls back, and BOTH the row change and
+      // any NOTIFY from that transaction must be discarded. This pins the
+      // producer's transactional atomicity (e.g. moving the grant mutation or
+      // the audit append off the transaction client goes RED here). The
+      // notify-specific `db → pool` swap is pinned by the unit-lane
+      // transaction-client assertion and, at compile time, by the
+      // `DbTransactionClient` brand on `notifyGrantUpdate`.
       received.length = 0
       const before = await db.pool.query<{ default_target_ref: string | null }>(
         `SELECT default_target_ref FROM plugin_workload_sdk_grants
@@ -160,27 +185,31 @@ describeRealPostgres(
         [NS, RECIPE]
       )
 
+      permissionEventsSeam.failNext = new Error('injected permission-event failure (issue #375 M3)')
       await expect(
-        db.withTransaction(async client => {
-          await client.query(
-            `UPDATE plugin_workload_sdk_grants SET default_target_ref = 'ROLLED-BACK-SENTINEL'
-            WHERE recipe_namespace = $1 AND recipe_name = $2 AND capability_family = 'promptBridge'`,
-            [NS, RECIPE]
-          )
-          await client.query('SELECT pg_notify($1, $2)', [
-            sdk.PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL,
-            sdk.buildGrantUpdateNotifyPayload({ recipeNamespace: NS, recipeName: RECIPE }),
-          ])
-          throw new Error('force rollback')
-        })
-      ).rejects.toThrow('force rollback')
+        sdk.upsertGrant(
+          {
+            recipeNamespace: NS,
+            recipeName: RECIPE,
+            capabilityFamily: 'promptBridge',
+            provider: 'openai',
+            allowedModels: ['gpt-5'],
+            allowedCallers: ['api'],
+            defaultTargetRef: 'ROLLED-BACK-SENTINEL',
+          },
+          OPERATOR_ID
+        )
+      ).rejects.toThrow('injected permission-event failure')
+      expect(
+        permissionEventsSeam.failNext,
+        'the injected failure must have been consumed by the real upsert path'
+      ).toBeNull()
 
-      // The NOTIFY was discarded on rollback...
+      // The transaction never delivered a NOTIFY...
       const delivered = await waitForGrantNotification(1_000)
       expect(delivered, 'a rolled-back NOTIFY must never be delivered').toBeUndefined()
 
-      // ...and so was the mutation — the grant is unchanged, proving the notify
-      // shared the mutation's transaction.
+      // ...and the REAL mutation was rolled back — the grant row is unchanged.
       const after = await db.pool.query<{ default_target_ref: string | null }>(
         `SELECT default_target_ref FROM plugin_workload_sdk_grants
         WHERE recipe_namespace = $1 AND recipe_name = $2 AND capability_family = 'promptBridge'`,

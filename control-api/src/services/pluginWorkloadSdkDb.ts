@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { type DbClient, pool, withTransaction } from '../db.js'
+import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../db.js'
 import type { AdministrativeEventSubmitterPrincipalV1 } from '../middleware/tracingSubmitterAuth.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import {
@@ -62,7 +62,13 @@ export function buildGrantUpdateNotifyPayload(input: GrantUpdateNotifyInput): st
  * short family), which cannot approach that bound. So the mutation is never at
  * risk from the notify, and the transactional coupling is intentional.
  */
-async function notifyGrantUpdate(db: DbClient, input: GrantUpdateNotifyInput): Promise<void> {
+async function notifyGrantUpdate(
+  // issue #375 M3: REQUIRES the branded transaction session — `pool` no longer
+  // structurally satisfies this parameter, so the db→pool refactor that breaks
+  // COMMIT/ROLLBACK coupling fails to COMPILE instead of merely failing a test.
+  db: DbTransactionClient,
+  input: GrantUpdateNotifyInput
+): Promise<void> {
   await db.query('SELECT pg_notify($1, $2)', [
     PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL,
     buildGrantUpdateNotifyPayload(input),

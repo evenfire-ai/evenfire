@@ -14,7 +14,7 @@
 import * as k8s from '@kubernetes/client-node'
 import type { Pool } from 'pg'
 import { loadConfig } from './config'
-import { getPool, initDb } from './db'
+import { createGrantUpdateListenerPool, getPool, initDb } from './db'
 import {
   type GovernedTraceReporter,
   type WorkflowInfrastructureTelemetryProjection,
@@ -619,6 +619,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   // a DB (same gate as dbRunProcessor); without a DB the listener never starts
   // and the level-triggered reconcile remains the sole convergence path.
   private grantUpdateListener: GrantUpdateListener | null = null
+  // issue #375 (M4, jozer review): the LISTEN session pins its client for the
+  // process lifetime, so it gets its OWN single-connection pool and consumes
+  // zero slots of the shared `poolMax` (default 4) pool that dbRunProcessor,
+  // leader election, and run-sync all contend for. Owned (and ended) by this
+  // watcher because it exists solely for the grant-update listener.
+  private grantUpdateListenerPool: Pool | null = null
   private config = loadConfig()
   private stopped = false
   private runtimeCredentialRefreshTimer: ReturnType<typeof setInterval> | null = null
@@ -686,8 +692,13 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       // issue #375 (P3): on a grant-update NOTIFY, force-reconcile the affected
       // recipe through the SAME path the 30s watchdog uses. The dispatch body is
       // a named method so it is unit-testable without standing up a DB.
+      // issue #375 (M4): the listener LISTENs on a DEDICATED single-connection
+      // pool, never the shared one — a lifetime-pinned LISTEN checkout would
+      // permanently burn one of the shared pool's 4 slots (dbRunProcessor
+      // already pins another).
+      this.grantUpdateListenerPool = createGrantUpdateListenerPool(this.config.db)
       this.grantUpdateListener = createGrantUpdateListener({
-        pool,
+        pool: this.grantUpdateListenerPool,
         onGrantUpdate: ({ recipeNamespace, recipeName }) =>
           this.handleGrantUpdateNotification(recipeNamespace, recipeName),
       })
@@ -1388,6 +1399,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     }
     if (this.grantUpdateListener) {
       await this.grantUpdateListener.stop()
+    }
+    if (this.grantUpdateListenerPool) {
+      // issue #375 (M4): the watcher owns the dedicated LISTEN pool — end it on
+      // shutdown so its single connection is closed with the process.
+      await this.grantUpdateListenerPool.end()
+      this.grantUpdateListenerPool = null
     }
     if (this.traceReporter) {
       const result = await this.traceReporter.stopAndDrain()

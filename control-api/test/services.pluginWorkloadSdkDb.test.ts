@@ -21,14 +21,27 @@ import {
 
 const permissionEvents = vi.hoisted(() => ({ append: vi.fn() }))
 
+// issue #375 M3 (jozer review): the client handed out by the mocked
+// withTransaction is DISTINGUISHABLE from the pool. Its query spy DELEGATES to
+// pool.query (so the per-test mockResolvedValueOnce queues keep driving row
+// responses) but records its own calls — so an out-of-transaction refactor
+// (`notifyGrantUpdate(pool, …)` instead of the in-transaction `db`) never
+// reaches `txClient` and turns the NOTIFY assertions below RED. The previous
+// mock passed `work({ query: pool.query })`, making the transaction client and
+// the pool literally the same object and that distinction unrepresentable.
+const txClient = vi.hoisted(() => ({ query: vi.fn() }))
+
 // Mock the pg pool so we can inspect the exact SQL + bind parameters the real
 // db-layer functions produce.
 vi.mock('../src/db.js', () => ({
   ...(() => {
     const query = vi.fn().mockResolvedValue({ rows: [{ prompt_bridge_count: 1 }], rowCount: 1 })
+    txClient.query.mockImplementation((...args: unknown[]) =>
+      (query as (...inner: unknown[]) => unknown)(...args)
+    )
     return {
       pool: { query, connect: vi.fn() },
-      withTransaction: (work: (db: { query: typeof query }) => unknown) => work({ query }),
+      withTransaction: (work: (db: { query: typeof txClient.query }) => unknown) => work(txClient),
     }
   })(),
 }))
@@ -65,6 +78,7 @@ function mockUpsertGrantQueries(row: Record<string, unknown>): void {
 describe('JIT credential ticket jti registry', () => {
   beforeEach(() => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
   })
 
   it('registers a non-secret, invocation-bound jti and reports insertion conflicts', async () => {
@@ -145,6 +159,7 @@ describe('JIT credential ticket jti registry', () => {
 describe('ordered provider-attempt reservation', () => {
   beforeEach(() => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
   })
 
   it('reserves only the next authorized target after an eligible prior failure', async () => {
@@ -245,6 +260,7 @@ describe('ordered provider-attempt reservation', () => {
 describe('legacy promptBridge inventory', () => {
   beforeEach(() => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
   })
 
   it('reports legacy shape without rewriting policy or exposing secrets', async () => {
@@ -314,6 +330,7 @@ describe('legacy promptBridge inventory', () => {
 describe('invocation retry lifecycle timestamps', () => {
   beforeEach(() => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     vi.mocked(pool.query).mockResolvedValue({ rows: [], rowCount: 1 } as never)
   })
 
@@ -451,6 +468,7 @@ describe('upsertGrant — provider column (R1)', () => {
 
   beforeEach(() => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
   })
 
   it('persists the explicit provider and maps it back on the returned grant', async () => {
@@ -579,6 +597,7 @@ describe('resolveRecipientProfiles', () => {
 
   beforeEach(() => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
   })
 
   it('returns [] without querying when no ref is a UUID', async () => {
@@ -691,6 +710,7 @@ describe('Plugin Workload SDK governed permission events', () => {
 
   beforeEach(() => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     permissionEvents.append.mockResolvedValue('operation-id')
   })
@@ -716,7 +736,9 @@ describe('Plugin Workload SDK governed permission events', () => {
     )
 
     expect(permissionEvents.append).toHaveBeenCalledWith(
-      expect.objectContaining({ query: pool.query }),
+      // issue #375 M3: the audit append must receive the TRANSACTION client
+      // handed out by withTransaction, never the pool.
+      expect.objectContaining({ query: txClient.query }),
       expect.objectContaining({
         operatorSub: OPERATOR_ID,
         changes: [
@@ -769,6 +791,7 @@ describe('Plugin Workload SDK internal revocation audit actor', () => {
 
   beforeEach(() => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     permissionEvents.append.mockResolvedValue('operation-id')
   })
@@ -796,7 +819,9 @@ describe('Plugin Workload SDK internal revocation audit actor', () => {
       revokePluginWorkloadSdkForRecipe('sandbox-recipes', 'sdk-recipe', actor)
     ).resolves.toMatchObject({ state: 'revoking', revoked: 1 })
     expect(permissionEvents.append).toHaveBeenCalledWith(
-      expect.objectContaining({ query: pool.query }),
+      // issue #375 M3: the audit append must receive the TRANSACTION client
+      // handed out by withTransaction, never the pool.
+      expect.objectContaining({ query: txClient.query }),
       expect.objectContaining({
         operatorSub: 'wrc-provisioner',
         internalPrincipal,
@@ -833,7 +858,9 @@ describe('Plugin Workload SDK internal revocation audit actor', () => {
       finalizePluginWorkloadSdkRevocation('sandbox-recipes', 'sdk-recipe', REVOCATION_ID, actor)
     ).resolves.toMatchObject({ state: 'disabled', disabled: 1 })
     expect(permissionEvents.append).toHaveBeenCalledWith(
-      expect.objectContaining({ query: pool.query }),
+      // issue #375 M3: the audit append must receive the TRANSACTION client
+      // handed out by withTransaction, never the pool.
+      expect.objectContaining({ query: txClient.query }),
       expect.objectContaining({
         operatorSub: 'wrc-provisioner',
         internalPrincipal,
@@ -905,6 +932,7 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
 
   it('upsertGrant emits a transactional pg_notify on the grant-update channel', async () => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     permissionEvents.append.mockResolvedValue('operation-id')
     vi.mocked(pool.query)
@@ -947,12 +975,14 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
       'operator-1'
     )
 
-    const notifyCall = vi
-      .mocked(pool.query)
-      .mock.calls.find(([sql]) => String(sql).includes('pg_notify')) as unknown as
-      | [string, unknown[]]
-      | undefined
-    expect(notifyCall).toBeDefined()
+    // issue #375 M3: the pg_notify MUST run on the in-transaction client, not
+    // the pool — searching txClient (not pool.query) is what turns the
+    // `notifyGrantUpdate(pool, …)` refactor RED (a pool-issued NOTIFY is
+    // autocommitted and escapes the mutation's COMMIT/ROLLBACK coupling).
+    const notifyCall = txClient.query.mock.calls.find(([sql]) =>
+      String(sql).includes('pg_notify')
+    ) as unknown as [string, unknown[]] | undefined
+    expect(notifyCall, 'pg_notify must be issued on the transaction client').toBeDefined()
     const [, params] = notifyCall as [string, unknown[]]
     expect(params[0]).toBe(PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL)
     expect(JSON.parse(String(params[1]))).toEqual({
@@ -964,6 +994,7 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
 
   it('deleteGrant emits a transactional pg_notify on the grant-update channel', async () => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     permissionEvents.append.mockResolvedValue('operation-id')
     vi.mocked(pool.query)
@@ -997,12 +1028,14 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
       'operator-1'
     )
 
-    const notifyCall = vi
-      .mocked(pool.query)
-      .mock.calls.find(([sql]) => String(sql).includes('pg_notify')) as unknown as
-      | [string, unknown[]]
-      | undefined
-    expect(notifyCall).toBeDefined()
+    // issue #375 M3: the pg_notify MUST run on the in-transaction client, not
+    // the pool — searching txClient (not pool.query) is what turns the
+    // `notifyGrantUpdate(pool, …)` refactor RED (a pool-issued NOTIFY is
+    // autocommitted and escapes the mutation's COMMIT/ROLLBACK coupling).
+    const notifyCall = txClient.query.mock.calls.find(([sql]) =>
+      String(sql).includes('pg_notify')
+    ) as unknown as [string, unknown[]] | undefined
+    expect(notifyCall, 'pg_notify must be issued on the transaction client').toBeDefined()
     const [, params] = notifyCall as [string, unknown[]]
     expect(params[0]).toBe(PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL)
     expect(JSON.parse(String(params[1]))).toMatchObject({
@@ -1013,6 +1046,7 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
 
   it('revokePluginWorkloadSdkForRecipe emits a transactional pg_notify on the grant-update channel', async () => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     permissionEvents.append.mockResolvedValue('operation-id')
     vi.mocked(pool.query)
@@ -1034,12 +1068,14 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
       operatorSub: 'operator-1',
     })
 
-    const notifyCall = vi
-      .mocked(pool.query)
-      .mock.calls.find(([sql]) => String(sql).includes('pg_notify')) as unknown as
-      | [string, unknown[]]
-      | undefined
-    expect(notifyCall).toBeDefined()
+    // issue #375 M3: the pg_notify MUST run on the in-transaction client, not
+    // the pool — searching txClient (not pool.query) is what turns the
+    // `notifyGrantUpdate(pool, …)` refactor RED (a pool-issued NOTIFY is
+    // autocommitted and escapes the mutation's COMMIT/ROLLBACK coupling).
+    const notifyCall = txClient.query.mock.calls.find(([sql]) =>
+      String(sql).includes('pg_notify')
+    ) as unknown as [string, unknown[]] | undefined
+    expect(notifyCall, 'pg_notify must be issued on the transaction client').toBeDefined()
     const [, params] = notifyCall as [string, unknown[]]
     expect(params[0]).toBe(PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL)
     expect(JSON.parse(String(params[1]))).toMatchObject({
@@ -1055,6 +1091,7 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
     // NOTIFY again — a reconcile+pg_notify spin. Match upsert/delete: notify only
     // on a real mutation.
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     permissionEvents.append.mockResolvedValue('operation-id')
     vi.mocked(pool.query)
@@ -1085,6 +1122,7 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
 
   it('does NOT emit pg_notify when deleteGrant matches no row (rowCount 0)', async () => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     vi.mocked(pool.query)
       .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // recipe advisory lock
@@ -1107,6 +1145,7 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
 
   it('does NOT emit pg_notify on a revoke that finds no grants (state=missing)', async () => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     vi.mocked(pool.query)
       .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // recipe advisory lock
@@ -1124,6 +1163,7 @@ describe('Plugin Workload SDK grant-update NOTIFY (issue #375 P3)', () => {
 
   it('does NOT emit pg_notify on a revoke that conflicts on revocation epoch (state=conflict)', async () => {
     vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
     permissionEvents.append.mockReset()
     vi.mocked(pool.query)
       .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // recipe advisory lock

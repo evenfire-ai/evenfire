@@ -426,6 +426,10 @@ describe('shouldPatchRecipeStatus', () => {
     // The exact incident shape: phase and top-level message are unchanged, the
     // ONLY change is the SDK capability state. Before the fix this returned
     // false and the validated state was never published.
+    // M2 (jozer review): the persisted verifiedAt is FRESH, so the >5-min
+    // throttle branch stays CLOSED and this can only pass through the semantic
+    // field comparisons — a hardcoded stale timestamp made it pass via the
+    // throttle, pinning nothing about the incident's mechanism.
     expect(
       shouldPatchRecipeStatus(
         sdkRecipe({
@@ -433,7 +437,7 @@ describe('shouldPatchRecipeStatus', () => {
           promptBridge: true,
           clientNotifications: false,
           message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
-          verifiedAt: '2026-08-17T17:24:50.000Z',
+          verifiedAt: new Date(Date.now() - 10_000).toISOString(),
         }),
         {
           phase: 'active',
@@ -645,6 +649,107 @@ describe('shouldPatchRecipeStatus', () => {
         }
       )
     ).toBe(false)
+  })
+
+  // ── issue #375 M2 (jozer review): every projection field comparison is pinned
+  // INDIVIDUALLY. Each case varies exactly ONE field between the persisted
+  // capability and the projection, with a FRESH persisted verifiedAt so the
+  // >5-min throttle branch stays closed — removing that single field's
+  // comparison in pluginWorkloadSdkProjectionChanged turns that case RED.
+  describe('per-field projection comparisons (issue #375 M2)', () => {
+    function persistedBase(): Record<string, unknown> {
+      return {
+        state: 'validated',
+        promptBridge: true,
+        clientNotifications: false,
+        message: 'Capability validated (promptBridge)',
+        policyRevision: 3,
+        policyHash: 'sha256:policy-a',
+        defaultTargetRef: 'primary-openai',
+        bootstrapPodUid: 'pod-abc',
+        bootstrapContractVersion: 2,
+        bootstrapProvider: 'openai',
+        bootstrapModel: 'gpt-5.4-mini',
+        // FRESH: keeps the verifiedAt throttle CLOSED so a `true` can only come
+        // from the varied field's own comparison.
+        verifiedAt: new Date(Date.now() - 10_000).toISOString(),
+      }
+    }
+
+    function projectionFrom(
+      persisted: Record<string, unknown>,
+      override: Record<string, unknown>
+    ): { conditions: never[]; capability: never } {
+      const { verifiedAt: _persistedVerifiedAt, ...semantic } = persisted
+      return {
+        conditions: [],
+        capability: {
+          ...semantic,
+          verifiedAt: new Date().toISOString(),
+          validatedAt: new Date().toISOString(),
+          ...override,
+        } as never,
+      }
+    }
+
+    const cases: Array<[field: string, override: Record<string, unknown>]> = [
+      ['state', { state: 'awaiting_policy' }],
+      ['message', { message: 'Capability validated (promptBridge, clientNotifications)' }],
+      ['policyRevision', { policyRevision: 4 }],
+      ['policyHash', { policyHash: 'sha256:policy-b' }],
+      ['defaultTargetRef', { defaultTargetRef: 'fallback-anthropic' }],
+      ['bootstrapPodUid', { bootstrapPodUid: 'pod-def' }],
+      ['bootstrapContractVersion', { bootstrapContractVersion: null }],
+      ['bootstrapProvider', { bootstrapProvider: 'anthropic' }],
+      ['bootstrapModel', { bootstrapModel: 'claude-sonnet-4-6' }],
+      ['promptBridge', { promptBridge: false }],
+      ['clientNotifications', { clientNotifications: true }],
+    ]
+
+    for (const [field, override] of cases) {
+      it(`a lone ${field} change forces a patch (throttle closed)`, () => {
+        const persisted = persistedBase()
+        expect(
+          shouldPatchRecipeStatus(sdkRecipe(persisted), {
+            phase: 'active',
+            message: 'All workloads deployed',
+            workloadStatuses: [],
+            pluginWorkloadSdkProjection: projectionFrom(persisted, override),
+          })
+        ).toBe(true)
+      })
+    }
+
+    it('control: with NO field varied and a fresh persisted verifiedAt, no patch is emitted', () => {
+      const persisted = persistedBase()
+      expect(
+        shouldPatchRecipeStatus(sdkRecipe(persisted), {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: projectionFrom(persisted, {}),
+        })
+      ).toBe(false)
+    })
+
+    it('first-ever publish: a computed capability with NOTHING persisted forces a patch', () => {
+      // Pins the `if (!current) return true` branch — the first publish of
+      // status.pluginWorkloadSdk after a recipe declares the capability.
+      expect(
+        shouldPatchRecipeStatus(
+          makeWorkflowRecipe({
+            spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+            status: { phase: 'active', message: 'All workloads deployed' },
+          }),
+          {
+            phase: 'active',
+            message: 'All workloads deployed',
+            workloadStatuses: [],
+            pluginWorkloadSdkProjection: projectionFrom(persistedBase(), {}),
+          }
+        )
+      ).toBe(true)
+    })
   })
 })
 
@@ -2670,5 +2775,105 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// ── issue #375 M1/M4 (jozer review): the REAL constructor + start()/stop()
+// wiring of the grant-update listener. Every prior watcher test hand-installed
+// collaborators onto Object.create(prototype), so removing the constructor
+// wiring or the start()/stop() calls left the whole suite green. These tests
+// construct the real watcher and go RED if:
+//   - the constructor stops creating the listener,
+//   - the listener is handed the SHARED pool instead of its dedicated one (M4),
+//   - `await this.grantUpdateListener.start()` is removed from start(),
+//   - `await this.grantUpdateListener.stop()` is removed from stop().
+describe('WorkflowRecipeWatcher wiring — grant-update listener lifecycle (issue #375 M1/M4)', () => {
+  function makeFakeKubeConfig() {
+    return {
+      makeApiClient: vi.fn(() => ({})),
+    } as unknown as import('@kubernetes/client-node').KubeConfig
+  }
+
+  type ListenerStub = { start: () => Promise<void>; stop: () => Promise<void> }
+  type InternalWatcher = {
+    grantUpdateListener: ListenerStub | null
+    grantUpdateListenerPool: { connect?: unknown; end: () => Promise<void> } | null
+    dbRunProcessor: { start: () => Promise<void>; stop: () => Promise<void> } | null
+    traceReporter: null
+    tryInitializeWorkflow: () => Promise<void>
+    startWatch: () => Promise<void>
+    startSecretWatch: () => Promise<void>
+    startBrokerTokenRotationLoop: () => void
+    startRuntimeCredentialRefreshLoop: () => void
+    startWorkloadStatusRefreshLoop: () => void
+    startExternalEgressRefreshLoop: () => void
+  }
+
+  it('constructor wires a listener backed by a DEDICATED pool — LISTEN never checks out of the shared pool (M4)', async () => {
+    const sharedPool = { connect: vi.fn(), query: vi.fn(), on: vi.fn() }
+    const watcher = new WorkflowRecipeWatcher(makeFakeKubeConfig(), sharedPool as never)
+    const internal = watcher as unknown as InternalWatcher
+
+    expect(internal.grantUpdateListener).not.toBeNull()
+    expect(internal.grantUpdateListenerPool).not.toBeNull()
+    // M4: a lifetime-pinned LISTEN session must not burn one of the shared
+    // pool's 4 slots — the listener owns a dedicated single-connection pool.
+    expect(internal.grantUpdateListenerPool).not.toBe(sharedPool)
+
+    // Behavioral pin: starting the listener checks out of the DEDICATED pool
+    // and never touches the shared one.
+    const fakeClient = {
+      on: vi.fn(),
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      release: vi.fn(),
+      removeAllListeners: vi.fn(),
+    }
+    const dedicatedConnect = vi.fn().mockResolvedValue(fakeClient)
+    ;(internal.grantUpdateListenerPool as { connect?: unknown }).connect = dedicatedConnect
+    await (internal.grantUpdateListener as ListenerStub).start()
+    expect(dedicatedConnect).toHaveBeenCalledTimes(1)
+    expect(sharedPool.connect).not.toHaveBeenCalled()
+    await (internal.grantUpdateListener as ListenerStub).stop()
+  })
+
+  it('does not create the listener (or its pool) without a DB pool', () => {
+    const watcher = new WorkflowRecipeWatcher(makeFakeKubeConfig(), null)
+    const internal = watcher as unknown as InternalWatcher
+    expect(internal.grantUpdateListener).toBeNull()
+    expect(internal.grantUpdateListenerPool).toBeNull()
+  })
+
+  it('start() starts and stop() stops the grant-update listener and ends its dedicated pool (M1)', async () => {
+    const sharedPool = { connect: vi.fn(), query: vi.fn(), on: vi.fn() }
+    const watcher = new WorkflowRecipeWatcher(makeFakeKubeConfig(), sharedPool as never)
+    const internal = watcher as unknown as InternalWatcher
+
+    // Stub the heavy collaborators. The REAL start()/stop() method bodies stay
+    // in play, so neutering the listener wiring inside them goes RED here.
+    internal.tryInitializeWorkflow = vi.fn().mockResolvedValue(undefined)
+    internal.startWatch = vi.fn().mockResolvedValue(undefined)
+    internal.startSecretWatch = vi.fn().mockResolvedValue(undefined)
+    internal.startBrokerTokenRotationLoop = vi.fn()
+    internal.startRuntimeCredentialRefreshLoop = vi.fn()
+    internal.startWorkloadStatusRefreshLoop = vi.fn()
+    internal.startExternalEgressRefreshLoop = vi.fn()
+    internal.dbRunProcessor = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+    }
+    internal.traceReporter = null
+    const listenerStart = vi.fn().mockResolvedValue(undefined)
+    const listenerStop = vi.fn().mockResolvedValue(undefined)
+    internal.grantUpdateListener = { start: listenerStart, stop: listenerStop }
+    const poolEnd = vi.fn().mockResolvedValue(undefined)
+    internal.grantUpdateListenerPool = { end: poolEnd }
+
+    await watcher.start()
+    expect(listenerStart).toHaveBeenCalledTimes(1)
+
+    await watcher.stop()
+    expect(listenerStop).toHaveBeenCalledTimes(1)
+    // M4: the watcher owns the dedicated pool and must close its connection.
+    expect(poolEnd).toHaveBeenCalledTimes(1)
   })
 })

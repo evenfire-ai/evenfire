@@ -40,6 +40,13 @@ function makeFakeClient(opts: { failQuery?: boolean } = {}) {
       return { rows: [], rowCount: 0 }
     }),
     release: vi.fn(),
+    // pg PoolClient is an EventEmitter; the listener strips its own handlers
+    // before handing a subscribed client back to the pool (issue #375 M5).
+    removeAllListeners: vi.fn((event?: string) => {
+      if (event) delete handlers[event]
+      else for (const key of Object.keys(handlers)) delete handlers[key]
+      return client
+    }),
   }
   return {
     client,
@@ -194,49 +201,115 @@ describe('createGrantUpdateListener', () => {
 describe('createGrantUpdateListener — sustained reconnect regime (issue #375 Finding 1)', () => {
   interface FakeGenClient {
     released: boolean
+    destroyed: boolean
+    subscribed: boolean
+    handlerCount: (event: string) => number
     on: (event: string, handler: (...args: unknown[]) => void) => FakeGenClient
     query: ReturnType<typeof vi.fn>
     release: ReturnType<typeof vi.fn>
+    removeAllListeners: (event?: string) => FakeGenClient
     emitError: (err: Error) => void
     emitNotification: (msg: { channel: string; payload?: string }) => void
   }
 
-  /** A fresh fake client per connect(), tracking created + per-client released. */
+  /**
+   * pg-pool-FAITHFUL fake (issue #375 M5, jozer review): the previous fake
+   * modeled a plain-released client as silently non-dispatching and minted a
+   * fresh object on every connect() — exactly the two divergences from pg-pool
+   * that hid the still-subscribed-client leak. Faithful semantics:
+   *   - `release()` (no error) re-idles the SAME object; pg-pool `_release`
+   *     re-attaches only its OWN idle listener — user handlers stay attached and
+   *     the server-side LISTEN subscription stays live, so the client KEEPS
+   *     dispatching after a plain release.
+   *   - `connect()` REUSES an idle client before creating a new one.
+   *   - `release(err)` DESTROYS the client (removed from the pool; its session
+   *     — and therefore its subscription — is gone).
+   *   - `LISTEN`/`UNLISTEN` queries toggle the server-side subscription; only a
+   *     subscribed, non-destroyed session receives a broadcast NOTIFY.
+   */
   function makeFakeClientFactory() {
     const created: FakeGenClient[] = []
-    function connect(): FakeGenClient {
+    const idle: FakeGenClient[] = []
+    let listenHold: Promise<void> | null = null
+    let releaseListenHold: (() => void) | null = null
+    function makeClient(): FakeGenClient {
       const handlers: Record<string, ((...args: unknown[]) => void)[]> = {}
       const client: FakeGenClient = {
         released: false,
+        destroyed: false,
+        subscribed: false,
+        handlerCount: (event: string) => (handlers[event] ?? []).length,
         on(event, handler) {
           ;(handlers[event] ??= []).push(handler)
           return client
         },
-        query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
-        release: vi.fn(() => {
-          client.released = true
+        query: vi.fn(async (sql: string) => {
+          if (/^LISTEN\b/.test(sql)) {
+            if (listenHold) await listenHold
+            client.subscribed = true
+          }
+          if (/^UNLISTEN\b/.test(sql)) client.subscribed = false
+          return { rows: [], rowCount: 0 }
         }),
+        release: vi.fn((err?: Error) => {
+          client.released = true
+          if (err) {
+            client.destroyed = true
+            client.subscribed = false
+          } else if (!client.destroyed) {
+            idle.push(client)
+          }
+        }),
+        removeAllListeners(event?: string) {
+          if (event) delete handlers[event]
+          else for (const key of Object.keys(handlers)) delete handlers[key]
+          return client
+        },
         emitError(err: Error) {
-          for (const h of handlers.error ?? []) h(err)
+          for (const h of [...(handlers.error ?? [])]) h(err)
         },
         emitNotification(msg) {
-          // A released client is back in the pool and must not dispatch.
-          if (client.released) return
-          for (const h of handlers.notification ?? []) h(msg)
+          // Faithful: dispatch depends ONLY on the session being alive and
+          // subscribed — NOT on pool checkout state. A plain-released client
+          // keeps dispatching (that is the leak the old fake hid).
+          if (client.destroyed || !client.subscribed) return
+          for (const h of [...(handlers.notification ?? [])]) h(msg)
         },
       }
+      return client
+    }
+    function connect(): FakeGenClient {
+      const reused = idle.shift()
+      if (reused) {
+        reused.released = false
+        return reused
+      }
+      const client = makeClient()
       created.push(client)
       return client
     }
     return {
       created,
+      idle,
       connect,
-      /** Live (checked-out, unreleased) sessions right now. */
-      liveCount: () => created.filter(c => !c.released).length,
+      /** Live (checked-out, unreleased, undestroyed) sessions right now. */
+      liveCount: () => created.filter(c => !c.released && !c.destroyed).length,
       current: () => created[created.length - 1],
-      /** Simulate a real pg NOTIFY broadcast to EVERY live session. */
+      /** Simulate a real pg NOTIFY broadcast to EVERY subscribed session. */
       broadcast(msg: { channel: string; payload?: string }) {
         for (const c of created) c.emitNotification(msg)
+      },
+      /** Park the next LISTEN round-trip until releaseListen() is called. */
+      holdListen() {
+        listenHold = new Promise<void>(resolve => {
+          releaseListenHold = () => {
+            listenHold = null
+            resolve()
+          }
+        })
+      },
+      releaseListen() {
+        releaseListenHold?.()
       },
     }
   }
@@ -357,6 +430,101 @@ describe('createGrantUpdateListener — sustained reconnect regime (issue #375 F
       recipeName: 'research',
     })
 
+    await listener.stop()
+    expect(factory.liveCount()).toBe(0)
+  })
+
+  // ── issue #375 M5 (jozer review): a client that ran LISTEN and carries this
+  // module's handlers must never be plain-release()d back to the shared pool.
+  // pg-pool re-idles the SAME object (no UNLISTEN, user handlers kept), so the
+  // session stays subscribed: it dispatches after stop() and double-dispatches
+  // after a reuse. These three tests drive the exact leak paths with the
+  // pg-pool-faithful fake and go RED without the UNLISTEN/removeAllListeners/
+  // generation hardening.
+  it('M5a: stop() during the in-flight LISTEN round-trip leaves NO subscribed, dispatching session behind', async () => {
+    const factory = makeFakeClientFactory()
+    const onGrantUpdate = vi.fn()
+    const listener = createGrantUpdateListener({
+      pool: {} as never,
+      onGrantUpdate,
+      logger: makeLogger(),
+      connect: async () => factory.connect() as never,
+    })
+
+    factory.holdListen()
+    const startPromise = listener.start() // parks inside the LISTEN round-trip
+    await flush()
+    await listener.stop() // stop() lands while LISTEN is in flight
+    factory.releaseListen() // LISTEN resolves AFTER stop
+    await startPromise
+    await flush()
+
+    // The released client went back to the pool; it must NOT still be a live
+    // subscriber that dispatches into a stopped listener.
+    factory.broadcast(NOTIFY)
+    expect(onGrantUpdate, 'post-stop dispatch from a pool-returned client').not.toHaveBeenCalled()
+    expect(factory.liveCount(), 'no session may stay checked out').toBe(0)
+    expect(
+      factory.created[0].handlerCount('notification'),
+      'listener handlers must be stripped before the client re-enters the pool'
+    ).toBe(0)
+  })
+
+  it('M5b: stop() then start() reusing the pooled client dispatches exactly once (no stacked handler pairs)', async () => {
+    const factory = makeFakeClientFactory()
+    const onGrantUpdate = vi.fn()
+    const listener = createGrantUpdateListener({
+      pool: {} as never,
+      onGrantUpdate,
+      logger: makeLogger(),
+      connect: async () => factory.connect() as never,
+    })
+
+    await listener.start()
+    await listener.stop()
+    await listener.start() // pg-pool hands back the SAME client object
+
+    expect(factory.created, 'pool-faithful fake must reuse the idle client').toHaveLength(1)
+    factory.broadcast(NOTIFY)
+    // Without stripping handlers on release, each stop→start cycle stacks one
+    // handler pair on the same client and one NOTIFY dispatches twice.
+    expect(onGrantUpdate).toHaveBeenCalledTimes(1)
+    await listener.stop()
+    expect(factory.liveCount()).toBe(0)
+  })
+
+  it('M5c: a reconnect parked across stop()→start() must not leave the superseded session subscribed (single dispatch)', async () => {
+    const factory = makeFakeClientFactory()
+    const { sleep, resolvers } = resolverQueueSleep()
+    const onGrantUpdate = vi.fn()
+    const listener = createGrantUpdateListener({
+      pool: {} as never,
+      onGrantUpdate,
+      logger: makeLogger(),
+      connect: async () => factory.connect() as never,
+      sleep,
+    })
+
+    await listener.start()
+    const clientA = factory.current()
+    clientA.emitError(new Error('drop')) // destroys A, parks a reconnect in its backoff sleep
+    await flush()
+    await listener.stop()
+    await listener.start() // session B attaches and becomes current
+    await flush()
+    const clientB = factory.current()
+    expect(clientB.subscribed).toBe(true)
+
+    // The parked reconnect resumes AFTER the restart: session C attaches and the
+    // non-overwrite guard releases B. Pre-fix that release was plain — B stayed
+    // subscribed with handlers attached → one logical NOTIFY dispatched twice.
+    ;(resolvers.shift() as () => void)()
+    await flush()
+
+    expect(factory.liveCount(), 'at most one live session').toBeLessThanOrEqual(1)
+    onGrantUpdate.mockClear()
+    factory.broadcast(NOTIFY)
+    expect(onGrantUpdate, 'superseded session must not double-dispatch').toHaveBeenCalledTimes(1)
     await listener.stop()
     expect(factory.liveCount()).toBe(0)
   })

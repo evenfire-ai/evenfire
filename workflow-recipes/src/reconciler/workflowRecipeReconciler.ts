@@ -1517,13 +1517,17 @@ export class WorkflowRecipeReconciler {
       }
 
       if (currentPhase === 'active' && awaitsTriggeredRun && !wfExecPhase) {
-        // Plugin Workload SDK promptBridge recipes keep an eager mcp-host whose
-        // provider must be (re-)configured once it becomes Ready and after any
-        // pod restart. Fall through to the inner reconcile so ensureEagerSdkMcpHost
-        // retries the /configure; the short-circuit below would freeze it
-        // provider_unavailable forever. clientNotifications-only needs no provider,
-        // so it keeps the cheap short-circuit.
-        if (!recipe.spec.pluginWorkloadSdk?.promptBridge) {
+        // Plugin Workload SDK recipes (BOTH families) keep an eager mcp-host and
+        // must fall through to the inner reconcile: promptBridge so
+        // ensureEagerSdkMcpHost retries the /configure (the short-circuit below
+        // would freeze it provider_unavailable forever), and clientNotifications-
+        // only so the reconcile re-gathers the bootstrap proof and recomputes the
+        // capability projection (issue #375 jozer BLOCKER: short-circuiting here
+        // returned skipStatusPatch:true, so a computed awaiting_policy→validated
+        // transition was never published for that family). The Step 8 ownership
+        // gate inside the inner reconcile covers Secret-ownership revocation on
+        // the fall-through path, exactly as it already did for promptBridge.
+        if (!recipe.spec.pluginWorkloadSdk) {
           if (coordinatorGfsPolicyCanOpen) {
             await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
           }
@@ -1649,11 +1653,24 @@ export class WorkflowRecipeReconciler {
         // operator re-labels the Secret.
         const activeOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
         if (activeOwnership) return activeOwnership
-        return {
-          phase: 'active' as RecipePhase,
-          message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
-          workloadStatuses: [],
-          skipStatusPatch: true,
+        // issue #375 (jozer BLOCKER): Plugin Workload SDK recipes fall through to
+        // the inner reconcile (mirroring the awaiting-trigger carve-out above) so
+        // the bootstrap proof is re-gathered and a computed capability transition
+        // (e.g. awaiting_policy→validated) is actually published — this
+        // short-circuit's skipStatusPatch:true suppressed it unconditionally.
+        // The gfs/credentials/ownership enforcement above has already run.
+        // EXCEPTION: while a workflow execution is in progress the short-circuit
+        // is kept even for SDK recipes — this branch exists to protect the
+        // coordinator's 409-free windows, and the capability publication is
+        // level-triggered (requeue + watchdog) so it lands on the next
+        // non-running pass.
+        if (!recipe.spec.pluginWorkloadSdk || wfInProgress) {
+          return {
+            phase: 'active' as RecipePhase,
+            message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
+            workloadStatuses: [],
+            skipStatusPatch: true,
+          }
         }
       }
 

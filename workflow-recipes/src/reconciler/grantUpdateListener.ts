@@ -103,6 +103,45 @@ export function createGrantUpdateListener(opts: GrantUpdateListenerOptions): Gra
   let stopped = true
   // H1: collapse concurrent reconnect triggers into ONE in-flight reconnect.
   let reconnecting = false
+  // M5 (jozer review): monotonic session generation. A session's notification
+  // handler dispatches ONLY while its own generation is the current one — a
+  // superseded-but-not-destroyed session (e.g. one that raced a release) goes
+  // mute instead of double-dispatching. The 'error' identity gate below covers
+  // reconnect scheduling; this covers the dispatch path it never guarded.
+  let generation = 0
+
+  /**
+   * M5 (jozer review): a client that has run LISTEN and carries this module's
+   * handlers must NEVER be plain-release()d back to the shared pool. pg-pool's
+   * `_release` re-idles the SAME Client object and re-attaches only its OWN
+   * idle listener — user handlers stay attached and the Postgres session stays
+   * subscribed, so the client keeps dispatching after stop() and
+   * double-dispatches after a pool reuse (and dbRunProcessor could check out a
+   * client with this module's stale 'error' handler still attached). Unsubscribe
+   * and strip our handlers first; if the UNLISTEN cannot be delivered the
+   * session state is unknowable, so DESTROY the client (release(err)) instead of
+   * re-idling it.
+   */
+  async function releaseSubscribedClient(attached: PoolClient): Promise<void> {
+    let unlistened = false
+    try {
+      await attached.query(`UNLISTEN ${PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL}`)
+      unlistened = true
+    } catch {
+      /* session unusable — destroyed below instead of re-idled */
+    }
+    attached.removeAllListeners('notification')
+    attached.removeAllListeners('error')
+    try {
+      if (unlistened) {
+        attached.release()
+      } else {
+        attached.release(new Error('grant-update LISTEN session UNLISTEN failed — destroying'))
+      }
+    } catch {
+      /* idempotent */
+    }
+  }
 
   async function attachListener(): Promise<void> {
     let client: PoolClient | null = null
@@ -110,13 +149,24 @@ export function createGrantUpdateListener(opts: GrantUpdateListenerOptions): Gra
       client = await connect()
       // H2: stop() may have run while we awaited connect(); do NOT bring up a
       // LISTEN session after shutdown. Release the client and bail before any
-      // handler is registered, so nothing dispatches post-stop.
+      // handler is registered, so nothing dispatches post-stop. (Plain release
+      // is correct HERE: no LISTEN has run and no handler is attached yet.)
       if (stopped) {
         client.release()
         return
       }
       const attached = client
+      // M5: assigned only when this session is INSTALLED as the current
+      // listener; until then — and forever after supersession — the handler is
+      // mute (generation is bumped on every install and on stop()).
+      let sessionGeneration = -1
       attached.on('notification', msg => {
+        if (sessionGeneration !== generation) {
+          log.debug('superseded listen session notification — dropped', {
+            channel: msg.channel,
+          })
+          return
+        }
         if (msg.channel !== PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL || !msg.payload) return
         const notification = parseGrantUpdatePayload(msg.payload)
         if (!notification) {
@@ -157,32 +207,35 @@ export function createGrantUpdateListener(opts: GrantUpdateListenerOptions): Gra
           return
         }
         log.warn('listen session error — will reconnect', { err: err.message })
+        // M5: mute the errored session's dispatch path immediately (its client
+        // was destroyed above, but the generation bump costs nothing and closes
+        // the window where release(err) itself failed).
+        generation += 1
         listenClient = null
         scheduleReconnect()
       })
       await attached.query(`LISTEN ${PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL}`)
       // H2: re-check after the async LISTEN resolves — stop() may have run
-      // during the round-trip.
+      // during the round-trip. M5: this client has ALREADY run LISTEN with
+      // handlers attached — it must be unsubscribed and stripped, never
+      // plain-released into the pool where it would keep dispatching.
       if (stopped) {
-        try {
-          attached.release()
-        } catch {
-          /* idempotent */
-        }
+        await releaseSubscribedClient(attached)
         return
       }
       // Finding 1: never overwrite a live `listenClient` without releasing the
       // prior one. Defense-in-depth alongside the identity gate above — a stray
       // interleaving that reaches here with a different session still checked out
-      // must not leak it.
+      // must not leak it. M5: the loser ran LISTEN with handlers attached, so it
+      // gets the full unsubscribe+strip release, not a plain one.
       if (listenClient && listenClient !== attached) {
-        try {
-          listenClient.release()
-        } catch {
-          /* idempotent */
-        }
+        await releaseSubscribedClient(listenClient)
       }
       listenClient = attached
+      // M5: install-time bump — makes THIS session the sole dispatcher and any
+      // surviving predecessor stale.
+      generation += 1
+      sessionGeneration = generation
       log.info('LISTEN plugin_workload_sdk_grant_update attached')
     } catch (err) {
       log.warn('LISTEN attach failed — will retry', {
@@ -234,18 +287,16 @@ export function createGrantUpdateListener(opts: GrantUpdateListenerOptions): Gra
       // stop()→start() restart is not blocked by a stale flag left set by a
       // reconnect that was still mid-sleep when we stopped (belt-and-suspenders).
       reconnecting = false
+      // M5: mute ANY session that survives teardown (e.g. one parked in an
+      // in-flight LISTEN whose release races this stop).
+      generation += 1
       if (listenClient) {
-        try {
-          await listenClient.query(`UNLISTEN ${PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL}`)
-        } catch {
-          /* best-effort — the session is being torn down */
-        }
-        try {
-          listenClient.release()
-        } catch {
-          /* idempotent */
-        }
+        const current = listenClient
         listenClient = null
+        // M5: unsubscribe + strip handlers before the client re-enters the
+        // pool — a plain release would re-idle a still-subscribed client whose
+        // handlers dispatch after stop() and stack up on the next start().
+        await releaseSubscribedClient(current)
       }
     },
   }
