@@ -161,14 +161,28 @@ const HOOK_TRUST_ORDER: Record<string, number> = { low: 0, mid: 1, high: 2 }
 // Lifecycle points that ALWAYS receive message/response content (§8.4/§8.7). preCall
 // is the one point with two flavors — content-bearing unless the hook declares
 // `contentAccess: metadata` — so it is handled separately in isContentBearingHook.
-const INHERENTLY_CONTENT_POINTS = new Set(['moderate', 'postCallSuccess', 'onError'])
+//
+// The tool-lane points (§6.2) are here because the tool lane has NO metadata
+// projection: preToolUse receives {tool, arguments} and postToolUse receives the
+// tool result, and remoteToolHook never consults contentAccess. Leaving them out
+// classified a preToolUse-only hook as content-free, so a low-trust third-party
+// hook with egressBindings or a remote target passed the content/egress gate
+// while reading every tool argument and result at runtime.
+const INHERENTLY_CONTENT_POINTS = new Set([
+  'moderate',
+  'postCallSuccess',
+  'onError',
+  'preToolUse',
+  'postToolUse',
+])
 
 /**
  * §8.4/§8.7 — does this hook receive message/response CONTENT at any of its
- * lifecycle points? moderate/postCallSuccess/onError always do; preCall does
- * unless it explicitly declared `contentAccess: metadata` (mcp-host's projection
- * enforces the same rule, so the gate and the runtime agree — the two land
- * together, §12.4). Absent contentAccess ⇒ content-bearing (conservative).
+ * lifecycle points? moderate/postCallSuccess/onError and both tool-lane points
+ * always do; preCall does unless it explicitly declared `contentAccess: metadata`
+ * (mcp-host's projection enforces the same rule, so the gate and the runtime
+ * agree — the two land together, §12.4). Absent contentAccess ⇒ content-bearing
+ * (conservative).
  */
 export function isContentBearingHook(
   lifecyclePoints: string[] | undefined,
