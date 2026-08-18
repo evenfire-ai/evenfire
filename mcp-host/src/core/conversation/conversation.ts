@@ -307,6 +307,15 @@ export class ConversationManager {
     if (currentTurn) {
       currentTurn.response = response
       currentTurn.completed_at = new Date()
+      // Mirror the turn's guardrail-input aggregate onto the live Turn. The
+      // cached (active-session) `/messages` path serves `conversation.turns`
+      // directly, and `recordGuardrailActivity` only touches the conversation-
+      // level field — so without this copy an in-RAM turn has no
+      // `guardrailActivity` and the transparency wire stays dark until the
+      // session falls out of cache and cold-loads (where `groupMessagesIntoTurns`
+      // rehydrates it from the persisted blob). persistTurnComplete below stamps
+      // the same aggregate, keeping the cached and cold-load paths in parity.
+      currentTurn.guardrailActivity = conversation.guardrailActivity
     }
 
     conversation.state = ConversationState.Idle
@@ -489,6 +498,9 @@ export class ConversationManager {
     if (currentTurn) {
       currentTurn.response = '[Task cancelled by user before completion]'
       currentTurn.completed_at = new Date()
+      // Live-turn parity with the persisted blob (see completeTurn) — persistTurnCancel
+      // stamps the same aggregate, so the cached and cold-load paths agree.
+      currentTurn.guardrailActivity = conversation.guardrailActivity
     }
     void this.store.persistTurnCancel(conversation)
   }

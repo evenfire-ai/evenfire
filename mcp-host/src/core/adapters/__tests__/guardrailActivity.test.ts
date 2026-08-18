@@ -3,7 +3,10 @@
  *
  * Measurement: HookedLlmPort attributes each source's signed token delta per LLM
  * call, skips no-op steps, records same-size rewrites as `changed`, and drops the
- * whole record on a tokenizer fault without affecting the turn.
+ * whole record on an estimator fault without affecting the turn. The measurement
+ * tests inject a deterministic chars counter; one test exercises the production
+ * `chars/4` default (dense-content-appropriate; the prose word-heuristic would
+ * sign-flip on JSON/CSV — see estimateInputTokens).
  * Aggregation: ConversationManager.recordGuardrailActivity sums across a turn's
  * calls per source (§2.3 — the regression that matters most).
  */
@@ -19,23 +22,25 @@ import type {
 } from '../../types'
 import { HookedLlmPort } from '../hookedLlmPort'
 
-/** Deterministic stand-in for the tokenizer: total chars across string content. */
-function chars(msgs: ChatMessage[]): number {
-  return msgs.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0)
+/** Deterministic counter injected by the measurement tests: total NON-system
+ *  string-content chars (production defaults to a chars/4 estimate). */
+function nonSystemChars(req: ToolCompletionRequest): number {
+  return (req.messages ?? [])
+    .filter(m => m.role !== 'system')
+    .reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0)
 }
 
-function innerPort(countSync: (m: ChatMessage[]) => number = chars) {
-  const countFn = vi.fn((m: ChatMessage[]) => countSync(m))
+function innerPort() {
   const completeWithTools = vi.fn(
     async () => ({ content: 'ok', tool_calls: null, usage: {}, finish_reason: 'stop' }) as never
   )
   const inner = {
     modelName: () => 'm',
-    getTokenCounter: () => ({ countSync: countFn }) as never,
+    getTokenCounter: () => ({}) as never,
     complete: async () => ({}) as never,
     completeWithTools,
   } as unknown as LlmPort
-  return { inner, countFn, completeWithTools }
+  return { inner, completeWithTools }
 }
 
 function capture() {
@@ -55,7 +60,7 @@ describe('HookedLlmPort guardrail-input measurement (§3)', () => {
     const steps: BuiltinStep[] = [
       { sourceId: 'token-trim', shape: r => ({ ...r, messages: [msg('short')] }) },
     ]
-    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink)
+    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink, nonSystemChars)
 
     await hooked.completeWithTools(req(long))
 
@@ -74,33 +79,55 @@ describe('HookedLlmPort guardrail-input measurement (§3)', () => {
     ])
   })
 
-  it('skips a no-op step entirely — it costs no count and no row (§3.2)', async () => {
-    const { inner, countFn } = innerPort()
+  it('uses a chars/4 estimate by default and excludes system messages', async () => {
+    const { inner } = innerPort()
     const { sink, records } = capture()
+    // non-system 40 chars -> ceil(40/4)=10 ; rewritten to 8 chars -> 2. System excluded.
+    const request = {
+      messages: [{ role: 'system', content: 'S'.repeat(999) }, msg('X'.repeat(40))],
+      tools: [],
+    } as unknown as ToolCompletionRequest
+    const steps: BuiltinStep[] = [
+      {
+        sourceId: 'token-trim',
+        shape: r => ({ ...r, messages: [r.messages[0], msg('Y'.repeat(8))] }),
+      },
+    ]
+    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink) // default chars/4 estimator
+
+    await hooked.completeWithTools(request)
+
+    expect(records[0]).toMatchObject({ tokensBefore: 10, tokensAfter: 2 })
+    expect(records[0].changes[0].deltaTokens).toBe(-8)
+  })
+
+  it('skips a no-op step entirely — it costs no count and no row (§3.2)', async () => {
+    const { inner } = innerPort()
+    const { sink, records } = capture()
+    const counter = vi.fn(nonSystemChars)
     const steps: BuiltinStep[] = [
       { sourceId: 'prompt-shaping', shape: r => r }, // no-op: same object
       { sourceId: 'token-trim', shape: r => ({ ...r, messages: [msg('x')] }) },
     ]
-    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink)
+    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink, counter)
 
     await hooked.completeWithTools(req('hello world'))
 
     // begin() + the ONE acting step = 2 counts; the no-op adds nothing.
-    expect(countFn).toHaveBeenCalledTimes(2)
+    expect(counter).toHaveBeenCalledTimes(2)
     expect(records[0].changes.map(c => c.sourceId)).toEqual(['token-trim'])
   })
 
   it('records a same-size rewrite as changed:true with delta 0 (D4)', async () => {
     const { inner } = innerPort()
     const { sink, records } = capture()
-    // New object, identical content → count unchanged but request replaced.
     const steps: BuiltinStep[] = [
       {
         sourceId: 'prompt-shaping',
         shape: r => ({ ...r, messages: r.messages.map(m => ({ ...m })) }),
       },
     ]
-    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink)
+    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink, nonSystemChars)
 
     await hooked.completeWithTools(req('unchanged'))
 
@@ -109,15 +136,16 @@ describe('HookedLlmPort guardrail-input measurement (§3)', () => {
     ])
   })
 
-  it('a tokenizer fault drops the record without affecting the turn (§3.4)', async () => {
-    const { inner, completeWithTools } = innerPort(() => {
-      throw new Error('tokenizer boom')
-    })
+  it('an estimator fault drops the record without affecting the turn (§3.4)', async () => {
+    const { inner, completeWithTools } = innerPort()
     const { sink, records } = capture()
+    const boom = () => {
+      throw new Error('estimator boom')
+    }
     const steps: BuiltinStep[] = [
       { sourceId: 'token-trim', shape: r => ({ ...r, messages: [msg('x')] }) },
     ]
-    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink)
+    const hooked = new HookedLlmPort(inner, r => r, undefined, steps, sink, boom)
 
     const res = await hooked.completeWithTools(req('hello'))
 
@@ -127,10 +155,18 @@ describe('HookedLlmPort guardrail-input measurement (§3)', () => {
   })
 
   it('runs NO measurement when no sink is wired (fast path unchanged)', async () => {
-    const { inner, countFn } = innerPort()
-    const hooked = new HookedLlmPort(inner, r => ({ ...r, temperature: 0.9 }))
+    const { inner } = innerPort()
+    const counter = vi.fn(nonSystemChars)
+    const hooked = new HookedLlmPort(
+      inner,
+      r => ({ ...r, temperature: 0.9 }),
+      undefined,
+      undefined,
+      undefined,
+      counter
+    )
     await hooked.completeWithTools(req('hi'))
-    expect(countFn).not.toHaveBeenCalled()
+    expect(counter).not.toHaveBeenCalled()
   })
 })
 

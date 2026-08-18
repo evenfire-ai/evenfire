@@ -115,11 +115,31 @@ function approxRequestChars(req: ToolCompletionRequest): number {
 }
 
 /**
+ * Token estimate for the guardrail-input-transparency delta: `chars/4` over
+ * NON-system message string content. Deliberately NOT the LLM-lane `countSync`:
+ * for an Anthropic session that counter is a PROSE word-count heuristic, and
+ * guardrails act on dense, whitespace-poor data (pasted JSON/CSV) where it badly
+ * under-counts the original — enough to INVERT the delta's sign after a
+ * compaction (a 53%-smaller CSV reads as +tokens). `chars/4` is the standard BPE
+ * approximation — the same estimate mcp-host already uses for dense tool schemas
+ * (`heuristicCountTools`) — and stays monotonic with what a compactor does, so
+ * "reduced my input" never shows as an increase. Sync + no network.
+ */
+function estimateInputTokens(req: ToolCompletionRequest): number {
+  let chars = 0
+  for (const m of req.messages ?? []) {
+    if (m.role === 'system') continue
+    if (typeof m.content === 'string') chars += m.content.length
+  }
+  return Math.ceil(chars / 4)
+}
+
+/**
  * Best-effort per-LLM-call measurement of how much each guardrail source changed
- * the input, for the guardrail-input-transparency surface (spec §3). Counts only
- * NON-system messages — the exact surface hooks may touch (§3.3) — via the
- * injected `countSync`. Every count is guarded: a tokenizer fault sets `failed`
- * and the call is dropped with no emit. Measurement must NEVER affect a turn (§3.4).
+ * the input, for the guardrail-input-transparency surface (spec §3). Uses the
+ * injected token estimator over NON-system messages — the exact surface hooks may
+ * touch (§3.3). Every count is guarded: an estimator fault sets `failed` and the
+ * call is dropped with no emit. Measurement must NEVER affect a turn (§3.4).
  */
 class GuardrailActivityMeter {
   private failed = false
@@ -195,7 +215,13 @@ export class HookedLlmPort implements LlmPort {
      * shaped via `shapeMainLane` exactly as before.
      */
     private readonly builtinSteps?: BuiltinStep[],
-    private readonly onGuardrailActivity?: (activity: TurnGuardrailActivity) => void
+    private readonly onGuardrailActivity?: (activity: TurnGuardrailActivity) => void,
+    /**
+     * Token estimator for the transparency delta. Defaults to the `chars/4`
+     * dense-content estimate; injectable so tests can supply a deterministic (or
+     * throwing) counter.
+     */
+    private readonly countInputTokens: (req: ToolCompletionRequest) => number = estimateInputTokens
   ) {}
 
   modelName(): string {
@@ -244,10 +270,7 @@ export class HookedLlmPort implements LlmPort {
     // Guardrail-input-transparency (spec §3): measure per source only when a sink
     // is wired. `meter` is null in tests / no-config, so the fast path is untouched.
     const meter = this.onGuardrailActivity
-      ? new GuardrailActivityMeter(
-          r => this.getTokenCounter().countSync(r.messages.filter(m => m.role !== 'system')),
-          this.onGuardrailActivity
-        )
+      ? new GuardrailActivityMeter(this.countInputTokens, this.onGuardrailActivity)
       : null
 
     // Built-ins: when measuring, apply each step individually so its delta is
