@@ -97,7 +97,12 @@ export default defineConfig({
   },
   retries: 0,
   projects: [
-    { name: 'chromium', use: { browserName: 'chromium' } },
+    { name: 'chromium', testIgnore: '**/gfs-upload-v2.spec.ts', use: { browserName: 'chromium' } },
+    {
+      name: 'large-upload',
+      testMatch: /gfs-upload-v2\.spec\.ts/,
+      use: { browserName: 'chromium', trace: 'retain-on-failure' },
+    },
     ...gfsAuthCrossBrowserProjects,
   ],
 })

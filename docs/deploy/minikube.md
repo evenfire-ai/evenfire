@@ -230,9 +230,9 @@ using them.
 
 > **NOTE**: `make minikube-gen-keys` applies the key Secrets and then chains
 > `make minikube-sync-auth-key` itself (Makefile, `minikube-gen-keys`), so the JWT public
-> key lands in mcp-host-config without a separate command. Re-running
+> key lands in `mcp-host-config` and `gfs-config` without a separate command. Re-running
 > `make minikube-sync-auth-key` later is harmless — `scripts/minikube/sync-auth-key.sh`
-> only writes the ConfigMap when it detects drift.
+> only writes each ConfigMap when it detects drift.
 
 > **`minikube-gen-keys` does NOT regenerate keys on an existing cluster.**
 > `scripts/minikube/generate-keys.sh` has an anti-pattern guard: if the Secret
@@ -278,12 +278,34 @@ Desktop App
 
 ### Critical Invariants
 
-| Invariant                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Same RSA key**             | `rpc-proxy-secrets.RPC_PROXY_JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == public pair of `control-api-secrets.CONTROL_API_RPC_JWT_PRIVATE_KEY`. `scripts/minikube/generate-keys.sh` writes the two Secrets into `deploy/minikube/secrets/jwt-signing-keys.yaml`; the ConfigMap value is **not** in that manifest — `scripts/minikube/sync-auth-key.sh` copies the public key from the live `rpc-proxy-secrets` Secret into the live `mcp-host-config` ConfigMap. |
-| **Token stops at rpc-proxy** | The RPC token (`aud: "rpc-proxy"`) is validated by rpc-proxy and is NOT forwarded. `/v1/runtime/*` routes on mcp-host are wrapped in `runtimeEdgeGuard`, which returns `401 Authorization is not accepted on this direct mcp-host runtime route` if an `Authorization` header is present.                                                                                                                                                                                              |
-| **Issuer**                   | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                                                                                                                                                                                                                                                                                      |
-| **Edge headers**             | `rpc-proxy/src/services/controlApiRestService.ts` returns `headers: {}` on purpose; `mcpProxyService.ts` then adds `x-clerum-edge-caller: rpc-proxy`, `x-clerum-edge-host-ref`, `x-clerum-edge-user-id`. Adding an `Authorization` header here would make every mcp-host call fail 401.                                                                                                                                                                                                |
+| Invariant                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Same RSA key**             | `rpc-proxy-secrets.RPC_PROXY_JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == `gfs-config.jwt-public-key` == public pair of `control-api-secrets.CONTROL_API_RPC_JWT_PRIVATE_KEY`. `scripts/minikube/generate-keys.sh` writes the two Secrets into `deploy/minikube/secrets/jwt-signing-keys.yaml`; the ConfigMap values are **not** in that manifest — `scripts/minikube/sync-auth-key.sh` copies the public key from the live `rpc-proxy-secrets` Secret into both live consumer ConfigMaps. |
+| **Token stops at rpc-proxy** | The RPC token (`aud: "rpc-proxy"`) is validated by rpc-proxy and is NOT forwarded. `/v1/runtime/*` routes on mcp-host are wrapped in `runtimeEdgeGuard`, which returns `401 Authorization is not accepted on this direct mcp-host runtime route` if an `Authorization` header is present.                                                                                                                                                                                                                        |
+| **Issuer**                   | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **Edge headers**             | `rpc-proxy/src/services/controlApiRestService.ts` returns `headers: {}` on purpose; `mcpProxyService.ts` then adds `x-clerum-edge-caller: rpc-proxy`, `x-clerum-edge-host-ref`, `x-clerum-edge-user-id`. Adding an `Authorization` header here would make every mcp-host call fail 401.                                                                                                                                                                                                                          |
+
+### GFS Upload v2 local/T2 profile
+
+The committed Minikube overlay enables GFS Upload v2 through
+`patches/gfs-upload-v2.yaml`. It patches the host-context-controller, which is
+the owner of generated GFSC workload configuration, with the exact release
+contract: 200 MiB files, preferred 8 MiB / maximum 16 MiB parts, four parts per
+session, sixteen global part streams, and the documented TTL, admission, and
+free-space limits. `minikube-ghcr`, `minikube-no-uis`, and
+`minikube-no-uis-ghcr` inherit the same patch from the base Minikube overlay.
+
+The `GlobalFileSystem` resource intentionally does not carry
+`uploadV2Enabled`. Feature activation and product limits are operator-owned HCC
+configuration; editing an HCC-generated `gfsc-writer` Deployment would be
+overwritten by reconciliation. The public deployment base remains disabled,
+and this local activation does not authorize enabling a production overlay.
+
+Validate the committed profile without touching a cluster:
+
+```bash
+bash scripts/tests/test-minikube-gfs-upload-v2-profile.sh
+```
 
 ### Required Configuration Per Service
 
@@ -999,8 +1021,13 @@ kubectl rollout restart deployment/control-api -n control-plane
 kubectl rollout restart deployment/external-rest-api -n profiles
 ```
 
+The chained auth-key sync restarts the GFSC writer and reader itself when their
+database credential is populated and the GFS ConfigMap changed, so they are not
+duplicated in the manual restart list above.
+
 > **Note**: you do not edit the public key by hand.
 > `scripts/minikube/sync-auth-key.sh` copies `RPC_PROXY_JWT_PUBLIC_KEY` from the
 > `rpc-proxy-secrets` Secret into the live `mcp-host-config` ConfigMap (as
-> `CLERUM_AUTH_JWT_PUBLIC_KEY`), and it is already invoked by
+> `CLERUM_AUTH_JWT_PUBLIC_KEY`) and the live `gfs-config` ConfigMap (as
+> `jwt-public-key`), and it is already invoked by
 > `make minikube-gen-keys` and `make minikube-deploy-all`.

@@ -16,12 +16,13 @@ function okResponse(body?: unknown): Response {
   } as unknown as Response
 }
 
-function errorResponse(status: number, body: string): Response {
+function errorResponse(status: number, body: string, headers?: Record<string, string>): Response {
   return {
     ok: false,
     status,
     statusText: 'Error',
     text: () => Promise.resolve(body),
+    headers: new Headers(headers),
   } as unknown as Response
 }
 
@@ -90,5 +91,17 @@ describe('requestJson — transient retry', () => {
     ).rejects.toBeInstanceOf(ApiError)
 
     expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves Retry-After on HTTP errors for bounded upload lifecycle retries', async () => {
+    const fetchSpy = vi.mocked(global.fetch)
+    fetchSpy.mockResolvedValueOnce(
+      errorResponse(429, '{"error":"quota_exceeded"}', { 'retry-after': '7' })
+    )
+
+    await expect(requestJson('POST', 'http://localhost/upload')).rejects.toMatchObject({
+      status: 429,
+      retryAfter: '7',
+    })
   })
 })

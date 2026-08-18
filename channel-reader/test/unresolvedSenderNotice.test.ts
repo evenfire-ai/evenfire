@@ -554,14 +554,69 @@ describe('unresolved notice link', () => {
     expect(sendEphemeral.mock.calls[0][2]).toContain('https://profile.example.com')
   })
 
+  it('links straight to the Teams tab, not the Profile UI root', async () => {
+    // The root drops the user on Profile with no indication of where to go, and
+    // the path they need is four levels in (Settings > Social channels > Teams >
+    // Connect). Deep-link to the tab that owns the Connect button.
+    const { deliver, sendMessage } = buildReader({
+      medium: 'teams',
+      profileUiUrl: 'https://profile.example.com',
+    })
+    await deliver()
+    expect(sendMessage.mock.calls[0][1]).toContain(
+      'https://profile.example.com/settings/social/teams'
+    )
+  })
+
+  it('links straight to the Slack tab too', async () => {
+    const { deliver, sendEphemeral } = buildReader({
+      medium: 'slack',
+      profileUiUrl: 'https://profile.example.com',
+    })
+    await deliver('C1', 'U1')
+    expect(sendEphemeral.mock.calls[0][2]).toContain(
+      'https://profile.example.com/settings/social/slack'
+    )
+  })
+
+  it('does not double the slash when the configured URL has a trailing one', async () => {
+    const { deliver, sendMessage } = buildReader({
+      medium: 'teams',
+      profileUiUrl: 'https://profile.example.com/',
+    })
+    await deliver()
+    expect(sendMessage.mock.calls[0][1]).toContain(
+      'https://profile.example.com/settings/social/teams'
+    )
+    expect(sendMessage.mock.calls[0][1]).not.toContain('.com//settings')
+  })
+
+  it('pins the Teams copy exactly, the way the Slack copy is pinned', async () => {
+    // Without an exact assertion the Teams copy could be replaced wholesale and
+    // stay green: the only other Teams assertion checks the URL, which comes
+    // from profileSocialChannelUrl rather than from this string.
+    const { deliver, sendMessage } = buildReader({ medium: 'teams', profileUiUrl: undefined })
+    await deliver()
+    expect(sendMessage.mock.calls[0][1]).toBe(
+      "I can't accept messages from this Teams account. If you haven't linked it yet on the " +
+        'profile UI, open Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+        'If you think you should already have access, contact your admin.'
+    )
+    expect(sendMessage.mock.calls[0][1]).not.toContain('undefined')
+    expect(sendMessage.mock.calls[0][1]).not.toContain('/settings/social')
+  })
+
   it('sends the copy unchanged when no profile URL is configured', async () => {
     const { deliver, sendEphemeral } = buildReader({ profileUiUrl: undefined })
     await deliver('C1', 'U1')
     const text = sendEphemeral.mock.calls[0][2]
     expect(text).toBe(
-      "I can't accept messages from this Slack account. If you haven't linked it yet, " +
-        'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+      "I can't accept messages from this Slack account. If you haven't linked it yet on the " +
+        'profile UI, open Settings > Social channels > Slack and choose Connect Slack. ' +
+        'If you think you should already have access, contact your admin.'
     )
     expect(text).not.toContain('undefined')
+    // No profile URL configured means no dangling path fragment either.
+    expect(text).not.toContain('/settings/social')
   })
 })

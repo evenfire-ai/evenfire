@@ -120,4 +120,49 @@ describe('CONTROL_ROUTES App Router resolution', () => {
       ])
     )
   })
+
+  it('preserves the old host-detail tab slugs as compatibility redirects', async () => {
+    // R1-H1: the host-detail page consolidated Member access + Team access
+    // into a single Access tab, and Per-tool approval + Env vars into a
+    // single Advanced tab. The old slugs must still resolve so bookmarks,
+    // shared links, and the approval-tools E2E keep working.
+    const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
+
+    expect(redirects).toEqual(
+      expect.arrayContaining([
+        {
+          source: '/agents/:name/member-access',
+          destination: '/agents/:name/access',
+          permanent: true,
+        },
+        {
+          source: '/agents/:name/team-access',
+          destination: '/agents/:name/access',
+          permanent: true,
+        },
+        {
+          source: '/agents/:name/approvals',
+          destination: '/agents/:name/advanced',
+          permanent: true,
+        },
+        {
+          source: '/agents/:name/env-vars',
+          destination: '/agents/:name/advanced',
+          permanent: true,
+        },
+      ])
+    )
+  })
+
+  it('follows the legacy tab slugs all the way to an app route', async () => {
+    const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
+    const rewrites = ((await nextConfig.rewrites?.()) ?? []) as RouteRule[]
+    const appRoutes = appRoutePatterns()
+    const legacySlugs = ['member-access', 'team-access', 'approvals', 'env-vars']
+
+    for (const slug of legacySlugs) {
+      const pathname = `/agents/foo/${slug}`
+      expect(resolvesToAppRoute(pathname, redirects, rewrites, appRoutes)).toBe(true)
+    }
+  })
 })

@@ -2,6 +2,7 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
+  type PluginWorkloadSdkGrant,
   getAdminUsers,
   getPluginWorkloadSdkLegacyInventory,
   getRecipes,
@@ -77,6 +78,31 @@ const prefilledUser = {
   displayName: null,
 }
 
+function makeGrant(overrides: Partial<PluginWorkloadSdkGrant>): PluginWorkloadSdkGrant {
+  return {
+    id: 'grant-1',
+    recipeNamespace: 'sandbox-recipes',
+    recipeName: 'notify-recipe',
+    capabilityFamily: 'clientNotifications',
+    provider: null,
+    allowedModels: [],
+    allowedEventTypes: ['scan.complete'],
+    allowedTargetRefs: [],
+    allowedUserRefs: [],
+    allowedCallers: ['scanner'],
+    quotaLimits: {},
+    modelPolicies: {},
+    promptTargets: [],
+    defaultTargetRef: null,
+    policyState: 'active',
+    revocationId: null,
+    policyRevision: 1,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
 beforeEach(() => {
   vi.mocked(getAdminUsers).mockResolvedValue({ items: [manualUser] })
   vi.mocked(getPluginWorkloadSdkLegacyInventory).mockResolvedValue({
@@ -134,5 +160,28 @@ describe('Plugin Workload SDK operator page', () => {
     const selected = screen.getByLabelText('Selected users')
     expect(within(selected).getByText('Manual user')).toBeInTheDocument()
     expect(within(selected).queryByText('Prefilled user')).not.toBeInTheDocument()
+  })
+
+  it('renders the quota cell as N/min for a per-minute override and "platform defaults" without one', async () => {
+    // Issue #348: the grants table shows API-set per-minute overrides when
+    // present, else 'platform defaults'. Covers the PR's only observable UI
+    // change (per-run caps removed; per-minute override surfaced).
+    vi.mocked(listPluginWorkloadSdkGrants).mockResolvedValue({
+      items: [
+        makeGrant({
+          id: 'grant-override',
+          recipeName: 'override-recipe',
+          capabilityFamily: 'promptBridge',
+          provider: 'openai',
+          quotaLimits: { maxInvocationsPerMinute: 4 },
+        }),
+        makeGrant({ id: 'grant-default', recipeName: 'default-recipe', quotaLimits: {} }),
+      ],
+    })
+
+    render(<PluginWorkloadSdkPage />)
+
+    expect(await screen.findByText('4/min')).toBeInTheDocument()
+    expect(screen.getByText('platform defaults')).toBeInTheDocument()
   })
 })

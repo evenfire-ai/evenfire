@@ -165,11 +165,14 @@ describe('routes/access forwarding', () => {
         .expect(200)
     }
 
-    await request(app)
+    const limited = await request(app)
       .get('/me/teams/directory')
       .set('authorization', 'Bearer good-token')
       .expect(429)
 
+    expect(limited.headers['retry-after']).toMatch(/^\d+$/)
+    expect(limited.headers['x-ratelimit-limit']).toBe('10')
+    expect(limited.headers['x-ratelimit-remaining']).toBe('0')
     expect(meServiceMock.getMyTeamDirectory).toHaveBeenCalledTimes(10)
   })
 

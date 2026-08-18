@@ -149,6 +149,55 @@ function openTeamsAccessTab() {
   fireEvent.click(screen.getByRole('tab', { name: /Teams/i }))
 }
 
+/**
+ * Walk to the Access step choosing "New credential" so a Secret is actually
+ * created (secretMode='new'). This is the vehicle the create-only/compensation
+ * tests need: an already-POSTed secret that a later failure must roll back. The
+ * new Secret name is auto-derived from the agent name as `${slug}-llm`.
+ */
+async function walkToAccessStepNewSecret(opts?: { agentName?: string; contextName?: string }) {
+  const name = opts?.agentName ?? 'newsecretagent'
+  const ctx = opts?.contextName ?? 'ctx1'
+
+  await waitFor(() => {
+    expect(api.getAdminUsers).toHaveBeenCalled()
+  })
+
+  // Step 0: Agent name
+  fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: name } })
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  // Step 1: new context
+  fireEvent.click(screen.getByLabelText(/Create new context/i))
+  fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: ctx } })
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  // Step 2: New secret → make the OpenAI primary usable; secret name auto-derives.
+  // (dev's wizard renamed the "New credential" toggle to the "New secret"
+  // secretMode radio — the create-only seam it drives is unchanged.)
+  fireEvent.click(screen.getByLabelText(/New secret/i))
+  fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  // Now at the "Access" step.
+}
+
+/**
+ * Build the exact Error object the client's fetch layer would surface for a 409,
+ * derived from the REAL formatApiError (importActual, T1) — never hand-shaped —
+ * so `error.status`, `error.code`, and `error.body` carry precisely what the
+ * producer emits. `bodyObj` stands in for the server's JSON response body.
+ */
+async function build409(bodyObj: Record<string, unknown>): Promise<Error> {
+  const actual = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
+  const text = JSON.stringify(bodyObj)
+  const res = new Response(text, { status: 409, statusText: 'Conflict' })
+  return actual.formatApiError(res, text)
+}
+
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
@@ -174,7 +223,8 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
     fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
 
-    expect(screen.getByText(/Providers: OpenAI, Amazon Bedrock/)).toBeInTheDocument()
+    const option = screen.getByRole('option', { name: /shared-llm-keys/ })
+    expect(option).toHaveTextContent(/Providers: OpenAI, Amazon Bedrock/)
   })
 
   it('matches the primary provider to the selected credential', async () => {
@@ -219,11 +269,11 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
     const existingCard = screen.getByLabelText(/Use an existing Secret/i).closest('label')
-    const newCard = screen.getByLabelText(/New credential/i).closest('label')
+    const newCard = screen.getByLabelText(/New secret/i).closest('label')
     expect(existingCard).not.toBeNull()
     expect(newCard).not.toBeNull()
     expect(screen.getByLabelText(/Use an existing Secret/i)).toBeChecked()
-    expect(screen.getByLabelText(/New credential/i)).not.toBeChecked()
+    expect(screen.getByLabelText(/New secret/i)).not.toBeChecked()
     expect(screen.getByText('Credential', { selector: 'strong' })).toBeInTheDocument()
     expect(existingCard?.compareDocumentPosition(newCard as Node)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING
@@ -252,7 +302,7 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
     // Step 2: explicitly create a new Secret and make the OpenAI primary usable.
-    fireEvent.click(screen.getByLabelText(/New credential/i))
+    fireEvent.click(screen.getByLabelText(/New secret/i))
     fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
 
     // Add a fallback and switch it to Bedrock (a different provider than the
@@ -413,10 +463,15 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
 
     await waitFor(() => {
       expect(screen.queryByText(/Failed to create agent resources/i)).not.toBeInTheDocument()
+      // Create-only contract (R5-C1/R5-B1): the Host is POSTed to the collection,
+      // never PUT to a name (which would upsert-overwrite a foreign agent).
       expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/empty-access-test',
-        expect.objectContaining({ spec: expect.objectContaining({ channels: [] }) })
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'empty-access-test' },
+          spec: expect.objectContaining({ channels: [] }),
+        })
       )
     })
 
@@ -564,18 +619,123 @@ describe('HostWizard — Agent type (stateless lifecycle)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
 
     await waitFor(() => {
-      expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/stateful-agent',
-        expect.any(Object)
-      )
+      // Create-only contract (R5-C1/R5-B1): POST to the collection, not PUT to a name.
+      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/hosts', expect.any(Object))
     })
     const hostCall = vi
       .mocked(api.apiSend)
-      .mock.calls.find(call => call[1] === '/api/v1/admin/hosts/stateful-agent')
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
     expect(hostCall).toBeDefined()
     const payload = hostCall![2] as { spec: Record<string, unknown> }
     expect('lifecycle' in payload.spec).toBe(false)
     expect('workflowControl' in payload.spec).toBe(false)
+  })
+})
+
+describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)', () => {
+  it('surfaces the friendly collision message and rolls back the created secret when the context POST 409s WITHOUT a body code', async () => {
+    // Code-less 409 from a create-only POST = unambiguous AlreadyExists collision.
+    const collision = await build409({
+      error: 'contexts.mcp.evenfire.io "ctx1" already exists',
+    })
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/contexts') throw collision
+      return {}
+    })
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'coll-agent', contextName: 'ctx1' })
+    fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
+
+    // Observable (T4): the friendly per-resource collision message is shown —
+    // NOT the raw K8s AlreadyExists text.
+    await waitFor(() => {
+      expect(screen.getByText(/A context named "ctx1" already exists/i)).toBeInTheDocument()
+    })
+    // Observable (T4): the already-created secret is compensated with an inverse DELETE.
+    expect(api.apiSend).toHaveBeenCalledWith('DELETE', '/api/v1/admin/secrets/coll-agent-llm')
+    // The Host was never POSTed (the seam aborted before the boundary).
+    expect(
+      vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
+    ).toBe(false)
+  })
+
+  it('rolls back the created secret AND context in inverse order when the HOST create fails', async () => {
+    const hostErr = await build409({
+      error: 'hosts.mcp.evenfire.io "hostfail" already exists',
+    })
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/hosts') throw hostErr
+      return {}
+    })
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'hostfail', contextName: 'ctx1' })
+    fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/That agent name is already in use/i)).toBeInTheDocument()
+    })
+    // Inverse order: created = [secret, context] → compensate context THEN secret.
+    const deletePaths = vi
+      .mocked(api.apiSend)
+      .mock.calls.filter(c => c[0] === 'DELETE')
+      .map(c => c[1])
+    expect(deletePaths).toEqual([
+      '/api/v1/admin/contexts/ctx1',
+      '/api/v1/admin/secrets/hostfail-llm',
+    ])
+  })
+
+  it('rolls back NOTHING when a GRANT fails after the host is created (V-7)', async () => {
+    // The grant runs AFTER hostCreated=true; its failure must not trigger any
+    // sibling rollback — the host + siblings stay and grants retry from detail.
+    // vi.clearAllMocks() resets call history but NOT implementations, so pin a
+    // clean all-resolving apiSend for this test (prior tests set throwing ones).
+    vi.mocked(api.apiSend).mockImplementation(async () => ({}))
+    vi.mocked(api.updateAgentUsers).mockRejectedValueOnce(new Error('grant boom'))
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'grantfail', contextName: 'ctx1' })
+    // Select a user so updateAgentUsers is invoked.
+    fireEvent.click(screen.getByLabelText(/alice/i))
+    fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
+
+    // The grant error is surfaced verbatim (no 409 remap at the top level).
+    await waitFor(() => {
+      expect(screen.getByText(/grant boom/i)).toBeInTheDocument()
+    })
+    // The host WAS created...
+    expect(
+      vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
+    ).toBe(true)
+    // ...so NO compensation DELETE runs.
+    expect(vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'DELETE')).toBe(false)
+  })
+
+  it('re-throws the server message untouched on a CODED 409 (CRD-outdated) — no collision remap', async () => {
+    // 409 WITH a body `code` = CRD-outdated, NOT a collision: keep the server's
+    // human message, do not remap to the friendly "already exists" text.
+    const crdErr = await build409({
+      error: 'context CRD is outdated; apply the latest CRDs and retry',
+      code: 'context_crd_outdated',
+    })
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/contexts') throw crdErr
+      return {}
+    })
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'crd-agent', contextName: 'ctx1' })
+    fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/context CRD is outdated/i)).toBeInTheDocument()
+    })
+    // The friendly collision text must NOT appear (coded 409 is not a collision).
+    expect(screen.queryByText(/A context named .* already exists/i)).not.toBeInTheDocument()
+    // Boundary rule still applies: the secret created before the failing context
+    // is compensated (host never created), but nothing beyond that.
+    expect(api.apiSend).toHaveBeenCalledWith('DELETE', '/api/v1/admin/secrets/crd-agent-llm')
   })
 })
