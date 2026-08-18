@@ -50,8 +50,13 @@ spec:
         # complete untouched; long-lived watches (>min age) are reset — exactly
         # GKE's balancer idle-timeout behaviour. The listener never dies, so HCC
         # reconnects, re-LISTs, and bumps its watch generation on every cut.
+        # The cut loop re-checks /churn-ctl/paused (emptyDir) on every tick, so
+        # the gate can freeze the churn IN PLACE via pause_hcc_churn_proxy —
+        # no env patch, no Deployment rollout, no final cut — while the relay
+        # and every live socket stay up.
         - >-
           const net=require('net');
+          const fs=require('fs');
           const period=Number(process.env.CHURN_PERIOD_MS);
           const minAge=Number(process.env.CHURN_MIN_AGE_MS);
           const live=new Set();
@@ -63,7 +68,8 @@ spec:
             c.on('error',close);u.on('error',close);c.on('close',close);u.on('close',close);
             c.pipe(u);u.pipe(c);
           }).listen(${CHURN_PROXY_PORT},'0.0.0.0');
-          setInterval(()=>{const now=Date.now();
+          setInterval(()=>{if(fs.existsSync('/churn-ctl/paused'))return;
+            const now=Date.now();
             for(const r of [...live]){ if(now-r.born>=minAge){ r.c.destroy();r.u.destroy();live.delete(r);} }
           },period);
         readinessProbe: {tcpSocket: {port: ${CHURN_PROXY_PORT}}, periodSeconds: 1}
@@ -78,6 +84,10 @@ spec:
           runAsUser: 1000
           runAsGroup: 1000
           seccompProfile: {type: RuntimeDefault}
+        volumeMounts:
+        - {name: churn-ctl, mountPath: /churn-ctl}
+      volumes:
+      - {name: churn-ctl, emptyDir: {}}
 ---
 apiVersion: v1
 kind: Service
@@ -122,6 +132,27 @@ spec:
 EOF
   kctl rollout status deployment "$PROXY_NAME" -n "$HCC_NS" --timeout=90s >/dev/null ||
     die "churn proxy did not become ready"
+}
+
+# Freeze the churn WITHOUT restarting anything: write the pause flag that the
+# relay's cut loop re-checks on every tick. Alternatives all restart something:
+# an env patch on the proxy Deployment rolls the proxy pod (one final cut plus
+# a rollout race against the readiness probe), and `scale --replicas=0` severs
+# the HCC's ONLY apiserver egress — both contaminate the post-churn
+# measurement. `kubectl exec` reaches the pod via apiserver->kubelet, so the
+# gate's NetworkPolicies do not constrain it, and `node` is guaranteed on PATH
+# because it is the container's own command. The flag lives on an emptyDir
+# (writable under readOnlyRootFilesystem, pod-lifetime persistent), and the
+# write is verified read-after-write so a silent no-op cannot pass.
+pause_hcc_churn_proxy() {
+  local pod
+  pod="$(kctl get pods -n "$HCC_NS" -l "app=${PROXY_NAME}" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" || return 1
+  [ -n "$pod" ] || return 1
+  kctl exec "pod/${pod}" -n "$HCC_NS" -c proxy -- node -e \
+    'const fs=require("fs");fs.writeFileSync("/churn-ctl/paused","1");if(!fs.existsSync("/churn-ctl/paused"))process.exit(1)' \
+    >/dev/null 2>&1
 }
 
 # create_synthetic_fleet CONTEXTS MCPSERVERS HOSTS  — HCC must be scaled to 0 first.
