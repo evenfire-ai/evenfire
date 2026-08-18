@@ -10,6 +10,8 @@ import {
 } from '../../core/tools/workflowEffectiveTargets'
 import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
+import { ClaudeProvider } from '../../llm/claude'
 import type { Task, TaskError } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
@@ -261,6 +263,45 @@ describe('TaskExecutor', () => {
         message: 'LLM down',
         retryable: true,
         provider: 'openai',
+      })
+    )
+  })
+
+  it('surfaces a provider 404 as a non-retryable LLM_MODEL_NOT_AVAILABLE TaskError', async () => {
+    // Derive the LlmError from the real Claude classifier fed a real
+    // Anthropic.APIError (not a hand-built shape), then wrap it exactly as
+    // LlmPortAdapter.handleProviderError does, so the observable TaskError
+    // carries the classified code + additive fields (incl. the correctly-nested
+    // providerCode='not_found_error', not the envelope's 'error').
+    const provider = new ClaudeProvider('fake-key', 'claude-sonnet-4-6')
+    const err404 = anthropicApiError(404, 'not_found_error', 'model: x not found')
+    const c = provider.classifyError(err404)
+    const llmError = new LlmError(
+      c.message,
+      'claude',
+      c.code,
+      c.retryable,
+      undefined,
+      c.httpStatus,
+      c.providerCode
+    )
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockRejectedValueOnce(llmError)
+
+    const deps = createDeps()
+    const task = createTask('Hello')
+    const executor = new TaskExecutor(task, deps)
+
+    await executor.run()
+
+    expect(executor.executorState).toBe('failed')
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        code: 'LLM_MODEL_NOT_AVAILABLE',
+        retryable: false,
+        provider: 'claude',
+        httpStatus: 404,
+        providerCode: 'not_found_error',
       })
     )
   })
