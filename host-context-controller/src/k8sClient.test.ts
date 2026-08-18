@@ -9436,11 +9436,12 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
   // GKE closes long-lived watches ("Premature close") every few minutes. The
   // old contract armed a FIXED 5s timer before the first re-LIST, so every
   // isolated close cost ~5.5s of /ready 503. The hardened contract: the FIRST
-  // recovery attempt after a close is IMMEDIATE (microtask, no timer), the 5s
-  // timer survives only as the retry-after-failure pacing, and an anti-busy-loop
-  // FLOOR (1s) demotes a close that arrives <1s after the last successful
-  // recovery back onto the paced timer so a degraded apiserver is never
-  // hammered with back-to-back re-LISTs.
+  // recovery attempt after a close is IMMEDIATE (microtask, no timer), a paced
+  // timer survives only as the retry-after-failure pacing (now the jittered
+  // exponential backoff: first failure retries within [500ms, 1000ms]), and an
+  // anti-busy-loop FLOOR (1s) demotes a close that arrives <1s after the last
+  // successful recovery back onto the paced timer so a degraded apiserver is
+  // never hammered with back-to-back re-LISTs.
   const inventoryLanes = [
     {
       kind: 'McpServer',
@@ -9583,7 +9584,7 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
   })
 
   it.each(inventoryLanes)(
-    'falls back to the 5s retry timer only after a failed immediate $kind recovery attempt',
+    'falls back to the paced backoff retry timer only after a failed immediate $kind recovery attempt',
     async lane => {
       const doneCallbacks: Array<(error: Error | null) => void> = []
       let listCalls = 0
@@ -9618,10 +9619,12 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
       expect((watcher as any)[lane.syncedField]).toBe(false)
       expect((watcher as any)[lane.timerField]).not.toBeNull()
 
-      // Retry-after-failure keeps the 5s pacing: nothing before the deadline.
-      await vi.advanceTimersByTimeAsync(4999)
+      // Retry-after-failure keeps its pacing: the first-failure backoff delay
+      // is jittered within [500ms, 1000ms], so nothing may fire before the
+      // 500ms floor and the retry must have fired by the 1000ms bound.
+      await vi.advanceTimersByTimeAsync(499)
       expect(listCalls).toBe(1)
-      await vi.advanceTimersByTimeAsync(1)
+      await vi.advanceTimersByTimeAsync(501)
       await flushMicrotasks(20)
       expect(listCalls).toBe(2)
       expect((watcher as any)[lane.syncedField]).toBe(true)
@@ -9632,7 +9635,7 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
     }
   )
 
-  it('falls back to the 5s retry timer only after a failed immediate Host recovery attempt', async () => {
+  it('falls back to the paced backoff retry timer only after a failed immediate Host recovery attempt', async () => {
     const doneCallbacks: Array<(error: Error | null) => void> = []
     let hostListCalls = 0
     mocks.watch.mockImplementation(async (path, _options, _callback, done) => {
@@ -9663,14 +9666,15 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
     await flushMicrotasks(20)
 
     // The immediate attempt ran (and failed): exactly one LIST, retry armed
-    // by performHostInventoryRecovery's existing failure path.
+    // by performHostInventoryRecovery's existing failure path. The first-
+    // failure backoff delay is jittered within [500ms, 1000ms].
     expect(hostListCalls).toBe(1)
     expect((watcher as any).hostCacheSynced).toBe(false)
     expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
 
-    await vi.advanceTimersByTimeAsync(4999)
+    await vi.advanceTimersByTimeAsync(499)
     expect(hostListCalls).toBe(1)
-    await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(501)
     await flushMicrotasks(20)
     expect(hostListCalls).toBe(2)
     expect((watcher as any).hostCacheSynced).toBe(true)
@@ -9682,7 +9686,7 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
   })
 
   it.each(inventoryLanes)(
-    'demotes a $kind close arriving within the 1s floor of the last recovery onto the 5s timer',
+    'demotes a $kind close arriving within the 1s floor of the last recovery onto the paced retry timer',
     async lane => {
       const doneCallbacks: Array<(error: Error | null) => void> = []
       let listCalls = 0
@@ -9715,7 +9719,7 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
 
       // Burst close: the recovered watch dies again with ZERO fake-time
       // elapsed since the recovery that established it (< 1s floor). The
-      // anti-busy-loop floor must demote this attempt onto the 5s timer
+      // anti-busy-loop floor must demote this attempt onto the paced timer
       // instead of hammering the (visibly degraded) apiserver immediately.
       doneCallbacks[1](Object.assign(new Error('Premature close'), { statusCode: 500 }))
       await flushMicrotasks(20)
@@ -9723,7 +9727,7 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
       expect((watcher as any)[lane.timerField]).not.toBeNull()
       expect((watcher as any)[lane.syncedField]).toBe(false)
 
-      // The paced retry recovers it at +5s.
+      // The paced retry recovers it within the +5s advance.
       await vi.advanceTimersByTimeAsync(5000)
       await flushMicrotasks(20)
       expect(listCalls).toBe(2)
@@ -9744,7 +9748,7 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
     }
   )
 
-  it('demotes a Host close arriving within the 1s floor of the last recovery onto the 5s timer', async () => {
+  it('demotes a Host close arriving within the 1s floor of the last recovery onto the paced retry timer', async () => {
     const doneCallbacks: Array<(error: Error | null) => void> = []
     let hostListCalls = 0
     mocks.watch.mockImplementation(async (path, _options, _callback, done) => {
@@ -9774,7 +9778,7 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
     expect(doneCallbacks).toHaveLength(2)
     expect((watcher as any).hostCacheSynced).toBe(true)
 
-    // Burst close within the 1s floor: demoted onto the paced 5s timer.
+    // Burst close within the 1s floor: demoted onto the paced retry timer.
     doneCallbacks[1](Object.assign(new Error('Premature close'), { statusCode: 500 }))
     await flushMicrotasks(20)
     expect(hostListCalls).toBe(1)
@@ -9798,4 +9802,328 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
     logSpy.mockRestore()
     await watcher.stop()
   })
+})
+
+describe('McpServerWatcher watch-recovery retry backoff (exponential, jittered, reset-on-success)', () => {
+  // During a long apiserver outage (GKE zonal control-plane upgrade: minutes
+  // of every watch down and every re-LIST failing) a FIXED retry interval
+  // hammers the recovering apiserver, and — worse — the HCC's inventory
+  // streams synchronize after a simultaneous cut and hit it in phase. The
+  // ecosystem standard (client-go reflector) is exponential backoff with
+  // jitter. Contract under test, per hardened lane (McpServer/Context/Host):
+  //   - retry-after-failure delay = min(BASE * 2^(failures-1), CAP) with FULL
+  //     jitter (random() * computed) floored at BASE/2 so jitter can never
+  //     reintroduce a 0-delay busy-loop;
+  //   - a SUCCESSFUL recovery resets the failure counter (next failure starts
+  //     the ladder again at ~BASE, not where the last outage left off);
+  //   - an HTTP 429 carrying Retry-After overrides the computed delay
+  //     (respects GKE APF), clamped into [BASE/2, CAP];
+  //   - the FIRST attempt after a close stays IMMEDIATE (hardening intact).
+  const BACKOFF_BASE_MS = 1000
+  const BACKOFF_CAP_MS = 30000
+  const BACKOFF_MIN_MS = BACKOFF_BASE_MS / 2
+
+  const inventoryLanes = [
+    {
+      kind: 'McpServer',
+      plural: 'mcpservers',
+      pathSuffix: '/mcpservers',
+      restartMethod: 'restartMcpServerWatch',
+      startSnapshot: { resourceVersion: 'mcp-backoff-start-rv', servers: [] },
+      recoveryRvPrefix: 'mcp-backoff-recovery-rv',
+      timerField: 'mcpServerCacheRecoveryTimer',
+      syncedField: 'mcpServerCacheSynced',
+      peerSyncedField: 'contextCacheSynced',
+    },
+    {
+      kind: 'Context',
+      plural: 'contexts',
+      pathSuffix: '/contexts',
+      restartMethod: 'restartContextWatch',
+      startSnapshot: { resourceVersion: 'context-backoff-start-rv', contexts: [] },
+      recoveryRvPrefix: 'context-backoff-recovery-rv',
+      timerField: 'contextCacheRecoveryTimer',
+      syncedField: 'contextCacheSynced',
+      peerSyncedField: 'mcpServerCacheSynced',
+    },
+  ] as const
+
+  let randomSpy: ReturnType<typeof vi.spyOn>
+  let errorSpy: ReturnType<typeof vi.spyOn>
+  let logSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
+    mocks.listNamespacedCustomObject.mockReset().mockResolvedValue({ items: [] })
+    randomSpy = vi.spyOn(Math, 'random')
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    randomSpy.mockRestore()
+    errorSpy.mockRestore()
+    logSpy.mockRestore()
+    vi.useRealTimers()
+  })
+
+  /** Install the lane's watch and mock its LIST with a scriptable outcome. */
+  async function setUpInventoryLane(
+    lane: (typeof inventoryLanes)[number],
+    listOutcome: (call: number) => 'fail' | 'fail-429' | { retryAfter: string } | 'succeed'
+  ) {
+    const doneCallbacks: Array<(error: Error | null) => void> = []
+    let listCalls = 0
+    mocks.watch.mockImplementation(async (path, _options, _callback, done) => {
+      if (path.endsWith(lane.pathSuffix)) doneCallbacks.push(done)
+      return { abort: vi.fn() }
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural !== lane.plural) return { items: [] }
+      listCalls += 1
+      const outcome = listOutcome(listCalls)
+      if (outcome === 'fail') {
+        throw Object.assign(new Error(`${lane.plural} re-LIST unavailable`), { code: 500 })
+      }
+      if (outcome === 'fail-429' || typeof outcome === 'object') {
+        const retryAfter = outcome === 'fail-429' ? '7' : outcome.retryAfter
+        throw Object.assign(new Error(`${lane.plural} re-LIST throttled`), {
+          code: 429,
+          headers: { 'retry-after': retryAfter },
+        })
+      }
+      return {
+        metadata: { resourceVersion: `${lane.recoveryRvPrefix}-${listCalls}` },
+        items: [],
+      }
+    })
+    const watcher = new McpServerWatcher()
+    ;(watcher as any)[lane.peerSyncedField] = true
+    await (watcher as any)[lane.restartMethod](lane.startSnapshot)
+    return { watcher, doneCallbacks, getListCalls: () => listCalls }
+  }
+
+  /** Host analogue of setUpInventoryLane. */
+  async function setUpHostLane(
+    listOutcome: (call: number) => 'fail' | { retryAfter: string } | 'succeed'
+  ) {
+    const doneCallbacks: Array<(error: Error | null) => void> = []
+    let listCalls = 0
+    mocks.watch.mockImplementation(async (path, _options, _callback, done) => {
+      if (path.endsWith('/hosts')) doneCallbacks.push(done)
+      return { abort: vi.fn() }
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural !== 'hosts') return { items: [] }
+      listCalls += 1
+      const outcome = listOutcome(listCalls)
+      if (outcome === 'fail') {
+        throw Object.assign(new Error('hosts re-LIST unavailable'), { code: 500 })
+      }
+      if (typeof outcome === 'object') {
+        throw Object.assign(new Error('hosts re-LIST throttled'), {
+          code: 429,
+          headers: { 'retry-after': outcome.retryAfter },
+        })
+      }
+      return {
+        metadata: { resourceVersion: `host-backoff-recovery-rv-${listCalls}` },
+        items: [],
+      }
+    })
+    const watcher = newContextAuthoritativeWatcher()
+    vi.spyOn(watcher as any, 'requestHostFleetReconcile').mockResolvedValue(undefined)
+    await (watcher as any).startHostWatch('host-backoff-initial-rv')
+    ;(watcher as any).hostCacheSynced = true
+    return { watcher, doneCallbacks, getListCalls: () => listCalls }
+  }
+
+  const closeError = () => Object.assign(new Error('Premature close'), { statusCode: 500 })
+
+  /**
+   * Advance to just before the expected fire instant (no re-LIST may have
+   * happened) and then across it (exactly one more re-LIST must happen).
+   */
+  async function expectRetryAt(delayMs: number, getListCalls: () => number): Promise<void> {
+    const before = getListCalls()
+    await vi.advanceTimersByTimeAsync(delayMs - 1)
+    expect(getListCalls()).toBe(before)
+    await vi.advanceTimersByTimeAsync(1)
+    await flushMicrotasks(20)
+    expect(getListCalls()).toBe(before + 1)
+  }
+
+  it.each(inventoryLanes)(
+    'grows the $kind retry delay exponentially (1s, 2s, 4s, ... capped at 30s) under consecutive recovery failures',
+    async lane => {
+      randomSpy.mockReturnValue(1) // upper jitter bound: delay == computed backoff
+      const { watcher, doneCallbacks, getListCalls } = await setUpInventoryLane(lane, () => 'fail')
+
+      // First attempt after the close is immediate (failure #1)...
+      doneCallbacks[0](closeError())
+      await flushMicrotasks(20)
+      expect(getListCalls()).toBe(1)
+      expect((watcher as any)[lane.timerField]).not.toBeNull()
+
+      // ...then each retry-after-failure doubles, bounded by the 30s cap.
+      for (const expectedDelay of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
+        await expectRetryAt(expectedDelay, getListCalls)
+      }
+      await watcher.stop()
+    }
+  )
+
+  it('grows the Host retry delay exponentially (1s, 2s, 4s, ... capped at 30s) under consecutive recovery failures', async () => {
+    randomSpy.mockReturnValue(1)
+    const { watcher, doneCallbacks, getListCalls } = await setUpHostLane(() => 'fail')
+
+    doneCallbacks[0](closeError())
+    await flushMicrotasks(20)
+    expect(getListCalls()).toBe(1)
+    expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
+
+    for (const expectedDelay of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
+      await expectRetryAt(expectedDelay, getListCalls)
+    }
+    await watcher.stop()
+  })
+
+  it.each(inventoryLanes)(
+    'resets the $kind backoff to the base delay after a successful recovery',
+    async lane => {
+      randomSpy.mockReturnValue(1)
+      const { watcher, doneCallbacks, getListCalls } = await setUpInventoryLane(lane, call =>
+        call === 3 || call === 5 ? 'succeed' : 'fail'
+      )
+
+      // Two consecutive failures escalate the ladder: immediate (#1), +1s (#2).
+      doneCallbacks[0](closeError())
+      await flushMicrotasks(20)
+      expect(getListCalls()).toBe(1)
+      await expectRetryAt(1000, getListCalls)
+      // Third attempt (+2s) SUCCEEDS and must reset the failure counter.
+      await expectRetryAt(2000, getListCalls)
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      expect(doneCallbacks).toHaveLength(2)
+
+      // A later close (beyond the 1s floor) fails immediately again (#4). The
+      // escalation must restart at the BASE delay (1s), not continue at 4s.
+      await vi.advanceTimersByTimeAsync(1500)
+      doneCallbacks[1](closeError())
+      await flushMicrotasks(20)
+      expect(getListCalls()).toBe(4)
+      await expectRetryAt(1000, getListCalls)
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      await watcher.stop()
+    }
+  )
+
+  it('resets the Host backoff to the base delay after a successful recovery', async () => {
+    randomSpy.mockReturnValue(1)
+    const { watcher, doneCallbacks, getListCalls } = await setUpHostLane(call =>
+      call === 3 || call === 5 ? 'succeed' : 'fail'
+    )
+
+    doneCallbacks[0](closeError())
+    await flushMicrotasks(20)
+    expect(getListCalls()).toBe(1)
+    await expectRetryAt(1000, getListCalls)
+    await expectRetryAt(2000, getListCalls)
+    expect((watcher as any).hostCacheSynced).toBe(true)
+    expect(doneCallbacks).toHaveLength(2)
+
+    await vi.advanceTimersByTimeAsync(1500)
+    doneCallbacks[1](closeError())
+    await flushMicrotasks(20)
+    expect(getListCalls()).toBe(4)
+    await expectRetryAt(1000, getListCalls)
+    expect((watcher as any).hostCacheSynced).toBe(true)
+    await watcher.stop()
+  })
+
+  it.each(inventoryLanes)(
+    'floors the jittered $kind delay at 500ms (random()=0 must never produce a 0-delay busy-loop)',
+    async lane => {
+      randomSpy.mockReturnValue(0) // lower jitter bound
+      const { watcher, doneCallbacks, getListCalls } = await setUpInventoryLane(lane, call =>
+        call === 1 ? 'fail' : 'succeed'
+      )
+
+      doneCallbacks[0](closeError())
+      await flushMicrotasks(20)
+      expect(getListCalls()).toBe(1)
+      // Full jitter with random()=0 computes 0; the floor must hold it at
+      // BASE/2 = 500ms — no instant (busy-loop) retry.
+      await expectRetryAt(BACKOFF_MIN_MS, getListCalls)
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      await watcher.stop()
+    }
+  )
+
+  it('floors the jittered Host delay at 500ms (random()=0 must never produce a 0-delay busy-loop)', async () => {
+    randomSpy.mockReturnValue(0)
+    const { watcher, doneCallbacks, getListCalls } = await setUpHostLane(call =>
+      call === 1 ? 'fail' : 'succeed'
+    )
+
+    doneCallbacks[0](closeError())
+    await flushMicrotasks(20)
+    expect(getListCalls()).toBe(1)
+    await expectRetryAt(BACKOFF_MIN_MS, getListCalls)
+    expect((watcher as any).hostCacheSynced).toBe(true)
+    await watcher.stop()
+  })
+
+  it.each(inventoryLanes)(
+    'honors a 429 Retry-After for the next $kind retry instead of the computed backoff',
+    async lane => {
+      randomSpy.mockReturnValue(1)
+      const { watcher, doneCallbacks, getListCalls } = await setUpInventoryLane(lane, call =>
+        call === 1 ? 'fail-429' : 'succeed'
+      )
+
+      doneCallbacks[0](closeError())
+      await flushMicrotasks(20)
+      expect(getListCalls()).toBe(1)
+      // APF said Retry-After: 7 — the next retry must land at 7000ms, not at
+      // the 1000ms first-failure backoff.
+      await expectRetryAt(7000, getListCalls)
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      await watcher.stop()
+    }
+  )
+
+  it('honors a 429 Retry-After for the next Host retry, clamped to the 30s cap', async () => {
+    randomSpy.mockReturnValue(1)
+    const { watcher, doneCallbacks, getListCalls } = await setUpHostLane(call =>
+      call === 1 ? { retryAfter: '3600' } : 'succeed'
+    )
+
+    doneCallbacks[0](closeError())
+    await flushMicrotasks(20)
+    expect(getListCalls()).toBe(1)
+    // Retry-After: 3600 (an hour) must not stall recovery: clamp to the cap.
+    await expectRetryAt(BACKOFF_CAP_MS, getListCalls)
+    expect((watcher as any).hostCacheSynced).toBe(true)
+    await watcher.stop()
+  })
+
+  it.each(inventoryLanes)(
+    'keeps the first $kind attempt after a spaced close immediate (hardening not regressed by backoff)',
+    async lane => {
+      randomSpy.mockReturnValue(0) // worst-case jitter must not delay the immediate path
+      const { watcher, doneCallbacks, getListCalls } = await setUpInventoryLane(lane, () => 'succeed')
+
+      await vi.advanceTimersByTimeAsync(1500)
+      doneCallbacks[0](closeError())
+      await flushMicrotasks(20)
+      // Immediate microtask re-LIST, no timer armed.
+      expect(getListCalls()).toBe(1)
+      expect((watcher as any)[lane.timerField]).toBeNull()
+      expect((watcher as any)[lane.syncedField]).toBe(true)
+      await watcher.stop()
+    }
+  )
 })

@@ -109,10 +109,21 @@ const PLURAL_COMMUNICATIONCHANNELS = 'communicationchannels'
 // sweep made provider.start() fail and Kubernetes restarted HCC. These retries
 // retain that convergence guarantee now that the sweeps run in the background.
 const INITIAL_CONVERGENCE_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
-const INVENTORY_CACHE_RECOVERY_RETRY_MS = 5000
 
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
-const HOST_CACHE_RECOVERY_RETRY_MS = 5000
+// Retry-after-failure pacing for the three hardened inventory lanes
+// (McpServer/Context/Host) is exponential with full jitter, mirroring the
+// client-go reflector standard. During a long apiserver outage (a GKE zonal
+// control-plane upgrade: minutes of every watch down and every re-LIST
+// failing) a fixed interval hammers the recovering apiserver, and — worse —
+// the HCC's ~3-6 streams synchronize after a simultaneous cut and hit it in
+// phase. delay = min(BASE * 2^(failures-1), CAP), then FULL jitter
+// (random() * delay; AWS-style full jitter maximizes de-correlation across
+// the streams, which is exactly the goal) floored at MIN so jitter can never
+// reintroduce a 0-delay busy-loop. A successful recovery resets the ladder.
+const WATCH_RECOVERY_BACKOFF_BASE_MS = 1000
+const WATCH_RECOVERY_BACKOFF_CAP_MS = 30000
+const WATCH_RECOVERY_BACKOFF_MIN_MS = WATCH_RECOVERY_BACKOFF_BASE_MS / 2
 // Anti-busy-loop floor for IMMEDIATE watch-close recovery. The first re-LIST
 // after an isolated watch close runs immediately (sub-second readiness blip
 // instead of the old fixed ~5.5s), but a close arriving within this floor of
@@ -124,6 +135,52 @@ const HOST_WATCH_RECONCILE_RETRY_DELAYS_MS = [5000, 15000, 30000]
 // Wake-pending Hosts get immediate per-Host admission after watch recovery
 // (§10.2 step 7) rather than waiting for the background fleet pass.
 const WAKE_REQUESTED_ANNOTATION = 'clerum.io/wake-requested'
+
+/**
+ * Next retry-after-failure delay for a hardened inventory lane. `retryAfterMs`
+ * (from an HTTP 429 Retry-After, i.e. GKE API Priority & Fairness telling us
+ * exactly when to come back) overrides the computed backoff, clamped into
+ * [MIN, CAP] so a throttled lane can neither busy-loop nor stall for an hour
+ * on a pathological header while readiness is failing closed.
+ */
+function computeWatchRecoveryRetryDelayMs(
+  consecutiveFailures: number,
+  retryAfterMs?: number
+): number {
+  if (retryAfterMs !== undefined) {
+    return Math.min(
+      Math.max(retryAfterMs, WATCH_RECOVERY_BACKOFF_MIN_MS),
+      WATCH_RECOVERY_BACKOFF_CAP_MS
+    )
+  }
+  const attempt = Math.max(1, consecutiveFailures)
+  const computed = Math.min(
+    WATCH_RECOVERY_BACKOFF_BASE_MS * 2 ** (attempt - 1),
+    WATCH_RECOVERY_BACKOFF_CAP_MS
+  )
+  return Math.max(WATCH_RECOVERY_BACKOFF_MIN_MS, Math.random() * computed)
+}
+
+/**
+ * Extract Retry-After (milliseconds) from an HTTP 429 error. The
+ * @kubernetes/client-node ApiException carries the response headers as a
+ * plain string map; header-name casing is transport-dependent, so the lookup
+ * is case-insensitive. Only the delta-seconds form is honored — the HTTP-date
+ * form is not parsed (APF emits delta-seconds; a date would need clock-skew
+ * handling for marginal value) and falls through to the computed backoff.
+ */
+function getRetryAfterMs(error: unknown): number | undefined {
+  if (getErrorCode(error) !== 429) return undefined
+  const headers = (error as { headers?: unknown }).headers
+  if (headers === null || typeof headers !== 'object') return undefined
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() !== 'retry-after') continue
+    const seconds = Number(value)
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000
+    return undefined
+  }
+  return undefined
+}
 
 type CommunicationChannelSnapshot = {
   channels: CommunicationChannelCRD[]
@@ -675,6 +732,17 @@ export class McpServerWatcher implements McpServerProvider {
   private lastMcpServerWatchRecoveryAt = Number.NEGATIVE_INFINITY
   private lastContextWatchRecoveryAt = Number.NEGATIVE_INFINITY
   private lastHostWatchRecoveryAt = Number.NEGATIVE_INFINITY
+  // Consecutive recovery FAILURES per hardened lane, driving the exponential
+  // backoff ladder in schedule*CacheRecovery. Reset to 0 by every successful
+  // recovery so an isolated later close starts again at the base delay. The
+  // paired retryAfterMs (captured from an HTTP 429 Retry-After) overrides the
+  // computed delay for exactly the next scheduled retry.
+  private mcpServerWatchRecoveryFailures = 0
+  private mcpServerWatchRecoveryRetryAfterMs: number | undefined
+  private contextWatchRecoveryFailures = 0
+  private contextWatchRecoveryRetryAfterMs: number | undefined
+  private hostWatchRecoveryFailures = 0
+  private hostWatchRecoveryRetryAfterMs: number | undefined
   // A watch callback can still settle after its stream reports completion.
   // Host reconciles change the mcp-host pod template, so stale callbacks must
   // never replay an older Host spec after a replacement watch is active.
@@ -1338,6 +1406,8 @@ export class McpServerWatcher implements McpServerProvider {
         await this.restartMcpServerWatch(snapshot)
         if (this.stopped) return false
         this.lastMcpServerWatchRecoveryAt = Date.now()
+        this.mcpServerWatchRecoveryFailures = 0
+        this.mcpServerWatchRecoveryRetryAfterMs = undefined
         this.changeCallback?.()
         if (this.contextCacheSynced) {
           void this.runInitialNetworkPolicyConvergence()
@@ -1345,6 +1415,8 @@ export class McpServerWatcher implements McpServerProvider {
         return true
       } catch (error) {
         this.mcpServerCacheSynced = false
+        this.mcpServerWatchRecoveryFailures += 1
+        this.mcpServerWatchRecoveryRetryAfterMs = getRetryAfterMs(error)
         console.error('[K8s] McpServer cache recovery failed:', error)
         return false
       }
@@ -1370,6 +1442,8 @@ export class McpServerWatcher implements McpServerProvider {
         await this.restartContextWatch(snapshot)
         if (this.stopped) return false
         this.lastContextWatchRecoveryAt = Date.now()
+        this.contextWatchRecoveryFailures = 0
+        this.contextWatchRecoveryRetryAfterMs = undefined
         this.hostFleetScheduler.bumpInputRevision()
         void this.runInitialNetworkPolicyConvergence()
         void this.runInitialSharedFileSystemConvergence()
@@ -1387,6 +1461,8 @@ export class McpServerWatcher implements McpServerProvider {
         return true
       } catch (error) {
         this.contextCacheSynced = false
+        this.contextWatchRecoveryFailures += 1
+        this.contextWatchRecoveryRetryAfterMs = getRetryAfterMs(error)
         console.error('[K8s] Context cache recovery failed:', error)
         return false
       }
@@ -1402,12 +1478,12 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
-   * One recovery attempt NOW (immediate re-LIST on watch close), with the 5s
-   * timer kept purely as retry-after-failure pacing. The anti-busy-loop floor
-   * demotes a close that arrives within WATCH_CLOSE_RECOVERY_FLOOR_MS of the
-   * last successful recovery back onto the paced timer. Dedup against
-   * concurrent attempts lives in recoverMcpServerInventoryAndWatch
-   * (mcpServerCacheRecoveryInFlight).
+   * One recovery attempt NOW (immediate re-LIST on watch close), with the
+   * jittered exponential-backoff timer kept purely as retry-after-failure
+   * pacing. The anti-busy-loop floor demotes a close that arrives within
+   * WATCH_CLOSE_RECOVERY_FLOOR_MS of the last successful recovery back onto
+   * the paced timer. Dedup against concurrent attempts lives in
+   * recoverMcpServerInventoryAndWatch (mcpServerCacheRecoveryInFlight).
    */
   private attemptMcpServerCacheRecovery(): void {
     if (this.stopped) return
@@ -1450,18 +1526,30 @@ export class McpServerWatcher implements McpServerProvider {
 
   private scheduleMcpServerCacheRecovery(): void {
     if (this.stopped || this.mcpServerCacheRecoveryTimer) return
+    const delayMs = computeWatchRecoveryRetryDelayMs(
+      this.mcpServerWatchRecoveryFailures,
+      this.mcpServerWatchRecoveryRetryAfterMs
+    )
+    // Retry-After applies to exactly the retry it throttled; the next failure
+    // recaptures it (or falls back to the backoff ladder).
+    this.mcpServerWatchRecoveryRetryAfterMs = undefined
     this.mcpServerCacheRecoveryTimer = setTimeout(() => {
       this.mcpServerCacheRecoveryTimer = null
       this.attemptMcpServerCacheRecovery()
-    }, INVENTORY_CACHE_RECOVERY_RETRY_MS)
+    }, delayMs)
   }
 
   private scheduleContextCacheRecovery(): void {
     if (this.stopped || this.contextCacheRecoveryTimer) return
+    const delayMs = computeWatchRecoveryRetryDelayMs(
+      this.contextWatchRecoveryFailures,
+      this.contextWatchRecoveryRetryAfterMs
+    )
+    this.contextWatchRecoveryRetryAfterMs = undefined
     this.contextCacheRecoveryTimer = setTimeout(() => {
       this.contextCacheRecoveryTimer = null
       this.attemptContextCacheRecovery()
-    }, INVENTORY_CACHE_RECOVERY_RETRY_MS)
+    }, delayMs)
   }
 
   private installCommunicationChannelSnapshot(snapshot: CommunicationChannelSnapshot): void {
@@ -1676,6 +1764,8 @@ export class McpServerWatcher implements McpServerProvider {
       // Authority is known ONLY after the WATCH is installed.
       this.hostCacheSynced = true
       this.lastHostWatchRecoveryAt = Date.now()
+      this.hostWatchRecoveryFailures = 0
+      this.hostWatchRecoveryRetryAfterMs = undefined
       hostWatchRecoverySeconds.observe(
         { phase: 'watch', outcome: 'success' },
         (Date.now() - watchStartedAt) / 1000
@@ -1746,6 +1836,8 @@ export class McpServerWatcher implements McpServerProvider {
         (Date.now() - startedAt) / 1000
       )
       if (!this.stopped) {
+        this.hostWatchRecoveryFailures += 1
+        this.hostWatchRecoveryRetryAfterMs = getRetryAfterMs(error)
         console.error('[K8s] Host watch recovery failed:', error)
         this.scheduleHostCacheRecovery(request)
       }
@@ -1864,6 +1956,11 @@ export class McpServerWatcher implements McpServerProvider {
       this.hostCacheRecoveryIntent = { ...requested }
     }
     if (this.hostCacheRecoveryTimer) return
+    const delayMs = computeWatchRecoveryRetryDelayMs(
+      this.hostWatchRecoveryFailures,
+      this.hostWatchRecoveryRetryAfterMs
+    )
+    this.hostWatchRecoveryRetryAfterMs = undefined
     this.hostCacheRecoveryTimer = setTimeout(() => {
       this.hostCacheRecoveryTimer = null
       const request = this.hostCacheRecoveryIntent ?? requested
@@ -1875,7 +1972,7 @@ export class McpServerWatcher implements McpServerProvider {
         request.ccLifecycleGeneration,
         request.cause
       ).catch(() => undefined)
-    }, HOST_CACHE_RECOVERY_RETRY_MS)
+    }, delayMs)
   }
 
   private isCurrentHostWatchEvent(
