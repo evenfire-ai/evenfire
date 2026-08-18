@@ -944,7 +944,7 @@ test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host 
 	E2E_HCC_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-readiness-bootstrap.sh
 
 .PHONY: test-e2e-hcc-watch-churn-readiness
-test-e2e-hcc-watch-churn-readiness: ## Prove HCC readiness survives sustained apiserver watch churn (PR #205 GKE livelock). EXPECT_LIVELOCK=1 reproduces the bug.
+test-e2e-hcc-watch-churn-readiness: ## Prove HCC readiness CONVERGES under sustained apiserver watch churn (PR #205 GKE livelock). Positive-only; the livelock RED lives in host-context-controller/src/k8sClient.test.ts. EXPECT_LIVELOCK=1 is refused.
 	@echo "Running HCC watch-churn readiness gate..."
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_WATCH_FAULT_INJECTION=1 EXPECT_LIVELOCK=$(EXPECT_LIVELOCK) E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-watch-churn-readiness.sh

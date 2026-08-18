@@ -207,6 +207,10 @@ type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
 
 type NetworkPolicySafetyCertificate = {
+  // VESTIGIAL — retained for record shape only, never read in any decision.
+  // The certificate is identified SOLELY by content revision (the PR #382 fix);
+  // the generation fields survive as diagnostics and MUST NOT gate readiness
+  // (reading them would reintroduce the channel-identity livelock).
   contextGeneration: number
   serverGeneration: number
   contextRevision: number
@@ -1656,6 +1660,12 @@ export class McpServerWatcher implements McpServerProvider {
   // Kubernetes bumps metadata.generation only on a spec change (not on the
   // status writes HCC itself makes), and the uid distinguishes a delete+recreate
   // of the same name. Same (uid, generation) = same desired Host state.
+  // SCOPE: unlike the McpServer/Context comparators (which hash spec+labels+
+  // annotations), this is blind to Host annotations/labels — correct today
+  // because no Host annotation/label is load-bearing for a mutation (the wake
+  // annotation drives dispatch, not template content). If a Host annotation or
+  // label ever becomes mutation-relevant, extend this to hash it, or a
+  // reconnect that re-LISTs an unchanged (uid, generation) would skip the bump.
   private sameHostDesiredRevision(previous: HostCRD, current: HostCRD): boolean {
     return previous.uid === current.uid && previous.generation === current.generation
   }

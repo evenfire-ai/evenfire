@@ -83,8 +83,9 @@ CHURN_MIN_AGE_MS="${CHURN_MIN_AGE_MS:-3000}"
 CHURN_MIN_CUTS="${CHURN_MIN_CUTS:-3}"
 READINESS_BUDGET_SEC="${READINESS_BUDGET_SEC:-360}"
 STABILITY_WINDOW_SEC="${STABILITY_WINDOW_SEC:-30}"
-# Longest tolerated CONTINUOUS 503 streak under churn: 5s recovery timer +
-# re-LIST + one retried cut cycle. A livelock produces an unbounded streak.
+# Longest tolerated CONTINUOUS 503 streak under churn: immediate re-LIST +
+# re-WATCH + a jittered backoff retry if that first attempt fails. A livelock
+# produces an unbounded streak.
 RECOVERY_BUDGET_SEC="${RECOVERY_BUDGET_SEC:-15}"
 # 1Hz observation window under churn after first Ready (fix mode): ~8 cut
 # cycles at the default 7s cadence, enough for repeated 503->200 evidence.
