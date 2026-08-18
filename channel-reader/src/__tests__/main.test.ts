@@ -1289,6 +1289,51 @@ describe('ChannelReader pollCycle provider guards', () => {
     expect(emailAdapter.fetchMessages).toHaveBeenCalledOnce()
     expect(messages).toHaveLength(1)
   })
+
+  // The empty-array guard above is only half the problem. `continue` inside the
+  // telegram branch aborts the whole CHANNEL, so a channel that legitimately has
+  // telegram groups but no telegram adapter (credentials absent) also loses every
+  // provider declared after telegram. charts/clerum-crds/examples/channels.yaml
+  // ships exactly this shape: one CommunicationChannel with telegram + email +
+  // slack. The inbox stops being polled, silently.
+  it('still polls email when a real telegram group has no adapter', async () => {
+    const emailAdapter = {
+      fetchMessages: vi.fn(async () => [
+        {
+          channelType: 'email' as const,
+          channelId: 'INBOX',
+          sender: 'someone@example.com',
+          content: 'hello',
+          timestamp: new Date('2026-08-18T12:00:00.000Z'),
+          messageId: 'email-2',
+        },
+      ]),
+      sendMessage: vi.fn(async () => undefined),
+    }
+
+    const reader = new ChannelReader({
+      rpcClient: rpcClient(),
+      notificationDeliveryClient: null,
+      // Email adapter only: telegram credentials are absent, which is the whole point.
+      adapters: new Map([['email', emailAdapter as unknown as ChannelAdapter]]),
+    })
+    ;(reader as unknown as { channels: unknown[] }).channels = [
+      {
+        name: 'all-channels',
+        namespace: 'channels',
+        spec: {
+          hostRef: 'agentjose',
+          telegram: [{ channelId: 'telegram1', chatType: 'private', userIds: ['123'] }],
+          email: [{ channelId: 'INBOX', emails: ['someone@example.com'] }],
+        },
+      },
+    ]
+
+    const messages = await reader.pollCycle()
+
+    expect(emailAdapter.fetchMessages).toHaveBeenCalledOnce()
+    expect(messages).toHaveLength(1)
+  })
 })
 
 describe('profileSocialChannelUrl', () => {

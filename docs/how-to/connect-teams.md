@@ -125,8 +125,9 @@ and no `.env` is written at all.
 **`--sign-in-audience myOrg` matters.** `channel-reader` fetches its bot token
 from `https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token`, which
 only works for a single-tenant app. A multi-tenant registration needs the
-`botframework.com` authority instead and fails with an `AADSTS` error. The
-default is single-tenant, but the flag exists, so pin it.
+`botframework.com` authority instead and fails with an `AADSTS` error. The CLI
+documents `myOrg` and `multipleOrgs` as the accepted values but does not say
+which one it defaults to, so pin it rather than assume.
 
 The command prints a **Teams App ID**, a **Bot ID**, an **Install in Teams**
 link, and writes `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`. On a
@@ -140,27 +141,16 @@ select the app, and under **Basic information** give the long description its
 own value. Do this regardless: it may be part of why the install link below
 fails (see Troubleshooting), though that has not been confirmed.
 
-Open the install link, add the app, and optionally add it to a channel.
-
-**Expect to wait about five minutes.** Teams publishes the app to its catalog on
-its own schedule, and the install link fails with "This app cannot be found"
-until that finishes. That is the normal wait, not a broken setup, and it is not
-a reason to re-run `teams app create`, which would leave you with two bots. Give
-it a couple of minutes and click the link again. Only if it still fails after
-several minutes is something actually wrong: see Troubleshooting.
-
-Then paste `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET` into the Control UI and
-create the channel. The secret is stored as `teams-app-password` in a Secret
-named `cc-<channel-name>-credentials` in the `channels` namespace, and is
-write-only: it renders masked and is never returned.
-
-Treat the generated `.env` as a secret. Do not paste it into a document, a chat,
-or a screenshot.
-
 ## Enable file upload and download
 
 Workflow results are delivered as files, which the bot cannot send unless the
 manifest allows it.
+
+**Do this before you install the app.** Microsoft documents that you "must
+reinstall if you change any app configurations", and `supportsFiles` is a
+configuration rather than a code change. An app installed from a manifest
+without it keeps that manifest, so enabling it afterwards means updating or
+reinstalling the app in every scope where it was added.
 
 `YOUR_CLIENT_ID` below is the `CLIENT_ID` from your `.env`. On a teams-managed
 bot the Teams App ID, the Bot ID and `CLIENT_ID` are the same UUID, so any of
@@ -198,6 +188,27 @@ the CLI, edit the manifest directly under Configure > **App package editor**.
 `teams app doctor YOUR_CLIENT_ID` is a useful checkpoint. It reports whether the
 endpoint is reachable and shows `Sign-in audience: AzureADMyOrg` for a correctly
 registered single-tenant bot.
+
+## Create the channel in the Control UI
+
+Then paste `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET` into the Control UI and
+create the channel. The secret is stored as `teams-app-password` in a Secret
+named `cc-<channel-name>-credentials` in the `channels` namespace, and is
+write-only: it renders masked and is never returned.
+
+Treat the generated `.env` as a secret. Do not paste it into a document, a chat,
+or a screenshot.
+
+## Install the app in Teams
+
+Open the install link, add the app, and optionally add it to a channel.
+
+**Expect to wait about five minutes.** Teams publishes the app to its catalog on
+its own schedule, and the install link fails with "This app cannot be found"
+until that finishes. That is the normal wait, not a broken setup, and it is not
+a reason to re-run `teams app create`, which would leave you with two bots. Give
+it a couple of minutes and click the link again. Only if it still fails after
+several minutes is something actually wrong: see Troubleshooting.
 
 ## Any cluster (CRD path)
 

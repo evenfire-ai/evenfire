@@ -1298,15 +1298,32 @@ export class ChannelReader {
 
       // Process Telegram private chats, groups, and supergroups. Personal identity is verified separately.
       //
-      // Guard on length, not presence. control-ui writes every provider array on
-      // every channel, so a Teams or Slack channel arrives carrying `telegram: []`.
-      // An empty array is truthy, so this branch used to run for those channels,
-      // fail to find a telegram adapter, and `continue` -- skipping every
-      // remaining provider on the same channel. An empty array means "no telegram
-      // groups to poll", not "this is a telegram channel".
-      if (spec.telegram?.length) {
+      // Two separate hazards are guarded here, and both used to cost the channel
+      // every provider declared after telegram.
+      //
+      // 1. Guard on length, not presence. Channels created before this release
+      //    carry `telegram: []` even when they are Teams or Slack channels, and
+      //    an empty array is truthy. An empty array means "no telegram groups to
+      //    poll", not "this is a telegram channel".
+      // 2. The exits below leave the LABELLED BLOCK, not the channel loop. A
+      //    `continue` here aborted the whole channel, so a channel with real
+      //    telegram groups but no telegram adapter (credentials absent) silently
+      //    stopped polling its email and everything else too.
+      //    charts/clerum-crds/examples/channels.yaml ships exactly that shape:
+      //    one CommunicationChannel carrying telegram + email + slack.
+      telegramGroups: if (spec.telegram?.length) {
         const adapter = this.adapterForChannel('telegram', channelCRD)
-        if (!adapter) continue
+        if (!adapter) {
+          // Previously silent, which is what made this hard to diagnose.
+          console.warn(
+            '[Main] Skipping Telegram groups for ' +
+              channelCRD.namespace +
+              '/' +
+              channelCRD.name +
+              ': no telegram adapter; other providers on this channel still poll'
+          )
+          break telegramGroups
+        }
         const providerTarget = providerTargetFromChannel(channelCRD)
         if (!providerTarget) {
           console.warn(
@@ -1316,7 +1333,7 @@ export class ChannelReader {
               channelCRD.name +
               ': provider target is incomplete'
           )
-          continue
+          break telegramGroups
         }
         const telegramPollGroups = new Map<
           string,
@@ -1385,10 +1402,12 @@ export class ChannelReader {
         }
       }
 
-      // Process Email groups. Same empty-array reasoning as the telegram guard above.
-      if (spec.email?.length) {
+      // Process Email groups. Same two hazards as the telegram guard above: an
+      // empty array is not an email channel, and a missing adapter must not cost
+      // the channel its remaining providers.
+      emailGroups: if (spec.email?.length) {
         const adapter = this.adapterForChannel('email', channelCRD)
-        if (!adapter) continue
+        if (!adapter) break emailGroups
         for (const group of spec.email) {
           const allowedSenders = new Set(group.emails)
           const messages = await adapter.fetchMessages(group.channelId, allowedSenders)

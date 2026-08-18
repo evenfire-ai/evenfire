@@ -591,6 +591,21 @@ describe('unresolved notice link', () => {
     expect(sendMessage.mock.calls[0][1]).not.toContain('.com//settings')
   })
 
+  it('pins the Teams copy exactly, the way the Slack copy is pinned', async () => {
+    // Without an exact assertion the Teams copy could be replaced wholesale and
+    // stay green: the only other Teams assertion checks the URL, which comes
+    // from profileSocialChannelUrl rather than from this string.
+    const { deliver, sendMessage } = buildReader({ medium: 'teams', profileUiUrl: undefined })
+    await deliver()
+    expect(sendMessage.mock.calls[0][1]).toBe(
+      "I can't accept messages from this Teams account. If you haven't linked it yet on the " +
+        'profile UI, open Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+        'If you think you should already have access, contact your admin.'
+    )
+    expect(sendMessage.mock.calls[0][1]).not.toContain('undefined')
+    expect(sendMessage.mock.calls[0][1]).not.toContain('/settings/social')
+  })
+
   it('sends the copy unchanged when no profile URL is configured', async () => {
     const { deliver, sendEphemeral } = buildReader({ profileUiUrl: undefined })
     await deliver('C1', 'U1')

