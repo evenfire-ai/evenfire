@@ -42,6 +42,21 @@ interface GfsAccessibleResource extends GfsBrowserChild {
   coversDescendants: boolean
 }
 
+type GfsAccessibleWirePage = Awaited<ReturnType<typeof window.clerum.gfs.listAccessible>>
+
+function normalizeAccessibleResource(
+  item: GfsAccessibleWirePage['items'][number]
+): GfsAccessibleResource {
+  return {
+    ...item,
+    drive: item.drive ?? 'main',
+    parentResourceId: item.parentResourceId ?? null,
+    sources: item.sources ?? [],
+    permissions: item.permissions ?? [],
+    coversDescendants: item.coversDescendants ?? false,
+  }
+}
+
 export interface GfsCrumb {
   resourceId: string
   gfsUri: string
@@ -112,10 +127,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
 
   const accessibleQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', DRIVE),
-    queryFn: ({ pageParam }) => {
+    queryFn: async ({ pageParam }): Promise<GfsAccessibleWirePage> => {
       const listAccessible = window.clerum?.gfs?.listAccessible
       if (typeof listAccessible !== 'function') {
-        return Promise.resolve({ items: [], nextCursor: null })
+        return { items: [], nextCursor: null }
       }
       return listAccessible(DRIVE, pageParam)
     },
@@ -254,7 +269,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [childrenQuery.data]
   )
   const accessibleResources = useMemo<GfsAccessibleResource[]>(
-    () => (accessibleQuery.data?.pages ?? []).flatMap(page => page.items),
+    () =>
+      (accessibleQuery.data?.pages ?? []).flatMap(page =>
+        page.items.map(normalizeAccessibleResource)
+      ),
     [accessibleQuery.data]
   )
   const grants = useMemo<GfsGrantListItem[]>(() => grantsQuery.data ?? [], [grantsQuery.data])
