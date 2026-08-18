@@ -40,6 +40,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "${PROJECT_DIR}/scripts/e2e/load-dotenv.sh"
 # shellcheck source=scripts/e2e/admin-credentials.sh
 source "${PROJECT_DIR}/scripts/e2e/admin-credentials.sh"
+# shellcheck source=scripts/e2e/minimal-bootstrap-contract.sh
+source "${PROJECT_DIR}/scripts/e2e/minimal-bootstrap-contract.sh"
 
 # ── Color helpers ──────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -966,7 +968,12 @@ if [ "$RESET_DB" = true ]; then
 else
   writer_dsn="$($KC -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
   if [ -n "${writer_dsn}" ]; then
-    if ! $KC rollout status deployment/control-api -n control-plane --timeout=5s >/dev/null 2>&1; then
+    # apply-inter-service-tokens.sh intentionally restarts control-api before
+    # this cutover check. A five-second probe races that rollout and makes an
+    # otherwise healthy REUSE_DB rerun fail closed before the new pod can be
+    # Ready. Keep the refusal, but wait for the same bounded rollout window
+    # used by the main readiness gate.
+    if ! $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null 2>&1; then
       err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
       exit 1
     fi
@@ -1418,20 +1425,31 @@ else
   else
     # Minimal: the Control-UI admin IS the sole Desktop App member — no separate
     # seeded user. Point both the admin-bootstrap email and the seeded desktop
-    # user at the same evenfire-branded address so the seeder's (idempotent)
-    # user+team step converges on the admin identity that /admin/auth/setup
-    # already provisioned (users row + "<username> team" + chatllm/context1
-    # grants), instead of minting a second member/team. `admin@clerum.io` would
-    # leak the internal code name onto a product surface (the Desktop member
-    # list) — evenfire branding belongs here (docs/concepts/code-names.md). If
-    # the best-effort admin desktop provisioning ever fails, the seeder still
-    # creates this one identity, so the minimal install is never member-less.
-    SEED_USER_DEFAULT_EMAIL="admin@evenfire.local"
+    # user at the same evenfire-branded address. seed-e2e-data.sh consumes
+    # /admin/auth/setup before login on a fresh DB, so this identity is created
+    # atomically with the initial_setup operator link instead of minting a
+    # second ordinary member/team. `admin@clerum.io` would leak the internal
+    # code name onto a product surface (the Desktop member list) — evenfire
+    # branding belongs here (docs/concepts/code-names.md).
+    ADMIN_EMAIL="$(clerum_canonical_email "${ADMIN_EMAIL:-admin@evenfire.local}")"
+    SEED_USER_DEFAULT_EMAIL="$ADMIN_EMAIL"
     SEED_USER_DEFAULT_NAME="admin"
-    : "${ADMIN_EMAIL:=admin@evenfire.local}"
   fi
-  SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
+  if [ "$SEED_PROFILE" = "minimal" ]; then
+    # The minimal quickstart owns the bootstrap identity. Do not let a
+    # process/.env E2E override silently mint a second ordinary Desktop user;
+    # only the explicitly named seed override is considered, and the guard
+    # below still requires it to equal ADMIN_EMAIL.
+    SEED_USER_EMAIL="$(clerum_canonical_email "${CLERUM_SEED_USER_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}")"
+  else
+    SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
+  fi
   SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
+  if [ "$SEED_PROFILE" = "minimal" ] \
+    && ! clerum_minimal_identity_matches "$ADMIN_EMAIL" "$SEED_USER_EMAIL"; then
+    err "$(clerum_minimal_identity_error "$SEED_USER_EMAIL" "$ADMIN_EMAIL")"
+    exit 1
+  fi
   log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
   SEED_USER_OK=true
   if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
@@ -1444,17 +1462,22 @@ else
   else
     SEED_USER_OK=false
     if [ "$SEED_PROFILE" = "minimal" ]; then
-      # This step is the only place that both creates the owner user AND
-      # rotates the bootstrap admin credential (POST /admin/auth/setup, called
-      # from seed-test-data.sh → scripts/e2e/seed-e2e-data.sh). generate-keys.sh
-      # bakes a hardcoded bcrypt hash of changeme123! into the admin Secret,
-      # and control-api/src/db.ts auto-inserts a live `admin` row from it on
-      # every fresh DB. If this step fails under the default (minimal)
-      # profile, that publicly-known credential is still live — a green
-      # summary would ship an install that is both unusable and insecure.
-      # Abort instead; setup is idempotent, so re-running after the underlying
-      # issue is fixed recovers cleanly.
-      err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
+      # This step is the only place that both consumes the governed
+      # /admin/auth/setup path and creates the owner Desktop identity. The
+      # minimal seed is setup-first; it refuses to fall back to an ordinary
+      # /admin/users member when the initial_setup operator link is missing.
+      # generate-keys.sh bakes a hardcoded bcrypt hash of changeme123! into the
+      # admin Secret, and control-api/src/db.ts auto-inserts a live `admin` row
+      # from it on every fresh DB. If this step fails under the default
+      # (minimal) profile, that publicly-known credential is still live — a
+      # green summary would ship an install that is both unusable and insecure.
+      # Abort instead. Setup is idempotent, so re-running after the underlying
+      # issue is fixed recovers cleanly for every failure except a missing
+      # initial_setup link on a reused database: control-api stamps
+      # last_login_at on each admin login and setup only matches a bootstrap
+      # row whose last_login_at is NULL, so that one needs a DB rebuild. The
+      # seeder prints the exact recovery command for that case.
+      err "Test user seed failed under SEED_PROFILE=minimal, aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup. If the seeder reported a missing initial_setup Desktop link, re-run without REUSE_DB/--keep-db so the control DB is rebuilt."
       exit 1
     else
       warn "Test user seed encountered errors — check output above"
