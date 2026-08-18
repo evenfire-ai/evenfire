@@ -33,6 +33,12 @@ grep -Fq 'T1_REDACT_PASSWORD="${PG_PASSWORD}"' "$T1" || grep -Fq 'T1_REDACT_PASS
 grep -Fq -- '--reporter=json' "$T1"
 grep -Fq 'pending_tests' "$T1"
 grep -Fq 'numTotalTests' "$T1"
+grep -Fq 'numTotalTestSuites' "$T1"
+grep -Fq 'passed_suites' "$T1"
+if grep -Fq "[ \"\$passed_files\" -ne \"\$expected\" ]" "$T1"; then
+  echo 'FAIL: T1 compares Vitest nested suite counts to physical file counts' >&2
+  exit 1
+fi
 grep -Fq 'port-forward' "$T1"
 grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 

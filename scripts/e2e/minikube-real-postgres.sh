@@ -148,26 +148,35 @@ run_suite() {
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package"
   }
-  stats="$(python3 - "$json_file" "$expected_files" <<'PY'
+  # Vitest's suite counters include nested describe blocks, so they are not
+  # comparable to the number of physical *realPostgres*.test.ts files above.
+  # Validate the reporter's own total/passed suite counts instead; the file
+  # discovery count remains a separate zero-selection guard.
+  stats="$(python3 - "$json_file" <<'PY'
 import json
 import sys
 result = json.loads(open(sys.argv[1]).read())
-expected = int(sys.argv[2])
-passed_files = int(result.get("numPassedTestSuites") or 0)
+total_suites = int(result.get("numTotalTestSuites") or 0)
+passed_suites = int(result.get("numPassedTestSuites") or 0)
+failed_suites = int(result.get("numFailedTestSuites") or 0)
 passed_tests = int(result.get("numPassedTests") or 0)
 failed_tests = int(result.get("numFailedTests") or 0)
 pending_files = int(result.get("numPendingTestSuites") or 0)
 pending_tests = int(result.get("numPendingTests") or 0)
 total_tests = int(result.get("numTotalTests") or 0)
 success = bool(result.get("success"))
-print(passed_files, passed_tests, failed_tests, pending_files, pending_tests, total_tests, int(success), expected)
+print(total_suites, passed_suites, failed_suites, passed_tests, failed_tests,
+      pending_files, pending_tests, total_tests, int(success))
 PY
   )"
-  read -r passed_files passed_tests failed_tests pending_files pending_tests total_tests success expected <<< "$stats"
+  read -r total_suites passed_suites failed_suites passed_tests failed_tests \
+    pending_files pending_tests total_tests success <<< "$stats"
   T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))
   T1_PASSED_TESTS=$((T1_PASSED_TESTS + passed_tests))
   T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
-  if [ "$success" -ne 1 ] || [ "$passed_files" -ne "$expected" ] || [ "$failed_tests" -ne 0 ]; then
+  if [ "$success" -ne 1 ] || [ "$total_suites" -le 0 ] || \
+     [ "$passed_suites" -ne "$total_suites" ] || [ "$failed_suites" -ne 0 ] || \
+     [ "$failed_tests" -ne 0 ]; then
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
     die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package"
   fi
@@ -175,7 +184,8 @@ PY
     T1_NEXT_COMMAND='repair the test selection or database route; a T1 run cannot silently skip suites'
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package"
   fi
-  printf '[minikube-t1] PASS %s files=%s tests=%s skipped=0\n' "$package" "$passed_files" "$passed_tests"
+  printf '[minikube-t1] PASS %s files=%s suites=%s tests=%s skipped=0\n' \
+    "$package" "$expected_files" "$passed_suites" "$passed_tests"
 }
 
 main() {
