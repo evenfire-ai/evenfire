@@ -133,6 +133,8 @@ const clerum = Object.freeze({
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
     renameResource: (resourceId: string, newName: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
+    moveResource: (resourceId: string, destinationId: string, drive?: string, ifMatch?: number) =>
+      ipcRenderer.invoke('gfs:moveResource', { resourceId, destinationId, drive, ifMatch }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:deleteResource', { resourceId, drive, ifMatch }),
     grant: (

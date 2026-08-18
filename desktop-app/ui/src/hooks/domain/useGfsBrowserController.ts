@@ -263,6 +263,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       await refreshGfs()
     },
   })
+  // Move refreshes the old parent's children, the destination's children, and
+  // the accessible roots in one shot via refreshGfs. The moved resource's own
+  // crumbs stay valid (its id does not change); only its parent does.
+  const moveResourceMutation = useMutation({
+    mutationFn: (input: { resourceId: string; destinationId: string; ifMatch?: number }) =>
+      window.clerum.gfs.moveResource(input.resourceId, input.destinationId, DRIVE, input.ifMatch),
+    onSuccess: async () => {
+      await refreshGfs()
+    },
+  })
 
   const items = useMemo<GfsBrowserChild[]>(
     () => (childrenQuery.data?.pages ?? []).flatMap(page => page.items),
@@ -400,6 +410,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   return {
     crumbs,
     current,
+    /** Cache-scope key (env + user + team) so the move dialog's queries share
+     *  the controller's cache and are dropped together on scope change. */
+    sessionScope: sessionScope ?? 'anonymous',
     accessibleResources,
     items,
     affordances: (affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null,
@@ -451,6 +464,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
+    moveResource: (resourceId: string, destinationId: string, ifMatch?: number) =>
+      moveResourceMutation.mutateAsync({ resourceId, destinationId, ifMatch }),
     deleteResource: (resourceId: string, ifMatch?: number) =>
       deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),
     mutating:
@@ -458,6 +473,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       createFileMutation.isPending ||
       replaceFileMutation.isPending ||
       renameResourceMutation.isPending ||
+      moveResourceMutation.isPending ||
       deleteResourceMutation.isPending,
   }
 }

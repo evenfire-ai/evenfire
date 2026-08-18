@@ -13,4 +13,7 @@ export type GfsResourceMenuProps = {
   onPreview?: () => void
   onDownload?: () => void
   onRename?: () => void
+  /** Open the move-to-folder flow. Move authority is parent-relative and
+   *  enforced server-side, so callers do NOT gate this on local affordances. */
+  onMove?: () => void
 }

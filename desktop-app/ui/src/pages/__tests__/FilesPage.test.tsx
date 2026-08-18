@@ -20,6 +20,7 @@ function baseController() {
   return {
     current: null,
     crumbs: [],
+    sessionScope: 'env-1:user-1:team-1',
     accessibleResources: [],
     items: [],
     affordances: null,
@@ -58,6 +59,7 @@ function baseController() {
     createFile: vi.fn(),
     replaceFile: vi.fn(),
     renameResource: vi.fn(),
+    moveResource: vi.fn(),
     deleteResource: vi.fn(),
     mutating: false,
     reset: vi.fn(),
@@ -1268,6 +1270,166 @@ describe('FilesPage', () => {
     expect(deleteResource).toHaveBeenCalledWith('child-1', 3)
     expect(pushToast).toHaveBeenCalledWith('Deleted notes.txt', 'success')
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('moves a folder child into another folder through the move dialog', async () => {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const listChildren = vi.fn(async () => ({
+      items: [
+        {
+          resourceId: 'sub-1',
+          rid: 'sub-1',
+          gfsUri: 'gfs://main/sub-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Subfolder',
+          kind: 'directory',
+          path: '/Product/Subfolder',
+          version: 6,
+          bytes: 0,
+        },
+      ],
+      nextCursor: null,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren } },
+    })
+    const child = {
+      resourceId: 'child-1',
+      rid: 'child-1',
+      gfsUri: 'gfs://main/child-1',
+      drive: 'main',
+      parentResourceId: 'folder-1',
+      name: 'notes.txt',
+      kind: 'file',
+      path: '/Product/notes.txt',
+      version: 3,
+      bytes: 12,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      items: [child],
+      moveResource,
+    })
+
+    renderFilesPage(pushToast)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    // Move is not affordance-gated (authority is parent-relative, server-side).
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+
+    // The dialog starts at the current folder and lists its subfolders, but
+    // never the moved resource itself.
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    expect(await within(dialog).findByRole('button', { name: 'Subfolder' })).toBeTruthy()
+    expect(within(dialog).queryByRole('button', { name: 'notes.txt' })).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Product)' }))
+    })
+
+    expect(moveResource).toHaveBeenCalledWith('child-1', 'folder-1', 3)
+    expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Product', 'success')
+  })
+
+  it('renames a folder child from its row menu once write affordances resolve', async () => {
+    const pushToast = vi.fn()
+    const renameResource = vi.fn(async () => ({}))
+    const setRowAffordancesResourceId = vi.fn()
+    const child = {
+      resourceId: 'child-1',
+      rid: 'child-1',
+      gfsUri: 'gfs://main/child-1',
+      drive: 'main',
+      parentResourceId: 'folder-1',
+      name: 'notes.txt',
+      kind: 'file',
+      path: '/Product/notes.txt',
+      version: 3,
+      bytes: 12,
+    }
+    const controller = {
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      items: [child],
+      renameResource,
+      setRowAffordancesResourceId,
+    }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    hookMock.useGfsBrowserController.mockReturnValue(controller)
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    // While the row affordances are unresolved, Rename is not offered.
+    expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull()
+
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller,
+      rowAffordancesResourceId: 'child-1',
+      rowAffordances: {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+    })
+    await act(async () => {
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <FilesPage pushToast={pushToast} />
+        </QueryClientProvider>
+      )
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    })
+    const dialog = screen.getByRole('dialog', { name: 'Rename resource' })
+    await act(async () => {
+      fireEvent.change(within(dialog).getByLabelText('New name'), {
+        target: { value: 'renamed-notes.txt' },
+      })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+    })
+
+    expect(renameResource).toHaveBeenCalledWith('child-1', 'renamed-notes.txt', 3)
+    expect(pushToast).toHaveBeenCalledWith('Renamed to renamed-notes.txt', 'success')
+    expect(screen.queryByRole('dialog', { name: 'Rename resource' })).toBeNull()
   })
 
   it('offers row delete on shared resources that carry the delete permission', async () => {

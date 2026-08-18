@@ -2488,6 +2488,23 @@ export class AppService {
     )
   }
 
+  /**
+   * Move a resource into a destination folder (PATCH newParentId). Move
+   * authority is parent-relative (write+delete on the old parent, write on the
+   * destination) and is enforced server-side; ifMatch pins the resource version.
+   */
+  async moveGfsResource(
+    resourceId: string,
+    destinationId: string,
+    drive?: string,
+    ifMatch?: number
+  ) {
+    return this.gfsClient.moveResource(
+      { resourceId, drive, destinationId, ifMatch },
+      this.requireSessionToken()
+    )
+  }
+
   async deleteGfsResource(resourceId: string, drive?: string, ifMatch?: number) {
     return this.gfsClient.deleteResource({ resourceId, drive, ifMatch }, this.requireSessionToken())
   }

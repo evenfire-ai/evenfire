@@ -14560,6 +14560,56 @@ pre {
   background: var(--surface-soft);
 }
 
+/* Page-level rename confirmation (row/header menus): a narrow dialog over the
+   manage-modal overlay, so a row rename never needs the manage dialog. */
+.da-gfs-manage-dialog--confirm {
+  width: min(440px, 94vw);
+  max-height: none;
+  padding: var(--space-4) var(--space-5);
+}
+
+.da-gfs-manage-dialog--confirm .da-gfs-manage-dialog__body {
+  padding: 0;
+}
+
+/* Move-to-folder picker: full-width dialog with a scrollable folder list. */
+.da-gfs-move-dialog__list {
+  min-height: var(--space-8);
+  max-height: min(320px, 40vh);
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  background: var(--surface-soft);
+}
+
+.da-gfs-move-dialog__row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.da-gfs-move-dialog__row-icon {
+  display: grid;
+  place-items: center;
+  color: var(--warning);
+}
+
+.da-gfs-move-dialog__row-icon svg {
+  width: var(--font-size-lg);
+  height: var(--font-size-lg);
+}
+
+.da-gfs-move-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 .da-gfs-manage-section--actions .da-gfs-inline-form__field {
   min-width: 0;
 }

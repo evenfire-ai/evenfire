@@ -16,6 +16,7 @@ export function GfsResourceMenu({
   onPreview,
   onDownload,
   onRename,
+  onMove,
 }: GfsResourceMenuProps) {
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLSpanElement | null>(null)
@@ -123,6 +124,11 @@ export function GfsResourceMenu({
           {onRename ? (
             <MenuItem role="menuitem" onClick={() => runAction(onRename)}>
               Rename
+            </MenuItem>
+          ) : null}
+          {onMove ? (
+            <MenuItem role="menuitem" onClick={() => runAction(onMove)}>
+              Move to…
             </MenuItem>
           ) : null}
           {onDownload ? (

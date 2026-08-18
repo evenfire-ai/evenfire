@@ -30,6 +30,7 @@ import {
   type GfsDelegationSubjectOption,
 } from '@/gfs/delegation'
 import { GfsFilePicker } from '@/gfs/filePicker'
+import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { normalizeGfsResourceName } from '@/gfs/resourceName'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type {
@@ -118,13 +119,24 @@ function mergeErrorMessages(...errors: unknown[]): string | null {
   return messages.length > 0 ? messages.join(' · ') : null
 }
 
+/** Any row/header action target — a listing row (GfsDriveResource) or the
+ *  current breadcrumb (GfsCrumb); both carry the identity fields the delete /
+ *  rename / move calls need (kind also powers dialog titles + the move cycle
+ *  guard). */
+type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'version'> & {
+  kind: 'file' | 'directory'
+}
+
 export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
   const [renameOpen, setRenameOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
-  const [deleteTarget, setDeleteTarget] = useState<GfsDriveResource | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<GfsActionTarget | null>(null)
+  const [moveTarget, setMoveTarget] = useState<GfsActionTarget | null>(null)
+  const [renameTarget, setRenameTarget] = useState<GfsActionTarget | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
@@ -136,6 +148,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const {
     current,
     crumbs,
+    sessionScope,
     accessibleResources,
     items,
     affordances,
@@ -244,15 +257,17 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   }
 
   useEffect(() => {
-    if (!manageOpen && !openLinkOpen) return
+    if (!manageOpen && !openLinkOpen && !moveTarget && !renameTarget) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       setManageOpen(false)
       setOpenLinkOpen(false)
+      setMoveTarget(null)
+      setRenameTarget(null)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [manageOpen, openLinkOpen])
+  }, [manageOpen, openLinkOpen, moveTarget, renameTarget])
 
   // One atomic bulk grant for every selected subject — the server grants all or
   // none (a `subjects_invalid` rejects the whole request), so there is no
@@ -457,7 +472,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     }
   }
 
-  const handleDeleteResource = async (resource: GfsDriveResource) => {
+  const handleDeleteResource = async (resource: GfsActionTarget) => {
     try {
       await ctrl.deleteResource(resource.resourceId, resource.version)
       pushToast?.(`Deleted ${resource.name}`, 'success')
@@ -481,6 +496,59 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       )
     }
     return Boolean(resource.permissions?.includes('delete'))
+  }
+
+  /** Rename gate: same lazy resolution as rowCanDelete, but on the write bit
+   *  (rename needs `write` on the resource itself). */
+  const rowCanRename = (resource: GfsDriveResource): boolean => {
+    if (currentIsFolder) {
+      return (
+        ctrl.rowAffordancesResourceId === resource.resourceId &&
+        Boolean(ctrl.rowAffordances?.held.includes('write'))
+      )
+    }
+    return Boolean(resource.permissions?.includes('write'))
+  }
+
+  /** Move commits bubble their failure back to the dialog (in-place banner);
+   *  success toasts and closes it. ifMatch pins the resource version. */
+  const handleMoveTarget = async (destinationId: string, destinationName: string) => {
+    if (!moveTarget) return
+    const target = moveTarget
+    await ctrl.moveResource(target.resourceId, destinationId, target.version)
+    setMoveTarget(null)
+    pushToast?.(`Moved ${target.name} to ${destinationName}`, 'success')
+  }
+
+  const requestMoveCurrent = () => {
+    if (current) setMoveTarget(current)
+  }
+
+  /** Page-level rename works for any row or the current resource; the manage
+   *  dialog keeps its own inline title-edit flow. Errors toast (stale version
+   *  → retry), matching the manage-dialog rename behavior. */
+  const handleRenameTarget = async () => {
+    if (!renameTarget) return
+    const target = renameTarget
+    const requestedName = renameDraft.trim()
+    if (!requestedName) return
+    try {
+      const name = await normalizeGfsResourceName(requestedName)
+      if (name === target.name) {
+        setRenameTarget(null)
+        return
+      }
+      await ctrl.renameResource(target.resourceId, name, target.version)
+      setRenameTarget(null)
+      pushToast?.(`Renamed to ${name}`, 'success')
+    } catch (renameError) {
+      pushToast?.(renameError instanceof Error ? renameError.message : String(renameError), 'error')
+    }
+  }
+
+  const openRenameTarget = (target: GfsActionTarget) => {
+    setRenameTarget(target)
+    setRenameDraft(target.name)
   }
 
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
@@ -570,6 +638,9 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                     setManageOpen(true)
                   }}
                   onCopyLink={() => void handleCopyLink(current.gfsUri)}
+                  onDelete={canDeleteCurrent ? () => setDeleteTarget(current) : undefined}
+                  onRename={canWriteCurrent ? () => openRenameTarget(current) : undefined}
+                  onMove={requestMoveCurrent}
                 />
               ) : null}
             </div>
@@ -629,6 +700,9 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                       setManageOpen(true)
                     }}
                     onCopyLink={() => void handleCopyLink(current.gfsUri)}
+                    onDelete={canDeleteCurrent ? () => setDeleteTarget(current) : undefined}
+                    onRename={canWriteCurrent ? () => openRenameTarget(current) : undefined}
+                    onMove={requestMoveCurrent}
                     onPreview={
                       currentPreviewAvailable ? () => void openFilePreview(current) : undefined
                     }
@@ -737,6 +811,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                         onOpenChange={open =>
                           ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
                         }
+                        onRename={
+                          rowCanRename(resource) ? () => openRenameTarget(resource) : undefined
+                        }
+                        onMove={() => setMoveTarget(resource)}
                         onPreview={
                           isGfsPreviewFile(resource.name)
                             ? () => void openFilePreview(resource)
@@ -888,6 +966,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                             }
                           : undefined
                       }
+                      onMove={requestMoveCurrent}
                       onDownload={
                         currentIsFile
                           ? () => void handleDownload(current.gfsUri, current.name)
@@ -1117,6 +1196,67 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           title={`Delete ${deleteTarget.name}?`}
           tone="danger"
         />
+      ) : null}
+
+      {moveTarget ? (
+        <GfsMoveDialog
+          busy={ctrl.mutating}
+          initialCrumbs={
+            moveTarget.resourceId === current?.resourceId ? crumbs.slice(0, -1) : crumbs
+          }
+          onClose={() => setMoveTarget(null)}
+          onMove={handleMoveTarget}
+          sessionScope={sessionScope}
+          target={moveTarget}
+        />
+      ) : null}
+
+      {renameTarget ? (
+        <div
+          className="da-gfs-manage-modal"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) setRenameTarget(null)
+          }}
+        >
+          <section
+            className="da-gfs-manage-dialog da-gfs-manage-dialog--confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Rename resource"
+          >
+            <div className="da-gfs-manage-dialog__body">
+              <form
+                className="da-gfs-inline-form"
+                onSubmit={event => {
+                  event.preventDefault()
+                  void handleRenameTarget()
+                }}
+              >
+                <label className="da-gfs-inline-form__field">
+                  <span>New name for {renameTarget.name}</span>
+                  <TextInput
+                    autoFocus
+                    aria-label="New name"
+                    value={renameDraft}
+                    onChange={event => setRenameDraft(event.currentTarget.value)}
+                  />
+                </label>
+                <Button loading={ctrl.mutating} size="sm" type="submit">
+                  Save
+                </Button>
+                <Button
+                  onClick={() => setRenameTarget(null)}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+              </form>
+            </div>
+          </section>
+        </div>
       ) : null}
     </section>
   )
