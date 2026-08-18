@@ -350,6 +350,17 @@ function looksLikeCredentialPlaceholder(value: string): boolean {
   ]).has(normalized)
 }
 
+/**
+ * Is a supplied credentials payload something other than a key→value object?
+ * A string passes `typeof x === 'object'`? No — but it DOES survive
+ * `Object.keys()`, which enumerates its character indices, so an unchecked
+ * `credentials: "abc"` reads as three credential names. Both install paths gate
+ * on this so they agree on what a payload is.
+ */
+export function isMalformedCredentialPayload(credentials: unknown): boolean {
+  return typeof credentials !== 'object' || Array.isArray(credentials)
+}
+
 function validateProvidedCredentialPayload(
   schema: RegistryCredentialSchema,
   credentials: RegistryInstallRequest['credentials']
@@ -357,7 +368,7 @@ function validateProvidedCredentialPayload(
   const requiredKeys = schema.keys?.map(k => k.name) ?? []
   if (!schema.required || requiredKeys.length === 0) return { ok: true, secretData: {} }
   if (credentials === undefined || credentials === null) return { ok: true, secretData: {} }
-  if (typeof credentials !== 'object' || Array.isArray(credentials)) {
+  if (isMalformedCredentialPayload(credentials)) {
     return {
       ok: false,
       body: {
@@ -1934,6 +1945,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryVersion
         ).catch(() => null)) as RegistryCredentialSchema | null
         const credRequired = !!credSchema?.required
+        // Reject a non-object payload before Object.keys() enumerates it. Unlike the
+        // McpServer path this cannot lean on validateProvidedCredentialPayload: that
+        // returns early when the schema is not `required`, so a malformed payload
+        // would reach createSecret as stringData. Same error shape as that path.
+        if (body.credentials !== undefined && body.credentials !== null) {
+          if (isMalformedCredentialPayload(body.credentials)) {
+            res.status(400).json({
+              error: 'credential.invalidPayload',
+              message: 'Credentials must be an object keyed by credential name.',
+            })
+            return
+          }
+        }
         const credentials = body.credentials ?? {}
         const secretName = `${crName}-creds`
         let secretCreated = false
