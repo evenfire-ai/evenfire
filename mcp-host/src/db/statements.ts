@@ -366,12 +366,14 @@ export function prepareStatements(db: Database): PreparedStatements {
         session_id, ordinal, role, content, content_parts,
         tool_call_id, tool_calls, tool_name, timestamp,
         token_count, finish_reason, spillover_ref, is_error, turn_number,
-        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        guardrail_activity
       ) VALUES (
         @session_id, @ordinal, @role, @content, @content_parts,
         @tool_call_id, @tool_calls, @tool_name, @timestamp,
         @token_count, @finish_reason, @spillover_ref, @is_error, @turn_number,
-        @input_tokens, @output_tokens, @cache_read_tokens, @cache_write_tokens
+        @input_tokens, @output_tokens, @cache_read_tokens, @cache_write_tokens,
+        @guardrail_activity
       )
     `),
     selectMessagesBySession: db.prepare(`

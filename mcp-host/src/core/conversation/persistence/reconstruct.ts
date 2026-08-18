@@ -16,6 +16,7 @@ import type {
   PendingApproval,
   TraceContextV1,
   Turn,
+  TurnGuardrailActivity,
   TurnToolCall,
 } from '../../types'
 import { ConversationState, isTraceContextV1 } from '../../types'
@@ -179,6 +180,18 @@ export function groupMessagesIntoTurns(messages: MessageRow[]): Turn[] {
     }
     if (m.cache_write_tokens != null) {
       turn.cache_write_tokens = (turn.cache_write_tokens ?? 0) + m.cache_write_tokens
+    }
+    // Rehydrate the per-turn guardrail-input-transparency blob (migration 013):
+    // a single stamped JSON on the boundary message, set directly (not summed).
+    // TOLERANT — a malformed blob is dropped with a log, never thrown during
+    // cold-load (spec §5.2). Same compaction caveat as the token columns above:
+    // compacted turns carry no `guardrail_activity` and go dark on cold-load.
+    if (m.guardrail_activity != null) {
+      try {
+        turn.guardrailActivity = JSON.parse(m.guardrail_activity) as TurnGuardrailActivity
+      } catch (err) {
+        console.warn('[reconstruct] dropping malformed guardrail_activity blob:', err)
+      }
     }
     if (m.role === 'user') {
       turn.user_input = m.content ?? ''

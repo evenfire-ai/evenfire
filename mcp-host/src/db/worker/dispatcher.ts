@@ -218,6 +218,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 output_tokens: null,
                 cache_read_tokens: null,
                 cache_write_tokens: null,
+                guardrail_activity: null,
               })
               updateSessionSummaryAfterInsert(s, {
                 session_id: sess.id,
@@ -340,6 +341,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 output_tokens: null,
                 cache_read_tokens: null,
                 cache_write_tokens: null,
+                guardrail_activity: null,
               })
               updateSessionSummaryAfterInsert(s, {
                 session_id: sess.id,
@@ -449,6 +451,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             output_tokens: op.payload.output_tokens ?? null,
             cache_read_tokens: op.payload.cache_read_tokens ?? null,
             cache_write_tokens: op.payload.cache_write_tokens ?? null,
+            guardrail_activity: op.payload.guardrail_activity ?? null,
           })
           updateSessionSummaryAfterInsert(s, op.payload)
           s.updateSessionCounters.run({
@@ -492,6 +495,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             output_tokens: op.message.output_tokens ?? null,
             cache_read_tokens: op.message.cache_read_tokens ?? null,
             cache_write_tokens: op.message.cache_write_tokens ?? null,
+            guardrail_activity: op.message.guardrail_activity ?? null,
           })
           updateSessionSummaryAfterInsert(s, op.message)
           s.updateSessionCounters.run({
@@ -547,6 +551,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               output_tokens: m.output_tokens ?? null,
               cache_read_tokens: m.cache_read_tokens ?? null,
               cache_write_tokens: m.cache_write_tokens ?? null,
+              guardrail_activity: m.guardrail_activity ?? null,
             })
           }
           s.recomputeSessionMessageSummary.run({ id: op.sessionId })

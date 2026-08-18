@@ -772,6 +772,11 @@ export class SqliteConversationStore implements ConversationStore {
           output_tokens: turn?.output_tokens ?? null,
           cache_read_tokens: turn?.cache_read_tokens ?? null,
           cache_write_tokens: turn?.cache_write_tokens ?? null,
+          // Per-turn guardrail-input-transparency aggregate (spec §5.2), stamped
+          // from the RAM running total. JSON of counts + source ids only (§8).
+          guardrail_activity: conv.guardrailActivity
+            ? JSON.stringify(conv.guardrailActivity)
+            : null,
         },
         sessionId: conv.id,
         state: conv.state,
@@ -824,6 +829,11 @@ export class SqliteConversationStore implements ConversationStore {
           output_tokens: turn?.output_tokens ?? null,
           cache_read_tokens: turn?.cache_read_tokens ?? null,
           cache_write_tokens: turn?.cache_write_tokens ?? null,
+          // Per-turn guardrail-input-transparency aggregate (spec §5.2); a
+          // cancelled turn keeps its partial record, like the token totals.
+          guardrail_activity: conv.guardrailActivity
+            ? JSON.stringify(conv.guardrailActivity)
+            : null,
         },
         sessionId: conv.id,
         state: 'idle',
