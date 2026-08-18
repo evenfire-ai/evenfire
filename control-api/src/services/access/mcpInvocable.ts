@@ -118,7 +118,7 @@ async function loadAllowedNamesByContext(
  * the CR's `transport.url` is blank by design — mcp-host applies the same
  * default. HTTP-transport servers MUST carry a URL on the CR.
  */
-function resolveServerUrl(s: McpServerCR, mcpServersNamespace: string): string | null {
+export function resolveMcpServerUrl(s: McpServerCR, mcpServersNamespace: string): string | null {
   const transportType = s.spec?.transport?.type
   const rawUrl = s.spec?.transport?.url
   if (typeof rawUrl === 'string' && rawUrl.trim()) return rawUrl.trim()
@@ -149,7 +149,7 @@ function filterInvocable(
     if (s.spec?.enabled === false) continue
     const authType = s.spec?.auth?.type
     if (authType && authType !== 'none') continue
-    if (!resolveServerUrl(s, mcpServersNamespace)) continue
+    if (!resolveMcpServerUrl(s, mcpServersNamespace)) continue
     out.add(name)
   }
   return out
@@ -189,7 +189,7 @@ export async function resolveInvocableMcpServersForContexts(
   for (const name of invocable) {
     const server = byName.get(name)
     if (!server) continue
-    const url = resolveServerUrl(server, mcpServersNamespace)
+    const url = resolveMcpServerUrl(server, mcpServersNamespace)
     if (url) out.push({ name, url })
   }
   out.sort((a, b) => a.name.localeCompare(b.name))

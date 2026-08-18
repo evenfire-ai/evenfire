@@ -44,6 +44,18 @@ export type PrincipalAuthoritySnapshot = Readonly<{
   memberships: readonly AuthorizationMembershipRevision[]
 }>
 
+export type LogicalSessionCheckpointAuthority = Readonly<{
+  contract: 'v2'
+  authorityMode: 'logical_session_checkpoint'
+  userId: string
+  sid: string
+  sessionVersion: number
+}>
+
+export type AccessAuthoritySession =
+  | ExternalSessionAuthorityContext
+  | LogicalSessionCheckpointAuthority
+
 export type ResourceAuthorityResult = Readonly<{
   exists: boolean
   candidates: readonly AuthorityCandidate[]
@@ -86,7 +98,7 @@ export function parseAuthorizationMemberships(value: unknown): AuthorizationMemb
 export async function loadPrincipalAuthoritySnapshot(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
-  session: ExternalSessionAuthorityContext
+  session: AccessAuthoritySession
   resource: CanonicalResourceIdentity
 }): Promise<PrincipalAuthoritySnapshot | null> {
   const result = await query(
@@ -114,7 +126,8 @@ export async function loadPrincipalAuthoritySnapshot(input: {
                    AND s.idle_expires_at > NOW()
                    AND s.absolute_expires_at > NOW()
                    AND (
-                     s.current_jti::text = $4
+                     $11::boolean
+                     OR s.current_jti::text = $4
                      OR (
                        s.prior_jti::text = $4
                        AND s.prior_jti_expires_at >= NOW()
@@ -176,13 +189,17 @@ export async function loadPrincipalAuthoritySnapshot(input: {
       input.session.userId,
       input.session.contract,
       input.session.contract === 'v2' ? input.session.sid : null,
-      input.session.contract === 'v2' ? input.session.jti : null,
+      input.session.contract === 'v2' && !('authorityMode' in input.session)
+        ? input.session.jti
+        : null,
       input.session.contract === 'v2' ? input.session.sessionVersion : null,
       input.session.contract === 'v1' ? input.session.tokenHash : null,
       input.session.contract === 'v1' ? input.session.issuedAt : null,
       input.resource.environmentId,
       input.resource.type,
       input.resource.logicalId,
+      'authorityMode' in input.session &&
+        input.session.authorityMode === 'logical_session_checkpoint',
     ]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined

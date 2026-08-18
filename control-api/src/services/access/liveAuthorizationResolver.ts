@@ -2,6 +2,7 @@ import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 import {
+  type AccessAuthoritySession,
   type AuthorityCandidate,
   filterCandidatesForOperationTarget,
   loadPrincipalAuthoritySnapshot,
@@ -50,7 +51,7 @@ import {
 } from './resourceIdentity.js'
 
 export type LiveAuthorizationInput = Readonly<{
-  session: ExternalSessionAuthorityContext
+  session: AccessAuthoritySession
   requiredCapability: unknown
   resource: CanonicalResourceIdentity
   operationTarget?: unknown
