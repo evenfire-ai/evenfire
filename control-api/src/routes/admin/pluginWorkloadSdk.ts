@@ -132,9 +132,15 @@ function parseModelArray(value: unknown, field: string, res: Response): string[]
   return values
 }
 
-const QUOTA_LIMIT_KEYS: ReadonlyArray<keyof PluginWorkloadSdkQuotaLimits> = [
+// Issue #348: per-run quota keys are deprecated. They remain accepted on the
+// wire for compatibility and are validated with the same shape rules, but they
+// are stripped before persistence — only per-minute/platform limits are stored.
+const DEPRECATED_QUOTA_LIMIT_KEYS: ReadonlyArray<keyof PluginWorkloadSdkQuotaLimits> = [
   'maxRequestsPerRun',
   'maxNotificationsPerRun',
+]
+
+const ACTIVE_QUOTA_LIMIT_KEYS: ReadonlyArray<keyof PluginWorkloadSdkQuotaLimits> = [
   'maxInvocationsPerMinute',
   'maxNotificationsPerMinute',
   'maxOutputTokens',
@@ -147,14 +153,18 @@ function parseQuotaLimits(value: unknown, res: Response): PluginWorkloadSdkQuota
     return null
   }
   const limits: PluginWorkloadSdkQuotaLimits = {}
-  for (const key of QUOTA_LIMIT_KEYS) {
+  for (const key of [...DEPRECATED_QUOTA_LIMIT_KEYS, ...ACTIVE_QUOTA_LIMIT_KEYS]) {
     const raw = value[key]
     if (raw === undefined) continue
     if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
       res.status(400).json({ error: `quotaLimits.${key} must be a positive integer` })
       return null
     }
-    limits[key] = raw
+    // Deprecated keys are validated (malformed input still 400s) but never
+    // assigned, so they are not persisted (issue #348).
+    if ((ACTIVE_QUOTA_LIMIT_KEYS as readonly string[]).includes(key)) {
+      limits[key] = raw
+    }
   }
   return limits
 }

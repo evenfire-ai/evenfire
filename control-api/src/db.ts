@@ -36,6 +36,20 @@ export type DbClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
 }
 
+// issue #375 M3 (jozer review): brand for clients that live INSIDE an open
+// transaction. `DbClient` is structural (`{ query }`), so `Pool` satisfies it
+// and a refactor from the in-transaction `db` to the module-level `pool` still
+// typechecks while silently breaking COMMIT/ROLLBACK coupling (e.g. a
+// transactional `pg_notify` becoming an autocommitted one). The unique-symbol
+// brand cannot be satisfied structurally, so any API that REQUIRES the
+// transaction session (like the grant-update NOTIFY) declares
+// `DbTransactionClient` and the pool no longer compiles there. It remains
+// assignable to `DbClient`, so passing it onward to ordinary helpers is free.
+declare const dbTransactionClientBrand: unique symbol
+export type DbTransactionClient = DbClient & {
+  readonly [dbTransactionClientBrand]: 'transaction'
+}
+
 type DbSessionClient = DbClient & {
   release: () => void
 }
@@ -6090,7 +6104,9 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
-export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Promise<T> {
+export async function withTransaction<T>(
+  work: (db: DbTransactionClient) => Promise<T>
+): Promise<T> {
   const client = (await pool.connect()) as PoolClient
   let transactionStarted = false
   let commitSent = false
@@ -6098,7 +6114,10 @@ export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Pr
   try {
     await client.query('BEGIN')
     transactionStarted = true
-    const result = await work(client)
+    // The brand is nominal-only (a declared unique symbol); the checked-out
+    // client IS the transaction session, so this cast is the single blessed
+    // point where the brand is minted (issue #375 M3).
+    const result = await work(client as unknown as DbTransactionClient)
     commitSent = true
     await client.query('COMMIT')
     return result

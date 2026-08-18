@@ -173,6 +173,10 @@ E2E_WAIT_STATUS_VALIDATED="${E2E_WAIT_STATUS_VALIDATED:-120}"
 E2E_WAIT_CALLER_MARKER="${E2E_WAIT_CALLER_MARKER:-180}"
 E2E_WAIT_CALLER_DONE="${E2E_WAIT_CALLER_DONE:-180}"
 E2E_WAIT_NOTIFICATION_ROW="${E2E_WAIT_NOTIFICATION_ROW:-60}"
+# issue #375 (P3): event-driven grant→WRC nudge target latency. A grant change
+# must re-reconcile the recipe via Postgres LISTEN/NOTIFY in ≤10s WITHOUT a WRC
+# restart (the ≤30s watchdog is the backstop, not the mechanism under test).
+E2E_WAIT_NUDGE_VALIDATED="${E2E_WAIT_NUDGE_VALIDATED:-10}"
 
 # Fail closed before creating any fixture if a caller or inherited shell
 # environment asks this gate to wait for an unbounded or human-scale interval.
@@ -197,6 +201,7 @@ validate_bounded_seconds E2E_WAIT_STATUS_VALIDATED "$E2E_WAIT_STATUS_VALIDATED" 
 validate_bounded_seconds E2E_WAIT_CALLER_MARKER "$E2E_WAIT_CALLER_MARKER" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
 validate_bounded_seconds E2E_WAIT_CALLER_DONE "$E2E_WAIT_CALLER_DONE" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
 validate_bounded_seconds E2E_WAIT_NOTIFICATION_ROW "$E2E_WAIT_NOTIFICATION_ROW" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_NUDGE_VALIDATED "$E2E_WAIT_NUDGE_VALIDATED" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
 validate_bounded_seconds POLL_INTERVAL "$POLL_INTERVAL" "$E2E_HARD_MAX_POLL_INTERVAL_SECONDS"
 
 require_write_confirmation() {
@@ -254,9 +259,14 @@ if [ -z "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" ]; then
     || { printf 'Unsupported promptBridge fallback provider %q; set E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT explicitly\n' "$E2E_PROMPT_FALLBACK_PROVIDER" >&2; exit 2; }
 fi
 if [ "$E2E_WORKFLOW_MODEL_PROVIDER" = "$E2E_PROMPT_FALLBACK_PROVIDER" ]; then
-  printf 'promptBridge E2E requires two distinct providers; got %q for both primary and fallback\n' \
-    "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
-  exit 2
+  if [ "${E2E_PROMPT_ALLOW_SAME_PROVIDER:-0}" = "1" ]; then
+    printf 'promptBridge E2E: primary and fallback share provider %q; proceeding because E2E_PROMPT_ALLOW_SAME_PROVIDER=1 (quota-limited local override — the ordered-fallback policy is still two ordered targets)\n' \
+      "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
+  else
+    printf 'promptBridge E2E requires two distinct providers; got %q for both primary and fallback\n' \
+      "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
+    exit 2
+  fi
 fi
 
 gate_assert_deadline() {
@@ -452,6 +462,14 @@ cleanup_sdk_recipe() {
 # shellcheck disable=SC2329 # Registered below through the EXIT trap.
 cleanup_on_exit() {
   local status=$?
+  # A non-zero abort that no assertion recorded (a prerequisite helper that died
+  # in a command-substitution subshell, a bare `exit` mid-phase, or a `set -e`
+  # abort) would otherwise let print_results claim "All tests passed!" over a run
+  # that skipped later phases. Record it as a real, countable failure first so
+  # the summary — and the gate verdict — stay honest.
+  if [ "$status" -ne 0 ] && [ "${e2e_fail:-0}" -eq 0 ]; then
+    fail "run aborted before completion (exit ${status}) — later phases were skipped; see the log above for the failing step"
+  fi
   if [ "${e2e_total:-0}" -gt 0 ] && [ "${E2E_SUPPRESS_RESULTS:-0}" != "1" ]; then
     print_results || true
   fi
@@ -721,8 +739,14 @@ ensure_external_rest_api_reachable() {
   if curl -sf -m 5 "$url" >/dev/null 2>&1; then
     return 0
   fi
-  fail "external-rest-api not reachable at ${E2E_EXTERNAL_REST_API_URL} (run branch-profile-pf for ${KUBECONTEXT:-<profile>})"
-  exit 1
+  # This helper runs inside obtain_desktop_session_token's command substitution,
+  # so `exit 1` would only terminate that subshell (aborting the parent via
+  # `set -e` with NO recorded failure) and a `fail` here would bump a counter the
+  # parent shell never sees. Propagate a non-zero RETURN instead and let the
+  # parent-shell caller record the countable, visible failure.
+  printf 'external-rest-api not reachable at %s (run branch-profile-pf for %s)\n' \
+    "${E2E_EXTERNAL_REST_API_URL}" "${KUBECONTEXT:-<profile>}" >&2
+  return 1
 }
 
 obtain_desktop_session_token() {
@@ -730,7 +754,7 @@ obtain_desktop_session_token() {
   if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
-  ensure_external_rest_api_reachable
+  ensure_external_rest_api_reachable || return 1
   response="$(
     printf '%s\0%s' "$email" "$password" \
       | jq -Rs 'split("\u0000") | {email: .[0], password: .[1]}' \
@@ -755,9 +779,24 @@ create_grant() {
   if [ "$family" = "promptBridge" ]; then
     payload="$(prompt_grant_payload "$WORKLOAD_ID")"
   else
-    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerRun":10}}'
+    # issue #348: active per-minute override (maxNotificationsPerMinute) drives the
+    # rate-limit gate; the deprecated maxNotificationsPerRun stays on the wire to
+    # exercise the admin validate-but-strip path (it is accepted then stripped).
+    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerMinute":10,"maxNotificationsPerRun":10}}'
   fi
   admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$payload"
+  # admin_curl only reflects transport success; the admin API returns 200 on
+  # accept and 4xx on a rejected policy (e.g. a duplicate provider+model target).
+  # Without this check a rejected grant looks "created" and the real failure only
+  # surfaces far downstream. Fail loud with a grant-specific, HTTP-bearing reason.
+  case "${ADMIN_CURL_HTTP_STATUS:-}" in
+    2[0-9][0-9]) return 0 ;;
+    *)
+      printf 'grant creation (%s) rejected by admin API: HTTP %s\n' \
+        "$family" "${ADMIN_CURL_HTTP_STATUS:-unknown}" >&2
+      return 1
+      ;;
+  esac
 }
 
 # The admin API validates the policy; jq is used here solely to serialize E2E
@@ -778,7 +817,7 @@ prompt_grant_payload() {
     --arg fallbackTargetRef "$E2E_PROMPT_FALLBACK_TARGET_REF" \
     --arg fallbackCredentialSlot "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" \
     --arg caller "$caller" \
-    '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model,$fallbackModel],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot},{targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:4}}'
+    '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model,$fallbackModel],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot},{targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller],quotaLimits:{maxInvocationsPerMinute:4,maxRequestsPerRun:4}}'
 }
 
 # ─── prerequisites ───────────────────────────────────────────────────────
@@ -1036,6 +1075,16 @@ if create_grant promptBridge >/dev/null; then
   ok "created promptBridge grant"
 else
   fail "promptBridge grant creation failed"
+  exit 1
+fi
+# issue #348: prove the admin API accepted the deprecated per-run key on the wire
+# (grant creation returned 200 above) but STRIPPED it, persisting only the active
+# per-minute override. This is the deprecate-and-ignore contract exercised end-to-end.
+persisted_pb_quota="$(psql_query "SELECT quota_limits::text FROM plugin_workload_sdk_grants WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}' AND capability_family='promptBridge';")"
+if printf '%s' "$persisted_pb_quota" | jq -e '(.maxInvocationsPerMinute == 4) and (has("maxRequestsPerRun") | not)' >/dev/null 2>&1; then
+  ok "deprecate-and-strip verified: maxInvocationsPerMinute=4 persisted, deprecated maxRequestsPerRun stripped"
+else
+  fail "persisted promptBridge quota_limits violate deprecate-and-strip (got: ${persisted_pb_quota})"
   exit 1
 fi
 if create_grant clientNotifications >/dev/null; then
@@ -1362,11 +1411,85 @@ else
   exit 1
 fi
 
-# Quota enforcement: N+1 call is rejected after quota exhausted.
+# Per-minute rate limit (issue #348): the 5th call is rejected once the grant's
+# maxInvocationsPerMinute=4 window is exhausted. The wire error code stays
+# `quota_exceeded` (HTTP 429), so the fixture marker names are unchanged.
 if printf "%s" "$logs" | grep -q E2E_SDK_QUOTA_EXCEEDED_OK; then
-  ok "quota enforcement correctly rejected call after 4/4 requests consumed"
+  ok "per-minute rate limit rejected the 5th call after 4/4 invocations in the window"
 else
-  fail "quota enforcement did not reject the excess call (fixture marker missing; caller logs redacted)"
+  fail "per-minute rate limit did not reject the 5th call (fixture marker missing; caller logs redacted). If the caller logged E2E_SDK_QUOTA_EXCEEDED_FAIL=*:possible_window_ageout or *:window_overcount, this is the known per-minute 60s-window timing race (issue #348 fixture caveat), not a real enforcement regression — retry on a less loaded cluster or apply the coordinated gate+fixture reset fix."
+  exit 1
+fi
+
+# ─── issue #375 (P3): event-driven grant→WRC nudge ───────────────────────
+# The recipe is validated by now. Prove the grant→WRC nudge accelerates
+# convergence: a grant change must re-reconcile the recipe (bump the published
+# policyRevision, state stays validated) within ≤10s via Postgres LISTEN/NOTIFY,
+# WITHOUT restarting the WRC (the ≤30s watchdog is the backstop, not the path
+# under test). This is an ADDITIVE phase; it does not touch #351's phases.
+header "Plugin Workload SDK grant→WRC event-driven nudge (issue #375 P3)"
+
+# Capture the WRC pod set (by name) so we can assert NO restart drove convergence.
+wrc_pods_before="$(kctl get pods -n "$CONTROL_NS" -o name 2>/dev/null \
+  | grep -E '^pod/workflow-recipes-' | sort | tr '\n' ',' || true)"
+if [ -z "$wrc_pods_before" ]; then
+  fail "could not enumerate workflow-recipes pods before the nudge (selector empty)"
+  exit 1
+fi
+
+nudge_rev_before="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+  -o jsonpath='{.status.pluginWorkloadSdk.policyRevision}' 2>/dev/null || true)"
+nudge_rev_before="${nudge_rev_before:-0}"
+
+# Re-upsert the promptBridge grant. The admin upsert increments policy_revision
+# and (issue #375 P3) emits the transactional grant-update NOTIFY on COMMIT.
+# issue #375 (R5): fail LOUD on a grant re-upsert failure. `|| true` here only
+# guards `set -e` so we can read ADMIN_CURL_HTTP_STATUS; the explicit assert
+# below is the real gate. Without it, an admin-API failure (expired token,
+# control-api 5xx) would fall through to the poll and be misattributed to the
+# nudge under test ("did not accelerate convergence"), hiding the real cause.
+create_grant promptBridge >/dev/null 2>&1 || true
+if [ "$ADMIN_CURL_HTTP_STATUS" != "200" ]; then
+  fail "grant re-upsert failed (admin API HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}) — cannot test the event-driven nudge"
+  exit 1
+fi
+
+nudge_found=0
+nudge_state=""
+nudge_rev_after=""
+# issue #375 (R1-L4): measure the printed elapsed from the SAME origin as the
+# deadline (post-upsert), so the cosmetic "~Ns (≤Xs)" line cannot exceed the cap.
+nudge_started_at="$SECONDS"
+nudge_deadline=$((SECONDS + E2E_WAIT_NUDGE_VALIDATED))
+while [ "$SECONDS" -lt "$nudge_deadline" ]; do
+  gate_assert_deadline "waiting for event-driven policyRevision bump (issue #375 P3)"
+  nudge_state="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+    -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)"
+  nudge_rev_after="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+    -o jsonpath='{.status.pluginWorkloadSdk.policyRevision}' 2>/dev/null || true)"
+  if [ "$nudge_state" = "validated" ] && [ -n "$nudge_rev_after" ] &&
+     [ "$nudge_rev_after" -gt "$nudge_rev_before" ] 2>/dev/null; then
+    nudge_found=1
+    break
+  fi
+  sleep "$POLL_INTERVAL"
+done
+
+nudge_elapsed=$((SECONDS - nudge_started_at))
+if [ "$nudge_found" -eq 1 ]; then
+  ok "grant change re-published (policyRevision ${nudge_rev_before}→${nudge_rev_after}, state=validated) in ~${nudge_elapsed}s via the event-driven nudge (≤${E2E_WAIT_NUDGE_VALIDATED}s)"
+else
+  fail "grant change was NOT re-published within ${E2E_WAIT_NUDGE_VALIDATED}s (state='${nudge_state:-<empty>}', policyRevision '${nudge_rev_before}'→'${nudge_rev_after:-<empty>}'); the LISTEN/NOTIFY nudge did not accelerate convergence"
+  exit 1
+fi
+
+# The acceleration must come from the NOTIFY-driven reconcile, NOT a WRC restart.
+wrc_pods_after="$(kctl get pods -n "$CONTROL_NS" -o name 2>/dev/null \
+  | grep -E '^pod/workflow-recipes-' | sort | tr '\n' ',' || true)"
+if [ "$wrc_pods_after" = "$wrc_pods_before" ]; then
+  ok "WRC was NOT restarted during convergence (pod set unchanged) — convergence was event-driven"
+else
+  fail "WRC pod set changed during the nudge phase (before='${wrc_pods_before}' after='${wrc_pods_after}'); convergence must not depend on a restart"
   exit 1
 fi
 
