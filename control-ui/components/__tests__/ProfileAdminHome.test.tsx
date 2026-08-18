@@ -170,6 +170,7 @@ describe('ProfileAdminHome — members invitations', () => {
       'data-relationship-role',
       'admin'
     )
+    expect(createAdminButton.querySelector('svg')).toHaveAttribute('data-icon', 'shield')
     expect(createAdminButton.querySelector('svg')).toHaveAttribute('data-create-badge', 'true')
 
     fireEvent.click(createAdminButton)
@@ -202,6 +203,7 @@ describe('ProfileAdminHome — members invitations', () => {
     const viewAdminButton = await screen.findByRole('button', { name: 'View admin' })
     expect(viewAdminButton).toHaveAttribute('title', 'View admin')
     expect(viewAdminButton.querySelector('svg')).toHaveAttribute('data-relationship-role', 'admin')
+    expect(viewAdminButton.querySelector('svg')).toHaveAttribute('data-icon', 'shield')
     expect(viewAdminButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
 
     fireEvent.click(viewAdminButton)

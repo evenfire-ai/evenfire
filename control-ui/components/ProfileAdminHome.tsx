@@ -24,7 +24,7 @@ import { formatTeamRole } from '../lib/teamRoles'
 import { ControlAdminsPanel } from './ControlAdminsPanel'
 import type { ProfileAdminHomeProps, ProfileAdminTab } from './ProfileAdminHome.types'
 import { SectionSearchInput } from './SectionSearchInput'
-import { IconSettings, IconUsers } from './Sidebar/icons'
+import { IconShield, IconUsers } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TabBar } from './TabBar'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -930,7 +930,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                     aria-label={user.controlAdminId ? 'View admin' : 'Create admin'}
                                     title={user.controlAdminId ? 'View admin' : 'Create admin'}
                                   >
-                                    <IconSettings
+                                    <IconShield
                                       createBadge={!user.controlAdminId}
                                       relationshipRole="admin"
                                     />
