@@ -1,8 +1,11 @@
 // Property coverage for zach88 R1-M2 on PR #382: the Host fleet-scheduler
 // precedence functions gained an `inputRevision` dimension, and these are exactly
 // the (state, input) precedence functions whose algebraic invariants must hold as
-// the request shape evolves. No fast-check dependency — the behavioral domain is
-// small (24 request shapes), so total enumeration is exhaustive AND deterministic.
+// the request shape evolves. Total enumeration over the finite 24-shape domain is a
+// deliberate choice over fast-check (which the T2 note names): the domain is small
+// and every branch of both functions is scale-invariant (max / equality), so full
+// enumeration is a strict superset of any random sample — exhaustive AND
+// deterministic, with no new dependency added to this package.
 import { describe, expect, it } from 'vitest'
 import {
   type HostFleetReconcileMode,
@@ -59,6 +62,35 @@ describe('hostFleetScheduler precedence functions — exhaustive property covera
     for (const a of DOMAIN) {
       expect(hostFleetRequestCovers(a, a), `covers(${a.reason}, self)`).toBe(true)
     }
+  })
+
+  it('hostFleetRequestCovers matches the spec formula on every ordered pair — mode, revision, and generation exercised in both directions', () => {
+    // Reflexivity alone never exercises mode-rejection (lifecycle does not cover
+    // full), a differing revision, or a differing generation. Characterize covers
+    // directly instead. Note: "merge(a,b) covers a and b" is deliberately NOT
+    // asserted — merge scales inputRevision to max(a,b), so it stops covering the
+    // lower-revision input by coalescing design.
+    let covered = 0
+    let rejected = 0
+    for (const active of DOMAIN) {
+      for (const requested of DOMAIN) {
+        const expected =
+          (active.mode === 'full' || requested.mode === 'lifecycle') &&
+          active.inputRevision === requested.inputRevision &&
+          (requested.ccLifecycleGeneration === undefined ||
+            active.ccLifecycleGeneration === requested.ccLifecycleGeneration)
+        expect(
+          hostFleetRequestCovers(active, requested),
+          `covers(${active.reason}, ${requested.reason})`
+        ).toBe(expected)
+        if (expected) covered += 1
+        else rejected += 1
+      }
+    }
+    // Non-vacuity: the formula must distinguish both outcomes on this domain, and
+    // the exact counts guard against silent shrinkage of the enumerated domain.
+    expect(covered).toBe(60)
+    expect(rejected).toBe(516)
   })
 
   it('mergeHostFleetRequests is idempotent on the safety core', () => {
