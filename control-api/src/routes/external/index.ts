@@ -9,6 +9,7 @@ import { createExternalInvitationsRouter } from './invitations.js'
 import { createExternalMembersRouter } from './members.js'
 import { createExternalNotificationsRouter } from './notifications.routes.js'
 import { createExternalOauthGrantsRouter } from './oauthGrants.js'
+import { createExternalRpcDelegationsRouter } from './rpcDelegations.js'
 import { createExternalSharedFilesystemsRouter } from './sharedFilesystems.js'
 import { createExternalTeamsRouter } from './teams.js'
 import { createExternalUsersRouter } from './users.js'
@@ -19,6 +20,7 @@ export function createExternalRouter(gateway: K8sGateway): Router {
   const router = Router()
   router.use(createExternalAccessRouter(gateway))
   router.use(createExternalAuthRouter(gateway))
+  router.use(createExternalRpcDelegationsRouter(gateway))
   router.use(createExternalUsersRouter(gateway))
   router.use(createExternalTeamsRouter(gateway))
   router.use(createExternalInvitationsRouter())

@@ -23,6 +23,7 @@ import { createNotificationsRouter } from './routes/notifications.js'
 import { createOauthCallbackRouter } from './routes/oauthCallback.js'
 import { createOauthGrantsRouter } from './routes/oauthGrants.js'
 import { createRpcRouter } from './routes/rpc.js'
+import { createRpcDelegationsRouter } from './routes/rpcDelegations.js'
 import { createTeamRouter } from './routes/team.js'
 import { createUserApprovalDecisionsRouter } from './routes/userApprovalDecisions.js'
 import { createWorkflowApprovalMediumsRouter } from './routes/workflowApprovalMediums.js'
@@ -80,6 +81,7 @@ export function createApp() {
   api.use(createInvitationsRouter())
   api.use(createDirectoryRouter())
   api.use(createRpcRouter())
+  api.use(createRpcDelegationsRouter())
   api.use(createNotificationsRouter())
   api.use(createUserApprovalDecisionsRouter())
   api.use(createOauthGrantsRouter())
