@@ -81,6 +81,9 @@ images:
 patchesStrategicMerge:
   - patches/resource-limits.yaml
   - patches/dynamic-images.yaml
+  # Minikube is the owned T2/dev activation environment for GFS Upload v2.
+  # Public base and production-safe defaults remain disabled.
+  - patches/gfs-upload-v2.yaml
   - patches/image-pull-policy.yaml
   - patches/service-tokens.yaml
   - patches/nginx-workflow-approval-gateway.yaml

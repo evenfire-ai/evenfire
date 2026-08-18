@@ -6,6 +6,7 @@ import type {
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigState,
+  LoginBackendHint,
   SessionMe,
 } from '../../../../src/types'
 import type { Tone } from '../../uiTypes'
@@ -59,6 +60,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
   const [desktopReleaseStatus, setDesktopReleaseStatus] = useState<DesktopReleaseStatus | null>(
     null
   )
+  const [backendSwitchHint, setBackendSwitchHint] = useState<LoginBackendHint | null>(null)
   const [desktopEnvironmentSetupComplete, setDesktopEnvironmentSetupComplete] = useState(false)
   const [pendingDesktopEnvironmentSetup, setPendingDesktopEnvironmentSetup] =
     useState<DesktopRuntimeConfig | null>(null)
@@ -169,17 +171,20 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     try {
       setBusy(true)
       setAuthTransitioning(true)
+      setBackendSwitchHint(null)
       const normalizedEmail = email.trim().toLowerCase()
       if (!normalizedEmail || !password) throw new Error('email and password are required')
       await window.clerum.auth.passwordLogin(normalizedEmail, password)
       setStatus('Signed in.', 'success')
       await onSessionNeedsLoad({ preserveNav: true })
     } catch (error) {
+      const invitationExpired = isInvitationExpiredError(error)
+      const missingInvitationConfig = isMissingInvitationConfigError(error)
       const unauthorized = isUnauthorizedError(error)
       setStatus(
-        isInvitationExpiredError(error)
+        invitationExpired
           ? 'Invitation expired.'
-          : isMissingInvitationConfigError(error)
+          : missingInvitationConfig
             ? 'You must be invited to be part of a team.'
             : unauthorized
               ? 'Email or password is incorrect.'
@@ -188,10 +193,36 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         undefined,
         unauthorized ? { toastDurationMs: DEFAULT_TOAST_DURATION_MS } : undefined
       )
+      // A generic (non-401, non-invitation) failure is the signature of a login
+      // aimed at a backend that isn't answering — most often the app is on a
+      // saved profile while a local minikube cluster is what's actually up.
+      // Only then do we probe for a reachable localhost and, if found, offer a
+      // one-click switch. A clean 401 means the backend answered, so it's a
+      // password problem, not a wrong-server problem — no switch offered.
+      if (!invitationExpired && !missingInvitationConfig && !unauthorized) {
+        try {
+          const hint =
+            typeof window.clerum.auth.diagnoseLoginBackend === 'function'
+              ? await window.clerum.auth.diagnoseLoginBackend()
+              : null
+          setBackendSwitchHint(hint)
+        } catch {
+          setBackendSwitchHint(null)
+        }
+      }
     } finally {
       setAuthTransitioning(false)
       setBusy(false)
     }
+  }
+
+  const handleSwitchLoginBackend = async () => {
+    const hint = backendSwitchHint
+    if (!hint) return
+    setBackendSwitchHint(null)
+    const state = await handleSelectRuntimeConfig(hint.targetOptionId)
+    if (!state) return
+    await handlePasswordLogin()
   }
 
   const handleStartDesktopSetup = async () => {
@@ -299,6 +330,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
   ): Promise<DesktopRuntimeConfigState | null> => {
     try {
       setBusy(true)
+      setBackendSwitchHint(null)
       const state = await window.clerum.auth.selectRuntimeConfig(optionId)
       // Switching environment (pre-login) must not carry another env's cached
       // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
@@ -406,6 +438,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     desktopReleaseStatus,
     desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup,
+    backendSwitchHint,
     runtimeConfigMissing,
     showRuntimeConfigSelector,
     hasDependencyOutage,
@@ -426,8 +459,10 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     setDesktopReleaseStatus,
     setDesktopEnvironmentSetupComplete,
     setPendingDesktopEnvironmentSetup,
+    setBackendSwitchHint,
     refreshRuntimeConfigState,
     handlePasswordLogin,
+    handleSwitchLoginBackend,
     handleStartDesktopSetup,
     handleCompleteDesktopSetup,
     handleSaveRuntimeConfig,

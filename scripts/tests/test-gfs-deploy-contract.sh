@@ -2,6 +2,19 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+external_rest_manifest="$(cat deploy/base/profiles/external-rest-api.yaml)"
+profiles_network_policy="$(cat deploy/base/profiles/networkpolicies.yaml)"
+ingress_network_policy="$(cat deploy/base/ingress/networkpolicies.yaml)"
+[[ "$external_rest_manifest" == *'type: ClusterIP'* ]] \
+  || fail 'external-rest-api must remain an internal ClusterIP, not a directly exposed service'
+[[ "$profiles_network_policy" == *'name: allow-ingress-profiles'* && \
+   "$profiles_network_policy" == *'app: cloudflared'* && \
+   "$profiles_network_policy" == *'values: [external-rest-api, profile-ui]'* && \
+   "$profiles_network_policy" == *'name: external-rest-api-from-profile-ui'* ]] \
+  || fail 'profiles ingress policy does not document the trusted Cloudflare/profile-ui paths'
+[[ "$ingress_network_policy" == *'app: external-rest-api'* && \
+   "$ingress_network_policy" == *'kubernetes.io/metadata.name: profiles'* ]] \
+  || fail 'ingress namespace policy does not restrict cloudflared egress to profiles services'
 # Scope: OSS-resident GFS deploy invariants only. The GCP deploy invariants
 # (deploy-dev/deploy-prod workflow ordering, gcp-* Makefile targets, gcp-prod
 # overlay render, and the HCC rollback contract) live in evenfire-infra after
@@ -19,7 +32,7 @@ role_migration="$(sed -n "/version: '0074_gfs_runtime_role_exact_contract'/,/^  
 [[ "$role_migration" != *'NOLOGIN'* && "$role_migration" != *'LOGIN'* && "$role_migration" != *'PASSWORD'* && "$role_migration" != *'DROP ROLE'* ]] || fail 'role-contract migration changes credentials or replaces a role'
 [[ "$role_migration" == *"ARRAY['gfs_controller', 'gfs_controller_reader']"* && "$role_migration" == *"EXECUTE format('REVOKE %I FROM %I'"* ]] || fail 'role-contract migration leaves inherited memberships'
 provision_contract="$(sed -n '/verify_role_contract()/,/^}/p' deploy/scripts/provision-gfs-db.sh)"
-[[ "$provision_contract" == *"has_column_privilege(:'role_name', 'control_admin_users', 'id', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'team_members', 'status', 'SELECT')"* && "$provision_contract" == *"column_name NOT IN ('id', 'status')"* && "$provision_contract" == *"column_name NOT IN ('team_id', 'user_id', 'status')"* ]] || fail 'provisioner does not verify the exact subject-column contract'
+[[ "$provision_contract" == *"has_column_privilege(:'role_name', 'control_admin_users', 'id', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'control_admin_users', 'session_version', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'users', 'lifecycle_version', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'gfs_desktop_operator_links', 'lineage_id', 'SELECT')"* && "$provision_contract" == *"column_name NOT IN ('id', 'status', 'session_version')"* && "$provision_contract" == *"column_name NOT IN ('team_id', 'user_id', 'status')"* ]] || fail 'provisioner does not verify the exact subject-column contract'
 writer_case="$(sed -n '/rotate-writer)/,/;;/p' deploy/scripts/provision-gfs-db.sh)"
 [[ "$writer_case" == *'reconcile_credential gfs_controller writer "$WRITER_SECRET" gfsc-writer true'* && "$writer_case" != *'gfsc-reader'* ]] || fail 'writer rollout scope'
 runtime_script="$(sed '/^[[:space:]]*#/d' deploy/scripts/provision-gfs-runtime.sh)"
@@ -56,17 +69,24 @@ grep -q 'claim.get("namespace") == "control-plane"' deploy/scripts/reset-control
 grep -q 'claim.get("uid") == expected_uid' deploy/scripts/reset-control-db-storage.sh || fail 'released PV cleanup is not claim-UID-scoped'
 ! grep -q 'ensure_pvc "control-postgres-data"' scripts/minikube/ensure-pvcs.sh || fail 'generic PVC reconciler can still delete the control database'
 reset_convergence="$(cat deploy/scripts/converge-control-db-after-reset.sh)"
-for required in run-control-api-db-migration.sh provision-control-api-runtime-roles.sh 'rollout status deployment/control-api' 'GFS_RESTORE_ACTIVE_NOLOGIN=true' reconcile-gfs-deploy-credentials.sh verify-gfs.sh; do
+for required in run-control-api-db-migration.sh provision-control-api-runtime-roles.sh 'scale deployment/control-api --replicas=0' "CONTROL_API_POD_SELECTOR='app=control-api,!clerum.io/component'" 'wait --for=delete pod' 'rollout status deployment/control-api' 'sync-auth-key.sh' '--require-gfs' 'GFS_RESTORE_ACTIVE_NOLOGIN=true' reconcile-gfs-deploy-credentials.sh verify-gfs.sh; do
   [[ "$reset_convergence" == *"$required"* ]] || fail "reset convergence omits $required"
 done
 migration="$(grep -n 'run-control-api-db-migration.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 roles="$(grep -n 'provision-control-api-runtime-roles.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
-scale="$(grep -n 'scale deployment/control-api' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
-ready="$(grep -n 'rollout status deployment/control-api' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
+control_zero="$(grep -n 'scale deployment/control-api --replicas=0' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+control_wait="$(grep -n -- '-l "$CONTROL_API_POD_SELECTOR" --timeout=180s' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+control_restore="$(grep -n 'scale deployment/control-api --replicas="\$CONTROL_API_REPLICAS"' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+ready="$(grep -n 'rollout status deployment/control-api' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
+auth_sync="$(grep -n 'sync-auth-key.sh' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 restore="$(grep -n 'GFS_RESTORE_ACTIVE_NOLOGIN=true' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
 verify="$(grep -n 'verify-gfs.sh' deploy/scripts/converge-control-db-after-reset.sh | tail -1 | cut -d: -f1)"
 success="$(grep -n 'migrations, runtime roles, GFS restore, and verification complete' deploy/scripts/converge-control-db-after-reset.sh | cut -d: -f1)"
-[[ "$migration" -lt "$roles" && "$roles" -lt "$scale" && "$scale" -lt "$ready" && "$ready" -lt "$restore" && "$restore" -lt "$verify" && "$verify" -lt "$success" ]] \
+[[ "$control_zero" -lt "$control_wait" && "$control_wait" -lt "$migration" && \
+   "$migration" -lt "$roles" && "$roles" -lt "$control_restore" && \
+   "$control_restore" -lt "$ready" && "$ready" -lt "$auth_sync" && \
+   "$auth_sync" -lt "$restore" && \
+   "$restore" -lt "$verify" && "$verify" -lt "$success" ]] \
   || fail 'reset convergence ordering is incomplete'
 ! grep -q '|| true' deploy/scripts/converge-control-db-after-reset.sh || fail 'reset convergence suppresses a critical failure'
 for upgrade_path in Makefile scripts/minikube/pre-gate-sync.sh scripts/minikube/full-setup.sh; do
@@ -92,13 +112,30 @@ assert_minikube_upgrade_classifier() {
      "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
     || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
 }
+assert_pre_gate_defers_gfs_reconcile() {
+  local block="$({ awk -v start="$1" -v end="$2" '
+    index($0, start) { active=1 }
+    active { print }
+    active && index($0, end) { exit }
+  ' "$3"; })"
+  local dsn defer reconcile migration serving
+  dsn="$(grep -n 'writer_dsn=.*get secret gfs-controller-db' <<<"$block" | head -1 | cut -d: -f1)"
+  defer="$(grep -ni 'deferring GFS credential reconciliation until after schema migration' <<<"$block" | head -1 | cut -d: -f1)"
+  reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' <<<"$block" | head -1 | cut -d: -f1 || true)"
+  migration="$(grep -n 'run-control-api-db-migration.sh' "$3" | head -1 | cut -d: -f1)"
+  serving="$(grep -n 'provision_gfs_serving' "$3" | tail -1 | cut -d: -f1)"
+  [[ -n "$dsn" && -n "$defer" && -z "$reconcile" ]] \
+    || fail "$3 must defer GFS credential reconciliation before migration"
+  [[ -n "$migration" && -n "$serving" && "$migration" -lt "$serving" ]] \
+    || fail "$3 must provision GFS serving only after schema migration"
+}
 # The block ends where the overlay apply begins. That apply no longer names a
 # fixed overlay: it resolves one from the mode the cluster's images were
 # acquired in (scripts/minikube/image-mode.sh), so the resolver call is the
 # anchor.
 assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'image-mode.sh --render-dir'
 assert_minikube_upgrade_classifier scripts/minikube/full-setup.sh '# Upgrade path: stage the additive reader' 'Applying kustomize overlay'
-assert_minikube_upgrade_classifier scripts/minikube/pre-gate-sync.sh 'apply-gfs-writer-secret.sh' 'incremental_build_images'
+assert_pre_gate_defers_gfs_reconcile 'apply-gfs-writer-secret.sh' 'incremental_build_images' scripts/minikube/pre-gate-sync.sh
 full_setup_classifier="$(sed -n '/# Upgrade path: stage the additive reader/,/Applying kustomize overlay/p' scripts/minikube/full-setup.sh)"
 reset_classifier="$(grep -n 'if \[ "$RESET_DB" = true \]; then' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
 reset_classifier_defer="$(grep -n 'HCC cutover deferred until post-convergence verification' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"

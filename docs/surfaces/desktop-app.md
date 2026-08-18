@@ -64,6 +64,35 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    (`SharedFilesTab`) scoped to a context, and the brokered Global File
    System for cross-context storage.
 
+## Self-hosted initial admin access to GFS
+
+In a self-hosted installation, the Desktop identity provisioned for the first
+Control Admin during the supported `/admin/auth/setup` bootstrap is linked
+directly to that exact Control Admin. The link grants GFS operator authority
+only; it is not inferred from an email address, a password, or a later
+invitation. No Control UI credential, admin password, or Control API token is
+ever sent to or stored by Desktop.
+
+The Control UI shows the exact Desktop-user/Control-Admin pair and its current
+link state. An authenticated administrator can confirm **Revoke/disable Desktop
+GFS operator access**. That action removes only the GFS operator link: it does
+not delete or disable the Control Admin, change either password, remove either
+identity, or alter unrelated Control Plane permissions. The next GFS request
+from the Desktop session is denied, while ordinary user behavior remains
+subject to its existing user-plane authorization.
+
+Revocation is a retained lifecycle state, not a row deletion. The same Control
+UI surface may explicitly **Reactivate Desktop GFS operator access** after a
+confirmation; reactivation creates the next link generation and preserves the
+revoked generation and its audit evidence. A stale generation or retired parent
+is rejected rather than silently recreated or reassigned. Retiring a linked
+Control Admin revokes its active generation and disables the admin in the same
+transaction; physical purge is a separately governed retention operation.
+
+This initial-setup link is deliberately separate from invitations and ordinary
+member provisioning. Those flows do not create, repair, or reassign an operator
+link.
+
 ## Screens
 
 The app's top-level navigation (`NavItem` in

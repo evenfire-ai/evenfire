@@ -128,11 +128,13 @@ else
 fi
 
 if runtime_contains 'assert_workflow_gateway_prompt_bridge_finalization_route()' &&
-   runtime_contains 'nginx -T' &&
-   runtime_contains 'invocations/[^/]+/finalize'; then
-  pass "pre-gate sync fails closed when the running gateway lacks SDK finalization"
+   runtime_contains 'nginx_config="$(${KC} exec' &&
+   runtime_contains 'could not inspect the active nginx configuration' &&
+   runtime_contains '[[ "${nginx_config}" != *"${expected_route}"* ]]' &&
+   ! grep -F 'nginx -T' "$RUNTIME_SCRIPT" | grep -Fq '|'; then
+  pass "pre-gate runtime guard separates nginx inspection from route validation"
 else
-  fail "pre-gate sync does not verify the running SDK finalization route"
+  fail "pre-gate runtime guard can confuse SIGPIPE or exec failure with a missing route"
 fi
 
 if contains 'fingerprint_dir packages/workflow-runtime-core' &&
@@ -157,6 +159,16 @@ if [[ -n "$control_api_migration_line" &&
   pass "pre-gate restores the control-api probe only after migration/roles and before gfs provisioning"
 else
   fail "pre-gate sync can run the GFS authentication probe while control-api is fenced"
+fi
+
+cluster_sync_line="$(grep -nF 'if [[ "${cluster_changed}" == "true" ]]; then' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+pre_migration_reconcile_line="$(awk -v start="$cluster_sync_line" -v end="$control_api_migration_line" \
+  'NR >= start && NR < end && /reconcile-gfs-deploy-credentials\.sh/ { print NR; exit }' "$SCRIPT")"
+if [[ -z "$pre_migration_reconcile_line" && -n "$gfs_provision_line" && \
+      -n "$control_api_migration_line" && "$control_api_migration_line" -lt "$gfs_provision_line" ]]; then
+  pass "pre-gate defers GFS credential reconciliation until after schema migration"
+else
+  fail "pre-gate can reconcile GFS roles before the migration that grants their projection"
 fi
 
 if contains 'fence_control_api()' &&

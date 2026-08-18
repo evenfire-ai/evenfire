@@ -247,6 +247,10 @@ export function registerIpcHandlers(service: AppService): void {
       )
     }
   )
+  ipcMain.handle('auth:diagnoseLoginBackend', async event => {
+    assertTrustedSender(event)
+    return service.diagnoseLoginBackend()
+  })
   ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
     assertTrustedSender(event)
     return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())
@@ -433,6 +437,119 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
   ipcMain.handle(
+    'gfs:createFileFromPath',
+    async (
+      event,
+      payload: { parentResourceId: string; name: string; filePath: string; drive?: string }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.createGfsFileFromPath(
+        sanitizeString(payload?.parentResourceId),
+        sanitizeString(payload?.name),
+        sanitizeString(payload?.filePath),
+        drive
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:startFileUpload',
+    async (
+      event,
+      payload: {
+        parentResourceId: string
+        name: string
+        filePath: string
+        drive?: string
+        resumeUploadId?: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const resumeUploadId = payload?.resumeUploadId
+        ? sanitizeString(payload.resumeUploadId)
+        : undefined
+      return service.startGfsFileUpload(
+        sanitizeString(payload?.parentResourceId),
+        sanitizeString(payload?.name),
+        sanitizeString(payload?.filePath),
+        drive,
+        resumeUploadId
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:startFileReplace',
+    async (
+      event,
+      payload: {
+        resourceId: string
+        filePath: string
+        drive?: string
+        ifMatch?: number
+        resumeUploadId?: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const resumeUploadId = payload?.resumeUploadId
+        ? sanitizeString(payload.resumeUploadId)
+        : undefined
+      return service.startGfsFileReplace(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.filePath),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch),
+        resumeUploadId
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:getUploadSnapshot',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.getGfsUploadSnapshot(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle('gfs:listUploadSessions', async (event, payload?: { drive?: string }) => {
+    assertTrustedSender(event)
+    return service.listGfsUploadSessions(payload?.drive ? sanitizeString(payload.drive) : undefined)
+  })
+  ipcMain.handle(
+    'gfs:pauseUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.pauseGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:resumeUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.resumeGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:cancelUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      await service.cancelGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+      return { ok: true }
+    }
+  )
+  ipcMain.handle(
     'gfs:replaceFile',
     async (
       event,
@@ -443,6 +560,22 @@ export function registerIpcHandlers(service: AppService): void {
       return service.replaceGfsFile(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.encodedData),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch)
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:replaceFileFromPath',
+    async (
+      event,
+      payload: { resourceId: string; filePath: string; drive?: string; ifMatch?: number }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.replaceGfsFileFromPath(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.filePath),
         drive,
         sanitizeOptionalInteger(payload?.ifMatch)
       )
@@ -515,6 +648,18 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('gfs:revokeGrant', async (event, payload: { grantId: string }) => {
     assertTrustedSender(event)
     return service.revokeGfsGrant(sanitizeString(payload?.grantId))
+  })
+  ipcMain.handle(
+    'gfs:listShares',
+    async (event, payload: { resourceId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.listGfsShares(sanitizeString(payload?.resourceId), drive)
+    }
+  )
+  ipcMain.handle('gfs:revokeShare', async (event, payload: { shareId: string }) => {
+    assertTrustedSender(event)
+    return service.revokeGfsShare(sanitizeString(payload?.shareId))
   })
   ipcMain.handle(
     'gfs:createShare',
