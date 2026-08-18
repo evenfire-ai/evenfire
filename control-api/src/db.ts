@@ -6167,7 +6167,7 @@ export const HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
  * inside an open transaction (`withTransaction`); the caller HOLDS it across the
  * subsequent impact read + mutation / K8s write.
  */
-export async function advisoryLockModelName(db: DbClient, model: string): Promise<void> {
+export async function advisoryLockModelName(db: DbTransactionClient, model: string): Promise<void> {
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
     `${LLM_MODEL_LOCK_NAMESPACE}${model}`,
   ])
@@ -6180,7 +6180,10 @@ export async function advisoryLockModelName(db: DbClient, model: string): Promis
  * pair acquires nothing (an empty set is a no-op). Key derivation stays in
  * `advisoryLockModelName` (regla D4).
  */
-export async function advisoryLockModelNames(db: DbClient, models: string[]): Promise<void> {
+export async function advisoryLockModelNames(
+  db: DbTransactionClient,
+  models: string[]
+): Promise<void> {
   const ordered = Array.from(new Set(models)).sort()
   for (const model of ordered) {
     await advisoryLockModelName(db, model)
@@ -6196,7 +6199,7 @@ export async function advisoryLockModelNames(db: DbClient, models: string[]): Pr
  * unit) and comes from a bounded env, so it can never inject SQL.
  */
 export async function boundCarrierTransactionIdleTimeout(
-  db: DbClient,
+  db: DbTransactionClient,
   ms: number = HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS
 ): Promise<void> {
   await db.query(`SELECT set_config('idle_in_transaction_session_timeout', $1, true)`, [String(ms)])
