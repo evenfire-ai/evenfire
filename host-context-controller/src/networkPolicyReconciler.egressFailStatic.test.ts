@@ -181,11 +181,16 @@ describe('R1-B1 regression: DNS timeout must fail-static (freeze), not prune', (
     await vi.advanceTimersByTimeAsync(5_000)
     const result = await settled
 
-    // 4) Fail-static (D4/H1): the timeout is a TRANSIENT resolver failure — the
-    // reconcile must freeze and keep serving the accumulated /32, not fail and
-    // not revoke the policy.
+    // 4) Fail-static (D4/H1): the timeout is a TRANSIENT resolver failure. The
+    // load-bearing retention proof is that the reconcile RESOLVES and does NOT
+    // delete the policy — pre-fix the misclassification prunes the lapsed set to
+    // zero, so the reconcile REJECTS and DELETES the policy (both assertions flip
+    // against the pre-fix tree). Freezing an already-correct policy is a no-op, so
+    // it issues no create/replace here.
     expect(result.outcome).toBe('resolved')
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    // Defensive: should a future freeze ever re-persist instead of no-op'ing, any
+    // write it makes must still carry the accumulated /32 (never a pruned body).
     const writes = [
       ...mockApi.createNamespacedNetworkPolicy.mock.calls,
       ...mockApi.replaceNamespacedNetworkPolicy.mock.calls,
