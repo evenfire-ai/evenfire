@@ -359,6 +359,13 @@ export interface Conversation {
    */
   contextBreakdown?: ContextBreakdown
   /**
+   * Per-turn LLM-lane guardrail input activity (guardrail-input-transparency
+   * spec §4/§5.1). Ephemeral RAM only, like `contextBreakdown`: a running
+   * aggregate for the CURRENT turn (reset when a new turn starts) that feeds the
+   * context-window popover. `undefined` until the first measured LLM call.
+   */
+  guardrailActivity?: TurnGuardrailActivity
+  /**
    * Dynamic-tool-loading (F3.1, LOCKED #6): the LATCHED `bridgeActive` decision
    * for this session. Computed once — on the first `DeferrableToolController.
    * refreshTools` of the session — and frozen thereafter so the advertised
@@ -426,6 +433,38 @@ export interface ContextBreakdown {
 }
 
 /**
+ * One guardrail source's net effect on the LLM-lane input, summed across a
+ * turn's LLM calls (guardrail-input-transparency spec §4). Counts only — never
+ * message content, never hook-authored strings (§8).
+ */
+export interface GuardrailInputChange {
+  /** `guardrails.builtins[].type` for a built-in, or the LlmHook CR name for an installed hook. */
+  sourceId: string
+  kind: 'builtin' | 'hook'
+  /** Signed net token delta (D4). Negative = reduced. 0 with `changed: true` = same-size rewrite. */
+  deltaTokens: number
+  /** True when the source replaced the request at least once (even at zero delta). */
+  changed: boolean
+  /** How many LLM calls in this turn this source acted on (§2.3). */
+  calls: number
+}
+
+/**
+ * Per-turn aggregate of LLM-lane guardrail effects on the input
+ * (guardrail-input-transparency spec §4). Ephemeral on `Conversation` (running
+ * aggregate for the current turn) and persisted per turn on the boundary message.
+ */
+export interface TurnGuardrailActivity {
+  /** Estimated non-system message tokens before the chain, summed over the turn's calls (§3.3). */
+  tokensBefore: number
+  /** Same, after the chain. `tokensBefore - tokensAfter` is the headline saving. */
+  tokensAfter: number
+  changes: GuardrailInputChange[]
+  /** Number of LLM calls in this turn whose chain was measured. */
+  llmCalls: number
+}
+
+/**
  * T1.4 — Per-task anti-thrash bookkeeping for `PressureContextManager`.
  *
  * After `INEFFECTIVE_MAX_RUN` consecutive compactions whose `post/pre` token
@@ -463,6 +502,13 @@ export interface Turn {
   output_tokens?: number
   cache_read_tokens?: number
   cache_write_tokens?: number
+  /**
+   * Per-turn LLM-lane guardrail input activity (guardrail-input-transparency
+   * spec §4/§5.2). Stamped onto the turn-boundary message and rehydrated from the
+   * `messages.guardrail_activity` column on cold-load. Undefined when no guardrail
+   * acted on the turn (or on compacted turns that lost per-turn columns).
+   */
+  guardrailActivity?: TurnGuardrailActivity
 }
 
 export interface TurnToolCall {

@@ -9,6 +9,7 @@ import {
   PendingApproval,
   TraceContextV1,
   Turn,
+  TurnGuardrailActivity,
   TurnToolCall,
 } from '../types'
 import type { SessionTokenUsage } from './conversationStore'
@@ -215,10 +216,7 @@ export class ConversationManager {
 
   private assertSessionOwner(conversation: Conversation, expectedUserId?: string): void {
     if (expectedUserId !== undefined && conversation.user_id !== expectedUserId) {
-      throw new ConversationError(
-        'Session access denied',
-        ConversationErrorCode.OwnershipMismatch
-      )
+      throw new ConversationError('Session access denied', ConversationErrorCode.OwnershipMismatch)
     }
   }
 
@@ -256,6 +254,10 @@ export class ConversationManager {
 
     // Clear per-turn wildcard approval — each new message requires fresh approval
     conversation.auto_approved_tools.delete('*')
+    // Reset the per-turn guardrail-input-transparency aggregate (spec §5.1): the
+    // running record accumulates across THIS turn's LLM calls, so a new turn
+    // starts fresh. Ephemeral RAM, like `contextBreakdown`.
+    conversation.guardrailActivity = undefined
 
     const turn: Turn = {
       number: conversation.turns.length + 1,
@@ -406,6 +408,38 @@ export class ConversationManager {
     // NOTE: intentionally does NOT bump `updated_at` — the breakdown is token
     // accounting recomputed every turn, not user activity (same invariant as
     // `recordSessionUsage`). The turn lifecycle owns `updated_at`.
+  }
+
+  /**
+   * Merge one LLM call's guardrail-input-transparency record into the running
+   * per-turn aggregate (spec §5.1). Called per LLM call by `HookedLlmPort`;
+   * `startTurn` resets the aggregate so it only ever spans one turn. Sums
+   * `tokensBefore`/`tokensAfter` and `llmCalls`, and merges `changes` by
+   * `sourceId` (accumulating `deltaTokens`/`calls`, OR-ing `changed`) — a naive
+   * "last call wins" would under-report a multi-call turn (§2.3). Like
+   * `recordContextBreakdown`, it does NOT bump `updated_at`.
+   */
+  recordGuardrailActivity(conversation: Conversation, callRecord: TurnGuardrailActivity): void {
+    const agg = conversation.guardrailActivity ?? {
+      tokensBefore: 0,
+      tokensAfter: 0,
+      changes: [],
+      llmCalls: 0,
+    }
+    agg.tokensBefore += callRecord.tokensBefore
+    agg.tokensAfter += callRecord.tokensAfter
+    agg.llmCalls += callRecord.llmCalls
+    for (const ch of callRecord.changes) {
+      const existing = agg.changes.find(c => c.sourceId === ch.sourceId)
+      if (existing) {
+        existing.deltaTokens += ch.deltaTokens
+        existing.calls += ch.calls
+        existing.changed = existing.changed || ch.changed
+      } else {
+        agg.changes.push({ ...ch })
+      }
+    }
+    conversation.guardrailActivity = agg
   }
 
   /**

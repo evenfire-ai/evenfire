@@ -25,7 +25,12 @@
  */
 import { aggregateDecision, guardrailDecisionsTotal, pickPresentationReason } from '../guardrails'
 import type { Contributor, GuardrailsConfig } from '../guardrails'
-import { type RequestShaper, buildLlmBuiltinChain } from '../guardrails/llm/builtinChain'
+import {
+  type BuiltinStep,
+  type RequestShaper,
+  buildLlmBuiltinChain,
+  buildLlmBuiltinSteps,
+} from '../guardrails/llm/builtinChain'
 import {
   type LlmLaneHookDeps,
   type LlmLaneHooks,
@@ -37,8 +42,10 @@ import {
   type CompletionRequest,
   type CompletionResponse,
   FinishReason,
+  type GuardrailInputChange,
   type ToolCompletionRequest,
   type ToolCompletionResponse,
+  type TurnGuardrailActivity,
 } from '../types'
 
 const EMPTY_HOOKS: LlmLaneHooks = { preCall: [], moderate: [], postCall: [], onError: [] }
@@ -107,11 +114,88 @@ function approxRequestChars(req: ToolCompletionRequest): number {
   return n
 }
 
+/**
+ * Best-effort per-LLM-call measurement of how much each guardrail source changed
+ * the input, for the guardrail-input-transparency surface (spec §3). Counts only
+ * NON-system messages — the exact surface hooks may touch (§3.3) — via the
+ * injected `countSync`. Every count is guarded: a tokenizer fault sets `failed`
+ * and the call is dropped with no emit. Measurement must NEVER affect a turn (§3.4).
+ */
+class GuardrailActivityMeter {
+  private failed = false
+  private tokensBefore = 0
+  private running = 0
+  private readonly changes = new Map<string, GuardrailInputChange>()
+
+  constructor(
+    private readonly count: (req: ToolCompletionRequest) => number,
+    private readonly sink: (activity: TurnGuardrailActivity) => void
+  ) {}
+
+  /** Seed the before/running count from the request as it enters the chain. */
+  begin(req: ToolCompletionRequest): void {
+    try {
+      this.tokensBefore = this.running = this.count(req)
+    } catch {
+      this.failed = true
+    }
+  }
+
+  /**
+   * Record that `sourceId` transformed the request. A no-op step (same object)
+   * costs nothing and is skipped (§3.2). A step that changed the request but
+   * produced a zero delta is still recorded as `changed` (D4 — e.g. a redactor).
+   */
+  record(
+    before: ToolCompletionRequest,
+    after: ToolCompletionRequest,
+    sourceId: string,
+    kind: 'builtin' | 'hook'
+  ): void {
+    if (this.failed || after === before) return
+    let delta = 0
+    try {
+      const c = this.count(after)
+      delta = c - this.running
+      this.running = c
+    } catch {
+      this.failed = true
+      return
+    }
+    // A source acts at most once per LLM call, so `calls` is 1 here; the
+    // ConversationManager sums it across the turn's calls (§2.3).
+    this.changes.set(sourceId, { sourceId, kind, deltaTokens: delta, changed: true, calls: 1 })
+  }
+
+  /** Emit this call's record to the sink. No-op on failure or when nothing acted. */
+  emit(): void {
+    if (this.failed || this.changes.size === 0) return
+    try {
+      this.sink({
+        tokensBefore: this.tokensBefore,
+        tokensAfter: this.running,
+        changes: [...this.changes.values()],
+        llmCalls: 1,
+      })
+    } catch {
+      /* best-effort telemetry — a sink fault must never affect the turn */
+    }
+  }
+}
+
 export class HookedLlmPort implements LlmPort {
   constructor(
     private readonly inner: LlmPort,
     private readonly shapeMainLane: RequestShaper,
-    private readonly hooks: LlmLaneHooks = EMPTY_HOOKS
+    private readonly hooks: LlmLaneHooks = EMPTY_HOOKS,
+    /**
+     * Guardrail-input-transparency (spec §5.1): the built-ins as individually
+     * addressable steps (so each is measured), plus a per-LLM-call activity sink.
+     * Both undefined in tests / no-config → measurement is off and the request is
+     * shaped via `shapeMainLane` exactly as before.
+     */
+    private readonly builtinSteps?: BuiltinStep[],
+    private readonly onGuardrailActivity?: (activity: TurnGuardrailActivity) => void
   ) {}
 
   modelName(): string {
@@ -157,7 +241,31 @@ export class HookedLlmPort implements LlmPort {
 
   /** Main lane (spec §7): built-ins → pre_call → dispatch (moderation concurrent with the call). */
   async completeWithTools(request: ToolCompletionRequest): Promise<ToolCompletionResponse> {
-    let req = this.shapeMainLane(request)
+    // Guardrail-input-transparency (spec §3): measure per source only when a sink
+    // is wired. `meter` is null in tests / no-config, so the fast path is untouched.
+    const meter = this.onGuardrailActivity
+      ? new GuardrailActivityMeter(
+          r => this.getTokenCounter().countSync(r.messages.filter(m => m.role !== 'system')),
+          this.onGuardrailActivity
+        )
+      : null
+
+    // Built-ins: when measuring, apply each step individually so its delta is
+    // attributed (equivalent to `shapeMainLane`). Otherwise take the composed
+    // fast path unchanged.
+    let req: ToolCompletionRequest
+    if (meter && this.builtinSteps) {
+      meter.begin(request)
+      req = request
+      for (const step of this.builtinSteps) {
+        const before = req
+        req = step.shape(req)
+        meter.record(before, req, step.sourceId, 'builtin')
+      }
+    } else {
+      req = this.shapeMainLane(request)
+      meter?.begin(req)
+    }
 
     // pre_call runs first — it shapes the request the model + moderation both see,
     // and a reject blocks the call outright (no tokens spent).
@@ -169,6 +277,8 @@ export class HookedLlmPort implements LlmPort {
         preContribs.push(c)
         if (c.rewrite) req = c.rewrite // already system-role-stripped + capability-gated (N4/F4)
       }
+      // Transparency: a may_rewrite hook that replaced the request is a source.
+      if (meter && c?.rewrite) meter.record(preReq, req, hook.id, 'hook')
       // Diagnostic (content-free, sizes only per §8.4): log only the meaningful,
       // low-frequency outcomes — a rewrite that was APPLIED (with before→after
       // chars, which should match the hook's own reported before/after), a deny,
@@ -193,6 +303,10 @@ export class HookedLlmPort implements LlmPort {
       }
     }
     if (aggregateDecision(preContribs) === 'deny') return this.denyRefusal(preContribs, 'pre_call')
+
+    // Emit the per-call transparency record only for a dispatched (non-denied)
+    // turn — a deny changes nothing about the input the model sees (§2.2).
+    meter?.emit()
 
     return this.hooks.moderate.length === 0
       ? this.dispatch(req)
@@ -297,7 +411,10 @@ export class HookedLlmPort implements LlmPort {
 export function maybeWrapHookedLlmPort(
   port: LlmPort,
   config: GuardrailsConfig | undefined,
-  deps: Partial<LlmLaneHookDeps> = {}
+  deps: Partial<LlmLaneHookDeps> & {
+    /** Per-LLM-call guardrail-input-transparency sink (spec §5.1). */
+    onGuardrailActivity?: (activity: TurnGuardrailActivity) => void
+  } = {}
 ): LlmPort {
   const hasBuiltins = !!config?.builtins && config.builtins.length > 0
   const hooks = buildLlmLaneHooks(config?.hookDescriptors, {
@@ -313,5 +430,11 @@ export function maybeWrapHookedLlmPort(
     hooks.postCall.length > 0 ||
     hooks.onError.length > 0
   if (!hasBuiltins && !hasHooks) return port
-  return new HookedLlmPort(port, buildLlmBuiltinChain(config?.builtins), hooks)
+  return new HookedLlmPort(
+    port,
+    buildLlmBuiltinChain(config?.builtins),
+    hooks,
+    buildLlmBuiltinSteps(config?.builtins),
+    deps.onGuardrailActivity
+  )
 }
