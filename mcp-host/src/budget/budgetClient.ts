@@ -197,12 +197,13 @@ export function deriveBudgetAttribution(task: Task): {
 
   if (task.source === 'channel') {
     if (task.sourceMessage?.channelType === 'rpc') {
-      const rawTeamId = task.sourceMessage.metadata?.teamId
+      const authority = task.sourceMessage.authorityV2
+      const rawTeamId = authority ? authority.effectiveTeamId : task.sourceMessage.metadata?.teamId
       const teamId = typeof rawTeamId === 'string' ? rawTeamId.trim() : ''
       return {
         ...base,
         source_kind: 'desktop',
-        user_id: task.sourceMessage.sender ?? null,
+        user_id: authority?.userId ?? task.sourceMessage.sender ?? null,
         team_id: teamId || null,
       }
     }
