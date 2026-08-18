@@ -28,3 +28,17 @@ migration or add a second logger convention. Direct console output is reserved
 for logger adapters, explicit CLI/bootstrap output, tests, E2E/fixtures, and
 intentional development diagnostics; never emit secrets, tokens, credentials,
 DSNs, private URLs, or raw request/response bodies.
+
+## Desktop Electron runtime
+
+A skipped Electron `postinstall` leaves the runtime undownloaded while `npm ci`
+still exits successfully, so the failure surfaces later as a test error that
+looks like a product bug. No `package.json` field prevents this; the guard is
+`npm run verify:electron`, which fails when `require('electron')` does not
+resolve to an executable. Desktop validation must use Node 24, run `npm ci`
+without `--ignore-scripts`, and pass that check before any test/build result is
+counted. If the check reports `Electron failed to install correctly`, switch to
+Node 24, repair the generated dependency directory, and rerun the install.
+Never bypass the postinstall with `ELECTRON_SKIP_BINARY_DOWNLOAD`, use an
+unverified override, or treat the resulting test failure as a product
+regression.
