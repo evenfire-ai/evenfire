@@ -49,27 +49,33 @@ dotenv_load_file() {
   done < "${env_file}"
 }
 
-dotenv_canonical_root() {
+# Directory whose .env is authoritative for this checkout. For a Git worktree
+# that is the primary checkout, never the worktree itself: the primary checkout
+# is the canonical local source of truth, and accepting a worktree-local file
+# would reintroduce per-lane credential drift. Exposed separately from
+# dotenv_canonical_root so callers that must report the path (prereq checks)
+# resolve it the same way the loader does, instead of assuming $PWD/.env.
+dotenv_canonical_dir() {
   local repo_root="${1:?repository root is required}"
-  local common_dir main_repo_dir
+  local common_dir
   common_dir="$(git -C "${repo_root}" rev-parse --git-common-dir 2>/dev/null || true)"
-  if [[ -n "${common_dir}" ]]; then
-    case "${common_dir}" in
-      /*) main_repo_dir="$(cd "${common_dir}/.." && pwd)" ;;
-      *) main_repo_dir="$(cd "${repo_root}/${common_dir}/.." && pwd)" ;;
-    esac
-    if [[ -f "${main_repo_dir}/.env" ]]; then
-      printf '%s\n' "${main_repo_dir}/.env"
-      return 0
-    fi
-    # A Git worktree intentionally does not fall back to its own .env. The
-    # primary checkout is the canonical local source of truth, and accepting a
-    # worktree-local file would reintroduce per-lane credential drift.
+  if [[ -z "${common_dir}" ]]; then
+    printf '%s\n' "${repo_root}"
     return 0
   fi
-  if [[ -f "${repo_root}/.env" ]]; then
-    printf '%s\n' "${repo_root}/.env"
+  case "${common_dir}" in
+    /*) (cd "${common_dir}/.." && pwd) ;;
+    *) (cd "${repo_root}/${common_dir}/.." && pwd) ;;
+  esac
+}
+
+dotenv_canonical_root() {
+  local repo_root="${1:?repository root is required}" canonical_dir
+  canonical_dir="$(dotenv_canonical_dir "${repo_root}")"
+  if [[ -f "${canonical_dir}/.env" ]]; then
+    printf '%s\n' "${canonical_dir}/.env"
   fi
+  # A missing canonical .env is not an error here; callers decide.
   return 0
 }
 

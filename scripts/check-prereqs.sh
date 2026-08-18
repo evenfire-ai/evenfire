@@ -217,10 +217,21 @@ env_value() {
 }
 
 echo
-ENV_FILE="$PROJECT_DIR/.env"
+# Check the .env setup will actually load. scripts/e2e/load-dotenv.sh resolves a
+# Git worktree to the PRIMARY checkout's .env and deliberately ignores a
+# worktree-local one, so testing "$PROJECT_DIR/.env" here fails this gate in
+# every worktree on a file that is never read.
+# shellcheck source=scripts/e2e/load-dotenv.sh
+. "$PROJECT_DIR/scripts/e2e/load-dotenv.sh"
+ENV_DIR="$(dotenv_canonical_dir "$PROJECT_DIR")"
+ENV_FILE="$ENV_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
-  err ".env     not found — setup aborts in Step 1"
-  echo -e "        Create it: ${BOLD}cp .env.example .env${NC}"
+  err ".env     not found at ${ENV_FILE} — setup aborts in Step 1"
+  if [ "$ENV_DIR" != "$PROJECT_DIR" ]; then
+    echo    "        This is a Git worktree; setup reads the primary checkout's .env,"
+    echo    "        so a worktree-local copy would be ignored."
+  fi
+  echo -e "        Create it: ${BOLD}cp $PROJECT_DIR/.env.example $ENV_FILE${NC}"
   echo    "        then set ADMIN_PASSWORD (required, no default) and ONE LLM key"
   MISSING=$((MISSING + 1))
 else
