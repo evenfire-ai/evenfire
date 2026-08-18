@@ -242,7 +242,7 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
   it('preserves an open Overview draft when Model & credentials is saved', async () => {
     const view = render(<HostDetailsPage />)
     await openOverviewEdit()
-    fireEvent.change(screen.getByLabelText('Name'), {
+    fireEvent.change(screen.getByLabelText('Display name'), {
       target: { value: 'unsaved-overview-name' },
     })
 

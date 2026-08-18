@@ -83,8 +83,10 @@ export async function setAgentUsers(agentName: string, userIds: string[], operat
 export async function getUserAgents(userId: string, db: Pick<DbClient, 'query'> = pool) {
   const result = await db.query(
     `SELECT agent_name
-       FROM user_agents
-      WHERE user_id = $1
+       FROM user_agents ua
+       JOIN users u ON u.id = ua.user_id
+      WHERE ua.user_id = $1
+        AND u.lifecycle_state = 'active'
    ORDER BY agent_name ASC`,
     [userId]
   )
@@ -104,6 +106,7 @@ export async function listUsersByAgent(agentName: string) {
        JOIN users u ON u.id = ua.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE ua.agent_name = $1
+        AND u.lifecycle_state = 'active'
    ORDER BY u.email ASC`,
     [resolvedAgentName]
   )

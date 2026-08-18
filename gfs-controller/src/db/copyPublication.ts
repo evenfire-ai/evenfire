@@ -239,6 +239,9 @@ function auditEvent(input: CopyInput, resourceId: string, mutationOutcome: "succ
   return {
     recordType: "mutation_outcome" as const,
     subject: input.subject,
+    actorOnBehalfOf: input.actorOnBehalfOf ?? null,
+    desktopUserId: input.desktopUserId,
+    authoritySource: input.authoritySource,
     op: "copy",
     resourceId: normalizeResourceId(resourceId),
     drive: input.drive,

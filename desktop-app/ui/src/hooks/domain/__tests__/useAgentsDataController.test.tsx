@@ -2,7 +2,7 @@
 import type { ReactNode } from 'react'
 import { describe, expect, it } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, renderHook } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import type { AccessCatalog } from '../../../../../src/types'
 import { useAgentsDataController } from '../useAgentsDataController'
 
@@ -44,6 +44,6 @@ describe('useAgentsDataController', () => {
       retryResult = await result.current.refreshWithCatalog(Promise.resolve(catalog(['agent-x'])))
     })
     expect(retryResult).toBe(true)
-    expect(result.current.agentNames).toEqual(['agent-x'])
+    await waitFor(() => expect(result.current.agentNames).toEqual(['agent-x']))
   })
 })

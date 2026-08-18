@@ -31,16 +31,12 @@ const ACCESS_SUB_TABS: { key: AccessSubTab; label: string }[] = [
   { key: 'teams', label: 'Teams' },
 ]
 
-export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccessTabProps) {
+export function HostAccessTab({ hostName }: HostAccessTabProps) {
   const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
   const mountedRef = useRef(true)
   const loadRequestId = useRef(0)
-  // Guarded by the parent when there's an unsaved rename. Surface a single
-  // derived flag so the grant/revoke handlers, the Add buttons, the modal
-  // inputs, and the confirm/submit controls all stay in sync.
-  const mutationDisabled = hasPendingRename
 
   const [subTab, setSubTab] = useState<AccessSubTab>('members')
   const [allUsers, setAllUsers] = useState<AccessUserRow[]>([])
@@ -134,7 +130,6 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
 
   async function grantUserAccess() {
     if (selectedUserIdsToGrant.length === 0) return
-    if (mutationDisabled) return
     setBusy(true)
     setError('')
     try {
@@ -168,7 +163,6 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
   }
 
   async function revokeUserAccess(userId: string) {
-    if (mutationDisabled) return
     const user = usersWithAccess.find(item => item.id === userId)
     const shouldRevoke = await confirm({
       title: 'Revoke Member Access',
@@ -203,7 +197,6 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
 
   async function grantTeamAccess() {
     if (selectedTeamIdsToGrant.length === 0) return
-    if (mutationDisabled) return
     setBusy(true)
     setError('')
     try {
@@ -237,7 +230,6 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
   }
 
   async function revokeTeamAccess(teamId: string) {
-    if (mutationDisabled) return
     const team = teamsWithAccess.find(item => item.id === teamId)
     const shouldRevoke = await confirm({
       title: 'Revoke Team Access',
@@ -282,12 +274,6 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
         </div>
       ) : null}
 
-      {mutationDisabled ? (
-        <div className="cu-banner cu-banner--warning" style={{ marginBottom: '0.75rem' }}>
-          Save the agent rename before changing member or team access.
-        </div>
-      ) : null}
-
       <TabBar<AccessSubTab>
         activeValue={subTab}
         ariaLabel="Access type"
@@ -304,7 +290,7 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
               onClick={() => setShowAddUser(true)}
-              disabled={busy || mutationDisabled}
+              disabled={busy}
             >
               Add member
             </button>
@@ -313,7 +299,7 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
               onClick={() => setShowAddTeam(true)}
-              disabled={busy || mutationDisabled}
+              disabled={busy}
             >
               Add team
             </button>
@@ -366,7 +352,7 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
                             type="button"
                             className="cu-btn cu-btn--icon cu-btn--danger-icon"
                             onClick={() => void revokeUserAccess(user.id)}
-                            disabled={busy || mutationDisabled}
+                            disabled={busy}
                             title="Revoke"
                             aria-label="Revoke member access"
                           >
@@ -401,7 +387,7 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
                           type="button"
                           className="cu-btn cu-btn--icon cu-btn--danger-icon"
                           onClick={() => void revokeTeamAccess(team.id)}
-                          disabled={busy || mutationDisabled}
+                          disabled={busy}
                           title="Revoke"
                           aria-label="Revoke team access"
                         >
@@ -420,7 +406,6 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
       {showAddUser ? (
         <AccessGrantModal
           busy={busy}
-          disabled={mutationDisabled}
           emptyLabel="No available members."
           id="agent-member-picker"
           label="Members"
@@ -444,7 +429,6 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
       {showAddTeam ? (
         <AccessGrantModal
           busy={busy}
-          disabled={mutationDisabled}
           emptyLabel="No available teams."
           id="agent-team-picker"
           label="Teams"
@@ -472,7 +456,6 @@ export function HostAccessTab({ hasPendingRename = false, hostName }: HostAccess
 
 type AccessGrantModalProps = {
   busy: boolean
-  disabled?: boolean
   emptyLabel: string
   id: string
   label: string
@@ -491,7 +474,6 @@ type AccessGrantModalProps = {
 
 function AccessGrantModal({
   busy,
-  disabled = false,
   emptyLabel,
   id,
   label,
@@ -507,7 +489,6 @@ function AccessGrantModal({
   titleId,
   value,
 }: AccessGrantModalProps) {
-  const blocked = busy || disabled
   return (
     <div
       style={{
@@ -522,7 +503,7 @@ function AccessGrantModal({
       }}
       role="presentation"
       onClick={e => {
-        if (e.target === e.currentTarget && !blocked) onClose()
+        if (e.target === e.currentTarget && !busy) onClose()
       }}
     >
       <div
@@ -539,18 +520,12 @@ function AccessGrantModal({
             type="button"
             className="cu-btn cu-btn--icon cu-btn--ghost"
             onClick={onClose}
-            disabled={blocked}
+            disabled={busy}
             aria-label="Close"
           >
             <IconX width={18} height={18} />
           </button>
         </div>
-
-        {disabled ? (
-          <p className="cu-banner cu-banner--warning" role="alert">
-            Save the agent rename before changing member or team access.
-          </p>
-        ) : null}
 
         <div className="cu-field">
           <label htmlFor={id}>{label}</label>
@@ -558,7 +533,7 @@ function AccessGrantModal({
             emptyLabel={emptyLabel}
             id={id}
             inline
-            disabled={blocked}
+            disabled={busy}
             onChange={onChange}
             options={options}
             placeholder={placeholder}
@@ -573,7 +548,7 @@ function AccessGrantModal({
             type="button"
             className="cu-btn cu-btn--ghost cu-btn--sm"
             onClick={onClose}
-            disabled={blocked}
+            disabled={busy}
           >
             Cancel
           </button>
@@ -581,7 +556,7 @@ function AccessGrantModal({
             type="button"
             className="cu-btn cu-btn--primary"
             onClick={() => void onConfirm()}
-            disabled={blocked || value.length === 0}
+            disabled={busy || value.length === 0}
           >
             {submitLabel}
           </button>

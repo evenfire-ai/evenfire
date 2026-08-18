@@ -25,7 +25,7 @@ import {
   recordInvocation,
   reviveFailedSdkInvocation,
 } from './pluginWorkloadSdkInvocationAuditor.js'
-import { checkRateLimit, consumeQuota } from './pluginWorkloadSdkQuotaTracker.js'
+import { checkRateLimit } from './pluginWorkloadSdkQuotaTracker.js'
 
 // ─── Plugin Workload SDK — authorizer (plan §2.2) ────────────────────────
 // Authorization pipeline for promptBridge and clientNotifications requests
@@ -467,22 +467,9 @@ async function authorizePromptBridgeInner(
       await transitionToFailed()
       return deny(rate.error, rate.message)
     }
-
-    // Period quota is charged once per logical idempotent invocation. A
-    // failed provider retry is a new physical attempt (rate-limited above),
-    // not a second logical request that should consume the same run budget.
-    if (recorded.kind !== 'replay') {
-      const quota = await consumeQuota(
-        claims.recipeNamespace,
-        claims.recipeName,
-        'promptBridge',
-        grant
-      )
-      if (!quota.ok) {
-        await transitionToFailed()
-        return deny(quota.error, quota.message)
-      }
-    }
+    // The former per-run quota leg (consumeQuota) was deleted here (issue
+    // #348): deprecated per-run caps are ignored; only the per-minute
+    // platform rate limit above gates the invocation.
   } catch (error) {
     try {
       await transitionToFailed()
@@ -812,21 +799,11 @@ async function authorizeClientNotificationInner(
     return deny(rate.error, rate.message)
   }
 
-  const quota = await consumeQuota(
-    claims.recipeNamespace,
-    claims.recipeName,
-    'clientNotifications',
-    grant
-  )
-  if (!quota.ok) {
-    await markInvocationStatus(recorded.invocation.id, 'failed', {
-      recipeNamespace: claims.recipeNamespace,
-      recipeName: claims.recipeName,
-    })
-    return deny(quota.error, quota.message)
-  }
+  // The former per-run quota leg (consumeQuota) was deleted here (issue
+  // #348): deprecated per-run caps are ignored; only the per-minute platform
+  // rate limit above gates the notification.
 
-  // Revive a previously-failed invocation that has now passed quota.
+  // Revive a previously-failed invocation that has now passed the rate limit.
   if (recorded.kind === 'replay') {
     await markInvocationStatus(recorded.invocation.id, 'accepted', {
       recipeNamespace: claims.recipeNamespace,

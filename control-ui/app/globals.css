@@ -5384,6 +5384,29 @@ textarea.cu-input {
   line-height: 1.3;
 }
 
+.cu-upload-file-flow__progress {
+  display: grid;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-upload-file-flow__progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  color: var(--cu-text-muted);
+  font-size: 0.8125rem;
+}
+
+.cu-upload-file-flow__progress progress {
+  width: 100%;
+  height: 0.5rem;
+  accent-color: var(--cu-accent);
+}
+
 .cu-upload-file-flow__destination code {
   color: var(--cu-text);
   overflow-wrap: anywhere;
@@ -8482,6 +8505,14 @@ textarea.cu-input {
 .cu-table__cell-muted {
   color: var(--cu-text-muted);
   font-size: 0.8125rem;
+}
+
+/* Secondary identity line under a primary display name (e.g. the immutable
+   slug shown beneath an agent's editable display name). */
+.cu-table__cell-subtle {
+  color: var(--cu-text-muted);
+  font-size: 0.75rem;
+  margin-top: 0.125rem;
 }
 
 .cu-table__cell-numeric {

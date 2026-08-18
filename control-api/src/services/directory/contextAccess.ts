@@ -41,8 +41,10 @@ export async function setUserContexts(userId: string, contextIds: string[], oper
 export async function getUserContexts(userId: string) {
   const result = await pool.query(
     `SELECT context_id
-       FROM user_contexts
-      WHERE user_id = $1
+       FROM user_contexts uc
+       JOIN users u ON u.id = uc.user_id
+      WHERE uc.user_id = $1
+        AND u.lifecycle_state = 'active'
    ORDER BY context_id ASC`,
     [userId]
   )
@@ -62,6 +64,7 @@ export async function listUsersByContext(contextId: string) {
        JOIN users u ON u.id = uc.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE uc.context_id = $1
+        AND u.lifecycle_state = 'active'
    ORDER BY u.email ASC`,
     [resolvedContextId]
   )

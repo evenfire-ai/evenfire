@@ -66,7 +66,8 @@ rollout_namespace_deployments() {
 assert_workflow_gateway_prompt_bridge_finalization_route() {
   local deployment="nginx-workflow-approval-gateway"
   local namespace="control-plane"
-  local candidate deletion ready pod_count=0
+  local expected_route='location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'
+  local candidate deletion ready nginx_config inspect_rc pod_count=0
 
   if ! ${KC} get deployment "${deployment}" -n "${namespace}" >/dev/null 2>&1; then
     log "ERROR: ${namespace}/${deployment} is absent; refusing Plugin Workload SDK gate"
@@ -86,8 +87,21 @@ assert_workflow_gateway_prompt_bridge_finalization_route() {
       -o jsonpath='{.status.containerStatuses[?(@.name=="nginx")].ready}' 2>/dev/null || true)"
     [[ "${ready}" == "true" ]] || continue
     pod_count=$((pod_count + 1))
-    if ! ${KC} exec -n "${namespace}" "${candidate}" -c nginx -- nginx -T 2>&1 | \
-      grep -Fq 'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'; then
+
+    # Consume the complete command before searching it. With the caller's
+    # `set -o pipefail`, piping `kubectl exec ... nginx -T` into `grep -q`
+    # lets grep close the pipe as soon as it finds the route. kubectl can then
+    # exit on SIGPIPE (141), turning a present route into a false failure.
+    # Keeping execution and content validation separate also preserves the
+    # distinction between an unreachable pod and a genuinely stale config.
+    if nginx_config="$(${KC} exec -n "${namespace}" "${candidate}" -c nginx -- nginx -T 2>&1)"; then
+      :
+    else
+      inspect_rc=$?
+      log "ERROR: could not inspect the active nginx configuration in ${namespace}/${candidate} (kubectl exec rc=${inspect_rc}); refusing gate"
+      return 1
+    fi
+    if [[ "${nginx_config}" != *"${expected_route}"* ]]; then
       log "ERROR: active ${namespace}/${candidate} does not serve the SDK finalization route; refusing gate"
       return 1
     fi
