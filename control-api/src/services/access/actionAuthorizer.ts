@@ -21,8 +21,9 @@ import {
   validateActionOperationTarget,
 } from './actionOperationRegistry.js'
 import {
+  type LiveAuthorizationOptions,
   type LiveAuthorizationResult,
-  resolveLiveAuthorization,
+  resolveLiveActionAuthorization,
 } from './liveAuthorizationResolver.js'
 import { actionOperationTargetHash } from './operationTarget.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
@@ -54,7 +55,7 @@ export type ActionAuthorizationV2Result =
       retryable: true
     }>
 
-type Resolver = typeof resolveLiveAuthorization
+type Resolver = typeof resolveLiveActionAuthorization
 
 function unavailable(): Extract<ActionAuthorizationV2Result, { status: 'authority_unavailable' }> {
   return { status: 'authority_unavailable', code: 'authority_unavailable', retryable: true }
@@ -92,7 +93,11 @@ export async function authorizeActionV2(
     gateway?: Pick<K8sGateway, 'getResourceExact'>
     correlationId?: string
   }>,
-  dependencies: Readonly<{ resolve?: Resolver; messageId?: () => string }> = {}
+  dependencies: Readonly<{
+    resolve?: Resolver
+    messageId?: () => string
+    authorizationOptions?: Pick<LiveAuthorizationOptions, 'transaction'>
+  }> = {}
 ): Promise<ActionAuthorizationV2Result> {
   if (input.session.contract !== 'v2') return { status: 'denied', code: 'session_not_live' }
   const operation = getActionOperationDefinition(input.operationId)
@@ -124,11 +129,11 @@ export async function authorizeActionV2(
   const ownedBudget = input.budget ? null : AccessExecutionBudget.create('action')
   const budget = input.budget ?? ownedBudget!
   try {
-    const resolve = dependencies.resolve ?? resolveLiveAuthorization
+    const resolve = dependencies.resolve ?? resolveLiveActionAuthorization
     const result = await resolve(
       {
         session: input.session,
-        requiredCapability: operation.requiredCapabilities[0],
+        operationId: input.operationId,
         resource: input.resource,
         operationTarget: preparedTarget.target,
         ...(input.requested.requestedAccessPathId
@@ -137,6 +142,9 @@ export async function authorizeActionV2(
       },
       {
         budget,
+        ...(dependencies.authorizationOptions?.transaction
+          ? { transaction: dependencies.authorizationOptions.transaction }
+          : {}),
         ...(input.gateway ? { gateway: input.gateway } : {}),
         ...(input.correlationId ? { correlationId: input.correlationId } : {}),
       }
