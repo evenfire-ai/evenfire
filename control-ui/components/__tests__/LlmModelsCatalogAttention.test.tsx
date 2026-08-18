@@ -2,7 +2,13 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { LlmAllowedModel } from '@lib/api'
-import { deleteLlmModel, getAdminAttention, getLlmModels, getUnpricedModels } from '@lib/api'
+import {
+  deleteLlmModel,
+  formatApiError,
+  getAdminAttention,
+  getLlmModels,
+  getUnpricedModels,
+} from '@lib/api'
 import { LlmModelsSurface } from '../LlmModelsSurface'
 import { ToastProvider } from '../Toast'
 
@@ -50,14 +56,14 @@ vi.mock('@lib/api', async importOriginal => {
   }
 })
 
-// Mirrors the Error shape lib/api.ts formatApiError produces: message plus the
-// preserved structured `.status`/`.code`/`.body` the typed helpers read.
+// Derive the rejected Error from the REAL client error producer (formatApiError,
+// lib/api.ts) instead of re-implementing its `.status`/`.code`/`.body` shape by
+// hand (T1). A change to how control-ui represents an API error now flows into
+// these tests rather than silently diverging from a hand-mirrored copy.
 function structuredApiError(status: number, body: Record<string, unknown>): Error {
-  const error = new Error(`${status} Conflict - ${String(body.error)}`)
-  ;(error as Error & { status?: number }).status = status
-  ;(error as Error & { code?: string }).code = String(body.error)
-  ;(error as Error & { body?: unknown }).body = body
-  return error
+  const text = JSON.stringify(body)
+  const res = new Response(text, { status, headers: { 'content-type': 'application/json' } })
+  return formatApiError(res, text)
 }
 
 const model: LlmAllowedModel = {
