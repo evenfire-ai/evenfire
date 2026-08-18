@@ -25,7 +25,10 @@ type HostFleetSchedulerDependencies = {
   recordRequest: (result: HostFleetRequestResult) => void
 }
 
-function hostFleetRequestCovers(
+// Exported for property coverage (hostFleetScheduler.properties.test.ts): this is
+// a (state, input) -> boolean precedence predicate whose invariants (reflexivity,
+// mode/revision/generation precedence) must hold as the request shape evolves.
+export function hostFleetRequestCovers(
   active: HostFleetReconcileRequest,
   requested: HostFleetReconcileRequest
 ): boolean {
@@ -36,7 +39,10 @@ function hostFleetRequestCovers(
   return active.ccLifecycleGeneration === requested.ccLifecycleGeneration
 }
 
-function mergeHostFleetRequests(
+// Exported for property coverage: this is the (state, input) -> state merge whose
+// idempotency / commutativity / associativity / no-drop invariants must survive
+// changes to the request shape (the PR added the `inputRevision` dimension).
+export function mergeHostFleetRequests(
   pending: HostFleetReconcileRequest,
   requested: HostFleetReconcileRequest
 ): HostFleetReconcileRequest {

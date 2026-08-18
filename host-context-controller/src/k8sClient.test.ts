@@ -311,24 +311,26 @@ vi.mock('./hostReconciler', () => ({
   },
 }))
 
-vi.mock('./networkPolicyReconciler', () => ({
-  sameContextDesiredRevision: (
-    expected: { name: string; namespace: string; spec: unknown },
-    current: { name: string; namespace: string; spec: unknown }
-  ) =>
-    expected.name === current.name &&
-    expected.namespace === current.namespace &&
-    JSON.stringify(expected.spec) === JSON.stringify(current.spec),
-  NetworkPolicyReconciler: class {
-    ensureDefaultPolicies = mocks.ensureDefaultPolicies
-    fullReconcile = mocks.netPolFullReconcile
-    reconcileExternalEgress = vi.fn()
-    reconcileContext = vi.fn()
-    reconcileDeleteContext = vi.fn()
-    cleanupExternalEgress = vi.fn()
-    hasCertifiedSafetyInventory = mocks.hasCertifiedSafetyInventory
-  },
-}))
+vi.mock('./networkPolicyReconciler', async () => {
+  // Use the REAL safety-critical comparator (uid/generation-aware, canonicalized)
+  // instead of a hand-rolled stand-in that diverged from prod semantics; only the
+  // NetworkPolicyReconciler class is replaced with a test double.
+  const actual = await vi.importActual<typeof import('./networkPolicyReconciler')>(
+    './networkPolicyReconciler'
+  )
+  return {
+    sameContextDesiredRevision: actual.sameContextDesiredRevision,
+    NetworkPolicyReconciler: class {
+      ensureDefaultPolicies = mocks.ensureDefaultPolicies
+      fullReconcile = mocks.netPolFullReconcile
+      reconcileExternalEgress = vi.fn()
+      reconcileContext = vi.fn()
+      reconcileDeleteContext = vi.fn()
+      cleanupExternalEgress = vi.fn()
+      hasCertifiedSafetyInventory = mocks.hasCertifiedSafetyInventory
+    },
+  }
+})
 
 vi.mock('./bindingPolicyReconciler', () => ({
   BindingPolicyReconciler: class {

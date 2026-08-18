@@ -1738,9 +1738,17 @@ export class NetworkPolicyReconciler {
         new Promise<never>((_, reject) => {
           timeout = setTimeout(
             () =>
+              // A bounded-timeout DNS failure is a TRANSIENT resolver error, not a
+              // permanent one. classifyDnsError keys on `.code`, and a codeless Error
+              // falls into the 'permanent' (NXDOMAIN/expire) branch, which prunes the
+              // accumulated egress instead of freezing it — breaking D4 fail-static.
+              // Tag it ETIMEDOUT (already in TRANSIENT_DNS_CODES) so it freezes.
               reject(
-                new Error(
-                  `DNS resolution timed out after ${config.externalEgressDnsResolveTimeoutMs}ms`
+                Object.assign(
+                  new Error(
+                    `DNS resolution timed out after ${config.externalEgressDnsResolveTimeoutMs}ms`
+                  ),
+                  { code: 'ETIMEDOUT' }
                 )
               ),
             config.externalEgressDnsResolveTimeoutMs

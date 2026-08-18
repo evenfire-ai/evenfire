@@ -151,8 +151,6 @@ function alignRevocationCounters(watcher: InstanceType<typeof McpServerWatcher>)
   w.mcpServerCacheSynced = true
   w.contextCacheSynced = true
   w.hostCacheSynced = true
-  w.networkPolicyRevocationContextGeneration = w.contextWatchGeneration
-  w.networkPolicyRevocationServerGeneration = w.mcpWatchGeneration
   w.networkPolicyRevocationContextRevision = w.contextDesiredRevision
   w.networkPolicyRevocationServerRevision = w.mcpServerDesiredRevision
 }
