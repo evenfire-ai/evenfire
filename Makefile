@@ -424,6 +424,29 @@ minikube-pre-gate-sync: ## Enforce minikube sync before a gate (use GATE=<name>)
 test-gfs-real-postgres-minikube: ## Run GFS T1 real-Postgres suites against a validated branch-owned Minikube profile
 	@CONTEXT="$(MINIKUBE_PROFILE)" bash scripts/e2e/gfs-real-pg-minikube-gate.sh
 
+.PHONY: minikube-t2-preflight
+minikube-t2-preflight: ## Read-only, fail-loud T0/T1/T2 preflight for the explicit branch-owned Minikube profile
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2-preflight.sh
+
+.PHONY: minikube-t2
+minikube-t2: ## Run the local development T0, Real PostgreSQL T1, and exact-head T2 contract
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2.sh
+
+.PHONY: minikube-t2-real-postgres
+minikube-t2-real-postgres: ## Run the explicit local Real PostgreSQL lane without changing CI's DSN contract
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/e2e/minikube-real-postgres.sh
+
+.PHONY: minikube-t2-public-boundary
+minikube-t2-public-boundary: ## Reject secrets, credentials, private URLs, and raw runtime artifacts from the public diff
+	@scripts/tests/test-minikube-t2-public-boundary.sh
+
+.PHONY: minikube-t2-scenarios
+minikube-t2-scenarios: ## Exercise the fail-loud negative cases and transition classifier without a cluster
+	@scripts/tests/test-minikube-t2-scenarios.sh
+
 .PHONY: minikube-verify-network-policy
 minikube-verify-network-policy: ## Prove NetworkPolicy enforcement in clerum-test/minikube before custom-image gates
 	@CONTEXT="$(MINIKUBE_PROFILE)" scripts/minikube/verify-network-policy-enforcement.sh

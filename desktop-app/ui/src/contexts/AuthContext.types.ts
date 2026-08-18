@@ -3,6 +3,7 @@ import type {
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigState,
+  LoginBackendHint,
   SessionMe,
 } from '../../../src/types'
 import type { Tone } from '../uiTypes'
@@ -26,6 +27,7 @@ export interface AuthContextValue {
   runtimeConfigState: DesktopRuntimeConfigState | null
   desktopReleaseStatus: DesktopReleaseStatus | null
   pendingDesktopEnvironmentSetup: DesktopRuntimeConfig | null
+  backendSwitchHint: LoginBackendHint | null
   runtimeConfigMissing: boolean
   showRuntimeConfigSelector: boolean
   dependencyHealth: DependencyHealth | null
@@ -47,6 +49,7 @@ export interface AuthContextValue {
   ) => void
   loadSession: (options?: { preserveNav?: boolean }) => Promise<void>
   handlePasswordLogin: () => Promise<void>
+  handleSwitchLoginBackend: () => Promise<void>
   handleStartDesktopSetup: () => Promise<void>
   handleCompleteDesktopSetup: () => Promise<void>
   handleSaveRuntimeConfig: (
