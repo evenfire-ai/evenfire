@@ -69,6 +69,10 @@ RUN_ID="$(date +%s)-$$"
 PROXY_NAME="$(truncate_rfc1123 "e2e-hcc-churn-proxy-${RUN_ID}")"
 PROXY_EGRESS_NP="$(truncate_rfc1123 "${PROXY_NAME}-api")"
 HCC_PROXY_NP="$(truncate_rfc1123 "${PROXY_NAME}-from-hcc")"
+# The reused verify_hcc_proxy_network_policy runs a negative probe (a non-HCC pod
+# that must NOT reach the proxy) and references these names.
+PROBE_NAME="$(truncate_rfc1123 "${PROXY_NAME}-negative-probe")"
+PROBE_EGRESS_NP="$(truncate_rfc1123 "${PROXY_NAME}-from-probe")"
 FLEET_PREFIX="$(truncate_rfc1123 "e2e-hcc-churn-${RUN_ID}")"
 FLEET_SECRET="$(truncate_rfc1123 "${FLEET_PREFIX}-llm")"
 LOG_ARTIFACT="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-churn.XXXXXX")"
@@ -76,8 +80,14 @@ ORIGINAL_REPLICAS=""
 HCC_IMAGE=""
 K8S_API_CIDR=""
 PROXY_CREATED=0
+PROBE_CREATED=0
 FLEET_CREATED=0
 HCC_PATCHED=0
+# Log-stream state consumed by hcc-watch-recovery-logs.sh (start/stop_hcc_recovery_log_stream).
+# Declared here so `set -u` never trips when the stream helper first touches them.
+HCC_LOG_BUFFER="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-churn-stream.XXXXXX")"
+HCC_LOG_STREAM_PID=""
+START_TIME=""
 # shellcheck disable=SC2034
 HCC_GATE_LOCK_ACQUIRED=0 HCC_GATE_LOCK_NAME="" HCC_GATE_LOCK_UID="" HCC_GATE_FINALIZATION_FAILURE=""
 
@@ -148,6 +158,7 @@ cleanup() {
   local status=$? cleanup_failed=0 restore_ok=1
   trap - EXIT
   set +e
+  stop_hcc_recovery_log_stream
   if [ "$HCC_PATCHED" = 1 ]; then
     kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null 2>&1
     wait_until 120 "HCC stop" hcc_pods_absent >/dev/null 2>&1 || restore_ok=0
@@ -159,7 +170,8 @@ cleanup() {
     kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null 2>&1 || restore_ok=0
   fi
   [ "$PROXY_CREATED" = 1 ] && kctl delete deployment,service "$PROXY_NAME" -n "$HCC_NS" --ignore-not-found >/dev/null 2>&1
-  kctl delete networkpolicy "$PROXY_EGRESS_NP" "$HCC_PROXY_NP" -n "$HCC_NS" --ignore-not-found >/dev/null 2>&1
+  [ "$PROBE_CREATED" = 1 ] && kctl delete pod "$PROBE_NAME" -n "$HCC_NS" --ignore-not-found >/dev/null 2>&1
+  kctl delete networkpolicy "$PROXY_EGRESS_NP" "$HCC_PROXY_NP" "$PROBE_EGRESS_NP" -n "$HCC_NS" --ignore-not-found >/dev/null 2>&1
   [ "$restore_ok" = 1 ] || {
     print_repair_instructions
     cleanup_failed=1
@@ -167,6 +179,7 @@ cleanup() {
   finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok" || cleanup_failed=1
   print_results || status=1
   [ "$cleanup_failed" = 0 ] || status=1
+  rm -f "$HCC_LOG_BUFFER"
   exit "$status"
 }
 trap cleanup EXIT
@@ -210,6 +223,8 @@ patch="$(jq -cn --arg ip "$proxy_ip" --arg cidr "$K8S_API_CIDR" '{spec:{template
 kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic -p "$patch" >/dev/null
 HCC_PATCHED=1
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=1 >/dev/null
+# Anchor the log stream to now so recovery-cycle assertions only see churn-era logs.
+START_TIME="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 start_hcc_recovery_log_stream
 
 deadline=$(($(date +%s) + READINESS_BUDGET_SEC))
