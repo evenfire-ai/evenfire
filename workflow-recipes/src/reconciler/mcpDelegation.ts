@@ -475,6 +475,10 @@ async function ensureMcpServer(
       }
 
       const carriedAnnotations: Record<string, string> = { ...existingAnnotations }
+      // Only the network ack pair is dropped. Other HCC-relevant handshake keys
+      // (notably clerum.io/pre-deploy) intentionally carry over from `existing`, even
+      // on the delegate path that does not re-specify them — HCC's re-ack guard keys
+      // off pre-deploy, so this is not the full set of handshake keys, just the ack.
       delete carriedAnnotations[NETWORK_READY_ANNOTATION]
       delete carriedAnnotations[NETWORK_READY_GENERATION_ANNOTATION]
       const mergedAnnotations = { ...carriedAnnotations, ...manifestAnnotations }
