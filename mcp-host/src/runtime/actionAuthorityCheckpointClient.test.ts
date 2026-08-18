@@ -5,15 +5,14 @@ import {
   hashActionTarget,
 } from '@clerum/action-context-contracts'
 import type { McpHostRuntimeAuth } from '../workflow/userApprovalRequester'
+import {
+  McpHostActionAuthorityCheckpointError,
+  checkpointMcpHostActionAuthority,
+  mcpHostActionAuthorityCheckpointRequest,
+} from './actionAuthorityCheckpointClient'
 
 const runtimeAuth = vi.hoisted(() => ({ refreshWithRecovery: vi.fn() }))
 vi.mock('../workflow/userApprovalRequester', () => runtimeAuth)
-
-const {
-  checkpointMcpHostActionAuthority,
-  mcpHostActionAuthorityCheckpointRequest,
-  McpHostActionAuthorityCheckpointError,
-} = await import('./actionAuthorityCheckpointClient')
 
 const resource = canonicalResourceIdentity({
   environmentId: 'development:local',
