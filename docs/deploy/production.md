@@ -60,6 +60,12 @@ kubectl apply -f ./charts/clerum-crds/crds/
     `member-registration-service` instead and leave the mode `remote`.
 11. **Observability** — metrics + log stack; alert on approval backlog and 5xx.
 
+For the generation-aware Desktop GFS rollout, read the [operator parity
+compatibility contract](../architecture/gfs-desktop-operator-parity.md#rollout-and-compatibility-contract)
+before upgrading. The first rollout intentionally requires one sign-in per
+existing external session, and direct callers of `DELETE /api/v1/members/:userId`
+must send both a non-empty `reason` and an `Idempotency-Key`.
+
 Use [minikube.md](minikube.md) as the **order-of-operations reference** even when
 the target is not minikube: the dependency graph is the same. One exception:
 minikube's `127.0.0.1` UI defaults cannot use hosted member-registration mode,

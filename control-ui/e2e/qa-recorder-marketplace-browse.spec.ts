@@ -36,26 +36,30 @@ test.describe('optional QA recorder: Control UI marketplace browse', () => {
     await page.getByRole('link', { name: 'Marketplace', exact: true }).click()
     await expect(page).toHaveURL(/\/marketplace\/connectors$/)
 
-    // Catalog shell: the TablePanelHeader subtitle and connector-only tablist
+    // Catalog shell: the TablePanelHeader subtitle and top-level Marketplace tabs
     // render regardless of catalog size or empty/loading/error state.
     await expect(
-      page.getByText('Discover and install connectors and plugins from the Marketplace.', {
+      page.getByText('Discover and install connectors from the Marketplace.', {
         exact: true,
       })
     ).toBeVisible({ timeout: 20_000 })
-    const entryTabs = page.getByRole('tablist', { name: 'Marketplace entry types' })
-    await expect(entryTabs.getByRole('tab', { name: 'Connectors', exact: true })).toBeVisible({
-      timeout: 20_000,
-    })
-    await expect(entryTabs.getByRole('tab', { name: 'Plugins', exact: true })).toHaveCount(0)
+    const marketplaceTabs = page.getByRole('tablist', { name: 'Marketplace sections' })
+    await expect(marketplaceTabs.getByRole('tab', { name: 'Connectors', exact: true })).toBeVisible(
+      {
+        timeout: 20_000,
+      }
+    )
+    await expect(page.getByRole('tab', { name: 'Connectors', exact: true })).toHaveCount(1)
+    await expect(page.getByRole('tab', { name: 'Plugins', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('tablist', { name: 'Marketplace entry types' })).toHaveCount(0)
 
     // Search: a query that matches nothing drives the result set to the empty
     // state (the catalog also shows it when entirely empty, so this is resilient
     // to stripped environments). Wait for initial load to release the input.
-    const connectorsSearch = page.getByLabel('Search Marketplace connectors', { exact: true })
+    const connectorsSearch = page.getByLabel('Search the Marketplace', { exact: true })
     await expect(connectorsSearch).toBeEnabled({ timeout: 20_000 })
     await connectorsSearch.fill('zzzz-no-such-entry')
-    await expect(page.getByText('No entries match your filters.', { exact: true })).toBeVisible({
+    await expect(page.getByText('No connectors match your filters.', { exact: true })).toBeVisible({
       timeout: 20_000,
     })
     await connectorsSearch.clear()

@@ -8,5 +8,8 @@
   "scripts": {
     "build": "node --check index.cjs",
     "test": "node --test index.test.cjs"
+  },
+  "devDependencies": {
+    "fast-check": "^4.9.0"
   }
 }

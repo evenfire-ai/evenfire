@@ -22,7 +22,8 @@
         "control-api/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-recipe-capability-policy/**",
-        "packages/image-policy/**"
+        "packages/image-policy/**",
+        "packages/display-field/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -31,7 +32,11 @@
       "name": "control-ui",
       "path": "control-ui",
       "rooted": true,
-      "source_paths": ["control-ui/**", "packages/workflow-recipe-capability-policy/**"],
+      "source_paths": [
+        "control-ui/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/display-field/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -49,7 +54,8 @@
       "source_paths": [
         "host-context-controller/**",
         "packages/workflow-recipe-capability-policy/**",
-        "packages/image-policy/**"
+        "packages/image-policy/**",
+        "packages/network-policy-core/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -135,6 +141,7 @@
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/network-policy-core/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -152,6 +159,7 @@
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/network-policy-core/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -168,6 +176,7 @@
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/network-policy-core/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -185,6 +194,7 @@
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/network-policy-core/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],

@@ -13,6 +13,13 @@ import path from 'node:path'
 import { AppService } from './appService.js'
 import { requireChatStore } from './chatStoreBinding.js'
 import {
+  PLUGIN_SDK_CAPABILITIES_CHANNEL,
+  PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,
+  PLUGIN_SDK_PERMISSIONS_CHANNEL,
+  PLUGIN_SDK_PERMISSION_STATE_CHANNEL,
+  PLUGIN_SDK_REQUEST_CHANNEL,
+} from './pluginSdkProtocol.js'
+import {
   DesktopRuntimeConfig,
   HostActivityStreamEvent,
   HostMessageRequest,
@@ -240,6 +247,10 @@ export function registerIpcHandlers(service: AppService): void {
       )
     }
   )
+  ipcMain.handle('auth:diagnoseLoginBackend', async event => {
+    assertTrustedSender(event)
+    return service.diagnoseLoginBackend()
+  })
   ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
     assertTrustedSender(event)
     return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())
@@ -426,6 +437,119 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
   ipcMain.handle(
+    'gfs:createFileFromPath',
+    async (
+      event,
+      payload: { parentResourceId: string; name: string; filePath: string; drive?: string }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.createGfsFileFromPath(
+        sanitizeString(payload?.parentResourceId),
+        sanitizeString(payload?.name),
+        sanitizeString(payload?.filePath),
+        drive
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:startFileUpload',
+    async (
+      event,
+      payload: {
+        parentResourceId: string
+        name: string
+        filePath: string
+        drive?: string
+        resumeUploadId?: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const resumeUploadId = payload?.resumeUploadId
+        ? sanitizeString(payload.resumeUploadId)
+        : undefined
+      return service.startGfsFileUpload(
+        sanitizeString(payload?.parentResourceId),
+        sanitizeString(payload?.name),
+        sanitizeString(payload?.filePath),
+        drive,
+        resumeUploadId
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:startFileReplace',
+    async (
+      event,
+      payload: {
+        resourceId: string
+        filePath: string
+        drive?: string
+        ifMatch?: number
+        resumeUploadId?: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const resumeUploadId = payload?.resumeUploadId
+        ? sanitizeString(payload.resumeUploadId)
+        : undefined
+      return service.startGfsFileReplace(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.filePath),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch),
+        resumeUploadId
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:getUploadSnapshot',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.getGfsUploadSnapshot(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle('gfs:listUploadSessions', async (event, payload?: { drive?: string }) => {
+    assertTrustedSender(event)
+    return service.listGfsUploadSessions(payload?.drive ? sanitizeString(payload.drive) : undefined)
+  })
+  ipcMain.handle(
+    'gfs:pauseUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.pauseGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:resumeUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.resumeGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:cancelUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      await service.cancelGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+      return { ok: true }
+    }
+  )
+  ipcMain.handle(
     'gfs:replaceFile',
     async (
       event,
@@ -436,6 +560,22 @@ export function registerIpcHandlers(service: AppService): void {
       return service.replaceGfsFile(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.encodedData),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch)
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:replaceFileFromPath',
+    async (
+      event,
+      payload: { resourceId: string; filePath: string; drive?: string; ifMatch?: number }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.replaceGfsFileFromPath(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.filePath),
         drive,
         sanitizeOptionalInteger(payload?.ifMatch)
       )
@@ -508,6 +648,18 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('gfs:revokeGrant', async (event, payload: { grantId: string }) => {
     assertTrustedSender(event)
     return service.revokeGfsGrant(sanitizeString(payload?.grantId))
+  })
+  ipcMain.handle(
+    'gfs:listShares',
+    async (event, payload: { resourceId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.listGfsShares(sanitizeString(payload?.resourceId), drive)
+    }
+  )
+  ipcMain.handle('gfs:revokeShare', async (event, payload: { shareId: string }) => {
+    assertTrustedSender(event)
+    return service.revokeGfsShare(sanitizeString(payload?.shareId))
   })
   ipcMain.handle(
     'gfs:createShare',
@@ -1493,6 +1645,10 @@ export function registerIpcHandlers(service: AppService): void {
       await service.openSandboxUi({
         recipeNs,
         recipeName,
+        // Human title from the installed recipe, used verbatim in consent
+        // prompts and notification attribution. Comes from the trusted renderer's
+        // app list — NEVER from anything the plugin itself can set.
+        title: sanitizeString((payload as { title?: unknown })?.title) || undefined,
         defaultPath: typeof payload?.defaultPath === 'string' ? payload.defaultPath : undefined,
         routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
@@ -1554,5 +1710,95 @@ export function registerIpcHandlers(service: AppService): void {
   // map is dropped with an error.
   ipcMain.handle('clerum:sandbox-ui:request-refresh', async event => {
     await service.requestSandboxUiRefresh(event.sender.id)
+  })
+
+  // ── Plugin UI SDK ────────────────────────────────────────────────────
+  //
+  // Same trust model as the refresh IPC above and for the same reason: these
+  // four channels are reachable by untrusted plugin JS, so `assertTrustedSender`
+  // cannot be the gate (the embed's origin is rpc-proxy). Identity comes from
+  // the surface pinning map, and every other check — consent, rate limits,
+  // response minimization, audit — happens inside the broker. Nothing is
+  // enforced here; this layer only routes.
+
+  // Lazily imported: `pluginSdkRuntime` pulls in `config`, whose module-level
+  // profile load needs a real Electron `app`. Importing it at the top of this
+  // file would make merely registering IPC handlers depend on an initialized
+  // Electron runtime. Mirrors how `appService` defers `sandboxUiDriver`.
+  const pluginSdk = async () => (await import('./pluginSdkRuntime.js')).getPluginSdkRuntime()
+
+  ipcMain.handle(PLUGIN_SDK_CAPABILITIES_CHANNEL, async event =>
+    (await pluginSdk()).broker.listCapabilities(event.sender.id)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_PERMISSION_STATE_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.permissionState(event.sender.id, payload)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_PERMISSIONS_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.requestPermissions(event.sender.id, payload)
+  )
+
+  ipcMain.handle(PLUGIN_SDK_REQUEST_CHANNEL, async (event, payload: unknown) =>
+    (await pluginSdk()).broker.request(event.sender.id, payload)
+  )
+
+  // ── Plugin SDK, trusted-renderer half ────────────────────────────────
+  //
+  // The consent resolve channel IS trusted-sender guarded. That is what stops
+  // an embed from answering its own permission prompt, and it pairs with the
+  // main-generated `promptId` nonce: a resolve for an unknown or already-
+  // answered prompt is dropped inside the gate (spec §9.4).
+
+  ipcMain.handle(
+    PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,
+    async (event, payload: { promptId?: unknown; allowed?: unknown }) => {
+      assertTrustedSender(event)
+      const promptId = sanitizeString(payload?.promptId)
+      if (!promptId) throw new Error('promptId is required')
+      const allowed = Array.isArray(payload?.allowed)
+        ? payload.allowed.filter((entry): entry is string => typeof entry === 'string')
+        : []
+      return (await pluginSdk()).resolveConsentPrompt(promptId, allowed)
+    }
+  )
+
+  ipcMain.handle('pluginSdk:listGrants', async event => {
+    assertTrustedSender(event)
+    return (await pluginSdk()).listGrants()
+  })
+
+  ipcMain.handle(
+    'pluginSdk:revoke',
+    async (event, payload: { pluginId?: unknown; capability?: unknown }) => {
+      assertTrustedSender(event)
+      const pluginId = sanitizeString(payload?.pluginId)
+      const capability = sanitizeString(payload?.capability)
+      if (!pluginId) throw new Error('pluginId is required')
+      const runtime = await pluginSdk()
+      if (capability) await runtime.revokeGrant(pluginId, capability)
+      else await runtime.revokeAllForPlugin(pluginId)
+    }
+  )
+
+  ipcMain.handle(
+    'pluginSdk:activity',
+    async (event, payload: { limit?: unknown; includeAmbient?: unknown }) => {
+      assertTrustedSender(event)
+      return (await pluginSdk()).readAudit({
+        limit: sanitizeOptionalInteger(payload?.limit),
+        includeAmbient: payload?.includeAmbient === true,
+      })
+    }
+  )
+
+  ipcMain.handle('pluginSdk:clearActivity', async event => {
+    assertTrustedSender(event)
+    await (await pluginSdk()).clearAudit()
+  })
+
+  ipcMain.handle('pluginSdk:setTheme', async (event, payload: { theme?: unknown }) => {
+    assertTrustedSender(event)
+    ;(await pluginSdk()).setTheme(payload?.theme)
   })
 }

@@ -374,6 +374,14 @@ export type UserContexts = {
  */
 export type AgentWithMcpServers = {
   name: string
+  /**
+   * Human-visible name for the agent (Agent CRD `spec.host`), surfaced by
+   * control-api's agent directory (accessReconciliation.buildAgentDirectoryEntry)
+   * and threaded through external-rest-api. `spec.host` is required in the CRD,
+   * so this is expected to always be present for a real agent; it is optional on
+   * the wire only to stay compatible with pre-display API builds.
+   */
+  displayName?: string
   contextRef: string | null
   provider?: string | null
   mcpServers: Array<{ name: string }>
@@ -447,6 +455,22 @@ export type AccessCatalog = {
    * as unknown.
    */
   agentProviderByName?: Record<string, string | null>
+  /**
+   * Visible name (Agent CRD `spec.host`) keyed by agent `metadata.name`. Built
+   * once at this producer boundary from the wire `displayName` (mirroring
+   * control-api's `configuredDisplayName || name` guard), so renderer consumers
+   * read `agentDisplayByName[name]` directly WITHOUT re-adding a `|| name`
+   * fallback (spec Decision #6: the guard lives at the producer, not sprinkled
+   * across consumers). Present when the catalog carried any agent display.
+   */
+  agentDisplayByName?: Record<string, string>
+  /**
+   * Visible name (Context CRD `spec.displayName`) keyed by context id. Optional
+   * field with no dedicated producer on the session path yet (external context
+   * display endpoint undecided — spec §8 / UT-7b), so consumers apply the single
+   * sanctioned fallback `contextDisplayById[id] ?? id`.
+   */
+  contextDisplayById?: Record<string, string>
 }
 
 export type RpcMcpServer = {
@@ -526,6 +550,22 @@ export type SessionState = {
 }
 
 export type PasswordLoginResult = SessionState
+
+/**
+ * Actionable diagnosis returned after a login failure when the app is pointed at
+ * a backend that isn't answering but a local Evenfire (minikube) IS reachable.
+ * Surfaced as a one-click "switch to Localhost and retry" affordance so a
+ * connection failure against the wrong runtime profile stops reading as a bare
+ * "login failed". Computed by `AppService.diagnoseLoginBackend`.
+ */
+export type LoginBackendHint = {
+  /** Runtime-config option to switch to (the localhost option's id). */
+  targetOptionId: string
+  /** Human label for the switch target, e.g. "Localhost". */
+  targetLabel: string
+  /** Human label for the backend the user is currently pointed at. */
+  activeLabel: string
+}
 
 export type InvitationPreview = {
   id: string

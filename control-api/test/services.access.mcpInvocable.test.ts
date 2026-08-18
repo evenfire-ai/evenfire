@@ -218,6 +218,30 @@ describe('resolveMcpServersForAgents', () => {
     ])
   })
 
+  // UT-7a (F3, agents): the per-agent directory entry that external routes put on
+  // the wire carries displayName = Host spec.host — a DISTINCT free-text value,
+  // not the RFC1123 identifier. An accidental `|| name` would fail this.
+  it("sets each agent's displayName from spec.host (distinct from metadata.name)", async () => {
+    const g = gateway({
+      contexts: [ctx('trading', ['mcp-a'])],
+      mcpservers: [okServer('mcp-a')],
+      hosts: [
+        {
+          metadata: { name: 'trader', namespace: 'mcp-host' },
+          spec: { contextRef: 'trading', host: 'Trading Agents / EU' },
+        },
+      ],
+    })
+    const out = await resolveMcpServersForAgents(g, {
+      mcpServersNamespace: 'mcp-server',
+      hostsNamespace: 'mcp-host',
+      agentNames: ['trader'],
+    })
+    expect(out).toHaveLength(1)
+    expect(out[0].name).toBe('trader')
+    expect(out[0].displayName).toBe('Trading Agents / EU')
+  })
+
   it('omits agents whose Host CR is missing', async () => {
     const g = gateway({
       contexts: [ctx('trading', ['mcp-a'])],

@@ -7,8 +7,10 @@ export async function listTeams(userId: string, currentTeamId: string) {
     `SELECT t.id, t.name, tm.role
        FROM team_members tm
        JOIN teams t ON t.id = tm.team_id
+       JOIN users u ON u.id = tm.user_id
       WHERE tm.user_id = $1
         AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
       ORDER BY t.created_at ASC`,
     [userId]
   )
@@ -23,9 +25,10 @@ export async function listAllTeams() {
   const result = await pool.query(
     `SELECT t.id,
             t.name,
-            COUNT(CASE WHEN tm.status = 'active' THEN 1 END) AS member_count
+            COUNT(CASE WHEN tm.status = 'active' AND u.lifecycle_state = 'active' THEN 1 END) AS member_count
        FROM teams t
   LEFT JOIN team_members tm ON tm.team_id = t.id
+  LEFT JOIN users u ON u.id = tm.user_id
    GROUP BY t.id, t.name
    ORDER BY t.name ASC`
   )
@@ -57,9 +60,11 @@ export async function getCurrentTeam(
     `SELECT t.id, t.name, tm.role
        FROM teams t
        JOIN team_members tm ON tm.team_id = t.id
+       JOIN users u ON u.id = tm.user_id
       WHERE tm.user_id = $1
         AND tm.team_id = $2
         AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [userId, teamId]
   )

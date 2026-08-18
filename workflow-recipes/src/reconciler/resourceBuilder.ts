@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { createHash, randomBytes } from 'node:crypto'
+import { RESOLVED_AT_ANNOTATION, TARGETS_ANNOTATION } from '@clerum/network-policy-core'
 import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   isPlatformRegistryImage,
@@ -1372,7 +1373,12 @@ export function buildUiEgressNetworkPolicy(
   recipe: WorkflowRecipeCRD,
   sandboxUiNamespace: string,
   sandboxRecipesNamespace: string,
-  resolvedExternal: ResolvedExternalEgressInput[]
+  resolvedExternal: ResolvedExternalEgressInput[],
+  // issue #299: when the reconciler runs the sliding-window accumulator it
+  // supplies the serialized state (state + targets + resolved-at). When
+  // present these REPLACE the single-snapshot provenance — `resolvedExternal`
+  // is then the accumulated effective set, and these annotations describe it.
+  stateAnnotations?: Record<string, string>
 ): k8s.V1NetworkPolicy | null {
   const ui = recipe.spec.ui
   if (!ui) return null
@@ -1415,7 +1421,7 @@ export function buildUiEgressNetworkPolicy(
     })
   }
 
-  const annotations = buildEgressProvenanceAnnotations(external)
+  const annotations = stateAnnotations ?? buildEgressProvenanceAnnotations(external)
 
   return {
     apiVersion: 'networking.k8s.io/v1',
@@ -1535,8 +1541,8 @@ function buildEgressProvenanceAnnotations(
   if (resolved.length === 0) return undefined
   const targets = resolved.map(r => `${r.source.fqdn}=${r.cidr}`).join(',')
   return {
-    'clerum.io/egress-fqdn-resolved-at': new Date().toISOString(),
-    'clerum.io/egress-fqdn-targets': targets,
+    [RESOLVED_AT_ANNOTATION]: new Date().toISOString(),
+    [TARGETS_ANNOTATION]: targets,
   }
 }
 
@@ -1666,7 +1672,11 @@ export function buildWorkloadEgressNetworkPolicy(
   workload: WorkloadDef,
   recipe: WorkflowRecipeCRD,
   workloadNamespace: string,
-  resolvedExternal: ResolvedExternalEgressInput[]
+  resolvedExternal: ResolvedExternalEgressInput[],
+  // issue #299: accumulated sliding-window state (state + targets + resolved-at)
+  // supplied by the reconciler. When present, REPLACES single-snapshot
+  // provenance; `resolvedExternal` is then the accumulated effective set.
+  stateAnnotations?: Record<string, string>
 ): k8s.V1NetworkPolicy | null {
   const bindings = workload.egressBindings ?? []
   if (bindings.length === 0) return null
@@ -1712,7 +1722,7 @@ export function buildWorkloadEgressNetworkPolicy(
 
   if (egress.length === 0) return null
 
-  const annotations = buildEgressProvenanceAnnotations(resolvedExternal)
+  const annotations = stateAnnotations ?? buildEgressProvenanceAnnotations(resolvedExternal)
 
   return {
     apiVersion: 'networking.k8s.io/v1',

@@ -24,6 +24,8 @@ export default defineConfig({
       'lib/**/__tests__/**/*.{test,spec}.{ts,tsx}',
       'lib/__tests__/**/*.{test,spec}.{ts,tsx}',
       'components/__tests__/**/*.{test,spec}.{ts,tsx}',
+      'app/**/__tests__/**/*.{test,spec}.{ts,tsx}',
+      'test/**/__tests__/**/*.{test,spec}.{ts,tsx}',
     ],
     exclude: ['node_modules', '.next'],
   },

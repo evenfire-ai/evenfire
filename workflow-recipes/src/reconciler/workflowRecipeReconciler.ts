@@ -14,6 +14,7 @@
  * 11. Handle delete (reverse dependency order, skip PVCs)
  */
 import * as k8s from '@kubernetes/client-node'
+import { STATE_ANNOTATION } from '@clerum/network-policy-core'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
 import {
@@ -54,7 +55,13 @@ import {
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { sort as sortDependencies } from './dependencyGraph'
-import { type FqdnLookup, defaultFqdnLookup, resolveExternalEgress } from './fqdnResolver'
+import { type AccumulateOutput, accumulateExternalEgress } from './externalEgressAccumulator'
+import {
+  type FqdnLookup,
+  defaultFqdnLookup,
+  isBlockedExternalIPv4,
+  resolveExternalEgress,
+} from './fqdnResolver'
 import { filterByIncludeWhen } from './includeWhenFilter'
 import { resolve as resolveInputs } from './inputResolver'
 import {
@@ -84,6 +91,7 @@ import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+  type PluginWorkloadSdkStatusProjection,
   buildPluginWorkloadSdkStatus,
   validatePluginWorkloadSdkSpec,
 } from './pluginWorkloadSdkValidator'
@@ -501,6 +509,17 @@ export interface ReconcileResult {
   /** Cleanup completed successfully while the SDK feature flag was off. */
   pluginWorkloadSdkTeardownConfirmed?: boolean
   pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+  /**
+   * SDK capability projection (conditions + `status.pluginWorkloadSdk` value)
+   * derived once per reconcile from this result. Populated by the watcher after
+   * `reconcile()` returns (see `projectPluginWorkloadSdk`) so BOTH
+   * `shouldPatchRecipeStatus` (to detect a computed awaiting_policy↔validated
+   * transition that no other diff would surface — issue #375) and `patchStatus`
+   * (to avoid recomputing it) consume the same object. Left undefined on paths
+   * that do not run the SDK lane (e.g. workload-status-only refresh), where the
+   * SDK comparison is intentionally skipped.
+   */
+  pluginWorkloadSdkProjection?: PluginWorkloadSdkStatusProjection
   workflowPhase?: import('../workflow/types').WorkflowPhase
   clearWorkflowExecution?: boolean
   /** When true, the caller should NOT patch the CRD status — the phase hasn't changed. */
@@ -627,6 +646,51 @@ export class RuntimeScopeResolutionPendingError extends Error {
   }
 }
 
+/**
+ * Recursively canonicalize a value: sort every object's keys (order-insensitive
+ * for objects) while PRESERVING array order (egress/to/ports arrays are emitted
+ * in a deterministic order and the apiserver preserves it). Used to compare
+ * policy egress without the key-ordering fragility of a raw JSON.stringify.
+ */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize)
+  if (value && typeof value === 'object') {
+    const src = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(src).sort()) out[k] = canonicalize(src[k])
+    return out
+  }
+  return value
+}
+
+/**
+ * A representation-independent signature of a policy's egress: a canonical
+ * (deep key-sorted) JSON of `spec.egress`. Decides whether a write is needed
+ * WITHOUT the key-ordering fragility of a raw JSON.stringify (audit R2-1): the
+ * apiserver/client deserializes rule objects with keys ordered differently than
+ * the builder emits them, so a raw compare is always unequal on a live cluster
+ * and would defeat the no-churn gate. Unlike the earlier tuple-only signature,
+ * this captures the FULL rule — including `namespaceSelector`/`podSelector` `to`
+ * entries for internal/cluster-local egress (audit H1): a tuple signature over
+ * ipBlock only was blind to selector changes, stranding a stale policy.
+ *
+ * It also projects `podSelector` and `policyTypes` (audit H-C), not just
+ * `spec.egress`: a policy whose selector or policy types drifted out-of-band —
+ * with the same destination rules — must count as changed so the reconcile
+ * re-owns it, rather than leaving external egress applied to the wrong pods.
+ * `policyTypes` is order-insensitive (sorted). Mirrors HCC's `egressSignature`.
+ */
+export function egressSignature(policy: k8s.V1NetworkPolicy): string {
+  const spec = policy.spec
+  return JSON.stringify(
+    canonicalize({
+      podSelector: spec?.podSelector ?? {},
+      policyTypes: [...(spec?.policyTypes ?? [])].sort(),
+      egress: spec?.egress ?? [],
+    })
+  )
+}
+
 export class WorkflowRecipeReconciler {
   private appsApi: k8s.AppsV1Api
   private batchApi: k8s.BatchV1Api
@@ -637,6 +701,12 @@ export class WorkflowRecipeReconciler {
   private workflowReconciler: WorkflowReconciler | null = null
   private _tokenFactory: JwtTokenFactory | null = null
   private fqdnLookup: FqdnLookup
+  // H2 (issue #299): the smallest DNS TTL (ms) observed across external-egress
+  // resolutions. The refresh loop advances to <= this/2 so a rotating low-TTL
+  // host is sampled every rotation. Ratchets down and never recovers until
+  // restart — deliberately: over-refreshing is cheap (writes are no-ops via the
+  // F2 gate) and the safe direction; under-refreshing would reopen #299.
+  private externalEgressMinObservedTtlMs = Infinity
   private secretReverseIndex: SecretReverseIndex | null
   private verifyWorkflowRunProvenance: NonNullable<
     WorkflowRecipeReconcilerDeps['verifyWorkflowRunProvenance']
@@ -1230,6 +1300,19 @@ export class WorkflowRecipeReconciler {
   // ─── Main Pipeline ────────────────────────────────────────────────
 
   async reconcile(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
+    // issue #375: compute the Plugin Workload SDK capability projection ONCE per
+    // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
+    // publish a computed awaiting_policy↔validated transition that no
+    // phase/message/workload diff would otherwise surface; patchStatus reuses
+    // the same object instead of rebuilding it. Paths that bypass this method
+    // (e.g. observeCurrentWorkloadStatus) leave the projection undefined, which
+    // both consumers treat as "no SDK opinion this pass".
+    const result = await this.reconcileInternal(recipe)
+    result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
+    return result
+  }
+
+  private async reconcileInternal(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
@@ -1434,13 +1517,17 @@ export class WorkflowRecipeReconciler {
       }
 
       if (currentPhase === 'active' && awaitsTriggeredRun && !wfExecPhase) {
-        // Plugin Workload SDK promptBridge recipes keep an eager mcp-host whose
-        // provider must be (re-)configured once it becomes Ready and after any
-        // pod restart. Fall through to the inner reconcile so ensureEagerSdkMcpHost
-        // retries the /configure; the short-circuit below would freeze it
-        // provider_unavailable forever. clientNotifications-only needs no provider,
-        // so it keeps the cheap short-circuit.
-        if (!recipe.spec.pluginWorkloadSdk?.promptBridge) {
+        // Plugin Workload SDK recipes (BOTH families) keep an eager mcp-host and
+        // must fall through to the inner reconcile: promptBridge so
+        // ensureEagerSdkMcpHost retries the /configure (the short-circuit below
+        // would freeze it provider_unavailable forever), and clientNotifications-
+        // only so the reconcile re-gathers the bootstrap proof and recomputes the
+        // capability projection (issue #375 jozer BLOCKER: short-circuiting here
+        // returned skipStatusPatch:true, so a computed awaiting_policy→validated
+        // transition was never published for that family). The Step 8 ownership
+        // gate inside the inner reconcile covers Secret-ownership revocation on
+        // the fall-through path, exactly as it already did for promptBridge.
+        if (!recipe.spec.pluginWorkloadSdk) {
           if (coordinatorGfsPolicyCanOpen) {
             await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
           }
@@ -1566,11 +1653,24 @@ export class WorkflowRecipeReconciler {
         // operator re-labels the Secret.
         const activeOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
         if (activeOwnership) return activeOwnership
-        return {
-          phase: 'active' as RecipePhase,
-          message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
-          workloadStatuses: [],
-          skipStatusPatch: true,
+        // issue #375 (jozer BLOCKER): Plugin Workload SDK recipes fall through to
+        // the inner reconcile (mirroring the awaiting-trigger carve-out above) so
+        // the bootstrap proof is re-gathered and a computed capability transition
+        // (e.g. awaiting_policy→validated) is actually published — this
+        // short-circuit's skipStatusPatch:true suppressed it unconditionally.
+        // The gfs/credentials/ownership enforcement above has already run.
+        // EXCEPTION: while a workflow execution is in progress the short-circuit
+        // is kept even for SDK recipes — this branch exists to protect the
+        // coordinator's 409-free windows, and the capability publication is
+        // level-triggered (requeue + watchdog) so it lands on the next
+        // non-running pass.
+        if (!recipe.spec.pluginWorkloadSdk || wfInProgress) {
+          return {
+            phase: 'active' as RecipePhase,
+            message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
+            workloadStatuses: [],
+            skipStatusPatch: true,
+          }
         }
       }
 
@@ -3905,25 +4005,104 @@ export class WorkflowRecipeReconciler {
 
     const externals = recipe.spec.ui?.egress?.external ?? []
     const { resolved, failures } = await resolveExternalEgress(externals, this.fqdnLookup)
-    if (failures.length > 0) {
+    this.recordExternalEgressTtl(resolved)
+
+    // Permanent failures (no-records / blocked range) never author a partial
+    // policy — fail exactly as the single-snapshot resolver did.
+    const permanentFailures = failures.filter(f => !f.retryable)
+    if (permanentFailures.length > 0) {
       throw egressResolutionError(
         `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
-        failures
+        permanentFailures
       )
     }
+
+    let effectiveResolved: rb.ResolvedExternalEgressInput[] = resolved
+    let stateAnnotations: Record<string, string> | undefined
+    let existing: k8s.V1NetworkPolicy | null = null
+    let egressRenewalDue = false
+    // H-E: the write gate compares rendered spec.egress (ipBlock cidr+port, no
+    // fqdn), so a rename old.example.com→new.example.com onto the SAME ip/port is
+    // spec-identical and would be skipped, discarding the re-attributed state
+    // annotation and losing the overlap grace when the new name later rotates.
+    // acc.changed is over (fqdn,ip,port,protocol), so it catches the rename.
+    let egressStateChanged = false
+    // R1-M2: read the live policy for ALL cases, not only external egress, so an
+    // internal-only sibling policy (ui.egress.internal[] with no external[]) can
+    // hit the no-op gate below instead of being rewritten on every reconcile —
+    // which the 60s external-egress refresh loop amplifies for mixed recipes. For
+    // external egress it also seeds the accumulator's rehydration (H5).
+    existing = await this.readNetworkPolicyOrNull(policyName, ns)
     if (externals.length > 0) {
+      // issue #299: fold this DNS snapshot into the accumulated sliding-window
+      // set persisted on the live policy's annotations (rehydrate H5).
+      const acc = accumulateExternalEgress({
+        externals: externals.map(e => ({ fqdn: e.fqdn, port: e.port })),
+        resolveResult: { resolved, failures },
+        previousAnnotations: existing?.metadata?.annotations,
+        now: Date.now(),
+        config: {
+          overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+          maxEntries: this.config.externalEgressMaxEntries,
+        },
+      })
+      // Bootstrap fail-closed: a transient resolver failure with NOTHING to
+      // freeze (no rehydratable prior set) must not author an empty policy.
+      if (acc.entries.length === 0 && failures.length > 0) {
+        throw egressResolutionError(
+          `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
+          failures
+        )
+      }
+      // Audit L3: a transient failure of a newly-added FQDN (with resolving
+      // siblings) does not throw and freezes nothing — surface it so the missing
+      // egress until the next refresh is not silent.
+      if (failures.length > 0) {
+        console.warn(
+          `[WR-Reconciler] ${policyName}: ${failures.length} external egress FQDN(s) failed to resolve this round; policy written without them until the next refresh converges: ${failures
+            .map(f => `${f.fqdn} (${f.retryable ? 'transient' : 'permanent'})`)
+            .join(', ')}`
+        )
+      }
+      this.warnEgressAccumulator(policyName, acc)
+      // Defense-in-depth (audit M3): rehydrated IPs bypass the fresh CIDR gate,
+      // so re-validate the effective set against blocked ranges before rendering.
+      effectiveResolved = acc.resolved.filter(
+        r => !isBlockedExternalIPv4(r.cidr.replace(/\/\d+$/, ''))
+      )
+      stateAnnotations = acc.annotations
+      egressRenewalDue = acc.renewalDue
+      egressStateChanged = acc.changed
+
       this.assertClusterEnforcesExternalEgress(
         recipe,
         'WRC sandbox-ui external egress policy is ready to apply'
       )
     }
 
-    const policy = rb.buildUiEgressNetworkPolicy(recipe, ns, this.config.sandboxNamespace, resolved)
+    const policy = rb.buildUiEgressNetworkPolicy(
+      recipe,
+      ns,
+      this.config.sandboxNamespace,
+      effectiveResolved,
+      stateAnnotations
+    )
 
     if (!policy) {
       await this.safeDelete(
         () => this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns }),
         `NetworkPolicy "${policyName}" in ${ns}`
+      )
+      return
+    }
+
+    // issue #299: NO-OP when the accumulated egress set and rules are already
+    // live — a TTL-only refresh must not churn the apiserver/dataplane. But DO
+    // write when the persisted window is aging (renewalDue, audit M1), even if
+    // the set is unchanged, so a stable-then-rotated IP keeps its overlap grace.
+    if (!this.egressWriteNeeded(existing, policy) && !egressRenewalDue && !egressStateChanged) {
+      console.log(
+        `[WR-Reconciler] NetworkPolicy "${policyName}" in ${ns} egress set unchanged — no-op`
       )
       return
     }
@@ -4290,22 +4469,82 @@ export class WorkflowRecipeReconciler {
         externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
         this.fqdnLookup
       )
-      if (failures.length > 0) {
+      this.recordExternalEgressTtl(resolvedExternal)
+
+      // Permanent failures never author a partial policy — fail as before.
+      const permanentFailures = failures.filter(f => !f.retryable)
+      if (permanentFailures.length > 0) {
         throw egressResolutionError(
           `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
-          failures
+          permanentFailures
         )
       }
+
+      let effectiveExternal: rb.ResolvedExternalEgressInput[] = resolvedExternal
+      let wlStateAnnotations: Record<string, string> | undefined
+      let existingWlPolicy: k8s.V1NetworkPolicy | null = null
+      let wlEgressRenewalDue = false
+      let wlEgressStateChanged = false // H-E: catch fqdn-attribution-only changes
+      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
+      // R1-M2: read the live policy for ALL cases so an internal-only (cluster-
+      // local) workload egress policy hits the no-op gate instead of churning
+      // every reconcile; for external egress it also seeds rehydration (H5).
+      existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
       if (externalDeclared.length > 0) {
+        // issue #299: accumulate the sliding-window egress set (rehydrate H5).
+        const acc = accumulateExternalEgress({
+          externals: externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
+          resolveResult: { resolved: resolvedExternal, failures },
+          previousAnnotations: existingWlPolicy?.metadata?.annotations,
+          now: Date.now(),
+          config: {
+            overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+            maxEntries: this.config.externalEgressMaxEntries,
+          },
+        })
+        // Bootstrap fail-closed: transient failure with nothing to freeze.
+        if (acc.entries.length === 0 && failures.length > 0) {
+          throw egressResolutionError(
+            `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
+            failures
+          )
+        }
+        this.warnEgressAccumulator(wlPolicyName, acc)
+        // Defense-in-depth (audit M3): re-validate rehydrated IPs vs blocked ranges.
+        effectiveExternal = acc.resolved.filter(
+          r => !isBlockedExternalIPv4(r.cidr.replace(/\/\d+$/, ''))
+        )
+        wlStateAnnotations = acc.annotations
+        wlEgressRenewalDue = acc.renewalDue
+        wlEgressStateChanged = acc.changed
+
         this.assertClusterEnforcesExternalEgress(
           recipe,
           `WRC workload "${w.id}" external egress policy is ready to apply`
         )
       }
 
-      const policy = rb.buildWorkloadEgressNetworkPolicy(w, recipe, wlNs, resolvedExternal)
+      const policy = rb.buildWorkloadEgressNetworkPolicy(
+        w,
+        recipe,
+        wlNs,
+        effectiveExternal,
+        wlStateAnnotations
+      )
       if (!policy) {
         await this.deleteWorkloadEgressIfExists(recipe.metadata.name, w.id, wlNs)
+        continue
+      }
+      // issue #299: NO-OP when the accumulated set and rules are already live —
+      // but still write when the persisted window is aging (renewalDue, M1).
+      if (
+        !this.egressWriteNeeded(existingWlPolicy, policy) &&
+        !wlEgressRenewalDue &&
+        !wlEgressStateChanged
+      ) {
+        console.log(
+          `[WR-Reconciler] NetworkPolicy "${wlPolicyName}" in ${wlNs} egress set unchanged — no-op`
+        )
         continue
       }
       await this.applyNetworkPolicy(policy, wlNs)
@@ -4350,6 +4589,103 @@ export class WorkflowRecipeReconciler {
     if (!ownsSameLane) {
       throw new NetworkPolicyOwnershipConflictError(
         `Refusing to replace NetworkPolicy "${desiredName}" in ${namespace}: existing policy is not the WRC internal-dependency policy for WorkflowRecipe "${desiredRecipe}"`
+      )
+    }
+  }
+
+  /**
+   * Read a NetworkPolicy for rehydration/no-op, returning null when it does not
+   * yet exist. Fails LOUD on any non-404 read error (issue #299): a rehydration
+   * we cannot perform must not silently blank the accumulated egress state.
+   */
+  private async readNetworkPolicyOrNull(
+    name: string,
+    namespace: string
+  ): Promise<k8s.V1NetworkPolicy | null> {
+    try {
+      return await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+  }
+
+  /**
+   * True when the live policy differs from the desired one and must be written
+   * (issue #299 NO-OP gate). Compares the accumulated-state fingerprint AND the
+   * enforced egress rules, so a change to either the external IP set OR the
+   * internal (sibling) rules still triggers a write — only a byte-for-byte match
+   * is a no-op.
+   */
+  /**
+   * The smallest DNS TTL (ms) observed so far across external-egress
+   * resolutions, or Infinity if none. The k8s refresh loop reads this to advance
+   * to <= TTL/2 (H2, issue #299).
+   */
+  get externalEgressRefreshMinTtlMs(): number {
+    return this.externalEgressMinObservedTtlMs
+  }
+
+  /**
+   * Ratchet the observed-min-TTL down from this round's resolved entries. Only
+   * positive TTLs count (an empty/A-less answer yields ttlSeconds 0, which is not
+   * a real refresh cadence).
+   */
+  private recordExternalEgressTtl(resolved: Array<{ ttlSeconds: number }>): void {
+    for (const r of resolved) {
+      if (r.ttlSeconds > 0) {
+        this.externalEgressMinObservedTtlMs = Math.min(
+          this.externalEgressMinObservedTtlMs,
+          r.ttlSeconds * 1000
+        )
+      }
+    }
+  }
+
+  private egressWriteNeeded(
+    existing: k8s.V1NetworkPolicy | null,
+    desired: k8s.V1NetworkPolicy
+  ): boolean {
+    if (!existing) return true
+    // Decide the write off the ENFORCED rules (the ipBlock set + ports), NOT the
+    // raw state annotation: serializeState embeds expiresAt/lastObservedAt, which
+    // renew on every OK tick, so comparing the annotation string would rewrite
+    // the policy every refresh even when the IP set is identical — an apiserver /
+    // dataplane write-storm (issue #299 audit F2). H4: a timestamp-only refresh
+    // must be a no-op.
+    if (egressSignature(existing) !== egressSignature(desired)) {
+      return true
+    }
+    // Rules are identical. Persist the new-format state annotation exactly once to
+    // migrate an EXTERNAL-egress policy that predates it, so a controller restart
+    // can rehydrate the accumulated window; thereafter (annotation present, egress
+    // unchanged) it is a no-op. R1-M2: gate on the DESIRED carrying a state
+    // annotation — an internal-only policy never has one, so without this guard it
+    // would return true forever and be rewritten every reconcile (mirrors HCC's
+    // externalEgressWriteNeeded).
+    const desiredState = desired.metadata?.annotations?.[STATE_ANNOTATION]
+    return Boolean(desiredState) && !existing.metadata?.annotations?.[STATE_ANNOTATION]
+  }
+
+  /**
+   * Surface the accumulator's staleness/pressure alarms (issue #299): a frozen
+   * FQDN means the resolver is transiently failing and we are serving last-known
+   * IPs (fail-static, H1); an over-cap eviction means the pool exceeded the
+   * alarm cap and least-recently-observed entries were dropped (H3).
+   */
+  private warnEgressAccumulator(policyName: string, acc: AccumulateOutput): void {
+    if (acc.frozenFqdns.length > 0) {
+      console.warn(
+        `[WR-Reconciler] ${policyName}: egress set FROZEN (fail-static) for ${acc.frozenFqdns.join(
+          ', '
+        )} — DNS resolution is transiently failing; serving last-known IPs, not pruning.`
+      )
+    }
+    if (acc.overCap) {
+      console.warn(
+        `[WR-Reconciler] ${policyName}: egress set hit the maxEntries cap — evicted ${acc.evicted.length} least-recently-observed entr${
+          acc.evicted.length === 1 ? 'y' : 'ies'
+        } (never rejecting the policy).`
       )
     }
   }
@@ -5737,6 +6073,44 @@ export class WorkflowRecipeReconciler {
   // ─── Status Patch ─────────────────────────────────────────────────
 
   /** Persist reconcile result to the CRD status subresource. */
+  /**
+   * Build the Plugin Workload SDK status projection (owned conditions +
+   * `status.pluginWorkloadSdk` value) from a reconcile result. Extracted so it
+   * can be computed ONCE per reconcile by the watcher (issue #375): the watcher
+   * attaches it to `result.pluginWorkloadSdkProjection` after `reconcile()`
+   * returns, `shouldPatchRecipeStatus` reads it to detect an
+   * awaiting_policy↔validated transition that no other diff would surface, and
+   * `patchStatus` reuses it instead of recomputing. `providerUnavailable` is
+   * derived here (not inferred from phase/message) so the SDK-only provider
+   * health bit stays explicit.
+   */
+  projectPluginWorkloadSdk(
+    recipe: WorkflowRecipeCRD,
+    result: ReconcileResult,
+    now: string = new Date().toISOString()
+  ): PluginWorkloadSdkStatusProjection {
+    return buildPluginWorkloadSdkStatus({
+      spec: recipe.spec,
+      existingConditions: recipe.status?.conditions,
+      phase: result.phase,
+      featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
+      providerUnavailable:
+        result.pluginWorkloadSdkProviderUnavailable === true ||
+        (result.workflowConditions ?? []).some(
+          condition =>
+            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
+            condition.status === 'True'
+        ),
+      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
+      policyPending: result.pluginWorkloadSdkPolicyPending === true,
+      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
+      now,
+      // issue #375 (R1): carry forward the stable validatedAt marker across
+      // steady-state throttle patches instead of resetting it to `now`.
+      existingCapability: recipe.status?.pluginWorkloadSdk,
+    })
+  }
+
   async patchStatus(recipe: WorkflowRecipeCRD, result: ReconcileResult): Promise<void> {
     const workloads = result.workloadStatuses.map(ws => {
       const def = (recipe.spec.workloads ?? []).find(w => w.id === ws.id)
@@ -5833,27 +6207,16 @@ export class WorkflowRecipeReconciler {
         recipe.status?.conditions,
       result.workloadConditions
     )
-    // Plugin Workload SDK conditions are derived here so every status patch
-    // carries a consistent projection of spec.pluginWorkloadSdk + feature flag,
-    // while the SDK-only provider health bit is propagated explicitly through
-    // ReconcileResult rather than inferred from a free-form phase/message.
-    const pluginSdkProjection = buildPluginWorkloadSdkStatus({
-      spec: recipe.spec,
-      existingConditions: recipe.status?.conditions,
-      phase: result.phase,
-      featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
-      providerUnavailable:
-        result.pluginWorkloadSdkProviderUnavailable === true ||
-        (result.workflowConditions ?? []).some(
-          condition =>
-            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
-            condition.status === 'True'
-        ),
-      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
-      policyPending: result.pluginWorkloadSdkPolicyPending === true,
-      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
-      now,
-    })
+    // Plugin Workload SDK conditions are derived so every status patch carries a
+    // consistent projection of spec.pluginWorkloadSdk + feature flag, while the
+    // SDK-only provider health bit is propagated explicitly through
+    // ReconcileResult rather than inferred from a free-form phase/message. Reuse
+    // the projection the watcher already computed for the patch decision
+    // (issue #375) so the exact object that drove shouldPatchRecipeStatus is
+    // what gets written; recompute only on paths that never attached one (e.g.
+    // observeCurrentWorkloadStatus).
+    const pluginSdkProjection =
+      result.pluginWorkloadSdkProjection ?? this.projectPluginWorkloadSdk(recipe, result, now)
     const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(
       workloadReconcileMergedConditions ??
         secretOwnershipMergedConditions ??

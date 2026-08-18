@@ -1,10 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { type Mock, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import type { RecordWithTtl } from 'node:dns'
 import * as dns from 'node:dns/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { NetworkPolicyReconciler, PUBLIC_EGRESS_EXCEPT_CIDRS } from './networkPolicyReconciler'
 import { ContextCRD, McpServerCRD } from './types'
+
+// resolve4({ ttl: true }) returns RecordWithTtl[]; `rec` builds that shape and
+// `resolve4Mock` sidesteps the string[]/RecordWithTtl[] overload inference.
+const rec = (...ips: string[]): RecordWithTtl[] => ips.map(address => ({ address, ttl: 300 }))
+const resolve4Mock = vi.mocked(dns.resolve4) as unknown as Mock
 
 // Mock config
 vi.mock('./config', () => ({
@@ -16,12 +22,21 @@ vi.mock('./config', () => ({
     port: 8081,
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
     k8sApiCidrs: [],
+    // #299 sliding-window knobs read by reconcileExternalEgress.
+    externalEgressOverlapSec: 300,
+    externalEgressMaxEntries: 128,
   },
 }))
 
-// Mock dns
+// Mock dns. Production now calls resolve4(host, { ttl: true }) for the #299
+// sliding window, so the resolver returns RecordWithTtl[] ({ address, ttl }),
+// not string[]. `rec()` builds that shape; `resolve4Mock` is the loosely-typed
+// mock accessor (resolve4's overloads otherwise infer the string[] return).
 vi.mock('node:dns/promises', () => ({
-  resolve4: vi.fn().mockResolvedValue(['1.2.3.4', '5.6.7.8']),
+  resolve4: vi.fn().mockResolvedValue([
+    { address: '1.2.3.4', ttl: 300 },
+    { address: '5.6.7.8', ttl: 300 },
+  ]),
 }))
 
 function makeMockNetworkingApi() {
@@ -70,7 +85,7 @@ describe('NetworkPolicyReconciler', () => {
     mockCustomApi = makeMockCustomApi()
     reconciler = makeReconciler(mockApi, undefined, mockCustomApi)
     vi.clearAllMocks()
-    vi.mocked(dns.resolve4).mockResolvedValue(['1.2.3.4', '5.6.7.8'])
+    resolve4Mock.mockResolvedValue(rec('1.2.3.4', '5.6.7.8'))
   })
 
   describe('public egress blocklist parity', () => {
@@ -830,9 +845,9 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('writes resolved egress IP status in stable DNS order', async () => {
-      vi.mocked(dns.resolve4).mockImplementation(async hostname => {
-        if (hostname === 'b.example.com') return ['5.6.7.8']
-        if (hostname === 'a.example.com') return ['1.2.3.4']
+      resolve4Mock.mockImplementation(async (hostname: string) => {
+        if (hostname === 'b.example.com') return rec('5.6.7.8')
+        if (hostname === 'a.example.com') return rec('1.2.3.4')
         return []
       })
       const server: McpServerCRD = {
@@ -861,6 +876,336 @@ describe('NetworkPolicyReconciler', () => {
       ])
     })
 
+    it('is a NO-OP on the next resync when DNS answers are unchanged (issue #299 F2 anti-churn)', async () => {
+      const server: McpServerCRD = {
+        name: 'noop-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'noop:latest',
+          transport: { type: 'streamableHttp', url: 'http://noop:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443 }],
+        },
+      }
+
+      // First reconcile bootstraps and writes the external-egress policy.
+      await reconciler.reconcileExternalEgress(server)
+      const created = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as {
+        body: k8s.V1NetworkPolicy
+      }
+      const written = created.body
+      expect(written.metadata?.annotations?.['clerum.io/egress-fqdn-state']).toBeTruthy()
+
+      // The policy is now live with its accumulated state annotation. Feed it back
+      // as the existing policy for the next resync tick.
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: written.metadata?.name,
+              labels: written.metadata?.labels,
+              annotations: written.metadata?.annotations,
+            },
+            spec: written.spec,
+          },
+        ],
+      })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      // Second resync: same DNS answers → same IP set → must NOT rewrite the
+      // policy (a timestamp-only refresh is a no-op). This is the churn the audit
+      // caught: before the fix, RESOLVED_AT + renewed expiry forced a write here.
+      await reconciler.reconcileExternalEgress(server)
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('WRITES on resync when the persisted window is AGING even though the IP set is unchanged (issue #299 M1 renewalDue wiring)', async () => {
+      const server: McpServerCRD = {
+        name: 'renew-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'renew:latest',
+          transport: { type: 'streamableHttp', url: 'http://renew:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443 }],
+        },
+      }
+      await reconciler.reconcileExternalEgress(server)
+      const written = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+
+      // Age the persisted window: rewrite each entry's expiresAt to just above now
+      // (well within overlap/2) so renewalDue fires while the IP set is unchanged.
+      const annotations = { ...(written.metadata?.annotations ?? {}) }
+      const state = JSON.parse(annotations['clerum.io/egress-fqdn-state']) as Array<{
+        expiresAt: number
+      }>
+      for (const e of state) e.expiresAt = Date.now() + 1000
+      annotations['clerum.io/egress-fqdn-state'] = JSON.stringify(state)
+
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: written.metadata?.name,
+              labels: written.metadata?.labels,
+              annotations,
+            },
+            spec: written.spec,
+          },
+        ],
+      })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      // Same DNS → set unchanged (changed=false) but window aging → renewalDue=true
+      // → the policy MUST be re-persisted (deleting `|| egressRenewalDue` breaks this,
+      // reintroducing the M1 overlap-grace loss).
+      await reconciler.reconcileExternalEgress(server)
+      const wrote =
+        mockApi.createNamespacedNetworkPolicy.mock.calls.length +
+        mockApi.replaceNamespacedNetworkPolicy.mock.calls.length
+      expect(wrote).toBeGreaterThan(0)
+    })
+
+    it('DROPS a blocked/private IP rehydrated from a tampered annotation (issue #299 M3 defense-in-depth)', async () => {
+      const server: McpServerCRD = {
+        name: 'tamper-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'tamper:latest',
+          transport: { type: 'streamableHttp', url: 'http://tamper:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443 }],
+        },
+      }
+      await reconciler.reconcileExternalEgress(server)
+      const written = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+
+      // Simulate a tampered live policy: a private IP injected into BOTH the state
+      // annotation (so it rehydrates) and the spec egress (so a write is needed).
+      const future = Date.now() + 3_600_000
+      const state = [
+        {
+          ip: '1.2.3.4',
+          port: 443,
+          protocol: 'TCP',
+          fqdn: 'api.example.com',
+          expiresAt: future,
+          lastObservedAt: Date.now(),
+        },
+        {
+          ip: '5.6.7.8',
+          port: 443,
+          protocol: 'TCP',
+          fqdn: 'api.example.com',
+          expiresAt: future,
+          lastObservedAt: Date.now(),
+        },
+        {
+          ip: '10.0.0.5',
+          port: 443,
+          protocol: 'TCP',
+          fqdn: 'api.example.com',
+          expiresAt: future,
+          lastObservedAt: Date.now(),
+        },
+      ]
+      const tampered: k8s.V1NetworkPolicy = {
+        metadata: {
+          name: written.metadata?.name,
+          labels: written.metadata?.labels,
+          annotations: { 'clerum.io/egress-fqdn-state': JSON.stringify(state) },
+        },
+        spec: {
+          ...written.spec!,
+          egress: [
+            { to: [{ ipBlock: { cidr: '1.2.3.4/32' } }], ports: [{ port: 443, protocol: 'TCP' }] },
+            { to: [{ ipBlock: { cidr: '5.6.7.8/32' } }], ports: [{ port: 443, protocol: 'TCP' }] },
+            { to: [{ ipBlock: { cidr: '10.0.0.5/32' } }], ports: [{ port: 443, protocol: 'TCP' }] },
+          ],
+        },
+      }
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [tampered] })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      await reconciler.reconcileExternalEgress(server)
+      // The reconcile must rewrite the policy WITHOUT the private IP.
+      const call =
+        mockApi.replaceNamespacedNetworkPolicy.mock.calls[0]?.[0] ??
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0]?.[0]
+      const cidrs = JSON.stringify(
+        (call as { body: k8s.V1NetworkPolicy })?.body?.spec?.egress ?? []
+      )
+      expect(call).toBeTruthy()
+      expect(cidrs).not.toContain('10.0.0.5')
+      expect(cidrs).toContain('1.2.3.4')
+    })
+
+    it('updates the observed min-TTL from a resolution (issue #299 M4 — feeds the TTL-aware resync)', async () => {
+      resolve4Mock.mockResolvedValueOnce([{ address: '1.2.3.4', ttl: 15 }]) // ttl 15s
+      const server: McpServerCRD = {
+        name: 'ttl-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'ttl:latest',
+          transport: { type: 'streamableHttp', url: 'http://ttl:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443 }],
+        },
+      }
+      await reconciler.reconcileExternalEgress(server)
+      // The min observed TTL (ms) must reflect the 15s answer — deleting the
+      // Math.min update leaves it Infinity and the resync degrades to the fixed
+      // interval (the #299 under-sampling failure mode).
+      expect(reconciler.externalEgressRefreshMinTtlMs).toBe(15_000)
+    })
+
+    it('accumulates the UNION across a real A->B rotation via rehydration (issue #299 M4 — wiring not vacuous)', async () => {
+      const server: McpServerCRD = {
+        name: 'rot-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'rot:latest',
+          transport: { type: 'streamableHttp', url: 'http://rot:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443 }],
+        },
+      }
+      // Round 1: DNS serves A only.
+      resolve4Mock.mockResolvedValueOnce([{ address: '140.82.112.3', ttl: 15 }])
+      await reconciler.reconcileExternalEgress(server)
+      const written = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [{ metadata: written.metadata, spec: written.spec }],
+      })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      // Round 2: DNS rotates to B. The written policy must be the UNION {A, B} —
+      // this only holds if previousAnnotations rehydration is actually wired in.
+      resolve4Mock.mockResolvedValueOnce([{ address: '140.82.112.4', ttl: 15 }])
+      await reconciler.reconcileExternalEgress(server)
+      const call =
+        mockApi.replaceNamespacedNetworkPolicy.mock.calls[0]?.[0] ??
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0]?.[0]
+      const egress = JSON.stringify(
+        (call as { body: k8s.V1NetworkPolicy })?.body?.spec?.egress ?? []
+      )
+      expect(egress).toContain('140.82.112.3') // A retained (overlap)
+      expect(egress).toContain('140.82.112.4') // B added
+    })
+
+    it('is a NO-OP on resync for an unchanged STATIC cidr binding (issue #299 F2 — no static churn)', async () => {
+      const server: McpServerCRD = {
+        name: 'cidr-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'cidr:latest',
+          transport: { type: 'streamableHttp', url: 'http://cidr:3000', port: 3000 },
+          egressBindings: [{ cidr: '93.184.216.0/24', port: 443 }],
+        },
+      }
+      await reconciler.reconcileExternalEgress(server)
+      const created = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as {
+        body: k8s.V1NetworkPolicy
+      }
+      const written = created.body
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [{ metadata: written.metadata, spec: written.spec }],
+      })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      await reconciler.reconcileExternalEgress(server)
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('is a NO-OP when the live policy has identical egress but different KEY ORDER (issue #299 R2-1)', async () => {
+      // The apiserver/client deserializes egress rules with keys ordered
+      // {ports, to} while the builder emits {to, ports}. A raw JSON.stringify
+      // compare would see them as different and rewrite every tick (write-storm).
+      // The semantic signature must treat them as equal → no-op.
+      const server: McpServerCRD = {
+        name: 'keyorder-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'keyorder:latest',
+          transport: { type: 'streamableHttp', url: 'http://keyorder:3000', port: 3000 },
+          egressBindings: [{ cidr: '93.184.216.0/24', port: 443 }],
+        },
+      }
+      await reconciler.reconcileExternalEgress(server)
+      const created = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as {
+        body: k8s.V1NetworkPolicy
+      }
+      const written = created.body
+      // Rebuild egress rules with keys in apiserver order {ports, to}.
+      const reordered: k8s.V1NetworkPolicy = {
+        metadata: written.metadata,
+        spec: {
+          ...written.spec!,
+          egress: (written.spec!.egress ?? []).map(r => ({ ports: r.ports, to: r.to })),
+        },
+      }
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [reordered] })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      await reconciler.reconcileExternalEgress(server)
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('self-heals an external-egress policy whose live spec.egress drifted out-of-band (issue #299 L1)', async () => {
+      const server: McpServerCRD = {
+        name: 'drift-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'drift:latest',
+          transport: { type: 'streamableHttp', url: 'http://drift:3000', port: 3000 },
+          egressBindings: [{ cidr: '93.184.216.0/24', port: 443 }],
+        },
+      }
+      await reconciler.reconcileExternalEgress(server)
+      const created = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as {
+        body: k8s.V1NetworkPolicy
+      }
+      const written = created.body
+      // Simulate out-of-band tampering: the live policy's egress was widened.
+      const drifted: k8s.V1NetworkPolicy = {
+        metadata: written.metadata,
+        spec: {
+          ...written.spec!,
+          egress: [
+            { to: [{ ipBlock: { cidr: '0.0.0.0/0' } }], ports: [{ port: 443, protocol: 'TCP' }] },
+          ],
+        },
+      }
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [drifted] })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      await reconciler.reconcileExternalEgress(server)
+      // The reconciler must rewrite the policy back to the declared CIDR.
+      const wrote =
+        mockApi.createNamespacedNetworkPolicy.mock.calls.length +
+        mockApi.replaceNamespacedNetworkPolicy.mock.calls.length
+      expect(wrote).toBeGreaterThan(0)
+    })
+
     it('rejects private or special-use CIDR bindings fail-closed', async () => {
       for (const cidr of ['10.0.0.0/8', '169.254.169.254/32', '192.168.1.0/24']) {
         const server: McpServerCRD = {
@@ -883,7 +1228,7 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('rejects mixed public/private DNS results for the whole hostname', async () => {
-      vi.mocked(dns.resolve4).mockResolvedValueOnce(['10.0.0.5', '1.2.3.4'])
+      resolve4Mock.mockResolvedValueOnce(rec('10.0.0.5', '1.2.3.4'))
       const server: McpServerCRD = {
         name: 'mixed-mcp',
         namespace: 'mcp-server',
@@ -939,7 +1284,7 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('does not create an external egress policy when DNS only resolves private IPs', async () => {
-      vi.mocked(dns.resolve4).mockResolvedValueOnce(['10.0.0.5', '192.168.1.10'])
+      resolve4Mock.mockResolvedValueOnce(rec('10.0.0.5', '192.168.1.10'))
       const server: McpServerCRD = {
         name: 'private-dns-mcp',
         namespace: 'mcp-server',

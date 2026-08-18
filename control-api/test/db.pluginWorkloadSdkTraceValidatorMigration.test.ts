@@ -23,10 +23,18 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
       candidate => candidate.version === '0090_plugin_workload_sdk_runtime_contract_reconciliation'
     )
     expect(migration).toBeDefined()
-    // 0089 immediately precedes 0090 (position-independent so later additions
-    // like 0091 don't break this ordering check).
-    const idx0090 = CONTROL_API_MIGRATIONS.findIndex(m => m.version === migration?.version)
-    expect(CONTROL_API_MIGRATIONS[idx0090 - 1]?.version).toBe(
+    const credentialTicketIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === '0089_plugin_workload_sdk_credential_ticket_runtime_access'
+    )
+    expect(credentialTicketIndex).toBeGreaterThanOrEqual(0)
+    expect(CONTROL_API_MIGRATIONS[credentialTicketIndex + 1]?.version).toBe(
+      '0090_plugin_workload_sdk_runtime_contract_reconciliation'
+    )
+    const migrationIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === migration?.version
+    )
+    const previousMigration = CONTROL_API_MIGRATIONS[migrationIndex - 1]
+    expect(previousMigration?.version).toBe(
       '0089_plugin_workload_sdk_credential_ticket_runtime_access'
     )
 

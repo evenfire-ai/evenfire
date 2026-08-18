@@ -258,9 +258,12 @@ export class K8sGateway {
       }
       spec: Record<string, unknown>
     },
-    namespace?: string
+    namespace?: string,
+    // N1 — forwards an already-read CR snapshot so ResourceService.updateResource
+    // can skip a redundant apiserver GET (see the admin PUT ratchet in resources.ts).
+    options?: Parameters<ResourceService['updateResource']>[4]
   ): Promise<unknown> {
-    return this.resources.updateResource(plural, name, body, namespace)
+    return this.resources.updateResource(plural, name, body, namespace, options)
   }
 
   /**
@@ -678,11 +681,16 @@ export function extractHttpStatus(err: unknown): number | null {
   const maybe = err as {
     statusCode?: number
     code?: number | string
+    httpStatus?: number
     response?: { statusCode?: number; status?: number }
   }
   if (typeof maybe.statusCode === 'number') return maybe.statusCode
   if (typeof maybe.code === 'number') return maybe.code
   if (typeof maybe.code === 'string' && /^\d+$/.test(maybe.code)) return Number(maybe.code)
+  // `.httpStatus` mirrors extractK8sError's chain (http/k8sError.ts): the
+  // service-layer K8sNotFoundError/K8sConflictError expose their status only
+  // there, so read it after code/statusCode or their 404/409 collapses to null.
+  if (typeof maybe.httpStatus === 'number') return maybe.httpStatus
   if (maybe.response && typeof maybe.response.statusCode === 'number')
     return maybe.response.statusCode
   if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status

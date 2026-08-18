@@ -1,6 +1,7 @@
-import express, { NextFunction, Request, Response } from 'express'
+import express from 'express'
 import { config } from './config.js'
 import type { DbClient } from './db.js'
+import { clerumErrorHandler } from './http/errorHandler.js'
 import { K8sGateway } from './k8s.js'
 import { type UiAuthedRequest, requireAuthForControlUI } from './middleware/controlUIAuth.js'
 import { correlationIdMiddleware } from './middleware/correlationId.js'
@@ -9,7 +10,6 @@ import {
   createTracingInFlightLimiter,
   getTracingMaxInFlight,
 } from './middleware/tracingSubmitterAuth.js'
-import { rootLogger } from './observability/logger.js'
 import { createAdminAuthRouter } from './routes/admin/auth.js'
 import { createAdminRouter } from './routes/admin/index.js'
 import { createWorkflowsAdminRouter } from './routes/admin/workflows/index.js'
@@ -35,7 +35,6 @@ import { createMetricsRouter } from './routes/metrics.js'
 import { createRecipeOauthRouter } from './routes/recipeOauth.js'
 import { createRegistryRouter } from './routes/registry.js'
 import { createRpcAccessRouter } from './routes/rpc-access/index.js'
-import { memberRegistrationErrorResponse } from './services/memberRegistrationErrors.js'
 import { setAdministrativeOperationService } from './services/resourceService.js'
 import { HccAdministrativeOutcomeBindingResolver } from './services/tracing/adminOperationBindingResolver.js'
 import { runWithAdministrativeRequestContext } from './services/tracing/adminOperationContext.js'
@@ -61,14 +60,11 @@ import {
 
 const TRACING_INTERNAL_PATH_PREFIX = '/api/v1/internal/tracing/'
 const RPC_HOST_ACCESS_PATH = /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/[^/]+\/?$/i
-
-// Only errors we construct with these codes are ever forwarded verbatim by the
-// global handler (see below). Keeps the blast radius tight: every other
-// status-less or non-allowlisted error still collapses to a 500.
-const FORWARDABLE_INTEGRATION_CODES = new Set([
-  'registry_unavailable',
-  'registry_integration_error',
-])
+// Upload v2 part bodies are raw octet streams. They must reach the streaming
+// proxy untouched; parsing them as JSON would either reject the first binary
+// byte or buffer the whole part in the control plane.
+const GFS_UPLOAD_PART_PATH =
+  /^\/api\/v1\/(?:gfs\/proxy\/v1|external\/gfs)\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/parts\/[0-9]+$/i
 
 export function createApp(gateway: K8sGateway) {
   const traceIngestDb: DbClient = meterTracingDbClient({
@@ -84,6 +80,10 @@ export function createApp(gateway: K8sGateway) {
       return
     }
     if (req.method === 'POST' && RPC_HOST_ACCESS_PATH.test(req.path)) {
+      next()
+      return
+    }
+    if (req.method === 'PUT' && GFS_UPLOAD_PART_PATH.test(req.path)) {
       next()
       return
     }
@@ -252,108 +252,7 @@ export function createApp(gateway: K8sGateway) {
     res.status(404).json({ error: 'Not Found' })
   })
 
-  app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
-    // Use the request-scoped correlation id if middleware ran, otherwise
-    // synthesize a short tag for legacy paths.
-    const correlationId = req.correlationId ?? Math.random().toString(36).slice(2, 10)
-    const log = req.log ?? rootLogger
-
-    // Typed member-registration failures map to 503 (spec §8.6) — scoped
-    // instanceof check; the generic 5xx-collapse below stays intact.
-    const memberRegistration = memberRegistrationErrorResponse(err)
-    if (memberRegistration) {
-      log.warn(
-        {
-          event: memberRegistration.error,
-          correlationId,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'member registration unavailable'
-      )
-      res.status(memberRegistration.status).json({ error: memberRegistration.error, correlationId })
-      return
-    }
-
-    // Errors thrown by service-layer code may carry a `.status` field to
-    // signal that the upstream response (e.g., registry 404) should be
-    // forwarded to the API client rather than collapsed into a 500. Honor
-    // 4xx values; 5xx still surface as Internal Server Error so backend
-    // failures don't leak through as caller-visible errors.
-    const errStatus =
-      err instanceof Error && typeof (err as Error & { status?: unknown }).status === 'number'
-        ? (err as Error & { status: number }).status
-        : undefined
-    const isClientError = errStatus !== undefined && errStatus >= 400 && errStatus < 500
-
-    if (isClientError) {
-      log.warn(
-        {
-          event: 'forwarded_client_error',
-          correlationId,
-          status: errStatus,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'forwarded client error from upstream'
-      )
-      res.status(errStatus as number).json({
-        error: err instanceof Error ? err.message : 'Bad Request',
-        correlationId,
-      })
-      return
-    }
-
-    // Allowlisted registry-integration errors carry a safe code + message we set
-    // ourselves (RegistryUnavailableError → 503; the 401 remap → 502). Forward
-    // them so the marketplace shows a clear message instead of a raw 500. The
-    // message is safe because only our own constructors set these codes.
-    const integrationCode = (err as { code?: unknown }).code
-    const integrationStatus = (err as { status?: unknown }).status
-    if (
-      typeof integrationStatus === 'number' &&
-      (integrationStatus === 502 || integrationStatus === 503) &&
-      typeof integrationCode === 'string' &&
-      FORWARDABLE_INTEGRATION_CODES.has(integrationCode)
-    ) {
-      log.warn(
-        {
-          event: 'forwarded_registry_integration_error',
-          correlationId,
-          status: integrationStatus,
-          code: integrationCode,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'forwarded registry integration error'
-      )
-      res.status(integrationStatus).json({
-        error: integrationCode,
-        message: err instanceof Error ? err.message : 'Registry integration error',
-        correlationId,
-      })
-      return
-    }
-
-    log.error(
-      {
-        event: 'unhandled_error',
-        correlationId,
-        err: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
-      },
-      'unhandled error'
-    )
-    if (process.env.NODE_ENV !== 'production') {
-      res.status(500).json({
-        error: 'Internal Server Error',
-        message: err instanceof Error ? err.message : 'Unknown error',
-        correlationId,
-      })
-    } else {
-      res.status(500).json({
-        error: 'Internal Server Error',
-        correlationId,
-      })
-    }
-  })
+  app.use(clerumErrorHandler)
 
   return app
 }

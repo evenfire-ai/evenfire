@@ -1,6 +1,6 @@
 import type { GfsVerifiedClaims } from "../auth/verify";
 import type { AuditSink } from "../authz/audit";
-import type { AuthzContext, AuthzQueryBudget, PermissionEpoch } from "../authz/permissionClient";
+import { auditAttribution, type AuthzContext, type AuthzQueryBudget, type PermissionEpoch } from "../authz/permissionClient";
 import type { GfsPermission } from "../authz/resolve";
 import { checkTokenCeiling } from "../authz/tokenCeiling";
 import type { DeadlineBudget } from "../db/deadlineQuery";
@@ -82,6 +82,7 @@ function checkDeadline(input: CopyRouteInput, deadlineAtMs: number, now: () => n
 async function failedAudit(input: CopyRouteInput, sourceResourceId: string, error: unknown): Promise<void> {
   await input.deps.audit.record({
     recordType: "mutation_outcome", subject: input.context.primarySubject, op: "copy",
+    ...auditAttribution(input.context),
     resourceId: sourceResourceId, drive: input.claims.drive, outcome: "error",
     reason: error instanceof GfsError ? error.code : "internal_error", requestId: input.requestId,
     matchedSubject: null, authorizationSource: null, cachedAuthorizationSource: null,
@@ -168,6 +169,7 @@ export async function executeCopyRoute(input: CopyRouteInput): Promise<Record<st
     publicationCalled = true;
     const published = await input.deps.writes.copy({
       requestId: input.requestId, subject: input.context.primarySubject, audit: input.deps.audit,
+      ...auditAttribution(input.context),
       drive: input.claims.drive, destinationParentId, plan, destination, deadlineAtMs,
       signal: input.signal, now: relativeNow,
       authzEpoch: { captured: authzEpochCaptured, current: input.deps.permissionEpoch },

@@ -244,6 +244,12 @@ export function buildPluginWorkloadSdkStatus(args: {
   teardownConfirmed?: boolean
   bootstrapProof?: PluginWorkloadSdkBootstrapProofInput
   now: string
+  /**
+   * The currently-persisted capability (recipe.status.pluginWorkloadSdk), used
+   * to CARRY FORWARD the stable `validatedAt` marker across steady-state
+   * throttle patches (issue #375 R1) instead of resetting it to `now`.
+   */
+  existingCapability?: PluginWorkloadSdkCapabilityStatus | null
 }): PluginWorkloadSdkStatusProjection {
   const {
     spec,
@@ -255,6 +261,7 @@ export function buildPluginWorkloadSdkStatus(args: {
     teardownConfirmed,
     bootstrapProof,
     now,
+    existingCapability,
   } = args
   const sdk = spec.pluginWorkloadSdk
 
@@ -408,6 +415,17 @@ export function buildPluginWorkloadSdkStatus(args: {
     .filter((f): f is string => f !== undefined)
     .join(', ')
 
+  // issue #375 (R1): validatedAt is the stable "first reached validated" marker.
+  // On a steady-state throttle refresh (already validated, only verifiedAt
+  // advances) it must be CARRIED FORWARD, not reset to `now`. Stamp a fresh
+  // `now` ONLY on the real transition into validated — no prior capability, or a
+  // prior state other than 'validated', or a prior validated record that somehow
+  // lacked the marker.
+  const validatedAt =
+    existingCapability?.state === 'validated' && existingCapability.validatedAt
+      ? existingCapability.validatedAt
+      : now
+
   return {
     conditions: [
       {
@@ -424,7 +442,7 @@ export function buildPluginWorkloadSdkStatus(args: {
       clientNotifications,
       message: `Capability validated (${families})`,
       ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
-      validatedAt: now,
+      validatedAt,
       ...(bootstrapProof
         ? {
             bootstrapContractVersion: bootstrapProof.contractVersion,

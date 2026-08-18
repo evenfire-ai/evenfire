@@ -36,6 +36,14 @@ spec:
                 contextId:
                   type: string
                   description: Unique identifier for this context (e.g. context1).
+                displayName:
+                  type: string
+                  description: >-
+                    Optional human-facing display name for this context, freely
+                    editable (spaces and capitals allowed). Decoupled from the
+                    immutable identifier (metadata.name / contextId). When absent,
+                    consumers fall back to metadata.name. Length is validated by
+                    control-api (free text; no pattern here).
                 description:
                   type: string
                   description: Human-readable description of the context scope.

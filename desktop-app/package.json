@@ -1,7 +1,7 @@
 {
   "name": "evenfire",
   "productName": "Evenfire",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "license": "MPL-2.0",
   "description": "Evenfire desktop client for secure agent and workflow access",
@@ -10,10 +10,12 @@
     "build": "npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.json",
     "build:renderer": "vite build --config ui/vite.config.ts",
+    "verify:electron": "node ./scripts/verify-electron-runtime.mjs",
     "icons:generate": "node ./scripts/generate-adaptive-icons.mjs",
     "test": "vitest run",
     "test:e2e": "vitest run --config test/e2e/vitest.config.ts",
     "test:e2e:playwright": "npm run build && playwright test --config test/e2e-playwright/playwright.config.ts",
+    "test:e2e:gfs-operator": "npm run build && playwright test --config test/e2e-playwright/playwright.gfs-desktop-operator.config.ts",
     "qa:recorder:auth": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-auth.spec.ts",
     "qa:recorder:navigation": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-navigation.spec.ts",
     "qa:recorder:agents": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-agents.spec.ts",
@@ -79,6 +81,9 @@
     "vite": "^7.1.7",
     "vitest": "^3.2.4",
     "wait-on": "^8.0.5"
+  },
+  "engines": {
+    "node": "24.x"
   },
   "overrides": {
     "@tootallnate/once": "^3.0.1",
