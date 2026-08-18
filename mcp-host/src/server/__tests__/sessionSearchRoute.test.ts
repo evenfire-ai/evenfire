@@ -60,6 +60,12 @@ function makeReq(query: Record<string, string> = {}, userId?: string): Request {
       caller: 'rpc-proxy',
       hostRef: 'chatllm',
       userId,
+      actionContextV2: {
+        operationId: 'session.search',
+        userId,
+        accessPathId: `ap1_${'a'.repeat(43)}`,
+        target: { hostRef: 'mcp-host/chatllm' },
+      },
     }
   }
   return req
@@ -90,7 +96,7 @@ describe('handleSessionSearchRoute', () => {
     expect(sessionSearchHandler).not.toHaveBeenCalled()
   })
 
-  it('#22 uses auth.sub even when ?user= is supplied (bypass attempt)', async () => {
+  it('#22 ignores caller user query and uses the trusted-edge v2 identity', async () => {
     const sessionSearchHandler: SessionSearchHandler = vi.fn().mockResolvedValue({
       results: [],
       total: 0,
