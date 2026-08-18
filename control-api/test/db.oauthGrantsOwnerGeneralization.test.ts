@@ -17,11 +17,11 @@ describe('0091 oauth_grants owner generalization migration', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('is registered last in the migration array, after 0090', async () => {
+  it('is registered last in the migration array, after 0099', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
-    expect(versions.at(-1)).toBe('0091_oauth_grants_owner_generalization')
-    expect(versions).toContain('0090_plugin_workload_sdk_runtime_contract_reconciliation')
+    expect(versions.at(-1)).toBe('0100_oauth_grants_owner_generalization')
+    expect(versions).toContain('0099_gfs_upload_finalizing_recovery')
   })
 
   it('adds owner_kind/context_id/bootstrapped_by, replaces the kind CHECK to admit shared, and rebuilds uniqueness', async () => {
