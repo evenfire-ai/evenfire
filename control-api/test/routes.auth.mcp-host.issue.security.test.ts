@@ -36,6 +36,9 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
   if (/rate_limit_buckets/i.test(text)) {
     return { rows: [{ count: 1 }], rowCount: 1 }
   }
+  if (/lifecycle_state/i.test(text)) {
+    return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
+  }
   return mockPoolQuery(text, params)
 })
 vi.mock('../src/db.js', () => ({
@@ -89,6 +92,7 @@ describe('Security: External /decide endpoint', () => {
       email: 'test@example.com',
       teamId: TEAM_ID,
       role: 'admin',
+      authGeneration: 1,
     })
   })
 

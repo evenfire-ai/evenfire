@@ -19,6 +19,10 @@ import type {
   SearchTeamResult,
 } from './types'
 
+const FULL_SEARCH_PLACEHOLDER = 'Search teams, contexts, members, agents or connectors...'
+const COMPACT_SEARCH_PLACEHOLDER = 'Search workspace...'
+const COMPACT_SEARCH_BREAKPOINT = 1220
+
 function formatApprovalTimestamp(value: string, mode: 'relative' | 'absolute'): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
@@ -85,7 +89,7 @@ export const AppHeader = React.memo(function AppHeader({
   onShellOverlayOpenChange,
 }: AppHeaderProps) {
   const { accessCatalog: agentsAccessCatalog } = useAgentsDataController()
-  const { contextIds } = useContextsDataController()
+  const { contextIds, contextDisplayById } = useContextsDataController()
   const { globalMcpServers, mcpServersByAgent } = useMcpServersDataController()
   const {
     teams,
@@ -121,6 +125,9 @@ export const AppHeader = React.memo(function AppHeader({
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [compactSearch, setCompactSearch] = useState(
+    () => window.innerWidth <= COMPACT_SEARCH_BREAKPOINT
+  )
   const searchRef = useRef<HTMLDivElement | null>(null)
   const notificationsRef = useRef<HTMLDivElement | null>(null)
   const searchDirectoryInFlightRef = useRef(false)
@@ -133,6 +140,13 @@ export const AppHeader = React.memo(function AppHeader({
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    const updateCompactSearch = () =>
+      setCompactSearch(window.innerWidth <= COMPACT_SEARCH_BREAKPOINT)
+    window.addEventListener('resize', updateCompactSearch)
+    return () => window.removeEventListener('resize', updateCompactSearch)
   }, [])
 
   useClickOutside(searchRef, searchOpen, () => setSearchOpen(false))
@@ -307,11 +321,17 @@ export const AppHeader = React.memo(function AppHeader({
       }
     }
 
+    // Visible name = agent `spec.host` (catalog `agentDisplayByName`, total over
+    // catalog agents at the producer). The `?? value` covers cross-team agents
+    // added from the team directory (no catalog display source), not a defensive
+    // guard on catalog agents — see spec Decision #6.
+    const agentDisplayByName = accessCatalog?.agentDisplayByName
     return [...byName.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([value, details]) => ({
         key: value,
         value,
+        display: agentDisplayByName?.[value] ?? value,
         fromSelectedScope: details.fromSelectedScope,
         fromUserScope: details.fromUserScope,
         teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
@@ -359,6 +379,7 @@ export const AppHeader = React.memo(function AppHeader({
         ? aggregatedAgents.filter(
             agent =>
               agent.value.toLowerCase().includes(normalizedSearch) ||
+              agent.display.toLowerCase().includes(normalizedSearch) ||
               agent.teamNames.some(teamName => teamName.toLowerCase().includes(normalizedSearch))
           )
         : [],
@@ -396,17 +417,22 @@ export const AppHeader = React.memo(function AppHeader({
       .map(([value, details]) => ({
         key: value,
         value,
+        // Visible name = context `spec.displayName`; fall back to the id (spec
+        // Decision #6) when no display exists OR the display is blank/whitespace-
+        // only (an out-of-band write must never render an empty context label).
+        display: (contextDisplayById[value] ?? '').trim() || value,
         fromSelectedScope: details.fromSelectedScope,
         fromUserScope: false,
         teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
       }))
-  }, [contextIds, teamDirectory, teams])
+  }, [contextDisplayById, contextIds, teamDirectory, teams])
   const filteredContexts = useMemo(
     () =>
       hasSearch
         ? aggregatedContexts.filter(
             context =>
               context.value.toLowerCase().includes(normalizedSearch) ||
+              context.display.toLowerCase().includes(normalizedSearch) ||
               context.teamNames.some(teamName => teamName.toLowerCase().includes(normalizedSearch))
           )
         : [],
@@ -438,6 +464,8 @@ export const AppHeader = React.memo(function AppHeader({
       .map(([value, agentNames]) => ({
         key: value,
         value,
+        // Connectors have no separate display name; the server name is the label.
+        display: value,
         fromSelectedScope: true,
         fromUserScope: false,
         teamNames: [...agentNames].sort((a, b) => a.localeCompare(b)),
@@ -525,9 +553,10 @@ export const AppHeader = React.memo(function AppHeader({
         <div className="global-search" ref={searchRef}>
           <TextInput
             type="text"
-            placeholder="Search teams, contexts, members, agents or connectors..."
+            placeholder={compactSearch ? COMPACT_SEARCH_PLACEHOLDER : FULL_SEARCH_PLACEHOLDER}
             className="search-input"
             aria-label="Search"
+            title={FULL_SEARCH_PLACEHOLDER}
             value={searchQuery}
             onChange={event => {
               setSearchQuery(event.target.value)
@@ -592,7 +621,7 @@ export const AppHeader = React.memo(function AppHeader({
                           size="sm"
                         >
                           <div className="search-result-main">
-                            <strong>{context.value}</strong>
+                            <strong>{context.display}</strong>
                             <span className="search-result-subline">
                               {context.teamNames.length
                                 ? `Teams: ${context.teamNames.join(', ')}`
@@ -652,7 +681,7 @@ export const AppHeader = React.memo(function AppHeader({
                           size="sm"
                         >
                           <div className="search-result-main">
-                            <strong>{agent.value}</strong>
+                            <strong>{agent.display}</strong>
                             <span className="search-result-subline">
                               {agent.teamNames.length
                                 ? `Teams: ${agent.teamNames.join(', ')}`

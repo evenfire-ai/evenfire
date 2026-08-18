@@ -333,6 +333,80 @@ describe('AppService.openForgotPassword', () => {
   })
 })
 
+describe('AppService explicit Profile UI browser actions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    config.desktopProfileUiBaseUrl = 'https://profile.example.com'
+    config.desktopProfileUiBaseUrlExplicit = false
+  })
+
+  it('opens forgot-password and profile settings from a valid explicit root origin', async () => {
+    config.desktopProfileUiBaseUrl = 'https://profile.self-hosted.example/'
+    config.desktopProfileUiBaseUrlExplicit = true
+    const service = new AppService() as unknown as {
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
+      openProfileSettings: (
+        email: string,
+        options?: { section?: 'profile'; action?: 'password' }
+      ) => Promise<{ profileUiUrl: string }>
+    }
+    const getInvitationProfile = vi.fn()
+    service.memberRegistrationServiceClient = { getInvitationProfile } as never
+
+    await expect(service.openForgotPassword(' User@Example.COM ')).resolves.toEqual({
+      profileUiUrl: 'https://profile.self-hosted.example/forgot-password?email=user%40example.com',
+    })
+    await expect(
+      service.openProfileSettings(' User@Example.COM ', {
+        section: 'profile',
+        action: 'password',
+      })
+    ).resolves.toEqual({
+      profileUiUrl: 'https://profile.self-hosted.example/settings/profile?action=password',
+    })
+    const { shell } = await import('electron')
+
+    expect(shell.openExternal).toHaveBeenNthCalledWith(
+      1,
+      'https://profile.self-hosted.example/forgot-password?email=user%40example.com'
+    )
+    expect(shell.openExternal).toHaveBeenNthCalledWith(
+      2,
+      'https://profile.self-hosted.example/settings/profile?action=password'
+    )
+    expect(getInvitationProfile).not.toHaveBeenCalled()
+  })
+
+  for (const [label, baseUrl] of [
+    ['non-root pathname', 'https://profile.self-hosted.example/profile'],
+    ['search parameters', 'https://profile.self-hosted.example?tenant=one'],
+  ] as const) {
+    it(`rejects an explicit Profile UI base URL with ${label}`, async () => {
+      config.desktopProfileUiBaseUrl = baseUrl
+      config.desktopProfileUiBaseUrlExplicit = true
+      const service = new AppService() as unknown as {
+        memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+        openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
+        openProfileSettings: (email: string) => Promise<{ profileUiUrl: string }>
+      }
+      const getInvitationProfile = vi.fn()
+      service.memberRegistrationServiceClient = { getInvitationProfile } as never
+
+      await expect(service.openForgotPassword('user@example.com')).rejects.toThrow(
+        'PROFILE_UI_BASE_URL must be an origin URL with a root pathname'
+      )
+      await expect(service.openProfileSettings('user@example.com')).rejects.toThrow(
+        'PROFILE_UI_BASE_URL must be an origin URL with a root pathname'
+      )
+      const { shell } = await import('electron')
+
+      expect(shell.openExternal).not.toHaveBeenCalled()
+      expect(getInvitationProfile).not.toHaveBeenCalled()
+    })
+  }
+})
+
 describe('AppService profile UI link authority', () => {
   beforeEach(() => {
     config.desktopProfileUiBaseUrl = 'https://profile.example.com'
@@ -417,7 +491,7 @@ describe('AppService profile UI link authority', () => {
     })
 
     await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'Cannot resolve the configured Profile UI URL'
+      'PROFILE_UI_BASE_URL must be an origin URL with a root pathname'
     )
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })

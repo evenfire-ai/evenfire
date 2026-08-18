@@ -58,8 +58,30 @@ export type ChannelCredentialsPanelProps = {
    *  When set, draft values for hidden types are pruned so they cannot leak
    *  into the POST body after a user removes the corresponding channel row. */
   visibleChannelTypes?: ChannelType[]
-  /** True when the backing Secret exists. Values stay write-only and render masked. */
-  hasStoredCredentials?: boolean
+  /** Credential key NAMES the backing Secret actually holds, from
+   *  `GET /api/v1/admin/communication-channels/:name/credentials`. Values are
+   *  never returned — only a key's presence is knowable, and only that key
+   *  renders masked.
+   *  - `undefined` → not known yet (the read is in flight or failed): fields
+   *    render a pending state, distinct from "nothing stored"
+   *  - `[]` → the Secret holds nothing: every field renders empty
+   *  - `['telegram-bot-token']` → only Telegram renders masked
+   *  This replaced a single `hasStoredCredentials` boolean, which masked every
+   *  field whenever the channel had any Secret at all, so a Telegram-only
+   *  channel reported a configured Slack Signing Secret it did not have. */
+  storedKeys?: string[]
+  /** Why the stored-key read failed, when it did. Non-empty means the read is
+   *  OVER and its answer is unusable, which is a different state from
+   *  `storedKeys === undefined` on its own (that also covers "still in
+   *  flight"). Without it a failed read parked the panel in its pending state
+   *  forever: every input, Edit and Delete disabled under a "Checking stored
+   *  credentials…" placeholder for a request that was not running.
+   *  The panel renders its own explanation; this string is the underlying
+   *  cause, shown as a detail line. Pass `onRetryStoredKeys` with it. */
+  storedKeysError?: string
+  /** Re-runs the stored-key read. Only meaningful alongside
+   *  `storedKeysError` — the panel does not own that request. */
+  onRetryStoredKeys?: () => void
   /** Render masked provider fields without rotation/delete controls. */
   readOnly?: boolean
 }

@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import { Button, Field, IconButton, SelectInput, TabButton, TextInput } from '@components/Common'
+import { PluginPermissions } from '@components/PluginPermissions'
 import {
   IconBell,
   IconConnectors,
@@ -33,7 +34,7 @@ import type {
 import type { SettingsPageProps } from './SettingsPage.types'
 
 type NotificationPreferenceSection = 'inApp' | 'desktop'
-type SettingsTab = 'account' | 'appearance' | 'notifications' | 'social' | 'information'
+type SettingsTab = 'account' | 'appearance' | 'notifications' | 'plugins' | 'social' | 'information'
 
 type EndpointDiagnostics = {
   appInfo: DesktopAppInfo | null
@@ -527,6 +528,16 @@ export function SettingsPage({
         >
           Notifications
         </TabButton>
+        <TabButton
+          active={activeSettingsTab === 'plugins'}
+          className="page-tab"
+          id="settings-tab-plugins"
+          role="tab"
+          aria-controls="settings-panel-plugins"
+          onClick={() => setActiveSettingsTab('plugins')}
+        >
+          Plugin permissions
+        </TabButton>
         {hasSocialChannelsAccess ? (
           <TabButton
             active={activeSettingsTab === 'social'}
@@ -630,6 +641,17 @@ export function SettingsPage({
                 />
               </div>
             </section>
+          </section>
+        ) : null}
+
+        {activeSettingsTab === 'plugins' ? (
+          <section
+            className="settings-tab-panel"
+            id="settings-panel-plugins"
+            role="tabpanel"
+            aria-labelledby="settings-tab-plugins"
+          >
+            <PluginPermissions />
           </section>
         ) : null}
 

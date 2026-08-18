@@ -1,6 +1,6 @@
 {
   "name": "@clerum/workflow-sdk",
-  "version": "1.0.29-beta.0",
+  "version": "1.0.31-beta.0",
   "description": "Clerum Workflow SDK — TypeScript library for workflow coordinator Pods",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

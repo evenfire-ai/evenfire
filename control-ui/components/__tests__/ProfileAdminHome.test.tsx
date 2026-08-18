@@ -293,11 +293,42 @@ describe('ProfileAdminHome — members invitations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete account' }))
 
     await waitFor(() => {
-      expect(deleteAdminUser).toHaveBeenCalledWith('accepted-password-pending-user')
+      expect(deleteAdminUser).toHaveBeenCalledWith(
+        'accepted-password-pending-user',
+        expect.objectContaining({
+          reason: 'control_ui_user_retirement',
+          idempotencyKey: expect.any(String),
+          correlationId: expect.any(String),
+        })
+      )
       expect(deleteAdminTeam).toHaveBeenCalledWith('team-1')
     })
     expect(vi.mocked(deleteAdminUser).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(deleteAdminTeam).mock.invocationCallOrder[0]
+    )
+  })
+
+  it('reuses the same retirement request identity when a failed delete is retried', async () => {
+    vi.mocked(deleteAdminUser)
+      .mockRejectedValueOnce(new Error('temporary upstream failure'))
+      .mockResolvedValueOnce({ deleted: true, id: 'accepted-password-pending-user' })
+    renderProfileAdminHome()
+
+    await waitFor(() => expect(screen.getByText('Accepted Invitee')).toBeInTheDocument())
+    fireEvent.click(screen.getByLabelText('Delete member Accepted Invitee'))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Delete account' })).toBeEnabled()
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete account' }))
+    await waitFor(() => expect(deleteAdminUser).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.getByText('temporary upstream failure')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete account' }))
+    await waitFor(() => expect(deleteAdminUser).toHaveBeenCalledTimes(2))
+
+    expect(vi.mocked(deleteAdminUser).mock.calls[1]?.[1]).toEqual(
+      vi.mocked(deleteAdminUser).mock.calls[0]?.[1]
     )
   })
 })

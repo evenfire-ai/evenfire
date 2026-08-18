@@ -140,7 +140,7 @@ export default function CreateTeamPage() {
         .sort((a, b) => a.localeCompare(b))
         .map(agentName => ({
           value: agentName,
-          label: getAgentDisplayName(agentName),
+          label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
     [hosts]

@@ -1,5 +1,6 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
+import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
@@ -626,7 +627,9 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
     '/mcp-host/plugin-workload-sdk',
     rateLimit({
       windowMs: 60_000,
-      limit: 600,
+      // ENV-tunable pre-auth flood guard (issue #348):
+      // CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN.
+      limit: config.pluginSdkPreauthRlPerMin,
       standardHeaders: 'draft-8',
       legacyHeaders: false,
       message: { error: 'Too Many Requests', retryable: true },

@@ -31,6 +31,8 @@
 ## How-to
 
 - Connect Telegram: how-to/connect-telegram.md
+- Connect Slack (app scopes, request URL, verify flow, approval buttons): how-to/connect-slack.md
+- Connect Microsoft Teams (Teams CLI registration, derived endpoint, single-tenant requirement, verify flow): how-to/connect-teams.md
 - Configure approvals: how-to/configure-approvals.md
 - Add MCP server: how-to/add-mcp-server.md
 - LLM providers overview (the 21 providers, mental model, support matrix): llm-providers/README.md

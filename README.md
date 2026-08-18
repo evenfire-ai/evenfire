@@ -11,8 +11,8 @@
 <h3 align="center">Build your company's intelligence layer, without losing control.</h3>
 
 <p align="center">
-  A complete, self-hosted platform for <b>LLM agents that do real work</b>. Connect tools,<br/>
-  compose workflows, manage teams, and govern cost, all declared as Kubernetes resources.<br/>
+  Where your team and AI agents work together — a complete, fully open-source platform,
+  from a native desktop app to a secure, self-hosted backend.
   Bring your own model keys; every risky action waits for a human "yes."
 </p>
 
@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
+  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
 </p>
 
 <p align="center">
@@ -37,8 +37,12 @@
 
 ## Quick start
 
-Stand up the whole platform on a local cluster with one command. It brings up
-every service and a seeded agent named `chatllm`:
+> **This quick start runs the whole platform on a local [minikube](https://minikube.sigs.k8s.io/) cluster** — the fastest way to try Evenfire on your workstation. 
+
+Stand up every service on minikube with one command, including a seeded agent
+named `chatllm`. On a fresh minimal install, setup consumes the first-run
+admin bootstrap before any login, creates the matching Desktop identity, and
+records the governed `initial_setup` GFS operator link atomically:
 
 ```bash
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
@@ -48,24 +52,10 @@ MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the note below on this ove
 make minikube-status                            # wait for every deployment READY
 ```
 
-**You do not build images.** `make minikube-setup` pulls them from
-`ghcr.io/evenfire-ai`, which publishes `linux/amd64` and `linux/arm64`, so an
-Apple Silicon Mac pulls a native image rather than compiling ~23 services.
-Expect roughly 15 minutes on a cold cache — almost all of it network transfer —
-and much less once the layers are local.
-
-Two things a first run trips over:
-
-- **`MINIKUBE_IMAGE_TAG=latest` is required today.** The cluster manifests pin
-  the next release tag, which is not cut yet, so without the override the pull
-  fails with a message naming this variable. Once that release is tagged and
-  promoted, plain `make minikube-setup` works and this override goes away.
-- **`MINIKUBE_MEMORY=9216`** if minikube fails to start. The default asks for
-  10240 MB, which exceeds a stock Docker Desktop memory ceiling.
-
-To build locally instead — the old behaviour — use `make minikube-setup-local`
-(or `IMAGE_SOURCE=local`). MCP servers are not part of either path: they are
-installed on demand from the evenfire registry.
+The seeded `admin@evenfire.local` Desktop account is therefore the initial GFS
+operator. Re-running setup is idempotent: it may log in to verify the existing
+active link, but it never recreates a revoked link or silently creates a second
+ordinary member. If the link is missing, setup stops with an actionable error.
 
 Then run the UIs from your workstation and say hello to the `chatllm` agent:
 
@@ -76,6 +66,8 @@ npm run ui              # Control UI + Profile UI + Desktop App
 
 The full walkthrough (prerequisites, login, and the pure-API path) is in
 [Get started on minikube](docs/get-started/minikube.md).
+
+Evenfire is meant to be run on a remote cluster — see [Deploying to a remote cluster](#deploying-to-a-remote-cluster).
 
 ---
 
@@ -191,6 +183,20 @@ Overview: [docs/llm-providers/README.md](docs/llm-providers/README.md) ·
 Configure: [docs/deploy/llm-providers.md](docs/deploy/llm-providers.md) ·
 Add one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md) ·
 Details: [mcp-host/README.md](mcp-host/README.md).
+
+---
+
+## Deploying to a remote cluster
+
+The [quick start](#quick-start) runs on local minikube for evaluation. Evenfire
+is meant to be run on a **remote Kubernetes cluster** — deploy the platform there
+with a NetworkPolicy-capable CNI (Calico or equivalent).
+
+Build on the Kubernetes manifests in [`deploy/base`](deploy/base) and the
+kustomize [`deploy/overlays`](deploy/overlays/) — the shipped `minikube` overlay
+is the reference to copy and adapt for your own cluster. Then follow the
+[production deployment guide](docs/deploy/production.md) for the rollout order,
+signing/JWT keys, secrets, and the security non-negotiables.
 
 ---
 

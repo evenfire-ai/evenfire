@@ -114,6 +114,7 @@ describe('generated WRC NetworkPolicy hardening', () => {
         cidr: '93.184.216.10/32',
         port: 443,
         source: { kind: 'fqdn', fqdn: 'api.stripe.com' },
+        ttlSeconds: 300,
       },
     ]
 

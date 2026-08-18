@@ -351,6 +351,73 @@ describe('buildPluginWorkloadSdkStatus', () => {
     })
   })
 
+  it('preserves the original validatedAt across a steady-state throttle refresh (issue #375 R1)', () => {
+    // The verifiedAt throttle rewrites the whole SDK projection every ~5 min in
+    // steady state. validatedAt is the stable "first reached validated" marker
+    // (operators/dashboards read it), so a still-validated recipe must NOT have
+    // it reset to now on each throttle patch — only verifiedAt advances.
+    const EARLIER = '2026-08-17T10:00:00.000Z'
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec({ promptBridge: {} }),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        provider: 'zai',
+        model: 'glm-4.7',
+        policyRevision: 1,
+        defaultTargetRef: 'primary-zai',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+      // Already validated on a prior pass, with the stable marker set EARLIER.
+      existingCapability: {
+        state: 'validated',
+        promptBridge: true,
+        clientNotifications: false,
+        validatedAt: EARLIER,
+        verifiedAt: EARLIER,
+      },
+    })
+    expect(projection.capability?.state).toBe('validated')
+    // validatedAt is carried forward (stable), verifiedAt advances to now.
+    expect(projection.capability?.validatedAt).toBe(EARLIER)
+    expect(projection.capability?.verifiedAt).toBe(NOW)
+  })
+
+  it('stamps a fresh validatedAt on a genuine transition INTO validated (issue #375 R1)', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec({ promptBridge: {} }),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        provider: 'zai',
+        model: 'glm-4.7',
+        policyRevision: 1,
+        defaultTargetRef: 'primary-zai',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+      // Prior state was awaiting_policy — this is the real transition.
+      existingCapability: {
+        state: 'awaiting_policy',
+        promptBridge: true,
+        clientNotifications: false,
+        validatedAt: null,
+        verifiedAt: '2026-08-17T10:00:00.000Z',
+      },
+    })
+    expect(projection.capability?.state).toBe('validated')
+    expect(projection.capability?.validatedAt).toBe(NOW)
+  })
+
   it('keeps a mixed recipe pending until every declared family has an active proof', () => {
     const projection = buildPluginWorkloadSdkStatus({
       spec: baseSpec({

@@ -310,7 +310,9 @@ export class LlmPortAdapter implements LlmPort {
       this.providerName,
       classified.code,
       classified.retryable,
-      err as Error
+      err as Error,
+      classified.httpStatus,
+      classified.providerCode
     )
   }
 

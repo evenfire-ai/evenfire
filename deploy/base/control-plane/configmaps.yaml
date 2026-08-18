@@ -56,6 +56,17 @@ data:
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_INTERVAL_MS: "5000"
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_BATCH_SIZE: "10"
   APPROVAL_RL_REQUEST_PER_MIN: "120"
+  # Plugin Workload SDK platform rate limits (issue #348). Per-run SDK quotas
+  # (maxRequestsPerRun / maxNotificationsPerRun) are deprecated and ignored;
+  # limits are enforced over a trailing 60s window (no fixed reset); once
+  # traffic slows below the limit the window drains within ~60s — stepless
+  # recipes are never permanently trapped. Values MUST equal the code defaults
+  # in control-api/src/config.ts (150/120/600/600) — the config deploy-mirror
+  # test fails on drift.
+  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "150"
+  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "120"
+  CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: "600"
   # Hard ceiling for caller-provided ttlSeconds. Defaults to 48h so a client
   # asking for ttlSeconds=604800 (code default) can't freeze a workflow step
   # for a full week. Overlays may tighten further for stricter environments.
@@ -79,6 +90,9 @@ data:
   # prefixes for their own registry.
   CONTROL_API_ALLOWED_IMAGE_PREFIXES: "ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/"
   CONTROL_API_ENFORCE_IMAGE_ALLOWLIST: "false"
+  # LLM catalog discovery sync cron (spec 09 Fase 4). Non-destructive; code
+  # default off. Interval + plausibility floors keep their code defaults.
+  LLM_CATALOG_SYNC_CRON_ENABLED: "true"
 ---
 apiVersion: v1
 kind: ConfigMap

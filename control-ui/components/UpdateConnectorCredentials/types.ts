@@ -1,5 +1,10 @@
 import type { EnvSecret } from '../../lib/api'
 
+export type RegistryCredentialSource = {
+  name: string
+  version: string
+}
+
 export type UpdateConnectorCredentialsProps = {
   /**
    * McpServer CRD name — the connector currently being edited. Also the
@@ -14,6 +19,12 @@ export type UpdateConnectorCredentialsProps = {
    * instead of a form when this is unset.
    */
   envSecret: EnvSecret | undefined
+  /**
+   * Marketplace source retained on the connector CRD. When present, its
+   * credential schema supplies operator-friendly field names while secret
+   * keys remain the stable write-only data identifiers.
+   */
+  registryCredentialSource?: RegistryCredentialSource
 }
 
 /**

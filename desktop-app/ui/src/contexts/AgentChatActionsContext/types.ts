@@ -8,6 +8,7 @@ import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../..
  */
 export interface AgentChatActionsContextValue {
   chatEndRef: RefObject<HTMLDivElement | null>
+  scrollChatToBottom: () => void
   handleCreateChat: () => Promise<void>
   handleRenameChat: (chatId: string, newTitle: string) => Promise<void>
   handleRenameChatForAgent: (agentRef: string, chatId: string, newTitle: string) => Promise<void>

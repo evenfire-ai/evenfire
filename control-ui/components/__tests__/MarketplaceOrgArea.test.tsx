@@ -49,20 +49,26 @@ beforeEach(() => {
 })
 
 describe('MarketplaceOrgArea', () => {
-  it('labels the area with the org name, linked to the Entries tab', () => {
+  it('keeps Marketplace as the organization-area header', () => {
     vi.mocked(capHook.useRegistryCapability).mockReturnValue(
       cap({ orgName: 'acme', scope: '@acme', canManageOrg: true })
     )
     render(<MarketplaceOrgArea activeTab="entries" />)
-    const orgLink = screen.getByRole('link', { name: '@acme' })
-    expect(orgLink).toHaveAttribute('href', '/marketplace/org/entries')
+    expect(screen.getByText('Marketplace')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '@acme' })).toBeNull()
   })
 
-  it('labels the area "Your org" (plain text, not a link) before the deployment is claimed', () => {
-    vi.mocked(capHook.useRegistryCapability).mockReturnValue(cap({}))
+  it('places Marketplace navigation below the organization header', () => {
+    vi.mocked(capHook.useRegistryCapability).mockReturnValue(
+      cap({ orgName: 'acme', scope: '@acme', canManageOrg: true })
+    )
     render(<MarketplaceOrgArea activeTab="entries" />)
-    expect(screen.getByText('Your org')).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Your org' })).toBeNull()
+
+    const header = screen.getByText('Marketplace')
+    const marketplaceTabs = screen.getByText('marketplace-tabs')
+    expect(header.compareDocumentPosition(marketplaceTabs) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
   })
 
   it('entries: shows OwnedEntries when the org can manage', () => {

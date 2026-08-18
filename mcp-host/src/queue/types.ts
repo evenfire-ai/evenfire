@@ -21,6 +21,15 @@ export interface TaskError {
    */
   retryable: boolean
   provider: string // a registered LlmProvider id (llm/registryCore.ts) or "unknown"
+  /**
+   * Additive diagnostics (spec 02, Pieza A). Provider HTTP status and native
+   * error code/type behind `code`, when the classifier recovered them. Optional
+   * and purely additive — this interface is the serialized contract across all
+   * four user-delivery channels, so existing desktop consumers ignore unknown
+   * fields and keep working.
+   */
+  httpStatus?: number
+  providerCode?: string
 }
 
 export interface TaskResponsePayload {

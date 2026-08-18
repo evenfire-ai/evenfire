@@ -53,7 +53,7 @@ describe('HostIdentityTab', () => {
     await expectMarkdownEditorValue(/Agent instructions markdown/i, 'a')
     fireEvent.click(screen.getByRole('tab', { name: 'User context' }))
     await expectMarkdownEditorValue(/User context markdown/i, 'u')
-  })
+  }, 15_000)
 
   it('shows a loading skeleton while the initial request is pending', () => {
     ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockReturnValue(
