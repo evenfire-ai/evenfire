@@ -1,4 +1,9 @@
 import { createHash } from 'node:crypto'
+import {
+  type Pr2RuntimeHopReadiness,
+  allPr2RuntimeHopsReady,
+  unavailablePr2RuntimeHops,
+} from './pr2RuntimeReadiness.js'
 
 export const USER_ACCESS_POLICY_VERSION = '1' as const
 
@@ -54,6 +59,7 @@ export type DeploymentReadiness = Readonly<{
   actionSafeRevisions: Readiness
   actionContext: Readiness
   rpcDelegationAllHops: Readiness
+  pr2RuntimeHops: Pr2RuntimeHopReadiness
   desktop: Readiness
   explicitTeamAdapters: Readiness
   profile: Readiness
@@ -207,6 +213,10 @@ export function compileUserAccessPolicy(
     requireCondition(acceptV2, 'action_context_requires_v2_acceptance')
     requireCondition(readiness.accessBudget === 'ready', 'action_context_budget_unavailable')
     requireCondition(readiness.actionContext === 'ready', 'action_context_unavailable')
+    requireCondition(
+      allPr2RuntimeHopsReady(readiness.pr2RuntimeHops),
+      'action_context_pr2_hops_unavailable'
+    )
   }
   if (intent.rpcDelegationV2) {
     requireCondition(intent.actionContextV2, 'rpc_v2_requires_action_context')
@@ -349,6 +359,10 @@ export const reconstructionReadiness: DeploymentReadiness = Object.freeze({
   actionContext: 'unavailable',
   // PR 2 owns the rpc-proxy and mcp-host hops. This stays unavailable in PR 1.
   rpcDelegationAllHops: 'unavailable',
+  // This is deliberately independent of configured intent and coarse release
+  // readiness. Every PR 2 producer, consumer, and continuation hop must supply
+  // executable evidence before either v2 runtime contract can be advertised.
+  pr2RuntimeHops: unavailablePr2RuntimeHops,
   desktop: 'unavailable',
   explicitTeamAdapters: 'ready',
   profile: 'unavailable',
