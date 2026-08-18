@@ -9430,6 +9430,41 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
     ;(watcher as any).installHostSnapshot({ hosts: [], resourceVersion: 'rv4' })
     expect((watcher as any).hostDesiredRevision).toBe(base + 2)
   })
+
+  it('installHostSnapshot is deliberately blind to Host annotations/labels (pins the mutation-relevance invariant)', () => {
+    // Guards the SCOPE note on sameHostDesiredRevision: the Host comparator is
+    // uid+generation only, unlike the McpServer/Context comparators that hash
+    // labels/annotations. That is correct ONLY while no Host annotation/label is
+    // load-bearing for a mutation (the wake annotation drives dispatch, not
+    // template content). This test pins that contract: annotation/label churn at
+    // the SAME (uid, generation) — e.g. a Premature-close re-LIST — must NOT bump
+    // the desired revision. If a Host annotation/label ever becomes mutation-
+    // relevant, whoever extends the comparator to hash it will break this test and
+    // be forced to re-examine the fail-open the SCOPE note warns about.
+    const watcher = new McpServerWatcher()
+    const hostA = {
+      name: 'a',
+      namespace: 'mcp-host',
+      uid: 'ua',
+      generation: 1,
+      spec: { contextRef: 'ctx' },
+      annotations: { 'clerum.io/wake': 'v1' },
+      labels: { tier: 'a' },
+    } as unknown as HostCRD
+    ;(watcher as any).installHostSnapshot({ hosts: [hostA], resourceVersion: 'rv1' })
+    const base = (watcher as any).hostDesiredRevision
+    ;(watcher as any).installHostSnapshot({
+      hosts: [
+        {
+          ...hostA,
+          annotations: { 'clerum.io/wake': 'v2', 'clerum.io/added': 'x' },
+          labels: { tier: 'b' },
+        },
+      ],
+      resourceVersion: 'rv2',
+    })
+    expect((watcher as any).hostDesiredRevision).toBe(base)
+  })
 })
 
 describe('McpServerWatcher watch-close recovery latency (immediate first attempt + floor)', () => {
@@ -10114,7 +10149,10 @@ describe('McpServerWatcher watch-recovery retry backoff (exponential, jittered, 
     'keeps the first $kind attempt after a spaced close immediate (hardening not regressed by backoff)',
     async lane => {
       randomSpy.mockReturnValue(0) // worst-case jitter must not delay the immediate path
-      const { watcher, doneCallbacks, getListCalls } = await setUpInventoryLane(lane, () => 'succeed')
+      const { watcher, doneCallbacks, getListCalls } = await setUpInventoryLane(
+        lane,
+        () => 'succeed'
+      )
 
       await vi.advanceTimersByTimeAsync(1500)
       doneCallbacks[0](closeError())
