@@ -15,7 +15,6 @@ import type { GfsBrokeredAuthority } from '../auth/verify'
 import {
   GFS_UPLOAD_V2_COMPLETE_BODY_MAX_BYTES,
   GFS_UPLOAD_V2_METADATA_BODY_MAX_BYTES,
-  GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
   GfsUploadGeometryError,
   type GfsUploadPartGeometry,
   disabledGfsUploadV2Capability,
@@ -540,11 +539,11 @@ export class GfsUploadSessionService {
     if (
       !Number.isSafeInteger(input.sizeBytes) ||
       input.sizeBytes < 0 ||
-      input.sizeBytes > GFS_UPLOAD_V2_PRODUCT_MAX_BYTES
+      input.sizeBytes > this.deps.config.productMaxFileBytes
     ) {
       throw new GfsError(
         'payload_too_large',
-        `sizeBytes must be between 0 and ${GFS_UPLOAD_V2_PRODUCT_MAX_BYTES}`
+        `sizeBytes must be between 0 and ${this.deps.config.productMaxFileBytes}`
       )
     }
     const name = normalizedName(input.name)

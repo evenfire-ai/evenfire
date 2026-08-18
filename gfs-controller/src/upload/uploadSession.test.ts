@@ -11,8 +11,12 @@ import {
   type Transactor,
   type TxClient,
 } from '../db/writeStore'
-import { GFS_UPLOAD_V2_PRODUCT_MAX_BYTES, partGeometry } from './protocol'
-import { GfsUploadSessionService, type UploadSessionServiceDeps } from './uploadSession'
+import { GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES, partGeometry } from './protocol'
+import {
+  GfsUploadSessionService,
+  type UploadSessionServiceDeps,
+  uploadCapabilities,
+} from './uploadSession'
 
 type Row = Record<string, unknown>
 
@@ -571,11 +575,11 @@ describe('GfsUploadSessionService', () => {
     const exactDb = new MemoryDb()
     const exact = await service(exactDb, CONFIG).create({
       ...input,
-      sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+      sizeBytes: GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
       idempotencyKey: '11111111-1111-4111-8111-111111111112',
     })
     expect(exact.created).toBe(true)
-    expect(exact.session.expectedBytes).toBe(GFS_UPLOAD_V2_PRODUCT_MAX_BYTES)
+    expect(exact.session.expectedBytes).toBe(GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES)
     expect(exact.session.partBytes).toBe(8 * 1024 * 1024)
     expect(exact.session.partCount).toBe(25)
     expect(exactDb.sessions).toHaveLength(1)
@@ -584,7 +588,7 @@ describe('GfsUploadSessionService', () => {
     await expect(
       service(overDb, CONFIG).create({
         ...input,
-        sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES + 1,
+        sizeBytes: GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES + 1,
         idempotencyKey: '11111111-1111-4111-8111-111111111113',
       })
     ).rejects.toMatchObject({ code: 'payload_too_large' })
@@ -594,11 +598,66 @@ describe('GfsUploadSessionService', () => {
     await expect(
       service(partCountDb, { ...CONFIG, maxPartCount: 24 }).create({
         ...input,
-        sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+        sizeBytes: GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
         idempotencyKey: '11111111-1111-4111-8111-111111111114',
       })
     ).rejects.toMatchObject({ code: 'payload_too_large' })
     expect(partCountDb.sessions).toHaveLength(0)
+  })
+
+  it.each([
+    ['100 MiB', 100 * 1024 * 1024],
+    ['250 MiB', 250 * 1024 * 1024],
+    ['300 MiB', 300 * 1024 * 1024],
+    ['the protocol maximum', 1024 * 1024 * 1024],
+  ] as const)(
+    'advertises and enforces the configured %s product limit before allocation',
+    async (_label, productMaxFileBytes) => {
+      tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-runtime-boundary-'))
+      const config = { ...CONFIG, productMaxFileBytes }
+      const capability = uploadCapabilities(true, config).resumableV2
+      expect(capability).toMatchObject({ enabled: true, maxFileBytes: productMaxFileBytes })
+
+      const input = {
+        ...principal,
+        operation: 'create' as const,
+        parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        name: 'runtime-boundary.bin',
+      }
+      const exactDb = new MemoryDb()
+      const exact = await service(exactDb, config).create({
+        ...input,
+        sizeBytes: productMaxFileBytes,
+        idempotencyKey: '21111111-1111-4111-8111-111111111112',
+      })
+      expect(exact.session.expectedBytes).toBe(productMaxFileBytes)
+      expect(exactDb.sessions).toHaveLength(1)
+
+      const overDb = new MemoryDb()
+      await expect(
+        service(overDb, config).create({
+          ...input,
+          sizeBytes: productMaxFileBytes + 1,
+          idempotencyKey: '21111111-1111-4111-8111-111111111113',
+        })
+      ).rejects.toMatchObject({ code: 'payload_too_large' })
+      expect(overDb.sessions).toHaveLength(0)
+    }
+  )
+
+  it('keeps zero-byte uploads valid with a positive configured product limit', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-empty-file-'))
+    const db = new MemoryDb()
+    const created = await service(db, { ...CONFIG, productMaxFileBytes: 1 }).create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'empty.bin',
+      sizeBytes: 0,
+      idempotencyKey: '21111111-1111-4111-8111-111111111114',
+    })
+    expect(created.session.expectedBytes).toBe(0)
+    expect(created.session.partCount).toBe(0)
   })
 
   it(
