@@ -90,6 +90,9 @@ data:
   # prefixes for their own registry.
   CONTROL_API_ALLOWED_IMAGE_PREFIXES: "ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/"
   CONTROL_API_ENFORCE_IMAGE_ALLOWLIST: "false"
+  # LLM catalog discovery sync cron (spec 09 Fase 4). Non-destructive; code
+  # default off. Interval + plausibility floors keep their code defaults.
+  LLM_CATALOG_SYNC_CRON_ENABLED: "true"
 ---
 apiVersion: v1
 kind: ConfigMap
