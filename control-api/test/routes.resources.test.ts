@@ -11,6 +11,23 @@ vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(),
 }))
 
+// R1-H3 fase 1: Host create/update now wrap validation + the K8s write in a
+// carrier transaction that holds a per-model-name advisory lock. Keep the rest of
+// db.js real; stub only the transaction runner + lock / idle-timeout guards so
+// these route tests need no live Postgres (serialization is covered by the
+// real-Postgres race test).
+vi.mock('../src/db.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/db.js')>('../src/db.js')
+  return {
+    ...actual,
+    withTransaction: (work: (db: { query: (...a: unknown[]) => unknown }) => Promise<unknown>) =>
+      work({ query: async () => ({ rows: [], rowCount: 0 }) }),
+    advisoryLockModelName: async () => {},
+    advisoryLockModelNames: async () => {},
+    boundCarrierTransactionIdleTimeout: async () => {},
+  }
+})
+
 class PruningCommunicationChannelGateway extends MockGateway {
   override async createResource(
     plural: Parameters<MockGateway['createResource']>[0],
