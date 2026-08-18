@@ -1108,8 +1108,8 @@ describe('HostReconciler Host inventory mutation authority', () => {
     const mutationAuthority = {
       current: {
         known: true,
-        hostGeneration: 7,
-        contextGeneration: 11,
+        hostRevision: 7,
+        contextRevision: 11,
       },
     }
     ;(reconciler as any).setHostMutationAuthority(() => mutationAuthority.current)
@@ -1126,13 +1126,15 @@ describe('HostReconciler Host inventory mutation authority', () => {
     const fleet = reconciler.fullReconcile([hostA, hostB])
     await vi.waitFor(() => expect(reconcileCore).toHaveBeenCalledWith(hostA, expect.any(Function)))
 
-    // Context retired and recovered to a fresh LIST -> WATCH generation while
-    // Host authority remained continuously known: a host-only lease would miss
-    // this ABA transition and admit Host B with stale derived mounts.
+    // Context desired state changed (its content revision advanced) while Host
+    // authority remained continuously known: a host-only lease would miss this
+    // transition and admit Host B with stale derived mounts. A pure watch
+    // reconnect with identical content would NOT advance the revision and is
+    // correctly admitted — that is the point of the content-identity fence.
     mutationAuthority.current = {
       known: true,
-      hostGeneration: 7,
-      contextGeneration: 13,
+      hostRevision: 7,
+      contextRevision: 13,
     }
     releaseBlocker.resolve(undefined)
     await occupied
@@ -1160,8 +1162,8 @@ describe('HostReconciler Host inventory mutation authority', () => {
     reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
     reconciler.setHostMutationAuthority(() => ({
       known: true,
-      hostGeneration: 7,
-      contextGeneration: 11,
+      hostRevision: 7,
+      contextRevision: 11,
     }))
     reconciler.setResolveHostMutationDependencies(() => [selectedContext])
 
@@ -1216,8 +1218,8 @@ describe('HostReconciler Host inventory mutation authority', () => {
     reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
     reconciler.setHostMutationAuthority(() => ({
       known: true,
-      hostGeneration: 7,
-      contextGeneration: 11,
+      hostRevision: 7,
+      contextRevision: 11,
     }))
     reconciler.setResolveHostMutationDependencies(() => [selectedContext])
 
@@ -1272,8 +1274,8 @@ describe('HostReconciler Host inventory mutation authority', () => {
     reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
     reconciler.setHostMutationAuthority(() => ({
       known: true,
-      hostGeneration: 7,
-      contextGeneration: 11,
+      hostRevision: 7,
+      contextRevision: 11,
     }))
     reconciler.setResolveHostMutationDependencies(() => [context, selectedDependency])
 

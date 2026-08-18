@@ -82,13 +82,17 @@ export type HostWatchAuthoritySnapshot = { known: boolean; generation: number }
 /**
  * Immutable lease for every inventory that contributes to a Host mutation.
  * Host resources come from the Host watch; mounted SharedFileSystems come from
- * the Context watch. Keeping both generations prevents a false-stable
- * Host-only lease when Context retires and recovers during queued work.
+ * the Context watch. Both are CONTENT revisions (they move only on a real
+ * desired-state change), not channel generations — a watch reconnect that
+ * re-LISTs the identical inventory must not retire an in-flight Host lease, or
+ * sustained watch-churn starves every queued reconcile. Keeping both revisions
+ * still prevents a false-stable Host-only lease when Context desired state
+ * changes during queued work.
  */
 export type HostMutationAuthoritySnapshot = {
   known: boolean
-  hostGeneration: number
-  contextGeneration: number
+  hostRevision: number
+  contextRevision: number
 }
 
 class HostInventoryAuthorityUnavailableError extends Error {
@@ -99,9 +103,9 @@ class HostInventoryAuthorityUnavailableError extends Error {
   ) {
     super(
       `Host inventory authority changed before ${action} admission ` +
-        `(captured known=${captured.known} hostGeneration=${captured.hostGeneration} ` +
-        `contextGeneration=${captured.contextGeneration}, current known=${current.known} ` +
-        `hostGeneration=${current.hostGeneration} contextGeneration=${current.contextGeneration})`
+        `(captured known=${captured.known} hostRevision=${captured.hostRevision} ` +
+        `contextRevision=${captured.contextRevision}, current known=${current.known} ` +
+        `hostRevision=${current.hostRevision} contextRevision=${current.contextRevision})`
     )
     this.name = 'HostInventoryAuthorityUnavailableError'
   }
@@ -471,8 +475,11 @@ export class HostReconciler {
     const host = this.hostWatchAuthority()
     return {
       known: host.known,
-      hostGeneration: host.generation,
-      contextGeneration: 0,
+      // Standalone contract: no separate desired-revision plumbing here, so the
+      // Host watch generation stands in as the Host-only lease identity. The
+      // McpServerWatcher wires the real composite content revisions in production.
+      hostRevision: host.generation,
+      contextRevision: 0,
     }
   }
   /**
@@ -630,8 +637,8 @@ export class HostReconciler {
     if (
       !captured.known ||
       !current.known ||
-      captured.hostGeneration !== current.hostGeneration ||
-      captured.contextGeneration !== current.contextGeneration
+      captured.hostRevision !== current.hostRevision ||
+      captured.contextRevision !== current.contextRevision
     ) {
       throw new HostInventoryAuthorityUnavailableError(action, captured, current)
     }

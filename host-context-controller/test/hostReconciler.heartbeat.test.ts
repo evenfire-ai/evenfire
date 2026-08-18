@@ -945,8 +945,8 @@ describe('HostReconciler.suspendHostFromHeartbeat', () => {
     reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
     reconciler.setHostMutationAuthority(() => ({
       known: true,
-      hostGeneration: 1,
-      contextGeneration: 1,
+      hostRevision: 1,
+      contextRevision: 1,
     }))
     const draining = freshHostRead({ state: 'draining', wakeHandledGeneration: 2 })
     Object.assign(draining.metadata, {

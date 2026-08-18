@@ -644,6 +644,7 @@ export class McpServerWatcher implements McpServerProvider {
   private contextWatchGeneration = 0
   private mcpServerDesiredRevision = 0
   private contextDesiredRevision = 0
+  private hostDesiredRevision = 0
   // Readiness covers authoritative revocation, not additive fleet completion.
   // Generations bind the completed safety sweep to the exact LIST -> WATCH
   // pair that supplied its absence decisions. A recovered watch invalidates
@@ -840,8 +841,8 @@ export class McpServerWatcher implements McpServerProvider {
     }))
     this.hostReconciler.setHostMutationAuthority(() => ({
       known: this.hostCacheSynced && this.contextCacheSynced,
-      hostGeneration: this.hostWatchGeneration,
-      contextGeneration: this.contextWatchGeneration,
+      hostRevision: this.hostDesiredRevision,
+      contextRevision: this.contextDesiredRevision,
     }))
     this.hostReconciler.setResolveHostMutationDependencies(host => {
       const context = this.contexts.get(host.spec.contextRef)
@@ -1504,7 +1505,29 @@ export class McpServerWatcher implements McpServerProvider {
     this.clearAllHostWatchRetries()
   }
 
+  // Host content identity for the diffing installer and the watch-event bump.
+  // Kubernetes bumps metadata.generation only on a spec change (not on the
+  // status writes HCC itself makes), and the uid distinguishes a delete+recreate
+  // of the same name. Same (uid, generation) = same desired Host state.
+  private sameHostDesiredRevision(previous: HostCRD, current: HostCRD): boolean {
+    return previous.uid === current.uid && previous.generation === current.generation
+  }
+
+  private hostSnapshotChangesDesiredState(snapshot: HostSnapshot): boolean {
+    if (snapshot.hosts.length !== this.hosts.size) return true
+    for (const host of snapshot.hosts) {
+      const previous = this.hosts.get(host.name)
+      if (previous === undefined || !this.sameHostDesiredRevision(previous, host)) return true
+    }
+    return false
+  }
+
   private installHostSnapshot(snapshot: HostSnapshot): void {
+    // Same diffing rule as the Context/McpServer installers: a Premature-close
+    // reconnect that re-LISTs the identical Host inventory leaves hostDesiredRevision
+    // untouched, so the Host mutation-authority fence no longer starves every
+    // queued reconcile with HostInventoryAuthorityUnavailableError under churn.
+    if (this.hostSnapshotChangesDesiredState(snapshot)) this.hostDesiredRevision += 1
     this.hosts.clear()
     for (const host of snapshot.hosts) this.hosts.set(host.name, host)
   }
@@ -3959,11 +3982,19 @@ export class McpServerWatcher implements McpServerProvider {
       this.clearHostWatchRetry(host.name)
       const eventRevision = ++this.hostWatchRevision
       this.latestHostWatchEventRevisions.set(host.name, eventRevision)
+      // Advance hostDesiredRevision only on a real desired-state change (the
+      // content identity the mutation-authority fence reads), separate from the
+      // per-event hostWatchRevision counter above.
+      const previousHost = this.hosts.get(host.name)
+      let hostDesiredStateChanged = false
       if (eventType === 'ADDED' || eventType === 'MODIFIED') {
+        hostDesiredStateChanged =
+          previousHost === undefined || !this.sameHostDesiredRevision(previousHost, host)
         this.hosts.set(host.name, host)
       } else {
-        this.hosts.delete(host.name)
+        hostDesiredStateChanged = this.hosts.delete(host.name)
       }
+      if (hostDesiredStateChanged) this.hostDesiredRevision += 1
 
       try {
         // Direct dispatch (§10.3): reconcileHostWatchEvent enters the per-Host

@@ -9395,4 +9395,30 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
     ;(watcher as any).installMcpServerSnapshot({ servers: [], resourceVersion: 'rv4' })
     expect((watcher as any).mcpServerDesiredRevision).toBe(base + 2)
   })
+
+  it('installHostSnapshot bumps the desired revision only when re-listed content changed', () => {
+    const watcher = new McpServerWatcher()
+    const hostA = {
+      name: 'a',
+      namespace: 'mcp-host',
+      uid: 'ua',
+      generation: 1,
+      spec: { contextRef: 'ctx' },
+    } as unknown as HostCRD
+    ;(watcher as any).installHostSnapshot({ hosts: [hostA], resourceVersion: 'rv1' })
+    const base = (watcher as any).hostDesiredRevision
+    // Identical re-LIST (a Premature-close reconnect) must NOT bump — this is
+    // what stops the Host mutation-authority fence from starving every reconcile.
+    ;(watcher as any).installHostSnapshot({ hosts: [hostA], resourceVersion: 'rv2' })
+    expect((watcher as any).hostDesiredRevision).toBe(base)
+    // A spec change (metadata.generation advances) MUST bump.
+    ;(watcher as any).installHostSnapshot({
+      hosts: [{ ...hostA, generation: 2 }],
+      resourceVersion: 'rv3',
+    })
+    expect((watcher as any).hostDesiredRevision).toBe(base + 1)
+    // A removal MUST bump.
+    ;(watcher as any).installHostSnapshot({ hosts: [], resourceVersion: 'rv4' })
+    expect((watcher as any).hostDesiredRevision).toBe(base + 2)
+  })
 })
