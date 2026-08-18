@@ -157,6 +157,11 @@ CONTEXT_A='context1'
 CONTEXT_B="np08-e2e-${RUN_ID}-context-b"
 SERVER_A="np08-e2e-${RUN_ID}-server-a"
 SERVER_B="np08-e2e-${RUN_ID}-server-b"
+# SERVER_C is a same-Context (CONTEXT_A) no-auth server: no `auth:` block, so a
+# credential request must return 200 token:null. Self-provisioned by this test
+# instead of assuming a pre-seeded environment server, so the no-auth leg does
+# not depend on an external stack existing in the branch profile.
+SERVER_C="np08-e2e-${RUN_ID}-server-c"
 SECRET_A="np08-e2e-${RUN_ID}-server-a-auth"
 SECRET_B="np08-e2e-${RUN_ID}-server-b-auth"
 
@@ -169,8 +174,8 @@ cleanup() {
   local remove_patch context_contains_fixture context_a_json
   set +e
   if [[ "${fixture_context_patched:-0}" == 1 ]]; then
-    remove_patch="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json 2>/dev/null | jq -c --arg server "${SERVER_A}" '
-      [(.spec.mcpServers // [] | to_entries[] | select(.value == $server) | .key)]
+    remove_patch="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json 2>/dev/null | jq -c --arg servera "${SERVER_A}" --arg serverc "${SERVER_C}" '
+      [(.spec.mcpServers // [] | to_entries[] | select(.value == $servera or .value == $serverc) | .key)]
       | reverse | map({op:"remove", path:("/spec/mcpServers/" + tostring)})' 2>/dev/null)"
     if [[ -z "${remove_patch}" || "${remove_patch}" == "null" ]]; then
       cleanup_status=1
@@ -187,7 +192,7 @@ cleanup() {
   done
   context_a_json="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json 2>/dev/null)" || cleanup_status=1
   if [[ -n "${context_a_json}" ]]; then
-    context_contains_fixture="$(jq -r --arg server "${SERVER_A}" '(.spec.mcpServers // []) | any(. == $server)' <<<"${context_a_json}" 2>/dev/null)" || cleanup_status=1
+    context_contains_fixture="$(jq -r --arg servera "${SERVER_A}" --arg serverc "${SERVER_C}" '(.spec.mcpServers // []) | any(. == $servera or . == $serverc)' <<<"${context_a_json}" 2>/dev/null)" || cleanup_status=1
   else
     context_contains_fixture='unknown'
   fi
@@ -222,7 +227,7 @@ kctl -n "${CONTROL_NS}" get deployment host-context-controller-api-gateway \
 kctl -n "${HOST_NS}" get deployment "${HOST_DEPLOYMENT}" \
   -o jsonpath='{.status.readyReplicas}' | grep -qx '1'
 
-if kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json | jq -e --arg server "${SERVER_A}" '(.spec.mcpServers // []) | any(. == $server)' >/dev/null; then
+if kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json | jq -e --arg servera "${SERVER_A}" --arg serverc "${SERVER_C}" '(.spec.mcpServers // []) | any(. == $servera or . == $serverc)' >/dev/null; then
   echo "FAIL: generated fixture server name already exists in ${CONTEXT_A}" >&2
   exit 1
 fi
@@ -310,6 +315,24 @@ spec:
     secretRef: ${SECRET_B}
     secretKey: token
   enabled: true
+---
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: ${SERVER_C}
+  namespace: ${MCP_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
+spec:
+  contextRef: ${CONTEXT_A}
+  image: clerum/mock-mcp-server:dev
+  managed: false
+  transport:
+    type: streamableHttp
+    url: http://synthetic-c.invalid/mcp
+    port: 3000
+  enabled: true
 YAML
 
 # Append only the fixture owned by this test; cleanup removes only this
@@ -317,13 +340,15 @@ YAML
 kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
   -p="[{\"op\":\"add\",\"path\":\"/spec/mcpServers/-\",\"value\":\"${SERVER_A}\"}]" >/dev/null
 fixture_context_patched=1
+kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
+  -p="[{\"op\":\"add\",\"path\":\"/spec/mcpServers/-\",\"value\":\"${SERVER_C}\"}]" >/dev/null
 
 echo 'E2E setup: waiting for HCC to observe the synthetic Context/McpServer fixtures'
 
 # Keep the runtime JWT and the returned synthetic token inside the Host pod.
 # The process emits only assertion labels and status/error classes.
 kctl -n "${HOST_NS}" exec -i "deploy/${HOST_DEPLOYMENT}" -- \
-  env "NP08_SERVER_A=${SERVER_A}" "NP08_SERVER_B=${SERVER_B}" \
+  env "NP08_SERVER_A=${SERVER_A}" "NP08_SERVER_B=${SERVER_B}" "NP08_SERVER_C=${SERVER_C}" \
   "NP08_EXPECTED_SYNTHETIC_TOKEN=np08-synthetic-${RUN_ID}-a" node - <<'NODE'
 const base = 'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
 let accessToken = process.env.MCP_HOST_RUNTIME_ACCESS_TOKEN
@@ -331,9 +356,10 @@ const refreshToken = process.env.MCP_HOST_RUNTIME_REFRESH_TOKEN
 const workflowToken = process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN
 const serverA = process.env.NP08_SERVER_A
 const serverB = process.env.NP08_SERVER_B
+const serverC = process.env.NP08_SERVER_C
 const expectedSyntheticToken = process.env.NP08_EXPECTED_SYNTHETIC_TOKEN
 
-if (!accessToken || !refreshToken || !workflowToken || !serverA || !serverB || !expectedSyntheticToken) {
+if (!accessToken || !refreshToken || !workflowToken || !serverA || !serverB || !serverC || !expectedSyntheticToken) {
   throw new Error('runtime token environment is unavailable')
 }
 
@@ -435,7 +461,7 @@ for (const [label, serverName] of [['cross-Context', serverB], ['unknown', 'np08
 const noAuth = await call(credentialPath, {
   method: 'POST',
   headers: jsonHeaders(accessToken),
-  body: JSON.stringify({ serverName: 'mongodb-mcp-stack-mongodb-mcp-server' }),
+  body: JSON.stringify({ serverName: serverC }),
 })
 if (noAuth.response.status !== 200 || noAuth.body?.token !== null) {
   throw new Error(`same-Context no-auth server did not return token:null (HTTP ${noAuth.response.status})`)
