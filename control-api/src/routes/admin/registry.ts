@@ -112,6 +112,29 @@ export function catalogAnnotations(entryName: string, version: string): Record<s
   }
 }
 
+/**
+ * A digest-pinned image ref: exactly one `@`, immediately followed by
+ * `sha256:<64 hex>` and nothing else.
+ *
+ * Anchoring at the front is what makes it exact. An unanchored `/@sha256:…$/`
+ * also accepts `repo@bar@sha256:…`, and the digest was then read with
+ * `split('@')[1]` — which yields `bar`. That value is written into every Host's
+ * `guardrails.hooks[].digest`, and the Host-side pin is exactly what mcp-host
+ * compares against `status.observedDigest` to detect drift and quarantine a
+ * hook, so a junk pin degrades the check that quarantine depends on.
+ *
+ * Shared by install-hook and upgrade-hook so the two cannot drift apart again —
+ * they did: upgrade was fixed while install kept both halves of the bug.
+ */
+export function isDigestPinnedImageRef(ref: unknown): boolean {
+  return typeof ref === 'string' && /^[^@]+@sha256:[0-9a-f]{64}$/.test(ref)
+}
+
+/** The `sha256:…` digest of a ref that passed `isDigestPinnedImageRef`. */
+export function imageRefDigest(ref: unknown): string | undefined {
+  return isDigestPinnedImageRef(ref) ? (ref as string).split('@').pop() : undefined
+}
+
 const MAX_RECIPE_YAML_SIZE = 100 * 1024 // 100 KB (spec §7.3)
 const DELETE_SETTLE_TIMEOUT_MS = 3_000
 const DELETE_SETTLE_POLL_MS = 100
@@ -1907,7 +1930,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // Step 7 — image preflight: digest-pinned (§8.2 resolution) + allowlist (§8.5).
         const image = hookMeta.target.image
         if (image) {
-          if (!/@sha256:[0-9a-f]{64}$/.test(image.ref ?? '')) {
+          if (!isDigestPinnedImageRef(image.ref)) {
             res.status(422).json({ error: 'image_ref_not_digest_pinned' })
             return
           }
@@ -2065,7 +2088,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // Step 10 — reference the hook from Host.spec.guardrails.hooks[phase] as
         // {id, digest}. If this fails the hook exists but no Host runs it, so roll
         // the CR (+ Secret) back rather than return a false success.
-        const digest = image?.ref?.includes('@') ? image.ref.split('@')[1] : undefined
+        const digest = imageRefDigest(image?.ref)
         try {
           // Atomic read→derive→write (shared with the uninstall/upgrade paths):
           // re-reads the Host, derives the hooks map from THAT read, and sends its
@@ -2226,9 +2249,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         const newImage = hookMeta.target.image
         let newDigest: string | undefined
         if (newImage) {
-          // Anchored, and take the LAST @-segment: an unanchored test plus
-          // split('@')[1] pinned "bar" for a ref like `repo@bar@sha256:…`.
-          if (!/^[^@]+@sha256:[0-9a-f]{64}$/.test(newImage.ref ?? '')) {
+          if (!isDigestPinnedImageRef(newImage.ref)) {
             res.status(422).json({ error: 'image_ref_not_digest_pinned' })
             return
           }
@@ -2239,7 +2260,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(422).json({ error: 'image_not_allowlisted', reason: newImage.ref })
             return
           }
-          newDigest = newImage.ref?.includes('@') ? newImage.ref.split('@').pop() : undefined
+          newDigest = imageRefDigest(newImage.ref)
         }
 
         // Host-independent admissibility gates — upgrade-hook is the sanctioned
