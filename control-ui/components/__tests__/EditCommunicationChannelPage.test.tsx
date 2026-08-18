@@ -725,6 +725,55 @@ describe('EditCommunicationChannelPage Teams setup command', () => {
 })
 
 /**
+ * An operator without an authenticated Teams CLI, or without a tenant that
+ * permits sideloading, used to hit both assumptions unannounced, only after
+ * copying the `teams app create` command. The prerequisites block exists to
+ * surface both before that command, and to point at the full guide. Unlike
+ * the create page, this section renders unconditionally on the Teams tab
+ * (it does not wait for teamsRequestUrl), so no draft setup is needed here.
+ */
+describe('EditCommunicationChannelPage Teams prerequisites', () => {
+  const TEAMS_GUIDE_URL =
+    'https://github.com/evenfire-ai/evenfire/blob/main/docs/how-to/connect-teams.md'
+
+  it('shows CLI install/login and the sideloading check on the Teams tab', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText(/npm install -g @microsoft\/teams\.cli/)).toBeInTheDocument()
+    expect(screen.getByText('teams login')).toBeInTheDocument()
+    expect(screen.getByText('Sideloading: enabled')).toBeInTheDocument()
+    // The point of running `teams status` at all: it proves both prerequisites
+    // in one shot, and a disabled result means propagation, not breakage.
+    expect(screen.getByText(/proves both prerequisites/i)).toBeInTheDocument()
+    expect(screen.getByText(/not that anything is broken/i)).toBeInTheDocument()
+  })
+
+  it('links to the Teams setup guide', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const link = screen.getByRole('link', { name: /Teams setup guide/i })
+    expect(link).toHaveAttribute('href', TEAMS_GUIDE_URL)
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+
+  it('does not show the Teams prerequisites on the Slack tab', async () => {
+    mockChannel('slack-channel', SLACK_CHANNEL_SPEC)
+    await renderLoadedPage()
+
+    expect(screen.queryByText('Sideloading: enabled')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Teams setup guide/i })).not.toBeInTheDocument()
+  })
+})
+
+/**
  * spec.teamsSettings.appName is a free-form DISPLAY name: the CRD declares it
  * with no pattern (unlike tenantId right below it), control-api checks only
  * non-empty and 80 characters (unlike appId, which carries a UUID regex), and

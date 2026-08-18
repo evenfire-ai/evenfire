@@ -13,7 +13,7 @@
  */
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ToastProvider } from '@components/Toast'
 import CreateCommunicationChannelPage from '../../app/communication-channels/new/page'
 import * as api from '../../lib/api'
@@ -253,18 +253,86 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
     expect(
       screen.getByText(/The command writes CLIENT_ID, TENANT_ID and CLIENT_SECRET into/i)
     ).toBeInTheDocument()
-    expect(screen.getByText('Upload and download files')).toBeInTheDocument()
+    // supportsFiles is a manifest property, not a Developer Portal toggle. The
+    // panel used to point at a checkbox the current portal does not present.
+    expect(screen.getByText(/bots\[0\]\.supportsFiles=true/)).toBeInTheDocument()
+    expect(screen.getByText(/direct chat only, not in a channel/i)).toBeInTheDocument()
 
     const command = screen.getByText(/teams app create/).closest('pre')
     expect(command).toHaveTextContent('teams app create')
     // Quoted, so a display name with a space stays one argument.
     expect(command).toHaveTextContent('--name "Evenfire Bot"')
     expect(command).toHaveTextContent('--endpoint "https://webhook.example.com/webhooks/teams/')
+    // channel-reader uses a tenant-scoped token URL, so a multi-tenant app fails
+    // with AADSTS. The CLI does not document its default, so the flag is pinned.
+    expect(command).toHaveTextContent('--sign-in-audience myOrg')
     expect(command).toHaveTextContent('--env .env')
     expect(screen.getByLabelText(/^CLIENT_ID/)).toBeInTheDocument()
     expect(screen.getByLabelText(/^TENANT_ID/)).toBeInTheDocument()
     expect(screen.getByLabelText('CLIENT_SECRET')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+  })
+
+  // The list used to narrate three steps and then drop both commands after it, so
+  // "run this" in step 1 pointed past step 3 at a block that was not even the
+  // command step 3 talked about. Each command now sits in the step that means it.
+  it('puts each Teams command inside the step that tells you to run it', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+
+    const steps = screen.getByText(/Run this from any directory/i).closest('ol')
+    const items = Array.from(steps?.querySelectorAll(':scope > li') ?? [])
+    expect(items).toHaveLength(4)
+
+    expect(items[0].querySelector('pre')).toHaveTextContent('teams app create')
+    // File support comes BEFORE install: an installed app keeps the manifest it
+    // was installed with, so enabling it afterwards means reinstalling.
+    // Named placeholder, never `<appId>`: angle brackets are a redirect in sh and
+    // zsh, so pasting the command unedited fails with "no such file or directory".
+    expect(items[1].querySelector('pre')).toHaveTextContent(
+      "teams app manifest update YOUR_CLIENT_ID --set-json 'bots[0].supportsFiles=true' --yes"
+    )
+    expect(items[2].querySelector('pre')).toBeNull()
+    // The install step carries no command until both ids are filled in, at which
+    // point it renders a link rather than something to paste into a terminal.
+    expect(items[3].textContent ?? '').toMatch(/install the app in Teams/i)
+    expect(items[3].querySelector('a')).toBeNull()
+  })
+
+  // Inline <code> is not copyable, and this command is the one with the trap in it.
+  it('makes the file support command copyable and fills in CLIENT_ID once pasted', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+
+    expect(
+      screen.getByRole('button', { name: 'Copy Teams file support command' })
+    ).toBeInTheDocument()
+
+    // On a teams-managed bot the app id IS CLIENT_ID, so the placeholder resolves
+    // to a command that can be run as copied.
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '11111111-2222-3333-4444-555555555555' },
+    })
+    expect(
+      screen.getByText(
+        "teams app manifest update 11111111-2222-3333-4444-555555555555 --set-json 'bots[0].supportsFiles=true' --yes"
+      )
+    ).toBeInTheDocument()
   })
 
   it('warns and still renders a placeholder-origin command when the deployment has no public webhook origin', async () => {
@@ -443,6 +511,39 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
         credentials: { 'teams-app-password': 'secret' },
       })
     )
+  })
+
+  it('sends only the selected provider, not empty arrays for the other two', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82' },
+    })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
+    })
+    fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), { target: { value: 'secret' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const body = vi.mocked(api.apiSend).mock.calls[0][2] as { spec: Record<string, unknown> }
+    const specKeys = Object.keys(body.spec)
+
+    // A Teams channel used to ship `telegram: []` and `slack: []` too. Those are
+    // truthy in channel-reader's provider guards, which made it treat the channel
+    // as a misconfigured Telegram channel and skip its real providers.
+    expect(specKeys).toContain('teamsSettings')
+    expect(specKeys).not.toContain('telegram')
+    expect(specKeys).not.toContain('telegramSettings')
+    expect(specKeys).not.toContain('slack')
+    expect(specKeys).not.toContain('slackSettings')
   })
 
   it('prefills copied access and agent while creating the selected provider', async () => {
@@ -720,5 +821,158 @@ describe('CreateCommunicationChannelPage — Teams CLI instruction', () => {
         /Run this from any directory. The command writes CLIENT_ID, TENANT_ID and CLIENT_SECRET into/i
       )
     ).toBeInTheDocument()
+  })
+})
+
+/**
+ * An operator without an authenticated Teams CLI, or without a tenant that
+ * permits sideloading, used to hit both assumptions unannounced, only after
+ * copying the `teams app create` command. The prerequisites block exists to
+ * surface both before that command, and to point at the full guide.
+ */
+describe('CreateCommunicationChannelPage — Teams prerequisites', () => {
+  const TEAMS_GUIDE_URL =
+    'https://github.com/evenfire-ai/evenfire/blob/main/docs/how-to/connect-teams.md'
+
+  it('shows CLI install/login and the sideloading check before the Teams provider is selected', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+
+    expect(screen.getByText(/npm install -g @microsoft\/teams\.cli/)).toBeInTheDocument()
+    expect(screen.getByText('teams login')).toBeInTheDocument()
+    expect(screen.getByText('Sideloading: enabled')).toBeInTheDocument()
+    // The point of running `teams status` at all: it proves both prerequisites
+    // in one shot, and a disabled result means propagation, not breakage.
+    expect(screen.getByText(/proves both prerequisites/i)).toBeInTheDocument()
+    expect(screen.getByText(/not that anything is broken/i)).toBeInTheDocument()
+  })
+
+  it('links to the Teams setup guide', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+
+    const link = screen.getByRole('link', { name: /Teams setup guide/i })
+    expect(link).toHaveAttribute('href', TEAMS_GUIDE_URL)
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+
+  it('does not show the Teams prerequisites on the Telegram provider', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+
+    expect(screen.queryByText('Sideloading: enabled')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Teams setup guide/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('CreateCommunicationChannelPage — Teams install link', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('offers no install link until both ids are present, then builds it from them', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+
+    // A link built from half the values fails as "app cannot be found", which is
+    // indistinguishable from catalog lag, so none is offered until both are real.
+    expect(screen.queryByRole('link', { name: 'Install in Teams' })).not.toBeInTheDocument()
+
+    const appId = '0cd0e1e6-adf7-40f4-952f-79006d320a05'
+    const tenantId = '18517e81-9d09-4c73-88f3-e84a6c90c3d9'
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), { target: { value: appId } })
+    expect(screen.queryByRole('link', { name: 'Install in Teams' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), { target: { value: tenantId } })
+
+    const link = screen.getByRole('link', { name: 'Install in Teams' })
+    expect(link).toHaveAttribute(
+      'href',
+      `https://teams.microsoft.com/l/app/${appId}?installAppPackage=true&appTenantId=${tenantId}`
+    )
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'))
+  })
+
+  it('keeps the package fallback collapsed, so it does not read as a step of its own', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+    const appId = '0cd0e1e6-adf7-40f4-952f-79006d320a05'
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), { target: { value: appId } })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '18517e81-9d09-4c73-88f3-e84a6c90c3d9' },
+    })
+
+    // Downloading a package is a recovery path for Teams' catalog lag, not
+    // something every operator does. Rendered as a sibling of the install link it
+    // reads as a required step and sends people to hand-upload an app the link
+    // would have installed. It stays inside a closed disclosure.
+    const command = screen.getByText(`teams app package download ${appId}`)
+    const disclosure = command.closest('details')
+    expect(disclosure).not.toBeNull()
+    expect(disclosure).not.toHaveAttribute('open')
+    expect(
+      within(disclosure as HTMLElement).getByText('Install now by uploading the package')
+    ).toBeInTheDocument()
+  })
+
+  it('warns about the catalog wait up front, outside the collapsed fallback', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Evenfire Bot' } })
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '0cd0e1e6-adf7-40f4-952f-79006d320a05' },
+    })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '18517e81-9d09-4c73-88f3-e84a6c90c3d9' },
+    })
+
+    // Teams publishes to its catalog on its own schedule, so the link routinely
+    // 404s for the first few minutes. Stated only inside the collapsed fallback,
+    // this reaches the operator AFTER they have read "app cannot be found" as a
+    // broken setup and started debugging the wrong thing. It has to be visible
+    // before the click, so it must not sit inside the disclosure.
+    const note = screen.getByText(/not in the Teams catalog yet/)
+    expect(note.closest('details')).toBeNull()
   })
 })
