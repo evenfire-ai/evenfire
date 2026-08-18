@@ -10072,6 +10072,49 @@ describe('WorkflowRecipeReconciler', () => {
       expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
     })
 
+    it('steady-active lane (run-labelled): promptBridge recipes ALSO fall through (no family re-carve)', async () => {
+      // Side effect of the carve-out being family-agnostic: a promptBridge SDK
+      // recipe in phase active, run-labelled (awaitsTriggeredRun false), with NO
+      // in-progress execution, falls through the steady-active short-circuit
+      // too — intended, bounded by the verifiedAt throttle. This pin turns RED
+      // if the condition is ever re-carved by family (e.g.
+      // `!recipe.spec.pluginWorkloadSdk?.clientNotifications`) or reverted to
+      // the unconditional skipStatusPatch:true return.
+      const { workflowReconcile, reconcilePluginWorkloadSdkOnly } = stubWorkflowReconciler()
+      const recipe = makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          labels: { 'clerum.io/workflow-run-id': 'run-e2e-4' },
+        },
+        spec: {
+          steps: [{ id: 'step-1', run: snippetRun() }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+        status: {
+          phase: 'active',
+          message: CN_MESSAGE,
+          pluginWorkloadSdk: {
+            state: 'awaiting_policy',
+            promptBridge: true,
+            clientNotifications: false,
+            message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
+            verifiedAt: new Date(Date.now() - 10_000).toISOString(),
+          } as never,
+        },
+      })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(reconcilePluginWorkloadSdkOnly).not.toHaveBeenCalled()
+      expect(result.skipStatusPatch).toBeFalsy()
+      expect(result.pluginWorkloadSdkProjection?.capability?.state).toBe('validated')
+      expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
+    })
+
     it('steady-active lane with an IN-PROGRESS execution: SDK recipes still short-circuit (409-window protection)', async () => {
       // The carve-out is bounded: while a workflow execution is in progress the
       // steady-active short-circuit is KEPT even for SDK recipes — that branch
