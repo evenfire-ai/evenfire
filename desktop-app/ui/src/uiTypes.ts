@@ -3,6 +3,7 @@ import type {
   HostActivityEvent,
   MessageToolStep,
   SessionTokensLite,
+  TurnGuardrailsLite,
 } from '../../src/types'
 import type {
   AgentWorkspaceRoute as AgentWorkspaceRouteValue,
@@ -82,6 +83,10 @@ export type AgentChatMessage = {
   /** Tools used in the turn — persisted so the progress stepper survives a reload
    *  (the live SSE steps are renderer-only). Absent on user messages / no-tool turns. */
   toolSteps?: MessageToolStep[]
+  /** LLM-lane guardrail input activity for this assistant message's turn (from
+   *  /messages). Counts + admin-authored ids only, never content (§8). Absent on
+   *  user messages and turns where no guardrail acted. */
+  guardrails?: TurnGuardrailsLite
 }
 
 export type AgentActivityStateTone =

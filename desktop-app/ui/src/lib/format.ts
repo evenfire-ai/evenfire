@@ -65,6 +65,30 @@ export function formatBucketPercent(fraction: number): string {
 }
 
 /**
+ * Signed compact token delta for the guardrail-input-transparency surface —
+ * `−11.9k` (reduced) / `+0.4k` (added). Reuses `formatTokenCount` for k/M
+ * scaling; uses the U+2212 minus to match the surrounding numeric UI. Returns
+ * `0` for a zero (or non-finite) delta — the caller decides whether a
+ * same-size rewrite renders as `changed` instead of a number (spec §7.1).
+ */
+export function formatSignedTokenDelta(delta: number): string {
+  if (!Number.isFinite(delta) || delta === 0) return '0'
+  return `${delta < 0 ? '−' : '+'}${formatTokenCount(Math.abs(delta))}`
+}
+
+/**
+ * Net guardrail effect as a signed percentage of the pre-chain input — e.g.
+ * `−12%` for the popover `96.6k → 84.7k` pair (spec §1.3). Computed against
+ * `tokensBefore` (never the context window, §3.3); `0%` when there was no input.
+ */
+export function formatGuardrailPercent(tokensBefore: number, tokensAfter: number): string {
+  if (!(tokensBefore > 0)) return '0%'
+  const pct = Math.round(((tokensAfter - tokensBefore) / tokensBefore) * 100)
+  const sign = pct < 0 ? '−' : pct > 0 ? '+' : ''
+  return `${sign}${Math.abs(pct)}%`
+}
+
+/**
  * Full token breakdown for a tooltip: `Input 1,234 · Output 567` plus
  * `· Cache read X · Cache write Y` when the model reported cache (cacheRead/
  * cacheWrite present). Exact figures (toLocaleString), unlike the compact label.

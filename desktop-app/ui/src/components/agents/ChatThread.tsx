@@ -48,6 +48,7 @@ import type { AgentChatMessage, ProgressStep, TaskProgress } from '../../uiTypes
 import { ProgressStepper } from '../ProgressStepper'
 import { ChatStateBadge } from './ChatStateBadge'
 import { InFlightAssistantPlaceholder } from './InFlightAssistantPlaceholder'
+import { MessageGuardrails } from './MessageGuardrails'
 import { MessageTokens } from './MessageTokens'
 import { NudgeArea } from './NudgeArea'
 
@@ -691,6 +692,9 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                 </span>
                                 {message.role === 'assistant' && message.tokens && (
                                   <MessageTokens tokens={message.tokens} />
+                                )}
+                                {message.role === 'assistant' && message.guardrails && (
+                                  <MessageGuardrails guardrails={message.guardrails} />
                                 )}
                               </div>
                               <IconButton

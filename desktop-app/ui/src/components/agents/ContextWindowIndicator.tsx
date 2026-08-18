@@ -3,7 +3,13 @@ import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { useClickOutside } from '@hooks/useClickOutside'
 import type { ContextBreakdownLite } from '../../hooks/useChatStore'
 import { useContextBreakdown } from '../../hooks/useContextBreakdown'
-import { formatBucketPercent, formatContextFill, formatTokenCount } from '../../lib/format'
+import {
+  formatBucketPercent,
+  formatContextFill,
+  formatGuardrailPercent,
+  formatTokenCount,
+} from '../../lib/format'
+import { guardrailRowValue, guardrailSourceLabel } from '../../lib/guardrailLabels'
 import { Pill } from '../Common'
 
 export interface ContextWindowIndicatorProps {
@@ -194,6 +200,35 @@ export function ContextWindowIndicator({
                   </li>
                 ))}
               </ul>
+
+              {breakdown.guardrails && breakdown.guardrails.changes.length > 0 && (
+                <div className="context-window-guardrails">
+                  <div className="context-window-guardrails-head">
+                    <span className="context-window-guardrails-title">Guardrails</span>
+                    <span className="context-window-guardrails-summary">
+                      {formatTokenCount(breakdown.guardrails.tokensBefore)} →{' '}
+                      {formatTokenCount(breakdown.guardrails.tokensAfter)} (
+                      {formatGuardrailPercent(
+                        breakdown.guardrails.tokensBefore,
+                        breakdown.guardrails.tokensAfter
+                      )}
+                      )
+                    </span>
+                  </div>
+                  <ul className="context-window-guardrails-rows">
+                    {breakdown.guardrails.changes.map(change => (
+                      <li key={change.sourceId} className="context-window-guardrails-row">
+                        <span className="context-window-guardrails-source">
+                          {guardrailSourceLabel(change)}
+                        </span>
+                        <span className="context-window-guardrails-value">
+                          {guardrailRowValue(change)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {breakdown.cacheHitRate !== undefined && (
                 <div className="context-window-cache">
