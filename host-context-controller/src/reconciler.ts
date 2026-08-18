@@ -13,6 +13,11 @@ import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
 import { createHash } from 'crypto'
 import { classifyPluginImage } from '@clerum/image-policy'
+import {
+  NETWORK_READY_ANNOTATION,
+  NETWORK_READY_GENERATION_ANNOTATION,
+  PRE_DEPLOY_ANNOTATION,
+} from '@clerum/network-policy-core'
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
@@ -71,9 +76,10 @@ type McpServerReconcilerDeps = {
   networkingApi?: k8s.NetworkingV1Api
 }
 
-// G2: Pre-deploy handshake constants
-const PRE_DEPLOY_ANNOTATION = 'clerum.io/pre-deploy'
-const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
+// G2: Pre-deploy handshake constants — imported from @clerum/network-policy-core
+// (single source of truth shared with WRC; a divergence is a compile error rather
+// than a silent 30s fail-open timeout). clerum.io/network-ready-observed-generation
+// (Issue #408) is the generation HCC stamps when acking, so WRC can reject a stale ack.
 
 // Issue #223: sha256 of the envSecret content, carried on the POD TEMPLATE (not
 // the Deployment object) so that changing it changes the pod template hash and
@@ -1499,6 +1505,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           metadata: {
             annotations: {
               [NETWORK_READY_ANNOTATION]: 'true',
+              // Issue #408: stamp the acked generation so WRC's waitForNetworkReady
+              // can reject a stale ack from a previous generation.
+              ...(typeof server.generation === 'number'
+                ? { [NETWORK_READY_GENERATION_ANNOTATION]: String(server.generation) }
+                : {}),
             },
           },
         },
@@ -1930,7 +1941,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // NetworkPolicies are in place and workload can proceed.
     if (
       server.annotations?.[PRE_DEPLOY_ANNOTATION] === 'true' &&
-      server.annotations?.[NETWORK_READY_ANNOTATION] !== 'true'
+      (server.annotations?.[NETWORK_READY_ANNOTATION] !== 'true' ||
+        // Issue #408: re-ack when the stamped generation is stale (spec changed since
+        // the last ack). A non-numeric generation keeps the legacy behavior.
+        (typeof server.generation === 'number' &&
+          server.annotations?.[NETWORK_READY_GENERATION_ANNOTATION] !== String(server.generation)))
     ) {
       try {
         await this.setNetworkReadyAnnotation(server)
