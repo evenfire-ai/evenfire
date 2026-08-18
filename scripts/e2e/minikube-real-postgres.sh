@@ -16,6 +16,7 @@ T1_TMP_ROOT="$T2_TMP_ROOT"
 if [ -z "$T1_TMP_ROOT" ]; then T1_TMP_ROOT=/tmp; fi
 T1_TMP_DIR=""
 PORT_FORWARD_PID=""
+T1_PF_PID_FILE=""
 LOCAL_PORT=""
 ADMIN_DSN=""
 PG_USER=""
@@ -45,11 +46,18 @@ cleanup_t1() {
   if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
     local command_line
     command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
-    if [[ "$command_line" == *port-forward* && "$command_line" == *svc/control-postgres* ]]; then
+    # PORT_FORWARD_PID is this lane's own kubectl port-forward child; it cannot
+    # be reused by another process until we wait/reap it, so matching just
+    # "port-forward" is a sufficient and truncation-robust guard. The previous
+    # "svc/control-postgres" substring appears late in a long command line and
+    # could be dropped by ps command-column truncation, skipping the kill and
+    # leaking the forward past T1 into the T2 final preflight (PORT_FORWARD_CONFLICT).
+    if [[ "$command_line" == *port-forward* ]]; then
       kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
       wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
     fi
   fi
+  if [ -n "$T1_PF_PID_FILE" ]; then rm -f "$T1_PF_PID_FILE" >/dev/null 2>&1 || true; fi
   if [ "$T1_GFS_RESTORE_REQUIRED" = true ] && \
      ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$T2_CONTEXT" \
        bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
@@ -236,6 +244,12 @@ main() {
   t2_kc -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
     >"$T1_TMP_DIR/port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
+  # Record the forward as profile-owned so the T2 final preflight's
+  # t2_process_check (which accepts PIDs recorded under /tmp/pf-<profile>-*.pid)
+  # recognises it and never misreads a still-terminating T1 forward as an
+  # unrelated process. cleanup_t1 removes this file after tearing the forward down.
+  T1_PF_PID_FILE="/tmp/pf-${T2_PROFILE//[^A-Za-z0-9_.-]/_}-t1-real-postgres.pid"
+  printf '%s\n' "$PORT_FORWARD_PID" >"$T1_PF_PID_FILE" 2>/dev/null || T1_PF_PID_FILE=""
   if ! wait_for_tcp "$LOCAL_PORT"; then
     sanitize_file "$T1_TMP_DIR/port-forward.log"
     cat "$T1_TMP_DIR/port-forward.log" >&2 || true
