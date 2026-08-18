@@ -546,16 +546,15 @@ assert_minimal_bootstrap_contract_runs_on_system_bash() {
     [ "$(clerum_canonical_email "Admin@EvenFire.Local")" = "admin@evenfire.local" ]
     [ "$(clerum_minimal_desktop_email "Admin@EvenFire.Local" "" false)" = "admin@evenfire.local" ]
     [ "$(clerum_minimal_desktop_email "Admin@EvenFire.Local" "Desktop@Example.Local" true)" = "desktop@example.local" ]
-    clerum_initial_setup_link_is_active active initial_setup desktop-id true
     clerum_initial_setup_link_matches active initial_setup desktop-id admin-id admin-id
+    ! clerum_initial_setup_link_matches revoked initial_setup desktop-id admin-id admin-id
+    ! clerum_initial_setup_link_matches active revoked desktop-id admin-id admin-id
     ! clerum_initial_setup_link_matches active initial_setup desktop-id "" admin-id
     ! clerum_initial_setup_link_matches active initial_setup "" admin-id admin-id
+    ! clerum_initial_setup_link_matches active initial_setup desktop-id other-admin admin-id
     [ "$(clerum_minimal_setup_outcome 201)" = setup_succeeded ]
     [ "$(clerum_minimal_setup_outcome 409)" = setup_already_consumed ]
     [ "$(clerum_minimal_setup_outcome 401)" = setup_failed ]
-    ! clerum_initial_setup_link_is_active revoked initial_setup desktop-id true
-    ! clerum_initial_setup_link_is_active active revoked desktop-id true
-    ! clerum_initial_setup_link_is_active active initial_setup "" true
     printf ok
   ' bash "$contract")"
   if [ "$output" = "ok" ] && \

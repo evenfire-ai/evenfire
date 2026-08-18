@@ -18,13 +18,6 @@ clerum_minimal_desktop_email() {
   fi
 }
 
-clerum_initial_setup_link_is_active() {
-  [ "${1:-}" = "active" ] &&
-    [ "${2:-}" = "initial_setup" ] &&
-    [ -n "${3:-}" ] &&
-    [ "${4:-}" = "true" ]
-}
-
 clerum_initial_setup_link_matches() {
   [ "${1:-}" = "active" ] &&
     [ "${2:-}" = "initial_setup" ] &&
