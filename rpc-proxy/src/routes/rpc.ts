@@ -44,6 +44,7 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // own copy (the two services share no package, so each names its own).
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
+const SESSION_SEARCH_LIMIT_CAP = 50
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
@@ -282,11 +283,24 @@ export function createRpcRouter(): Router {
           ...(authorizedV2
             ? {
                 authorityCacheKey: actionAuthorityCacheKey(authorizedV2.claims, authorizedV2.bound),
+                authorityExpiresAt: authorizedV2.trustedEdgeContext.expiresAt,
                 beforeRetry: async () => {
-                  req.authorizedActionV2 = await authorizeActionV2(
-                    authorizedV2.claims,
-                    authorizedV2.bound
+                  const refreshed = await authorizeActionV2(authorizedV2.claims, authorizedV2.bound)
+                  const refreshedServer = await resolveServerConnectionForUser(
+                    auth.sub,
+                    serverName,
+                    rpcAccessToken,
+                    refreshed
                   )
+                  if (!refreshedServer) {
+                    throw new Error('Refreshed v2 MCP destination is unavailable')
+                  }
+                  req.authorizedActionV2 = refreshed
+                  return {
+                    server: refreshedServer,
+                    authorityCacheKey: actionAuthorityCacheKey(refreshed.claims, refreshed.bound),
+                    authorityExpiresAt: refreshed.trustedEdgeContext.expiresAt,
+                  }
                 },
               }
             : {}),
@@ -711,6 +725,103 @@ export function createRpcRouter(): Router {
             rpcAccessToken,
             ...wakeAndHoldV2Options(req, host),
             attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
+      } catch (error) {
+        guardedNext(res, next, error)
+      }
+    }
+  )
+
+  // Session search is a PR 2 trusted-edge operation. Unlike the neighboring
+  // compatibility session reads, this route deliberately has no v1 user-token
+  // authority: the selected path must be checkpointed and carried to mcp-host.
+  router.get(
+    '/rpc/hosts/:hostRef/sessions/search',
+    requireRpcAuth,
+    requireScope('host:session:read'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        if (!req.userDelegationV2 || !req.authorizedActionV2) {
+          res.status(403).json({ error: 'User delegation v2 required for session search' })
+          return
+        }
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        const rawQuery = req.query.q
+        const rawScope = req.query.scope
+        const rawChannel = req.query.channel
+        const rawSince = req.query.since
+        const rawLimit = parseUnsignedIntegerQuery(req.query.limit)
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          typeof rawQuery !== 'string' ||
+          !rawQuery.trim() ||
+          (rawScope !== undefined && typeof rawScope !== 'string') ||
+          (rawChannel !== undefined && (typeof rawChannel !== 'string' || !rawChannel.trim())) ||
+          (rawSince !== undefined && (typeof rawSince !== 'string' || !rawSince.trim())) ||
+          rawLimit === null ||
+          (rawLimit !== undefined && rawLimit < 1)
+        ) {
+          res.status(400).json({ error: 'Invalid session search query' })
+          return
+        }
+
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+        const upstreamUrl = new URL(`${host.url.replace(/\/+$/, '')}/v1/runtime/sessions/search`)
+        upstreamUrl.searchParams.set('q', rawQuery.trim())
+        upstreamUrl.searchParams.set(
+          'scope',
+          rawScope === 'all_channels' ? 'all_channels' : 'this_channel'
+        )
+        if (typeof rawChannel === 'string') {
+          upstreamUrl.searchParams.set('channel', rawChannel.trim())
+        }
+        if (typeof rawSince === 'string') upstreamUrl.searchParams.set('since', rawSince.trim())
+        if (rawLimit !== undefined) {
+          upstreamUrl.searchParams.set(
+            'limit',
+            String(Math.min(rawLimit, SESSION_SEARCH_LIMIT_CAP))
+          )
+        }
+
+        const forwardSearch = async () => {
+          const response = await fetch(upstreamUrl, {
+            method: 'GET',
+            headers: { ...host.headers },
+            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+          })
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body)
+        }
+        try {
+          await forwardSearch()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            ...wakeAndHoldV2Options(req, host),
+            attemptUpstream: forwardSearch,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
         }
