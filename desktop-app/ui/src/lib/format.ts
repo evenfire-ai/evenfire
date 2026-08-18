@@ -77,9 +77,12 @@ export function formatSignedTokenDelta(delta: number): string {
 }
 
 /**
- * Net guardrail effect as a signed percentage of the pre-chain input — e.g.
- * `−12%` for the popover `96.6k → 84.7k` pair (spec §1.3). Computed against
- * `tokensBefore` (never the context window, §3.3); `0%` when there was no input.
+ * Net guardrail effect as a signed percentage of the pre-chain input it measured
+ * — e.g. `−3%` for `82.7k → 80.3k`. Computed against `tokensBefore` (the guardrail
+ * measurement scale — non-system messages, chars/4 — NEVER the billed context
+ * window, spec §3.3/§7.2). Shown in the footer INSTEAD of an absolute token count
+ * so it can't be misread as a fraction of the billed input tokens beside it.
+ * `0%` when there was no input.
  */
 export function formatGuardrailPercent(tokensBefore: number, tokensAfter: number): string {
   if (!(tokensBefore > 0)) return '0%'

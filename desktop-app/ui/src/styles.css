@@ -3371,99 +3371,32 @@ h3 {
   padding-top: var(--space-1);
 }
 
-/* Guardrail-input-transparency (spec §7): popover section + footer note. Counts
-   only, tokens-driven; no hover transform/filter per desktop-app/ui/CLAUDE.md. */
-.context-window-guardrails {
-  display: grid;
-  gap: var(--space-0-5);
-  border-top: 1px solid rgba(var(--edge-rgb), 0.4);
-  padding-top: var(--space-1);
-}
-
-.context-window-guardrails-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-size: var(--font-size-xs);
-  color: var(--text-dim);
-}
-
-.context-window-guardrails-summary {
-  margin-left: auto;
+/* Guardrail-input-transparency (spec §7): folded into the input/output token
+   tooltip. A shield stat on the micro row signals a guardrail acted (dim, brightens
+   with the tooltip like the cache glyph); the tooltip carries the net delta + a
+   per-source row list. Counts only, tokens-driven; no hover transform/filter per
+   desktop-app/ui/CLAUDE.md. */
+/* Guardrail stat reads brighter than the dim ↑↓ counts so the shield + net delta
+   is actually noticeable; its icon keeps full opacity (the shared rule dims to .7). */
+.token-usage-stat--guardrail {
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
-.context-window-guardrails-rows {
-  display: grid;
-  gap: var(--space-0-5);
-  margin: 0;
-  padding: 0 0 0 var(--space-1);
-  list-style: none;
+.token-usage-stat--guardrail svg {
+  opacity: 1;
 }
 
-.context-window-guardrails-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-size: var(--font-size-2xs);
-  color: var(--text-dim);
+.token-usage-tooltip-row--head .token-usage-tooltip-label {
+  color: var(--text);
 }
 
-.context-window-guardrails-value {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-}
-
-.guardrail-note {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-dim);
-  font-size: var(--font-size-2xs);
-}
-
-.guardrail-note__toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-0-5);
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-}
-
-.guardrail-note__toggle:hover {
-  color: var(--text-muted);
-}
-
-.guardrail-note__toggle:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.guardrail-note__net,
-.guardrail-note__value {
-  font-variant-numeric: tabular-nums;
-}
-
-.guardrail-note__caret {
-  opacity: 0.7;
-}
-
-.guardrail-note__rows {
-  display: inline-grid;
-  gap: var(--space-0-5);
-  margin-left: var(--space-1);
+.token-usage-tooltip-row--sub {
   padding-left: var(--space-1);
-  border-left: 1px solid rgba(var(--edge-rgb), 0.5);
 }
 
-.guardrail-note__row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
+.token-usage-tooltip-row--sub .token-usage-tooltip-label {
+  font-size: var(--font-size-2xs);
 }
 
 .context-window-empty {
