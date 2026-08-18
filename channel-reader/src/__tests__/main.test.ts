@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TeamsAdapter } from '../channels/teams'
 import type { TeamsMessageHandoff } from '../handoffServer'
-import { ChannelReader, type ChannelReaderOptions } from '../main'
+import { ChannelReader, type ChannelReaderOptions, profileSocialChannelUrl } from '../main'
 import { createProgressStream } from '../progressClient'
 import type { MessageResponse } from '../rpcClient'
 import type { ChannelAdapter, Message } from '../types'
@@ -1288,5 +1288,42 @@ describe('ChannelReader pollCycle provider guards', () => {
 
     expect(emailAdapter.fetchMessages).toHaveBeenCalledOnce()
     expect(messages).toHaveLength(1)
+  })
+})
+
+describe('profileSocialChannelUrl', () => {
+  it('appends the provider tab path', () => {
+    expect(profileSocialChannelUrl('https://profile.example.com', 'teams')).toBe(
+      'https://profile.example.com/settings/social/teams'
+    )
+    expect(profileSocialChannelUrl('https://profile.example.com', 'slack')).toBe(
+      'https://profile.example.com/settings/social/slack'
+    )
+  })
+
+  it('falls back to the bare base URL for a provider with no tab', () => {
+    // Better than guessing a segment: profile-ui 404s on an unknown network.
+    expect(profileSocialChannelUrl('https://profile.example.com', 'telegram')).toBe(
+      'https://profile.example.com'
+    )
+  })
+
+  // Regression guard for the /\/+$/ -> index-walk rewrite (CodeQL
+  // js/polynomial-redos). This asserts the rewrite preserved behaviour; it does
+  // NOT prove the ReDoS is gone, since the old regex produced the same string,
+  // only slowly. The linearity lives in the implementation, not in this test.
+  it('strips a run of trailing slashes, however long', () => {
+    expect(profileSocialChannelUrl('https://profile.example.com' + '/'.repeat(500), 'teams')).toBe(
+      'https://profile.example.com/settings/social/teams'
+    )
+    expect(profileSocialChannelUrl('  https://profile.example.com//  ', 'teams')).toBe(
+      'https://profile.example.com/settings/social/teams'
+    )
+  })
+
+  it('leaves a URL with no trailing slash untouched', () => {
+    expect(profileSocialChannelUrl('https://p.example.com/base', 'teams')).toBe(
+      'https://p.example.com/base/settings/social/teams'
+    )
   })
 })

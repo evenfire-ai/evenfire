@@ -132,8 +132,15 @@ const PROFILE_SOCIAL_CHANNEL_PATH: Partial<Record<ChannelType, string>> = {
  * degrades to today's behaviour rather than emitting a 404 path.
  */
 export function profileSocialChannelUrl(baseUrl: string, channelType: ChannelType): string {
-  const base = baseUrl.trim().replace(/\/+$/, '')
-  return `${base}${PROFILE_SOCIAL_CHANNEL_PATH[channelType] ?? ''}`
+  const trimmed = baseUrl.trim()
+  // Trailing slashes are walked off by index rather than matched with /\/+$/.
+  // An end-anchored `+` over a run of the same character backtracks
+  // polynomially (CodeQL js/polynomial-redos), and profileUiUrl is deployment
+  // config that arrives here unvalidated. The walk is linear and needs no
+  // reasoning about the regex engine to stay that way.
+  let end = trimmed.length
+  while (end > 0 && trimmed.charCodeAt(end - 1) === 47 /* '/' */) end--
+  return `${trimmed.slice(0, end)}${PROFILE_SOCIAL_CHANNEL_PATH[channelType] ?? ''}`
 }
 // Telegram deliberately gets no Profile UI link and no product name: unlike Teams
 // and Slack, anyone who discovers the bot handle can message it, so a reply must
