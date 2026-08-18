@@ -11,6 +11,7 @@ export function GfsImagePreview({
   gfsUri,
   mimeType,
   onClose,
+  onDownloadError,
 }: GfsImagePreviewProps) {
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -40,6 +41,7 @@ export function GfsImagePreview({
         setPreviewUrl(objectUrl)
       } catch (error) {
         if (!active) return
+        onDownloadError?.(error)
         setPreviewError(error instanceof Error ? error.message : 'Could not load the image preview')
       }
     }
@@ -49,7 +51,7 @@ export function GfsImagePreview({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, gfsUri, mimeType])
+  }, [byteLength, gfsUri, mimeType, onDownloadError])
 
   return createPortal(
     <div

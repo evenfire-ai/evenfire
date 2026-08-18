@@ -151,6 +151,17 @@ incremental_classify_path() {
     channel-reader/*) incremental_add_target channel-reader channels channel-reader-chatllm ;;
     mcp-proxy/*) incremental_add_target mcp-proxy mcp-server mcp-proxy ;;
     control-ui/*) incremental_add_target control-ui control-plane control-ui ;;
+    packages/display-field/*)
+      # display-field is consumed ONLY by the control-api and control-ui images
+      # (their Dockerfiles COPY it and their field validation runs off it), so a
+      # change here changes exactly those two image outputs. Reshadow both
+      # instead of falling into the unmapped full-build/abort path below.
+      # (llm-providers is deliberately NOT mapped here: it has five consumers,
+      # so it stays on the fail-closed full-build default rather than risk a
+      # partial, drift-prone target list — see work-tracker/issues.)
+      incremental_add_target control-api control-plane control-api
+      incremental_add_target control-ui control-plane control-ui
+      ;;
     profile-ui/*) incremental_add_target profile-ui profiles profile-ui ;;
     webhook-proxy/*) incremental_add_target webhook-proxy webhook-ingress webhook-proxy ;;
     tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)

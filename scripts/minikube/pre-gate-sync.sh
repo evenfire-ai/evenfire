@@ -459,12 +459,13 @@ if [[ "${cluster_changed}" == "true" ]]; then
     CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
     writer_dsn="$(${KC} -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
     if [[ -n "${writer_dsn}" ]]; then
-      if ! ${KC} -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then
-        log "ERROR: existing GFS writer detected but control-api is not Ready; refusing full overlay sync"
-        exit 1
-      fi
-      log "Upgrade path — reconciling GFS credentials before full overlay sync"
-      CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+      # Do not reconcile the GFS roles before the migration window. The
+      # current control-api image may add a new least-privilege projection
+      # (0095 currently adds lifecycle/link columns); provision-gfs-db.sh
+      # correctly refuses a role that does not have that projection yet. The
+      # post-migration provision_gfs_serving call below is the authoritative
+      # reconciliation point after schema and runtime roles have converged.
+      log "Upgrade path — deferring GFS credential reconciliation until after schema migration"
     else
       log "Fresh bootstrap — reader staging deferred until post-migration convergence; GFSC remains fail-closed"
     fi

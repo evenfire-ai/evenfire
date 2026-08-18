@@ -21,7 +21,14 @@ vi.mock('@hooks/domain/useContextsDataController', () => ({
   useContextsDataController: () => ({ contextIds: [], loading: false, error: null }),
 }))
 vi.mock('@hooks/domain/useMcpServersDataController', () => ({
-  useMcpServersDataController: () => ({ agentContextByName: {}, selectedAgentMcpServers: [] }),
+  useMcpServersDataController: () => ({
+    agentContextByName: {},
+    // AgentWorkspace reads agentDisplayByName for the visible agent name
+    // (R1-M3); the mock must supply it or the display lookup dereferences
+    // undefined.
+    agentDisplayByName: {},
+    selectedAgentMcpServers: [],
+  }),
 }))
 vi.mock('../ComposerPanel', () => ({ ComposerPanel: () => null }))
 vi.mock('../ContextWindowIndicator', () => ({ ContextWindowIndicator: () => null }))

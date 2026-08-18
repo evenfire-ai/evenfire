@@ -12,9 +12,13 @@ export function FileUploadModal({
   file,
   fileSummary,
   guidance,
+  progress,
   onClose,
+  onCancelUpload,
   onFileChange,
   onUpload,
+  onPauseUpload,
+  onResumeUpload,
   title = 'Upload file',
 }: FileUploadModalProps): React.JSX.Element {
   const inputId = useId()
@@ -124,19 +128,81 @@ export function FileUploadModal({
               Uploads to <code>{destination}</code>
             </p>
           ) : null}
+
+          {progress ? (
+            <div
+              className="cu-upload-file-flow__progress"
+              data-testid="gfs-upload-row"
+              data-upload-file-name={file?.name || undefined}
+              aria-live="polite"
+            >
+              <div className="cu-upload-file-flow__progress-head">
+                <span>
+                  {progress.state === 'paused'
+                    ? 'Paused'
+                    : progress.state === 'completed'
+                      ? 'Complete'
+                      : progress.state === 'failed'
+                        ? 'Upload failed'
+                        : 'Uploading'}
+                </span>
+                <span>
+                  {formatProgressBytes(progress.uploadedBytes)} /{' '}
+                  {formatProgressBytes(progress.totalBytes)}
+                </span>
+              </div>
+              <progress
+                aria-label={file ? `Upload progress for ${file.name}` : 'Upload progress'}
+                aria-valuemin={0}
+                aria-valuemax={Math.max(progress.totalBytes, 1)}
+                aria-valuenow={Math.min(progress.uploadedBytes, Math.max(progress.totalBytes, 1))}
+                max={Math.max(progress.totalBytes, 1)}
+                value={Math.min(progress.uploadedBytes, Math.max(progress.totalBytes, 1))}
+              />
+            </div>
+          ) : null}
         </div>
 
         <footer className="cu-modal-panel__foot">
-          <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="primary" disabled={busy || !file} onClick={onUpload}>
-            {busy ? 'Uploading…' : 'Upload'}
-          </Button>
+          {busy && onCancelUpload ? (
+            <Button size="sm" variant="danger" onClick={onCancelUpload}>
+              Cancel upload
+            </Button>
+          ) : (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
+              Cancel
+            </Button>
+          )}
+          {progress?.state === 'paused' && onResumeUpload ? (
+            <Button variant="primary" disabled={!file} onClick={onResumeUpload}>
+              Resume
+            </Button>
+          ) : progress?.state === 'uploading' && onPauseUpload ? (
+            <Button variant="ghost" onClick={onPauseUpload}>
+              Pause
+            </Button>
+          ) : (
+            <Button variant="primary" disabled={busy || !file} onClick={onUpload}>
+              {busy ? 'Uploading…' : 'Upload'}
+            </Button>
+          )}
         </footer>
       </section>
     </div>
   )
+}
+
+function formatProgressBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  const units = ['KiB', 'MiB', 'GiB']
+  let value = bytes / 1024
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`
 }
 
 export type { FileUploadModalProps } from './types'

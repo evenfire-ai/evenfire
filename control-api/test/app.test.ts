@@ -178,7 +178,10 @@ describe('app router wiring', () => {
       .send(payload)
       .expect(401)
 
-    vi.spyOn(pool, 'query').mockResolvedValueOnce({ rows: [{}], rowCount: 1 })
+    vi.spyOn(pool, 'query').mockResolvedValueOnce({
+      rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }],
+      rowCount: 1,
+    })
 
     const res = await request(app)
       .post('/api/v1/external/auth/session-token')

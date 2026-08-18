@@ -250,7 +250,11 @@ assert_gfs_provisioning_follows_migrations_and_core_readiness() {
   ensure_line="$(grep -n 'ensure_control_postgres_ready' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
   migration_line="$(grep -n 'deploy/scripts/run-control-api-db-migration.sh' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
   reconcile_after_migration="$(grep -n 'reconcile-gfs-deploy-credentials.sh' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
-  control_ready_line="$(grep -n 'rollout status deployment/control-api.*timeout=180s' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  # There are two intentional control-api readiness fences: the re-use path
+  # waits before the HCC cutover, and the migration path waits afterwards.
+  # Assert the post-migration fence here so adding the bounded re-use wait does
+  # not make this ordering check select the earlier guard.
+  control_ready_line="$(grep -n 'rollout status deployment/control-api.*timeout=180s' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
   core_block="$(sed -n '/^CORE_DEPLOYS=(/,/^)/p' scripts/minikube/full-setup.sh)"
   reset_block="$(sed -n '/# 6a. Optional DB reset/,/# 6c. Re-apply generated service tokens/p' scripts/minikube/full-setup.sh)"
   wal_block="$(sed -n '/A stale or late corruption signature/,/err "${ns}\/\${name} NOT ready"/p' scripts/minikube/full-setup.sh)"
@@ -464,6 +468,189 @@ assert_image_source_local_is_honoured() {
   else
     fail "IMAGE_SOURCE=local resolved to '${got}'"
   fi
+}
+
+assert_bootstrap_seed_deferral_is_opt_in() {
+  local got
+  got="$(full_setup_resolves DEFER_BOOTSTRAP_SEED)"
+  if [ "$got" = "false" ]; then
+    pass "bootstrap seed deferral defaults to false"
+  else
+    fail "bootstrap seed deferral defaulted to '${got}', expected 'false'"
+  fi
+}
+
+assert_bootstrap_seed_deferral_flag_resolves_for_local_minimal() {
+  local d got
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d"
+  got="$(full_setup_copy_resolves "$d" DEFER_BOOTSTRAP_SEED --defer-bootstrap-seed IMAGE_SOURCE=local)"
+  if [ "$got" = "true" ]; then
+    pass "--defer-bootstrap-seed resolves true for the local minimal browser flow"
+  else
+    fail "--defer-bootstrap-seed resolved to '${got}', expected 'true'"
+  fi
+  rm -rf "$d"
+}
+
+assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes() {
+  local d out rc problems=""
+  d="$(mktemp -d)"
+  make_full_setup_copy "$d"
+
+  out="$(full_setup_copy_output "$d" --defer-bootstrap-seed IMAGE_SOURCE=ghcr 2>&1)" || rc=$?
+  rc="${rc:-0}"
+  if [ "$rc" -eq 0 ] || ! grep -q "IMAGE_SOURCE=local" <<< "$out"; then
+    problems+="ghcr mode was not rejected; "
+  fi
+
+  rc=0
+  out="$(full_setup_copy_output "$d" "--defer-bootstrap-seed --seed-profile=e2e" IMAGE_SOURCE=local 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ] || ! grep -q "requires --seed-profile=minimal" <<< "$out"; then
+    problems+="e2e seed profile was not rejected; "
+  fi
+
+  if [ -z "$problems" ]; then
+    pass "bootstrap seed deferral rejects GHCR and e2e fixture modes"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+assert_minimal_seed_is_setup_first_and_link_fail_closed() {
+  local seed="$REPO_ROOT/scripts/e2e/seed-e2e-data.sh"
+  local dispatch verify_body setup_line login_line verify_line
+
+  # Bound the dispatch and the verifier exactly. A range that ends at the first
+  # bare `else` runs past every nested block and swallows most of the file, so
+  # presence greps alone still pass when the ordering is reversed or the
+  # fail-closed abort is downgraded to a warning.
+  dispatch="$(awk '/^# ─── Step 1: Bootstrap before login/,/^fi$/' "$seed")"
+  verify_body="$(awk '/^verify_minimal_operator_bootstrap\(\) \{$/,/^\}$/' "$seed")"
+
+  setup_line="$(printf '%s\n' "$dispatch" | grep -n '^  perform_initial_setup$' | head -1 | cut -d: -f1)"
+  login_line="$(printf '%s\n' "$dispatch" | grep -n 'login_admin_only' | head -1 | cut -d: -f1)"
+  verify_line="$(printf '%s\n' "$dispatch" | grep -n '^  verify_minimal_operator_bootstrap$' | head -1 | cut -d: -f1)"
+
+  if [ -z "$setup_line" ] || [ -z "$login_line" ] || [ -z "$verify_line" ]; then
+    fail "minimal seed dispatch must call setup, the login fallback and link verification"
+    return
+  fi
+  # control-api marks last_login_at on every successful admin login, and
+  # setupInitialAdminCredentials only matches a bootstrap row whose
+  # last_login_at is still NULL. Logging in first destroys setup eligibility
+  # permanently, so this ordering is the whole point of the minimal path.
+  if [ "$setup_line" -ge "$login_line" ]; then
+    fail "minimal seed logs in at line $login_line before consuming setup at line $setup_line; login sets last_login_at and permanently disqualifies /admin/auth/setup"
+    return
+  fi
+  if [ "$verify_line" -le "$login_line" ]; then
+    fail "minimal seed must verify the initial_setup link after the login fallback, not before it"
+    return
+  fi
+  if ! printf '%s\n' "$verify_body" | grep -Fq 'if ! clerum_initial_setup_link_matches '; then
+    fail "minimal link verification does not gate on the shared initial_setup link contract"
+    return
+  fi
+  # The missing-link branch must abort. Downgrading it to a log leaves the
+  # install running as an ordinary unlinked member, which is the exact
+  # regression this assertion exists to catch.
+  if ! printf '%s\n' "$verify_body" | grep -Eq '^ *die "Minimal bootstrap is incomplete'; then
+    fail "minimal link verification does not abort when the initial_setup link is absent"
+    return
+  fi
+  pass "minimal seed consumes setup before login and aborts without an active initial_setup link"
+}
+
+assert_minimal_bootstrap_contract_runs_on_system_bash() {
+  local contract="$REPO_ROOT/scripts/e2e/minimal-bootstrap-contract.sh"
+  local output
+  if ! /bin/bash -n "$contract" "$REPO_ROOT/scripts/e2e/seed-e2e-data.sh" "$REPO_ROOT/scripts/minikube/full-setup.sh"; then
+    fail "minimal bootstrap scripts are not parseable by the system Bash"
+    return
+  fi
+  # `! cmd` is explicitly exempt from set -e, so a bare `! predicate` line can
+  # never fail this suite. refute() runs the predicate inside an `if` and exits
+  # non-zero on unexpected success, which set -e does propagate.
+  output="$(/bin/bash -c '
+    set -e
+    source "$1"
+    refute() { if "$@"; then printf "unexpected success: %s\n" "$*" >&2; exit 1; fi; }
+    [ "$(clerum_canonical_email "Admin@EvenFire.Local")" = "admin@evenfire.local" ]
+    [ "$(clerum_minimal_desktop_email "Admin@EvenFire.Local" "" false)" = "admin@evenfire.local" ]
+    [ "$(clerum_minimal_desktop_email "Admin@EvenFire.Local" "Desktop@Example.Local" true)" = "desktop@example.local" ]
+    clerum_initial_setup_link_matches active initial_setup desktop-id admin-id admin-id
+    refute clerum_initial_setup_link_matches revoked initial_setup desktop-id admin-id admin-id
+    refute clerum_initial_setup_link_matches active revoked desktop-id admin-id admin-id
+    refute clerum_initial_setup_link_matches active initial_setup desktop-id "" admin-id
+    refute clerum_initial_setup_link_matches active initial_setup "" admin-id admin-id
+    refute clerum_initial_setup_link_matches active initial_setup desktop-id other-admin admin-id
+    [ "$(clerum_minimal_setup_outcome 201)" = setup_succeeded ]
+    [ "$(clerum_minimal_setup_outcome 409)" = setup_already_consumed ]
+    [ "$(clerum_minimal_setup_outcome 401)" = setup_failed ]
+    printf ok
+  ' bash "$contract")"
+  if [ "$output" = "ok" ] && \
+     ! grep -Eq '\$\{[A-Za-z_][A-Za-z0-9_]*,,\}' "$REPO_ROOT/scripts/e2e/seed-e2e-data.sh" "$REPO_ROOT/scripts/minikube/full-setup.sh"; then
+    pass "minimal bootstrap canonicalization and link contract run on system Bash 3.2"
+  else
+    fail "minimal bootstrap still contains a Bash-4 lowercase expansion or contract failure"
+  fi
+}
+
+assert_minimal_seed_rejects_a_divergent_identity() {
+  local seed="$REPO_ROOT/scripts/e2e/seed-e2e-data.sh"
+  local output rc=0
+  output="$(CONTEXT=clerum-test SEED_PROFILE=minimal \
+    ADMIN_EMAIL='Admin@EvenFire.Local' E2E_DEV_LOGIN_EMAIL='other@example.invalid' \
+    ADMIN_PASSWORD='test-password-only' /bin/bash "$seed" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] && grep -Fq 'requires the Desktop identity email' <<<"$output"; then
+    pass "minimal seeder rejects a Desktop identity that differs from the bootstrap admin"
+  else
+    fail "minimal seeder accepted a divergent Desktop identity (rc=$rc output=$output)"
+  fi
+}
+
+assert_minimal_setup_requires_admin_identity_email() {
+  local contract="$REPO_ROOT/scripts/e2e/minimal-bootstrap-contract.sh"
+  local output
+
+  # Exercise the decision both call sites now share, rather than grepping for
+  # the source line that expresses it. A grep passes on any refactor that keeps
+  # the text and changes the meaning.
+  if ! output="$(/bin/bash -c '
+    set -e
+    source "$1"
+    refute() { if "$@"; then printf "unexpected success: %s\n" "$*" >&2; exit 1; fi; }
+    clerum_minimal_identity_matches admin@evenfire.local admin@evenfire.local
+    refute clerum_minimal_identity_matches admin@evenfire.local other@example.invalid
+    refute clerum_minimal_identity_matches admin@evenfire.local ""
+    refute clerum_minimal_identity_matches "" admin@evenfire.local
+    refute clerum_minimal_identity_matches "" ""
+    case "$(clerum_minimal_identity_error other@example.invalid admin@evenfire.local)" in
+      *"Desktop identity email (other@example.invalid)"*"bootstrap admin email (admin@evenfire.local)"*) ;;
+      *) exit 1 ;;
+    esac
+    printf ok
+  ' bash "$contract")"; then
+    fail "minimal identity guard does not accept the admin identity and reject every divergence"
+    return
+  fi
+  if [ "$output" != "ok" ]; then
+    fail "minimal identity guard contract did not complete (output=$output)"
+    return
+  fi
+  # Both enforcement points must route through the shared guard, so a fix in
+  # one cannot silently leave the other permissive.
+  if ! grep -Fq 'clerum_minimal_identity_matches "$ADMIN_EMAIL" "$SEED_USER_EMAIL"' \
+      "$REPO_ROOT/scripts/minikube/full-setup.sh" ||
+    ! grep -Fq 'clerum_minimal_identity_matches "$ADMIN_EMAIL" "$DEV_EMAIL"' \
+      "$REPO_ROOT/scripts/e2e/seed-e2e-data.sh"; then
+    fail "a minimal enforcement point does not use the shared identity guard"
+    return
+  fi
+  pass "minimal setup refuses a second unlinked Desktop identity"
 }
 
 assert_an_unknown_image_source_is_a_hard_error() {
@@ -1055,6 +1242,13 @@ assert_skip_build_staleness_find_is_sigpipe_guarded
 assert_pipefail_head_guard_prevents_abort
 assert_ghcr_is_the_default_image_source
 assert_image_source_local_is_honoured
+assert_bootstrap_seed_deferral_is_opt_in
+assert_bootstrap_seed_deferral_flag_resolves_for_local_minimal
+assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes
+assert_minimal_seed_is_setup_first_and_link_fail_closed
+assert_minimal_setup_requires_admin_identity_email
+assert_minimal_bootstrap_contract_runs_on_system_bash
+assert_minimal_seed_rejects_a_divergent_identity
 assert_an_unknown_image_source_is_a_hard_error
 assert_ghcr_mode_moves_only_the_render_dir
 assert_ghcr_mode_with_skip_uis_renders_the_no_uis_ghcr_overlay

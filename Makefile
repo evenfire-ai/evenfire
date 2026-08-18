@@ -317,10 +317,11 @@ minikube-restart-deploy: ## Restart a single deployment without rebuilding (usag
 # KEY INVARIANT: After generating new keys, the public key must be in sync across:
 #   1. rpc-proxy-secrets (namespace: rpc-proxy)  → RPC_PROXY_JWT_PUBLIC_KEY
 #   2. mcp-host-config   (namespace: mcp-host)   → CLERUM_AUTH_JWT_PUBLIC_KEY
-#   3. deploy/overlays/minikube/configmaps/mcp-host-config.yaml  (persisted in repo)
+#   3. gfs-config        (namespace: gfs)        → jwt-public-key
+#   4. deploy/overlays/minikube/configmaps/mcp-host-config.yaml  (persisted in repo)
 #
 # Use `make minikube-sync-auth-key` to copy the public key automatically
-# from rpc-proxy-secrets into mcp-host-config after key regeneration.
+# from rpc-proxy-secrets into both runtime ConfigMaps after key regeneration.
 #
 .PHONY: minikube-gen-keys
 minikube-gen-keys: ## Generate JWT signing keys + auto-sync to mcp-host-config
@@ -362,7 +363,7 @@ minikube-apply-namespaces: ## Create all namespaces
 	$(KC) apply -f deploy/base/namespaces.yaml
 
 .PHONY: minikube-sync-auth-key
-minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets -> mcp-host-config only when drift exists
+minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets into runtime ConfigMaps when drift exists
 	@bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE)
 
 .PHONY: minikube-sync-auth-key-if-present
@@ -418,6 +419,33 @@ minikube-pf-all-bg: ## Refresh background port-forwards for gate automation
 .PHONY: minikube-pre-gate-sync
 minikube-pre-gate-sync: ## Enforce minikube sync before a gate (use GATE=<name>)
 	@scripts/minikube/pre-gate-sync.sh --gate "$${GATE:-manual}" $(ARGS)
+
+.PHONY: test-gfs-real-postgres-minikube
+test-gfs-real-postgres-minikube: ## Run GFS T1 real-Postgres suites against a validated branch-owned Minikube profile
+	@CONTEXT="$(MINIKUBE_PROFILE)" bash scripts/e2e/gfs-real-pg-minikube-gate.sh
+
+.PHONY: minikube-t2-preflight
+minikube-t2-preflight: ## Read-only, fail-loud T0/T1/T2 preflight for the explicit branch-owned Minikube profile
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2-preflight.sh
+
+.PHONY: minikube-t2
+minikube-t2: ## Run the local development T0, Real PostgreSQL T1, and exact-head T2 contract
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2.sh
+
+.PHONY: minikube-t2-real-postgres
+minikube-t2-real-postgres: ## Run the explicit local Real PostgreSQL lane without changing CI's DSN contract
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/e2e/minikube-real-postgres.sh
+
+.PHONY: minikube-t2-public-boundary
+minikube-t2-public-boundary: ## Reject secrets, credentials, private URLs, and raw runtime artifacts from the public diff
+	@scripts/tests/test-minikube-t2-public-boundary.sh
+
+.PHONY: minikube-t2-scenarios
+minikube-t2-scenarios: ## Exercise the fail-loud negative cases and transition classifier without a cluster
+	@scripts/tests/test-minikube-t2-scenarios.sh
 
 .PHONY: minikube-verify-network-policy
 minikube-verify-network-policy: ## Prove NetworkPolicy enforcement in clerum-test/minikube before custom-image gates
