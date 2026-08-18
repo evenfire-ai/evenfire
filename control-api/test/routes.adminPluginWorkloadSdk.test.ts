@@ -489,7 +489,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         // quotaLimits must be empty, not { maxRequestsPerRun: 10 }.
         quotaLimits: {},
       }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
