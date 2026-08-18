@@ -17,20 +17,20 @@ the endpoint is settled.
 
 ## Before you start
 
-| You need                          | Because                                            |
-| --------------------------------- | -------------------------------------------------- |
-| Admin of the Teams organization   | Enabling custom app upload                          |
-| The Teams desktop or web client   | Installing the app                                  |
-| Admin in the Control UI           | Creating the channel                                |
-| An existing agent (`Host`)        | `spec.hostRef` is required                          |
-| Node.js 20 or later               | Installing `@microsoft/teams.cli`                   |
-| A publicly reachable cluster      | Microsoft must reach `webhook-proxy`                |
+| You need                        | Because                              |
+| ------------------------------- | ------------------------------------ |
+| Admin of the Teams organization | Enabling custom app upload           |
+| The Teams desktop or web client | Installing the app                   |
+| Admin in the Control UI         | Creating the channel                 |
+| An existing agent (`Host`)      | `spec.hostRef` is required           |
+| Node.js 20 or later             | Installing `@microsoft/teams.cli`    |
+| A publicly reachable cluster    | Microsoft must reach `webhook-proxy` |
 
 ## Enable custom app upload
 
-In the [Teams admin center](https://admin.teams.microsoft.com), open Teams apps
-> **Setup policies**, click the name **Global (Org-wide default)**, turn on
-**Upload custom apps**, and save.
+In the [Teams admin center](https://admin.teams.microsoft.com), open
+**Teams apps → Setup policies**, click the name **Global (Org-wide default)**,
+turn on **Upload custom apps**, and save.
 
 That enables sideloading for everyone in the tenant, which is what you want on a
 test tenant. Check it first, since it is often already on. In a production org,
@@ -125,15 +125,71 @@ and no `.env` is written at all.
 **`--sign-in-audience myOrg` matters.** `channel-reader` fetches its bot token
 from `https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token`, which
 only works for a single-tenant app. A multi-tenant registration needs the
-`botframework.com` authority instead and fails with an `AADSTS` error. The
-default is single-tenant, but the flag exists, so pin it.
+`botframework.com` authority instead and fails with an `AADSTS` error. The CLI
+documents `myOrg` and `multipleOrgs` as the accepted values but does not say
+which one it defaults to, so pin it rather than assume.
 
 The command prints a **Teams App ID**, a **Bot ID**, an **Install in Teams**
 link, and writes `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`. On a
 teams-managed bot the Teams App ID, Bot ID and `CLIENT_ID` are the same UUID;
 do not go hunting for three different values.
 
-Open the install link, add the app, and optionally add it to a channel.
+**Short and long description need to differ.** `teams app create` sets both to
+the app name. The Developer Portal requires them to be different, so before
+installing, open the [Developer Portal](https://dev.teams.microsoft.com/apps),
+select the app, and under **Basic information** give the long description its
+own value. Do this regardless: it may be part of why the install link below
+fails (see Troubleshooting), though that has not been confirmed.
+
+## Enable file upload and download
+
+Workflow results are delivered as files, which the bot cannot send unless the
+manifest allows it.
+
+**Do this before you install the app.** Microsoft documents that you "must
+reinstall if you change any app configurations", and `supportsFiles` is a
+configuration rather than a code change. An app installed from a manifest
+without it keeps that manifest, so enabling it afterwards means updating or
+reinstalling the app in every scope where it was added.
+
+`YOUR_CLIENT_ID` below is the `CLIENT_ID` from your `.env`. On a teams-managed
+bot the Teams App ID, the Bot ID and `CLIENT_ID` are the same UUID, so any of
+the three works and there is nothing extra to look up.
+
+> **Files only work in a one to one chat.** Microsoft's file consent APIs, which
+> this uses, are documented as working in the `personal` context only and not in
+> `channel` or `groupchat`. A workflow that produces a file will deliver it in a
+> direct chat with the bot and will not deliver it in a channel. That is
+> Microsoft's constraint, not ours, so test artifact delivery in a direct chat or
+> you will conclude it is broken when it is behaving as designed.
+
+```shell
+teams app manifest update YOUR_CLIENT_ID --set-json 'bots[0].supportsFiles=true' --yes
+```
+
+**`--yes` is load-bearing.** Without it the command prints "Manifest update
+requires --yes in non-interactive mode", changes nothing, and still looks like
+it worked. The global `-y` you passed to `teams app create` does not carry over.
+Confirm against the server rather than trusting the exit code:
+
+```shell
+teams app manifest download YOUR_CLIENT_ID ./verify.json
+```
+
+Expect `bots[0].supportsFiles` to be `true` and the manifest version to have
+bumped.
+
+**There is no checkbox for this in the current Developer Portal.** Microsoft
+documents `supportsFiles` as a manifest property rather than a portal setting,
+and older guidance pointing at App features > Bot > "Upload and download files"
+describes a UI that the portal no longer presents. If you would rather not use
+the CLI, edit the manifest directly under Configure > **App package editor**.
+
+`teams app doctor YOUR_CLIENT_ID` is a useful checkpoint. It reports whether the
+endpoint is reachable and shows `Sign-in audience: AzureADMyOrg` for a correctly
+registered single-tenant bot.
+
+## Create the channel in the Control UI
 
 Then paste `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET` into the Control UI and
 create the channel. The secret is stored as `teams-app-password` in a Secret
@@ -143,31 +199,29 @@ write-only: it renders masked and is never returned.
 Treat the generated `.env` as a secret. Do not paste it into a document, a chat,
 or a screenshot.
 
-## Enable file upload and download
+## Install the app in Teams
 
-Workflow results are delivered as files, which the bot cannot send unless the
-manifest allows it:
+Open the install link, add the app, and optionally add it to a channel.
+
+**A freshly created app is not in the catalog yet.** Teams publishes it on its
+own schedule, and until that finishes the install link returns "This app cannot
+be found". That is not a broken setup, and it is not a reason to re-run
+`teams app create`, which would leave you with two bots. Observed on this
+platform: the link failed on an app 22 minutes old and worked on one two days
+old, so treat the wait as open-ended rather than a fixed number of minutes.
+
+**To install now, upload the package instead.** This sideloads the app directly
+and does not wait on the catalog, which makes it the reliable path on a
+just-created app:
 
 ```shell
-teams app manifest update <appId> --set-json 'bots[0].supportsFiles=true' --yes
+teams app package download YOUR_CLIENT_ID
 ```
 
-**`--yes` is load-bearing.** Without it the command prints "Manifest update
-requires --yes in non-interactive mode", changes nothing, and still looks like
-it worked. The global `-y` you passed to `teams app create` does not carry over.
-Confirm against the server rather than trusting the exit code:
-
-```shell
-teams app manifest download <appId> ./verify.json
-```
-
-Expect `bots[0].supportsFiles` to be `true` and the manifest version to have
-bumped. The equivalent portal path is App Features > Bot > **Upload and download
-files**.
-
-`teams app doctor <appId>` is a useful checkpoint. It reports whether the
-endpoint is reachable and shows `Sign-in audience: AzureADMyOrg` for a correctly
-registered single-tenant bot.
+Then in Teams: **Apps > Manage your apps > Upload an app > Upload a custom
+app**, pick the generated `.zip`, and choose the channel during install rather
+than adding it afterwards. Build the package _after_ the `supportsFiles` update
+above, so the uploaded manifest already carries it.
 
 ## Any cluster (CRD path)
 
@@ -212,7 +266,9 @@ spec:
 **Do this before trying to chat.** Until a conversation is confirmed, the agent
 will not act on it.
 
-1. Open **Profile UI > Settings > Approval Channels > Teams**.
+1. Open **Profile UI > Settings > Social channels > Teams** and choose
+   **Connect Microsoft Teams**. This is a tab under **Settings**, not the
+   **Approval Channels** page in the sidebar, which is a different screen.
 2. Start a connection and pick the Teams channel.
 3. Copy the code it shows.
 4. Open the conversation you want to connect. For a channel, add the bot to it
@@ -251,7 +307,7 @@ flow when it is not.
 
 **Nothing arrives, but the channel saved.** Almost always the endpoint. Confirm
 the registered endpoint matches the channel's current name, and that the origin
-is publicly reachable. `teams app doctor <appId>` reports reachability.
+is publicly reachable. `teams app doctor YOUR_CLIENT_ID` reports reachability.
 
 A wrong endpoint is not fatal. The messaging endpoint stays editable in the
 [Teams Developer Portal](https://dev.teams.microsoft.com/apps). Only
@@ -265,6 +321,30 @@ endpoint changed with it. Update the bot's messaging endpoint in the portal.
 signed-in user is not the one it was assigned to. Check `teams status` rather
 than guessing.
 
+**The install link says "This app cannot be found."** Clicking the
+**Install in Teams** link `teams app create` prints, right after creation,
+returns this even though the app exists and is visible in the Developer Portal.
+It reads like the create failed. It did not: re-running `teams app create` in
+response leaves you with two bots.
+
+This is the catalog catching up, and waiting does eventually clear it, but the
+wait is open-ended: observed failing on an app 22 minutes old and working on one
+two days old. Do not plan around a number.
+
+Three ways past it, most reliable first:
+
+1. **Upload the package** (see "Install the app in Teams" above). This sideloads
+   the app and never consults the catalog, so it works on an app created
+   seconds ago.
+2. Use **Preview in Teams** from the
+   [Developer Portal](https://dev.teams.microsoft.com/apps) instead of the
+   printed link; it also bypasses the catalog lookup.
+3. Wait, then regenerate the link and try again:
+
+```shell
+teams app get YOUR_CLIENT_ID --install-link
+```
+
 **The bot cannot get a token.** An `AADSTS` error means the app is multi-tenant.
 `channel-reader` needs single-tenant; `teams app doctor` should report
 `Sign-in audience: AzureADMyOrg`.
@@ -275,7 +355,7 @@ the manifest update with `--yes` and verify by downloading the manifest.
 **You lost the install link.**
 
 ```shell
-teams app get <teamsAppId> --install-link
+teams app get YOUR_CLIENT_ID --install-link
 teams app list                              # every app with its id
 ```
 

@@ -34,6 +34,7 @@ expect_code() {
 
 repo="$tmp/evenfire"
 mkdir -p "$repo"
+repo="$(cd "$repo" && pwd -P)"
 git init -q -b dev "$repo"
 git -C "$repo" config user.email test@example.invalid
 git -C "$repo" config user.name scenario-test
@@ -63,12 +64,14 @@ repo_env=(
   T2_PROFILE_ROOT="$tmp/profiles"
   T2_PROFILE_ENV="$profile_root/profile.env"
   T2_PORTS_ENV="$profile_root/ports.env"
+  T2_BRANCH=feat/scenario
+  T2_HEAD="$feature_sha"
   T2_LOCK_ROOT="$tmp/locks"
   T2_EVIDENCE_ROOT="$tmp/evidence"
 )
 
 expect_code DEVELOPMENT_SCOPE_REQUIRED wrong-repository wrong-repository \
-  env "${repo_env[@]}" bash -c 'git -C "$T2_PROJECT_DIR" remote set-url origin https://example.invalid/not-evenfire.git; source "$1"; t2_repo_metadata' bash "$COMMON"
+  env "${repo_env[@]}" bash -c 'git -C "$T2_PROJECT_DIR" remote set-url origin https://example.invalid/other-repository.git; source "$1"; t2_repo_metadata' bash "$COMMON"
 git -C "$repo" remote set-url origin https://github.com/evenfire-ai/evenfire.git
 
 git -C "$repo" branch main "$base_sha"
@@ -118,6 +121,12 @@ printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s
 expect_code PROFILE_OWNERSHIP_MISMATCH profile-ownership profile-ownership \
   env "${ownership_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
 
+stale_profile_env="$tmp/stale-profile.env"
+printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=oldsha1\nDIRTY=false\nREPO_DIR=%s\n' \
+  "$profile" "$repo" >"$stale_profile_env"
+env "${repo_env[@]}" T2_PROFILE_ENV="$stale_profile_env" \
+  bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
 marker_env=("${repo_env[@]}" T2_HEAD="$feature_sha" T2_WORKTREE_ID=worktree-a)
 expect_code HEAD_MARKER_MISMATCH stale-marker stale-marker \
   env "${marker_env[@]}" FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"old","worktreeId":"worktree-a","imageSource":"local","imageTag":"test"}}' \
@@ -140,10 +149,43 @@ bootstrap_manifest_state="$(env "${repo_env[@]}" T2_IMAGE_MANIFEST="$invalid_man
 [ "$bootstrap_manifest_state" = full-bootstrap ] || fail "invalid bootstrap manifest selected $bootstrap_manifest_state instead of full-bootstrap"
 
 local_manifest="$tmp/local-image-manifest.json"
-printf '{"imageSource":"local","imageTag":""}\n' >"$local_manifest"
-local_manifest_state="$(env "${repo_env[@]}" T2_IMAGE_MANIFEST="$local_manifest" T2_BOOTSTRAP_REQUIRED=false \
-  bash -c 'source "$1"; t2_image_check; printf "%s\t%s" "$T2_IMAGE_SOURCE" "$T2_IMAGE_TAG"' bash "$COMMON")"
-[ "$local_manifest_state" = $'local\t' ] || fail "local manifest with an empty tag was rejected: $local_manifest_state"
+printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$local_manifest"
+env "${repo_env[@]}" T2_IMAGE_MANIFEST="$local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
+empty_local_manifest="$tmp/empty-local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":"","images":{}}\n' >"$empty_local_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH empty-local empty-local \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$empty_local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
+not_built_local_manifest="$tmp/not-built-local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"NOT_BUILT"}}\n' >"$not_built_local_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH not-built-local not-built-local \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$not_built_local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
+# The multi-node writer records minikube_image_id output, which is NOT_FOUND
+# when an image is absent from the node. Single-node records docker inspect's
+# NOT_BUILT. Both sentinels must be rejected, so cover the multi-node one too.
+not_found_local_manifest="$tmp/not-found-local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"NOT_FOUND"}}
+' >"$not_found_local_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH not-found-local not-found-local \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$not_found_local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
+short_local_manifest="$tmp/short-local-image-manifest.json"
+printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef"}}\n' >"$short_local_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH short-local short-local \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$short_local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
+
+ghcr_manifest="$tmp/ghcr-image-manifest.json"
+printf '{"imageSource":"ghcr","imageTag":""}\n' >"$ghcr_manifest"
+expect_code IMAGE_MANIFEST_MISMATCH tagless-ghcr tagless-ghcr \
+  env "${repo_env[@]}" T2_IMAGE_MANIFEST="$ghcr_manifest" T2_IMAGE_SOURCE=ghcr T2_IMAGE_TAG= \
+  bash -c 'source "$1"; T2_IMAGE_SOURCE=ghcr; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
 
 expect_code SECRET_MISSING missing-secret missing-secret \
   env "${repo_env[@]}" T2_BOOTSTRAP_REQUIRED=false T2_REQUIRED_NAMESPACES=control-plane \

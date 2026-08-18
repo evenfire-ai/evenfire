@@ -62,7 +62,6 @@ jobs:
           - external-rest-api
           - profile-ui
           - desktop-app
-          - profile-ui
           - mcp-servers
           - packages/desktop-app-links
           - packages/workflow-runtime-core
@@ -96,6 +95,11 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: npm ci
+
+      - name: Verify Electron runtime
+        if: matrix.service == 'desktop-app'
+        working-directory: desktop-app
+        run: npm run verify:electron
 
       - name: Build
         working-directory: ${{ matrix.service }}

@@ -205,10 +205,10 @@ t2_profile_scope() {
     T2_NEXT_COMMAND='regenerate the profile for the current branch'
     t2_fail PROFILE_OWNERSHIP_MISMATCH 'profile branch does not match current branch'
   fi
-  if [[ "$T2_HEAD" != "$profile_sha"* ]]; then
-    T2_NEXT_COMMAND='regenerate the profile for the current HEAD'
-    t2_fail PROFILE_OWNERSHIP_MISMATCH 'profile SHA does not match current HEAD'
-  fi
+  # A healthy branch-owned profile is reusable across commits. The cache SHA
+  # is historical naming metadata; exact runtime identity is enforced below
+  # by the pre-gate marker's gitHead/worktreeId pair, not by recreating a
+  # Minikube cluster for every commit.
   if [ ! -f "$T2_PORTS_ENV" ]; then
     T2_NEXT_COMMAND='generate the profile-owned random ports before starting a gate'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "profile-owned ports.env is missing: $T2_PORTS_ENV"
@@ -322,11 +322,18 @@ except (OSError, ValueError):
     raise SystemExit("invalid")
 source = payload.get("imageSource") or payload.get("source") or payload.get("mode") or ""
 tag = payload.get("imageTag") or payload.get("tag") or ""
-# Local images deliberately have no registry tag; build-images.sh records an
-# empty imageTag and image-mode.sh treats that as the local coordinate. A tag
-# is mandatory only for the ghcr acquisition mode.
-if not source or (source == "ghcr" and not tag):
+# Local builds are identified by the per-image digests in the manifest and
+# intentionally have no registry tag. GHCR manifests still require a tag.
+images = payload.get("images")
+if source not in {"local", "ghcr"} or (source == "ghcr" and not tag):
     raise SystemExit("missing")
+if source == "local":
+    import re
+    if not isinstance(images, dict) or not images:
+        raise SystemExit("local-images")
+    digest = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
+    if any(not isinstance(name, str) or not name or not isinstance(value, str) or not digest.fullmatch(value) for name, value in images.items()):
+        raise SystemExit("local-digests")
 print(source + "\t" + tag)
 PY
   )"; then
@@ -336,7 +343,7 @@ PY
       return 0
     fi
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
-    t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or has no source/tag'
+    t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or incomplete for its image source'
   fi
   local manifest_source manifest_tag
   IFS=$'\t' read -r manifest_source manifest_tag <<< "$manifest_values"
