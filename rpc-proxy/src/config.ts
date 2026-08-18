@@ -37,6 +37,7 @@ type Config = {
   wakeRetriggerMs: number
   hccBaseUrl: string
   hostNamespace: string
+  mcpServerNamespace: string
   desktopCookieName: string
   desktopCookieMaxAgeMs: number
   desktopCookieSecret: string
@@ -224,6 +225,7 @@ export const config: Config = {
     'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
   ),
   hostNamespace: requiredOrDevDefault('RPC_PROXY_HOST_NAMESPACE', 'mcp-host'),
+  mcpServerNamespace: requiredOrDevDefault('RPC_PROXY_MCP_SERVER_NAMESPACE', 'mcp-server'),
   desktopCookieName: process.env.RPC_PROXY_DESKTOP_COOKIE_NAME || 'clerum_desktop_session',
   desktopCookieMaxAgeMs: Number(process.env.RPC_PROXY_DESKTOP_COOKIE_MAX_AGE_MS || 3_600_000),
   desktopCookieSecret: requiredOrDevDefault(

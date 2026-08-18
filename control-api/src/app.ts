@@ -19,6 +19,7 @@ import { createOAuthCallbackRouter } from './routes/external/oauthCallback.js'
 import { createGfsRouter } from './routes/gfs/index.js'
 import { createHealthRouter } from './routes/health.js'
 import { createInternalActionAuthorityCheckpointRouter } from './routes/internal/actionAuthorityCheckpoint.js'
+import { createInternalActionAuthorityHostWakeRouter } from './routes/internal/actionAuthorityHostWake.js'
 import { createInternalAdministrativeEventsRouter } from './routes/internal/administrativeEvents.js'
 import { createInternalAgentRunEventsRouter } from './routes/internal/agentRunEvents.js'
 import { createInternalBudgetsCheckRouter } from './routes/internal/budgetsCheck.js'
@@ -164,6 +165,7 @@ export function createApp(gateway: K8sGateway) {
   // Must be mounted BEFORE requireInternalToken which would block them.
   api.use(createMcpHostRoutes(gateway, directRunAttributionBindingService))
   api.use(createInternalActionAuthorityCheckpointRouter(gateway))
+  api.use(createInternalActionAuthorityHostWakeRouter(gateway))
   api.use(
     createInternalAgentRunEventsRouter({
       submit: input => tracingSubmissionService.submit(input),

@@ -1,3 +1,4 @@
+import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
@@ -61,8 +62,17 @@ export async function listAllowedServersForUser(
 export async function resolveServerConnectionForUser(
   userId: string,
   serverName: string,
-  rpcAccessToken: string
+  rpcAccessToken: string,
+  authorizedActionV2?: AuthorizedActionV2
 ): Promise<ResolvedServerConnection | null> {
+  if (authorizedActionV2) {
+    const destination = authorizedActionV2.checkpoint.destination
+    const expectedRef = `${config.mcpServerNamespace}/${serverName}`
+    if (!destination || destination.kind !== 'mcp_server' || destination.ref !== expectedRef) {
+      throw new Error('Invalid v2 MCP destination binding')
+    }
+    return { name: serverName, url: destination.url, headers: {} }
+  }
   const data = await getCachedUserAllowedServers(userId, rpcAccessToken)
   const server = data.servers.find(entry => entry.name === serverName)
   if (!server) return null
@@ -82,22 +92,40 @@ export async function resolveHostConnectionForUser(
     teamId?: string | null
     requestId?: string
     directRunBinding?: DirectRunBindingRequest
+    actionContextV2?: string
+    destination?: Readonly<{ kind: 'host' | 'mcp_server'; ref: string; url: string }>
   }
 ): Promise<ResolvedServerConnection | null> {
-  const host = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
-    directRunBinding: edgeContext?.directRunBinding,
-  })
+  const expectedRef = `${config.hostNamespace}/${hostRef}`
+  const host = edgeContext?.actionContextV2
+    ? edgeContext.destination?.kind === 'host' && edgeContext.destination.ref === expectedRef
+      ? {
+          name: hostRef,
+          url: edgeContext.destination.url,
+          headers: {},
+          attributionBindingStatus: undefined,
+        }
+      : (() => {
+          throw new Error('Invalid v2 host destination binding')
+        })()
+    : await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
+        directRunBinding: edgeContext?.directRunBinding,
+      })
   if (!host) return null
 
   const headers: Record<string, string> = {
     ...host.headers,
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': hostRef,
-    'x-clerum-edge-user-id': userId,
   }
-  if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
-  headers['x-clerum-edge-access-scope'] =
-    edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')
+  if (edgeContext?.actionContextV2) {
+    headers['x-clerum-edge-action-context'] = edgeContext.actionContextV2
+  } else {
+    headers['x-clerum-edge-user-id'] = userId
+    if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
+    headers['x-clerum-edge-access-scope'] =
+      edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')
+  }
   if (edgeContext?.requestId) headers['x-clerum-edge-request-id'] = edgeContext.requestId
 
   return {
