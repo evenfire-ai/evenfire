@@ -203,12 +203,25 @@ or a screenshot.
 
 Open the install link, add the app, and optionally add it to a channel.
 
-**Expect to wait about five minutes.** Teams publishes the app to its catalog on
-its own schedule, and the install link fails with "This app cannot be found"
-until that finishes. That is the normal wait, not a broken setup, and it is not
-a reason to re-run `teams app create`, which would leave you with two bots. Give
-it a couple of minutes and click the link again. Only if it still fails after
-several minutes is something actually wrong: see Troubleshooting.
+**A freshly created app is not in the catalog yet.** Teams publishes it on its
+own schedule, and until that finishes the install link returns "This app cannot
+be found". That is not a broken setup, and it is not a reason to re-run
+`teams app create`, which would leave you with two bots. Observed on this
+platform: the link failed on an app 22 minutes old and worked on one two days
+old, so treat the wait as open-ended rather than a fixed number of minutes.
+
+**To install now, upload the package instead.** This sideloads the app directly
+and does not wait on the catalog, which makes it the reliable path on a
+just-created app:
+
+```shell
+teams app package download YOUR_CLIENT_ID
+```
+
+Then in Teams: **Apps > Manage your apps > Upload an app > Upload a custom
+app**, pick the generated `.zip`, and choose the channel during install rather
+than adding it afterwards. Build the package _after_ the `supportsFiles` update
+above, so the uploaded manifest already carries it.
 
 ## Any cluster (CRD path)
 
@@ -253,7 +266,9 @@ spec:
 **Do this before trying to chat.** Until a conversation is confirmed, the agent
 will not act on it.
 
-1. Open **Profile UI > Settings > Approval Channels > Teams**.
+1. Open **Profile UI > Settings > Social channels > Teams** and choose
+   **Connect Microsoft Teams**. This is a tab under **Settings**, not the
+   **Approval Channels** page in the sidebar, which is a different screen.
 2. Start a connection and pick the Teams channel.
 3. Copy the code it shows.
 4. Open the conversation you want to connect. For a channel, add the bot to it
@@ -312,14 +327,19 @@ returns this even though the app exists and is visible in the Developer Portal.
 It reads like the create failed. It did not: re-running `teams app create` in
 response leaves you with two bots.
 
-For roughly the first five minutes this is just the catalog catching up, and the
-fix is to wait and click the link again. Everything below is for a link that is
-still failing after several minutes.
+This is the catalog catching up, and waiting does eventually clear it, but the
+wait is open-ended: observed failing on an app 22 minutes old and working on one
+two days old. Do not plan around a number.
 
-Two workarounds. Use **Preview in Teams** from the
-[Developer Portal](https://dev.teams.microsoft.com/apps) instead of the
-printed link; it bypasses the catalog lookup that is failing. Or regenerate the
-link:
+Three ways past it, most reliable first:
+
+1. **Upload the package** (see "Install the app in Teams" above). This sideloads
+   the app and never consults the catalog, so it works on an app created
+   seconds ago.
+2. Use **Preview in Teams** from the
+   [Developer Portal](https://dev.teams.microsoft.com/apps) instead of the
+   printed link; it also bypasses the catalog lookup.
+3. Wait, then regenerate the link and try again:
 
 ```shell
 teams app get YOUR_CLIENT_ID --install-link

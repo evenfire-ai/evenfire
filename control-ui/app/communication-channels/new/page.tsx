@@ -872,17 +872,19 @@ export default function CreateCommunicationChannelPage() {
                                   Install in Teams
                                 </a>
                                 <p className="cu-teams-setup__install-note">
-                                  Teams can take around five minutes to publish the app to its
-                                  catalog, so the link may say the app cannot be found at first.
-                                  That is the expected wait, not a broken setup: give it a couple of
-                                  minutes and click it again.
+                                  A newly created app is not in the Teams catalog yet, so this link
+                                  may say the app cannot be found. That is expected, not a broken
+                                  setup, and re-running the create command would leave you with two
+                                  bots. The wait is open ended, so to install now, upload the
+                                  package instead.
                                 </p>
                                 <details className="cu-advanced-details cu-teams-setup__fallback">
-                                  <summary>If it still fails after several minutes</summary>
+                                  <summary>Install now by uploading the package</summary>
                                   <p className="cu-advanced-details__hint">
-                                    Build the package and upload it by hand from Apps &gt; Manage
-                                    your apps &gt; Upload an app. This skips the catalog lookup that
-                                    the link depends on.
+                                    This sideloads the app without waiting on the catalog. Run the
+                                    command, then in Teams choose Apps &gt; Manage your apps &gt;
+                                    Upload an app &gt; Upload a custom app, and pick the channel
+                                    during install.
                                   </p>
                                   <CommandBlock
                                     command={teamsPackageDownloadCommand}

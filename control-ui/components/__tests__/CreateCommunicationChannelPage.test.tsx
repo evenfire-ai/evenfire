@@ -945,7 +945,7 @@ describe('CreateCommunicationChannelPage — Teams install link', () => {
     expect(disclosure).not.toBeNull()
     expect(disclosure).not.toHaveAttribute('open')
     expect(
-      within(disclosure as HTMLElement).getByText('If it still fails after several minutes')
+      within(disclosure as HTMLElement).getByText('Install now by uploading the package')
     ).toBeInTheDocument()
   })
 
@@ -972,7 +972,7 @@ describe('CreateCommunicationChannelPage — Teams install link', () => {
     // this reaches the operator AFTER they have read "app cannot be found" as a
     // broken setup and started debugging the wrong thing. It has to be visible
     // before the click, so it must not sit inside the disclosure.
-    const note = screen.getByText(/five minutes to publish the app to its catalog/)
+    const note = screen.getByText(/not in the Teams catalog yet/)
     expect(note.closest('details')).toBeNull()
   })
 })
