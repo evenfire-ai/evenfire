@@ -27,6 +27,7 @@ T1_NEXT_COMMAND='repair the first reported Real PostgreSQL precondition, then re
 T1_TOTAL_TESTS=0
 T1_PASSED_TESTS=0
 T1_PENDING_TESTS=0
+T1_GFS_RESTORE_REQUIRED=false
 
 die_t1() {
   local code="$1"
@@ -48,6 +49,12 @@ cleanup_t1() {
       kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
       wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
     fi
+  fi
+  if [ "$T1_GFS_RESTORE_REQUIRED" = true ] && \
+     ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$T2_CONTEXT" \
+       bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    printf '[minikube-t1] ERROR: failed to restore branch-profile GFS credentials\n' >&2
+    status=1
   fi
   if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi
   exit "$status"
@@ -240,6 +247,12 @@ main() {
     cat "$T1_TMP_DIR/port-forward.log" >&2 || true
     T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward exited before the T1 lane started'
+  fi
+  if t2_kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
+    # Real role-contract suites intentionally leave their cluster-global GFS
+    # roles NOLOGIN during teardown. Restore the branch profile before T1
+    # exits so the following T2 gate observes the production-like runtime.
+    T1_GFS_RESTORE_REQUIRED=true
   fi
 
   ADMIN_DSN="$(printf '%s\0%s\0%s' "$PG_USER" "$PG_PASSWORD" "$LOCAL_PORT" | python3 -c '

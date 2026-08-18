@@ -35,6 +35,8 @@ grep -Fq 'pending_tests' "$T1"
 grep -Fq 'numTotalTests' "$T1"
 grep -Fq 'numTotalTestSuites' "$T1"
 grep -Fq 'passed_suites' "$T1"
+grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$T1"
+grep -Fq 'reconcile-gfs-deploy-credentials.sh' "$T1"
 if grep -Fq "[ \"\$passed_files\" -ne \"\$expected\" ]" "$T1"; then
   echo 'FAIL: T1 compares Vitest nested suite counts to physical file counts' >&2
   exit 1
