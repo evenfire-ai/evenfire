@@ -300,4 +300,48 @@ describe('delete impact gate (409 model_in_use → force)', () => {
     // mutation, not a polling loop.
     expect(vi.mocked(getAdminAttention)).toHaveBeenCalledTimes(2)
   })
+
+  // R3-M1 (T5): the PR body promises a *transient failure* of the post-mutation
+  // refetch soft-degrades — the banner clears and hides, and the models surface
+  // stays usable (CatalogAttentionBanner.tsx catch -> setItems([])). The sibling
+  // test above only covers a second fetch that RESOLVES empty; this covers the
+  // rejecting path. Assert the observable outcome (banner gone, catalog still
+  // interactive), not the fetch internals (T4).
+  it('hides the banner but keeps the surface usable when the post-mutation refetch fails (R3-M1)', async () => {
+    vi.mocked(deleteLlmModel).mockResolvedValue(undefined)
+    // Mount feed carries a visible item; the post-delete re-fetch REJECTS (a
+    // transient attention failure, not a silent abort), so the advisory must
+    // soft-degrade to hidden rather than tumble the surface.
+    vi.mocked(getAdminAttention)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            kind: 'stale_model_referenced',
+            provider: 'openai',
+            model: 'gpt-5-mini',
+            displayName: 'GPT-5 Mini',
+            hostsAffected: [{ namespace: 'mcp-host', name: 'agent-b', roles: ['primary'] }],
+            grantsAffected: [],
+          },
+        ],
+        generatedAt: 'x',
+      })
+      .mockRejectedValue(new Error('attention refetch failed'))
+
+    renderSurface()
+
+    // The stale item is visible in the banner before the mutation.
+    expect(await screen.findByText('GPT-5 Mini')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+
+    // The rejected refetch clears the banner: the advisory item leaves the view.
+    await waitFor(() => {
+      expect(screen.queryByText('GPT-5 Mini')).not.toBeInTheDocument()
+    })
+    // And nothing else broke — the models surface stays interactive.
+    expect(screen.getByText('Model catalog')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' })).toBeInTheDocument()
+  })
 })
