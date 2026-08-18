@@ -3,6 +3,10 @@
  * the enabled allowlist entry for the Host's provider; `models` is `[hostDefault]`
  * (name only) when the allowlist is unavailable (`degraded`).
  */
+import type {
+  AuthorityBindingV2,
+  TrustedEdgeActionContextV2,
+} from '@clerum/action-context-contracts'
 import type { ModelWireEntry } from '../config/modelResolution.js'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import type { Attachment, TraceContextV1 } from '../core/types'
@@ -50,6 +54,8 @@ export interface IncomingMessage {
    * non-allowlisted value is ignored (fail-open on the message).
    */
   model?: string
+  /** Server-derived per-effect authority. Client input is always discarded. */
+  authorityV2?: AuthorityBindingV2
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'
@@ -63,6 +69,8 @@ export interface RuntimeCallerContext {
   channelType?: string
   channelId?: string
   sender?: string
+  /** Present only after strict parsing of rpc-proxy's v2 trusted-edge envelope. */
+  actionContextV2?: TrustedEdgeActionContextV2
 }
 
 export interface MessageResponse {
@@ -197,6 +205,7 @@ export interface HostActivityEvent {
   severity: HostActivitySeverity
   meta: Record<string, unknown>
   redactions: string[]
+  authorityV2?: AuthorityBindingV2
 }
 
 export interface HostActivitySnapshotResponse {

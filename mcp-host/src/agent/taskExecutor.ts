@@ -1437,15 +1437,14 @@ export class TaskExecutor {
     const t = this.task
     if (t.source === 'channel') {
       if (t.sourceMessage?.channelType === 'rpc') {
-        const teamId =
-          typeof t.sourceMessage.metadata?.teamId === 'string'
-            ? t.sourceMessage.metadata.teamId.trim()
-            : ''
+        const authority = t.sourceMessage.authorityV2
+        const rawTeamId = authority ? authority.effectiveTeamId : t.sourceMessage.metadata?.teamId
+        const teamId = typeof rawTeamId === 'string' ? rawTeamId.trim() : ''
         return {
           source_kind: 'desktop',
           traceContext: t.traceContext ?? null,
           team_id: teamId || null,
-          user_id: t.sourceMessage.sender ?? null,
+          user_id: authority?.userId ?? t.sourceMessage.sender ?? null,
           task_id: t.id,
         }
       }

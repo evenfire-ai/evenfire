@@ -266,6 +266,7 @@ function publishActivity(input: {
     title: input.title,
     severity: input.severity || 'info',
     meta: input.meta,
+    authorityV2: input.task?.sourceMessage?.authorityV2,
   })
 }
 
