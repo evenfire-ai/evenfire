@@ -13,6 +13,7 @@ import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { ChatDrawer } from '@components/ChatDrawer'
 import { ChatLocalSearch } from '@components/ChatLocalSearch'
+import { ChatSwitcher } from '@components/ChatSwitcher'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
 import { Button, ToastStack } from '@components/Common'
@@ -258,6 +259,7 @@ export function App() {
   const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
+  const [chatSwitcherFocusRequestId, setChatSwitcherFocusRequestId] = React.useState(0)
   const [availableSandboxUiApps, setAvailableSandboxUiApps] = React.useState<ActiveSandboxUiApp[]>(
     []
   )
@@ -276,6 +278,10 @@ export function App() {
   // callbacks) can tell whether a reveal should target the in-app drawer or the
   // full-screen chat route without re-binding on every render.
   const chatDrawerVisibleRef = React.useRef(false)
+  // Set when `chat.switcher` fires with the drawer still closed: the switcher is
+  // not mounted yet, so we open the drawer and defer the focus bump until its
+  // column commits.
+  const pendingChatSwitcherFocusRef = React.useRef(false)
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
@@ -703,6 +709,15 @@ export function App() {
   React.useEffect(() => {
     setChatDrawerReady(false)
   }, [activeSandboxUiApp?.appRef, chatDrawerVisible])
+
+  // Once the drawer becomes visible after a `chat.switcher` on a closed drawer,
+  // the switcher is mounted — bump its focus request so it opens the dropdown.
+  React.useEffect(() => {
+    if (chatDrawerVisible && pendingChatSwitcherFocusRef.current) {
+      pendingChatSwitcherFocusRef.current = false
+      setChatSwitcherFocusRequestId(value => value + 1)
+    }
+  }, [chatDrawerVisible])
 
   const handleSandboxUiBoundsApplied = React.useCallback(() => {
     if (appNotificationDrawerOpen) setNotificationDrawerReady(true)
@@ -1156,6 +1171,7 @@ export function App() {
     setCommandPaletteReturnToSandbox(false)
     setSettingsShortcutsRequestId(0)
     setChatDrawerOpen(false)
+    setChatSwitcherFocusRequestId(0)
   }, [vm.authenticatedPrincipalIdentity])
 
   const desktopCommandContext = React.useMemo(
@@ -1309,6 +1325,18 @@ export function App() {
         handleNewChatViewTab()
         return
       }
+      if (commandId === 'chat.switcher') {
+        closeChatLocalSearch(false)
+        if (chatDrawerVisibleRef.current) {
+          setChatSwitcherFocusRequestId(value => value + 1)
+        } else {
+          // Open the drawer first; the deferred-focus effect opens the switcher
+          // once the switcher's column has mounted.
+          pendingChatSwitcherFocusRef.current = true
+          openChatDrawer()
+        }
+        return
+      }
       if (commandId === 'chat.closeTab') {
         closeChatLocalSearch(false)
         handleCloseChatViewTab(state.activeTabId)
@@ -1365,6 +1393,7 @@ export function App() {
       handleCloseChatViewTab,
       handleNewChatViewTab,
       handleSidebarNavSelect,
+      openChatDrawer,
       revealChatViewTab,
       sandboxUiMounted,
       vm.activeChatId,
@@ -1958,9 +1987,13 @@ export function App() {
                                   {chatDrawerVisible && (
                                     <ChatDrawer
                                       header={
-                                        <span className="chat-drawer__title">
-                                          {activeChatViewTab(chatViewTabs).title}
-                                        </span>
+                                        <ChatSwitcher
+                                          tabs={chatViewTabs.tabs}
+                                          activeTabId={chatViewTabs.activeTabId}
+                                          onSelect={handleSelectChatViewTab}
+                                          onNewChat={handleNewChatViewTab}
+                                          focusRequestId={chatSwitcherFocusRequestId}
+                                        />
                                       }
                                       onNewChat={handleNewChatViewTab}
                                       onClose={closeChatDrawer}

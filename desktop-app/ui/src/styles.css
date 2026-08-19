@@ -12611,6 +12611,77 @@ pre {
   flex-direction: column;
 }
 
+/* Open-chats selector in the drawer header — a thin dropdown over chatViewTabs.
+   The narrow drawer column can't host a horizontal tab strip, so the switcher
+   lists chats vertically with their status badge. */
+.chat-switcher {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-switcher__trigger {
+  min-width: 0;
+}
+
+.chat-switcher__trigger-main {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-switcher__chevron {
+  flex: 0 0 auto;
+  margin-left: var(--space-1);
+  color: var(--text-dim);
+}
+
+.chat-switcher__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-switcher__menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  right: 0;
+  z-index: calc(var(--layer-dropdown) + 10);
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-hard);
+  padding: var(--space-1);
+  display: grid;
+  gap: var(--space-1);
+}
+
+.chat-switcher__options {
+  display: grid;
+  gap: var(--space-0-5);
+  max-height: min(360px, 50vh);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.chat-switcher__option {
+  min-width: 0;
+  gap: var(--space-1-5);
+}
+
+.chat-switcher__option.is-active {
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.chat-switcher__footer {
+  border-top: 1px solid rgba(var(--edge-rgb), 0.24);
+  padding-top: var(--space-1);
+}
+
 @media (min-width: 901px) and (max-width: 1220px) {
   .content-panel {
     --app-header-utilities-width: calc(
