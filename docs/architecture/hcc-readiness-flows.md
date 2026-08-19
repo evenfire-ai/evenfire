@@ -1,10 +1,10 @@
-# HCC readiness & external-egress — design note (PR #205)
+# HCC readiness & external-egress — design note (#382)
 
 > Design note for the readiness-decoupling and single-writer NetworkPolicy work in
 > `host-context-controller` (HCC). Addresses the "no design/decision doc for the
 > 500+-line external-egress coordinator and the certification barrier" review gap.
 
-![HCC flows resolved by PR #205](./pr205-hcc-flows.png)
+![HCC readiness flows resolved by #382](./hcc-readiness-flows-diagram.png)
 
 ## 1. Readiness lifecycle — decoupled from initial fleet convergence
 
