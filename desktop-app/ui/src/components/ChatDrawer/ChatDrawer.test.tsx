@@ -6,6 +6,11 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { ChatDrawer } from '.'
 
+const stylesheet = readFileSync(
+  path.join(process.cwd(), 'ui', 'src', 'styles.css'),
+  'utf8'
+)
+
 beforeEach(() => {
   const style = document.createElement('style')
   style.dataset.testStyles = 'chat-drawer'
@@ -64,6 +69,19 @@ describe('ChatDrawer', () => {
     expect(drawer.classList.contains('is-ready')).toBe(false)
     expect(getComputedStyle(drawer).opacity).toBe('0')
     expect(getComputedStyle(drawer).pointerEvents).toBe('none')
+  })
+
+  it('confines the composer reference submenu to the drawer interior, off the embed rect', () => {
+    // Right-docked drawer: the embed is to its LEFT, so the composer submenu must
+    // stay anchored rightward (left: 100%+, right: auto) to render over drawer DOM
+    // instead of being occluded by the native view. A left flip would cross the
+    // embed rect — the confinement guards against that.
+    const rule = stylesheet.match(
+      /\.chat-drawer \.composer-reference-submenu\s*\{([^}]*)\}/
+    )?.[1]
+    expect(rule).toBeTruthy()
+    expect(rule).toMatch(/left:\s*calc\(100% \+ var\(--space-1\)\)/)
+    expect(rule).toMatch(/right:\s*auto/)
   })
 
   it('reveals once ready', () => {

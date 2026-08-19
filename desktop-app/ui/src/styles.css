@@ -12682,6 +12682,25 @@ pre {
   padding-top: var(--space-1);
 }
 
+/* Overlay confinement (spec §6). The native app view paints above ALL DOM, so
+   any chat overlay that crosses the embed's rect is hidden behind it. The drawer
+   is RIGHT-docked, so the embed sits to its LEFT. The composer reference menu is
+   anchored at the composer's left edge and its submenu flies RIGHT
+   (`left: calc(100% + …)`) — i.e. INTO the drawer, away from the embed — so it is
+   already off the app rect. Pin that rightward direction inside the drawer so a
+   future global LEFT flip can't leak the submenu over the embed and be occluded.
+   (The spec's suggested LEFT flip is inverted for a right-docked drawer: leftward
+   pushes the submenu over the embed, not off it. See report.) */
+.chat-drawer .composer-reference-submenu {
+  left: calc(100% + var(--space-1));
+  right: auto;
+}
+
+.chat-drawer .composer-reference-menu-panel {
+  left: 0;
+  right: auto;
+}
+
 @media (min-width: 901px) and (max-width: 1220px) {
   .content-panel {
     --app-header-utilities-width: calc(
