@@ -12595,6 +12595,15 @@ pre {
   flex: 0 0 auto;
 }
 
+/* The base .ui-icon-button sizes the button but never the glyph — each call
+   site sets its own svg size. Match the app's standard 16px icon inside a 30px
+   (sm) icon button so the new-chat / close controls line up with the rest of
+   the app instead of rendering the raw 24-viewbox artwork oversized. */
+.chat-drawer__header-actions .ui-icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
 .chat-drawer__title {
   display: block;
   font-weight: var(--font-weight-semibold);

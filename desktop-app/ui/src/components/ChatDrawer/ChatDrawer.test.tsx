@@ -62,6 +62,16 @@ describe('ChatDrawer', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('sizes the header CTA icons to the app standard (16px), not the raw viewBox', () => {
+    const { container } = renderDrawer()
+    const svgs = container.querySelectorAll('.chat-drawer__header-actions .ui-icon-button svg')
+    expect(svgs.length).toBe(2)
+    svgs.forEach(svg => {
+      expect(getComputedStyle(svg as Element).width).toBe('16px')
+      expect(getComputedStyle(svg as Element).height).toBe('16px')
+    })
+  })
+
   it('stays hidden and inert until the embed acknowledges its shrunk bounds', () => {
     const { container } = renderDrawer({ ready: false })
     const drawer = container.querySelector('.chat-drawer') as HTMLElement
