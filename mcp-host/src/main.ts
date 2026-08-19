@@ -66,6 +66,7 @@ import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
 import { McpManager } from './mcp'
+import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import {
   AuthoritativeMcpFleetCoordinator,
   DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
@@ -166,7 +167,7 @@ let bootFallbackEntry: FallbackEntry | null = null
 let hostWatcher: HostWatcher | null = null
 let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
-let mcpStatusHeartbeatTimer: ReturnType<typeof setInterval> | null = null
+let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
 let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
 let mcpManager: McpManager | null = null
@@ -968,22 +969,28 @@ export function stopContextMapperPolling(): void {
  * the connection (spec §4.5, §7.1).
  */
 function startMcpStatusHeartbeat(): void {
-  if (mcpStatusHeartbeatTimer) return
+  if (mcpStatusHeartbeat) return
   const interval = config.mcpStatusHeartbeatInterval
-  console.log(`[Main] Starting MCP status heartbeat (interval: ${interval}ms)`)
-  mcpStatusHeartbeatTimer = setInterval(() => {
-    if (!mcpManager) return
-    mcpManager.refreshAllServerStatus().catch((err: unknown) => {
+  const timeoutMs = config.mcpStatusHeartbeatTimeoutMs
+  console.log(
+    `[Main] Starting MCP status heartbeat (interval: ${interval}ms, timeout: ${timeoutMs}ms)`
+  )
+  mcpStatusHeartbeat = new McpStatusHeartbeat({
+    intervalMs: interval,
+    timeoutMs,
+    getRefresher: () => mcpManager,
+    onError: (err: unknown) => {
       console.error('[Main] MCP status heartbeat failed:', err)
-    })
-  }, interval)
+    },
+  })
+  mcpStatusHeartbeat.start()
 }
 
 function stopMcpStatusHeartbeat(): void {
-  if (mcpStatusHeartbeatTimer) {
+  if (mcpStatusHeartbeat) {
     console.log('[Main] Stopping MCP status heartbeat')
-    clearInterval(mcpStatusHeartbeatTimer)
-    mcpStatusHeartbeatTimer = null
+    mcpStatusHeartbeat.stop()
+    mcpStatusHeartbeat = null
   }
 }
 

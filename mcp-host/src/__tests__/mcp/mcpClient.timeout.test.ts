@@ -10,6 +10,8 @@ const sdkState = vi.hoisted(() => ({
   callToolQueue: [] as Array<() => unknown>,
   listToolsCalls: [] as unknown[][],
   listToolsQueue: [] as Array<() => unknown>,
+  requestCalls: [] as unknown[][],
+  requestQueue: [] as Array<() => unknown>,
   transportCloseCalls: [] as unknown[][],
   transportCloseQueue: [] as Array<() => unknown>,
 }))
@@ -31,6 +33,13 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
     async listTools(...args: unknown[]) {
       sdkState.listToolsCalls.push(args)
       const next = sdkState.listToolsQueue.shift()
+      if (next) return next()
+      return { tools: [] }
+    }
+
+    async request(...args: unknown[]) {
+      sdkState.requestCalls.push(args)
+      const next = sdkState.requestQueue.shift()
       if (next) return next()
       return { tools: [] }
     }
@@ -103,6 +112,8 @@ describe('McpClient SDK request timeouts', () => {
     sdkState.callToolQueue.length = 0
     sdkState.listToolsCalls.length = 0
     sdkState.listToolsQueue.length = 0
+    sdkState.requestCalls.length = 0
+    sdkState.requestQueue.length = 0
     sdkState.transportCloseCalls.length = 0
     sdkState.transportCloseQueue.length = 0
   })
@@ -413,7 +424,7 @@ describe('McpClient SDK request timeouts', () => {
     expect(requestOptions.maxTotalTimeout).toBe(requestOptions.timeout)
   })
 
-  it('passes explicit timeout options to SDK listTools calls', async () => {
+  it('uses a raw validated SDK request for status probes without calling listTools', async () => {
     const controller = new AbortController()
     const c = client()
 
@@ -428,14 +439,16 @@ describe('McpClient SDK request timeouts', () => {
         signal: controller.signal,
       }),
     ])
-    expect(sdkState.listToolsCalls[1]).toEqual([
-      undefined,
+    expect(sdkState.requestCalls[0]).toEqual([
+      { method: 'tools/list', params: undefined },
+      expect.anything(),
       expect.objectContaining({
         timeout: 3_000,
         maxTotalTimeout: 3_000,
         signal: controller.signal,
       }),
     ])
+    expect(sdkState.listToolsCalls).toHaveLength(1)
   })
 
   it('fails connect when SDK tool discovery fails', async () => {
@@ -704,10 +717,12 @@ describe('McpClient SDK request timeouts', () => {
     const staleProbe = deferred<{
       tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
     }>()
-    sdkState.listToolsQueue.push(() => staleProbe.promise)
+    // probeTools() issues a validated raw `request(tools/list)` (not listTools),
+    // so drive the in-flight probe through the request queue.
+    sdkState.requestQueue.push(() => staleProbe.promise)
 
     const probing = c.probeTools()
-    await vi.waitFor(() => expect(sdkState.listToolsCalls).toHaveLength(2))
+    await vi.waitFor(() => expect(sdkState.requestCalls).toHaveLength(1))
     const closing = retirePermanently(c)
     staleProbe.resolve({
       tools: [{ name: 'stale-tool', description: 'stale', inputSchema: {} }],
