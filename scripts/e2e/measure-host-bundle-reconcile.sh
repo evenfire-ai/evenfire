@@ -151,9 +151,10 @@ readonly DELPASS_RESURRECTION_SETTLE_S=30     # quiet window before re-asserting
 # termination grace. A child with NO deletionTimestamp never gets this
 # extension (the delete was never issued → immediate fail).
 readonly MEASURE_TEARDOWN_CONVERGE_S=120
-# Exact log lines emitted by host-context-controller/src/k8sClient.ts for
-# the startup full fleet pass (reason string 'initial Host reconciliation').
-readonly HCC_PASS_STARTED_MARKER='Running initial Host reconciliation'
+# The startup marker is emitted immediately before the cold-start Host
+# inventory/watch recovery. COMPLETE/FAIL below retain the precise
+# 'initial Host reconciliation' reason supplied to the fleet pass.
+readonly HCC_PASS_STARTED_MARKER='Starting initial Host background convergence'
 readonly HCC_PASS_COMPLETED_MARKER='Completed Host reconciliation after initial Host reconciliation'
 readonly HCC_PASS_FAILED_MARKER='Host reconciliation after initial Host reconciliation failed'
 
@@ -964,9 +965,9 @@ phase_delete_during_pass() {
   _delpass_pass_active_probe() {
     local logs
     logs="$(kctl -n "$CONTROL_NS" logs "pod/${new_pod}" 2>/dev/null || true)"
-    if printf '%s' "$logs" | grep -Fq "$HCC_PASS_FAILED_MARKER"; then pass_state='failed'; return 0; fi
-    if printf '%s' "$logs" | grep -Fq "$HCC_PASS_COMPLETED_MARKER"; then pass_state='completed'; return 0; fi
-    if printf '%s' "$logs" | grep -Fq "$HCC_PASS_STARTED_MARKER"; then pass_state='active'; return 0; fi
+    if grep -Fq -- "$HCC_PASS_FAILED_MARKER" <<<"$logs"; then pass_state='failed'; return 0; fi
+    if grep -Fq -- "$HCC_PASS_COMPLETED_MARKER" <<<"$logs"; then pass_state='completed'; return 0; fi
+    if grep -Fq -- "$HCC_PASS_STARTED_MARKER" <<<"$logs"; then pass_state='active'; return 0; fi
     return 1
   }
   # shellcheck disable=SC2329  # invoked by name via wait_until
@@ -1015,7 +1016,7 @@ phase_delete_during_pass() {
     fail "delete-during-pass: could not re-read HCC logs immediately after the delete — overlap cannot be verified (fail-closed)"
     return 1
   fi
-  if printf '%s' "$post_delete_logs" | grep -Fq "$HCC_PASS_COMPLETED_MARKER"; then
+  if grep -Fq -- "$HCC_PASS_COMPLETED_MARKER" <<<"$post_delete_logs"; then
     fail "delete-during-pass: pass logged COMPLETED within the probe->delete window — overlap NOT established; re-run"
     return 1
   fi
@@ -1027,8 +1028,8 @@ phase_delete_during_pass() {
   _delpass_pass_completed_probe() {
     local logs
     logs="$(kctl -n "$CONTROL_NS" logs "pod/${new_pod}" 2>/dev/null || true)"
-    if printf '%s' "$logs" | grep -Fq "$HCC_PASS_FAILED_MARKER"; then pass_state='failed'; return 0; fi
-    printf '%s' "$logs" | grep -Fq "$HCC_PASS_COMPLETED_MARKER" && pass_state='completed'
+    if grep -Fq -- "$HCC_PASS_FAILED_MARKER" <<<"$logs"; then pass_state='failed'; return 0; fi
+    grep -Fq -- "$HCC_PASS_COMPLETED_MARKER" <<<"$logs" && pass_state='completed'
   }
   if ! wait_until "$DELPASS_PASS_COMPLETE_DEADLINE_S" 2 "initial full pass completion after the delete" \
     _delpass_pass_completed_probe _delpass_logs_diag; then

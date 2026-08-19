@@ -421,7 +421,8 @@ describe('useAgentChatController — characterization (D.0)', () => {
 
       expect(spies.pushToast).toHaveBeenCalledWith('Message to agent-x failed: LLM down', 'error')
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
-        Array<{ isError?: boolean; errorCode?: string }> | undefined
+        | Array<{ isError?: boolean; errorCode?: string }>
+        | undefined
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.errorCode).toBe('provider_error')
     })
@@ -559,7 +560,8 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await sendPromise
 
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
-        Array<{ isError?: boolean; content?: string }> | undefined
+        | Array<{ isError?: boolean; content?: string }>
+        | undefined
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.content).toContain('Failed to retrieve task result')
       expect(spies.pushToast).toHaveBeenCalledWith(
@@ -937,11 +939,13 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // once its message is the error bubble.
       await waitFor(() => {
         const last = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]?.[0] as
-          { isError?: boolean } | undefined
+          | { isError?: boolean }
+          | undefined
         expect(last?.isError).toBe(true)
       })
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
-        Array<{ isError?: boolean; errorCode?: string; content?: string }> | undefined
+        | Array<{ isError?: boolean; errorCode?: string; content?: string }>
+        | undefined
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.errorCode).toBe('BUDGET_EXCEEDED')
       expect(appended?.[0]?.content).toContain('Token budget exceeded')
@@ -997,11 +1001,13 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // first; the recovery's reply lands after the `getTaskResult` await).
       await waitFor(() => {
         const last = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]?.[0] as
-          { role?: string } | undefined
+          | { role?: string }
+          | undefined
         expect(last?.role).toBe('assistant')
       })
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
-        Array<{ role?: string; content?: string; isError?: boolean }> | undefined
+        | Array<{ role?: string; content?: string; isError?: boolean }>
+        | undefined
       expect(appended?.[0]?.role).toBe('assistant')
       expect(appended?.[0]?.content).toBe('here is your report')
       expect(appended?.[0]?.isError).toBeUndefined()
