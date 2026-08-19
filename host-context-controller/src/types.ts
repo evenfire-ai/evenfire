@@ -388,6 +388,45 @@ export interface HostWorkflowControlSpec {
   scopes?: HostWorkflowControlScope[]
 }
 
+/**
+ * A single installed-hook reference inside Host.spec.guardrails.hooks[phase].
+ * `id` is the LlmHook CR name (llm-hooks namespace); `digest` is the expected
+ * image digest mcp-host binds against status.observedDigest (§8.2).
+ */
+export interface HostGuardrailHookRef {
+  id: string
+  digest?: string
+}
+
+/**
+ * Host.spec.guardrails.hooks — installed LlmHook references grouped by
+ * lifecycle phase. Only the hook `id`s matter to HCC: they form the
+ * Host→LlmHook reverse index that drives the shared hook pod's NetworkPolicy
+ * ingress set (guardrails phase-4 design §5).
+ */
+export interface HostGuardrailHooks {
+  preToolUse?: HostGuardrailHookRef[]
+  postToolUse?: HostGuardrailHookRef[]
+  preCall?: HostGuardrailHookRef[]
+  moderate?: HostGuardrailHookRef[]
+  postCallSuccess?: HostGuardrailHookRef[]
+  onError?: HostGuardrailHookRef[]
+}
+
+/**
+ * Host.spec.guardrails — additive, opt-in guardrail policy (guardrails spec
+ * §5). HCC only reads `hooks` (for the reverse index); the loosely-typed
+ * `rules`/`builtins`/ceiling fields are owned by mcp-host/control-api.
+ */
+export interface HostGuardrailsSpec {
+  hooks?: HostGuardrailHooks
+  rules?: unknown[]
+  builtins?: unknown[]
+  minInstalledHookTrustLevel?: 'low' | 'mid' | 'high'
+  approvalPolicies?: string[]
+  capabilityCeiling?: string[]
+}
+
 export interface HostSpec {
   host: string
   contextRef: string
@@ -398,6 +437,7 @@ export interface HostSpec {
   desktop?: HostDesktopSpec
   lifecycle?: HostLifecycleSpec
   workflowControl?: HostWorkflowControlSpec
+  guardrails?: HostGuardrailsSpec
 }
 
 export type HostLifecycleState = 'active' | 'draining' | 'suspended'
@@ -549,4 +589,104 @@ export interface McpServersResponse {
 export interface ErrorResponse {
   error: string
   message: string
+}
+
+// ─── LlmHook CRD ─────────────────────────────────────────────────────────────
+//
+// An installed guardrail hook mcp-host calls over the /v1 protocol (guardrails
+// spec §8). host-context-controller reconciles `image`-target hooks into a
+// shared Deployment+Service+NetworkPolicy in the llm-hooks namespace
+// (digest-dedup: hooks sharing a pod key co-locate on one pod, routed by
+// spec.path). `service` and `remote` targets deploy no workload (status-only).
+
+/** External egress a hook pod is permitted (looser CRD shape than McpServer). */
+export interface LlmHookEgressBinding {
+  toFQDN?: string
+  cidr?: string
+  ports?: number[]
+}
+
+/** Security context overrides for a hook pod. */
+export interface LlmHookSecurity {
+  addCapabilities?: string[]
+}
+
+/** In-cluster image hook target — the only target HCC deploys a workload for. */
+export interface LlmHookImageTarget {
+  ref: string
+  port: number
+  imagePullSecrets?: string[]
+  envSecret?: string
+  egressBindings?: LlmHookEgressBinding[]
+  security?: LlmHookSecurity
+}
+
+/** Existing in-cluster Service target — status-only, nothing deployed. */
+export interface LlmHookServiceTarget {
+  name: string
+  namespace: string
+  port: number
+}
+
+/** External HTTPS endpoint target — status-only, nothing deployed. */
+export interface LlmHookRemoteTarget {
+  baseUrl: string
+  authHeadersSecret?: string
+}
+
+export interface LlmHookTarget {
+  image?: LlmHookImageTarget
+  service?: LlmHookServiceTarget
+  remote?: LlmHookRemoteTarget
+}
+
+export type LlmHookLifecyclePoint = 'preCall' | 'moderate' | 'postCallSuccess' | 'onError'
+
+export type LlmHookCapability =
+  | 'may_deny'
+  | 'may_rewrite'
+  | 'may_substitute_result'
+  | 'may_add_context'
+
+export interface LlmHookSpec {
+  target: LlmHookTarget
+  path?: string
+  lifecyclePoints: LlmHookLifecyclePoint[]
+  order?: number
+  failMode?: 'open' | 'closed'
+  timeoutMs?: number
+  onUnavailable?: {
+    mode?: 'strict' | 'breaker'
+    failureThreshold?: number
+    cooldownMs?: number
+  }
+  capabilities?: LlmHookCapability[]
+  config?: Record<string, unknown>
+}
+
+export interface LlmHookCondition {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason?: string
+  message?: string
+  lastTransitionTime?: string
+  observedGeneration?: number
+}
+
+export interface LlmHookStatus {
+  observedDigest?: string
+  readyReplicas?: number
+  lastReconciled?: string
+  conditions?: LlmHookCondition[]
+}
+
+export interface LlmHookCRD {
+  name: string
+  namespace: string
+  uid?: string
+  generation?: number
+  annotations?: Record<string, string>
+  labels?: Record<string, string>
+  spec: LlmHookSpec
+  status?: LlmHookStatus
 }

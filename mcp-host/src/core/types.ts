@@ -306,6 +306,13 @@ export interface Conversation {
   turns: Turn[]
   pending_approval?: PendingApproval
   auto_approved_tools: Set<string>
+  /**
+   * Guardrail doom-loop counter (spec §6.4) — tracks consecutive identical
+   * `(resolved tool, effective-input)` tool calls across turns within a task.
+   * Ephemeral (like `auto_approved_tools`): not persisted; resets on resume.
+   * Absent until the first guarded tool call.
+   */
+  guardrail_doom_loop?: { lastKey?: string; count: number }
   created_at: Date
   updated_at: Date
   /**
@@ -520,6 +527,7 @@ export type AgentEventType =
   | 'llm:completed'
   | 'safety:input_blocked'
   | 'safety:output_sanitized'
+  | 'guardrail:decision'
   | 'context:compacted'
   | 'compaction:skipped'
   | 'compaction:thrashing'
