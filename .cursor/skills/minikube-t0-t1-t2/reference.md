@@ -26,7 +26,9 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   argv** when avoidable. `t2_process_check` accepts only real `kubectl`
   processes (`comm=kubectl`) whose PIDs are recorded in the profile cache or
   legacy `/tmp/pf-<profile>-*.pid`; a lookalike wrapper trips
-  `PORT_FORWARD_CONFLICT`.
+  `PORT_FORWARD_CONFLICT`. The argv0 pre-filter keys off the `ps -ef` TIME
+  field immediately before `kubectl` and must match both macOS `N:MM[.ss]`
+  and Linux `HH:MM:SS`.
 - **Do not commit** `.local-notes/`, lockfiles produced by an incidental
   `npm ci`, generated ports/profile metadata, or anything secret-like. Run
   `make minikube-t2-public-boundary` first.
