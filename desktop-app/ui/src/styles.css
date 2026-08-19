@@ -12548,6 +12548,17 @@ pre {
   padding-right: 0;
 }
 
+/* The chat drawer occupies the right rail at --layer-chat-overlay, above the
+   header (`.top-bar` at --layer-header) within the shared content-panel stacking
+   context — so the header's transient dropdowns (the notification Inbox popover,
+   global search) would paint BEHIND the drawer and never surface. While the chat
+   drawer is open, lift the header to the dropdown layer so those overlays surface
+   over it, exactly as they do over chat content in full-screen. Toasts
+   (z-index: 4000) still sit above the header; the drawer's own z is unchanged. */
+.content-panel.content-panel--chat-drawer-open .top-bar {
+  z-index: var(--layer-dropdown);
+}
+
 .chat-drawer {
   position: fixed;
   top: calc(var(--space-4) + 36px + var(--space-2));
