@@ -14,7 +14,7 @@
 # Backward compatible: the four original providers (openai/claude/zai/
 # bailian) keep their test-placeholder fallbacks so an empty .env (CI, first
 # boot) still stands up the default `zai` agent. Real values override the
-# placeholders; the other 17 providers appear only when their key is set.
+# placeholders; the other 18 providers appear only when their key is set.
 #
 # The Secret stores keys in the registry `dataKey` form (lowercase-hyphen,
 # e.g. `openai-api-key`), which is what mcp-host's LLM-secret watch expects.
