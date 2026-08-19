@@ -840,7 +840,7 @@ Three approaches were evaluated:
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **A — ReadinessGate**                   | HCC patches `pod.status.conditions` with `clerum.io/network-isolated: True` after applying NPs                                                    | Standard K8s pattern, Service won't route until ready                                                    | HCC must watch pods in all namespaces, direct pod patching violates Invariant #1 (CRD-only communication), adds Pod RBAC to HCC, complex lifecycle (pod restart = re-patch) |
 | **B — Init container**                  | Sidecar init container blocks until NetworkPolicy exists                                                                                          | No HCC changes needed                                                                                    | Requires shared ServiceAccount, polling from within pod is fragile, no guarantee NP is _applied_ vs just _created_                                                          |
-| **C — Pre-deploy annotation handshake** | WRC creates McpServer CRD with `clerum.io/pre-deploy: true` → HCC applies NPs → HCC sets `clerum.io/network-ready: true` → WRC creates Deployment | 100% CRD-based (Invariant #1 preserved), no pod patching, no RBAC expansion, reuses existing watch loops | Adds ~1-5s latency to first deployment, requires timeout handling for HCC unavailability                                                                                    |
+| **C — Pre-deploy annotation handshake** | WRC creates McpServer CRD with `clerum.io/pre-deploy: true` → HCC applies NPs → HCC sets `clerum.io/network-ready: true` (+ `network-ready-observed-generation`, Issue #408) → WRC creates Deployment | 100% CRD-based (Invariant #1 preserved), no pod patching, no RBAC expansion, reuses existing watch loops | Adds ~1-5s latency to first deployment, requires timeout handling for HCC unavailability                                                                                    |
 
 **Decision**: **Option C** — the annotation handshake preserves the CRD-only communication invariant while closing the vulnerability window. ReadinessGate (Option A) is deferred indefinitely as Option C provides equivalent security guarantees with simpler implementation.
 
@@ -857,7 +857,7 @@ WRC                                    McpServer CRD                          HC
  │                                           ├── watch triggers ───────────────►│
  │                                           │                                  │
  │                                           │◄── HCC applies L2/L3 NPs ───────┤
- │                                           │    + sets annotation:            │
+ │                                           │    + sets ack + generation:      │
  │                                           │    clerum.io/network-ready: true │
  │                                           │                                  │
  │◄── Step 7c: Poll for network-ready ──────┤                                  │
@@ -872,10 +872,11 @@ WRC                                    McpServer CRD                          HC
 
 #### 11.4.3 Annotations
 
-| Annotation                | Set by | Value    | Meaning                                                                            |
-| ------------------------- | ------ | -------- | ---------------------------------------------------------------------------------- |
-| `clerum.io/pre-deploy`    | WRC    | `"true"` | McpServer CRD created before workload pods exist; HCC should apply NPs proactively |
-| `clerum.io/network-ready` | HCC    | `"true"` | L2/L3 NetworkPolicies applied; safe to start workload pods                         |
+| Annotation                                   | Set by | Value                  | Meaning                                                                                                              |
+| -------------------------------------------- | ------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `clerum.io/pre-deploy`                       | WRC    | `"true"`               | McpServer CRD created before workload pods exist; HCC should apply NPs proactively                                   |
+| `clerum.io/network-ready`                    | HCC    | `"true"`               | L2/L3 NetworkPolicies applied; safe to start workload pods. Honored only when the generation stamp matches the current generation (a non-numeric generation is tolerated as fresh without a stamp — defensive; `metadata.generation` is always numeric in a real cluster) |
+| `clerum.io/network-ready-observed-generation` | HCC    | `"<metadata.generation>"` | Generation HCC observed when acking (Issue #408). WRC honors `network-ready` only when this equals the current generation, so a stale ack from a prior generation cannot satisfy the gate. HCC re-acks (re-stamps) when the generation advances |
 
 #### 11.4.4 Timeout and Graceful Degradation
 

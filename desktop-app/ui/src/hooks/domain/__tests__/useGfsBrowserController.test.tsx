@@ -119,7 +119,10 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
       <button type="button" onClick={() => ctrl.retryAccess()}>
         retry access
       </button>
-      <button type="button" onClick={() => void ctrl.createFolder('Root docs')}>
+      <button
+        type="button"
+        onClick={() => (ctrl.current ? void ctrl.createFolder('Root docs') : undefined)}
+      >
         create folder current
       </button>
       <button

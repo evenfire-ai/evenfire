@@ -18,6 +18,7 @@ import {
   createMcpServerProvider,
   getKubeConfig,
 } from './k8sClient'
+import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
 import { ContextMapperServer } from './server'
 import { StatelessLifecycleTracker } from './statelessLifecycleTracker'
 import {
@@ -29,6 +30,7 @@ let provider: McpServerProvider | null = null
 let server: ContextMapperServer | null = null
 let secretInformer: SecretInformer | null = null
 let channelSecretInformer: SecretInformer | null = null
+let llmHooksSecretInformer: SecretInformer | null = null
 let lifecycleTracker: StatelessLifecycleTracker | null = null
 let heartbeatPoller: HeartbeatPoller | null = null
 let isShuttingDown = false
@@ -47,6 +49,7 @@ async function shutdown(signal: string): Promise<void> {
 
   secretInformer?.stop()
   channelSecretInformer?.stop()
+  llmHooksSecretInformer?.stop()
   heartbeatPoller?.stop()
   lifecycleTracker?.stop()
   await provider?.stop()
@@ -113,6 +116,16 @@ async function main(): Promise<void> {
   const hasDesktopFn = hostReconciler
     ? (hostRef: string) => hostReconciler.hasDesktop(hostRef)
     : undefined
+  // Dev (no watcher) gets an explicit always-authoritative gate: no inventory
+  // to certify there, and the server's fail-closed default would otherwise pin
+  // /ready at 503 forever (R3-B1). See resolveProviderAuthoritativeFn.
+  const providerAuthoritativeFn = resolveProviderAuthoritativeFn(watcher)
+  // Desktop status gates on Host inventory authority alone (not full readiness).
+  // Dev (no watcher) mirrors the provider gate above: there is no Host inventory
+  // to certify, so authority is unconditional (permissive) — otherwise the
+  // server's fail-closed default would pin /api/v1/desktop/* at 503 forever in
+  // dev (R2-M1). See resolveHostAuthoritativeFn.
+  const hostAuthoritativeFn = resolveHostAuthoritativeFn(watcher)
 
   // Stateless heartbeat consumption — mcp-host pods authenticate their
   // heartbeats toward control-api's /mcp-host facade (control-api is the
@@ -145,16 +158,23 @@ async function main(): Promise<void> {
         `target=${config.controlApiBaseUrl})`
     )
   }
-  server = new ContextMapperServer(provider, config.port, hostReconciler, hasDesktopFn)
+  server = new ContextMapperServer(
+    provider,
+    config.port,
+    hostReconciler,
+    hasDesktopFn,
+    providerAuthoritativeFn,
+    hostAuthoritativeFn
+  )
   await server.start()
 
   // One-shot legacy sweep: delete the static `clerum-channel-reader`
   // Deployment if it still exists in the channels namespace. MUST run
-  // BEFORE provider.start(): provider.start() invokes fullReconcile on
-  // the initial Host list, which creates per-Host channel-reader Deployments
-  // that immediately try to long-poll Telegram. If the static is still
-  // alive at that moment, both pods compete on the same bot's getUpdates
-  // and Telegram 409s one of them. Sweeping first guarantees zero overlap.
+  // BEFORE provider.start(): provider startup establishes the Host inventory
+  // watch and schedules its initial fleet convergence, which creates per-Host
+  // channel-reader Deployments in the background. If the static is still alive
+  // when that work begins, both pods compete on the same bot's getUpdates and
+  // Telegram 409s one of them. Sweeping first guarantees zero overlap.
   // Idempotent; 404 (already gone) is the steady state. See issue #273
   // for the empirical reproduction.
   if (!config.devMode && hostReconciler) {
@@ -199,12 +219,11 @@ async function main(): Promise<void> {
   // reconcileChannelReaderRevision is self-contained (does not throw), so
   // the .catch here is defensive — it catches any unexpected runtime error
   // in the SecretInformer's own callback path.
-  if (!config.devMode && hostReconciler) {
+  if (!config.devMode && watcher) {
     const kc = getKubeConfig()
     if (kc) {
-      const reconciler = hostReconciler
       channelSecretInformer = new SecretInformer(kc, config.channelsNamespace, evt => {
-        reconciler.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
+        watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
           console.error('[Main] reconcileChannelReaderRevision failed:', err)
         })
       })
@@ -215,6 +234,29 @@ async function main(): Promise<void> {
         )
       } catch (err) {
         console.error('[Main] channels SecretInformer failed to start:', err)
+      }
+    }
+  }
+
+  // Third SecretInformer: hook credential Secrets in the llm-hooks namespace.
+  // A rotation re-stamps the credentials-revision and rolls the hook pod
+  // (§8.2, mirroring the McpServer envSecret informer above).
+  if (!config.devMode && provider instanceof McpServerWatcher) {
+    const kc = getKubeConfig()
+    if (kc) {
+      const watcher = provider
+      llmHooksSecretInformer = new SecretInformer(kc, config.llmHooksNamespace, evt => {
+        watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
+          console.error('[Main] reconcileLlmHookByEnvSecret failed:', err)
+        })
+      })
+      try {
+        await llmHooksSecretInformer.start()
+        console.log(
+          `[Main] llm-hooks SecretInformer started on namespace ${config.llmHooksNamespace}`
+        )
+      } catch (err) {
+        console.error('[Main] llm-hooks SecretInformer failed to start:', err)
       }
     }
   }

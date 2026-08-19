@@ -9,6 +9,7 @@ type Config = {
   contextsNamespace: string
   communicationChannelsNamespace: string
   mcpServersNamespace: string
+  llmHooksNamespace: string
   sandboxNamespace: string
   sandboxUiNamespace: string
   secretsNamespace: string
@@ -103,6 +104,26 @@ type Config = {
   usageRollupDailyIntervalMs: number
   usageRetentionIntervalMs: number
   budgetReservationSweepIntervalMs: number
+  // LLM catalog discovery sync cron (Fase 4). Runs syncDiscoveredModels()
+  // periodically. DEFAULT OFF — the operator opts in consciously so a fresh
+  // plane never hammers models.dev on boot. When on, one tick every
+  // llmCatalogSyncIntervalMs (default 24h), cross-replica-deduped by a session
+  // advisory lock inside the cron.
+  llmCatalogSyncCronEnabled: boolean
+  llmCatalogSyncIntervalMs: number
+  // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
+  // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
+  // (a flappy/truncated external catalog must not mass-stale the allowlist);
+  // the inert `enabled=false` inserts still proceed. Calibrated off the vendored
+  // snapshot (~1051 mapped models across 21 providers) — a conservative <10%
+  // floor catches a catastrophic collapse without tripping on normal variation.
+  modelsDevMinPlausibleLiveTotal: number
+  // §4.5 sanity guard, layer 2: per-provider low/zero-live floor. A provider
+  // that returns FEWER than this many live models but still has discovery rows
+  // in DB is treated as suspicious and NOT stale-marked. 0 (the default) means
+  // only the zero-live case is guarded (the mandatory floor); a higher value
+  // also guards implausibly-low provider counts.
+  llmCatalogSyncProviderMinLive: number
   registryPullSecretReconcileIntervalMs: number
   budgetReservationTtlSeconds: number
   approvalRetentionDays: number
@@ -240,6 +261,8 @@ type Config = {
   // error; enforce mode rejects installs/updates with a disallowed image.
   allowedPluginImagePrefixes: string[]
   enforcePluginImageAllowlist: boolean
+  curatedHookOrgs: string[]
+  defaultHookTrustCap: string
 }
 
 function assertNotPlaceholder(label: string, value: string): void {
@@ -323,6 +346,22 @@ function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   return value
 }
 
+/**
+ * A non-negative integer env (>= 0). Unlike `positiveIntegerFromEnv`, 0 is a
+ * valid, meaningful value here (the per-provider stale floor's default: guard
+ * only the zero-live case). An unset/blank env yields the default; any other
+ * non-integer / negative value is refused at boot rather than silently coerced.
+ */
+function nonNegativeIntegerFromEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return defaultValue
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`)
+  }
+  return value
+}
+
 function boundedIntegerFromEnv(name: string, defaultValue: number, maxValue: number): number {
   const value = positiveIntegerFromEnv(name, defaultValue)
   if (value > maxValue) {
@@ -354,11 +393,14 @@ function intervalMsFromEnv(name: string, defaultValue: number, minValue: number)
 // services/llmAllowedModelsConfigMap.ts.
 const HOSTS_NAMESPACE = process.env.CONTROL_API_HOSTS_NAMESPACE || 'mcp-host'
 const MCP_SERVERS_NAMESPACE = process.env.CONTROL_API_MCP_SERVERS_NAMESPACE || 'mcp-server'
+const LLM_HOOKS_NAMESPACE = process.env.CONTROL_API_LLM_HOOKS_NAMESPACE || 'llm-hooks'
 const SANDBOX_NAMESPACE = process.env.CONTROL_API_SANDBOX_NAMESPACE || 'sandbox-recipes'
 const SANDBOX_UI_NAMESPACE = process.env.CONTROL_API_SANDBOX_UI_NAMESPACE || 'sandbox-ui'
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REFS = 32
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REF_LENGTH = 63 + 1 + 253
 const REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS = 10_000
+// A 24h-default cron should never be dialed below a minute — refuse a hot loop.
+const LLM_CATALOG_SYNC_MIN_INTERVAL_MS = 60_000
 const WORKFLOW_MAX_WORKLOADS_PER_RECIPE_CEILING = 25
 const WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS_CEILING = 25
 const WORKFLOW_MAX_STEPS_CEILING = 100
@@ -580,6 +622,7 @@ export const config: Config = {
   communicationChannelsNamespace:
     process.env.CONTROL_API_COMMUNICATION_CHANNELS_NAMESPACE || 'channels',
   mcpServersNamespace: MCP_SERVERS_NAMESPACE,
+  llmHooksNamespace: LLM_HOOKS_NAMESPACE,
   sandboxNamespace: SANDBOX_NAMESPACE,
   sandboxUiNamespace: SANDBOX_UI_NAMESPACE,
   secretsNamespace: process.env.CONTROL_API_SECRETS_NAMESPACE || 'mcp-host',
@@ -726,6 +769,23 @@ export const config: Config = {
   budgetReservationSweepIntervalMs: Number(
     process.env.BUDGET_RESERVATION_SWEEP_INTERVAL_MS || 60_000
   ),
+  // Default OFF: `=== 'true'`, NOT the default-on `(x ?? 'true') !== 'false'`
+  // idiom used by the other crons. This one stays dark until an operator turns
+  // it on deliberately.
+  llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
+  // Default 24h. Validated (not merely parsed): the value goes straight into
+  // setInterval and each tick opens a Postgres transaction + advisory lock. A
+  // 60s floor is orders of magnitude below the default and far above a hot loop.
+  llmCatalogSyncIntervalMs: intervalMsFromEnv(
+    'LLM_CATALOG_SYNC_INTERVAL_MS',
+    24 * 60 * 60 * 1000,
+    LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+  ),
+  modelsDevMinPlausibleLiveTotal: positiveIntegerFromEnv(
+    'MODELS_DEV_MIN_PLAUSIBLE_LIVE_TOTAL',
+    100
+  ),
+  llmCatalogSyncProviderMinLive: nonNegativeIntegerFromEnv('LLM_CATALOG_SYNC_PROVIDER_MIN_LIVE', 0),
   // How often to re-assert the platform image-pull credential. This is a standing
   // invariant, not a fast path: a WorkflowRecipe created by `kubectl apply` or the WRC
   // `deploy_recipe` tool never touches control-api, so the credential has to be there
@@ -986,6 +1046,22 @@ export const config: Config = {
   enforcePluginImageAllowlist:
     (process.env.CONTROL_API_ENFORCE_IMAGE_ALLOWLIST ?? '').toLowerCase() === 'true' ||
     process.env.CONTROL_API_ENFORCE_IMAGE_ALLOWLIST === '1',
+  // Guardrails install-hook trust policy (spec §8.4 / registry gap #1). The
+  // registry's entries.trust_level is publisher-influenced, so the saga only
+  // honors it for CURATED orgs; every other org's hook is capped at
+  // `defaultHookTrustCap` regardless of the column. The cluster's OWN org (from
+  // resolvePublishScope) and official evenfire (`@clerum`/`@evenfire`) are ALWAYS
+  // curated — not listed here — so this env is purely ADDITIVE, for extra
+  // third-party orgs the operator chooses to trust. Empty by default. Case-
+  // sensitive (org scopes carry '@'); NOT parseCsvList (which lowercases).
+  curatedHookOrgs: (process.env.CONTROL_API_CURATED_HOOK_ORGS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+  // Trust ceiling applied to a non-curated org's hook. `mid` lets a self-published
+  // hook clear a `mid` floor but never reach `high` (so it can never unlock the
+  // content+egress combination gated at `high`, §8.4).
+  defaultHookTrustCap: (process.env.CONTROL_API_DEFAULT_HOOK_TRUST_CAP ?? 'mid').toLowerCase(),
 }
 
 // Namespace config validation: fail fast if any namespace is empty.
@@ -995,6 +1071,7 @@ const NAMESPACE_KEYS: (keyof Config)[] = [
   'contextsNamespace',
   'communicationChannelsNamespace',
   'mcpServersNamespace',
+  'llmHooksNamespace',
   'sandboxNamespace',
   'sandboxUiNamespace',
   'secretsNamespace',
