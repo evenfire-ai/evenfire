@@ -22,7 +22,7 @@ function connectedManager(clients: Record<string, ProbeClient>): {
 }
 
 describe('McpManager status refresh', () => {
-  it('aggregates raw-probe metadata and gives every client a distinct derived signal', async () => {
+  it('aggregates raw-probe metadata and forwards the round signal to every probe', async () => {
     const first = {
       probeTools: vi.fn().mockResolvedValue({ ok: true, toolCount: 2, outputSchemaCount: 1 }),
     }
@@ -47,9 +47,8 @@ describe('McpManager status refresh', () => {
 
     const firstSignal = first.probeTools.mock.calls[0]?.[0].signal as AbortSignal
     const secondSignal = second.probeTools.mock.calls[0]?.[0].signal as AbortSignal
-    expect(firstSignal).not.toBe(controller.signal)
-    expect(secondSignal).not.toBe(controller.signal)
-    expect(firstSignal).not.toBe(secondSignal)
+    expect(firstSignal).toBe(controller.signal)
+    expect(secondSignal).toBe(controller.signal)
     expect(tracker.get('first')?.toolCount).toBe(2)
     expect(tracker.get('second')?.reason).toBe('unknown')
   })

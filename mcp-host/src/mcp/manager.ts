@@ -14,13 +14,6 @@ export interface McpStatusRefreshSummary {
   aborted: boolean
 }
 
-function deriveProbeSignal(roundSignal: AbortSignal | undefined): AbortSignal {
-  const probeController = new AbortController()
-  return roundSignal
-    ? AbortSignal.any([roundSignal, probeController.signal])
-    : probeController.signal
-}
-
 export type McpAdmissionOutcome = 'applied' | 'stale'
 export interface McpAdmissionControl {
   isCurrent?: () => boolean
@@ -489,9 +482,12 @@ export class McpManager {
           return {
             name,
             client,
+            // Probes share the round's abort signal directly: the heartbeat owns
+            // round-level cancellation and no per-probe cancellation capability
+            // exists, so wrapping the signal would only fake a seam.
             result: await client.probeTools({
               timeoutMs: options.timeoutMs,
-              signal: deriveProbeSignal(options.signal),
+              signal: options.signal,
             }),
           }
         } catch (error) {
