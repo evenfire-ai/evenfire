@@ -35,6 +35,16 @@ export interface ClassifiedError {
   code: LlmErrorCode
   retryable: boolean
   message: string
+  /**
+   * Additive diagnostics (spec 02, Pieza A). The provider's HTTP status and the
+   * provider-native error code/type (e.g. `not_found_error`, `1211`,
+   * `Model.AccessDenied`) when the classifier recovered them. Threaded verbatim
+   * through `LlmError` → `TaskError` so downstream (desktop) can distinguish a
+   * retired-model 404 from an ambiguous failure without re-parsing the raw SDK
+   * error. Optional: transport/unknown errors leave them undefined.
+   */
+  httpStatus?: number
+  providerCode?: string
 }
 
 /**

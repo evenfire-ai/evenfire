@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { type DbClient, pool, withTransaction } from '../db.js'
+import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../db.js'
 import type { AdministrativeEventSubmitterPrincipalV1 } from '../middleware/tracingSubmitterAuth.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import {
@@ -17,6 +17,63 @@ import {
 
 export const PLUGIN_WORKLOAD_SDK_FAMILIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkFamily = (typeof PLUGIN_WORKLOAD_SDK_FAMILIES)[number]
+
+// ─── Grant-update NOTIFY (issue #375, P3) ────────────────────────────────
+// CROSS-SERVICE CONTRACT: a transactional `pg_notify` fired inside the
+// grant-mutation transactions (upsert / delete / revoke) so the Workflow
+// Recipes Controller re-reconciles the affected recipe immediately (~1–5s)
+// instead of waiting for its ≤30s level-triggered watchdog. The WRC LISTEN side
+// lives in `workflow-recipes/src/reconciler/grantUpdateListener.ts` — the
+// channel name and payload shape below MUST stay in sync with it.
+//
+// This is an app-level NOTIFY (not a DDL trigger) so the payload stays typed and
+// the change is fully revertible. Being inside the transaction, it is delivered
+// on COMMIT and discarded on ROLLBACK. Semantics are best-effort: a dropped
+// notification degrades to the existing polling backstop, never worse.
+export const PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL = 'plugin_workload_sdk_grant_update'
+
+export interface GrantUpdateNotifyInput {
+  recipeNamespace: string
+  recipeName: string
+  /** Omitted for a whole-recipe revoke that spans multiple families. */
+  capabilityFamily?: string
+}
+
+/**
+ * Build the JSON payload for a grant-update NOTIFY. Pure and exported so the
+ * exact wire shape can be unit-tested without a live Postgres.
+ */
+export function buildGrantUpdateNotifyPayload(input: GrantUpdateNotifyInput): string {
+  return JSON.stringify({
+    recipeNamespace: input.recipeNamespace,
+    recipeName: input.recipeName,
+    ...(input.capabilityFamily ? { capabilityFamily: input.capabilityFamily } : {}),
+  })
+}
+
+/**
+ * Emit the grant-update NOTIFY on the shared channel. MUST be called with the
+ * in-transaction `db` client so the signal is delivered on COMMIT (and dropped
+ * on ROLLBACK), never as a separate connection.
+ *
+ * A `pg_notify` inside the transaction would roll the whole grant mutation back
+ * if it threw — but the only failure mode is a payload over Postgres' 8000-byte
+ * NOTIFY limit, and this payload is just a recipe namespace/name (+ optional
+ * short family), which cannot approach that bound. So the mutation is never at
+ * risk from the notify, and the transactional coupling is intentional.
+ */
+async function notifyGrantUpdate(
+  // issue #375 M3: REQUIRES the branded transaction session — `pool` no longer
+  // structurally satisfies this parameter, so the db→pool refactor that breaks
+  // COMMIT/ROLLBACK coupling fails to COMPILE instead of merely failing a test.
+  db: DbTransactionClient,
+  input: GrantUpdateNotifyInput
+): Promise<void> {
+  await db.query('SELECT pg_notify($1, $2)', [
+    PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL,
+    buildGrantUpdateNotifyPayload(input),
+  ])
+}
 
 export const PLUGIN_WORKLOAD_SDK_INVOCATION_STATUSES = [
   'in_progress',
@@ -325,7 +382,7 @@ function promptTargets(value: unknown): PluginWorkloadSdkPromptTarget[] {
   })
 }
 
-function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
+export function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
   const family = row.capability_family
   if (!PLUGIN_WORKLOAD_SDK_FAMILIES.includes(family as PluginWorkloadSdkFamily)) {
     throw new Error(`unknown capability_family from db: ${String(family)}`)
@@ -467,9 +524,27 @@ export interface UpsertGrantParams {
 
 export async function upsertGrant(
   params: UpsertGrantParams,
-  operatorSub: string
+  operatorSub: string,
+  // When the caller already runs inside a carrier transaction (the grant
+  // write-gate, which holds the per-model advisory locks — R1-H3 fase 2), the
+  // upsert MUST reuse that same transaction so the recipe lock is taken AFTER
+  // the model locks (global order: `llm-model:*` before `plugin_workload_sdk:*`)
+  // and the enabled-ness revalidation + the write commit atomically. Every other
+  // caller passes no `db` and gets its own transaction, exactly as before.
+  // The carrier MUST be a real transaction session (branded, issue #375 M3):
+  // it holds the advisory locks and `notifyGrantUpdate` refuses `pool`.
+  db?: DbTransactionClient
 ): Promise<PluginWorkloadSdkGrant> {
-  return withTransaction(async db => {
+  if (db) return upsertGrantInTransaction(params, operatorSub, db)
+  return withTransaction(inner => upsertGrantInTransaction(params, operatorSub, inner))
+}
+
+async function upsertGrantInTransaction(
+  params: UpsertGrantParams,
+  operatorSub: string,
+  db: DbTransactionClient
+): Promise<PluginWorkloadSdkGrant> {
+  {
     // All capability families for a recipe share one lock. A family-scoped
     // lock permits an SDK-only revoke to race an upsert for the other family.
     const recipeLock = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}`
@@ -614,14 +689,27 @@ export async function upsertGrant(
         })),
     ]
     await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    // issue #375 (P3): nudge the WRC to re-reconcile now that the grant changed.
+    await notifyGrantUpdate(db, {
+      recipeNamespace: params.recipeNamespace,
+      recipeName: params.recipeName,
+      capabilityFamily: params.capabilityFamily,
+    })
     return grant
-  })
+  }
 }
 
-export async function listGrants(filter?: {
-  recipeNamespace?: string
-  recipeName?: string
-}): Promise<PluginWorkloadSdkGrant[]> {
+export async function listGrants(
+  filter?: {
+    recipeNamespace?: string
+    recipeName?: string
+  },
+  // Accepts a transaction client so the grant write-gate can read the stored
+  // grant (Pieza D no-worsening context) on the SAME connection that holds the
+  // model advisory locks — no extra pool checkout under the lock (adenda A3).
+  // Defaults to the global pool for every other (unlocked) caller.
+  db: Pick<DbClient, 'query'> = pool
+): Promise<PluginWorkloadSdkGrant[]> {
   const clauses: string[] = []
   const values: unknown[] = []
   if (filter?.recipeNamespace) {
@@ -633,10 +721,48 @@ export async function listGrants(filter?: {
     clauses.push(`recipe_name = $${values.length}`)
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT * FROM plugin_workload_sdk_grants ${where}
      ORDER BY recipe_namespace, recipe_name, capability_family`,
     values
+  )
+  return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
+}
+
+/**
+ * Grants whose `allowed_models` list names `model` — the 4th source of the
+ * LLM-model impact enumeration (Fase 3, `llmModelImpact.ts`).
+ *
+ * MATCH BY MODEL NAME ONLY, deliberately NOT by `(provider, model)`. The
+ * `allowed_models` column is a provider-LESS flat model-name list and is NOT
+ * enforced to hold only models of the grant's `provider` column: the write-gate
+ * (`routes/admin/pluginWorkloadSdk.ts`) validates `prompt_targets` per-provider,
+ * but `allowed_models` is parsed from the request body free-form and passed
+ * straight through — and since `prompt_targets` can span multiple providers, the
+ * mirrored `allowed_models` set can too. Filtering by `provider` would therefore
+ * UNDER-report references, the unsafe direction for a safety gate that gates a
+ * destructive disable/delete. Matching by model name may over-report a same-named
+ * model under a different provider (extra operator friction, never silent
+ * breakage) — the fail-safe trade-off. This is exercised by the realPostgres
+ * integration test `db.listGrantsReferencingModel.realPostgres.integration`.
+ *
+ * No `policy_state` and no `provider IS NOT NULL` filter: a grant is surfaced
+ * whenever it names the model, including legacy NULL-provider and
+ * `revoking`/`disabled` rows (fail-loud — never hide a dangling reference).
+ *
+ * `allowed_models @> to_jsonb($1::text)` is jsonb array-contains-scalar: for a
+ * text `model`, `to_jsonb('m'::text)` is the JSON string `"m"`, and a jsonb
+ * array `@>` a scalar is true when the array contains that element.
+ */
+export async function listGrantsReferencingModel(
+  model: string,
+  db: DbClient = pool
+): Promise<PluginWorkloadSdkGrant[]> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_grants
+      WHERE allowed_models @> to_jsonb($1::text)
+      ORDER BY recipe_namespace, recipe_name, capability_family`,
+    [model]
   )
   return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
 }
@@ -880,6 +1006,17 @@ export async function revokePluginWorkloadSdkForRecipe(
         changes,
       })
     }
+    // issue #375 (P3): a whole-recipe revoke spans every family, so omit the
+    // capabilityFamily — the WRC only needs the recipe coordinates to re-reconcile.
+    // issue #375 (B2): notify ONLY on an actual transition (rows moved to
+    // 'revoking', or permission changes emitted). A no-op revoke — every grant
+    // already revoking/disabled — must stay silent, otherwise the WRC would
+    // force-reconcile the still-cached recipe, which can re-enter revoke and
+    // NOTIFY again: a reconcile+pg_notify spin. Matches upsert/delete "notify
+    // only on a real mutation" semantics.
+    if ((revoked.rowCount ?? 0) > 0 || changes.length > 0) {
+      await notifyGrantUpdate(db, { recipeNamespace, recipeName })
+    }
     return {
       state:
         hasActivePolicy || hasRevokingPolicy || (revoked.rowCount ?? 0) > 0
@@ -897,6 +1034,11 @@ export async function revokePluginWorkloadSdkForRecipe(
  * that the recipe-bound SDK endpoint and credentials are gone. The state
  * transition is intentionally impossible from `active`, preventing callers
  * from declaring a kill-switch success without the teardown boundary.
+ *
+ * issue #375 (B2 counterpart): finalize (`revoking`→`disabled`) deliberately
+ * emits NO grant-update pg_notify — it is terminal cleanup reachable only after
+ * teardown is proven, its only caller/consumer is the WRC itself, and the
+ * visible `revoke` transition already notified.
  */
 export async function finalizePluginWorkloadSdkRevocation(
   recipeNamespace: string,
@@ -1044,6 +1186,13 @@ export async function deleteGrant(
         })),
     ]
     await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    // issue #375 (P3): nudge the WRC to re-reconcile after the grant is removed
+    // so the capability projection transitions back to awaiting_policy/degraded.
+    await notifyGrantUpdate(db, {
+      recipeNamespace: grant.recipeNamespace,
+      recipeName: grant.recipeName,
+      capabilityFamily: grant.capabilityFamily,
+    })
     return true
   })
 }
