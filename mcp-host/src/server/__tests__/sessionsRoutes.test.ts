@@ -231,11 +231,7 @@ describe('handleSessionsListRoute', () => {
     } as unknown as Request
     const captured = makeRes()
 
-    await handleSessionsListRoute(
-      req,
-      captured.res,
-      makeHandlers({ sessionsListHandler: null })
-    )
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler: null }))
 
     expect(captured.statusCode).toBe(400)
     expect(captured.jsonBody).toEqual({ error: 'Invalid sessions cursor' })

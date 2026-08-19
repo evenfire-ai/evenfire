@@ -195,12 +195,10 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     try {
       await expect(agent.bootstrap()).resolves.toBeUndefined()
       expect(agent.getPendingApprovals()).toEqual([])
-      expect(log).toHaveBeenCalledWith(
-        expect.stringContaining('CONV_OWNERSHIP_MISMATCH')
-      )
-      await expect(
-        manager.getOrCreate(sessionKey, { userId: 'user-1' })
-      ).rejects.toMatchObject({ code: 'CONV_OWNERSHIP_MISMATCH' })
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('CONV_OWNERSHIP_MISMATCH'))
+      await expect(manager.getOrCreate(sessionKey, { userId: 'user-1' })).rejects.toMatchObject({
+        code: 'CONV_OWNERSHIP_MISMATCH',
+      })
     } finally {
       log.mockRestore()
       await pod.shutdown()

@@ -60,9 +60,7 @@ describe('migration 010 — materialized session summaries', () => {
       message_count: 0,
     })
     expect(
-      db
-        .prepare(`SELECT last_activity_at FROM sessions WHERE id = 'clock-skewed-session'`)
-        .get()
+      db.prepare(`SELECT last_activity_at FROM sessions WHERE id = 'clock-skewed-session'`).get()
     ).toEqual({ last_activity_at: 100 })
 
     const indexes = db
@@ -108,9 +106,7 @@ describe('migration 010 — materialized session summaries', () => {
 
     m010.down(db)
     expect(
-      db
-        .prepare(`SELECT message_count FROM sessions WHERE id = 'session-with-messages'`)
-        .get()
+      db.prepare(`SELECT message_count FROM sessions WHERE id = 'session-with-messages'`).get()
     ).toEqual({ message_count: 5 })
 
     m010.up(db)

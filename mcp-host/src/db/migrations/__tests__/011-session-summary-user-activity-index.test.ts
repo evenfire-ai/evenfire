@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
-import { prepareStatements } from '../../statements'
 import * as m011 from '../011-session-summary-user-activity-index'
+import { prepareStatements } from '../../statements'
 import { migrations } from '../index'
 
 describe('migration 011 — session summary user/activity index', () => {

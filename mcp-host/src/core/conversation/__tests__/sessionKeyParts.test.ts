@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  sessionPartsFromPrefixedKey,
-  userIdFromStructuredSessionKey,
-} from '../sessionKeyParts'
+import { sessionPartsFromPrefixedKey, userIdFromStructuredSessionKey } from '../sessionKeyParts'
 
 describe('sessionPartsFromPrefixedKey', () => {
   it('preserves scoped chat ids when the explicit agent matches the prefix', () => {

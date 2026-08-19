@@ -15,9 +15,7 @@ export interface StructuredSessionKeyParts {
  * serialized suffix. The owner prefix may contain any number of `:` characters;
  * parsing from the front would therefore cross tenant boundaries.
  */
-export function userIdFromStructuredSessionKey(
-  parts: StructuredSessionKeyParts
-): string | null {
+export function userIdFromStructuredSessionKey(parts: StructuredSessionKeyParts): string | null {
   if (!parts.channelType || !parts.channelType.trim()) return null
   const channelId = parts.channelId || 'default'
   const threadId = parts.threadId || 'default'

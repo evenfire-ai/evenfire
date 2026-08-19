@@ -1,5 +1,5 @@
-import Database from 'better-sqlite3'
 import { describe, expect, it } from 'vitest'
+import Database from 'better-sqlite3'
 import { migrations } from '../index'
 
 const MIGRATION_NAME = '012-session-ownership-backfill'
@@ -45,14 +45,7 @@ describe('migration 012 — session ownership backfill', () => {
       'agent-x',
       'chat-full'
     )
-    insert.run(
-      'legacy-default-fields',
-      `${owner}:rpc:default:default`,
-      null,
-      'rpc',
-      null,
-      null
-    )
+    insert.run('legacy-default-fields', `${owner}:rpc:default:default`, null, 'rpc', null, null)
     insert.run(
       'legacy-real-mismatch',
       `${owner}:rpc:agent-x:chat-mismatch`,
@@ -95,9 +88,10 @@ describe('migration 012 — session ownership backfill', () => {
     migration!.up(db)
     expect(legacyCount()).toBe(2)
 
-    const rows = db
-      .prepare('SELECT id, user_id FROM sessions ORDER BY id')
-      .all() as Array<{ id: string; user_id: string | null }>
+    const rows = db.prepare('SELECT id, user_id FROM sessions ORDER BY id').all() as Array<{
+      id: string
+      user_id: string | null
+    }>
     expect(rows).toEqual([
       { id: 'legacy-blank-owner', user_id: owner },
       { id: 'legacy-default-fields', user_id: owner },
@@ -109,9 +103,7 @@ describe('migration 012 — session ownership backfill', () => {
     ])
 
     migration!.up(db)
-    expect(
-      db.prepare('SELECT id, user_id FROM sessions ORDER BY id').all()
-    ).toEqual(rows)
+    expect(db.prepare('SELECT id, user_id FROM sessions ORDER BY id').all()).toEqual(rows)
     db.close()
   })
 })

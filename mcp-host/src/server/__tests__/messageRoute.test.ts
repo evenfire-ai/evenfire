@@ -194,12 +194,11 @@ describe('handleMessageRoute — rpc sender identity invariant', () => {
   })
 
   it('maps persisted ownership mismatches to a generic 403', async () => {
-    const messageHandler = vi.fn().mockRejectedValue(
-      new ConversationError(
-        'sensitive ownership detail',
-        ConversationErrorCode.OwnershipMismatch
+    const messageHandler = vi
+      .fn()
+      .mockRejectedValue(
+        new ConversationError('sensitive ownership detail', ConversationErrorCode.OwnershipMismatch)
       )
-    )
     const req = {
       runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: 'legit-user' },
       body: {

@@ -189,12 +189,11 @@ describe('handleSetModelRoute (POST /v1/runtime/model)', () => {
   })
 
   it('maps persisted ownership mismatches to a generic 403', async () => {
-    const setModelHandler: SetModelHandler = vi.fn().mockRejectedValue(
-      new ConversationError(
-        'sensitive ownership detail',
-        ConversationErrorCode.OwnershipMismatch
+    const setModelHandler: SetModelHandler = vi
+      .fn()
+      .mockRejectedValue(
+        new ConversationError('sensitive ownership detail', ConversationErrorCode.OwnershipMismatch)
       )
-    )
     const req = makeReq({
       caller: 'rpc-proxy',
       userId: 'u-1',

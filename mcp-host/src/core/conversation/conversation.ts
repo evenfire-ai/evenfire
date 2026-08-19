@@ -215,10 +215,7 @@ export class ConversationManager {
 
   private assertSessionOwner(conversation: Conversation, expectedUserId?: string): void {
     if (expectedUserId !== undefined && conversation.user_id !== expectedUserId) {
-      throw new ConversationError(
-        'Session access denied',
-        ConversationErrorCode.OwnershipMismatch
-      )
+      throw new ConversationError('Session access denied', ConversationErrorCode.OwnershipMismatch)
     }
   }
 
