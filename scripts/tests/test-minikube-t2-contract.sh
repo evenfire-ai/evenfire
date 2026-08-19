@@ -32,6 +32,10 @@ if grep -Eq 'while IFS= read -r uid pid ppid rest' "$COMMON"; then
   exit 1
 fi
 grep -Fq 'while read -r uid pid ppid rest' "$COMMON"
+if ! grep -Fq '[0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?' "$COMMON"; then
+  echo 'FAIL: t2_process_check awk TIME token must accept Linux HH:MM:SS' >&2
+  exit 1
+fi
 grep -Fq 'CONTROL_API_REAL_PG_CONTEXT' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_ADMIN_URL=' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$T1"

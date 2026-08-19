@@ -107,7 +107,8 @@ Never remove a lock with a live owner, and never remove the whole lock root.
 The runner checks required namespaces, Services, Secret names, ConfigMap names,
 the `control-postgres` PVC/deployment, all required deployment readiness, the
 image manifest/source, and real `kubectl port-forward` processes for this
-profile. Allowed port-forward PIDs live in
+profile. The conflict check keys argv0 off the `ps -ef` TIME field and accepts
+both macOS `N:MM[.ss]` and Linux `HH:MM:SS`. Allowed port-forward PIDs live in
 `$HOME/.cache/clerum/minikube-profiles/<profile>/pids/*.pid` (and the
 legacy `/tmp/pf-<profile>-*.pid` files written by `pf-all-stack.sh`).
 `make minikube-t2` invokes `pre-gate-sync` with `--skip-port-forwards` so the
