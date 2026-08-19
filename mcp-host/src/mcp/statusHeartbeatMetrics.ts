@@ -9,6 +9,7 @@ export interface McpStatusHeartbeatMetricsPort {
   runStarted(): void
   runSkipped(): void
   runFinished(summary: McpStatusRefreshSummary): void
+  runErrored(aborted: boolean): void
 }
 
 function counter<Label extends string>(
@@ -89,6 +90,18 @@ export class McpStatusHeartbeatMetrics implements McpStatusHeartbeatMetricsPort 
 
   runSkipped(): void {
     this.runs.inc({ outcome: 'skipped' satisfies Outcome })
+  }
+
+  /**
+   * A round that threw. It never produced an authoritative summary, so only the
+   * outcome counter and in-flight gauge move (last-known gauges are preserved):
+   * an aborted throw (stop/timeout) is 'aborted', any other throw is 'failed'.
+   * Never 'completed' — the idle-memory gate (#148) proves zero failures from
+   * this series, so a real error must count as one.
+   */
+  runErrored(aborted: boolean): void {
+    this.inFlight.dec()
+    this.runs.inc({ outcome: (aborted ? 'aborted' : 'failed') satisfies Outcome })
   }
 
   runFinished(summary: McpStatusRefreshSummary): void {

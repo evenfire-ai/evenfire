@@ -1,5 +1,5 @@
 import type { McpToolCallOptions } from './client'
-import type { McpManager, McpStatusRefreshSummary } from './manager'
+import type { McpManager } from './manager'
 import {
   type McpStatusHeartbeatMetricsPort,
   mcpStatusHeartbeatMetrics,
@@ -73,22 +73,14 @@ export class McpStatusHeartbeat {
       } satisfies McpToolCallOptions)
       this.metrics.runFinished(summary)
     } catch (error) {
-      this.metrics.runFinished(failedSummary(controller.signal.aborted))
+      // A throw never yields an authoritative summary. Classify it explicitly so
+      // the run is counted as errored (aborted vs failed) instead of a summary
+      // with failed:0 that runFinished would misread as a clean 'completed'.
+      this.metrics.runErrored(controller.signal.aborted)
       this.options.onError?.(error)
     } finally {
       clearTimeout(timeout)
       if (this.activeRound === controller) this.activeRound = null
     }
-  }
-}
-
-function failedSummary(aborted: boolean): McpStatusRefreshSummary {
-  return {
-    serverCount: 0,
-    succeeded: 0,
-    failed: 0,
-    toolCount: 0,
-    outputSchemaCount: 0,
-    aborted,
   }
 }

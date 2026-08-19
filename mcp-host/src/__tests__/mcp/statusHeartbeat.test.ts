@@ -7,6 +7,7 @@ function metrics() {
     runStarted: vi.fn<() => void>(),
     runSkipped: vi.fn<() => void>(),
     runFinished: vi.fn<(summary: McpStatusRefreshSummary) => void>(),
+    runErrored: vi.fn<(aborted: boolean) => void>(),
   }
 }
 
@@ -74,6 +75,33 @@ describe('McpStatusHeartbeat', () => {
     release?.()
     await vi.runAllTimersAsync()
     expect(refreshAllServerStatus).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
+
+  it('classifies a thrown (non-aborted) round as errored, not completed', async () => {
+    vi.useFakeTimers()
+    const refreshAllServerStatus = vi
+      .fn<(options: { timeoutMs?: number; signal?: AbortSignal }) => Promise<typeof summary>>()
+      .mockRejectedValue(new Error('tracker exploded'))
+    const observedMetrics = metrics()
+    const onError = vi.fn<(error: unknown) => void>()
+    const heartbeat = new McpStatusHeartbeat({
+      intervalMs: 30_000,
+      timeoutMs: 25_000,
+      getRefresher: () => ({ refreshAllServerStatus }),
+      metrics: observedMetrics,
+      onError,
+    })
+
+    heartbeat.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // A genuine throw is a failed round, never a silent 'completed' — the
+    // idle-memory gate (#148) relies on runs_total distinguishing the two.
+    expect(observedMetrics.runErrored).toHaveBeenCalledWith(false)
+    expect(observedMetrics.runFinished).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledTimes(1)
+    heartbeat.stop()
     vi.useRealTimers()
   })
 })

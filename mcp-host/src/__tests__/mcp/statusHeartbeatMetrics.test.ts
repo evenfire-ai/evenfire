@@ -54,4 +54,21 @@ describe('MCP status heartbeat metrics', () => {
     expect(scrape).toContain('clerum_mcp_status_heartbeat_tools 66')
     expect(scrape).toContain('clerum_mcp_status_heartbeat_output_schemas 60')
   })
+
+  it('records a thrown round as failed and an aborted throw as aborted', async () => {
+    const registry = new Registry()
+    const metrics = new McpStatusHeartbeatMetrics(registry)
+
+    metrics.runStarted()
+    metrics.runErrored(false)
+    metrics.runStarted()
+    metrics.runErrored(true)
+
+    const scrape = await registry.metrics()
+    expect(scrape).toContain('clerum_mcp_status_heartbeat_runs_total{outcome="failed"} 1')
+    expect(scrape).toContain('clerum_mcp_status_heartbeat_runs_total{outcome="aborted"} 1')
+    // A thrown round must never be counted as a clean completion.
+    expect(scrape).toContain('clerum_mcp_status_heartbeat_runs_total{outcome="completed"} 0')
+    expect(scrape).toContain('clerum_mcp_status_heartbeat_in_flight 0')
+  })
 })
