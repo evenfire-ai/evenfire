@@ -93,4 +93,20 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
       expect(rule, `immutability rule for oauth.${field} present and oldSelf-guarded`).toBeDefined()
     }
   })
+
+  it('makes spec.contextRef immutable for oauth servers via oldSelf-guarded transition rule (M1)', () => {
+    // M1 (@alfredolopez80, PR #317): contextRef is the authoritative
+    // shared-identity coordinate for a grantScope:'context' oauth server, so
+    // it must be pinned once oauth exists. oauth-guarded (!has(oldSelf.oauth)
+    // short-circuit) so non-oauth servers can still be re-parented by WRC.
+    // Presence-only assertion — CEL semantics are enforced by the apiserver
+    // at admission (verify with `kubectl --dry-run=server`), not here.
+    const rule = specRules.find(
+      r =>
+        r.rule.includes('self.contextRef == oldSelf.contextRef') &&
+        r.rule.includes('!has(oldSelf.oauth)')
+    )
+    expect(rule, 'contextRef immutability rule present and oauth/oldSelf-guarded').toBeDefined()
+    expect(rule?.message).toMatch(/contextRef is immutable/)
+  })
 })
