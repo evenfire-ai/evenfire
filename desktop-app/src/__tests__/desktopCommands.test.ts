@@ -46,6 +46,7 @@ describe('Desktop command registry', () => {
 
   it('has unique stable IDs and no binding collisions within a source', () => {
     expect(new Set(DESKTOP_COMMANDS.map(command => command.id)).size).toBe(DESKTOP_COMMANDS.length)
+    expect(DESKTOP_COMMANDS.every(command => !('editingPolicy' in command))).toBe(true)
     for (const platform of ['darwin', 'win32'] as const) {
       for (const source of ['host', 'sandbox'] as const) {
         const keys = DESKTOP_COMMANDS.filter(
