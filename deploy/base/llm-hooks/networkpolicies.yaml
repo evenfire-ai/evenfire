@@ -16,14 +16,25 @@
 # inbound connection (connection tracking), which needs no egress rule.
 #
 # Kubelet health/readiness probes originate from the node and are unaffected.
+#
+# OWNERSHIP: this baseline is applied by the DEPLOY, not by HCC, so it carries
+# `managed-by: llm-hooks` and a distinct name — the same convention
+# deploy/base/sandbox-ui/networkpolicies.yaml uses for its static baseline.
+# Labelling it `managed-by: host-context-controller` claimed an owner that has
+# never reconciled it, and the ValidatingAdmissionPolicy
+# `managed-networkpolicy-label-immutability` refuses CREATE of a NetworkPolicy
+# carrying a controller's label from anyone but that controller's ServiceAccount
+# or a system:masters bootstrap — so the restricted deploy identity was denied
+# and the whole apply aborted. A local (cluster-admin) apply is exempt, which is
+# why this only surfaced in CI.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: default-deny
+  name: llm-hooks-static-default-deny
   namespace: llm-hooks
   labels:
-    clerum.io/managed-by: host-context-controller
-    clerum.io/policy-type: infrastructure
+    clerum.io/managed-by: llm-hooks
+    clerum.io/policy-type: baseline
 spec:
   podSelector: {}
   policyTypes:
