@@ -30,7 +30,18 @@ export interface McpServerSecretRef {
  */
 export interface McpServerOAuth {
   id: string
-  provider: 'salesforce' | 'slack' | 'notion' | 'microsoft-graph' | 'google'
+  // Full control-api adapter set — must mirror the mcpserver.yaml `oauth.provider`
+  // enum, control-api `providers.ts` `OAuthProvider`, and workflow-recipes
+  // `OAuthProvider`. U2 (spec 06) added monday/clickup/vercel.
+  provider:
+    | 'salesforce'
+    | 'slack'
+    | 'notion'
+    | 'microsoft-graph'
+    | 'google'
+    | 'monday'
+    | 'clickup'
+    | 'vercel'
   clientIdRef: McpServerSecretRef
   clientSecretRef: McpServerSecretRef
   scopes?: string[]
@@ -379,6 +390,8 @@ export interface ContextStatus {
 export interface ContextCRD {
   name: string
   namespace: string
+  uid?: string
+  generation?: number
   spec: ContextSpec
   status?: ContextStatus
 }
@@ -553,6 +566,12 @@ export interface McpServerStatus {
   ready: boolean
   /** Human-readable status message. */
   message?: string
+  /**
+   * Whether HCC can tie this status to the current McpServer identity and
+   * generation. False means discovery is authoritative but runtime status has
+   * not yet been re-established after controller startup.
+   */
+  authoritative?: boolean
 }
 
 /**

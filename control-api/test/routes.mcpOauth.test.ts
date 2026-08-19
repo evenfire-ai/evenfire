@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
@@ -86,12 +86,21 @@ function nonExpiredUserGrantRow(userId: string, expiresAt: Date) {
 describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
   let gateway: MockGateway
   let app: ReturnType<typeof createApp>
+  const originalBrokerEnabled = config.mcpOauthBrokerEnabled
 
   beforeEach(() => {
     gateway = new MockGateway(MCP_NS)
     app = createApp(gateway as never)
     mockPoolQuery.mockReset()
     mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    // These specs assert the broker's live behavior, so run them with the
+    // kill-switch ON. The flag defaults OFF (fail-closed); the OFF→404 spec
+    // below flips it back to exercise the disabled path.
+    config.mcpOauthBrokerEnabled = true
+  })
+
+  afterEach(() => {
+    config.mcpOauthBrokerEnabled = originalBrokerEnabled
   })
 
   it('401 without a control JWT', async () => {
@@ -319,5 +328,61 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
       .send({ mcpServerName: 'Foo/Bar', userId: 'user-1' })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('invalid_request')
+  })
+
+  // Finding R1-H1: the broker is gated behind a kill-switch that defaults OFF,
+  // so it cannot serve provider tokens in production until the U4 mcp-host
+  // runtime lands. When disabled, a fully well-formed AND authorized request —
+  // valid control JWT, correct scope, seeded server, a grant row that would
+  // otherwise resolve to a 200 token — must observe 404 not_found (the endpoint
+  // looks absent), and grant resolution must never run (no oauth_grants query).
+  describe('kill-switch (mcpOauthBrokerEnabled)', () => {
+    it('OFF (default): a well-formed authorized request returns 404 not_found and never resolves a grant', async () => {
+      config.mcpOauthBrokerEnabled = false
+      seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+      // A grant that WOULD resolve to a 200 token if the endpoint served — so
+      // the 404 can only come from the gate, not from a missing grant.
+      const future = new Date(Date.now() + 3600_000)
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [nonExpiredUserGrantRow('user-1', future)],
+        rowCount: 1,
+      })
+
+      const res = await request(app)
+        .post('/api/v1/mcp-oauth/user-token')
+        .set('Authorization', `Bearer ${controlToken()}`)
+        .send({ mcpServerName: 'gdrive', userId: 'user-1', contextId: 'ctx-9' })
+
+      // Load-bearing (T4): assert the observable HTTP response, not an internal
+      // call count. This assertion fails against the pre-gate parent (which
+      // always serves → 200 with the seeded grant).
+      expect(res.status).toBe(404)
+      expect(res.body.error).toBe('not_found')
+      expect(res.body.token).toBeUndefined()
+      // Never reached grant resolution — no oauth_grants lookup ran.
+      const grantQuery = mockPoolQuery.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
+      )
+      expect(grantQuery).toBeUndefined()
+    })
+
+    it('ON: the same request resolves normally (behavior unchanged)', async () => {
+      config.mcpOauthBrokerEnabled = true
+      seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+      const future = new Date(Date.now() + 3600_000)
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [nonExpiredUserGrantRow('user-1', future)],
+        rowCount: 1,
+      })
+
+      const res = await request(app)
+        .post('/api/v1/mcp-oauth/user-token')
+        .set('Authorization', `Bearer ${controlToken()}`)
+        .send({ mcpServerName: 'gdrive', userId: 'user-1', contextId: 'ctx-9' })
+
+      expect(res.status).toBe(200)
+      expect(res.body.token).toBe('GDRIVE-ACCESS')
+      expect(res.body.expiresAt).toBe(future.toISOString())
+    })
   })
 })

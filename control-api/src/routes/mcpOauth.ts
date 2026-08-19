@@ -174,8 +174,22 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
     next()
   }
 
+  // Fail-closed kill-switch (finding R1-H1). While the OAuth mcp-server broker
+  // is disabled the endpoint must look ABSENT — a 404 before any auth or token
+  // work, not a 403 — so it cannot serve provider tokens in production until the
+  // U4 mcp-host runtime lands. Read at request time so the flag is honored
+  // without a restart in tests; default is OFF (config.mcpOauthBrokerEnabled).
+  function requireBrokerEnabled(_req: Request, res: Response, next: NextFunction): void {
+    if (!config.mcpOauthBrokerEnabled) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    next()
+  }
+
   router.post(
     '/mcp-oauth/user-token',
+    requireBrokerEnabled,
     requireControlCaller,
     rateLimitMiddleware({
       bucketType: 'mcp_oauth_broker',
