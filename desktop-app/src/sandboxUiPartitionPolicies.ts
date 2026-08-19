@@ -33,8 +33,34 @@ export type EmbedNavigationOutcome =
    *  rpc-proxy and opens it in the OS browser. `background` is true when
    *  `background=1` was included in the deep link. */
   | { kind: 'oauth_authorize'; oauthClientId: string; background: boolean }
+  /** `gfs://<drive>/<resource>` — a link to a shared file rendered by the
+   *  plugin. The host resolves it with the USER's session and shows it in the
+   *  Desktop's own viewer; the plugin learns nothing from the click. */
+  | { kind: 'gfs_open'; uri: string }
   /** non-http(s) scheme or empty URL — drop silently. */
   | { kind: 'drop' }
+
+function pathWithoutTrailingSlash(pathname: string): string {
+  return pathname.replace(/\/+$/, '') || '/'
+}
+
+export function isSandboxUiNavigationWithinPrefix(
+  navigationUrl: string,
+  allowedNavigationPrefix: string
+): boolean {
+  try {
+    const navigation = new URL(navigationUrl)
+    const allowed = new URL(allowedNavigationPrefix)
+    const allowedPath = pathWithoutTrailingSlash(allowed.pathname)
+    const navigationPath = pathWithoutTrailingSlash(navigation.pathname)
+    return (
+      navigation.origin === allowed.origin &&
+      (navigationPath === allowedPath || navigation.pathname.startsWith(`${allowedPath}/`))
+    )
+  } catch {
+    return false
+  }
+}
 
 /**
  * Classify a candidate navigation URL against the recipe's allowed
@@ -45,12 +71,21 @@ export function classifyEmbedNavigation(
   allowedPrefix: string
 ): EmbedNavigationOutcome {
   if (!rawUrl) return { kind: 'drop' }
-  if (rawUrl.startsWith(allowedPrefix)) return { kind: 'allow' }
+  if (isSandboxUiNavigationWithinPrefix(rawUrl, allowedPrefix)) return { kind: 'allow' }
   if (rawUrl.startsWith('clerum:')) {
     const parsed = parseClerumOauthAuthorize(rawUrl)
     return parsed
-      ? { kind: 'oauth_authorize', oauthClientId: parsed.oauthClientId, background: parsed.background }
+      ? {
+          kind: 'oauth_authorize',
+          oauthClientId: parsed.oauthClientId,
+          background: parsed.background,
+        }
       : { kind: 'drop' }
+  }
+  if (rawUrl.startsWith('gfs://')) {
+    // Shape-checked here only; the host resolves it through the API, which is
+    // where authorization actually happens. A bad URI resolves to nothing.
+    return rawUrl.length <= 2048 ? { kind: 'gfs_open', uri: rawUrl } : { kind: 'drop' }
   }
   if (rawUrl.startsWith('https://') || rawUrl.startsWith('http://')) {
     return { kind: 'external', url: rawUrl }
@@ -113,31 +148,39 @@ export function applySandboxUiPartitionPolicies(ses: Session): void {
  * main process which fetches the provider authorize URL via rpc-proxy and
  * `shell.openExternal`s it.
  */
+export type SandboxUiNavigationHandlers = {
+  onOauthAuthorize?: (oauthClientId: string, background: boolean) => void
+  onGfsOpen?: (uri: string) => void
+}
+
 export function applySandboxUiNavigationPolicies(
   webContents: WebContents,
   allowedPrefix: string,
-  onOauthAuthorize?: (oauthClientId: string, background: boolean) => void
+  handlers?: SandboxUiNavigationHandlers
 ): void {
+  const resolved: SandboxUiNavigationHandlers = handlers ?? {}
+
+  const dispatch = (outcome: EmbedNavigationOutcome): void => {
+    if (outcome.kind === 'external') {
+      void shell.openExternal(outcome.url)
+    } else if (outcome.kind === 'oauth_authorize') {
+      resolved.onOauthAuthorize?.(outcome.oauthClientId, outcome.background)
+    } else if (outcome.kind === 'gfs_open') {
+      resolved.onGfsOpen?.(outcome.uri)
+    }
+  }
+
   webContents.on('will-navigate', (event, url) => {
     const outcome = classifyEmbedNavigation(url, allowedPrefix)
     if (outcome.kind === 'allow') return
     event.preventDefault()
-    if (outcome.kind === 'external') {
-      void shell.openExternal(outcome.url)
-    } else if (outcome.kind === 'oauth_authorize') {
-      onOauthAuthorize?.(outcome.oauthClientId, outcome.background)
-    }
+    dispatch(outcome)
   })
   webContents.setWindowOpenHandler(({ url }) => {
-    // `window.open` always opens in OS browser (for http(s)).
-    // `clerum://oauth?…` triggers the OAuth flow same as a top-level click;
-    // non-http schemes otherwise drop silently.
-    const outcome = classifyEmbedNavigation(url, allowedPrefix)
-    if (outcome.kind === 'external') {
-      void shell.openExternal(outcome.url)
-    } else if (outcome.kind === 'oauth_authorize') {
-      onOauthAuthorize?.(outcome.oauthClientId, outcome.background)
-    }
+    // `window.open` always opens in the OS browser (for http(s)).
+    // `clerum://oauth?…` and `gfs://…` behave the same as a top-level click;
+    // every other scheme drops silently.
+    dispatch(classifyEmbedNavigation(url, allowedPrefix))
     return { action: 'deny' }
   })
 }

@@ -2,7 +2,7 @@ import { config } from './config.js'
 import { assertDbReady, pool } from './db.js'
 import { K8sGateway } from './k8s.js'
 import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootReconcile.js'
-import { assertRegistryConnectionReady } from './registryBootGuard.js'
+import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
 import {
   startAdminRevokedTokenCleanup,
@@ -12,12 +12,17 @@ import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
+import { startLlmCatalogSyncCron, stopLlmCatalogSyncCron } from './services/llmCatalogSyncCron.js'
 import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
   startPluginWorkloadSdkMaintenanceCron,
   stopPluginWorkloadSdkMaintenanceCron,
 } from './services/pluginWorkloadSdkMaintenanceCron.js'
 import { startRateLimiterCleanup, stopRateLimiterCleanup } from './services/rateLimiterService.js'
+import {
+  reconcileRegistryPullSecret,
+  startRegistryPullSecretReconcileCron,
+} from './services/registryPullSecretReconcileCron.js'
 import {
   startWorkflowApprovalTraceProjector,
   stopWorkflowApprovalTraceProjector,
@@ -52,9 +57,10 @@ async function main(): Promise<void> {
   await assertDbReady()
   console.log('[ControlAPI] Database schema ready')
 
-  // Self-hosted fail-fast (spec §8 / §14.3): refuse to boot a registry-enabled
-  // self-hosted deployment that has no registry_connection identity row.
-  await assertRegistryConnectionReady()
+  // Observability only (never fatal): report whether this self-hosted deployment
+  // holds a registry identity. Auth is derived from credential presence, so a
+  // missing row simply means auth is inactive until the connect flow runs.
+  await logRegistryConnectionState()
 
   // Anti-drift (spec §3-R3.4 / V7): re-materialize the LLM allowlist ConfigMap
   // from Postgres. Non-fatal — logs + metric on failure, never aborts boot.
@@ -73,6 +79,20 @@ async function main(): Promise<void> {
   startBudgetReservationSweepCron(config.budgetReservationSweepIntervalMs)
   startWorkflowApprovalTraceProjector()
 
+  // LLM catalog discovery sync cron (Fase 4). DEFAULT OFF — opt in with
+  // LLM_CATALOG_SYNC_CRON_ENABLED=true. Non-destructive: inserts disabled
+  // discovery rows, only stale-flags vanished ones under the §4.5 guards.
+  if (config.llmCatalogSyncCronEnabled) {
+    startLlmCatalogSyncCron({}, config.llmCatalogSyncIntervalMs)
+    console.log(
+      `[ControlAPI] LLM catalog sync cron enabled (interval=${config.llmCatalogSyncIntervalMs}ms)`
+    )
+  } else {
+    console.log(
+      '[ControlAPI] LLM catalog sync cron disabled (LLM_CATALOG_SYNC_CRON_ENABLED not "true")'
+    )
+  }
+
   if (config.userApprovalRequestArchiveCronEnabled) {
     startArchiveCron({
       retentionDays: config.approvalRetentionDays,
@@ -86,6 +106,13 @@ async function main(): Promise<void> {
   }
 
   const gateway = new K8sGateway(config.namespace)
+
+  // Assert the platform image-pull credential up front and then on a timer. WRC injects
+  // the reference for ANY WorkflowRecipe, including ones created by `kubectl apply` or the
+  // `deploy_recipe` tool that control-api never sees — so provisioning cannot only happen
+  // on our own install routes. Non-fatal: an unconnected cluster logs and retries.
+  void reconcileRegistryPullSecret(gateway)
+  startRegistryPullSecretReconcileCron(gateway, config.registryPullSecretReconcileIntervalMs)
 
   if (config.workflowRunsArchiveCronEnabled) {
     startWorkflowRunsArchiveCron({
@@ -159,6 +186,7 @@ main().catch(error => {
   stopUsageRollupCron()
   stopUsageRetentionCron()
   stopBudgetReservationSweepCron()
+  stopLlmCatalogSyncCron()
   stopWorkflowApprovalTraceProjector()
   void pool.end()
   process.exit(1)

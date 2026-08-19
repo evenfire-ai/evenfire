@@ -19,9 +19,11 @@ import { UserApprovalMediumsPanel } from '../../../../components/UserApprovalMed
 import { IconPencil, IconX } from '../../../../components/icons'
 import {
   AdminUserChannels,
+  DeleteAdminUserRequest,
   HostResource,
   addAdminTeamMember,
   apiGet,
+  createDeleteAdminUserRequest,
   deleteAdminMember,
   deleteAdminTeam,
   deleteAdminUser,
@@ -82,6 +84,7 @@ export default function UserDetailsPage() {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const deleteUserTeamCheckIdRef = useRef(0)
+  const deleteUserRequestRef = useRef<DeleteAdminUserRequest | null>(null)
 
   const [activeTab, setActiveTab] = useState<UserTab>(() => parseUserTab(params.tab))
   const [busy, setBusy] = useState(false)
@@ -115,6 +118,7 @@ export default function UserDetailsPage() {
   const [selectedContextIdsToAdd, setSelectedContextIdsToAdd] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
+  const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
   const [communicationChannels, setCommunicationChannels] = useState<CommunicationChannelItem[]>([])
 
@@ -165,10 +169,10 @@ export default function UserDetailsPage() {
         .filter(agentName => !assignedAgentNames.includes(agentName))
         .map(agentName => ({
           value: agentName,
-          label: getAgentDisplayName(agentName),
+          label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
-    [assignedAgentNames, hostNameOptions]
+    [assignedAgentNames, hostNameOptions, hosts]
   )
   const userCommunicationConversations = useMemo(
     () =>
@@ -265,7 +269,8 @@ export default function UserDetailsPage() {
       )
       const agentPartition = partitionVisibleAccess(
         Array.isArray(userAgentAccess.agentNames) ? userAgentAccess.agentNames : [],
-        hostNames
+        hostNames,
+        Array.isArray(userAgentAccess.deletedAgentNames) ? userAgentAccess.deletedAgentNames : []
       )
       setAssignedContextIds(contextPartition.active)
       setDeletedContextIds(contextPartition.deleted)
@@ -273,6 +278,10 @@ export default function UserDetailsPage() {
       setUserTeams(Array.isArray(userTeamsData.items) ? userTeamsData.items : [])
       setHosts(Array.isArray(hostsData.items) ? hostsData.items : [])
       setAssignedAgentNames(agentPartition.active)
+      setObservedAgentNames([
+        ...(userAgentAccess.agentNames || []),
+        ...(userAgentAccess.deletedAgentNames || []),
+      ])
       setCommunicationChannels(communicationChannelsData.items || [])
       setAvailableContextIds(ids)
     } catch (e) {
@@ -431,9 +440,14 @@ export default function UserDetailsPage() {
     setError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
-      const updated = await updateAdminUserAgents(userId, normalized)
-      const partition = partitionVisibleAccess(updated.agentNames || [], hostNameOptions)
+      const updated = await updateAdminUserAgents(userId, normalized, observedAgentNames)
+      const partition = partitionVisibleAccess(
+        updated.agentNames || [],
+        hostNameOptions,
+        updated.deletedAgentNames || []
+      )
       setAssignedAgentNames(partition.active)
+      setObservedAgentNames([...(updated.agentNames || []), ...(updated.deletedAgentNames || [])])
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
     } catch (e) {
@@ -466,6 +480,7 @@ export default function UserDetailsPage() {
     setDeleteUserSoloTeams([])
     setDeleteEmptyTeamsWithUser(false)
     setDeleteUserTeamCheckLoading(false)
+    deleteUserRequestRef.current = createDeleteAdminUserRequest()
     setShowDeleteUserConfirm(true)
     if (userTeams.length === 0) return
 
@@ -500,7 +515,11 @@ export default function UserDetailsPage() {
     const teamsToDelete = deleteEmptyTeamsWithUser ? deleteUserSoloTeams : []
     setError('')
     try {
-      await deleteAdminUser(userId)
+      await deleteAdminUser(
+        userId,
+        deleteUserRequestRef.current ??
+          (deleteUserRequestRef.current = createDeleteAdminUserRequest())
+      )
       const teamDeleteResults = await Promise.allSettled(
         teamsToDelete.map(team => deleteAdminTeam(team.id))
       )
@@ -509,6 +528,7 @@ export default function UserDetailsPage() {
         return result?.status === 'rejected'
       })
       setShowDeleteUserConfirm(false)
+      deleteUserRequestRef.current = null
       if (failedTeams.length > 0) {
         showToast(
           `Member deleted, but ${failedTeams.length === 1 ? 'team' : 'teams'} could not be deleted: ${formatTeamNames(failedTeams)}.`,

@@ -6,6 +6,33 @@ import { NativeToolConfig } from './core/interfaces'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
 
+/** Route families projected by WRC into a recipe-bound mcp-host. */
+export const PLUGIN_WORKLOAD_SDK_CAPABILITIES = ['promptBridge', 'clientNotifications'] as const
+export type PluginWorkloadSdkCapability = (typeof PLUGIN_WORKLOAD_SDK_CAPABILITIES)[number]
+
+/**
+ * Parse the WRC capability projection without silently accepting typos. An
+ * empty/missing value is intentionally an empty set so the SDK activation gate
+ * fails closed rather than exposing a broader route surface than the recipe.
+ */
+export function parsePluginWorkloadSdkCapabilities(
+  raw: string | undefined
+): PluginWorkloadSdkCapability[] {
+  if (!raw?.trim()) return []
+  const declared = raw
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+  const known = new Set<string>(PLUGIN_WORKLOAD_SDK_CAPABILITIES)
+  const unknown = declared.filter(value => !known.has(value))
+  if (unknown.length > 0) {
+    throw new Error(
+      `PLUGIN_WORKLOAD_SDK_CAPABILITIES contains unsupported value(s): ${unknown.join(', ')}`
+    )
+  }
+  return PLUGIN_WORKLOAD_SDK_CAPABILITIES.filter(capability => declared.includes(capability))
+}
+
 export interface Config {
   // Dev mode - if true, reads config from env vars instead of K8s
   devMode: boolean
@@ -191,7 +218,12 @@ export interface Config {
   approvalPromptHistoryEnabled: boolean
   approvalPromptHistoryMaxBytes: number
 
-  // Workflow mode — set by WRC via CLERUM_WORKFLOW_ENABLED=true on the Pod
+  // Canonical process runtime. `workflowEnabled` is retained as a derived
+  // compatibility view for code that only needs the workflow yes/no answer;
+  // startup dispatch MUST use `runtimeKind` so sdk-only can never fall through
+  // to the standalone host.
+  runtimeKind: 'standalone' | 'workflow' | 'sdk-only'
+  // Workflow mode — derived from runtimeKind, never independently trusted.
   workflowEnabled: boolean
   workflowRecipeName: string
   userApprovalRequestRecipeName: string
@@ -218,11 +250,16 @@ export interface Config {
   // (flag + runtime JWT recipeNamespace + downward-API pod namespace, all
   // fail-closed — see pluginWorkloadSdk/server/sdkServer.ts).
   pluginWorkloadSdkEnabled: boolean
+  /** Exact capability families declared by WRC for this recipe-bound host. */
+  pluginWorkloadSdkCapabilities: PluginWorkloadSdkCapability[]
+  pluginWorkloadSdkRuntimeMode: 'workflow' | 'sdk-only'
   pluginWorkloadSdkPort: number
   /** Pod namespace via Kubernetes downward API (defense-in-depth). */
   podNamespace: string
   /** Overrides mcpHostGatewayUrl for SDK → control-api calls when set. */
   pluginWorkloadSdkGatewayUrl?: string
+  /** WRC endpoint that redeems one signed prompt target ticket per attempt. */
+  pluginWorkloadSdkCredentialBrokerUrl: string
   /** Recipe-scoped shared token workloads present to the SDK server. @deprecated use tokensDir */
   pluginWorkloadSdkWorkloadToken?: string
   /** Dev-only caller binding when using a single legacy workload token env var. */
@@ -260,6 +297,38 @@ function getEnvNumber(key: string, defaultValue: number): number {
     return defaultValue
   }
   return parsed
+}
+
+export type McpHostRuntimeKind = 'standalone' | 'workflow' | 'sdk-only'
+
+/**
+ * Resolve the one authoritative startup kind from the two historical env
+ * signals. Explicit SDK/runtime mode and CLERUM_WORKFLOW_ENABLED must agree;
+ * contradictory combinations fail at config load instead of silently
+ * exposing workflow or standalone routes from an sdk-only Pod.
+ */
+export function resolveMcpHostRuntimeKind(input: {
+  workflowEnabled: boolean
+  pluginWorkloadSdkRuntimeMode?: string
+}): McpHostRuntimeKind {
+  const rawMode = input.pluginWorkloadSdkRuntimeMode?.trim()
+  if (!rawMode) return input.workflowEnabled ? 'workflow' : 'standalone'
+  if (rawMode !== 'workflow' && rawMode !== 'sdk-only') {
+    throw new Error(
+      `Invalid PLUGIN_WORKLOAD_SDK_RUNTIME_MODE="${rawMode}"; expected workflow or sdk-only`
+    )
+  }
+  if (rawMode === 'workflow' && !input.workflowEnabled) {
+    throw new Error(
+      'Contradictory mcp-host runtime configuration: PLUGIN_WORKLOAD_SDK_RUNTIME_MODE=workflow requires CLERUM_WORKFLOW_ENABLED=true'
+    )
+  }
+  if (rawMode === 'sdk-only' && input.workflowEnabled) {
+    throw new Error(
+      'Contradictory mcp-host runtime configuration: PLUGIN_WORKLOAD_SDK_RUNTIME_MODE=sdk-only requires CLERUM_WORKFLOW_ENABLED=false'
+    )
+  }
+  return rawMode
 }
 
 /**
@@ -359,6 +428,11 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
 }
 
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
+const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
+const configuredRuntimeKind = resolveMcpHostRuntimeKind({
+  workflowEnabled: configuredWorkflowEnabled,
+  pluginWorkloadSdkRuntimeMode: getEnv('PLUGIN_WORKLOAD_SDK_RUNTIME_MODE'),
+})
 
 // Raw CLERUM_MODEL_PROVIDER env var. NOT validated here: this runs at module top
 // level (imported very early, in prod too), so a stray/invalid value must never
@@ -746,8 +820,10 @@ export const config: Config = {
     getEnv('TRACING_APPROVAL_PROMPT_HISTORY_MAX_BYTES', '16384')!
   ),
 
-  // Workflow mode
-  workflowEnabled: getEnvBool('CLERUM_WORKFLOW_ENABLED', false),
+  // Canonical runtime mode. Keep the boolean derived from the discriminant so
+  // downstream code cannot observe an impossible sdk-only+workflow pairing.
+  runtimeKind: configuredRuntimeKind,
+  workflowEnabled: configuredRuntimeKind === 'workflow',
   workflowRecipeName: getEnv('CLERUM_WORKFLOW_RECIPE', '')!,
   userApprovalRequestRecipeName: getEnv('CLERUM_WORKFLOW_APPROVAL_RECIPE', '')!,
   userApprovalRequestRecipeNamespace: getEnv(
@@ -775,9 +851,16 @@ export const config: Config = {
 
   // Plugin Workload SDK (plan §3.5 config table)
   pluginWorkloadSdkEnabled: getEnvBool('PLUGIN_WORKLOAD_SDK_ENABLED', false),
+  pluginWorkloadSdkCapabilities: parsePluginWorkloadSdkCapabilities(
+    getEnv('PLUGIN_WORKLOAD_SDK_CAPABILITIES', '')
+  ),
+  // Workflow is the backwards-compatible SDK mode for workflow/standalone
+  // processes; WRC explicitly sets sdk-only on the stepless adapter.
+  pluginWorkloadSdkRuntimeMode: configuredRuntimeKind === 'sdk-only' ? 'sdk-only' : 'workflow',
   pluginWorkloadSdkPort: parseInt(getEnv('MCP_HOST_PLUGIN_SDK_PORT', '8099')!, 10),
   podNamespace: getEnv('MCP_HOST_POD_NAMESPACE', '')!,
   pluginWorkloadSdkGatewayUrl: getEnv('CONTROL_API_GATEWAY_URL', ''),
+  pluginWorkloadSdkCredentialBrokerUrl: getEnv('CLERUM_WRC_URL', '') ?? '',
   pluginWorkloadSdkWorkloadToken: getEnv('PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKEN', ''),
   pluginWorkloadSdkBoundCallerRef: getEnv('PLUGIN_WORKLOAD_SDK_BOUND_CALLER_REF', ''),
   pluginWorkloadSdkWorkloadTokensDir: getEnv('PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR', ''),

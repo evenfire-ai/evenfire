@@ -193,8 +193,28 @@ export interface Config {
 
   // Periodic external-egress DNS resync interval (seconds). Re-resolves
   // McpServer.spec.egressBindings so DNS changes and failures converge without
-  // requiring a watch event. 0 disables.
+  // requiring a watch event. 0 disables. Must sit below externalEgressOverlapSec
+  // so accumulated IPs never expire between refreshes (issue #299).
   externalEgressResyncIntervalSec: number
+
+  // Deadline for one DNS resolution attempt. A silent resolver cannot block
+  // safety convergence indefinitely.
+  externalEgressDnsResolveTimeoutMs: number
+
+  // Grace kept after a DNS TTL before an accumulated /32 may expire (seconds).
+  // The sliding window that fixes #299: entries live for TTL + overlap, so a
+  // provider that rotates a single A record still resolves through the union of
+  // recently-live IPs. Set via HCC_EXTERNAL_EGRESS_OVERLAP_SEC.
+  externalEgressOverlapSec: number
+
+  // Minimum sane refresh interval (seconds); guards against a hot-loop resync.
+  // Set via HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC.
+  externalEgressRefreshFloorSec: number
+
+  // Per-FQDN accumulated-entry cap. On overflow the core evicts the
+  // least-recently-observed IP (never rejects the policy). Set via
+  // HCC_EXTERNAL_EGRESS_MAX_ENTRIES.
+  externalEgressMaxEntries: number
 
   // Plugin image-host allowlist (Phase 2.3). Trusted raw-image prefixes for
   // local-mode McpServer images. Audit mode (default) logs would-be denials
@@ -227,6 +247,37 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 5_000
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 2_147_483_647) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS must be a positive integer no greater than 2147483647, got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+/**
+ * Loud integer env parser for the external-egress knobs (audit R1-L1). Unlike
+ * getEnvInt (parseInt), this rejects non-canonical values instead of silently
+ * coercing them: '60.5'->60 or '60abc'->60 would pass getEnvInt AND the
+ * range invariant (which re-checks the already-truncated value), letting an
+ * in-range typo through quietly. Canonical unsigned base-10 only; empty -> default.
+ */
+function getExternalEgressEnvInt(key: string, defaultValue: number): number {
+  const raw = process.env[key]
+  if (raw === undefined || raw === '') return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${key} must be an unsigned base-10 integer (seconds), got '${raw}'`)
+  }
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${key} is out of the safe integer range, got '${raw}'`)
+  }
+  return parsed
 }
 
 /**
@@ -365,6 +416,85 @@ const devMode = getEnvBool('CLERUM_DEV_MODE', false)
 validateRemovedStatelessCommunicationChannelPolicy(
   getEnv('CLERUM_STATELESS_COMMUNICATION_CHANNEL_POLICY')
 )
+
+/**
+ * Enforce the external-egress sliding-window invariant (issue #299):
+ *   refreshFloor >= 1, overlap > 0, maxEntries >= 1, and when the periodic
+ *   resync is enabled (interval > 0): floor <= interval <= overlap/2.
+ * The interval MUST stay at or below HALF the overlap so an accumulated /32 is
+ * refreshed before it can expire (the renewal-write window is only overlap/2
+ * wide); otherwise a gap reopens and the pod loses egress on the next rotation.
+ * Fails loud at startup rather than degrading silently.
+ */
+// Upper bounds (audit M-C, port of commit 3f968956). The one-hour cadence
+// ceiling keeps every timer far below Node's signed-32-bit setTimeout limit
+// (2^31-1 ms ≈ 24.8 days) — an unbounded seconds value multiplied to ms would
+// overflow and Node clamps it to 1ms, turning the self-rescheduling resync into
+// a back-to-back DNS hot loop. The entry ceiling is a coarse COUNT alarm cap
+// matching WRC (1300); the real bound on the annotation size is the core's
+// byte-aware eviction (MAX_ANNOTATION_BYTES in network-policy-core), which trims
+// long-FQDN sets well before this count is reached (R1-M5 — the previous 4096
+// claim of "matches WRC" was false; WRC is 1300 and 4096 never bounds bytes).
+const MAX_EXTERNAL_EGRESS_CADENCE_SEC = 60 * 60
+const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 1300
+
+export function validateExternalEgressResyncInvariant(cfg: {
+  externalEgressResyncIntervalSec: number
+  externalEgressOverlapSec: number
+  externalEgressRefreshFloorSec: number
+  externalEgressMaxEntries: number
+}): void {
+  const interval = cfg.externalEgressResyncIntervalSec
+  const overlap = cfg.externalEgressOverlapSec
+  const floor = cfg.externalEgressRefreshFloorSec
+  const max = cfg.externalEgressMaxEntries
+
+  if (!Number.isInteger(overlap) || overlap <= 0 || overlap > MAX_EXTERNAL_EGRESS_CADENCE_SEC) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_OVERLAP_SEC must be an integer between 1 and ` +
+        `${MAX_EXTERNAL_EGRESS_CADENCE_SEC} (seconds), got '${overlap}'`
+    )
+  }
+  if (!Number.isInteger(floor) || floor < 1 || floor > MAX_EXTERNAL_EGRESS_CADENCE_SEC) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC must be an integer between 1 and ` +
+        `${MAX_EXTERNAL_EGRESS_CADENCE_SEC} (seconds), got '${floor}'`
+    )
+  }
+  if (!Number.isInteger(max) || max < 1 || max > MAX_EXTERNAL_EGRESS_MAX_ENTRIES) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_MAX_ENTRIES must be an integer between 1 and ` +
+        `${MAX_EXTERNAL_EGRESS_MAX_ENTRIES}, got '${max}'`
+    )
+  }
+  // A negative interval is a typo, not "disabled" — reject it loudly so it can't
+  // silently reinstate the #299 drift bug (audit F4). 0 = explicitly disabled.
+  // The upper cap (M-C) prevents a signed-32-bit setTimeout overflow.
+  if (!Number.isInteger(interval) || interval < 0 || interval > MAX_EXTERNAL_EGRESS_CADENCE_SEC) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_RESYNC_SEC must be an integer between 0 and ` +
+        `${MAX_EXTERNAL_EGRESS_CADENCE_SEC} (0 disables), got '${interval}'`
+    )
+  }
+  // interval 0 disables periodic resync; only enforce ordering when enabled.
+  if (interval > 0) {
+    if (interval < floor) {
+      throw new Error(
+        `HCC_EXTERNAL_EGRESS_RESYNC_SEC (${interval}) must be >= the refresh floor (${floor})`
+      )
+    }
+    // Audit L2: the renewal-write window is only overlap/2 wide, so the interval
+    // must be <= overlap/2 (not just < overlap) — otherwise the persisted window
+    // can lapse between refreshes and a rotated-away IP is pruned with grace ~=
+    // interval instead of TTL+overlap.
+    if (interval * 2 > overlap) {
+      throw new Error(
+        `HCC_EXTERNAL_EGRESS_RESYNC_SEC (${interval}) must be <= half the overlap window ` +
+          `(${overlap}/2 = ${overlap / 2}) so the persisted window never lapses between refreshes (issue #299)`
+      )
+    }
+  }
+}
 
 export const config: Config = {
   devMode,
@@ -594,8 +724,20 @@ export const config: Config = {
   // the ClerumConfig interface above.
   runtimeTokenRotateBeforeSec: getEnvInt('CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S', 86_400),
 
-  // Periodic external-egress DNS resync (default 5 min). 0 disables.
-  externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 300),
+  // Periodic external-egress DNS resync. Lowered from the legacy 5 min to 60s so
+  // it sits below the 300s overlap window: accumulated IPs are refreshed before
+  // they expire, closing the #299 rotation gap. 0 disables (reintroduces the
+  // stale-snapshot risk; only for operators who explicitly opt out).
+  externalEgressResyncIntervalSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
+  externalEgressDnsResolveTimeoutMs: parseExternalEgressDnsTimeoutMs(
+    getEnv('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS')
+  ),
+  externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
+  externalEgressRefreshFloorSec: getExternalEgressEnvInt(
+    'HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC',
+    5
+  ),
+  externalEgressMaxEntries: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_MAX_ENTRIES', 128),
 
   // Plugin image-host allowlist (Phase 2.3). Permissive default = current
   // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).
@@ -615,3 +757,7 @@ export const config: Config = {
   statelessMaxUptimeHours: getEnvInt('CONTEXT_MAPPER_STATELESS_MAX_UPTIME_HOURS', 72),
   heartbeatPollMs: parseHeartbeatPollMs(getEnv('CONTEXT_MAPPER_HEARTBEAT_POLL_MS')),
 }
+
+// Fail loud at import time if the external-egress sliding-window knobs are
+// inconsistent (issue #299) — a silent misconfig would reopen the rotation gap.
+validateExternalEgressResyncInvariant(config)

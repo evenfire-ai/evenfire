@@ -10,6 +10,8 @@
 #   ./scripts/minikube/full-setup.sh                # Full setup
 #   ./scripts/minikube/full-setup.sh --skip-build   # Skip image build
 #   ./scripts/minikube/full-setup.sh --skip-uis     # Skip UIs and Desktop App
+#   ./scripts/minikube/full-setup.sh --defer-bootstrap-seed
+#                                                     # Leave first-run setup for browser E2E
 #   ./scripts/minikube/full-setup.sh --reset-db     # Reset postgres DB
 #   ./scripts/minikube/full-setup.sh --force-keys   # Regenerate JWT keys
 #   ./scripts/minikube/full-setup.sh -h | --help
@@ -21,6 +23,11 @@
 #   MINIKUBE_RECREATE_PROFILE=true     Allow destructive profile recreation only
 #   CONFIRM_PROFILE=<profile>          when it matches the exact target profile.
 #   BRANCH_PROFILE_DEPLOY_DIR=<dir>     Optional branch-profile deploy cache root.
+#   IMAGE_SOURCE=ghcr|local            ghcr (default) pulls published images;
+#                                      local builds all of them from source.
+#   MINIKUBE_IMAGE_TAG=<tag>           Render-time override of the committed
+#                                      ghcr pin. Never committed. Use `latest`
+#                                      before a release tag exists.
 #
 # Loads .env from project root if present (API keys, credentials).
 # ======================================================================
@@ -29,6 +36,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${PROJECT_DIR}/scripts/e2e/load-dotenv.sh"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${PROJECT_DIR}/scripts/e2e/admin-credentials.sh"
+# shellcheck source=scripts/e2e/minimal-bootstrap-contract.sh
+source "${PROJECT_DIR}/scripts/e2e/minimal-bootstrap-contract.sh"
 
 # ── Color helpers ──────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -113,11 +126,32 @@ SKIP_BUILD=false
 SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
 RESET_DB=true
 FORCE_KEYS=false
+DEFER_BOOTSTRAP_SEED="${MINIKUBE_DEFER_BOOTSTRAP_SEED:-false}"
+CONTROL_DB_RESET_PVC_UID="${CONTROL_DB_RESET_PVC_UID:-}"
+CONTROL_DB_RESET_RESUME="${CONTROL_DB_RESET_RESUME:-false}"
 
 case "${SKIP_UIS}" in
   true|1|yes) SKIP_UIS=true ;;
   *) SKIP_UIS=false ;;
 esac
+
+# ghcr (default): pull published ghcr.io/evenfire-ai images and render the
+# -ghcr overlays. local: build every image from source, today's behaviour.
+#
+# This is what an ACQUIRING run would do. A --skip-build run acquires nothing,
+# so it re-resolves the mode from what the cluster actually holds -- see the
+# image_mode_source block after the flag loop.
+IMAGE_SOURCE="${IMAGE_SOURCE:-ghcr}"
+case "$IMAGE_SOURCE" in
+  ghcr|local) ;;
+  *) err "Unknown IMAGE_SOURCE: '${IMAGE_SOURCE}' (expected: ghcr | local)"; exit 1 ;;
+esac
+export IMAGE_SOURCE
+# A render-time override of the committed pin, NEVER committed. It exists for
+# two real needs the pin alone cannot serve: exercising the pull path before a
+# release tag exists (MINIKUBE_IMAGE_TAG=latest) and recovering from a bad
+# release forward (MINIKUBE_IMAGE_TAG=v0.6.1). See apply_image_tag_override.
+export MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}"
 
 # Rebuild the DB from scratch by default (RESET_DB=true above) so a stale
 # control-postgres volume from an older build cannot drift from the current
@@ -155,6 +189,11 @@ Options:
                          test fixtures. e2e: adds the E2E fixtures (test user,
                          e2e-* recipes, demo MCP servers). Requires ADMIN_PASSWORD
                          unless --seed-profile=e2e.
+  --defer-bootstrap-seed
+                         local branch-E2E mode: skip Step 10's admin/user
+                         seed so the browser owns the one-shot
+                         /api/v1/admin/auth/setup bootstrap. Requires
+                         IMAGE_SOURCE=local and --seed-profile=minimal.
   --reset-db     Force a postgres DB rebuild (already the default; deletes PVC, re-deploys)
   --keep-db      Preserve the existing postgres DB volume (skip the default rebuild)
   --force-keys   Force JWT key regeneration (invalidates existing tokens)
@@ -169,12 +208,28 @@ Environment:
                          default rebuilds control-postgres from scratch every run
   MINIKUBE_SEED_PROFILE, ADMIN_PASSWORD
                          See --seed-profile above
+  MINIKUBE_DEFER_BOOTSTRAP_SEED
+                         Set true to select the same browser-bootstrap mode
+                         as --defer-bootstrap-seed
   MINIKUBE_RECREATE_PROFILE
                          Set true to allow destructive broken-profile recreation
   CONFIRM_PROFILE        Must match MINIKUBE_PROFILE before any profile deletion
+  CONTROL_DB_RESET_PVC_UID
+                         Required with --reset-db: exact approved PVC UID, or
+                         "none" when no control-postgres-data PVC exists
+  CONTROL_DB_RESET_RESUME
+                         Set true only to resume the same interrupted reset
   BRANCH_PROFILE_DEPLOY_DIR
                          Optional deploy cache root; when set, kustomize uses
                          <dir>/overlays/minikube instead of PROJECT_DIR/deploy
+  IMAGE_SOURCE           ghcr (default) pulls published ghcr.io/evenfire-ai
+                         images; local builds every image from source. Ignored
+                         with --skip-build, which acquires nothing and so
+                         follows what the cluster already holds
+  MINIKUBE_IMAGE_TAG     Render-time override applied to a temp copy of deploy/
+                         and never committed. Without it the tag is whatever the
+                         last acquisition recorded, else the committed pin. Use
+                         'latest' before a release tag exists
 
   Loads .env from project root if present. Supported variables:
     OPENAI_API_KEY, CLAUDE_API_KEY, ZAI_API_KEY, BAILIAN_API_KEY
@@ -187,6 +242,7 @@ Examples:
   $(basename "$0") --skip-build          # Re-deploy without rebuilding images
   $(basename "$0") --skip-uis            # Deploy backend services without UIs
   $(basename "$0") --seed-profile=e2e     # Full E2E fixture set
+  $(basename "$0") --defer-bootstrap-seed # Leave first-run setup to browser E2E
   $(basename "$0") --keep-db             # Preserve the existing DB (skip the default rebuild)
   $(basename "$0") --force-keys          # Regenerate all JWT keys
 EOF
@@ -198,6 +254,7 @@ for arg in "$@"; do
     --skip-build) SKIP_BUILD=true ;;
     --skip-uis)   SKIP_UIS=true ;;
     --seed-profile=*) SEED_PROFILE="${arg#*=}" ;;
+    --defer-bootstrap-seed) DEFER_BOOTSTRAP_SEED=true ;;
     --reset-db)   RESET_DB=true ;;
     --keep-db)    RESET_DB=false ;;
     --force-keys) FORCE_KEYS=true ;;
@@ -214,49 +271,191 @@ case "${SEED_PROFILE}" in
   *) err "Unknown --seed-profile: '${SEED_PROFILE}' (expected: minimal | e2e)"; exit 1 ;;
 esac
 
-# ── Load .env ──────────────────────────────────────────────────────────
-# When running from a git worktree (.claude/worktrees/*/), PROJECT_DIR points
-# to the worktree checkout which does NOT contain .env — the file lives in the
-# main repo. `git rev-parse --git-common-dir` returns the shared .git dir
-# (main/.git for worktrees, same-as-git-dir for normal checkouts); its parent
-# is the main repo root.
-ENV_FILE=""
-if [ -f "${PROJECT_DIR}/.env" ]; then
-  ENV_FILE="${PROJECT_DIR}/.env"
-else
-  GIT_COMMON_DIR="$(cd "$PROJECT_DIR" && git rev-parse --git-common-dir 2>/dev/null || echo "")"
-  if [ -n "$GIT_COMMON_DIR" ]; then
-    # git-common-dir can be relative — resolve it against PROJECT_DIR
-    case "$GIT_COMMON_DIR" in
-      /*) MAIN_REPO_DIR="$(cd "${GIT_COMMON_DIR}/.." && pwd)" ;;
-      *)  MAIN_REPO_DIR="$(cd "${PROJECT_DIR}/${GIT_COMMON_DIR}/.." && pwd)" ;;
-    esac
-    if [ -f "${MAIN_REPO_DIR}/.env" ]; then
-      ENV_FILE="${MAIN_REPO_DIR}/.env"
-    fi
+case "${DEFER_BOOTSTRAP_SEED}" in
+  true|1|yes) DEFER_BOOTSTRAP_SEED=true ;;
+  false|0|no|"") DEFER_BOOTSTRAP_SEED=false ;;
+  *) err "Unknown MINIKUBE_DEFER_BOOTSTRAP_SEED: '${DEFER_BOOTSTRAP_SEED}' (expected: true | false)"; exit 1 ;;
+esac
+
+if [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  if [ "$SEED_PROFILE" != "minimal" ]; then
+    err "--defer-bootstrap-seed requires --seed-profile=minimal; the e2e fixture profile owns its seed flow."
+    exit 1
+  fi
+  if [ "$IMAGE_SOURCE" != "local" ]; then
+    err "--defer-bootstrap-seed requires IMAGE_SOURCE=local so browser evidence can correspond to this worktree HEAD."
+    exit 1
   fi
 fi
 
+# ── The mode follows the cluster on a run that acquires nothing ────────
+#
+# THE OVERLAY MUST FOLLOW THE IMAGES ON THE NODE, NOT THIS SHELL. --skip-build
+# re-deploys WITHOUT pulling or building anything, so the only truthful source
+# for "which images does this cluster run" is what the last acquisition
+# recorded. Taking IMAGE_SOURCE instead rendered the -ghcr overlays over a
+# locally built cluster -- every Deployment then names a ghcr ref nothing ever
+# pulled, i.e. cluster-wide ImagePullBackOff -- and the mirror image (clerum/*
+# refs over a pulled cluster) is the same bug with the operands swapped. It is
+# not a rare path: `make minikube-setup` ALWAYS passes IMAGE_SOURCE (the
+# Makefile defaults it to ghcr), so the environment can never be read as "the
+# operator asked for this".
+#
+# On an ACQUIRING run the environment still decides, because that run is about
+# to rewrite the record -- otherwise `make minikube-setup-local` over a pulled
+# cluster could never switch a cluster back to local builds.
+#
+# image_mode_source falls back to the environment when nothing is recorded, so
+# the FIRST run on a fresh cluster is unchanged; this is the same resolver
+# `make minikube-deploy-all` and `build-images.sh --verify-only` already use.
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${SCRIPT_DIR}/image-mode.sh"
+if [ "$SKIP_BUILD" = true ]; then
+  RECORDED_IMAGE_SOURCE="$(image_mode_source "$PROJECT_DIR")" || exit 1
+  if [ "$RECORDED_IMAGE_SOURCE" != "$IMAGE_SOURCE" ]; then
+    warn "This cluster's images were acquired as IMAGE_SOURCE=${RECORDED_IMAGE_SOURCE} (deploy/minikube/.image-manifest.json)."
+    warn "--skip-build acquires nothing, so the overlay follows the cluster, not IMAGE_SOURCE=${IMAGE_SOURCE}."
+    warn "To change the mode, re-run WITHOUT --skip-build so the images are actually re-acquired."
+    IMAGE_SOURCE="$RECORDED_IMAGE_SOURCE"
+    export IMAGE_SOURCE
+  fi
+fi
+
+# ── Load .env ──────────────────────────────────────────────────────────
+# Worktrees resolve through git-common-dir to the primary checkout. Dotenv is
+# parsed as data (never sourced as shell code), and admin aliases use the
+# shared layer-first contract: canonical .env, then process, then local fallback.
+ENV_FILE="$(dotenv_canonical_root "${PROJECT_DIR}")"
+
 if [ -n "$ENV_FILE" ]; then
   log "Loading .env from ${ENV_FILE}..."
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+  dotenv_load_file "$ENV_FILE"
   ok ".env loaded"
 else
   warn "No .env found in ${PROJECT_DIR} or main repo — channel-reader + LLM secrets will use placeholders"
 fi
+ADMIN_PASSWORD="$(e2e_resolve_admin_password "${PROJECT_DIR}" || true)"
+export ADMIN_PASSWORD
 
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
 TOTAL_STEPS=12
+# MINIKUBE_IMAGE_TAG overrides the committed pin AT RENDER TIME ONLY.
+#
+# A stdout filter cannot do this: the overlay is rendered from a DIRECTORY at
+# four independent sites (`kubectl apply -k` at Step 6b, two
+# `kubectl kustomize | apply -f -` calls, and run-control-api-db-migration.sh,
+# which takes --overlay and extracts the control-api image from the render).
+# `kustomize edit set image` is not available either -- everything here uses
+# `kubectl kustomize`, and kubectl has no `edit` subcommand, so it would mean a
+# new prerequisite. Mutating the committed component in place would make this
+# operator lever a SECOND WRITER of the release coordinate, which is exactly
+# what the one-writer rule forbids.
+#
+# So: copy deploy/ to a temp dir, rewrite the component's newTag THERE, and
+# point the existing BRANCH_PROFILE_DEPLOY_DIR hook at the copy. The whole tree
+# must move because `resources: ../minikube` and
+# deploy/scripts/minikube-detect-k8s-api-ip.sh both resolve relative to that
+# root.
+apply_image_tag_override() {
+  [ "$IMAGE_SOURCE" = ghcr ] || return 0
+  [ -n "$MINIKUBE_IMAGE_TAG" ] || return 0
+
+  local src override_root
+  src="${BRANCH_PROFILE_DEPLOY_DIR:-${PROJECT_DIR}/deploy}"
+  override_root="$(mktemp -d)"
+  cp -R "$src" "${override_root}/deploy"
+
+  local component="${override_root}/deploy/components/ghcr-images/kustomization.yaml"
+  [ -f "$component" ] || { err "ghcr component not found in the deploy copy at ${component}"; exit 1; }
+
+  # In-place on the COPY only. -i.bak plus rm keeps this portable across BSD
+  # and GNU sed; `sed -i ''` is a BSD-only spelling that GNU sed rejects.
+  sed -i.bak "s|^\([[:space:]]*newTag:[[:space:]]*\).*$|\1${MINIKUBE_IMAGE_TAG}|" "$component"
+  rm -f "${component}.bak"
+
+  local rewritten
+  rewritten="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$component" | sort -u)"
+  [ "$rewritten" = "$MINIKUBE_IMAGE_TAG" ] \
+    || { err "tag override did not apply cleanly: copy now carries '${rewritten}', expected '${MINIKUBE_IMAGE_TAG}'"; exit 1; }
+
+  export BRANCH_PROFILE_DEPLOY_DIR="${override_root}/deploy"
+}
+apply_image_tag_override
+
 ACTIVE_MINIKUBE_DEPLOY_DIR="${BRANCH_PROFILE_DEPLOY_DIR:-${PROJECT_DIR}/deploy}"
+# The kustomize dir is where the generated k8s-api-ip.yaml lands and where
+# patches/k8s-api-ip.yaml.template lives. It NEVER moves; only the render dir
+# switches between the plain and the -ghcr overlay.
 ACTIVE_MINIKUBE_KUSTOMIZE_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube"
-ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}"
-if [ "$SKIP_UIS" = true ]; then
-  ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube-no-uis"
+if [ "$IMAGE_SOURCE" = ghcr ]; then
+  if [ "$SKIP_UIS" = true ]; then
+    ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube-no-uis-ghcr"
+  else
+    ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube-ghcr"
+  fi
+else
+  if [ "$SKIP_UIS" = true ]; then
+    ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_DEPLOY_DIR}/overlays/minikube-no-uis"
+  else
+    ACTIVE_MINIKUBE_RENDER_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}"
+  fi
 fi
+
+# The effective tag and where it came from, for the banner and for every error
+# message that has to tell an operator what to change.
+#
+# Reading the committed pin here ignored the tag the cluster actually holds: on
+# the documented `MINIKUBE_IMAGE_TAG=latest make minikube-setup` bootstrap, any
+# LATER run (which has no such variable) reported and acted on v0.6.0 against a
+# cluster running :latest. image_mode_ghcr_tag applies override -> recorded ->
+# pin, the same precedence pull-images.sh and build-images.sh --verify-only
+# use; the `= ghcr` branch above is this file's mode gate, which is why the
+# ungated ghcr resolver is the right one to call.
+#
+# The pin is read from PROJECT_DIR, not ACTIVE_MINIKUBE_DEPLOY_DIR: the two
+# differ only when MINIKUBE_IMAGE_TAG rewrote a copy, and that override already
+# wins ahead of any pin.
+EFFECTIVE_IMAGE_TAG=""
+TAG_ORIGIN=""
+if [ "$IMAGE_SOURCE" = ghcr ]; then
+  EFFECTIVE_IMAGE_TAG="$(image_mode_ghcr_tag "$PROJECT_DIR")" || exit 1
+  TAG_ORIGIN="$(image_mode_tag_origin "$PROJECT_DIR")" || exit 1
+  # Never continue on an empty tag: every ref built from it would be tagless,
+  # and the banner would confidently print nothing at all.
+  if [ -z "$EFFECTIVE_IMAGE_TAG" ] || [ -z "$TAG_ORIGIN" ]; then
+    err "could not resolve the ghcr image tag (tag='${EFFECTIVE_IMAGE_TAG}' origin='${TAG_ORIGIN}')"
+    err "Set MINIKUBE_IMAGE_TAG=<tag>, or fix deploy/components/ghcr-images/kustomization.yaml."
+    exit 1
+  fi
+fi
+
+print_image_source_banner() {
+  echo ""
+  echo -e "${BOLD}================================================================${NC}"
+  if [ "$IMAGE_SOURCE" = ghcr ]; then
+    echo -e "${BOLD}  Images: PULLED from ghcr.io/evenfire-ai${NC}"
+    echo -e "  tag:    ${EFFECTIVE_IMAGE_TAG}"
+    echo -e "  origin: ${TAG_ORIGIN}"
+    echo -e "  build locally instead with: ${BOLD}make minikube-setup-local${NC}"
+  else
+    echo -e "${BOLD}  Images: BUILT LOCALLY from source (IMAGE_SOURCE=local)${NC}"
+    echo -e "  This is the slow path. The default pulls published images."
+  fi
+  echo -e "  render: ${ACTIVE_MINIKUBE_RENDER_DIR#${ACTIVE_MINIKUBE_DEPLOY_DIR}/}"
+  echo -e "${BOLD}================================================================${NC}"
+}
+print_image_source_banner
+
+# Test seam: everything above resolves configuration only, with no cluster or
+# network call. `MINIKUBE_FULL_SETUP_CONFIG_ONLY=true` stops here so
+# scripts/tests/test-minikube-full-setup.sh can read the resolved values
+# without a cluster. It must stay immediately after the resolution block and
+# before the first minikube call.
+if [ "${MINIKUBE_FULL_SETUP_CONFIG_ONLY:-false}" = "true" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 MINIKUBE_START_SCRIPT="${MINIKUBE_START_SCRIPT:-${SCRIPT_DIR}/start.sh}"
 
 minikube_status_snapshot() {
@@ -317,6 +516,28 @@ maybe_exit_after_cluster_step() {
   fi
 }
 
+postgres_has_invalid_checkpoint() {
+  local pods pod logs
+  pods="$($KC get pods -n control-plane -l app=control-postgres -o name)" || return 1
+  pod="${pods%%$'\n'*}"
+  [ -n "$pod" ] || return 1
+  logs="$($KC logs "$pod" -n control-plane --tail=50)" || return 1
+  grep -q "invalid checkpoint record" <<<"$logs"
+}
+
+ensure_control_postgres_ready() {
+  if $KC rollout status deployment/control-postgres -n control-plane --timeout=180s >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! postgres_has_invalid_checkpoint; then
+    err "control-plane/control-postgres did not become Ready and no supported WAL recovery signature was found"
+    return 1
+  fi
+  err "Postgres reports an invalid checkpoint; automatic destructive recovery is disabled"
+  err "Re-run with --reset-db and CONTROL_DB_RESET_PVC_UID=<exact approved UID>"
+  return 1
+}
+
 # ======================================================================
 # Step 1: Preconditions
 # ======================================================================
@@ -360,7 +581,7 @@ ok "ruby is available"
 
 # Fail here, not at Step 10. Image builds dominate a 5-10 min first run
 # (README.md:178); aborting after them for a missing .env line is hostile.
-if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
+if [ "$SEED_PROFILE" = "minimal" ] && [ "$DEFER_BOOTSTRAP_SEED" != true ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
   err "ADMIN_PASSWORD is not set."
   err ""
   err "  This is your Control UI admin password AND your Desktop App login."
@@ -377,9 +598,9 @@ fi
 # defer, the bootstrap POST fails with "password must be between 8 and 256
 # characters" only AFTER image builds + deploy, and the admin account may still
 # hold the publicly-known default. Keep these bounds in sync with auth.ts. Scope
-# to the minimal profile: e2e force-assigns ADMIN_PASSWORD later (search
-# E2E_ADMIN_PASSWORD), so a short .env value there is irrelevant.
-if [ "$SEED_PROFILE" = "minimal" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+# to the minimal profile: the E2E profile may use its local-only fallback when
+# no canonical or explicit admin credential is configured.
+if [ "$SEED_PROFILE" = "minimal" ] && [ "$DEFER_BOOTSTRAP_SEED" != true ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
   pw_len=${#ADMIN_PASSWORD}
   if [ "$pw_len" -lt 8 ] || [ "$pw_len" -gt 256 ]; then
     err "ADMIN_PASSWORD must be between 8 and 256 characters (got ${pw_len})."
@@ -390,7 +611,13 @@ if [ "$SEED_PROFILE" = "minimal" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
     exit 1
   fi
 fi
-ok "ADMIN_PASSWORD is set"
+if [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  ok "Bootstrap admin/user seed deferred; the first-run browser setup owns /api/v1/admin/auth/setup"
+elif [ -n "${ADMIN_PASSWORD:-}" ]; then
+  ok "ADMIN_PASSWORD resolved from the canonical environment contract"
+else
+  ok "No admin password configured; the E2E-only local fallback will be used at seed time"
+fi
 
 # ======================================================================
 # Step 2: Cluster
@@ -575,7 +802,10 @@ fi
 step_header 5 $TOTAL_STEPS "Build Images"
 
 if [ "$SKIP_BUILD" = true ]; then
-  # Even with --skip-build, warn if local code is newer than images
+  # Even with --skip-build, warn if local code is newer than the images the
+  # cluster will run. The ADVICE has to branch on the mode: "rebuild" is wrong
+  # in ghcr mode, where nothing was built and rebuilding is precisely what the
+  # default path exists to avoid.
   LAST_BUILD_MARKER="deploy/minikube/.image-manifest.json"
   if [ -f "$LAST_BUILD_MARKER" ]; then
     NEWEST_SRC=$(find \
@@ -588,15 +818,68 @@ if [ "$SKIP_BUILD" = true ]; then
       control-ui/lib \
       -type f -newer "$LAST_BUILD_MARKER" 2>/dev/null | head -1 || true)
     if [ -n "$NEWEST_SRC" ]; then
-      warn "Source files changed since last image build (e.g., $NEWEST_SRC)."
-      warn "Images may be STALE. Run without --skip-build to rebuild."
+      if [ "$IMAGE_SOURCE" = ghcr ]; then
+        warn "Local source is newer than the pulled images (e.g., $NEWEST_SRC)."
+        warn "This cluster runs RELEASE images (${EFFECTIVE_IMAGE_TAG}); your local edits are NOT in them."
+        warn "To test local edits: 'make minikube-pre-gate-sync' shadow-builds only the changed"
+        warn "services over the release tag, or 'make minikube-setup-local' builds everything."
+      else
+        warn "Source files changed since last image build (e.g., $NEWEST_SRC)."
+        warn "Images may be STALE. Run without --skip-build to rebuild."
+      fi
     else
-      log "Skipping image build (--skip-build). No source changes detected since last build."
+      log "Skipping image acquisition (--skip-build). No source changes detected."
     fi
   else
-    warn "No image manifest found — images may never have been built."
-    warn "Run without --skip-build if pods show ImagePullBackOff or model-config-failed."
+    if [ "$IMAGE_SOURCE" = ghcr ]; then
+      warn "No image manifest found — images may never have been pulled."
+      warn "Run without --skip-build, or 'make minikube-pull-images', if pods show ImagePullBackOff."
+    else
+      warn "No image manifest found — images may never have been built."
+      warn "Run without --skip-build if pods show ImagePullBackOff or model-config-failed."
+    fi
   fi
+elif [ "$IMAGE_SOURCE" = ghcr ]; then
+  # ORDER MATTERS. build-images.sh regenerates
+  # deploy/minikube/.image-manifest.json on EVERY invocation, including
+  # --only= runs (its header comment claims otherwise; the code at the bottom
+  # of the script is unconditional). So every build-images.sh call has to come
+  # BEFORE the pull, or it clobbers the puller's manifest -- the one file the
+  # --skip-build staleness check reads -- with a mostly-NOT_BUILT map. (The
+  # `imageSource` key survives that clobber either way: an --only= run carries
+  # the recorded value forward rather than claiming the cluster is local.)
+  #
+  # No clerum image build runs on this path, so nothing else pulls the public
+  # third-party images (postgres, redis, nginx, ...) into the daemon.
+  log "Loading public base images (postgres, redis, nginx, ...) into minikube..."
+  bash "${SCRIPT_DIR}/build-images.sh" --public-only
+  ok "Public base images loaded"
+
+  # No local build runs on this path any more. The published:false images
+  # (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e) have no ghcr
+  # counterpart, and both are now built only by the path that actually needs
+  # them: `make minikube-setup-e2e`.
+
+  log "Pulling published images (${EFFECTIVE_IMAGE_TAG}) into minikube..."
+  # --skip-uis is forwarded for the same reason the local build path passes it:
+  # the -no-uis-ghcr overlay DELETES the control-ui and profile-ui Deployments,
+  # so pulling them spends ~470 MiB of transfer and disk on images no pod will
+  # ever reference.
+  PULL_IMAGE_ARGS=()
+  if [ "$SKIP_UIS" = true ]; then
+    PULL_IMAGE_ARGS+=(--skip-uis)
+  fi
+  # `${PULL_IMAGE_ARGS[@]+"${PULL_IMAGE_ARGS[@]}"}`: expanding an EMPTY array as
+  # `"${arr[@]}"` is an unbound-variable abort under `set -u` in bash 3.2, which
+  # is what /bin/bash on macOS still is.
+  #
+  # `${MINIKUBE_MULTI_NODE:-false}`, not `$MINIKUBE_MULTI_NODE`: this script
+  # never assigns that variable (every other use site defaults it inline), so
+  # the bare form is an unbound-variable abort under `set -u` on the default
+  # single-node path.
+  MINIKUBE_PROFILE="$PROFILE" MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}" \
+    bash "${SCRIPT_DIR}/pull-images.sh" ${PULL_IMAGE_ARGS[@]+"${PULL_IMAGE_ARGS[@]}"}
+  ok "All published images pulled"
 else
   log "Building and loading images into minikube..."
   BUILD_IMAGE_ARGS=(--skip-public)
@@ -613,62 +896,153 @@ fi
 step_header 6 $TOTAL_STEPS "Deploy"
 
 # 6a. Optional DB reset
-if [ "$RESET_DB" = true ]; then
-  log "Rebuilding postgres database from scratch (set REUSE_DB=true to keep it)..."
-  # Scale down to release PVC
-  $KC scale deployment/control-api -n control-plane --replicas=0 2>/dev/null || true
-  $KC scale deployment/control-postgres -n control-plane --replicas=0 2>/dev/null || true
-  # Wait for pods to terminate
-  sleep 3
-  # Delete PVC
-  $KC delete pvc control-postgres-data -n control-plane --ignore-not-found=true
-  # Delete any Released PVs matching control-postgres
-  RELEASED_PVS=$($KC get pv -o json 2>/dev/null | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for pv in data.get('items', []):
-    name = pv['metadata']['name']
-    phase = pv.get('status', {}).get('phase', '')
-    claim = pv.get('spec', {}).get('claimRef', {}).get('name', '')
-    if phase == 'Released' and 'control-postgres' in claim:
-        print(name)
-" 2>/dev/null || true)
-  if [ -n "$RELEASED_PVS" ]; then
-    for pv in $RELEASED_PVS; do
-      $KC delete pv "$pv" --ignore-not-found=true
-      ok "Deleted Released PV: $pv"
-    done
+if [ "$RESET_DB" = true ] && [ -z "$CONTROL_DB_RESET_PVC_UID" ]; then
+  # Never-bootstrapped auto-detect: with no control-postgres PVC AND no reset
+  # recovery state there is nothing a storage reset could destroy or resume,
+  # and the reset preflight (ready GFS secrets, running gfsc deployments)
+  # cannot succeed before the first deploy. Continue on the same path a
+  # REUSE_DB=true bootstrap takes. Any other combination keeps the hard-fail.
+  FRESH_PVC_UID="$($KC -n control-plane get pvc control-postgres-data \
+    -o 'jsonpath={.metadata.uid}' --ignore-not-found)"
+  FRESH_RESET_STATE="$($KC -n control-plane get configmap control-db-reset-state \
+    -o name --ignore-not-found)"
+  if [ -z "$FRESH_PVC_UID" ] && [ -z "$FRESH_RESET_STATE" ]; then
+    log "Fresh cluster: control DB was never bootstrapped; nothing to reset — continuing without a storage reset"
+    RESET_DB=false
   fi
+fi
+if [ "$RESET_DB" = true ]; then
+  [ -n "$CONTROL_DB_RESET_PVC_UID" ] \
+    || { err "CONTROL_DB_RESET_PVC_UID is required with --reset-db (pass the current control-postgres PVC UID, 'none' for a cluster without that PVC, or skip the reset with REUSE_DB=true/--keep-db). A cluster with no control-postgres PVC and no reset state is detected automatically and skips the reset."; exit 1; }
+  if [ "$CONTROL_DB_RESET_PVC_UID" = none ]; then
+    RESET_STORAGE_ARGS=(--expect-no-pvc)
+  else
+    RESET_STORAGE_ARGS=(--expected-pvc-uid "$CONTROL_DB_RESET_PVC_UID")
+  fi
+  case "$CONTROL_DB_RESET_RESUME" in
+    true|1|yes) RESET_STORAGE_ARGS+=(--resume) ;;
+  esac
+  log "Resetting postgres database (--reset-db)..."
+  CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reset-control-db-storage.sh" "${RESET_STORAGE_ARGS[@]}"
+  RESET_REPLICA_STATE="$($KC -n control-plane get configmap control-db-reset-state -o \
+    'jsonpath={.data.hccReplicas}{"|"}{.data.workflowReplicas}{"|"}{.data.traceReplicas}{"|"}{.data.writerReplicas}{"|"}{.data.readerReplicas}{"|"}{.data.controlApiReplicas}')"
+  IFS='|' read -r RESET_HCC_REPLICAS RESET_WORKFLOW_REPLICAS RESET_TRACE_REPLICAS \
+    RESET_WRITER_REPLICAS RESET_READER_REPLICAS RESET_CONTROL_API_REPLICAS <<<"$RESET_REPLICA_STATE"
+  [[ "$RESET_HCC_REPLICAS" =~ ^[0-9]+$ ]] \
+    && [[ "$RESET_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] \
+    && [[ "$RESET_TRACE_REPLICAS" =~ ^[0-9]+$ ]] \
+    && [[ "$RESET_WRITER_REPLICAS" =~ ^[1-9][0-9]*$ ]] \
+    && [[ "$RESET_READER_REPLICAS" =~ ^[1-9][0-9]*$ ]] \
+    && [[ "$RESET_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] \
+    || { err "Reset replica recovery state is invalid"; exit 1; }
   ok "Postgres PVCs deleted"
 fi
 
 # 6b. Deploy via kustomize
 log "Refreshing minikube K8s API endpoint CIDRs..."
 CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
+# patches/k8s-api-ip.yaml is GENERATED and gitignored -- overlays/minikube
+# commits only the .template -- and overlays/minikube-ghcr renders ../minikube,
+# which patches with it.
+#
+# With MINIKUBE_IMAGE_TAG set, ACTIVE_MINIKUBE_KUSTOMIZE_DIR is the mktemp COPY
+# (apply_image_tag_override), so the line above writes the patch THERE and the
+# working tree never gets one. Every later consumer renders from the working
+# tree, or from image-mode.sh's own fresh copy of it: the next
+# `make minikube-pre-gate-sync` renders the control-api migration overlay
+# BEFORE `make minikube-deploy-all` regenerates the patch, and kustomize dies
+# with an evalsymlink error naming a file nothing ever wrote. Generate it in the
+# working tree too whenever the active dir is not the working tree.
+PROJECT_MINIKUBE_KUSTOMIZE_DIR="${PROJECT_DIR}/deploy/overlays/minikube"
+if [ "$ACTIVE_MINIKUBE_KUSTOMIZE_DIR" != "$PROJECT_MINIKUBE_KUSTOMIZE_DIR" ]; then
+  CONTEXT="${PROFILE}" OVERLAY_DIR="${PROJECT_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
+fi
 ok "Minikube K8s API CIDRs refreshed"
 
+# Upgrade path: stage the additive reader credential before the full overlay
+# changes HCC. Fresh bootstrap has no ready control-api yet and remains
+# fail-closed until the post-migration branch immediately below.
+CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+if [ "$RESET_DB" = true ]; then
+  log "Database reset path — HCC cutover deferred until post-convergence verification"
+else
+  writer_dsn="$($KC -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
+  if [ -n "${writer_dsn}" ]; then
+    # apply-inter-service-tokens.sh intentionally restarts control-api before
+    # this cutover check. A five-second probe races that rollout and makes an
+    # otherwise healthy REUSE_DB rerun fail closed before the new pod can be
+    # Ready. Keep the refusal, but wait for the same bounded rollout window
+    # used by the main readiness gate.
+    if ! $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null 2>&1; then
+      err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
+      exit 1
+    fi
+    log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  else
+    log "Fresh bootstrap detected — reader staging deferred until migrations; GFSC remains fail-closed"
+  fi
+fi
+
 log "Applying kustomize overlay (${ACTIVE_MINIKUBE_RENDER_DIR})..."
-kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+if [ "$RESET_DB" = true ]; then
+  # Keep control-api scaled to zero until migrations and role restoration are
+  # complete; applying the full overlay here would race it against a fresh DB.
+  $KC apply -k "$ACTIVE_MINIKUBE_RENDER_DIR" -l app=control-postgres
+else
+  kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+fi
 ok "Kustomize overlay applied"
 
-# 6b-2. Control-api database migrations + runtime DB roles.
-# control-api, workflow-recipes, and trace-maintenance-worker mount
-# least-privilege runtime DB credentials from the *-postgres-runtime Secrets,
-# which ship empty. The governed-trace runtime-roles migration creates the fixed
-# roles; the provision script writes each role's connection-string into its
-# Secret. Until then those pods sit
-# in CreateContainerConfigError and recover automatically once the Secrets are
-# populated (Step 8 waits them out). Running the migration here (against the
-# control-postgres superuser) breaks the bootstrap cycle so the roles exist
-# before control-api needs its own runtime credential to start.
-log "Applying control-api database migrations and runtime roles..."
-$KC rollout status deployment/control-postgres -n control-plane --timeout=180s >/dev/null
-CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-  bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
-  --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
-CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-  bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
-ok "Control-api database migrations and runtime roles applied"
+if [ "$RESET_DB" = true ]; then
+  log "Rebuilding database contracts and restoring GFS roles after reset..."
+  $KC rollout status deployment/control-postgres -n control-plane --timeout=180s >/dev/null
+  CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/converge-control-db-after-reset.sh" \
+    --overlay "$ACTIVE_MINIKUBE_RENDER_DIR" \
+    --job-name control-api-db-migrate-reset
+  kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+  # The overlay declares ordinary one-replica defaults. Reassert the exact
+  # pre-reset operating counts after applying it; credentials are verified and
+  # HCC is restored by convergence before this safe rollout boundary.
+  $KC -n gfs scale deployment/gfsc-writer --replicas="$RESET_WRITER_REPLICAS" >/dev/null
+  $KC -n gfs scale deployment/gfsc-reader --replicas="$RESET_READER_REPLICAS" >/dev/null
+  $KC -n control-plane scale deployment/control-api --replicas="$RESET_CONTROL_API_REPLICAS" >/dev/null
+  $KC -n control-plane scale deployment/workflow-recipes --replicas="$RESET_WORKFLOW_REPLICAS" >/dev/null
+  $KC -n control-plane scale deployment/trace-maintenance-worker --replicas="$RESET_TRACE_REPLICAS" >/dev/null
+  $KC -n control-plane scale deployment/host-context-controller --replicas="$RESET_HCC_REPLICAS" >/dev/null
+  $KC -n gfs rollout status deployment/gfsc-writer --timeout=180s >/dev/null
+  $KC -n gfs rollout status deployment/gfsc-reader --timeout=180s >/dev/null
+  if [ "$RESET_WORKFLOW_REPLICAS" -gt 0 ]; then
+    $KC -n control-plane rollout status deployment/workflow-recipes --timeout=180s >/dev/null
+  fi
+  if [ "$RESET_TRACE_REPLICAS" -gt 0 ]; then
+    $KC -n control-plane rollout status deployment/trace-maintenance-worker --timeout=180s >/dev/null
+  fi
+  if [ "$RESET_HCC_REPLICAS" -gt 0 ]; then
+    $KC -n control-plane rollout status deployment/host-context-controller --timeout=900s >/dev/null
+  fi
+  ok "Control-api database and GFS roles converged after reset"
+else
+  ensure_control_postgres_ready
+  log "Applying control-api database migrations and runtime roles..."
+  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+    bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
+    --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
+  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
+    ok "Control-api database migrations and runtime roles applied"
+
+    # The credential probe runs through control-api, so prove that deployment is
+    # live before normal staging on bootstrap or an idempotent upgrade.
+    $KC scale deployment/control-api -n control-plane --replicas=1 >/dev/null
+    $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
+    # On the upgrade path the overlay above may still be cutting HCC over to
+    # the split writer/reader templates; reconciling before that lands leaves
+    # the staged reader credential rollout-pending and fails the final verify.
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    ok "GFS credentials reconciled and writer bootstrap verified"
+fi
 
 # 6c. Re-apply generated service tokens after kustomize.
 # Re-patch the generated inter-service tokens after every overlay apply so the
@@ -685,6 +1059,20 @@ ok "CRD instances applied (Host, Context, CommunicationChannel, GFS, policy)"
 # instances-e2e/context-mcpservers.yaml must apply AFTER instances/context.yaml
 # so its non-empty mcpServers list wins over the empty default.
 if [ "$SEED_PROFILE" = "e2e" ]; then
+  # airtable-server.yaml names the LOCAL ref clerum/airtable-mcp-server:test,
+  # and this directory is applied with `kubectl apply -f` -- outside kustomize,
+  # so the ghcr component never rewrites it -- while HCC forces
+  # imagePullPolicy=IfNotPresent on minikube. That ref must therefore already
+  # be in the daemon, and minikube setup no longer acquires it: the registry
+  # distributes MCP servers and installs them on demand, so airtable-mcp-server
+  # is deployed_to_minikube:false and is neither built nor pulled by default.
+  # Build it here, gated on the one branch that consumes it, rather than paying
+  # for it on every setup.
+  log "Building the optional Airtable MCP image for the E2E demo instance..."
+  MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true \
+    bash "${SCRIPT_DIR}/build-images.sh" --only=airtable-mcp-server
+  ok "airtable-mcp-server built"
+
   log "Applying E2E demo MCP server instances..."
   $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances-e2e/"
   ok "E2E instances applied (airtable, mongodb, mongodb-mcp-stack + context1 servers)"
@@ -939,55 +1327,11 @@ for entry in "${CORE_DEPLOYS[@]}"; do
   else
     warn "${ns}/${name} not ready — checking for recovery..."
 
-    # Check for postgres WAL corruption (CrashLoopBackOff + invalid checkpoint)
-    if [ "$name" = "control-api" ] || [ "$name" = "control-postgres" ]; then
-      PG_POD=$($KC get pods -n control-plane -l app=control-postgres -o name 2>/dev/null | head -1)
-      if [ -n "$PG_POD" ]; then
-        PG_LOGS=$($KC logs "$PG_POD" -n control-plane --tail=50 2>/dev/null || true)
-        if echo "$PG_LOGS" | grep -q "invalid checkpoint record"; then
-          warn "Postgres WAL corruption detected — auto-recovering..."
-
-          # Scale down
-          $KC scale deployment/control-api -n control-plane --replicas=0 2>/dev/null || true
-          $KC scale deployment/control-postgres -n control-plane --replicas=0 2>/dev/null || true
-          sleep 5
-
-          # Delete PVC
-          $KC delete pvc control-postgres-data -n control-plane --ignore-not-found=true
-
-          # Delete Released PVs
-          RELEASED_PVS=$($KC get pv -o json 2>/dev/null | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for pv in data.get('items', []):
-    n = pv['metadata']['name']
-    phase = pv.get('status', {}).get('phase', '')
-    claim = pv.get('spec', {}).get('claimRef', {}).get('name', '')
-    if phase == 'Released' and 'control-postgres' in claim:
-        print(n)
-" 2>/dev/null || true)
-          for pv in $RELEASED_PVS; do
-            $KC delete pv "$pv" --ignore-not-found=true
-          done
-
-          # Re-apply kustomize to recreate PVC + deployments
-          log "Refreshing minikube K8s API endpoint CIDRs before recovery re-apply..."
-          CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
-          kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
-          CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-inter-service-tokens.sh"
-
-          # Wait for postgres rollout
-          log "Waiting for postgres recovery (120s)..."
-          if $KC rollout status deployment/control-postgres -n control-plane --timeout=120s 2>/dev/null; then
-            ok "Postgres recovered"
-            # Now wait for control-api
-            if $KC rollout status deployment/control-api -n control-plane --timeout=120s 2>/dev/null; then
-              ok "control-api recovered after postgres fix"
-              continue
-            fi
-          fi
-        fi
-      fi
+    # A stale or late corruption signature is diagnostic evidence only. Storage
+    # deletion always requires a new explicit --reset-db invocation and UID.
+    if [ "$name" = "control-api" ] && postgres_has_invalid_checkpoint; then
+      err "Postgres reports an invalid checkpoint; automatic destructive recovery is disabled"
+      err "Re-run with --reset-db and CONTROL_DB_RESET_PVC_UID=<exact approved UID>"
     fi
 
     err "${ns}/${name} NOT ready"
@@ -1011,8 +1355,8 @@ if $KC get configmap gfs-config -n gfs &>/dev/null; then
     err "gfs public-key sync FAILED — gfsc cannot verify tokens. Fix and re-run."
     exit 1
   fi
-  if CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/provision-gfs-db.sh"; then
-    ok "gfs serving provisioned (gfsc can verify tokens + reach the permission store)"
+  if CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/scripts/minikube/verify-gfs.sh"; then
+    ok "gfs serving verified (reader/writer credentials and readiness)"
   else
     err "gfs DB provisioning FAILED — gfsc /readyz will fail closed and every GFS operation will 503. Fix and re-run."
     exit 1
@@ -1058,65 +1402,86 @@ fi
 # ======================================================================
 step_header 10 $TOTAL_STEPS "Seed Test User"
 
-# The e2e profile reproduces today's inputs exactly: tests/e2e/testUser.ts pins
-# test@clerum.io, and ~26 control-ui/e2e specs log in as admin/changeme123!.
-# The minimal profile must not seed anything named test*.
-if [ "$SEED_PROFILE" = "e2e" ]; then
-  SEED_USER_DEFAULT_EMAIL="test@clerum.io"
-  SEED_USER_DEFAULT_NAME="Test User"
-  # Force-assign, do NOT defer to .env via `: "${ADMIN_PASSWORD:=...}"`.
-  # .env is sourced with `set -a` above, and this branch requires users to
-  # set a real ADMIN_PASSWORD there — under the `:=` form that real password
-  # would win and override the e2e pin. The E2E specs never read .env: they
-  # hardcode changeme123! (or read ADMIN_PASS), so a leaked .env password
-  # would seed admin/<real password> while the specs still send
-  # admin/changeme123!, turning the whole E2E lane red. E2E_ADMIN_PASSWORD
-  # remains the deliberate escape hatch for callers that need a non-default
-  # e2e password.
-  ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-changeme123!}"
+if [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  # The browser E2E must be the first actor to consume the one-shot
+  # /api/v1/admin/auth/setup route. Do not invoke seed-test-data.sh here: it
+  # logs in as the auto-seeded admin and makes that route correctly reject a
+  # later setup attempt with HTTP 409.
+  SEED_USER_OK=deferred
+  SEED_USER_EMAIL=""
+  log "Deferring bootstrap/admin seed; browser E2E owns /api/v1/admin/auth/setup"
 else
-  # Minimal: the Control-UI admin IS the sole Desktop App member — no separate
-  # seeded user. Point both the admin-bootstrap email and the seeded desktop
-  # user at the same evenfire-branded address so the seeder's (idempotent)
-  # user+team step converges on the admin identity that /admin/auth/setup
-  # already provisioned (users row + "<username> team" + chatllm/context1
-  # grants), instead of minting a second member/team. `admin@clerum.io` would
-  # leak the internal code name onto a product surface (the Desktop member
-  # list) — evenfire branding belongs here (docs/concepts/code-names.md). If
-  # the best-effort admin desktop provisioning ever fails, the seeder still
-  # creates this one identity, so the minimal install is never member-less.
-  SEED_USER_DEFAULT_EMAIL="admin@evenfire.local"
-  SEED_USER_DEFAULT_NAME="admin"
-  : "${ADMIN_EMAIL:=admin@evenfire.local}"
-fi
-SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
-SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
-log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
-SEED_USER_OK=true
-if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
-   SEED_PROFILE="${SEED_PROFILE}" \
-   ADMIN_EMAIL="${ADMIN_EMAIL:-}" \
-   E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
-   E2E_DEV_LOGIN_NAME="${SEED_USER_NAME}" \
-   bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
-  ok "Test user seeded"
-else
-  SEED_USER_OK=false
-  if [ "$SEED_PROFILE" = "minimal" ]; then
-    # This step is the only place that both creates the owner user AND
-    # rotates the bootstrap admin credential (POST /admin/auth/setup, called
-    # from seed-test-data.sh → scripts/e2e/seed-e2e-data.sh). generate-keys.sh
-    # bakes a hardcoded bcrypt hash of changeme123! into the admin Secret,
-    # and control-api/src/db.ts auto-inserts a live `admin` row from it on
-    # every fresh DB. If this step fails under the default (minimal)
-    # profile, that publicly-known credential is still live — a green
-    # summary would ship an install that is both unusable and insecure.
-    # Abort instead; setup is idempotent, so re-running after the underlying
-    # issue is fixed recovers cleanly.
-    err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
-    exit 1
+  # The e2e profile seeds the test identities used by the Desktop and Control UI
+  # journeys. The minimal profile must not seed anything named test*.
+  if [ "$SEED_PROFILE" = "e2e" ]; then
+    SEED_USER_DEFAULT_EMAIL="test@clerum.io"
+    SEED_USER_DEFAULT_NAME="Test User"
+    # ADMIN_PASSWORD was resolved once above. Use the known local test fallback
+    # only when neither the canonical .env nor the process configured any admin
+    # alias; never replace a real seeded credential.
+    if [ -z "${ADMIN_PASSWORD:-}" ]; then
+      ADMIN_PASSWORD="$(printf '%s%s' 'changeme123' '!')"
+    fi
   else
-    warn "Test user seed encountered errors — check output above"
+    # Minimal: the Control-UI admin IS the sole Desktop App member — no separate
+    # seeded user. Point both the admin-bootstrap email and the seeded desktop
+    # user at the same evenfire-branded address. seed-e2e-data.sh consumes
+    # /admin/auth/setup before login on a fresh DB, so this identity is created
+    # atomically with the initial_setup operator link instead of minting a
+    # second ordinary member/team. `admin@clerum.io` would leak the internal
+    # code name onto a product surface (the Desktop member list) — evenfire
+    # branding belongs here (docs/concepts/code-names.md).
+    ADMIN_EMAIL="$(clerum_canonical_email "${ADMIN_EMAIL:-admin@evenfire.local}")"
+    SEED_USER_DEFAULT_EMAIL="$ADMIN_EMAIL"
+    SEED_USER_DEFAULT_NAME="admin"
+  fi
+  if [ "$SEED_PROFILE" = "minimal" ]; then
+    # The minimal quickstart owns the bootstrap identity. Do not let a
+    # process/.env E2E override silently mint a second ordinary Desktop user;
+    # only the explicitly named seed override is considered, and the guard
+    # below still requires it to equal ADMIN_EMAIL.
+    SEED_USER_EMAIL="$(clerum_canonical_email "${CLERUM_SEED_USER_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}")"
+  else
+    SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
+  fi
+  SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
+  if [ "$SEED_PROFILE" = "minimal" ] \
+    && ! clerum_minimal_identity_matches "$ADMIN_EMAIL" "$SEED_USER_EMAIL"; then
+    err "$(clerum_minimal_identity_error "$SEED_USER_EMAIL" "$ADMIN_EMAIL")"
+    exit 1
+  fi
+  log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
+  SEED_USER_OK=true
+  if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+     SEED_PROFILE="${SEED_PROFILE}" \
+     ADMIN_EMAIL="${ADMIN_EMAIL:-}" \
+     E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
+     E2E_DEV_LOGIN_NAME="${SEED_USER_NAME}" \
+     bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
+    ok "Test user seeded"
+  else
+    SEED_USER_OK=false
+    if [ "$SEED_PROFILE" = "minimal" ]; then
+      # This step is the only place that both consumes the governed
+      # /admin/auth/setup path and creates the owner Desktop identity. The
+      # minimal seed is setup-first; it refuses to fall back to an ordinary
+      # /admin/users member when the initial_setup operator link is missing.
+      # generate-keys.sh bakes a hardcoded bcrypt hash of changeme123! into the
+      # admin Secret, and control-api/src/db.ts auto-inserts a live `admin` row
+      # from it on every fresh DB. If this step fails under the default
+      # (minimal) profile, that publicly-known credential is still live — a
+      # green summary would ship an install that is both unusable and insecure.
+      # Abort instead. Setup is idempotent, so re-running after the underlying
+      # issue is fixed recovers cleanly for every failure except a missing
+      # initial_setup link on a reused database: control-api stamps
+      # last_login_at on each admin login and setup only matches a bootstrap
+      # row whose last_login_at is NULL, so that one needs a DB rebuild. The
+      # seeder prints the exact recovery command for that case.
+      err "Test user seed failed under SEED_PROFILE=minimal, aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup. If the seeder reported a missing initial_setup Desktop link, re-run without REUSE_DB/--keep-db so the control DB is rebuilt."
+      exit 1
+    else
+      warn "Test user seed encountered errors — check output above"
+    fi
   fi
 fi
 
@@ -1193,36 +1558,32 @@ else
 fi
 echo ""
 echo -e "  ${BOLD}Already done by setup:${NC}"
-# Step 10 (Seed Test User) is what actually rotates the bootstrap admin
-# credential and creates the seed user. If it failed, SEED_USER_OK=false and
-# these lines must say so instead of printing a false ✓ (a failed Step 10
-# under minimal already aborts before reaching here — see Step 10 above —
-# so this else branch is reachable only via the e2e soft-fail path).
-if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / changeme123!)"
-  else
-    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed; admin/changeme123! may not be live"
-  fi
+# Step 10 either owns the normal seed flow or is deliberately deferred so the
+# first-run browser setup can consume /api/v1/admin/auth/setup. Keep the
+# summary explicit: deferred is not a successful seed and must never be shown
+# as one.
+if [ "$DEFER_BOOTSTRAP_SEED" = true ]; then
+  echo -e "    ${YELLOW}•${NC} Bootstrap admin seed deferred — browser E2E owns /api/v1/admin/auth/setup"
+  echo -e "    ${YELLOW}•${NC} Owner user seed deferred — created by the browser setup journey"
 else
   if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / your ADMIN_PASSWORD from .env)"
+    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (resolved admin credential)"
   else
     echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
   fi
-fi
-if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+  if [ "${SEED_PROFILE:-}" = "e2e" ]; then
+    if [ "${SEED_USER_OK:-true}" = "true" ]; then
+      echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+    else
+      echo -e "    ${RED}✗${NC} Test user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
+    fi
+    echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
   else
-    echo -e "    ${RED}✗${NC} Test user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
-  fi
-  echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
-else
-  if [ "${SEED_USER_OK:-true}" = "true" ]; then
-    echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1, password = your ADMIN_PASSWORD)"
-  else
-    echo -e "    ${RED}✗${NC} Owner user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
+    if [ "${SEED_USER_OK:-true}" = "true" ]; then
+      echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+    else
+      echo -e "    ${RED}✗${NC} Owner user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
+    fi
   fi
 fi
 echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"

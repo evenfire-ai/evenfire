@@ -53,12 +53,14 @@ export function resolveMcpRequestTimeoutMs(callerTimeoutMs?: number): number {
 
 export function ensureNotAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return
-  const reason =
-    typeof signal.reason === 'string' && signal.reason.trim() ? signal.reason : 'aborted'
-  throw new Error(reason)
+  throw abortError(signal, 'aborted')
 }
 
 function abortError(signal: AbortSignal | undefined, fallback: string): Error {
+  // Preserve an Error abort reason verbatim (e.g. the lifecycle 'closed' /
+  // 'superseded' error propagated through retirementController.abort()), so a
+  // retired/superseded connection surfaces its real cause instead of 'aborted'.
+  if (signal?.reason instanceof Error) return signal.reason
   const reason =
     typeof signal?.reason === 'string' && signal.reason.trim() ? signal.reason : fallback
   return new Error(reason)

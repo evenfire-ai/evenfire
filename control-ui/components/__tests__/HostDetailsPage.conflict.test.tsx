@@ -31,6 +31,12 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
+vi.mock('../HostAccessTab', () => ({
+  HostAccessTab: ({ hostName }: { hostName: string }) => (
+    <div data-testid="access-tab">Access editor for {hostName}</div>
+  ),
+}))
+
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
@@ -91,6 +97,15 @@ function setupApiMocks(bundleHost: TestHost, refetchHost: TestHost = bundleHost)
 
 function render(children: ReactNode) {
   return rtlRender(<ToastProvider>{children}</ToastProvider>)
+}
+
+function navigateToTab(view: ReturnType<typeof rtlRender>, tab: 'overview' | 'model'): void {
+  mockParams = tab === 'overview' ? { name: 'foo' } : { name: 'foo', tab }
+  view.rerender(
+    <ToastProvider>
+      <HostDetailsPage />
+    </ToastProvider>
+  )
 }
 
 async function openOverviewEdit() {
@@ -213,6 +228,60 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(await screen.findByText('boom')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+  })
+})
+
+describe('HostDetailsPage cross-tab draft preservation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockParams = { name: 'foo' }
+    setupApiMocks(formLoadHost, refetchedHost)
+  })
+
+  it('preserves an open Overview draft when Model & credentials is saved', async () => {
+    const view = render(<HostDetailsPage />)
+    await openOverviewEdit()
+    fireEvent.change(screen.getByLabelText('Display name'), {
+      target: { value: 'unsaved-overview-name' },
+    })
+
+    navigateToTab(view, 'model')
+    expect(
+      await screen.findByText(
+        'Provider, allowed models, fallback policy, and credentials for this agent.'
+      )
+    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.change(screen.getByLabelText('Secret reference'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText('Model & credentials saved.')).toBeInTheDocument()
+
+    navigateToTab(view, 'overview')
+    expect(await screen.findByDisplayValue('unsaved-overview-name')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+  })
+
+  it('preserves an open Model & credentials draft when Overview is saved', async () => {
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    expect(
+      await screen.findByText(
+        'Provider, allowed models, fallback policy, and credentials for this agent.'
+      )
+    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.change(screen.getByLabelText('Secret reference'), { target: { value: '' } })
+
+    navigateToTab(view, 'overview')
+    await openOverviewEdit()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText('Agent configuration saved.')).toBeInTheDocument()
+
+    navigateToTab(view, 'model')
+    await waitFor(() =>
+      expect((screen.getByLabelText('Secret reference') as HTMLSelectElement).value).toBe('')
+    )
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
   })
 })

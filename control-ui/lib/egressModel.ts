@@ -474,13 +474,20 @@ export function analyzeWorkflowRecipeEgress(
     ? (spec.workloads as Record<string, unknown>[])
     : []
   workloads.forEach((workload, index) => {
-    if (!workload.transport) return
+    const isTransport = !!workload.transport
+    const hasBindings = Array.isArray(workload.egressBindings) && workload.egressBindings.length > 0
+    // Review every transport workload (to state default-deny even when closed) and
+    // any non-transport workload that declares egressBindings. Plain deployments,
+    // cronjobs, and stateful sets that reach the internet (or cluster-internal
+    // hosts) must surface their rules too — not only MCP transports.
+    if (!isTransport && !hasBindings) return
     const id = typeof workload.id === 'string' ? workload.id : `workload-${index}`
+    const label = isTransport ? `Transport workload "${id}"` : `Workload "${id}"`
     const summary = summarizeBindings(workload.egressBindings)
     if (summary.mode === 'none') {
       findings.push({
         key: `workload-${index}-default-deny`,
-        label: `Transport workload "${id}"`,
+        label,
         mode: 'none',
         bindingCount: 0,
         severity: 'info',
@@ -492,7 +499,7 @@ export function analyzeWorkflowRecipeEgress(
     if (summary.bindingCount > MAX_EGRESS_BINDINGS) {
       findings.push({
         key: `workload-${index}-too-many`,
-        label: `Transport workload "${id}"`,
+        label,
         mode: summary.mode,
         bindingCount: summary.bindingCount,
         severity: 'error',
@@ -504,7 +511,7 @@ export function analyzeWorkflowRecipeEgress(
     }
     findings.push({
       key: `workload-${index}-${summary.mode}`,
-      label: `Transport workload "${id}"`,
+      label,
       mode: summary.mode,
       bindingCount: summary.bindingCount,
       severity: summary.mode === 'public-web' ? 'warning' : 'info',

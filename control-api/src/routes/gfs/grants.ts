@@ -1,6 +1,7 @@
 import type { Request, Router } from 'express'
 import { createHash } from 'node:crypto'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import type { ExternalGfsAuthority } from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId } from '../../gfs/hostSubject.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
@@ -34,6 +35,8 @@ export interface GrantsDb {
 const DEFAULT_DRIVE = 'main'
 export const PERMISSIONS = ['read', 'write', 'delete', 'manage_acl', 'share'] as const
 export type GfsPermission = (typeof PERMISSIONS)[number]
+const MANAGED_FIRST_PARTY_HOST_PERMISSIONS = new Set<GfsPermission>(['read', 'write'])
+const LEGACY_STANDALONE_HOST_SUBJECT_ID = '1st:mcp-host/standalone'
 const SUBJECT_TYPES = ['operator', 'user', 'team', 'host', 'context'] as const
 export type GfsSubjectType = (typeof SUBJECT_TYPES)[number]
 export const UUID_RE =
@@ -68,6 +71,26 @@ export interface GfsCaller {
   subjects: Set<string>
   /** Audit actor key (`operator:` or `user:<uuid>`). */
   actorKey: string
+  /** Effective admin for a linked Desktop operator; never the Desktop actor. */
+  effectiveControlAdminId?: string
+  /** Authenticated Desktop actor for brokered external requests. */
+  desktopUserId?: string
+  /** Broker authority attribution; independent of authorization_source evidence. */
+  authoritySource?: 'user-session' | 'linked-admin'
+  /** Persisted legacy/effective actor_on_behalf_of value. */
+  actorOnBehalfOf?: string | null
+}
+
+export function callerAuditFields(caller: GfsCaller): {
+  actorOnBehalfOf: string | null
+  desktopUserId?: string
+  authoritySource?: 'user-session' | 'linked-admin'
+} {
+  return {
+    actorOnBehalfOf: caller.actorOnBehalfOf ?? null,
+    ...(caller.desktopUserId ? { desktopUserId: caller.desktopUserId } : {}),
+    ...(caller.authoritySource ? { authoritySource: caller.authoritySource } : {}),
+  }
 }
 
 type RequestWithResolvedGfsSubjects = Request & {
@@ -84,7 +107,24 @@ type RequestWithResolvedGfsSubjects = Request & {
 export function resolveCaller(req: Request): GfsCaller {
   const admin = (req as { adminAuth?: { sub?: string } }).adminAuth
   if (admin?.sub) {
-    return { isOperator: true, subjects: new Set(['operator:']), actorKey: 'operator:' }
+    return {
+      isOperator: true,
+      subjects: new Set(['operator:']),
+      actorKey: 'operator:',
+      actorOnBehalfOf: 'operator:',
+    }
+  }
+  const authority = (req as { gfsAuthority?: ExternalGfsAuthority }).gfsAuthority
+  if (authority?.kind === 'linked-admin') {
+    return {
+      isOperator: true,
+      subjects: new Set(['operator:']),
+      actorKey: 'operator:',
+      effectiveControlAdminId: authority.controlAdminId,
+      desktopUserId: authority.desktopUserId,
+      authoritySource: 'linked-admin',
+      actorOnBehalfOf: authority.controlAdminId,
+    }
   }
   const external = (req as { externalAuth?: { userId?: string; teamId?: string | null } })
     .externalAuth
@@ -94,7 +134,14 @@ export function resolveCaller(req: Request): GfsCaller {
     const subjects = new Set(preResolved && preResolved.length > 0 ? preResolved : [key])
     subjects.add(key)
     if (external.teamId) subjects.add(`team:${external.teamId}`)
-    return { isOperator: false, subjects, actorKey: key }
+    return {
+      isOperator: false,
+      subjects,
+      actorKey: key,
+      desktopUserId: external.userId,
+      authoritySource: 'user-session',
+      actorOnBehalfOf: null,
+    }
   }
   throw new GfsGrantError(401, 'unauthenticated')
 }
@@ -234,7 +281,7 @@ export async function assertMayGrant(
   resourceId: string,
   permissions: GfsPermission[],
   target: GfsSubject,
-  opts: { isShare: boolean }
+  opts: { isShare: boolean; allowLegacyRetirement?: boolean }
 ): Promise<void> {
   await assertMayGrantBatch(db, caller, drive, resourceId, permissions, [target], opts)
 }
@@ -334,16 +381,45 @@ function assertTargetPolicy(
   caller: GfsCaller,
   permissions: readonly GfsPermission[],
   target: GfsSubject,
-  opts: { isShare: boolean }
+  opts: { isShare: boolean; allowLegacyRetirement?: boolean }
 ): void {
+  const isLegacyStandaloneSubject =
+    target.type === 'host' && target.id === LEGACY_STANDALONE_HOST_SUBJECT_ID
+  const isLegacyRetirement = isLegacyStandaloneSubject && opts.allowLegacyRetirement === true
+
+  // The historical fleet-wide subject remains parseable so operators can
+  // inventory, migrate, and revoke its stored rows. It must never receive a
+  // new grant after the individual-Host cutover — single or bulk. Revocation
+  // callers opt in explicitly via allowLegacyRetirement; every create and
+  // delegation path remains fail-closed.
+  if (isLegacyStandaloneSubject && !isLegacyRetirement) {
+    throw new GfsGrantError(403, 'legacy_standalone_subject_reserved')
+  }
   // Agent (host) restriction (spec §Delegation): manage_acl/share are never
   // grantable to a host by a folder owner — only the operator can. `share` as a
-  // share-grant is for users/teams only, never a host.
+  // share-grant is for users/teams only, never a host. Caller authority is
+  // adjudicated before the per-target permission envelope below.
   const grantsManagerBit = permissions.includes('manage_acl') || permissions.includes('share')
   if (!caller.isOperator && target.type === 'host' && grantsManagerBit) {
     throw new GfsGrantError(403, 'agent_manager_forbidden')
   }
-  if (opts.isShare && target.type === 'host') {
+  // HCC-issued first-party Host credentials intentionally carry data-plane
+  // authority only. Enforce the same boundary on stored grants before the
+  // operator bypass so a future token-policy regression cannot activate a
+  // dormant destructive/governance grant. Third-party hosts retain their
+  // existing grant compatibility; their runtime token scopes are constrained
+  // independently by provisionerScopePolicy. Revocation (the only caller that
+  // sets allowLegacyRetirement) is exempt: an over-privileged stored row from
+  // before this envelope existed must remain deletable, never locked in.
+  if (
+    target.type === 'host' &&
+    target.id?.startsWith('1st:') &&
+    opts.allowLegacyRetirement !== true &&
+    permissions.some(permission => !MANAGED_FIRST_PARTY_HOST_PERMISSIONS.has(permission))
+  ) {
+    throw new GfsGrantError(403, 'managed_agent_permission_forbidden')
+  }
+  if (opts.isShare && target.type === 'host' && !isLegacyRetirement) {
     throw new GfsGrantError(403, 'share_to_agent_forbidden')
   }
   // A non-operator may not grant/share TO the operator subject — the operator is
@@ -392,7 +468,7 @@ export async function assertMayGrantBatch(
   resourceId: string,
   permissions: readonly GfsPermission[],
   targets: readonly GfsSubject[],
-  opts: { isShare: boolean }
+  opts: { isShare: boolean; allowLegacyRetirement?: boolean }
 ): Promise<void> {
   for (const target of targets) {
     assertTargetPolicy(caller, permissions, target, opts)
@@ -466,6 +542,9 @@ export async function auditMutation(
     outcome: 'allowed' | 'denied'
     requestId?: string
     sourceIp?: string
+    actorOnBehalfOf?: string | null
+    desktopUserId?: string
+    authoritySource?: 'user-session' | 'linked-admin'
   }
 ): Promise<string | null> {
   const gfsUri = `gfs://${params.drive}/${params.resourceId}`
@@ -476,24 +555,30 @@ export async function auditMutation(
         params.op,
         gfsUri,
         params.outcome,
-        params.actorKey,
+        params.actorOnBehalfOf === undefined ? params.actorKey : (params.actorOnBehalfOf ?? ''),
+        params.desktopUserId ?? '',
+        params.authoritySource ?? '',
         params.requestId ?? '',
       ].join(' ')
     )
     .digest('hex')
   const result = await db.query(
-    `INSERT INTO gfs_audit (subject, actor_on_behalf_of, op, gfs_uri, outcome, source_ip, request_id, row_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO gfs_audit
+       (subject, actor_on_behalf_of, op, gfs_uri, outcome, source_ip, request_id,
+        row_hash, desktop_user_id, authority_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, $10)
      RETURNING sequence_no::text AS id`,
     [
       params.targetKey,
-      params.actorKey,
+      params.actorOnBehalfOf === undefined ? params.actorKey : params.actorOnBehalfOf,
       params.op,
       gfsUri,
       params.outcome,
       params.sourceIp ?? null,
       params.requestId ?? null,
       rowHash,
+      params.desktopUserId ?? null,
+      params.authoritySource ?? null,
     ]
   )
   const row = result.rows[0] as { id?: unknown } | undefined
@@ -611,7 +696,9 @@ export function permissionReadFilter(req: Request): { drive: string; resourceId:
 }
 
 export function requestIdOf(req: Request): string | undefined {
-  const id = (req as { correlationId?: string }).correlationId
+  const id =
+    (req as { gfsRequestId?: string; correlationId?: string }).gfsRequestId ??
+    (req as { correlationId?: string }).correlationId
   return typeof id === 'string' && id.length > 0 ? id : undefined
 }
 
@@ -621,6 +708,9 @@ type GfsPermissionEventOperator = {
 }
 
 function permissionEventOperator(req: Request, caller: GfsCaller): GfsPermissionEventOperator {
+  if (caller.effectiveControlAdminId) {
+    return { kind: 'control_admin', sub: caller.effectiveControlAdminId }
+  }
   const adminSub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
   if (adminSub) return { kind: 'control_admin', sub: adminSub }
   const userId = (req as { externalAuth?: { userId?: string } }).externalAuth?.userId
@@ -767,6 +857,7 @@ export async function writeGfsGrantBatchInTransaction(
     auditIds.push(
       await auditMutation(db, {
         actorKey: params.caller.actorKey,
+        ...callerAuditFields(params.caller),
         targetKey: subjectKey(subject),
         op: `grant.put[${params.permissions.join(',')}]`,
         drive: params.drive,
@@ -821,35 +912,80 @@ export function registerGfsGrantRoutes(router: Router): void {
   )
 }
 
+export interface GfsGrantListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  inherit: boolean
+}
+
+/** One resource's grant rows in the canonical list shape (`id` powers revoke). */
+export async function queryGrantItems(
+  drive: string,
+  resourceId: string
+): Promise<GfsGrantListItem[]> {
+  const result = await pool.query(
+    `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
+       FROM gfs_grants
+      WHERE drive = $1 AND resource_id = $2::uuid
+      ORDER BY created_at ASC, id ASC`,
+    [drive, resourceId]
+  )
+  return (result.rows as Record<string, unknown>[]).map(row => {
+    const subjectId = String(row.subject_id ?? '')
+    return {
+      id: String(row.id),
+      drive: String(row.drive),
+      resourceId: String(row.resource_id),
+      subject: {
+        type: String(row.subject_type),
+        ...(subjectId ? { id: subjectId } : {}),
+      },
+      permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
+      inherit: Boolean(row.inherit),
+    }
+  })
+}
+
 export async function handleGrantRead(
   req: Request,
   res: import('express').Response
 ): Promise<void> {
   try {
     const { drive, resourceId } = permissionReadFilter(req)
-    const result = await pool.query(
-      `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
-         FROM gfs_grants
-        WHERE drive = $1 AND resource_id = $2::uuid
-        ORDER BY created_at ASC, id ASC`,
-      [drive, resourceId]
-    )
-    res.status(200).json({
-      items: (result.rows as Record<string, unknown>[]).map(row => {
-        const subjectId = String(row.subject_id ?? '')
-        return {
-          id: String(row.id),
-          drive: String(row.drive),
-          resourceId: String(row.resource_id),
-          subject: {
-            type: String(row.subject_type),
-            ...(subjectId ? { id: subjectId } : {}),
-          },
-          permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
-          inherit: Boolean(row.inherit),
-        }
-      }),
-    })
+    res.status(200).json({ items: await queryGrantItems(drive, resourceId) })
+  } catch (err) {
+    if (err instanceof GfsGrantError) {
+      sendGfsGrantError(res, err)
+      return
+    }
+    throw err
+  }
+}
+
+/**
+ * Non-operator grants listing for the external (folder-owner) plane. The ACL of
+ * a resource is delegation metadata naming third-party subjects, so viewing it
+ * requires the same authority as changing it: `manage_acl` on the resource,
+ * held directly or through an inheriting ancestor (view-ACL = manage-ACL).
+ * A missing resource yields the same 403 — no existence oracle.
+ */
+export async function handleGrantListForCaller(
+  req: Request,
+  res: import('express').Response
+): Promise<void> {
+  try {
+    const caller = resolveCaller(req)
+    const { drive, resourceId } = permissionReadFilter(req)
+    if (!caller.isOperator) {
+      const held = await heldPermissions(pool, caller, drive, resourceId)
+      if (!held.includes('manage_acl')) {
+        throw new GfsGrantError(403, 'manage_acl_required')
+      }
+    }
+    res.status(200).json({ items: await queryGrantItems(drive, resourceId) })
   } catch (err) {
     if (err instanceof GfsGrantError) {
       sendGfsGrantError(res, err)
@@ -918,7 +1054,9 @@ export async function handleGrantDelete(
            FOR UPDATE`,
         [id]
       )
-      if (existing.rows.length === 0) return { kind: 'not_found' as const }
+      if (existing.rows.length === 0) {
+        return caller.isOperator ? { kind: 'not_found' as const } : { kind: 'hidden' as const }
+      }
       const row = existing.rows[0] as {
         drive: string
         resource_id: string
@@ -940,12 +1078,13 @@ export async function handleGrantDelete(
           String(row.resource_id),
           (row.permissions as GfsPermission[]) ?? ['manage_acl'],
           subject,
-          { isShare: false }
+          { isShare: false, allowLegacyRetirement: true }
         )
       } catch (error) {
         if (!(error instanceof GfsGrantError)) throw error
         const auditId = await auditMutation(db, {
           actorKey: caller.actorKey,
+          ...callerAuditFields(caller),
           targetKey: subjectKey(subject),
           op: 'grant.delete',
           drive: row.drive,
@@ -971,6 +1110,7 @@ export async function handleGrantDelete(
       await db.query(`DELETE FROM gfs_grants WHERE id = $1::uuid`, [id])
       const auditId = await auditMutation(db, {
         actorKey: caller.actorKey,
+        ...callerAuditFields(caller),
         targetKey: subjectKey(subject),
         op: 'grant.delete',
         drive: row.drive,
@@ -995,6 +1135,10 @@ export async function handleGrantDelete(
     })
     if (result.kind === 'not_found') {
       res.status(404).json({ error: 'grant_not_found' })
+      return
+    }
+    if (result.kind === 'hidden') {
+      res.status(403).json({ error: 'forbidden' })
       return
     }
     if (result.kind === 'denied') {

@@ -1,0 +1,100 @@
+# Rewrites every pull_in_ghcr_mode image (deploy/images.json:
+# published && deployed_to_minikube) from its local clerum/* name to its
+# published ghcr.io/evenfire-ai counterpart at the pinned release tag.
+# Consumed by deploy/overlays/minikube-ghcr and minikube-no-uis-ghcr.
+#
+# THE ROW SET IS NOT A FREE CHOICE. It is exactly pullInGhcrMode() from
+# scripts/release/images-manifest.mjs, enforced in both directions by
+# scripts/tests/test-ghcr-component.sh. An extra row is not harmless: adding
+# clerum/workflow-custom-sdk-e2e here rewrites the WRC tag-prefix allowlist
+# value "clerum/workflow-custom-sdk-e2e:" into
+# "ghcr.io/evenfire-ai/workflow-custom-sdk-e2e:v0.6.0", appending a tag and
+# silently breaking the prefix match against the locally built fixture.
+#
+# imagetags.yaml below is a MANDATORY byte-identical copy of
+# ../../overlays/minikube/kustomizeconfig/imagetags.yaml. Kustomize refuses a
+# component whose `configurations:` file lives outside the component directory
+# ("security; file ... is not in or below ..."), and `kubectl apply -k` has no
+# --load-restrictor escape. The copy is drift-guarded by the harness.
+#
+# newTag is THE release pointer coordinate. It is written by
+# scripts/release/prepare-release.mjs at release-cut time and checked by
+# scripts/release/validate-release-tag.mjs. Never hand-edit it, and never
+# commit a moving tag here -- MINIKUBE_IMAGE_TAG overrides it at render time
+# in a temp copy instead (scripts/minikube/full-setup.sh).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+configurations:
+  - imagetags.yaml
+
+images:
+  - name: clerum/channel-reader
+    newName: ghcr.io/evenfire-ai/channel-reader
+    newTag: v0.7.0
+  - name: clerum/workflow-approval-request-reader
+    newName: ghcr.io/evenfire-ai/workflow-approval-request-reader
+    newTag: v0.7.0
+  - name: clerum/control-api
+    newName: ghcr.io/evenfire-ai/control-api
+    newTag: v0.7.0
+  - name: clerum/control-ui
+    newName: ghcr.io/evenfire-ai/control-ui
+    newTag: v0.7.0
+  - name: clerum/external-rest-api
+    newName: ghcr.io/evenfire-ai/external-rest-api
+    newTag: v0.7.0
+  - name: clerum/host-context-controller
+    newName: ghcr.io/evenfire-ai/host-context-controller
+    newTag: v0.7.0
+  - name: clerum/mcp-host
+    newName: ghcr.io/evenfire-ai/mcp-host
+    newTag: v0.7.0
+  - name: clerum/mcp-host-slim
+    newName: ghcr.io/evenfire-ai/mcp-host-slim
+    newTag: v0.7.0
+  - name: clerum/mcp-host-full
+    newName: ghcr.io/evenfire-ai/mcp-host-full
+    newTag: v0.7.0
+  - name: clerum/mcp-proxy
+    newName: ghcr.io/evenfire-ai/mcp-proxy
+    newTag: v0.7.0
+  - name: clerum/gfs-controller
+    newName: ghcr.io/evenfire-ai/gfs-controller
+    newTag: v0.7.0
+  - name: clerum/nginx-egress-proxy
+    newName: ghcr.io/evenfire-ai/nginx-egress-proxy
+    newTag: v0.7.0
+  - name: clerum/profile-ui
+    newName: ghcr.io/evenfire-ai/profile-ui
+    newTag: v0.7.0
+  - name: clerum/rpc-proxy
+    newName: ghcr.io/evenfire-ai/rpc-proxy
+    newTag: v0.7.0
+  - name: clerum/workflow-recipes
+    newName: ghcr.io/evenfire-ai/workflow-recipes
+    newTag: v0.7.0
+  - name: clerum/workflow-coordinator
+    newName: ghcr.io/evenfire-ai/workflow-coordinator
+    newTag: v0.7.0
+  - name: clerum/workflow-snippet-runner
+    newName: ghcr.io/evenfire-ai/workflow-snippet-runner
+    newTag: v0.7.0
+  - name: clerum/stdio-bridge
+    newName: ghcr.io/evenfire-ai/stdio-bridge
+    newTag: v0.7.0
+  - name: clerum/workspace-files-controller
+    newName: ghcr.io/evenfire-ai/workspace-files-controller
+    newTag: v0.7.0
+  - name: clerum/mock-mcp-server
+    newName: ghcr.io/evenfire-ai/mock-mcp-server
+    newTag: v0.7.0
+  - name: clerum/mock-stdio-mcp-server
+    newName: ghcr.io/evenfire-ai/mock-stdio-mcp-server
+    newTag: v0.7.0
+  - name: clerum/webhook-gateway
+    newName: ghcr.io/evenfire-ai/webhook-gateway
+    newTag: v0.7.0
+  - name: clerum/webhook-proxy
+    newName: ghcr.io/evenfire-ai/webhook-proxy
+    newTag: v0.7.0

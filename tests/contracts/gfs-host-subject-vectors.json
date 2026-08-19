@@ -1,0 +1,74 @@
+[
+  {
+    "label": "canonical host",
+    "namespace": "mcp-host",
+    "name": "quarterly-analyst",
+    "displayText": "Quarterly Analyst",
+    "expectedSubjectId": "1st:mcp-host/quarterly-analyst",
+    "expectedSubject": "host:1st:mcp-host/quarterly-analyst"
+  },
+  {
+    "label": "same durable identity after recreation",
+    "namespace": "agent-workloads",
+    "name": "researcher-7",
+    "displayText": "Researcher recreated runtime",
+    "expectedSubjectId": "1st:agent-workloads/researcher-7",
+    "expectedSubject": "host:1st:agent-workloads/researcher-7"
+  },
+  {
+    "label": "uppercase namespace",
+    "namespace": "Mcp-Host",
+    "name": "analyst",
+    "displayText": "Analyst",
+    "expectedSubjectId": null,
+    "expectedSubject": null
+  },
+  {
+    "label": "display text used as name",
+    "namespace": "mcp-host",
+    "name": "Quarterly Analyst",
+    "displayText": "Quarterly Analyst",
+    "expectedSubjectId": null,
+    "expectedSubject": null
+  },
+  {
+    "label": "leading namespace whitespace",
+    "namespace": " mcp-host",
+    "name": "analyst",
+    "displayText": "Analyst",
+    "expectedSubjectId": null,
+    "expectedSubject": null
+  },
+  {
+    "label": "trailing name whitespace",
+    "namespace": "mcp-host",
+    "name": "analyst ",
+    "displayText": "Analyst",
+    "expectedSubjectId": null,
+    "expectedSubject": null
+  },
+  {
+    "label": "path traversal name",
+    "namespace": "mcp-host",
+    "name": "../analyst",
+    "displayText": "Analyst",
+    "expectedSubjectId": null,
+    "expectedSubject": null
+  },
+  {
+    "label": "empty namespace",
+    "namespace": "",
+    "name": "analyst",
+    "displayText": "Analyst",
+    "expectedSubjectId": null,
+    "expectedSubject": null
+  },
+  {
+    "label": "overlong name",
+    "namespace": "mcp-host",
+    "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "displayText": "Analyst",
+    "expectedSubjectId": null,
+    "expectedSubject": null
+  }
+]

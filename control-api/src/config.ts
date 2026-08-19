@@ -28,6 +28,7 @@ type Config = {
   desktopRpcProxyBaseUrl: string
   desktopProfileUiBaseUrl: string
   desktopAppName: string
+  desktopGfsOperatorLinkingEnabled: boolean
   controlUiBaseUrl: string
   controlUiAppName: string
   sessionJwtPrivateKey: string
@@ -59,7 +60,7 @@ type Config = {
    */
   registryVoucherPrivateKey: string
   // The registry-assigned key_id (uuid) used as the voucher `kid` header in
-  // MANAGED mode (spec §14.2). Delivered by MCC in the registry-voucher Secret
+  // MANAGED mode (spec §14.2). Delivered by the managed operator in the registry-voucher Secret
   // as CONTROL_API_REGISTRY_VOUCHER_KID. Self-hosted reads kid from the DB row.
   registryVoucherKid: string
   // Registry consumer config — added in Path A.
@@ -102,6 +103,27 @@ type Config = {
   usageRollupDailyIntervalMs: number
   usageRetentionIntervalMs: number
   budgetReservationSweepIntervalMs: number
+  // LLM catalog discovery sync cron (Fase 4). Runs syncDiscoveredModels()
+  // periodically. DEFAULT OFF — the operator opts in consciously so a fresh
+  // plane never hammers models.dev on boot. When on, one tick every
+  // llmCatalogSyncIntervalMs (default 24h), cross-replica-deduped by a session
+  // advisory lock inside the cron.
+  llmCatalogSyncCronEnabled: boolean
+  llmCatalogSyncIntervalMs: number
+  // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
+  // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
+  // (a flappy/truncated external catalog must not mass-stale the allowlist);
+  // the inert `enabled=false` inserts still proceed. Calibrated off the vendored
+  // snapshot (~1051 mapped models across 21 providers) — a conservative <10%
+  // floor catches a catastrophic collapse without tripping on normal variation.
+  modelsDevMinPlausibleLiveTotal: number
+  // §4.5 sanity guard, layer 2: per-provider low/zero-live floor. A provider
+  // that returns FEWER than this many live models but still has discovery rows
+  // in DB is treated as suspicious and NOT stale-marked. 0 (the default) means
+  // only the zero-live case is guarded (the mandatory floor); a higher value
+  // also guards implausibly-low provider counts.
+  llmCatalogSyncProviderMinLive: number
+  registryPullSecretReconcileIntervalMs: number
   budgetReservationTtlSeconds: number
   approvalRetentionDays: number
   userApprovalRequestArchiveCronEnabled: boolean
@@ -129,8 +151,35 @@ type Config = {
   approvalRlRequestPerMin: number
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
+  approvalRlExternalEdgePerMin: number
+  approvalRlExternalClientIpPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
+  // Plugin Workload SDK platform rate limits (issue #348): per-minute
+  // ceilings on the plugin abuse surface (data-path + pre-auth). Platform
+  // protection, not per-service business quotas — usage/cost stays governed
+  // by Token Budgets.
+  pluginSdkNotificationsRlPerMin: number
+  pluginSdkPromptBridgeRlPerMin: number
+  pluginSdkRequestBucketRlPerMin: number
+  pluginSdkPreauthRlPerMin: number
+  // External Desktop GFS is a separate authority plane. The process-local
+  // ingress backstop is intentionally wider than the distributed operation
+  // buckets so normal Desktop read waterfalls cannot consume the security
+  // budgets before authority resolution. The narrower values remain the
+  // authoritative per-user/IP/actor operation ceilings.
+  externalGfsIngressRlPerMin: number
+  externalGfsTokenUserRlPerMin: number
+  externalGfsTokenIpRlPerMin: number
+  // Aggregate source-IP ceiling before authority resolution. This is a
+  // defense-in-depth ceiling across authenticated non-token GFS traffic; it
+  // is intentionally wider than the per-class/session/actor budgets.
+  externalGfsIpRlPerMin: number
+  // Read waterfalls have a separate budget from mutations. A Desktop root
+  // refresh legitimately performs more reads than a mutation burst, while
+  // mutation/grant/share ceilings remain deliberately narrow.
+  externalGfsReadRlPerMin: number
+  externalGfsOperationRlPerMin: number
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
   hostWakeRlPerMin: number
@@ -184,6 +233,22 @@ type Config = {
   gfscBaseUrl: string
   // In-cluster base URL of the writer-only gfsc Service for mutations.
   gfscWriteBaseUrl: string
+  // Timeout (ms) for the control-api→gfsc proxied fetch. Homologous with the browser
+  // client (GFS_UPLOAD_TIMEOUT_MS, 300s) and the control-ui server proxy
+  // (CONTROL_API_PROXY_TIMEOUT_MS, set to 300s in the deployment; its route.ts code
+  // fallback is 30s). This one defaults to 300s in code. Raise all three together.
+  gfscProxyTimeoutMs: number
+  // Upload-v2 edge admission. These are transport-abuse budgets, separate
+  // from the 200 MiB product/file limit and GFSC's 4/16 stream authority.
+  gfsUploadRequestPerMinute: number
+  gfsUploadIpRequestPerMinute: number
+  gfsUploadByteUnitBytes: number
+  gfsUploadByteUnitsPerMinute: number
+  gfsUploadIpByteUnitsPerMinute: number
+  gfsUploadMaxActivePerSubject: number
+  gfsUploadMaxActivePerIp: number
+  gfsUploadMaxActiveGlobal: number
+  gfsUploadMaxPartBytes: number
   // ClusterIP service URL template for the per-SFS wfc. {hash} is replaced
   // with the 10-char sfsHash that HCC's sharedFileSystemReconciler computes.
   // The template ends without a trailing slash; the proxy concatenates the
@@ -207,6 +272,14 @@ function assertNotPlaceholder(label: string, value: string): void {
       `${label} has placeholder value "${value}". Run deploy/scripts/apply-inter-service-tokens.sh before deploying.`
     )
   }
+}
+
+// Parse a millisecond timeout env: must be a positive integer within the
+// setTimeout/AbortSignal safe range (2^31-1); anything else falls back to the
+// default (never lets NaN/overflow reach AbortSignal.timeout).
+function parseTimeoutMs(raw: string | undefined, fallback: number): number {
+  const parsed = raw ? Number(raw) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647 ? parsed : fallback
 }
 
 function parseInternalTokens(input: string): string[] {
@@ -270,10 +343,44 @@ function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   return value
 }
 
+/**
+ * A non-negative integer env (>= 0). Unlike `positiveIntegerFromEnv`, 0 is a
+ * valid, meaningful value here (the per-provider stale floor's default: guard
+ * only the zero-live case). An unset/blank env yields the default; any other
+ * non-integer / negative value is refused at boot rather than silently coerced.
+ */
+function nonNegativeIntegerFromEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return defaultValue
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`)
+  }
+  return value
+}
+
 function boundedIntegerFromEnv(name: string, defaultValue: number, maxValue: number): number {
   const value = positiveIntegerFromEnv(name, defaultValue)
   if (value > maxValue) {
     throw new Error(`${name} must be an integer between 1 and ${maxValue}`)
+  }
+  return value
+}
+
+/**
+ * A background-loop interval: a positive integer of milliseconds that must also clear a
+ * floor.
+ *
+ * The floor is the part `positiveIntegerFromEnv` cannot express. `1` parses perfectly and
+ * still reconciles a thousand times a second, so for a value handed straight to
+ * `setInterval` "positive" is not the same as "sane". Refused at boot rather than clamped,
+ * for the same reason every other invalid value here is refused: a silently corrected
+ * interval leaves the operator's setting and the running behaviour disagreeing forever.
+ */
+function intervalMsFromEnv(name: string, defaultValue: number, minValue: number): number {
+  const value = positiveIntegerFromEnv(name, defaultValue)
+  if (value < minValue) {
+    throw new Error(`${name} must be an integer >= ${minValue} (milliseconds)`)
   }
   return value
 }
@@ -287,6 +394,9 @@ const SANDBOX_NAMESPACE = process.env.CONTROL_API_SANDBOX_NAMESPACE || 'sandbox-
 const SANDBOX_UI_NAMESPACE = process.env.CONTROL_API_SANDBOX_UI_NAMESPACE || 'sandbox-ui'
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REFS = 32
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REF_LENGTH = 63 + 1 + 253
+const REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS = 10_000
+// A 24h-default cron should never be dialed below a minute — refuse a hot loop.
+const LLM_CATALOG_SYNC_MIN_INTERVAL_MS = 60_000
 const WORKFLOW_MAX_WORKLOADS_PER_RECIPE_CEILING = 25
 const WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS_CEILING = 25
 const WORKFLOW_MAX_STEPS_CEILING = 100
@@ -304,6 +414,56 @@ function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
   if (raw === undefined || raw === '') return 'managed' // default; requiredness enforced in the guard below
   if (raw === 'managed' || raw === 'self-hosted') return raw
   throw new Error(`REGISTRY_CONNECTION_MODE must be 'managed' or 'self-hosted' (got '${raw}')`)
+}
+
+type ExternalRateLimitSource = 'default' | 'environment'
+
+function externalRateLimitSettingFromEnv(
+  name: string,
+  defaultValue: number
+): { value: number; source: ExternalRateLimitSource } {
+  const raw = process.env[name]
+  return {
+    value: positiveIntegerFromEnv(name, defaultValue),
+    source: raw === undefined || raw.trim() === '' ? 'default' : 'environment',
+  }
+}
+
+// External routes intentionally have three independent dimensions with
+// different scopes. operation <= session < clientIp is the recommended
+// capacity topology, but it is not a correctness invariant: an operator may
+// deliberately tune any one scope without changing the other two. Keep scalar
+// values fail-closed, preserve exact overrides, and make a crossed topology an
+// actionable boot advisory instead of a service-startup failure.
+const externalRateLimitConfig = (() => {
+  const operation = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_PER_MIN', 60)
+  const session = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_EDGE_PER_MIN', 120)
+  const clientIp = externalRateLimitSettingFromEnv('APPROVAL_RL_EXTERNAL_CLIENT_IP_PER_MIN', 1200)
+  const followsRecommendedTopology =
+    operation.value <= session.value && session.value < clientIp.value
+
+  if (!followsRecommendedTopology) {
+    console.warn(
+      '[ControlAPI] External rate-limit configuration crosses the recommended operation <= session < clientIp topology; preserving exact configured values',
+      {
+        resolved: { operation, session, clientIp },
+        recommendedTopology: 'operation <= session < clientIp',
+      }
+    )
+  }
+
+  return {
+    operation: operation.value,
+    session: session.value,
+    clientIp: clientIp.value,
+  }
+})()
+
+function failClosedBooleanFromEnv(name: string): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '' || raw === 'false') return false
+  if (raw === 'true') return true
+  throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
 }
 
 function publicKeyFromPrivateKey(privateKey: string): string {
@@ -516,6 +676,11 @@ export const config: Config = {
   desktopProfileUiBaseUrl:
     process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL || 'http://127.0.0.1:3001',
   desktopAppName: process.env.CONTROL_API_DESKTOP_APP_NAME || 'Evenfire',
+  // Narrow, explicit elevation switch. Missing/false is intentionally OFF;
+  // this must not inherit registry, password-seeding, or generic deploy mode.
+  desktopGfsOperatorLinkingEnabled: failClosedBooleanFromEnv(
+    'CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED'
+  ),
   controlUiBaseUrl: process.env.CONTROL_API_CONTROL_UI_BASE_URL || 'http://127.0.0.1:3000',
   controlUiAppName: process.env.CONTROL_API_CONTROL_UI_APP_NAME || 'Evenfire',
   sessionJwtPrivateKey: normalizePem(
@@ -599,6 +764,39 @@ export const config: Config = {
   budgetReservationSweepIntervalMs: Number(
     process.env.BUDGET_RESERVATION_SWEEP_INTERVAL_MS || 60_000
   ),
+  // Default OFF: `=== 'true'`, NOT the default-on `(x ?? 'true') !== 'false'`
+  // idiom used by the other crons. This one stays dark until an operator turns
+  // it on deliberately.
+  llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
+  // Default 24h. Validated (not merely parsed): the value goes straight into
+  // setInterval and each tick opens a Postgres transaction + advisory lock. A
+  // 60s floor is orders of magnitude below the default and far above a hot loop.
+  llmCatalogSyncIntervalMs: intervalMsFromEnv(
+    'LLM_CATALOG_SYNC_INTERVAL_MS',
+    24 * 60 * 60 * 1000,
+    LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+  ),
+  modelsDevMinPlausibleLiveTotal: positiveIntegerFromEnv(
+    'MODELS_DEV_MIN_PLAUSIBLE_LIVE_TOTAL',
+    100
+  ),
+  llmCatalogSyncProviderMinLive: nonNegativeIntegerFromEnv('LLM_CATALOG_SYNC_PROVIDER_MIN_LIVE', 0),
+  // How often to re-assert the platform image-pull credential. This is a standing
+  // invariant, not a fast path: a WorkflowRecipe created by `kubectl apply` or the WRC
+  // `deploy_recipe` tool never touches control-api, so the credential has to be there
+  // already. Installs still provision synchronously, so this interval only bounds how long
+  // a CRD created OUTSIDE control-api waits. Coarse (10 min) on purpose — each tick is a
+  // few reads and no mint once the cluster is healthy.
+  //
+  // Validated, not merely parsed: this value goes straight into `setInterval`, and each tick
+  // costs a Postgres advisory-lock transaction plus a Secret read per platform namespace. A
+  // 10s floor is still two orders of magnitude below the default and far above anything that
+  // could pass for a hot loop.
+  registryPullSecretReconcileIntervalMs: intervalMsFromEnv(
+    'REGISTRY_PULL_SECRET_RECONCILE_INTERVAL_MS',
+    600_000,
+    REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS
+  ),
   // Danger-zone reservation TTL (§9.8a: ~2-3× the rollup lag, ~5 min). Short
   // enough that a hung reservation auto-frees; long enough that real spend has
   // reached the rollups before it expires (no double-count on the next check).
@@ -663,9 +861,43 @@ export const config: Config = {
   ),
   approvalRlRequestPerMin: Number(process.env.APPROVAL_RL_REQUEST_PER_MIN || 120),
   approvalRlRefreshPerMin: Number(process.env.APPROVAL_RL_REFRESH_PER_MIN || 20),
-  approvalRlExternalPerMin: Number(process.env.APPROVAL_RL_EXTERNAL_PER_MIN || 60),
+  approvalRlExternalPerMin: externalRateLimitConfig.operation,
+  approvalRlExternalEdgePerMin: externalRateLimitConfig.session,
+  // By default the source-IP backstop is wider than the per-session edge bucket
+  // so a shared NAT does not turn the 120/min fairness budget into a
+  // platform-wide ceiling. Operators may override these independent scopes;
+  // crossed values are preserved after the boot advisory above.
+  approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
+  // Plugin Workload SDK platform rate limits (issue #348). Parsed via
+  // positiveIntegerFromEnv so invalid operator config (non-integer, zero,
+  // negative) fails loud at boot instead of running with NaN limits, which
+  // would effectively fail open.
+  pluginSdkNotificationsRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN',
+    150
+  ),
+  pluginSdkPromptBridgeRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN',
+    120
+  ),
+  pluginSdkRequestBucketRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN',
+    600
+  ),
+  pluginSdkPreauthRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN', 600),
+  // Approved GFS authority-boundary budgets. Keep them fixed here rather than
+  // accepting an unreviewed environment override. The 1800/min ingress guard
+  // is only a coarse process-local backstop; the aggregate source-IP ceiling,
+  // read buckets, token buckets, and mutation/delegation buckets remain
+  // independently bounded below.
+  externalGfsIngressRlPerMin: 1_800,
+  externalGfsTokenUserRlPerMin: 10,
+  externalGfsTokenIpRlPerMin: 600,
+  externalGfsIpRlPerMin: 1_200,
+  externalGfsReadRlPerMin: 120,
+  externalGfsOperationRlPerMin: 30,
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
   // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in
@@ -747,7 +979,7 @@ export const config: Config = {
   //
   // v1 invariant: SharedFileSystem CRDs always live with the Hosts that mount
   // their PVCs read-only, i.e. in the Hosts namespace. So this MUST default to
-  // HOSTS_NAMESPACE (not a hardcoded `mcp-host`): on a per-tenant MCC cluster
+  // HOSTS_NAMESPACE (not a hardcoded `mcp-host`): on a per-tenant managed cluster
   // the Hosts namespace is `mcp-host-<slug>`, and the SharedFilesystems admin
   // route + the granted RBAC both target that tenant namespace. Defaulting to
   // a bare `mcp-host` made the route query the untenanted namespace and 403
@@ -762,6 +994,32 @@ export const config: Config = {
   gfscBaseUrl: process.env.CONTROL_API_GFSC_BASE_URL || 'http://gfsc.gfs.svc.cluster.local:8087',
   gfscWriteBaseUrl:
     process.env.CONTROL_API_GFSC_WRITE_BASE_URL || 'http://gfsc-writer.gfs.svc.cluster.local:8087',
+  gfscProxyTimeoutMs: parseTimeoutMs(process.env.CONTROL_API_GFSC_PROXY_TIMEOUT_MS, 300_000),
+  gfsUploadRequestPerMinute: positiveIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_REQUESTS_PER_MINUTE',
+    120
+  ),
+  gfsUploadIpRequestPerMinute: positiveIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_IP_REQUESTS_PER_MINUTE',
+    600
+  ),
+  gfsUploadByteUnitBytes: 1024 * 1024,
+  gfsUploadByteUnitsPerMinute: positiveIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MIB_PER_MINUTE', 512),
+  gfsUploadIpByteUnitsPerMinute: positiveIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_IP_MIB_PER_MINUTE',
+    2048
+  ),
+  gfsUploadMaxActivePerSubject: positiveIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_MAX_ACTIVE_PER_SUBJECT',
+    8
+  ),
+  gfsUploadMaxActivePerIp: positiveIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_ACTIVE_PER_IP', 16),
+  gfsUploadMaxActiveGlobal: positiveIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_ACTIVE_GLOBAL', 32),
+  gfsUploadMaxPartBytes: boundedIntegerFromEnv(
+    'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES',
+    16 * 1024 * 1024,
+    16 * 1024 * 1024
+  ),
   // {hash} = first 10 chars of sha256(`${ns}/${name}`); see sharedFileSystemHash
   // in host-context-controller/src/k8s/sharedFileSystemFactory.ts.
   wfcServiceUrlTemplate:
@@ -807,25 +1065,42 @@ for (const key of NAMESPACE_KEYS) {
 }
 
 // Registry consumer auth guard: when auth is on, refuse to boot without OAuth2
-// credentials and refuse a registry URL outside the allowlist (defense against
+// credentials; separately, refuse a registry URL outside the allowlist for any
+// deployment that will really talk to a registry (defense against
 // cross-environment misconfiguration sending writes to the wrong registry).
-if (config.registryAuthEnabled) {
-  // Mode must be set EXPLICITLY when the registry is enabled — never inferred
-  // from which credentials happen to be present (S10: no silent split-brain).
-  if (!process.env.REGISTRY_CONNECTION_MODE) {
-    throw new Error(
-      'REGISTRY_CONNECTION_MODE is required (managed|self-hosted) when CLERUM_REGISTRY_AUTH_ENABLED=true'
-    )
-  }
-  console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
 
-  // URL allowlist applies in BOTH modes. The shared registry
-  // `registry.evenfire.ai` is the default a self-hoster connects to (see
-  // docs/how-to/connect-to-registry.md); the in-cluster URL covers a
-  // self-hosted registry-api. A deployment that runs its own registry adds its
-  // URL via CLERUM_REGISTRY_URL_ALLOWLIST (comma-separated) rather than editing
-  // this list. `example.com` is the reserved-domain fixture used across the
-  // test suite — inert (no real registry) and kept so tests need no churn.
+// A configured URL is MANDATORY whenever auth is on. Today this is enforced
+// implicitly — allowed.includes('') is never true, so an empty URL falls
+// through to the allowlist throw. The allowlist block below is preconditioned
+// on registryUrl !== '', which would SKIP that throw and let a managed
+// deployment with auth on and no URL boot, then fail later with a bare fetch
+// URL-parse TypeError. Kept as its own check so the OR cannot swallow it.
+if (config.registryAuthEnabled && config.registryUrl === '') {
+  throw new Error('CLERUM_REGISTRY_URL is required when CLERUM_REGISTRY_AUTH_ENABLED=true')
+}
+
+// URL allowlist — defense against cross-environment misconfiguration sending
+// writes to the wrong registry. Enforced whenever the deployment will really
+// talk to a registry: an EXPLICITLY self-hosted deployment (which POSTs its
+// registration before any credentials exist, so gating this on auth was always
+// backwards), or any auth-enabled deployment. The shared registry
+// `registry.evenfire.ai` is the default a self-hoster connects to (see
+// docs/how-to/connect-to-registry.md); the in-cluster URL covers a
+// self-hosted registry-api. A deployment that runs its own registry adds its
+// URL via CLERUM_REGISTRY_URL_ALLOWLIST (comma-separated) rather than editing
+// this list. `example.com` is the reserved-domain fixture used across the
+// test suite — inert (no real registry) and kept so tests need no churn.
+//
+// The gate must never be `config.registryUrl !== ''` alone — dropping the
+// self-hosted disjunct is exactly the rejected design that broke managed mode
+// (see the regression test below). Reading process.env directly here is
+// defensive against a future change to the parser's default; for today's
+// parser it is equivalent to config.registryConnectionMode, not itself
+// load-bearing.
+if (
+  config.registryUrl !== '' &&
+  (process.env.REGISTRY_CONNECTION_MODE === 'self-hosted' || config.registryAuthEnabled)
+) {
   const allowed = [
     'https://registry.evenfire.ai',
     'http://registry-api.registry.svc.cluster.local:8085',
@@ -845,6 +1120,19 @@ if (config.registryAuthEnabled) {
       `CLERUM_REGISTRY_URL=${config.registryUrl} is not in the registry URL allowlist: ${allowed.join(', ')}`
     )
   }
+}
+
+// Mode requirement (S10: never infer mode from which credentials exist) and the
+// managed credential/voucher checks stay gated on auth, UNCHANGED.
+if (config.registryAuthEnabled) {
+  // Mode must be set EXPLICITLY when the registry is enabled — never inferred
+  // from which credentials happen to be present (S10: no silent split-brain).
+  if (!process.env.REGISTRY_CONNECTION_MODE) {
+    throw new Error(
+      'REGISTRY_CONNECTION_MODE is required (managed|self-hosted) when CLERUM_REGISTRY_AUTH_ENABLED=true'
+    )
+  }
+  console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
 
   if (config.registryConnectionMode === 'managed') {
     // Managed machine creds live in env (unchanged).

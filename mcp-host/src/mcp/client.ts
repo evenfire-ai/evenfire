@@ -5,7 +5,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { McpServerInfo, McpTool } from '../types'
 import {
@@ -19,15 +18,30 @@ import {
 
 export type { McpToolCallOptions } from './requestOptions'
 
+type SupportedMcpTransport = SSEClientTransport | StreamableHTTPClientTransport
+
+interface McpCallRecovery {
+  sourceEpoch: number
+  sourceClient: Client
+  targetEpoch?: number
+  targetClient?: Client
+  promise: Promise<void>
+}
+
 export class McpClient {
   private client: Client | null = null
-  private transport: Transport | null = null
+  private transport: SupportedMcpTransport | null = null
   private serverConfig: McpServerInfo
   private authToken?: string
   private proxyUrl?: string
   private tools: McpTool[] = []
   private connected: boolean = false
   private reconnectPromise: Promise<void> | null = null
+  private reconnectCallRecovery: McpCallRecovery | null = null
+  private connectionEpoch = 0
+  private retired = false
+  private readonly retirementController = new AbortController()
+  private readonly transportCleanups = new WeakMap<SupportedMcpTransport, Promise<void>>()
 
   constructor(serverConfig: McpServerInfo, authToken?: string, proxyUrl?: string) {
     this.serverConfig = serverConfig
@@ -47,6 +61,70 @@ export class McpClient {
     return this.tools
   }
 
+  private lifecycleError(reason: 'closed' | 'superseded'): Error {
+    return new Error(`MCP client ${this.name} is ${reason}`)
+  }
+
+  private ensureNotRetired(): void {
+    if (this.retired) throw this.lifecycleError('closed')
+  }
+
+  private isCurrentConnection(
+    epoch: number,
+    client: Client,
+    transport: SupportedMcpTransport
+  ): boolean {
+    return (
+      !this.retired &&
+      this.connectionEpoch === epoch &&
+      this.client === client &&
+      this.transport === transport
+    )
+  }
+
+  private isCallCurrent(epoch: number, client: Client): boolean {
+    return (
+      !this.retired && this.connectionEpoch === epoch && this.client === client && this.connected
+    )
+  }
+
+  private ensureCallCurrent(epoch: number, client: Client): void {
+    if (this.isCallCurrent(epoch, client)) return
+    throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
+  }
+
+  private detachConnection(): () => Promise<void> {
+    const transport = this.transport
+    this.connectionEpoch += 1
+    this.client = null
+    this.transport = null
+    this.connected = false
+    this.tools = []
+
+    // Start physical I/O revocation now. The cleanup lane owns only awaiting
+    // this shared promise, so a saturated cleanup queue cannot leave an
+    // authenticated transport active after local authority was revoked.
+    const cleanup = transport ? this.closeCapturedTransport(transport) : Promise.resolve()
+    return () => cleanup
+  }
+
+  private closeCapturedTransport(transport: SupportedMcpTransport): Promise<void> {
+    const existingCleanup = this.transportCleanups.get(transport)
+    if (existingCleanup) return existingCleanup
+
+    let cleanup: Promise<void>
+    try {
+      // Both supported SDK transports abort their active I/O synchronously
+      // inside close(). Invoke it before returning while sharing the resulting
+      // cleanup across retirement and late connection continuations.
+      cleanup = transport.close().catch(() => undefined)
+    } catch {
+      cleanup = Promise.resolve()
+    }
+    this.transportCleanups.set(transport, cleanup)
+    return cleanup
+  }
+
   /**
    * Create the appropriate transport based on server configuration.
    */
@@ -60,7 +138,7 @@ export class McpClient {
     return transport.url || `http://${this.serverConfig.name}.mcp-server.svc.cluster.local:3000/mcp`
   }
 
-  private createTransport(): Transport {
+  private createTransport(): SupportedMcpTransport {
     const { transport } = this.serverConfig
     const headers: Record<string, string> = {}
 
@@ -96,39 +174,55 @@ export class McpClient {
 
     console.log(`[MCP:${this.name}] Connecting to ${transport.url} (${transport.type})...`)
 
+    this.ensureNotRetired()
+    const connectionEpoch = ++this.connectionEpoch
+    const nextTransport = this.createTransport()
+    const nextClient = new Client(
+      {
+        name: 'clerum-mcp-host',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {},
+      }
+    )
+    this.transport = nextTransport
+    this.client = nextClient
+
     try {
       ensureNotAborted(options.signal)
-      this.transport = this.createTransport()
-
-      // Create MCP client
-      this.client = new Client(
-        {
-          name: 'clerum-mcp-host',
-          version: '1.0.0',
-        },
-        {
-          capabilities: {},
-        }
-      )
 
       // MCP SDK Client.connect() does not currently accept request options.
       // Race it against the caller budget/signal so workflow setup cannot
       // outlive the step deadline if initialize hangs.
       await withRequestTimeout(
-        this.client.connect(this.transport),
+        nextClient.connect(nextTransport),
         options,
         'MCP SDK connect timeout'
       )
+      if (!this.isCurrentConnection(connectionEpoch, nextClient, nextTransport)) {
+        throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
+      }
       this.connected = true
 
       console.log(`[MCP:${this.name}] Connected successfully`)
 
       // Fetch available tools
       await this.refreshTools(options)
+      if (!this.isCurrentConnection(connectionEpoch, nextClient, nextTransport)) {
+        throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
+      }
     } catch (error) {
       console.error(`[MCP:${this.name}] Failed to connect:`, error)
-      this.connected = false
-      await this.disconnect().catch(() => undefined)
+      if (this.client === nextClient && this.transport === nextTransport) {
+        this.connectionEpoch += 1
+        this.client = null
+        this.transport = null
+        this.connected = false
+        this.tools = []
+      }
+      await this.closeCapturedTransport(nextTransport)
+      if (this.retired) throw this.lifecycleError('closed')
       throw error
     }
   }
@@ -137,25 +231,28 @@ export class McpClient {
    * Disconnect from the MCP server.
    */
   async disconnect(): Promise<void> {
-    if (this.client) {
-      try {
-        await this.client.close()
-      } catch {
-        // Ignore close errors
-      }
-      this.client = null
-    }
-    if (this.transport) {
-      try {
-        await this.transport.close()
-      } catch {
-        // Ignore close errors
-      }
-      this.transport = null
-    }
-    this.connected = false
-    this.tools = []
+    // Revoke local authority before close I/O. The SDK Client owns this same
+    // transport and Client.close() only delegates to transport.close(); calling
+    // both duplicates the close and can strand revocation behind a wrapper
+    // promise. The two transports created above abort their EventSource/fetch
+    // synchronously inside close(), and their onclose hook clears Client state.
+    const cleanup = this.detachConnection()
+    await cleanup()
     console.log(`[MCP:${this.name}] Disconnected`)
+  }
+
+  /**
+   * Permanently revoke this client before scheduling transport cleanup.
+   *
+   * Unlike disconnect(), retirement cannot be followed by an internal
+   * reconnect. Transport abort begins before this method returns; the returned
+   * cleanup only awaits the shared close result, so bounded cleanup lanes do
+   * not delay physical revocation.
+   */
+  retire(): () => Promise<void> {
+    this.retired = true
+    this.retirementController.abort(this.lifecycleError('closed'))
+    return this.detachConnection()
   }
 
   /**
@@ -167,26 +264,30 @@ export class McpClient {
       return
     }
 
+    const refreshClient = this.client
+    const refreshEpoch = this.connectionEpoch
     const sdkRequestOptions = requestOptions(options.timeoutMs, options.signal)
+    let response: Awaited<ReturnType<Client['listTools']>>
     try {
-      const response = await this.client.listTools(undefined, sdkRequestOptions)
-      this.tools = (response.tools || []).map(tool => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema as Record<string, unknown>,
-        serverName: this.name,
-      }))
-
-      console.log(`[MCP:${this.name}] Found ${this.tools.length} tool(s):`)
-      for (const tool of this.tools) {
-        console.log(
-          `[MCP:${this.name}]   - ${tool.name}: ${tool.description || '(no description)'}`
-        )
-      }
+      response = await refreshClient.listTools(undefined, sdkRequestOptions)
     } catch (error) {
+      this.ensureCallCurrent(refreshEpoch, refreshClient)
       console.error(`[MCP:${this.name}] Failed to list tools:`, error)
       this.tools = []
       throw error
+    }
+
+    this.ensureCallCurrent(refreshEpoch, refreshClient)
+    this.tools = (response.tools || []).map(tool => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema as Record<string, unknown>,
+      serverName: this.name,
+    }))
+
+    console.log(`[MCP:${this.name}] Found ${this.tools.length} tool(s):`)
+    for (const tool of this.tools) {
+      console.log(`[MCP:${this.name}]   - ${tool.name}: ${tool.description || '(no description)'}`)
     }
   }
 
@@ -211,27 +312,44 @@ export class McpClient {
   async probeTools(
     options: McpToolCallOptions = {}
   ): Promise<
-    { ok: true; toolCount: number; outputSchemaCount: number } | { ok: false; error: unknown }
+    | { ok: true; toolCount: number; outputSchemaCount: number }
+    | { ok: false; error: unknown; stale: boolean }
   > {
     if (!this.client || !this.connected) {
-      return { ok: false, error: new Error(`${this.name} is not connected`) }
+      return {
+        ok: false,
+        error: new Error(`${this.name} is not connected`),
+        stale: false,
+      }
     }
+    const probeClient = this.client
+    const probeEpoch = this.connectionEpoch
     try {
       // Deliberately use the validated raw request instead of Client.listTools().
       // The SDK convenience method compiles output schemas and mutates task/output
       // metadata caches, which must remain owned by connection and explicit refresh.
-      const response = await this.client.request(
+      const response = await probeClient.request(
         { method: 'tools/list', params: undefined },
         ListToolsResultSchema,
         requestOptions(options.timeoutMs, options.signal)
       )
+      // Preserve connection-epoch staleness: a probe that resolved against a
+      // superseded/retired connection must not report counts for it.
+      this.ensureCallCurrent(probeEpoch, probeClient)
       return {
         ok: true,
         toolCount: response.tools.length,
         outputSchemaCount: response.tools.filter(tool => tool.outputSchema !== undefined).length,
       }
     } catch (error) {
-      return { ok: false, error }
+      if (!this.isCallCurrent(probeEpoch, probeClient)) {
+        return {
+          ok: false,
+          error: this.lifecycleError(this.retired ? 'closed' : 'superseded'),
+          stale: true,
+        }
+      }
+      return { ok: false, error, stale: false }
     }
   }
 
@@ -261,12 +379,21 @@ export class McpClient {
    * Reconnect by tearing down the existing client/transport and creating new ones.
    */
   async reconnect(options: McpToolCallOptions = {}): Promise<void> {
+    this.ensureNotRetired()
     if (this.reconnectPromise) {
       return this.reconnectPromise
     }
+    // A caller-independent reconnect supersedes any completed session
+    // recovery. Calls from that older source must not adopt this connection.
+    this.reconnectCallRecovery = null
+    await this.startReconnect(options)
+  }
+
+  private async startReconnect(options: McpToolCallOptions): Promise<void> {
     this.reconnectPromise = (async () => {
       console.log(`[MCP:${this.name}] Reconnecting...`)
       await this.disconnect()
+      this.ensureNotRetired()
       await this.connect(options)
     })()
     try {
@@ -274,6 +401,92 @@ export class McpClient {
     } finally {
       this.reconnectPromise = null
     }
+  }
+
+  /**
+   * Join a session recovery only when it was started by another call from the
+   * exact same connection. An unrelated reconnect or replacement must keep
+   * stale calls fenced off. The completed source-to-target marker also lets a
+   * slower peer adopt a recovery that finished before its retry delay elapsed.
+   * Each joining caller retains its own budget and abort signal.
+   */
+  private async reconnectForCall(
+    callEpoch: number,
+    callClient: Client,
+    options: McpToolCallOptions
+  ): Promise<void> {
+    this.ensureNotRetired()
+    const existingRecovery = this.reconnectCallRecovery
+    if (
+      existingRecovery?.sourceEpoch === callEpoch &&
+      existingRecovery.sourceClient === callClient
+    ) {
+      await this.waitForCallRecovery(existingRecovery, options)
+      return
+    }
+
+    if (this.reconnectPromise) {
+      throw this.lifecycleError('superseded')
+    }
+
+    this.ensureCallCurrent(callEpoch, callClient)
+    const recovery: McpCallRecovery = {
+      sourceEpoch: callEpoch,
+      sourceClient: callClient,
+      promise: Promise.resolve(),
+    }
+    recovery.promise = (async () => {
+      try {
+        // Recovery belongs to the connection lifecycle, not to whichever
+        // affected call happens to win the race. Callers independently bound
+        // their wait below without cancelling recovery for healthier peers.
+        await this.startReconnect({})
+        const targetClient = this.client
+        const targetEpoch = this.connectionEpoch
+        if (!targetClient) throw this.lifecycleError('superseded')
+        this.ensureCallCurrent(targetEpoch, targetClient)
+        if (this.reconnectCallRecovery !== recovery) {
+          throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
+        }
+        recovery.targetEpoch = targetEpoch
+        recovery.targetClient = targetClient
+      } catch (error) {
+        if (this.reconnectCallRecovery === recovery) {
+          this.reconnectCallRecovery = null
+        }
+        throw error
+      }
+    })()
+    this.reconnectCallRecovery = recovery
+    await this.waitForCallRecovery(recovery, options)
+  }
+
+  private async waitForCallRecovery(
+    recovery: McpCallRecovery,
+    options: McpToolCallOptions
+  ): Promise<void> {
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, this.retirementController.signal])
+      : this.retirementController.signal
+    await withRequestTimeout(recovery.promise, { ...options, signal }, 'MCP reconnect timeout')
+    const { targetEpoch, targetClient } = recovery
+    if (
+      targetEpoch === undefined ||
+      !targetClient ||
+      !this.isCallCurrent(targetEpoch, targetClient)
+    ) {
+      throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
+    }
+  }
+
+  private canAdoptCallRecovery(callEpoch: number, callClient: Client): boolean {
+    const recovery = this.reconnectCallRecovery
+    if (recovery?.sourceEpoch !== callEpoch || recovery.sourceClient !== callClient) {
+      return false
+    }
+    if (recovery.targetEpoch === undefined && !recovery.targetClient) return true
+    if (recovery.targetEpoch === undefined || !recovery.targetClient) return false
+    return this.isCallCurrent(recovery.targetEpoch, recovery.targetClient)
   }
 
   /**
@@ -288,6 +501,9 @@ export class McpClient {
     if (!this.client || !this.connected) {
       throw new Error(`MCP server ${this.name} is not connected`)
     }
+    this.ensureNotRetired()
+    const callClient = this.client
+    const callEpoch = this.connectionEpoch
 
     console.log(`[MCP:${this.name}] Calling tool: ${toolName}`)
     console.log(`[MCP:${this.name}]   Args:`, JSON.stringify(args).substring(0, 200))
@@ -300,7 +516,7 @@ export class McpClient {
 
     try {
       ensureNotAborted(options.signal)
-      const result = await this.client.callTool(
+      const result = await callClient.callTool(
         {
           name: toolName,
           arguments: args,
@@ -308,22 +524,35 @@ export class McpClient {
         undefined,
         callRequestOptions()
       )
+      this.ensureCallCurrent(callEpoch, callClient)
 
       console.log(`[MCP:${this.name}] Tool result:`, JSON.stringify(result).substring(0, 200))
       return result
     } catch (error) {
-      if (this.isSessionError(error)) {
+      const sessionError = this.isSessionError(error)
+      if (this.retired) {
+        throw this.lifecycleError('closed')
+      }
+      const callCurrent = this.isCallCurrent(callEpoch, callClient)
+      if (!callCurrent && (!sessionError || !this.canAdoptCallRecovery(callEpoch, callClient))) {
+        throw this.lifecycleError('superseded')
+      }
+      if (sessionError) {
         console.warn(`[MCP:${this.name}] Session lost, reconnecting and retrying after delay...`)
         try {
           // Brief delay before reconnect to avoid hammering the server
           const retryDelayMs = Math.min(1000, remainingBudgetMs(deadlineMs) ?? 1000)
           await new Promise(resolve => setTimeout(resolve, retryDelayMs))
-          await this.reconnect({
+          ensureNotAborted(options.signal)
+          await this.reconnectForCall(callEpoch, callClient, {
             timeoutMs: remainingBudgetMs(deadlineMs),
             signal: options.signal,
           })
           ensureNotAborted(options.signal)
-          const result = await this.client!.callTool(
+          const retryClient = this.client
+          if (!retryClient || !this.connected) throw this.lifecycleError('superseded')
+          const retryEpoch = this.connectionEpoch
+          const result = await retryClient.callTool(
             {
               name: toolName,
               arguments: args,
@@ -331,6 +560,7 @@ export class McpClient {
             undefined,
             callRequestOptions()
           )
+          this.ensureCallCurrent(retryEpoch, retryClient)
           console.log(
             `[MCP:${this.name}] Tool result (after reconnect):`,
             JSON.stringify(result).substring(0, 200)

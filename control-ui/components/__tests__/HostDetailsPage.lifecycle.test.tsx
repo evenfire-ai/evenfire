@@ -31,6 +31,12 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
+vi.mock('../HostAccessTab', () => ({
+  HostAccessTab: ({ hostName }: { hostName: string }) => (
+    <div data-testid="access-tab">Access editor for {hostName}</div>
+  ),
+}))
+
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
@@ -180,7 +186,7 @@ describe('HostDetailsPage stateless lifecycle', () => {
     expect(screen.queryByText(/^Lifecycle:/)).not.toBeInTheDocument()
   })
 
-  it('loads spec.lifecycle.stateless=true into the Agent type field', async () => {
+  it('loads spec.lifecycle.stateless=true into the Type field', async () => {
     setupApiMocks(statelessHost)
     render(<HostDetailsPage />)
 
@@ -214,15 +220,14 @@ describe('HostDetailsPage stateless lifecycle', () => {
     expect(screen.queryByText(/SuspendBlocked: activeCronSchedules/)).not.toBeInTheDocument()
   })
 
-  it('echoes spec.lifecycle when saving an unrelated field (full-replace safety)', async () => {
+  it('echoes spec.lifecycle when saving Overview unchanged (full-replace safety)', async () => {
     setupApiMocks(statelessHost)
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
     const payload = await saveOverviewAndGetPayload()
 
-    expect(payload.spec.host).toBe('foo-updated')
+    expect(payload.spec.host).toBe('foo-display')
     expect(payload.spec.lifecycle).toEqual({ stateless: true })
     expect(payload.spec.approval).toEqual(baseSpec.approval)
   })
@@ -232,7 +237,6 @@ describe('HostDetailsPage stateless lifecycle', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
     const payload = await saveOverviewAndGetPayload()
 
     expect('lifecycle' in payload.spec).toBe(false)
@@ -246,7 +250,6 @@ describe('HostDetailsPage stateless lifecycle', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
     const payload = await saveOverviewAndGetPayload()
 
     expect(payload.spec.workflowControl).toEqual({
@@ -265,7 +268,7 @@ describe('HostDetailsPage stateless lifecycle', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Agent type'), { target: { value: 'stateless' } })
+    fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'stateless' } })
     const payload = await saveOverviewAndGetPayload()
 
     expect(payload.spec.lifecycle).toEqual({ stateless: true })
@@ -276,7 +279,7 @@ describe('HostDetailsPage stateless lifecycle', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Agent type'), { target: { value: 'stateful' } })
+    fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'stateful' } })
     const payload = await saveOverviewAndGetPayload()
 
     expect(payload.spec.lifecycle).toEqual({ stateless: false })

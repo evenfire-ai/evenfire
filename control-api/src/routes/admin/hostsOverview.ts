@@ -3,6 +3,7 @@ import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { K8sGateway } from '../../k8s.js'
+import { buildAgentDirectoryEntry } from '../../services/directory/accessReconciliation.js'
 import {
   listAllTeams,
   listTeamsByAgent,
@@ -26,10 +27,14 @@ export function createAdminHostsOverviewRouter(gateway: K8sGateway): Router {
       const selected = hosts
         .map(h => ({ name: h.metadata?.name, namespace: h.metadata?.namespace }))
         .filter(h => Boolean(h.name))
+      const agents = hosts
+        .map(host => buildAgentDirectoryEntry(host, config.hostsNamespace))
+        .filter(agent => agent !== null)
+        .sort((a, b) => a.name.localeCompare(b.name))
       const overviews = await Promise.all(
         selected.map(h => gateway.getHostOverview(h.name as string, h.namespace))
       )
-      res.status(200).json({ items: overviews })
+      res.status(200).json({ items: overviews, agents })
     })
   )
 
@@ -38,7 +43,14 @@ export function createAdminHostsOverviewRouter(gateway: K8sGateway): Router {
     enforceNamespace(config.hostsNamespace),
     asyncHandler(async (req, res) => {
       const overview = await gateway.getHostOverview(req.params.name, config.hostsNamespace)
-      res.status(200).json(overview)
+      const host =
+        overview && typeof overview === 'object' && 'host' in overview
+          ? (overview as { host?: unknown }).host
+          : null
+      res.status(200).json({
+        ...overview,
+        agent: buildAgentDirectoryEntry(host, config.hostsNamespace),
+      })
     })
   )
 

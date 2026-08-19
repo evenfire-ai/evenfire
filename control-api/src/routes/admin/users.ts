@@ -2,22 +2,14 @@ import { Router } from 'express'
 import type { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import {
-  filterAccessValues,
-  mergeActiveUpdateWithDeletedHistory,
-  partitionAccessValues,
-} from '../../services/directory/accessReconciliation.js'
-import {
-  adminDeleteUser,
+  DesktopUserRetirementError,
   createAdminUser,
   createPasswordSetupInvitationForUser,
   findMembership,
   getAdminUserContext,
-  getUserAgents,
-  getUserContexts,
   listTeams,
   listUsers,
-  setUserAgents,
-  setUserContexts,
+  retireDesktopUser,
   updateAdminUserContext,
 } from '../../services/directory/index.js'
 import { disableVerifiedMediumAccount } from '../../services/workflowApprovalMediumIdentityService.js'
@@ -26,11 +18,7 @@ import {
   listVerifiedMediumAccountsWithPreference,
   preferVerifiedMediumAccount,
 } from '../../services/workflowApprovalMediumPreferenceService.js'
-import {
-  loadAdminActiveAgentNames,
-  loadAdminActiveContextIds,
-  sendAdminAccessReconciliationError,
-} from './accessReconciliationResponse.js'
+import { registerAdminUserAccessRoutes } from './userAccess.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -256,107 +244,35 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
     }
   })
 
-  router.get('/admin/users/:userId/contexts', async (req, res, next) => {
-    try {
-      const base = await getUserContexts(req.params.userId)
-      const partition = partitionAccessValues(
-        base.contextIds,
-        await loadAdminActiveContextIds(gateway)
-      )
-      res.status(200).json({
-        ...base,
-        contextIds: partition.active,
-        deletedContextIds: partition.deleted,
-      })
-    } catch (error) {
-      if (sendAdminAccessReconciliationError(res, error)) return
-      next(error)
-    }
-  })
+  registerAdminUserAccessRoutes(router, gateway)
 
-  router.put('/admin/users/:userId/contexts', async (req, res, next) => {
+  /** Governed retirement requires the authenticated Control Admin and replay key. */
+  router.delete('/admin/users/:userId', async (req: UiAuthedRequest, res, next) => {
     try {
-      const contextIds = Array.isArray(req.body?.contextIds) ? req.body.contextIds.map(String) : []
-      const [existing, activeContextIds] = await Promise.all([
-        getUserContexts(req.params.userId),
-        loadAdminActiveContextIds(gateway),
-      ])
-      const existingPartition = partitionAccessValues(existing.contextIds, activeContextIds)
-      const updated = await setUserContexts(
-        req.params.userId,
-        mergeActiveUpdateWithDeletedHistory(
-          contextIds,
-          activeContextIds,
-          existingPartition.deleted
-        ),
-        (req as UiAuthedRequest).adminAuth!.sub
-      )
-      const updatedPartition = partitionAccessValues(updated.contextIds, activeContextIds)
-      res.status(200).json({
-        ...updated,
-        contextIds: updatedPartition.active,
-        deletedContextIds: updatedPartition.deleted,
-      })
-    } catch (error) {
-      if (sendAdminAccessReconciliationError(res, error)) return
-      next(error)
-    }
-  })
-
-  router.get('/admin/users/:userId/agents', async (req, res, next) => {
-    try {
-      const base = await getUserAgents(req.params.userId)
-      const partition = partitionAccessValues(
-        base.agentNames,
-        await loadAdminActiveAgentNames(gateway)
-      )
-      res.status(200).json({
-        ...base,
-        agentNames: partition.active,
-      })
-    } catch (error) {
-      if (sendAdminAccessReconciliationError(res, error)) return
-      next(error)
-    }
-  })
-
-  router.put('/admin/users/:userId/agents', async (req, res, next) => {
-    try {
-      const agentNames = Array.isArray(req.body?.agentNames) ? req.body.agentNames.map(String) : []
-      const activeAgentNames = await loadAdminActiveAgentNames(gateway)
-      const updated = await setUserAgents(
-        req.params.userId,
-        filterAccessValues(agentNames, new Set(activeAgentNames)),
-        (req as UiAuthedRequest).adminAuth!.sub
-      )
-      const updatedPartition = partitionAccessValues(updated.agentNames, activeAgentNames)
-      res.status(200).json({
-        ...updated,
-        agentNames: updatedPartition.active,
-      })
-    } catch (error) {
-      if (sendAdminAccessReconciliationError(res, error)) return
-      next(error)
-    }
-  })
-
-  /**
-   * Hard-delete user profile, memberships, and personal context/agent links (DB CASCADE).
-   * Teams are retained even when this leaves them with no members.
-   */
-  router.delete('/admin/users/:userId', async (req, res, next) => {
-    try {
-      const result = await adminDeleteUser(req.params.userId)
-      if ('error' in result) {
-        if (result.error === 'not_found') {
-          res.status(404).json({ error: 'not_found' })
-          return
-        }
-        const exhaustive: never = result.error
-        throw new Error(`Unhandled adminDeleteUser result: ${exhaustive}`)
+      const controlAdminId = req.adminAuth?.sub
+      if (!controlAdminId) {
+        return res.status(401).json({ error: 'Unauthorized' })
       }
-      res.status(200).json({ deleted: true, id: result.id })
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
+      if (!reason) return res.status(400).json({ error: 'reason_required' })
+      const idempotencyKey = String(req.header('Idempotency-Key') || '').trim()
+      if (!idempotencyKey) return res.status(400).json({ error: 'idempotency_key_required' })
+      const result = await retireDesktopUser(
+        { kind: 'control_admin', controlAdminId },
+        req.params.userId,
+        reason,
+        idempotencyKey,
+        req.correlationId ?? null
+      )
+      return res.status(200).json({ deleted: true, id: result.id })
     } catch (error) {
+      if (error instanceof DesktopUserRetirementError) {
+        if (error.code === 'not_found') return res.status(404).json({ error: 'not_found' })
+        if (error.code === 'invalid_input') {
+          return res.status(400).json({ error: 'invalid_retirement_input' })
+        }
+        return res.status(409).json({ error: error.code })
+      }
       next(error)
     }
   })

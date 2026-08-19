@@ -13,6 +13,11 @@ metadata:
     app: control-api
 spec:
   replicas: 1
+  # Control API writes the SDK policy/attempt ledger. Recreate prevents an old
+  # and a new writer from serving concurrently during an image or config
+  # rollout; schema-first pre-gate sync also fences replicas before migrations.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: control-api
@@ -74,6 +79,11 @@ spec:
           value: "mcp-host,sandbox-recipes"
         - name: CONTROL_API_REMOTE_MCP_EGRESS_PROXY_IMAGE
           value: clerum/nginx-egress-proxy:0.1.0
+        # control-api→gfsc proxy fetch timeout (ms). Homologous with the browser
+        # client and the control-ui server proxy (all 300s). Raise all three
+        # together or none. Guards large GFS uploads from a premature cut.
+        - name: CONTROL_API_GFSC_PROXY_TIMEOUT_MS
+          value: "300000"
         - name: CONTROL_API_PG_CONNECTION_STRING
           valueFrom:
             secretKeyRef:
@@ -115,10 +125,20 @@ spec:
         resources:
           limits:
             cpu: 300m
-            memory: 256Mi
+            # Legacy GFS mutations arrive base64-in-JSON and are fully buffered.
+            # v2 part PUTs bypass this parser and stream one bounded part at a time.
+            # Keep the existing 768Mi legacy headroom; do not treat it as a reason
+            # to raise any JSON cap for the 200 MiB product boundary. EVERY overlay
+            # must keep >=768Mi for the legacy path:
+            #   - deploy/overlays/minikube/patches/resource-limits.yaml (in this repo)
+            #   - keyper-labs/evenfire-infra gcp-dev/gcp-prod patches/resource-limits.yaml
+            #     (private infra repo — both currently pin 512Mi; a companion PR must
+            #     raise them to 768Mi before/with the next GKE deploy, or RC3 is inert
+            #     in dev/prod exactly as it was in minikube before the audit caught it).
+            memory: 768Mi
           requests:
             cpu: 50m
-            memory: 64Mi
+            memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

@@ -13,6 +13,34 @@ metadata:
     app: host-context-controller
 spec:
   replicas: 1
+  # HCC's safety model assumes a single NetworkPolicy writer: replicas:1 with no
+  # leader election (see statelessLifecycleExecutor.ts). RollingUpdate (the
+  # default) starts the new pod before terminating the old one, so every rollout
+  # would overlap two writers — during which the outgoing replica can win a
+  # conflict-retry replace and land its wider spec back over a policy the new
+  # replica just hardened and certified, with no NetworkPolicy resync to heal it
+  # and /ready still 200. Recreate terminates the old pod first, honouring the
+  # single-writer assumption through the rollout too.
+  strategy:
+    type: Recreate
+  # Recreate + replicas:1 means a botched rollout (new pod never Ready) leaves
+  # the control plane down until a manual `kubectl rollout undo` — the single-
+  # writer invariant forbids any overlap-based auto-recovery. This deadline is
+  # DETECTION ONLY: it flips Progressing=False (ProgressDeadlineExceeded) and
+  # fails `kubectl rollout status` for callers without their own --timeout; it
+  # does not roll back.
+  #
+  # Value (origin/dev, 2026-08-05): HCC's /ready stays 503 until its initial fleet
+  # reconciliation finishes, so time-to-Ready scales with the McpServer/Context
+  # fleet — clerum-dev took 651s at 108 McpServers / 22 Contexts. The unset default
+  # (600s) governed the deploy because `kubectl rollout status` aborts the instant
+  # the deadline is exceeded, and the clock starts at apply-inter-service-tokens.sh's
+  # `rollout restart`, so the wait inherits only the remaining budget (600-160=440s
+  # vs a 480s timeout on 2026-08-05: #202's timeout never bound, deploy failed 50s
+  # short). 1200s covers the 900s wait plus a 300s head-start. Mitigation, not the
+  # fix — #205 decouples readiness from fleet convergence, after which this should
+  # come back down.
+  progressDeadlineSeconds: 1200
   selector:
     matchLabels:
       app: host-context-controller
@@ -50,6 +78,15 @@ spec:
           value: clerum/mcp-host:0.9.5
         - name: CONTEXT_MAPPER_EGRESS_PROXY_IMAGE
           value: clerum/nginx-egress-proxy:0.1.0
+        # Legacy JSON GFS mutation cap (bytes), passed through to generated gfsc
+        # pods. Upload v2 uses raw indexed parts and is configured independently
+        # through CONTEXT_MAPPER_GFSC_UPLOAD_* private-infra settings.
+        - name: GFS_MAX_WRITE_BODY_BYTES
+          value: "25165824"
+        # gfsc memory limit for the legacy buffered path. v2 part streaming must be
+        # validated against the configured part/global concurrency budgets instead.
+        - name: CONTEXT_MAPPER_GFSC_LIMIT_MEMORY
+          value: 512Mi
         - name: STDIO_BRIDGE_IMAGE
           value: clerum/stdio-bridge:0.9.5
         - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
@@ -58,8 +95,16 @@ spec:
         # API or the HCC discovery API, so they get only deny-all + DNS.
         - name: CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES
           value: sandbox-ui
+        # issue #299: the external-egress resync interval MUST stay <= half the
+        # overlap window (HCC_EXTERNAL_EGRESS_OVERLAP_SEC, default 300s) so the
+        # persisted sliding window of resolved /32s never lapses between
+        # refreshes. The legacy 300 (== the overlap) let the accumulated set
+        # expire before the next refresh, which is the #299 drift itself; HCC
+        # now fails closed at startup on any interval > overlap/2.
         - name: HCC_EXTERNAL_EGRESS_RESYNC_SEC
-          value: "300"
+          value: "60"
+        - name: HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS
+          value: "5000"
         - name: HCC_HOST_K8S_REQUEST_TIMEOUT_MS
           value: "30000"
         # Bounded cross-Host concurrency for a full/lifecycle Host fleet pass.

@@ -6,15 +6,20 @@ import { RegistryInstallForm } from '../RegistryInstallForm'
 import { ToastProvider } from '../Toast'
 
 vi.mock('../../lib/api', async () => {
+  const { buildContextList, buildContextResource } =
+    await import('../../test/fixtures/contextResource')
   const mod: Record<string, unknown> = {}
   mod.getRegistryCredentialSchema = vi.fn().mockResolvedValue({
     required: false,
     authType: 'none',
     keys: [],
   })
-  mod.getContexts = vi.fn().mockResolvedValue({
-    items: [{ metadata: { name: 'context1' } }],
-  })
+  mod.getContexts = vi
+    .fn()
+    .mockResolvedValue(buildContextList([buildContextResource({ metadata: { name: 'context1' } })]))
+  mod.getContextUsers = vi.fn().mockResolvedValue({ items: [] })
+  mod.getContextTeams = vi.fn().mockResolvedValue({ items: [] })
+  mod.getHosts = vi.fn().mockResolvedValue({ items: [] })
   mod.installFromRegistry = vi.fn().mockResolvedValue({
     serverName: 'brave-search',
     namespace: 'mcp-server',
@@ -60,6 +65,12 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+async function waitForContinue(): Promise<void> {
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled(), {
+    timeout: 10_000,
+  })
+}
+
 describe('RegistryInstallForm -- pending connector credentials', () => {
   it('allows empty required credentials and blocks partial values with clear guidance', async () => {
     vi.mocked(api.getRegistryCredentialSchema).mockResolvedValueOnce({
@@ -85,14 +96,16 @@ describe('RegistryInstallForm -- pending connector credentials', () => {
 
     render(<RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />)
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled()
-    })
+    await waitForContinue()
+    fireEvent.click(screen.getByText('Configuration'))
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 
     expect(
       await screen.findByText(/Leave all credential fields empty to install now/i)
     ).toBeInTheDocument()
+    expect(screen.getByLabelText('API Key')).toHaveAttribute('placeholder', 'API Key')
     expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled()
 
     fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-test-123' } })
@@ -111,13 +124,106 @@ describe('RegistryInstallForm -- server name default', () => {
     const scopedEntry = { ...MOCK_ENTRY, name: '@test-oss-jose/helloo' }
     render(<RegistryInstallForm entry={scopedEntry} onCancel={vi.fn()} onInstalled={vi.fn()} />)
 
-    // Advance from step 0 (review) to step 1 (name & credentials).
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    // Configuration is deliberately collapsed on the Package step.
+    await waitForContinue()
+    fireEvent.click(screen.getByText('Configuration'))
 
     const nameInput = (await screen.findByLabelText('Server name')) as HTMLInputElement
     // `@test-oss-jose/helloo` sanitized to a valid RFC 1123 label — no manual fix.
     expect(nameInput.value).toBe('test-oss-jose-helloo')
     expect(screen.queryByText(/Must be a valid K8s name/i)).toBeNull()
+  })
+
+  it('keeps configuration collapsed and shows Package, Context, Credentials, and Install flow steps', async () => {
+    const { container } = render(
+      <RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />
+    )
+
+    await waitForContinue()
+
+    const configuration = container.querySelector('details.cu-registry-install-configuration')
+    expect(configuration).not.toBeNull()
+    expect(configuration).not.toHaveAttribute('open')
+    expect(screen.getByRole('button', { name: /Package/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Context/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Credentials/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Install/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Configure/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Network/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('high')).not.toBeInTheDocument()
+  })
+
+  it('shows the install details as a stacked summary', async () => {
+    render(<RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />)
+
+    await waitForContinue()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    const summary = screen.getByLabelText('Install summary')
+    expect(summary).toHaveTextContent('Connector')
+    expect(summary).toHaveTextContent('brave-search')
+    expect(summary).toHaveTextContent('Context')
+    expect(summary).toHaveTextContent('context1')
+    expect(summary).toHaveTextContent('Marketplace package')
+    expect(summary).toHaveTextContent('Version')
+    expect(screen.getByRole('region', { name: 'Connector access' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Connector access principals' })).toBeInTheDocument()
+  })
+
+  it('lists the users, teams, and agents that can access the selected context', async () => {
+    vi.mocked(api.getContextUsers).mockResolvedValueOnce({
+      items: [{ id: 'user-1', email: 'ada@example.com', name: 'Ada', displayName: 'Ada Lovelace' }],
+    })
+    vi.mocked(api.getContextTeams).mockResolvedValueOnce({
+      items: [{ id: 'team-1', name: 'Platform' }],
+    })
+    vi.mocked(api.getHosts).mockResolvedValueOnce({
+      items: [{ metadata: { name: 'research-agent' }, spec: { contextRef: 'context1' } }],
+    })
+
+    render(<RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />)
+
+    await waitForContinue()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    const access = await screen.findByLabelText('Context access')
+    expect(access).toHaveTextContent('Ada Lovelace')
+    expect(access).toHaveTextContent('Platform')
+    expect(access).toHaveTextContent('research-agent')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    const reviewAccess = screen.getByRole('region', { name: 'Connector access' })
+    expect(reviewAccess).toHaveTextContent('Ada Lovelace')
+    expect(reviewAccess).toHaveTextContent('Platform')
+    expect(reviewAccess).toHaveTextContent('research-agent')
+  })
+
+  it('shows a success card and lets the user open Connectors after installation', async () => {
+    const onViewConnectors = vi.fn()
+    render(
+      <RegistryInstallForm
+        entry={MOCK_ENTRY}
+        onCancel={vi.fn()}
+        onInstalled={vi.fn()}
+        onViewConnectors={onViewConnectors}
+      />
+    )
+
+    await waitForContinue()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Install' }))
+
+    expect(
+      await screen.findByRole('heading', { name: "Congratulations — you're ready to go" })
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/was installed and added to context/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Go to Connectors' }))
+    expect(onViewConnectors).toHaveBeenCalledOnce()
   })
 })

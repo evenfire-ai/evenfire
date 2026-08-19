@@ -1,11 +1,192 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   SANDBOX_UI_COOKIE_NAME,
+  applySandboxUiClientRoute,
+  canApplySandboxUiClientRoute,
   extractSandboxUiCookie,
   extractSandboxUiPath,
+  isSandboxUiNavigationWithinPrefix,
   partitionFor,
   reloadSandboxUiWebContents,
+  resolveSandboxUiDefaultPath,
+  resolveSandboxUiSharePath,
 } from '../sandboxUiDriver.js'
+
+describe('applySandboxUiClientRoute', () => {
+  it('hands a nested route to the loaded app without requesting it from the server', async () => {
+    const executeJavaScript = vi.fn().mockResolvedValue(true)
+
+    const applied = await applySandboxUiClientRoute(
+      { isDestroyed: () => false, executeJavaScript },
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/tasks/task-42'
+    )
+
+    expect(applied).toBe(true)
+    expect(executeJavaScript).toHaveBeenCalledOnce()
+    expect(executeJavaScript.mock.calls[0]?.[0]).toContain('/tasks/task-42')
+    expect(executeJavaScript.mock.calls[0]?.[0]).toContain('window.history.replaceState')
+    expect(executeJavaScript.mock.calls[0]?.[0]).toContain("PopStateEvent('popstate'")
+  })
+
+  it('does not hand off a route to a destroyed app view', async () => {
+    const executeJavaScript = vi.fn()
+
+    await expect(
+      applySandboxUiClientRoute(
+        { isDestroyed: () => true, executeJavaScript },
+        'https://rpc.example'
+      )
+    ).resolves.toBe(false)
+    expect(executeJavaScript).not.toHaveBeenCalled()
+  })
+})
+
+describe('canApplySandboxUiClientRoute', () => {
+  const allowedNavigationPrefix = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view'
+
+  it('waits through a 503 interstitial before handing off the client route', () => {
+    expect(
+      canApplySandboxUiClientRoute({
+        allowedNavigationPrefix,
+        currentUrl: allowedNavigationPrefix,
+        navigatedUrl: allowedNavigationPrefix,
+        httpResponseCode: 503,
+      })
+    ).toBe(false)
+  })
+
+  it('accepts canonicalized paths and redirects within the recipe view prefix', () => {
+    expect(
+      canApplySandboxUiClientRoute({
+        allowedNavigationPrefix,
+        currentUrl: `${allowedNavigationPrefix}/a%20b`,
+        navigatedUrl: `${allowedNavigationPrefix}/index.html`,
+        httpResponseCode: 200,
+      })
+    ).toBe(true)
+    expect(
+      canApplySandboxUiClientRoute({
+        allowedNavigationPrefix,
+        currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/other/view/',
+        navigatedUrl: allowedNavigationPrefix,
+        httpResponseCode: 200,
+      })
+    ).toBe(false)
+  })
+})
+
+describe('sandbox UI route normalization', () => {
+  it('recognizes canonicalized URLs within the allowed recipe prefix', () => {
+    expect(
+      isSandboxUiNavigationWithinPrefix(
+        'https://rpc.example/api/v1/sandbox-ui/ns/app/view/a%20b',
+        'https://rpc.example/api/v1/sandbox-ui/ns/app/view'
+      )
+    ).toBe(true)
+  })
+
+  it('omits the default route and rejects an unreadable active app URL when sharing', () => {
+    const input = {
+      currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/tasks',
+      rpcProxyOrigin: 'https://rpc.example',
+      recipeNs: 'ns',
+      recipeName: 'app',
+      defaultPath: '/tasks',
+    }
+    expect(resolveSandboxUiSharePath(input)).toBeUndefined()
+    expect(() =>
+      resolveSandboxUiSharePath({
+        ...input,
+        currentUrl: 'https://outside.example/api/v1/sandbox-ui/ns/app/view/tasks',
+      })
+    ).toThrow('Cannot read the current app route')
+  })
+
+  it('falls back to the default route when the app view has not committed a URL yet', () => {
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl: '',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: '/tasks',
+      })
+    ).toBeUndefined()
+  })
+
+  it('omits default routes that include query or hash state when sharing', () => {
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/#/dashboard',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: '/#/dashboard',
+      })
+    ).toBeUndefined()
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/index.php?view=board',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: '/index.php?view=board',
+      })
+    ).toBeUndefined()
+  })
+
+  it('uses the shared canonical route contract for default path acceptance', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    expect(resolveSandboxUiDefaultPath('/café menu/literal%percent')).toBe(
+      '/café menu/literal%percent'
+    )
+    expect(resolveSandboxUiDefaultPath('/caf%C3%A9%20menu/literal%25percent')).toBe(
+      '/café menu/literal%percent'
+    )
+    expect(resolveSandboxUiDefaultPath('/safe/%252e%252e/admin')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/safe/%252Fadmin')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/tasks\u2028admin')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/report ')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/report%20')).toBe('/')
+    expect(warn).toHaveBeenCalledTimes(5)
+
+    warn.mockRestore()
+  })
+
+  it('omits equivalent canonical default routes when sharing', () => {
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl:
+          'https://rpc.example/api/v1/sandbox-ui/ns/app/view/' +
+          'caf%C3%A9%20menu/literal%25percent',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: resolveSandboxUiDefaultPath('/caf%C3%A9%20menu/literal%25percent'),
+      })
+    ).toBeUndefined()
+  })
+
+  it('treats the bare view endpoint and nested routes as the same boundary', () => {
+    const prefix = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view'
+    expect(isSandboxUiNavigationWithinPrefix(prefix, prefix)).toBe(true)
+    expect(isSandboxUiNavigationWithinPrefix(`${prefix}/tasks`, prefix)).toBe(true)
+    expect(isSandboxUiNavigationWithinPrefix(`${prefix}-other`, prefix)).toBe(false)
+  })
+
+  it('uses valid defaults and warns before falling back from an invalid default', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    expect(resolveSandboxUiDefaultPath('/accounts')).toBe('/accounts')
+    expect(resolveSandboxUiDefaultPath('/#/dashboard')).toBe('/#/dashboard')
+    expect(resolveSandboxUiDefaultPath('/index.php?view=board')).toBe('/index.php?view=board')
+    expect(resolveSandboxUiDefaultPath('/app#/inbox')).toBe('/app#/inbox')
+    expect(resolveSandboxUiDefaultPath(undefined)).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/safe/../admin')).toBe('/')
+    expect(warn).toHaveBeenCalledOnce()
+    warn.mockRestore()
+  })
+})
 
 describe('partitionFor', () => {
   it('produces a stable persist:sandbox-ui partition name per (env, recipe)', () => {

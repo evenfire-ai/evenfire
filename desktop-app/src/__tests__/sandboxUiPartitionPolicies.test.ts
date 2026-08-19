@@ -1,9 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { WebContents } from 'electron'
 import {
+  applySandboxUiNavigationPolicies,
   classifyEmbedNavigation,
   parseClerumOauthAuthorize,
   shouldAllowEmbedPermission,
 } from '../sandboxUiPartitionPolicies.js'
+
+const { openExternal } = vi.hoisted(() => ({ openExternal: vi.fn() }))
+vi.mock('electron', () => ({ shell: { openExternal } }))
 
 describe('shouldAllowEmbedPermission', () => {
   it('allows fullscreen', () => {
@@ -44,6 +49,19 @@ describe('classifyEmbedNavigation', () => {
     })
     expect(classifyEmbedNavigation(allowed + 'sub/page?x=1', allowed)).toEqual({
       kind: 'allow',
+    })
+  })
+
+  it('does not allow sibling paths that only share a string prefix', () => {
+    const prefixWithoutSlash = allowed.replace(/\/$/, '')
+    const sibling = `${prefixWithoutSlash}-other/x`
+    expect(classifyEmbedNavigation(sibling, prefixWithoutSlash)).toEqual({
+      kind: 'external',
+      url: sibling,
+    })
+    expect(classifyEmbedNavigation(`${prefixWithoutSlash}x/secret`, prefixWithoutSlash)).toEqual({
+      kind: 'external',
+      url: `${prefixWithoutSlash}x/secret`,
     })
   })
 
@@ -193,5 +211,95 @@ describe('parseClerumOauthAuthorize', () => {
 
   it('returns null for malformed URL', () => {
     expect(parseClerumOauthAuthorize('clerum:not a url')).toBeNull()
+  })
+})
+
+describe('applySandboxUiNavigationPolicies (dispatch wiring)', () => {
+  const allowed = 'https://rpc-proxy.example/api/v1/sandbox-ui/sandbox-recipes/r1/view/'
+
+  beforeEach(() => {
+    openExternal.mockClear()
+  })
+
+  /** A fake WebContents that captures the will-navigate + window-open handlers. */
+  function makeWebContents() {
+    let willNavigate: ((event: { preventDefault: () => void }, url: string) => void) | undefined
+    let windowOpen: ((details: { url: string }) => { action: string }) | undefined
+    const wc = {
+      on: vi.fn((ev: string, cb: (event: { preventDefault: () => void }, url: string) => void) => {
+        if (ev === 'will-navigate') willNavigate = cb
+      }),
+      setWindowOpenHandler: vi.fn((fn: (details: { url: string }) => { action: string }) => {
+        windowOpen = fn
+      }),
+    } as unknown as WebContents
+    return {
+      wc,
+      navigate(url: string) {
+        const event = { preventDefault: vi.fn() }
+        willNavigate?.(event, url)
+        return event
+      },
+      openWindow: (url: string) => windowOpen?.({ url }),
+    }
+  }
+
+  it('fires onOauthAuthorize (with background) and prevents default for a clerum oauth link', () => {
+    const onOauthAuthorize = vi.fn()
+    const onGfsOpen = vi.fn()
+    const fake = makeWebContents()
+    applySandboxUiNavigationPolicies(fake.wc, allowed, { onOauthAuthorize, onGfsOpen })
+
+    const event = fake.navigate('clerum://oauth?clientId=salesforce-prod&background=1')
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(onOauthAuthorize).toHaveBeenCalledWith('salesforce-prod', true)
+    expect(onGfsOpen).not.toHaveBeenCalled()
+  })
+
+  it('fires onGfsOpen and prevents default for a gfs:// link', () => {
+    const onGfsOpen = vi.fn()
+    const fake = makeWebContents()
+    applySandboxUiNavigationPolicies(fake.wc, allowed, { onGfsOpen })
+
+    const event = fake.navigate('gfs://main/report.pdf')
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(onGfsOpen).toHaveBeenCalledWith('gfs://main/report.pdf')
+  })
+
+  it('opens external https navigations in the OS browser', () => {
+    const fake = makeWebContents()
+    applySandboxUiNavigationPolicies(fake.wc, allowed, {})
+    const event = fake.navigate('https://example.com/x')
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(openExternal).toHaveBeenCalledWith('https://example.com/x')
+  })
+
+  it('lets an in-prefix view navigation through — no preventDefault, no dispatch', () => {
+    const onGfsOpen = vi.fn()
+    const onOauthAuthorize = vi.fn()
+    const fake = makeWebContents()
+    applySandboxUiNavigationPolicies(fake.wc, allowed, { onGfsOpen, onOauthAuthorize })
+    const event = fake.navigate(`${allowed}index.html`)
+    expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(onGfsOpen).not.toHaveBeenCalled()
+    expect(onOauthAuthorize).not.toHaveBeenCalled()
+    expect(openExternal).not.toHaveBeenCalled()
+  })
+
+  it('dispatches window.open(gfs://…) and denies the popup', () => {
+    const onGfsOpen = vi.fn()
+    const fake = makeWebContents()
+    applySandboxUiNavigationPolicies(fake.wc, allowed, { onGfsOpen })
+    const result = fake.openWindow('gfs://main/a.png')
+    expect(onGfsOpen).toHaveBeenCalledWith('gfs://main/a.png')
+    expect(result).toEqual({ action: 'deny' })
+  })
+
+  it('routes window.open(https://…) to the OS browser and denies the popup', () => {
+    const fake = makeWebContents()
+    applySandboxUiNavigationPolicies(fake.wc, allowed, {})
+    const result = fake.openWindow('https://example.com/')
+    expect(openExternal).toHaveBeenCalledWith('https://example.com/')
+    expect(result).toEqual({ action: 'deny' })
   })
 })

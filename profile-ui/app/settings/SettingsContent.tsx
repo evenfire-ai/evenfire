@@ -8,6 +8,8 @@ import { useAuth } from '@components/AuthContext'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { FormField } from '@components/FormField'
+import { useProfileAccess } from '@components/ProfileAccessContext'
+import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
@@ -23,7 +25,6 @@ import {
 } from '@lib/api'
 import {
   disconnectWorkflowApprovalMedium,
-  listApprovalChannelTargets,
   listWorkflowApprovalMediums,
 } from '@lib/approvalChannels'
 import {
@@ -36,10 +37,7 @@ import {
   updateDraftRow,
 } from '@lib/profileSettings'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
-import type {
-  ApprovalChannelTarget,
-  WorkflowApprovalMediumAccount,
-} from '@/app/types/approvalChannels'
+import type { WorkflowApprovalMediumAccount } from '@/app/types/approvalChannels'
 import type { Me } from '@/app/types/profile'
 import packageJson from '../../package.json'
 import { SettingsChannelSection } from './SettingsChannelSection'
@@ -53,19 +51,9 @@ import type {
   SocialChannelTabKey,
 } from './types'
 
-type LoadState = 'idle' | 'loading' | 'ready' | 'error'
+type LoadState = 'loading' | 'ready' | 'error'
 type SettingsTab = 'profile' | 'social'
 type EditScope = 'profile' | null
-
-function LoadingSkeleton() {
-  return (
-    <div className="profile-skeleton" role="status" aria-label="Loading">
-      <span className="profile-skeleton__line profile-skeleton__line--medium" />
-      <span className="profile-skeleton__line" />
-      <span className="profile-skeleton__line profile-skeleton__line--short" />
-    </div>
-  )
-}
 
 export function SettingsContent({
   activeSettingsTab,
@@ -77,6 +65,7 @@ export function SettingsContent({
   const router = useRouter()
   const searchParams = useSearchParams()
   const { checkAuth, logout } = useAuth()
+  const { approvalTargets: targets, refreshApprovalTargets } = useProfileAccess()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [me, setMe] = useState<Me | null>(null)
@@ -84,9 +73,8 @@ export function SettingsContent({
   const [draft, setDraft] = useState<ProfileChannelDraft>(() =>
     channelsToDraft(EMPTY_PROFILE_CHANNELS)
   )
-  const [targets, setTargets] = useState<ApprovalChannelTarget[]>([])
   const [accounts, setAccounts] = useState<WorkflowApprovalMediumAccount[]>([])
-  const [state, setState] = useState<LoadState>('idle')
+  const [state, setState] = useState<LoadState>('loading')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [editScope, setEditScope] = useState<EditScope>(null)
@@ -152,20 +140,19 @@ export function SettingsContent({
     }
   }, [searchParams])
 
-  async function loadAll() {
+  async function loadAll(forceAccess = false) {
     setState('loading')
     setError('')
     try {
-      const [current, nextTargets, nextAccounts] = await Promise.all([
+      const [current, , nextAccounts] = await Promise.all([
         getMe(),
-        listApprovalChannelTargets(),
+        refreshApprovalTargets({ force: forceAccess }),
         listWorkflowApprovalMediums({ includeDisabled: true }),
       ])
       const channels = normalizeProfileChannels(current.profile.channels)
       setMe({ ...current, profile: { ...current.profile, channels } })
       setDisplayName(current.profile.displayName || current.name || current.email)
       setDraft(channelsToDraft(channels))
-      setTargets(nextTargets)
       setAccounts(nextAccounts)
       setState('ready')
     } catch (err) {
@@ -371,7 +358,7 @@ export function SettingsContent({
             <Button
               variant="secondary"
               className="cu-btn--icon cu-btn--toolbar"
-              onClick={loadAll}
+              onClick={() => void loadAll(true)}
               disabled={formDisabled}
               aria-label={state === 'loading' ? 'Refreshing settings' : 'Refresh settings'}
             >
@@ -380,7 +367,6 @@ export function SettingsContent({
           </div>
         </header>
 
-        {state === 'loading' && <LoadingSkeleton />}
         {error && <div className="message message--error">{error}</div>}
 
         <div className="tabs" role="tablist" aria-label="Settings sections">
@@ -406,7 +392,16 @@ export function SettingsContent({
           ) : null}
         </div>
 
-        {activeSettingsTab === 'profile' ? (
+        {state === 'loading' ? (
+          <ProfileBodySkeleton
+            label="Loading settings"
+            sections={[
+              activeSettingsTab === 'profile'
+                ? { title: 'Profile', actions: ['Update password', 'Edit'], rows: 3 }
+                : { title: 'Social channels', actions: ['Connect'], rows: 4 },
+            ]}
+          />
+        ) : activeSettingsTab === 'profile' ? (
           <section className="section settings-section">
             <div className="settings-section-head">
               <div>
@@ -442,7 +437,7 @@ export function SettingsContent({
           </section>
         ) : null}
 
-        {activeSettingsTab === 'social' && currentSocialTab ? (
+        {state !== 'loading' && activeSettingsTab === 'social' && currentSocialTab ? (
           <section className="section settings-section">
             <div className="tabs" role="tablist" aria-label="Social networks">
               {visibleSocialTabs.map(tab => (

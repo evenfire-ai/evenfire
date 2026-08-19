@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { loadConfig } from './config'
+import { loadConfig, registryUrlStartupWarning } from './config'
 
 describe('loadConfig', () => {
   const originalEnv = process.env
@@ -251,5 +251,103 @@ describe('loadConfig', () => {
     delete process.env.CLERUM_DEV_MODE
     const config = loadConfig()
     expect(config.devMode).toBe(false)
+  })
+
+  // ─── issue #299: external egress sliding-window accumulator knobs ─────────
+  it('defaults the external egress accumulator knobs (overlap/floor/interval/max)', () => {
+    delete process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS
+    delete process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS
+    delete process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS
+    delete process.env.WRC_EXTERNAL_EGRESS_MAX_ENTRIES
+    const config = loadConfig()
+    expect(config.externalEgressOverlapSeconds).toBe(300)
+    expect(config.externalEgressRefreshFloorSeconds).toBe(5)
+    expect(config.externalEgressRefreshIntervalSeconds).toBe(60)
+    expect(config.externalEgressMaxEntries).toBe(128)
+  })
+
+  it('reads external egress accumulator overrides', () => {
+    process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '600'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '7'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '30'
+    process.env.WRC_EXTERNAL_EGRESS_MAX_ENTRIES = '256'
+    const config = loadConfig()
+    expect(config.externalEgressOverlapSeconds).toBe(600)
+    expect(config.externalEgressRefreshFloorSeconds).toBe(7)
+    expect(config.externalEgressRefreshIntervalSeconds).toBe(30)
+    expect(config.externalEgressMaxEntries).toBe(256)
+  })
+
+  it.each([
+    ['WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS', '29'],
+    ['WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS', 'not-a-number'],
+    ['WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS', '0'],
+    ['WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS', '1.5'],
+    ['WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS', '0'],
+    ['WRC_EXTERNAL_EGRESS_MAX_ENTRIES', '7'],
+    ['WRC_EXTERNAL_EGRESS_MAX_ENTRIES', 'lots'],
+  ])('rejects invalid external egress knob %s=%s', (key, value) => {
+    process.env[key] = value
+    expect(() => loadConfig()).toThrow(new RegExp(key))
+  })
+
+  it('enforces the floor <= interval <= overlap/2 invariant (fail loud)', () => {
+    // floor > interval
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '40'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '30'
+    process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '300'
+    expect(() => loadConfig()).toThrow(/floor.*interval.*overlap|external egress/i)
+  })
+
+  it('rejects an interval that exceeds half the overlap', () => {
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '5'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '300'
+    process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '300'
+    expect(() => loadConfig()).toThrow(/floor.*interval.*overlap|external egress/i)
+  })
+
+  // R1-M6 boundary: the enforced contract is `interval <= overlap/2`, so exactly
+  // overlap/2 must pass and overlap/2 + 1 must throw.
+  it('accepts interval == overlap/2 and rejects overlap/2 + 1', () => {
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '5'
+    process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '300'
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '150'
+    expect(() => loadConfig()).not.toThrow()
+    process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '151'
+    expect(() => loadConfig()).toThrow(/floor.*interval.*overlap|external egress/i)
+  })
+})
+
+// An unset/unparseable CLERUM_REGISTRY_URL makes isPlatformRegistryImage() return false
+// for EVERY image, which turns off platform pull-credential injection entirely — while
+// control-api still mints and writes the Secret. Recipe pods then ImagePullBackOff and
+// nothing in the logs says why. This warning is the announcement of that state.
+describe('registryUrlStartupWarning', () => {
+  it('returns null when a parseable registry URL is configured', () => {
+    expect(registryUrlStartupWarning('https://registry.evenfire.ai')).toBeNull()
+    expect(registryUrlStartupWarning('http://registry-api.registry.svc.cluster.local:8085')).toBe(
+      null
+    )
+  })
+
+  it('warns that pull-credential injection is disabled when the URL is unset', () => {
+    for (const unset of ['', '   ']) {
+      const warning = registryUrlStartupWarning(unset)
+      expect(warning).toMatch(/CLERUM_REGISTRY_URL/)
+      expect(warning).toMatch(/not set/)
+      expect(warning).toMatch(/ImagePullBackOff/)
+    }
+  })
+
+  it('warns when the URL is set but unparseable — same silent-disable effect', () => {
+    const warning = registryUrlStartupWarning('registry.evenfire.ai')
+    expect(warning).toMatch(/CLERUM_REGISTRY_URL/)
+    expect(warning).toMatch(/registry\.evenfire\.ai/)
+    expect(warning).toMatch(/ImagePullBackOff/)
+  })
+
+  it('does not depend on ambient env — it reports on the value it is given', () => {
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
+    expect(registryUrlStartupWarning('')).not.toBeNull()
   })
 })

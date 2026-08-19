@@ -1,5 +1,10 @@
-import { contextBridge, ipcRenderer } from 'electron'
-import type { HostMessageRequest, ProfileSettingsOpenOptions } from './types.js'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { PluginConsentRequest } from './pluginSdkProtocol.js'
+import type {
+  HostMessageRequest,
+  ProfileSettingsOpenOptions,
+  SandboxUiDeepLinkEnvelope,
+} from './types.js'
 
 const clerum = Object.freeze({
   auth: {
@@ -19,6 +24,7 @@ const clerum = Object.freeze({
     googleLogin: (idToken: string) => ipcRenderer.invoke('auth:googleLogin', { idToken }),
     passwordLogin: (email: string, password: string) =>
       ipcRenderer.invoke('auth:passwordLogin', { email, password }),
+    diagnoseLoginBackend: () => ipcRenderer.invoke('auth:diagnoseLoginBackend'),
     startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),
     openForgotPassword: (email?: string) =>
       ipcRenderer.invoke('auth:openForgotPassword', { email }),
@@ -77,19 +83,79 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('gfs:createFolder', { parentResourceId, name, drive }),
     createFile: (parentResourceId: string, name: string, encodedData: string, drive?: string) =>
       ipcRenderer.invoke('gfs:createFile', { parentResourceId, name, encodedData, drive }),
+    createFileFromPath: (
+      parentResourceId: string,
+      name: string,
+      filePath: string,
+      drive?: string
+    ) => ipcRenderer.invoke('gfs:createFileFromPath', { parentResourceId, name, filePath, drive }),
+    startFileUpload: (
+      parentResourceId: string,
+      name: string,
+      filePath: string,
+      drive?: string,
+      resumeUploadId?: string
+    ) =>
+      ipcRenderer.invoke('gfs:startFileUpload', {
+        parentResourceId,
+        name,
+        filePath,
+        drive,
+        resumeUploadId,
+      }),
+    startFileReplace: (
+      resourceId: string,
+      filePath: string,
+      drive?: string,
+      ifMatch?: number,
+      resumeUploadId?: string
+    ) =>
+      ipcRenderer.invoke('gfs:startFileReplace', {
+        resourceId,
+        filePath,
+        drive,
+        ifMatch,
+        resumeUploadId,
+      }),
+    getUploadSnapshot: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
+    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
+    pauseUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
+    resumeUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
+    cancelUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
+    replaceFileFromPath: (resourceId: string, filePath: string, drive?: string, ifMatch?: number) =>
+      ipcRenderer.invoke('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
+    getPathForFile: (file: File) => webUtils.getPathForFile(file),
     renameResource: (resourceId: string, newName: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:deleteResource', { resourceId, drive, ifMatch }),
-    grant: (resourceId: string, subjectKey: string, bits: string[], drive?: string) =>
-      ipcRenderer.invoke('gfs:grant', { resourceId, subjectKey, bits, drive }),
+    grant: (
+      resourceId: string,
+      subjectKeys: string[],
+      bits: string[],
+      drive?: string,
+      inherit?: boolean
+    ) => ipcRenderer.invoke('gfs:grant', { resourceId, subjectKeys, bits, drive, inherit }),
+    listGrants: (resourceId: string, drive?: string) =>
+      ipcRenderer.invoke('gfs:listGrants', { resourceId, drive }),
+    revokeGrant: (grantId: string) => ipcRenderer.invoke('gfs:revokeGrant', { grantId }),
+    listShares: (resourceId: string, drive?: string) =>
+      ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
+    revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
     // A desktop share grants READ access only (the minimal shared capability) —
     // unlike `grant`, it takes no permission bits by design. The server still
     // enforces the caller holds read + share (no-escalation).
-    createShare: (resourceId: string, subjectKey: string, drive?: string) =>
-      ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKey, drive }),
+    createShare: (resourceId: string, subjectKeys: string[], drive?: string) =>
+      ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive }),
+  },
+  agents: {
+    listMine: () => ipcRenderer.invoke('agents:listMine'),
   },
   approvals: {
     listPending: (limit?: number) => ipcRenderer.invoke('approvals:listPending', { limit }),
@@ -308,10 +374,18 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('rpc:listArtifacts', { hostRef, hostRefs }),
     downloadArtifact: (hostRef: string, filename: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:downloadArtifact', { hostRef, filename, hostRefs }),
-    listSessions: (hostRef: string, hostRefs?: string[]) =>
-      ipcRenderer.invoke('rpc:listSessions', { hostRef, hostRefs }),
-    loadSessionMessages: (hostRef: string, agent: string, chatId: string, hostRefs?: string[]) =>
-      ipcRenderer.invoke('rpc:loadSessionMessages', { hostRef, agent, chatId, hostRefs }),
+    listSessions: (
+      hostRef: string,
+      hostRefs?: string[],
+      query?: import('./types.js').SessionsListQuery
+    ) => ipcRenderer.invoke('rpc:listSessions', { hostRef, hostRefs, query }),
+    loadSessionMessages: (
+      hostRef: string,
+      agent: string,
+      chatId: string,
+      hostRefs?: string[],
+      query?: import('./types.js').SessionMessagesQuery
+    ) => ipcRenderer.invoke('rpc:loadSessionMessages', { hostRef, agent, chatId, hostRefs, query }),
     getContextBreakdown: (hostRef: string, agent: string, chatId: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:getContextBreakdown', { hostRef, agent, chatId, hostRefs }),
     getHostModels: (hostRef: string, chatId: string, hostRefs?: string[]) =>
@@ -339,12 +413,15 @@ const clerum = Object.freeze({
   },
   app: {
     openUrl: (url: string) => ipcRenderer.invoke('app:openUrl', { url }),
+    rendererReady: () => ipcRenderer.invoke('app:rendererReady'),
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),
-    onVisibilityChange: (callback: (state: { visible: boolean }) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, state: { visible: boolean }) =>
-        callback(state)
+    onVisibilityChange: (callback: (state: { visible: boolean; focused: boolean }) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: { visible: boolean; focused: boolean }
+      ) => callback(state)
       ipcRenderer.on('window:visibility', listener)
       return () => ipcRenderer.off('window:visibility', listener)
     },
@@ -381,8 +458,14 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('chat:loadMessages', { agentRef, chatId, limit, offset }),
     appendMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:appendMessages', { agentRef, chatId, messages }),
-    replaceMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
-      ipcRenderer.invoke('chat:replaceMessages', { agentRef, chatId, messages }),
+    replaceMessages: (
+      agentRef: string,
+      chatId: string,
+      messages: unknown[],
+      options?: import('./types.js').ReplaceChatMessagesOptions
+    ) => ipcRenderer.invoke('chat:replaceMessages', { agentRef, chatId, messages, options }),
+    backfillCounters: (agentRef: string, chatId: string, messages: unknown[]) =>
+      ipcRenderer.invoke('chat:backfillCounters', { agentRef, chatId, messages }),
     markUnreadTerminal: (agentRef: string, chatId: string) =>
       ipcRenderer.invoke('chat:markUnreadTerminal', { agentRef, chatId }),
     clearUnreadTerminal: (agentRef: string, chatId: string) =>
@@ -405,15 +488,27 @@ const clerum = Object.freeze({
     open: (args: {
       recipeNs: string
       recipeName: string
+      title?: string
       defaultPath?: string
+      routePath?: string
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     close: () => ipcRenderer.invoke('sandboxUi:close'),
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
+    copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
+    listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
+    clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
+    acknowledgeDeepLink: (id: number) =>
+      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', { id }),
     setBounds: (bounds: { x: number; y: number; width: number; height: number; dpr?: number }) =>
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
+    onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
+      ipcRenderer.on('sandboxUi:deepLink', listener)
+      return () => ipcRenderer.off('sandboxUi:deepLink', listener)
+    },
     onClosed: (callback: (args: { appRef: string }) => void) => {
       const listener = (_event: unknown, args: { appRef: string }) => callback(args)
       ipcRenderer.on('sandboxUi:closed', listener)
@@ -425,6 +520,48 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
     },
+  },
+  /**
+   * Plugin permissions, trusted-renderer half: the consent modal and the
+   * Settings revocation surface. The plugin-facing half lives in a different
+   * preload (`sandboxUiEmbedPreload.ts`) behind a different trust model.
+   */
+  pluginSdk: {
+    onConsentRequested: (callback: (request: PluginConsentRequest) => void) => {
+      const listener = (_event: unknown, request: PluginConsentRequest) => callback(request)
+      ipcRenderer.on('pluginSdk:consentRequested', listener)
+      return () => ipcRenderer.off('pluginSdk:consentRequested', listener)
+    },
+    onConsentCancelled: (callback: (args: { promptId: string }) => void) => {
+      const listener = (_event: unknown, args: { promptId: string }) => callback(args)
+      ipcRenderer.on('pluginSdk:consentCancelled', listener)
+      return () => ipcRenderer.off('pluginSdk:consentCancelled', listener)
+    },
+    onOpenGfsResource: (
+      callback: (args: { gfsUri: string; name: string; kind: string; bytes: number | null }) => void
+    ) => {
+      const listener = (
+        _event: unknown,
+        args: { gfsUri: string; name: string; kind: string; bytes: number | null }
+      ) => callback(args)
+      ipcRenderer.on('pluginSdk:openGfsResource', listener)
+      return () => ipcRenderer.off('pluginSdk:openGfsResource', listener)
+    },
+    onNotificationClicked: (callback: (args: { pluginId: string; ref: string | null }) => void) => {
+      const listener = (_event: unknown, args: { pluginId: string; ref: string | null }) =>
+        callback(args)
+      ipcRenderer.on('pluginSdk:notificationClicked', listener)
+      return () => ipcRenderer.off('pluginSdk:notificationClicked', listener)
+    },
+    resolveConsent: (promptId: string, allowed: string[]) =>
+      ipcRenderer.invoke('pluginSdk:resolveConsent', { promptId, allowed }),
+    listGrants: () => ipcRenderer.invoke('pluginSdk:listGrants'),
+    revoke: (pluginId: string, capability?: string) =>
+      ipcRenderer.invoke('pluginSdk:revoke', { pluginId, capability }),
+    activity: (limit?: number, includeAmbient?: boolean) =>
+      ipcRenderer.invoke('pluginSdk:activity', { limit, includeAmbient }),
+    clearActivity: () => ipcRenderer.invoke('pluginSdk:clearActivity'),
+    setTheme: (theme: string) => ipcRenderer.invoke('pluginSdk:setTheme', { theme }),
   },
 })
 

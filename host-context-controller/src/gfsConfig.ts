@@ -60,8 +60,40 @@ export function gfsDefaultFactoryConfig(): GfsFactoryConfig {
     jwtPublicKeyConfigMapKey: env('CONTEXT_MAPPER_GFS_JWT_CONFIGMAP_KEY', 'jwt-public-key'),
     pgSecretName: env('CONTEXT_MAPPER_GFS_PG_SECRET', 'gfs-controller-db'),
     pgSecretKey: env('CONTEXT_MAPPER_GFS_PG_SECRET_KEY', 'connection-string'),
+    readerPgSecretName: env('CONTEXT_MAPPER_GFS_READER_PG_SECRET', 'gfs-controller-reader-db'),
+    readerPgSecretKey: env('CONTEXT_MAPPER_GFS_READER_PG_SECRET_KEY', 'connection-string'),
     driveName: env('CONTEXT_MAPPER_GFS_DRIVE_NAME', 'main'),
     tokenAudience: env('CONTEXT_MAPPER_GFS_TOKEN_AUDIENCE', 'gfs-controller'),
+    syncCopyMaxObjects: process.env.GFS_SYNC_COPY_MAX_OBJECTS,
+    syncCopyMaxBytes: process.env.GFS_SYNC_COPY_MAX_BYTES,
+    syncCopyTimeoutMs: process.env.GFS_SYNC_COPY_TIMEOUT_MS,
+    // Legacy JSON body cap. Upload v2 parts are raw streamed requests and remain
+    // independently bounded by the strict CONTEXT_MAPPER_GFSC_UPLOAD_* settings.
+    maxWriteBodyBytes: process.env.GFS_MAX_WRITE_BODY_BYTES,
+    uploadV2Enabled: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_V2_ENABLED,
+    uploadProtocolMaxFileBytes: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_PROTOCOL_MAX_FILE_BYTES,
+    uploadProductMaxFileBytes: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES,
+    uploadMaxFileBytes: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES,
+    uploadPreferredChunkBytes: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_PREFERRED_CHUNK_BYTES,
+    uploadMaxChunkBytes: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CHUNK_BYTES,
+    uploadMinPartBytes: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MIN_PART_BYTES,
+    uploadMaxPartCount: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MAX_PART_COUNT,
+    uploadSessionTtlMs: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_SESSION_TTL_MS,
+    uploadCompletedReceiptTtlMs: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_COMPLETED_RECEIPT_TTL_MS,
+    uploadStalePartLeaseMs: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_STALE_PART_LEASE_MS,
+    uploadMaxActivePerSubject: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MAX_ACTIVE_PER_SUBJECT,
+    uploadMaxActiveGlobal: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MAX_ACTIVE_GLOBAL,
+    uploadMaxConcurrentPartsPerSession:
+      process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_PARTS_PER_SESSION,
+    uploadMaxConcurrentPartStreamsGlobal:
+      process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_PART_STREAMS_GLOBAL,
+    uploadInstabilityFailureThreshold:
+      process.env.CONTEXT_MAPPER_GFSC_UPLOAD_INSTABILITY_FAILURE_THRESHOLD,
+    uploadMaxConcurrentFinalizations:
+      process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_FINALIZATIONS,
+    uploadMinFreeBytes: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_MIN_FREE_BYTES,
+    uploadPartTimeoutMs: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_PART_TIMEOUT_MS,
+    uploadFinalizeTimeoutMs: process.env.CONTEXT_MAPPER_GFSC_UPLOAD_FINALIZE_TIMEOUT_MS,
     nodeLocalDnsCidr: parseNodeLocalDnsCidr(env('CONTEXT_MAPPER_NODELOCAL_DNS_CIDR', '')),
   }
 }

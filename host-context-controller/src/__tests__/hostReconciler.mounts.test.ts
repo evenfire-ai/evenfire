@@ -172,6 +172,7 @@ function runtimeSecretAnnotations(host = makeHost(), refreshBefore = '2999-01-01
   const helper = HostReconciler as unknown as {
     runtimeTokenHostBindingHash: (h: HostCRD) => string
     runtimeTokenScopeHash: (h: HostCRD) => string
+    gfsCapabilitySetHash: () => string
   }
   return {
     'clerum.io/runtime-token-host-binding-hash': helper.runtimeTokenHostBindingHash(host),
@@ -179,6 +180,8 @@ function runtimeSecretAnnotations(host = makeHost(), refreshBefore = '2999-01-01
     'clerum.io/runtime-token-issuer': 'control-api',
     'clerum.io/runtime-token-audience': 'workflow-approvals',
     'clerum.io/runtime-token-schema-version': '2',
+    'clerum.io/gfs-token-expected-subject': `host:1st:${host.namespace}/${host.name}`,
+    'clerum.io/gfs-token-capability-set-hash': helper.gfsCapabilitySetHash(),
     'clerum.io/runtime-token-refresh-before': refreshBefore,
     'clerum.io/gfs-token-refresh-before': '2999-01-01T00:00:00.000Z',
   }

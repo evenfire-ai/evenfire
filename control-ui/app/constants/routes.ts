@@ -36,6 +36,7 @@ export const CONTROL_ROUTES = {
     root: '/connectors',
     new: '/connectors/new',
     edit: (name: string) => `/connectors/${segment(name)}/edit`,
+    editTab: (name: string, tab: string) => `/connectors/${segment(name)}/edit/${segment(tab)}`,
   },
   contexts: {
     root: '/contexts',
@@ -71,6 +72,12 @@ export const CONTROL_ROUTES = {
     root: '/marketplace',
     connectors: '/marketplace/connectors',
     plugins: '/marketplace/plugins',
+    // The org-named tab (design spec §4): everything this deployment owns.
+    org: '/marketplace/org',
+    orgEntries: '/marketplace/org/entries',
+    orgImages: '/marketplace/org/images',
+    orgCredentials: '/marketplace/org/credentials',
+    orgConnection: '/marketplace/org/connection',
     install: (query?: ControlRouteQuery) => withQuery('/marketplace/install', query),
     publish: (query?: ControlRouteQuery) => withQuery('/marketplace/publish', query),
     keys: '/marketplace/keys',

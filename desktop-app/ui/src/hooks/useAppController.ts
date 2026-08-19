@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type {
   AccessCatalog,
@@ -46,6 +46,7 @@ import {
   type WorkflowSelectionState,
   createResetWorkflowSelection,
 } from './domain/useWorkflowController.types'
+import { scheduleAfterFirstPaint } from './scheduleAfterFirstPaint'
 
 const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = {
   desktop_notification: 'Denied from desktop notification',
@@ -94,6 +95,21 @@ export async function loadWorkflowRunsWithArtifactsForApprovalRefresh(
   })
 }
 
+interface SessionIdentityRef {
+  current: string | null
+}
+
+export function scheduleAfterFirstPaintForSession(
+  sessionIdentityRef: SessionIdentityRef,
+  expectedIdentity: string,
+  task: () => Promise<unknown>
+): void {
+  scheduleAfterFirstPaint(async () => {
+    if (sessionIdentityRef.current !== expectedIdentity) return
+    await task()
+  })
+}
+
 export function useAppController() {
   const queryClient = useQueryClient()
 
@@ -104,6 +120,7 @@ export function useAppController() {
   // ─── Global status state (owned by coordinator, not auth) ───
   const [statusText, setStatusText] = useState('Ready.')
   const [statusTone, setStatusTone] = useState<Tone>('info')
+  const [postPaintDataReady, setPostPaintDataReady] = useState(false)
 
   // Build fullSetStatus using refs to avoid circular dependencies
   const setStatusTextRef = useRef(setStatusText)
@@ -136,6 +153,7 @@ export function useAppController() {
   // Use a ref so the stable onSessionNeedsLoad callback can call the real loadSession
   // without creating a circular dependency (loadSession is defined after auth+session).
   const loadSessionRef = useRef(async (_options?: { preserveNav?: boolean }) => {})
+  const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
   const authenticatedSessionIdentityRef = useRef<string | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
 
@@ -154,7 +172,14 @@ export function useAppController() {
   const contextsData = useContextsDataController()
   const mcpServersData = useMcpServersDataController()
   const teamsData = useTeamsDataController()
-  const currentTeamId = teamsData.currentTeamId || auth.me?.teamId || ''
+  const currentTeamId = auth.me?.teamId || teamsData.currentTeamId || ''
+  const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
+  const authenticatedPrincipalIdentity =
+    auth.isAuthenticated && auth.me
+      ? `${auth.me.id}:${String(auth.me.email || '')
+          .trim()
+          .toLowerCase()}`
+      : null
   const currentTeamName =
     teamsData.teams.find(team => team.id === currentTeamId)?.name || auth.me?.teamName || ''
   const currentTeamIdRef = useRef(currentTeamId)
@@ -228,9 +253,11 @@ export function useAppController() {
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
+    currentUserId: auth.me?.id,
     currentTeamId,
     currentTeamName,
     isAuthenticated: auth.isAuthenticated,
+    loadMenuData: postPaintDataReady,
     navItem: nav.navItem,
     pushToast,
     pushNotification: notif.pushNotification,
@@ -291,7 +318,7 @@ export function useAppController() {
   // ─── Host pre-warm (authenticated catalog only — see the hook's anti-flapping doc) ───
   useHostPrewarmController({
     agentNames: agentsData.agentNames,
-    isAuthenticated: auth.isAuthenticated,
+    isAuthenticated: auth.isAuthenticated && postPaintDataReady,
   })
 
   // ─── Desktop ───
@@ -304,6 +331,7 @@ export function useAppController() {
   const activity = useActivityController({
     selectedAgent: nav.selectedAgent,
     isAuthenticated: auth.isAuthenticated,
+    loadMenuData: postPaintDataReady,
     chatList: chat.chatList,
     progressByAgentMessage: chat.progressByAgentMessage,
     agentNames: agentsData.agentNames,
@@ -319,7 +347,7 @@ export function useAppController() {
   }, [])
 
   const refreshAgentsData = useCallback(async () => {
-    await agentsData.refreshWithCatalog(getCatalogRefreshPromise())
+    return agentsData.refreshWithCatalog(getCatalogRefreshPromise())
   }, [agentsData.refreshWithCatalog, getCatalogRefreshPromise])
 
   const refreshContextsData = useCallback(async () => {
@@ -353,10 +381,36 @@ export function useAppController() {
   }, [queryClient])
 
   const refreshAuthenticatedData = useCallback(
-    async (options: { initialLoad?: boolean } = {}) => {
+    async (options: { initialLoad?: boolean; sessionIdentity?: string } = {}) => {
       const refreshTeams = options.initialLoad
         ? teamsData.refreshInitialDirectory
         : teamsData.refresh
+      if (options.initialLoad) {
+        const scheduledIdentity = options.sessionIdentity
+        if (!scheduledIdentity) return false
+        let agentsLoaded = false
+        try {
+          agentsLoaded = await refreshAgentsData()
+        } catch (error) {
+          console.warn('[startup] failed to load the initial agent catalog', error)
+        } finally {
+          scheduleAfterFirstPaintForSession(
+            activeAuthenticatedSessionIdentityRef,
+            scheduledIdentity,
+            async () => {
+              setPostPaintDataReady(true)
+              await Promise.all([
+                refreshContextsData(),
+                refreshMcpServersData(),
+                refreshTeams(),
+                refreshWorkflowsData(),
+                notif.handleRefreshPendingApprovals({ silent: true }),
+              ])
+            }
+          )
+        }
+        return agentsLoaded
+      }
       return Promise.all([
         refreshAgentsData(),
         refreshContextsData(),
@@ -372,6 +426,7 @@ export function useAppController() {
       refreshContextsData,
       refreshMcpServersData,
       refreshWorkflowsData,
+      setPostPaintDataReady,
       teamsData.refresh,
       teamsData.refreshInitialDirectory,
     ]
@@ -379,26 +434,21 @@ export function useAppController() {
 
   const refreshWorkspaceDataForRoute = useCallback(
     async (route: NavItem) => {
-      let cycleCatalogPromise: Promise<AccessCatalog> | null = null
-      const getCycleCatalogPromise = () => {
-        if (!cycleCatalogPromise) {
-          cycleCatalogPromise = getCatalogRefreshPromise()
-        }
-        return cycleCatalogPromise
-      }
-
+      // Route refreshes deliberately update only the visible section. Hidden
+      // route data remains deferred until that route becomes visible; shared
+      // menu/composer data is loaded by the post-paint bootstrap instead.
       const refreshers = [
         {
           route: DESKTOP_ROUTES.agents,
-          refresh: () => agentsData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => agentsData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         {
           route: DESKTOP_ROUTES.contexts,
-          refresh: () => contextsData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => contextsData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         {
           route: DESKTOP_ROUTES.connectors,
-          refresh: () => mcpServersData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => mcpServersData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         { route: DESKTOP_ROUTES.teams, refresh: teamsData.refresh },
         { route: DESKTOP_ROUTES.plugins, refresh: refreshWorkflowsData },
@@ -411,10 +461,8 @@ export function useAppController() {
             ? DESKTOP_ROUTES.teams
             : route
       const current = refreshers.find(entry => entry.route === activeRoute)
-      const remaining = refreshers.filter(entry => entry.route !== activeRoute)
 
       if (current) await current.refresh()
-      await Promise.all(remaining.map(entry => entry.refresh()))
     },
     [
       agentsData.refreshWithCatalog,
@@ -496,7 +544,12 @@ export function useAppController() {
         auth.setMe(sessionState.me)
         auth.setEmail(sessionState.me.email || '')
         currentTeamIdRef.current = sessionState.me.teamId || teamId
-        authenticatedSessionIdentityRef.current = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        const switchedIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        activeAuthenticatedSessionIdentityRef.current = switchedIdentity
+        authenticatedSessionIdentityRef.current = switchedIdentity
+        // Team switching owns a complete foreground refresh. If it invalidated
+        // the login-time post-paint callback, re-enable deferred menu data here.
+        setPostPaintDataReady(true)
         await refreshAuthenticatedData()
         if (announce) {
           const teamName =
@@ -517,27 +570,32 @@ export function useAppController() {
       chat.resetChat,
       fullSetStatus,
       refreshAuthenticatedData,
+      setPostPaintDataReady,
       teamsData.teams,
     ]
   )
 
-  const ensureNotificationTeamContext = useCallback(
-    async (target: { teamId?: string }) => {
+  const ensureTeamContext = useCallback(
+    async (target: { teamId?: string; announce?: boolean }): Promise<boolean> => {
       const targetTeamId = String(target.teamId || '').trim()
-      if (!targetTeamId) return
+      if (!targetTeamId) return false
 
       const queuedSwitch = notificationTeamContextQueueRef.current.then(async () => {
         const activeTeamId = currentTeamIdRef.current
-        if (targetTeamId === activeTeamId) return
+        if (targetTeamId === activeTeamId) return false
 
-        chat.clearActiveChat()
-        await switchTeamForWorkspace(targetTeamId, { announce: false })
+        await switchTeamForWorkspace(targetTeamId, { announce: target.announce ?? false })
+        return true
       })
-      notificationTeamContextQueueRef.current = queuedSwitch.catch(() => undefined)
-      await queuedSwitch
+      notificationTeamContextQueueRef.current = queuedSwitch.then(
+        () => undefined,
+        () => undefined
+      )
+      return queuedSwitch
     },
-    [chat.clearActiveChat, switchTeamForWorkspace]
+    [switchTeamForWorkspace]
   )
+  const getCurrentTeamId = useCallback(() => currentTeamIdRef.current, [])
 
   const decideApprovalNotificationTarget = useCallback(
     async (target: AgentApprovalNotificationTarget) => {
@@ -569,14 +627,20 @@ export function useAppController() {
     async (options: { preserveNav?: boolean } = {}) => {
       const { preserveNav = false } = options
       try {
-        const health = await window.clerum.auth.getDependenciesHealth()
-        auth.setDependencyHealth(health)
+        void window.clerum.auth
+          .getDependenciesHealth()
+          .then(auth.setDependencyHealth)
+          .catch(error => {
+            console.warn('[Desktop] Could not refresh dependency health:', error)
+            auth.setDependencyHealth(null)
+          })
         const sessionState = await window.clerum.auth.getSessionState()
         const authenticated = Boolean(sessionState.authenticated && sessionState.me)
         auth.setIsAuthenticated(authenticated)
         auth.setMe(sessionState.me)
 
         if (!authenticated || !sessionState.me) {
+          setPostPaintDataReady(false)
           auth.setDesktopReleaseStatus(null)
           await chat.stopAllActivityStreams()
           agentsData.reset()
@@ -587,6 +651,7 @@ export function useAppController() {
           queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
           chat.resetChat()
           notif.resetNotifications()
+          activeAuthenticatedSessionIdentityRef.current = null
           authenticatedSessionIdentityRef.current = null
           if (!preserveNav) nav.handleNavSelect(DESKTOP_ROUTES.chat)
           return
@@ -596,9 +661,20 @@ export function useAppController() {
         auth.setEmail(sessionState.me.email || '')
         void auth.refreshDesktopReleaseStatus()
         const sessionIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        activeAuthenticatedSessionIdentityRef.current = sessionIdentity
         if (authenticatedSessionIdentityRef.current !== sessionIdentity) {
-          authenticatedSessionIdentityRef.current = sessionIdentity
-          await refreshAuthenticatedData({ initialLoad: true })
+          setPostPaintDataReady(false)
+          const loaded = await refreshAuthenticatedData({
+            initialLoad: true,
+            sessionIdentity,
+          })
+          if (loaded && activeAuthenticatedSessionIdentityRef.current === sessionIdentity) {
+            authenticatedSessionIdentityRef.current = sessionIdentity
+          }
+        } else {
+          // A prior post-paint callback may have been invalidated by an identity
+          // transition. An already-initialized matching session is ready now.
+          setPostPaintDataReady(true)
         }
         if (!preserveNav) {
           nav.handleNavSelect(DESKTOP_ROUTES.chat)
@@ -628,6 +704,7 @@ export function useAppController() {
       queryClient,
       refreshAuthenticatedData,
       resetWorkflowsData,
+      setPostPaintDataReady,
       teamsData.reset,
     ]
   )
@@ -652,6 +729,7 @@ export function useAppController() {
       // in cache would otherwise bleed into the next login (possibly a different
       // environment, since the env is chosen pre-login).
       queryClient.clear()
+      activeAuthenticatedSessionIdentityRef.current = null
       authenticatedSessionIdentityRef.current = null
       await window.clerum.auth.logout()
       chat.resetChat()
@@ -708,7 +786,20 @@ export function useAppController() {
     ) => {
       if (!agentName) return
       const targetChatId = String(options.chatId || '').trim()
-      if (targetChatId && nav.selectedAgent === agentName) {
+      // Fast path — ONLY when we are already on the chat route. `switchToChat`
+      // sets the active chat imperatively and leaves no pending selection behind,
+      // which is safe exactly while the agent-selection effect
+      // (useAgentChatController, deps [currentTeamId, navItem, selectedAgent])
+      // is NOT about to re-run. Coming from any other route the `setNavItem`
+      // below flips `navItem`, that effect re-runs, finds no pending selection
+      // and takes its reset branch (activeChatId -> null) — which would blank the
+      // just-opened session into the "new chat" empty state for a frame and then
+      // auto-select the most recent chat instead of the requested one. So from
+      // another route (Apps embed, agent workspace, settings…) we fall through to
+      // the pending-selection path below, which is designed to survive a route
+      // change: it sets the active chat synchronously AND records the selection
+      // the effect replays.
+      if (targetChatId && nav.selectedAgent === agentName && nav.navItem === DESKTOP_ROUTES.chat) {
         // D.4: switchToChat is now a single unified path (no isRemote) — the
         // server is the source of truth and hydrates server-only chats itself.
         void chat.switchToChat(agentName, targetChatId)
@@ -740,6 +831,7 @@ export function useAppController() {
       chat.clearActiveChat,
       chat.setPendingChatSelection,
       chat.switchToChat,
+      nav.navItem,
       nav.selectedAgent,
       nav.setNavItem,
       nav.setSelectedAgent,
@@ -777,10 +869,24 @@ export function useAppController() {
 
       try {
         if (requiresTeamSwitch) {
-          await ensureNotificationTeamContext({ teamId: targetTeamId })
+          await ensureTeamContext({ teamId: targetTeamId })
         }
 
-        if (targetChatId && !requiresTeamSwitch && nav.selectedAgent === targetAgent) {
+        // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
+        // leaves no pending selection, so it only survives while the route (and
+        // hence the agent-selection effect's deps) does not change. Opening a
+        // notification from the Apps embed / a workspace / settings flips
+        // `navItem` below, re-running that effect into its reset branch — the
+        // conversation would blank to the "new chat" empty state and then land on
+        // the most recent chat instead of the notification's. From another route
+        // we fall through to the pending-selection path, which replays the
+        // requested chat across the re-run.
+        if (
+          targetChatId &&
+          !requiresTeamSwitch &&
+          nav.selectedAgent === targetAgent &&
+          nav.navItem === DESKTOP_ROUTES.chat
+        ) {
           try {
             await chat.switchToChat(targetAgent, targetChatId)
             nav.setNavItem(DESKTOP_ROUTES.chat)
@@ -803,8 +909,9 @@ export function useAppController() {
     [
       chat.setPendingChatSelection,
       chat.switchToChat,
-      ensureNotificationTeamContext,
+      ensureTeamContext,
       fullSetStatus,
+      nav.navItem,
       nav.selectedAgent,
       nav.setNavItem,
       nav.setSelectedAgent,
@@ -818,7 +925,7 @@ export function useAppController() {
       const target = notification.workflow
       if (!target) return
       try {
-        await ensureNotificationTeamContext({ teamId: notification.teamId })
+        await ensureTeamContext({ teamId: notification.teamId })
         nav.setNavItem(DESKTOP_ROUTES.plugins)
 
         const fallbackWorkflow = {
@@ -880,7 +987,7 @@ export function useAppController() {
         )
       }
     },
-    [ensureNotificationTeamContext, fullSetStatus, nav.setNavItem, queryClient]
+    [ensureTeamContext, fullSetStatus, nav.setNavItem, queryClient]
   )
 
   const openSdkNotificationTarget = useCallback(
@@ -998,6 +1105,10 @@ export function useAppController() {
     statusTone,
     isAuthenticated: auth.isAuthenticated,
     me: auth.me,
+    currentTeamId,
+    availableTeamIds,
+    teamDirectoryHydrated: teamsData.teamDirectoryHydrated,
+    authenticatedPrincipalIdentity,
     email: auth.email,
     password: auth.password,
     desktopSetupAuthorizationToken: auth.desktopSetupAuthorizationToken,
@@ -1011,6 +1122,7 @@ export function useAppController() {
     desktopReleaseStatus: auth.desktopReleaseStatus,
     desktopEnvironmentSetupComplete: auth.desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup: auth.pendingDesktopEnvironmentSetup,
+    backendSwitchHint: auth.backendSwitchHint,
     showRuntimeConfigSelector: auth.showRuntimeConfigSelector,
     dependencyHealth: auth.dependencyHealth,
     hasDependencyOutage: auth.hasDependencyOutage,
@@ -1025,6 +1137,7 @@ export function useAppController() {
     setStatus: fullSetStatus,
     loadSession,
     handlePasswordLogin: auth.handlePasswordLogin,
+    handleSwitchLoginBackend: auth.handleSwitchLoginBackend,
     handleStartDesktopSetup: auth.handleStartDesktopSetup,
     handleCompleteDesktopSetup: auth.handleCompleteDesktopSetup,
     handleSaveRuntimeConfig: auth.handleSaveRuntimeConfig,
@@ -1049,6 +1162,8 @@ export function useAppController() {
     handleNavSelect,
     handleOpenAgentWorkspace,
     handleSelectChatAgent,
+    handleEnsureTeamContext: ensureTeamContext,
+    getCurrentTeamId,
     handleBackToAgents: nav.handleBackToAgents,
     handleOpenContextDetails: nav.handleOpenContextDetails,
     handleBackToContexts: nav.handleBackToContexts,
@@ -1094,16 +1209,21 @@ export function useAppController() {
     sessionStateByChatId: chat.sessionStateByChatId,
     sessionStateByChatKey: chat.sessionStateByChatKey,
     chatListLoading: chat.chatListLoading,
+    chatListMoreLoading: chat.chatListMoreLoading,
+    chatListHasMoreRemoteSessions: chat.chatListHasMoreRemoteSessions,
     latestChatSessions: chat.latestChatSessions,
     latestChatSessionsLoading: chat.latestChatSessionsLoading,
     chatMessages: chat.chatMessages,
     chatMessagesLoading: chat.chatMessagesLoading,
+    hasOlderMessages: chat.hasOlderMessages,
+    olderMessagesLoading: chat.olderMessagesLoading,
     composerImageAttachments: chat.composerImageAttachments,
     composerReferenceAttachments: chat.composerReferenceAttachments,
     agentSending: chat.agentSending,
     agentError: chat.agentError,
     failedAgentSend: chat.failedAgentSend,
     chatEndRef: chat.chatEndRef,
+    scrollChatToBottom: chat.scrollChatToBottom,
     activeMessages: chat.chatMessages,
     activityByMessageId: chat.activityByMessageId,
     progressByMessageId: chat.progressByMessageId,
@@ -1114,6 +1234,8 @@ export function useAppController() {
     handleDeleteChat: chat.handleDeleteChat,
     handleDeleteChatForAgent: chat.handleDeleteChatForAgent,
     handleSelectChat: chat.handleSelectChat,
+    handleLoadOlderMessages: chat.handleLoadOlderMessages,
+    loadMoreChatSessions: chat.loadMoreChatSessions,
     handleSendAgentMessage: chat.handleSendAgentMessage,
     handleRetryFailedAgentSend: chat.handleRetryFailedAgentSend,
     clearComposerSendError: chat.clearComposerSendError,

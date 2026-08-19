@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TeamsAdapter } from '../channels/teams'
 import type { TeamsMessageHandoff } from '../handoffServer'
-import { ChannelReader, type ChannelReaderOptions } from '../main'
+import { ChannelReader, type ChannelReaderOptions, profileSocialChannelUrl } from '../main'
 import { createProgressStream } from '../progressClient'
 import type { MessageResponse } from '../rpcClient'
 import type { ChannelAdapter, Message } from '../types'
@@ -69,7 +69,7 @@ function telegramMessage(overrides: Partial<Message> = {}): Message {
 describe('ChannelReader provider event idempotency', () => {
   it('does not forward a provider message when current access is denied', async () => {
     const rpc = rpcClient()
-    rpc.authorizeProviderMessage = vi.fn(async () => false)
+    rpc.authorizeProviderMessage = vi.fn(async () => ({ authorized: false }))
     const reader = new ChannelReader({
       rpcClient: rpc,
       notificationDeliveryClient: null,
@@ -84,7 +84,10 @@ describe('ChannelReader provider event idempotency', () => {
 
   it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
     const rpc = rpcClient()
-    rpc.authorizeProviderMessage = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    rpc.authorizeProviderMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ authorized: false })
+      .mockResolvedValueOnce({ authorized: true })
     const reader = new ChannelReader({
       rpcClient: rpc,
       notificationDeliveryClient: null,
@@ -1234,5 +1237,138 @@ describe('ChannelReader cron result delivery', () => {
     await (reader as unknown as { pollCronResults: () => Promise<void> }).pollCronResults()
 
     expect(rpc.acknowledgeCronResult).not.toHaveBeenCalled()
+  })
+})
+
+describe('ChannelReader pollCycle provider guards', () => {
+  // control-ui's create page writes every provider array on every channel, so a
+  // Teams or Slack channel arrives carrying `telegram: []`. An empty array is
+  // truthy, so the telegram branch used to run for those channels, find no
+  // telegram adapter, and `continue` -- skipping every remaining provider on the
+  // same channel. The empty array means "no telegram groups to poll", not "this
+  // is a telegram channel".
+  it('still polls other providers on a channel that carries an empty telegram array', async () => {
+    const emailAdapter = {
+      fetchMessages: vi.fn(async () => [
+        {
+          channelType: 'email' as const,
+          channelId: 'inbox-1',
+          sender: 'someone@example.com',
+          content: 'hello',
+          timestamp: new Date('2026-08-17T12:00:00.000Z'),
+          messageId: 'email-1',
+        },
+      ]),
+      sendMessage: vi.fn(async () => undefined),
+    }
+
+    const reader = new ChannelReader({
+      rpcClient: rpcClient(),
+      notificationDeliveryClient: null,
+      adapters: new Map([['email', emailAdapter as unknown as ChannelAdapter]]),
+    })
+    ;(reader as unknown as { channels: unknown[] }).channels = [
+      {
+        name: 'evenfire-teams-jose',
+        namespace: 'channels',
+        spec: {
+          hostRef: 'agentjose',
+          telegram: [],
+          email: [{ channelId: 'inbox-1', emails: ['someone@example.com'] }],
+          teamsSettings: {
+            appId: 'a2dad48d-1b07-4b53-b177-35820f4306d3',
+            tenantId: '18517e81-9d09-4c73-88f3-e84a6c90c3d9',
+            appName: 'evenfire-teams-jose',
+          },
+        },
+      },
+    ]
+
+    const messages = await reader.pollCycle()
+
+    expect(emailAdapter.fetchMessages).toHaveBeenCalledOnce()
+    expect(messages).toHaveLength(1)
+  })
+
+  // The empty-array guard above is only half the problem. `continue` inside the
+  // telegram branch aborts the whole CHANNEL, so a channel that legitimately has
+  // telegram groups but no telegram adapter (credentials absent) also loses every
+  // provider declared after telegram. charts/clerum-crds/examples/channels.yaml
+  // ships exactly this shape: one CommunicationChannel with telegram + email +
+  // slack. The inbox stops being polled, silently.
+  it('still polls email when a real telegram group has no adapter', async () => {
+    const emailAdapter = {
+      fetchMessages: vi.fn(async () => [
+        {
+          channelType: 'email' as const,
+          channelId: 'INBOX',
+          sender: 'someone@example.com',
+          content: 'hello',
+          timestamp: new Date('2026-08-18T12:00:00.000Z'),
+          messageId: 'email-2',
+        },
+      ]),
+      sendMessage: vi.fn(async () => undefined),
+    }
+
+    const reader = new ChannelReader({
+      rpcClient: rpcClient(),
+      notificationDeliveryClient: null,
+      // Email adapter only: telegram credentials are absent, which is the whole point.
+      adapters: new Map([['email', emailAdapter as unknown as ChannelAdapter]]),
+    })
+    ;(reader as unknown as { channels: unknown[] }).channels = [
+      {
+        name: 'all-channels',
+        namespace: 'channels',
+        spec: {
+          hostRef: 'agentjose',
+          telegram: [{ channelId: 'telegram1', chatType: 'private', userIds: ['123'] }],
+          email: [{ channelId: 'INBOX', emails: ['someone@example.com'] }],
+        },
+      },
+    ]
+
+    const messages = await reader.pollCycle()
+
+    expect(emailAdapter.fetchMessages).toHaveBeenCalledOnce()
+    expect(messages).toHaveLength(1)
+  })
+})
+
+describe('profileSocialChannelUrl', () => {
+  it('appends the provider tab path', () => {
+    expect(profileSocialChannelUrl('https://profile.example.com', 'teams')).toBe(
+      'https://profile.example.com/settings/social/teams'
+    )
+    expect(profileSocialChannelUrl('https://profile.example.com', 'slack')).toBe(
+      'https://profile.example.com/settings/social/slack'
+    )
+  })
+
+  it('falls back to the bare base URL for a provider with no tab', () => {
+    // Better than guessing a segment: profile-ui 404s on an unknown network.
+    expect(profileSocialChannelUrl('https://profile.example.com', 'telegram')).toBe(
+      'https://profile.example.com'
+    )
+  })
+
+  // Regression guard for the /\/+$/ -> index-walk rewrite (CodeQL
+  // js/polynomial-redos). This asserts the rewrite preserved behaviour; it does
+  // NOT prove the ReDoS is gone, since the old regex produced the same string,
+  // only slowly. The linearity lives in the implementation, not in this test.
+  it('strips a run of trailing slashes, however long', () => {
+    expect(profileSocialChannelUrl('https://profile.example.com' + '/'.repeat(500), 'teams')).toBe(
+      'https://profile.example.com/settings/social/teams'
+    )
+    expect(profileSocialChannelUrl('  https://profile.example.com//  ', 'teams')).toBe(
+      'https://profile.example.com/settings/social/teams'
+    )
+  })
+
+  it('leaves a URL with no trailing slash untouched', () => {
+    expect(profileSocialChannelUrl('https://p.example.com/base', 'teams')).toBe(
+      'https://p.example.com/base/settings/social/teams'
+    )
   })
 })

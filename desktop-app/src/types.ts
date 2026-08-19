@@ -15,6 +15,19 @@ export type RpcScope =
   | 'sandbox:ui:view'
 export type RpcAccessScope = 'team' | 'user'
 
+export type SandboxUiApp = {
+  appRef: string
+  title?: string
+  description?: string
+  icon?: string
+  defaultPath: string
+  ready: boolean
+  phase: string | null
+  updatedAt: string | null
+}
+
+export type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
+
 export type SessionMe = {
   id: string
   email: string
@@ -237,11 +250,11 @@ export type WorkflowInputContractSchema = {
 export type WorkflowInputValues = Record<string, string | number | boolean>
 
 export type PluginWorkloadSdkCapabilityStatus = {
-  state: 'validated' | 'disabled'
+  state: 'validated' | 'awaiting_policy' | 'disabled' | 'degraded'
   promptBridge: boolean
   clientNotifications: boolean
   message?: string
-  validatedAt?: string
+  validatedAt?: string | null
 }
 
 export type WorkflowRecipeResource = Record<string, unknown> & {
@@ -361,9 +374,24 @@ export type UserContexts = {
  */
 export type AgentWithMcpServers = {
   name: string
+  /**
+   * Human-visible name for the agent (Agent CRD `spec.host`), surfaced by
+   * control-api's agent directory (accessReconciliation.buildAgentDirectoryEntry)
+   * and threaded through external-rest-api. `spec.host` is required in the CRD,
+   * so this is expected to always be present for a real agent; it is optional on
+   * the wire only to stay compatible with pre-display API builds.
+   */
+  displayName?: string
   contextRef: string | null
   provider?: string | null
   mcpServers: Array<{ name: string }>
+  /**
+   * Canonical GFS grant target for this agent (`1st:<ns>/<name>`), built by
+   * control-api's agent directory (accessReconciliation.buildAgentDirectoryEntry).
+   * Optional on the wire: servers predating per-agent GFS access omit it, and
+   * the Manage modal must skip such agents as grant targets.
+   */
+  gfsSubject?: { type: 'host'; id: string }
 }
 
 export type UserAgents = {
@@ -427,6 +455,22 @@ export type AccessCatalog = {
    * as unknown.
    */
   agentProviderByName?: Record<string, string | null>
+  /**
+   * Visible name (Agent CRD `spec.host`) keyed by agent `metadata.name`. Built
+   * once at this producer boundary from the wire `displayName` (mirroring
+   * control-api's `configuredDisplayName || name` guard), so renderer consumers
+   * read `agentDisplayByName[name]` directly WITHOUT re-adding a `|| name`
+   * fallback (spec Decision #6: the guard lives at the producer, not sprinkled
+   * across consumers). Present when the catalog carried any agent display.
+   */
+  agentDisplayByName?: Record<string, string>
+  /**
+   * Visible name (Context CRD `spec.displayName`) keyed by context id. Optional
+   * field with no dedicated producer on the session path yet (external context
+   * display endpoint undecided — spec §8 / UT-7b), so consumers apply the single
+   * sanctioned fallback `contextDisplayById[id] ?? id`.
+   */
+  contextDisplayById?: Record<string, string>
 }
 
 export type RpcMcpServer = {
@@ -506,6 +550,22 @@ export type SessionState = {
 }
 
 export type PasswordLoginResult = SessionState
+
+/**
+ * Actionable diagnosis returned after a login failure when the app is pointed at
+ * a backend that isn't answering but a local Evenfire (minikube) IS reachable.
+ * Surfaced as a one-click "switch to Localhost and retry" affordance so a
+ * connection failure against the wrong runtime profile stops reading as a bare
+ * "login failed". Computed by `AppService.diagnoseLoginBackend`.
+ */
+export type LoginBackendHint = {
+  /** Runtime-config option to switch to (the localhost option's id). */
+  targetOptionId: string
+  /** Human label for the switch target, e.g. "Localhost". */
+  targetLabel: string
+  /** Human label for the backend the user is currently pointed at. */
+  activeLabel: string
+}
 
 export type InvitationPreview = {
   id: string
@@ -789,6 +849,9 @@ export interface ChatMetadata {
   createdAt: string // ISO 8601
   updatedAt: string // ISO 8601
   messageCount: number
+  /** Persisted activity aggregates keep dashboards from opening complete chat files. */
+  errorCount?: number
+  toolCallCount?: number
   /** D.5: a task terminated while this chat was NOT the active view. Drives the
    * sidebar "completed_unread" badge; persisted so it survives an app restart. */
   unreadTerminal?: boolean
@@ -797,8 +860,8 @@ export interface ChatMetadata {
 }
 
 export interface ChatIndex {
-  /** v2 aligns with ChatFile v2; bootstrap wipes any v1/missing-version dir (D.4 §7.1). */
-  version: 1 | 2
+  /** v2 remains readable by pre-paging builds; v3 is accepted and normalized for compatibility. */
+  version: 1 | 2 | 3
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
@@ -841,6 +904,13 @@ export interface ApprovalDecisionResult {
 export interface SessionMessagesResult {
   agent: string
   chatId: string
+  totalTurns?: number
+  oldestTurnNumber?: number
+  latestTurnNumber?: number
+  /** True only when older turns exist before the returned non-empty window. */
+  hasMoreBefore?: boolean
+  /** True only when newer turns exist after the returned non-empty window. */
+  hasMoreAfter?: boolean
   state?: SessionLifecycleState
   activeTaskId?: string
   pendingApproval?: PendingApprovalLite
@@ -854,6 +924,41 @@ export interface SessionMessagesResult {
     tokens?: SessionTokensLite
     tool_steps?: MessageToolStep[]
   }>
+}
+
+export interface SessionMessagesQuery {
+  limit?: number
+  beforeTurn?: number
+  afterTurn?: number
+}
+
+export interface SessionsListQuery {
+  agent?: string
+  limit?: number
+  cursor?: string
+}
+
+export interface SessionsListResult {
+  items: Array<{
+    agent: string
+    chatId: string
+    turnCount: number
+    messageCount?: number
+    lastActivityAt: string
+    state?: SessionLifecycleState
+    activeTaskId?: string
+    pendingApproval?: PendingApprovalLite
+    tokens?: SessionTokensLite
+  }>
+  nextCursor?: string
+  /**
+   * Number of wire items the parser dropped as malformed (R1-H1). Present only
+   * when > 0. A session catalog is parsed tolerantly — one corrupt entry must not
+   * blank the whole sidebar — but the drop must stay observable: this count lets a
+   * consumer see that the returned `items` is shorter than what the server sent,
+   * instead of a chat vanishing with no trace.
+   */
+  droppedItemCount?: number
 }
 
 // F5 compile-time guard: `SessionMessagesResult` MUST keep carrying the recovery
@@ -975,11 +1080,15 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: number
+  /** Authoritative server turn ordinal used for delta reconciliation and paging. */
+  serverTurnNumber?: number
   /** mcp-host task that produced/owns this message — used to rejoin after reload (D.3, v2). */
   task_id?: string
   attachments?: ChatMessageAttachment[]
   /** True when this message represents a structured error returned by mcp-host. */
   isError?: boolean
+  /** Local-only durable message that must not be evicted by server window reconciliation. */
+  preserveLocal?: boolean
   /** LLM error code, e.g. "LLM_AUTHENTICATION_FAILED". Present when isError is true. */
   errorCode?: string
   /** LLM provider name, e.g. "zai". Present when isError is true. */
@@ -992,6 +1101,16 @@ export interface ChatMessage {
    *  SSE steps are renderer-only). Minimal, serializable shape (no raw args/output).
    *  Absent on user messages and on turns with no tool calls. */
   toolSteps?: MessageToolStep[]
+}
+
+/**
+ * Controls how an authoritative server page is persisted locally.
+ *
+ * `activeTaskIds` lets the main process protect the same optimistic slots as
+ * the renderer while merging the authoritative window into local history.
+ */
+export interface ReplaceChatMessagesOptions {
+  activeTaskIds?: string[]
 }
 
 /**

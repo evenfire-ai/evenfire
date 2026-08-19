@@ -6,6 +6,11 @@ import { activeSidebarChildHref } from '../Sidebar/activeChild'
 import { SIDEBAR_TABS } from '../Sidebar/constants'
 
 const navigationState = vi.hoisted(() => ({ pathname: '/agents' }))
+const refreshPublishScope = vi.fn()
+
+function publishScopeState(state: Omit<hook.PublishScopeState, 'refresh'>): hook.PublishScopeState {
+  return { ...state, refresh: refreshPublishScope }
+}
 
 vi.mock('next/navigation', () => ({
   usePathname: () => navigationState.pathname,
@@ -23,51 +28,32 @@ afterEach(() => {
 beforeEach(() => vi.clearAllMocks())
 
 describe('Sidebar publisher gating', () => {
-  it('shows the Publisher entry for an org-bound non-curator deploy', async () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({
-      scope: { scope: 'acme', curator: false, orgName: 'Acme' },
-      loading: false,
-      error: false,
-    })
+  it('does not render a Publisher entry (folded into the Marketplace org tab)', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({
+        scope: { scope: 'acme', curator: false, orgName: 'Acme' },
+        loading: false,
+        error: false,
+      })
+    )
     render(<Sidebar currentTab="hosts" />)
-    const link = await screen.findByRole('link', { name: /publisher/i })
-    expect(link).toHaveAttribute('href', '/publisher')
-  })
-
-  it('hides the Publisher entry when publisherUiEnabled is false (self-hosted default), even for an org-bound non-curator deploy', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({
-      scope: { scope: 'acme', curator: false, orgName: 'Acme', publisherUiEnabled: false },
-      loading: false,
-      error: false,
-    })
-    render(<Sidebar currentTab="hosts" />)
+    // Publisher was folded into the org-named Marketplace tab (design spec §4).
     expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
-  })
-
-  it('hides the Publisher entry on a curator deploy', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({
-      scope: { scope: null, curator: true, orgName: null },
-      loading: false,
-      error: false,
-    })
-    render(<Sidebar currentTab="hosts" />)
-    expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
-  })
-
-  it('hides the Publisher entry while publish-scope is loading', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: true, error: false })
-    render(<Sidebar currentTab="hosts" />)
-    expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
+    expect(screen.getByRole('link', { name: /marketplace/i })).toBeInTheDocument()
   })
 
   it('still renders the other navigation entries', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: true })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: true })
+    )
     render(<Sidebar currentTab="hosts" />)
     expect(screen.getByRole('link', { name: /agents/i })).toBeInTheDocument()
   })
 
-  it('keeps Traces hidden and sorts visible navigation labels alphabetically', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+  it('keeps Traces hidden and renders visible navigation in the defined order', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     render(<Sidebar currentTab="traces" />)
 
     expect(screen.queryByText('Traces')).not.toBeInTheDocument()
@@ -75,43 +61,58 @@ describe('Sidebar publisher gating', () => {
     const labels = Array.from(nav.children).map(item =>
       item.querySelector('.cu-sidebar__label')?.textContent?.trim()
     )
-    expect(labels).toEqual(
-      [...labels].sort((first, second) => (first ?? '').localeCompare(second ?? ''))
-    )
+    expect(labels).toEqual([
+      'Users & Teams',
+      'Agents',
+      'Contexts',
+      'Marketplace',
+      'Installed connectors',
+      'Installed plugins',
+      'Files',
+      'External Channels',
+      'LLM Models',
+      'Secrets',
+      'Cost & Usage',
+    ])
   })
 
   it('keeps Settings in the footer on its canonical route', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     render(<Sidebar currentTab="settings" />)
 
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings/ui')
   })
 
-  it.each([
-    ['/llm-models', 'Catalog'],
-    ['/llm-models/model-id/edit', 'Catalog'],
-    ['/llm-models/discovery', 'Discovery'],
-  ])('keeps the matching LLM Models child selected for %s', (pathname, label) => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
-    navigationState.pathname = pathname
-    render(<Sidebar currentTab="llm-models" />)
+  it.each(['/llm-models', '/llm-models/model-id/edit', '/llm-models/discovery'])(
+    'keeps the merged LLM Models entry selected for %s',
+    pathname => {
+      vi.mocked(hook.usePublishScope).mockReturnValue(
+        publishScopeState({ scope: null, loading: false, error: false })
+      )
+      navigationState.pathname = pathname
+      render(<Sidebar currentTab="llm-models" />)
 
-    const child = screen.getByRole('link', { name: label })
-    expect(child).toHaveAttribute('data-active', 'true')
-    expect(child).toHaveAttribute('aria-current', 'page')
-  })
+      const entry = screen.getByRole('link', { name: 'LLM Models' })
+      expect(entry).toHaveAttribute('href', '/llm-models')
+      expect(entry).toHaveAttribute('data-active', 'true')
+      expect(entry).toHaveAttribute('aria-current', 'page')
+    }
+  )
 
   it.each([
-    ['/agent-files/example', 'Agent Files', '/agent-files'],
     ['/agent-outputs/recipe-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/agent-outputs/desktop-app-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/global-file-system', 'Global File System', '/global-file-system'],
-  ])('selects the matching Directories child for %s', (pathname, label, href) => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+  ])('selects the matching Files child for %s', (pathname, label, href) => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     navigationState.pathname = pathname
     render(<Sidebar currentTab="directories" />)
 
-    const group = screen.getByRole('button', { name: 'Directories' })
+    const group = screen.getByRole('button', { name: 'Files' })
     expect(group).toHaveAttribute('aria-expanded', 'true')
     expect(group).toHaveAttribute('data-active', 'true')
     const child = screen.getByRole('link', { name: label })
@@ -120,17 +121,42 @@ describe('Sidebar publisher gating', () => {
   })
 
   it('renders a thin icon for every visible child route', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     render(<Sidebar currentTab="directories" />)
 
-    for (const label of ['Agent Files', 'Agent Outputs', 'Global File System']) {
+    for (const label of ['Agent Outputs', 'Global File System']) {
       const child = screen.getByRole('link', { name: label })
       expect(child.querySelector('.cu-sidebar__subitem-icon svg')).toBeInTheDocument()
     }
   })
 
+  it('renders an icon for the Files group', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
+    render(<Sidebar currentTab="directories" />)
+
+    const directories = screen.getByRole('button', { name: 'Files' })
+    expect(directories.querySelector('.cu-sidebar__icon svg')).toBeInTheDocument()
+  })
+
+  it('hides Agent Files from the sidebar without changing its route', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
+    navigationState.pathname = '/agent-files/example'
+    render(<Sidebar currentTab="directories" />)
+
+    expect(screen.queryByRole('link', { name: 'Agent Files' })).not.toBeInTheDocument()
+    expect(SIDEBAR_TABS.directories.href).toBe('/agent-files')
+  })
+
   it('uses the shared Desktop paperclip glyph for Global File System', () => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
     navigationState.pathname = '/global-file-system'
     render(<Sidebar currentTab="directories" />)
 
@@ -147,11 +173,22 @@ describe('Sidebar publisher gating', () => {
     }
   })
 
-  it('sorts every sidebar group by the displayed child label', () => {
-    for (const item of Object.values(SIDEBAR_TABS)) {
+  it('sorts standard sidebar groups by the displayed child label', () => {
+    for (const [tab, item] of Object.entries(SIDEBAR_TABS)) {
+      if (tab === 'cost' || tab === 'directories') continue
       const labels = item.children?.map(child => child.label) ?? []
       expect(labels).toEqual([...labels].sort((first, second) => first.localeCompare(second)))
     }
+
+    expect(SIDEBAR_TABS.cost.children?.map(child => child.label)).toEqual([
+      'Usage',
+      'Token Budgets',
+      'LLM Prices',
+    ])
+    expect(SIDEBAR_TABS.directories.children?.map(child => child.label)).toEqual([
+      'Global File System',
+      'Agent Outputs',
+    ])
   })
 
   it('selects hidden Trace children by their nested routes', () => {

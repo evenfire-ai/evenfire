@@ -1,5 +1,11 @@
+import type {
+  PluginAuditEntryView,
+  PluginConsentRequest,
+  PluginGrantView,
+} from './pluginSdkProtocol.js'
 import {
   AccessCatalog,
+  AgentWithMcpServers,
   ApprovalDecisionResult,
   ChatIndex,
   ChatMessage,
@@ -17,16 +23,22 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
+  LoginBackendHint,
   MessageToolStep,
   PasswordLoginResult,
-  PendingApprovalLite,
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
+  ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
+  SandboxUiApp,
+  SandboxUiDeepLinkEnvelope,
   SessionLifecycleState,
+  SessionMessagesQuery,
+  SessionMessagesResult,
   SessionState,
-  SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -56,6 +68,7 @@ declare global {
         deleteRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
         googleLogin: (idToken: string) => Promise<SessionState>
         passwordLogin: (email: string, password: string) => Promise<PasswordLoginResult>
+        diagnoseLoginBackend: () => Promise<LoginBackendHint | null>
         startDesktopSetup: (email: string) => Promise<{ profileUiUrl: string; appName: string }>
         openForgotPassword: (email?: string) => Promise<{ profileUiUrl: string }>
         openProfileSettings: (
@@ -123,18 +136,20 @@ declare global {
             resourceId: string
             rid: string
             gfsUri: string
-            drive: string
-            parentResourceId: string | null
+            drive?: string
+            parentResourceId?: string | null
             name: string
             kind: 'file' | 'directory'
             path: string | null
             version: number
             bytes: number
-            sources: string[]
-            permissions: string[]
-            coversDescendants: boolean
+            sources?: string[]
+            permissions?: string[]
+            coversDescendants?: boolean
           }>
           nextCursor: string | null
+          rootResourceId?: string
+          view?: 'operator'
         }>
         listChildren: (
           resourceId: string,
@@ -197,6 +212,89 @@ declare global {
           version: number
           bytes: number
         }>
+        createFileFromPath: (
+          parentResourceId: string,
+          name: string,
+          filePath: string,
+          drive?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          resultResourceId?: string
+          resultVersion?: number
+        }>
+        startFileUpload: (
+          parentResourceId: string,
+          name: string,
+          filePath: string,
+          drive?: string,
+          resumeUploadId?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          expectedBytes: number
+          committedBytes: number
+          partBytes: number
+          partCount: number
+        }>
+        startFileReplace: (
+          resourceId: string,
+          filePath: string,
+          drive?: string,
+          ifMatch?: number,
+          resumeUploadId?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          expectedBytes: number
+          committedBytes: number
+          partBytes: number
+          partCount: number
+        }>
+        getUploadSnapshot: (
+          uploadId: string,
+          drive?: string
+        ) => Promise<{
+          state:
+            | 'initiated'
+            | 'uploading'
+            | 'paused'
+            | 'suspended_auth'
+            | 'finalizing'
+            | 'canceling'
+            | 'completed'
+            | 'aborted'
+            | 'failed'
+          session: {
+            uploadId: string
+            state: string
+            expectedBytes: number
+            committedBytes: number
+            resultResourceId?: string
+            resultVersion?: number
+          } | null
+          uploadedBytes: number
+          totalBytes: number
+        } | null>
+        listUploadSessions: (drive?: string) => Promise<
+          Array<{
+            uploadId: string
+            fileName: string
+            fileSize: number
+            name: string
+            drive: string
+            status: 'active' | 'paused' | 'failed' | 'suspended_auth'
+            target: {
+              operation: 'create' | 'replace'
+              parentRid?: string
+              resourceRid?: string
+              ifMatch?: number
+            }
+          }>
+        >
+        pauseUpload: (uploadId: string, drive?: string) => Promise<unknown>
+        resumeUpload: (uploadId: string, drive?: string) => Promise<unknown>
+        cancelUpload: (uploadId: string, drive?: string) => Promise<{ ok: true }>
         replaceFile: (
           resourceId: string,
           encodedData: string,
@@ -214,6 +312,18 @@ declare global {
           version: number
           bytes: number
         }>
+        replaceFileFromPath: (
+          resourceId: string,
+          filePath: string,
+          drive?: string,
+          ifMatch?: number
+        ) => Promise<{
+          uploadId: string
+          state: string
+          resultResourceId?: string
+          resultVersion?: number
+        }>
+        getPathForFile: (file: File) => string
         renameResource: (
           resourceId: string,
           newName: string,
@@ -227,11 +337,43 @@ declare global {
         ) => Promise<{ deleted: boolean; resourceId: string }>
         grant: (
           resourceId: string,
-          subjectKey: string,
+          subjectKeys: string[],
           bits: string[],
-          drive?: string
+          drive?: string,
+          inherit?: boolean
         ) => Promise<void>
-        createShare: (resourceId: string, subjectKey: string, drive?: string) => Promise<void>
+        listGrants: (
+          resourceId: string,
+          drive?: string
+        ) => Promise<
+          Array<{
+            id: string
+            drive: string
+            resourceId: string
+            subject: { type: string; id?: string }
+            permissions: string[]
+            inherit: boolean
+          }>
+        >
+        revokeGrant: (grantId: string) => Promise<void>
+        listShares: (
+          resourceId: string,
+          drive?: string
+        ) => Promise<
+          Array<{
+            id: string
+            drive: string
+            resourceId: string
+            subject: { type: string; id?: string }
+            permissions: string[]
+            includeDescendants: boolean
+          }>
+        >
+        revokeShare: (shareId: string) => Promise<void>
+        createShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
+      }
+      agents: {
+        listMine: () => Promise<AgentWithMcpServers[]>
       }
       approvals: {
         listPending: (limit?: number) => Promise<PendingWorkflowApproval[]>
@@ -378,41 +520,16 @@ declare global {
         ) => Promise<Buffer>
         listSessions: (
           hostRef: string,
-          hostRefs?: string[]
-        ) => Promise<{
-          items: Array<{
-            agent: string
-            chatId: string
-            turnCount: number
-            lastActivityAt: string
-            state?: SessionLifecycleState
-            activeTaskId?: string
-            pendingApproval?: PendingApprovalLite
-            tokens?: SessionTokensLite
-          }>
-        }>
+          hostRefs?: string[],
+          query?: SessionsListQuery
+        ) => Promise<SessionsListResult>
         loadSessionMessages: (
           hostRef: string,
           agent: string,
           chatId: string,
-          hostRefs?: string[]
-        ) => Promise<{
-          agent: string
-          chatId: string
-          state?: SessionLifecycleState
-          activeTaskId?: string
-          pendingApproval?: PendingApprovalLite
-          tokens?: SessionTokensLite
-          turns: Array<{
-            number: number
-            user_input: string
-            response?: string
-            started_at: string
-            completed_at?: string
-            tokens?: SessionTokensLite
-            tool_steps?: MessageToolStep[]
-          }>
-        }>
+          hostRefs?: string[],
+          query?: SessionMessagesQuery
+        ) => Promise<SessionMessagesResult>
         getContextBreakdown: (
           hostRef: string,
           agent: string,
@@ -443,10 +560,13 @@ declare global {
       }
       app: {
         openUrl: (url: string) => Promise<void>
+        rendererReady: () => Promise<void>
       }
       window: {
-        getVisibility: () => Promise<{ visible: boolean }>
-        onVisibilityChange: (callback: (state: { visible: boolean }) => void) => () => void
+        getVisibility: () => Promise<{ visible: boolean; focused: boolean }>
+        onVisibilityChange: (
+          callback: (state: { visible: boolean; focused: boolean }) => void
+        ) => () => void
       }
       system: {
         /** GAP-D1 (§4.5-4): OS resume / screen unlock tick — reconcile in-flight chats. */
@@ -498,6 +618,12 @@ declare global {
         replaceMessages: (
           agentRef: string,
           chatId: string,
+          messages: ChatMessage[],
+          options?: ReplaceChatMessagesOptions
+        ) => Promise<void>
+        backfillCounters?: (
+          agentRef: string,
+          chatId: string,
           messages: ChatMessage[]
         ) => Promise<void>
         getLastActive: (agentRef: string) => Promise<string | null>
@@ -513,26 +639,22 @@ declare global {
       }
       sandboxUi: {
         listApps: () => Promise<{
-          apps: Array<{
-            appRef: string
-            title?: string
-            description?: string
-            icon?: string
-            defaultPath: string
-            ready: boolean
-            phase: string | null
-            updatedAt: string | null
-          }>
+          apps: SandboxUiApp[]
         }>
         mintSession: (recipeNs: string, recipeName: string) => Promise<{ setCookie: string }>
         open: (args: {
           recipeNs: string
           recipeName: string
           defaultPath?: string
+          routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
+        copyDeepLink: (teamId?: string) => Promise<{ url: string }>
+        listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
+        clearPendingDeepLinks: () => Promise<void>
+        acknowledgeDeepLink: (id: number) => Promise<void>
         setBounds: (bounds: {
           x: number
           y: number
@@ -542,10 +664,32 @@ declare global {
         }) => Promise<void>
         setVisible: (visible: boolean) => Promise<void>
         capturePreview: () => Promise<string | null>
+        onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
         onClosed: (callback: (args: { appRef: string }) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void
         ) => () => void
+      }
+      pluginSdk: {
+        onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void
+        onConsentCancelled: (callback: (args: { promptId: string }) => void) => () => void
+        onOpenGfsResource: (
+          callback: (args: {
+            gfsUri: string
+            name: string
+            kind: string
+            bytes: number | null
+          }) => void
+        ) => () => void
+        onNotificationClicked: (
+          callback: (args: { pluginId: string; ref: string | null }) => void
+        ) => () => void
+        resolveConsent: (promptId: string, allowed: string[]) => Promise<boolean>
+        listGrants: () => Promise<PluginGrantView[]>
+        revoke: (pluginId: string, capability?: string) => Promise<void>
+        activity: (limit?: number, includeAmbient?: boolean) => Promise<PluginAuditEntryView[]>
+        clearActivity: () => Promise<void>
+        setTheme: (theme: string) => Promise<void>
       }
     }
   }

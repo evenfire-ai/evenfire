@@ -53,6 +53,17 @@ const rateLimitMock = vi.hoisted(() => ({
   checkAndIncrement: vi.fn(),
 }))
 
+const dbMock = vi.hoisted(() => ({
+  query: vi.fn(),
+}))
+
+vi.mock('../src/db.js', () => ({
+  pool: {
+    query: (...args: unknown[]) => dbMock.query(...args),
+  },
+  withTransaction: vi.fn(),
+}))
+
 vi.mock('../src/services/directory/index.js', () => svc)
 vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 vi.mock(
@@ -70,6 +81,17 @@ vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
 
 describe('routes/profile', () => {
+  it('refuses to mint a session without a current lifecycle generation', () => {
+    expect(() =>
+      signExternalSessionToken({
+        userId: 'u1',
+        email: 'u@example.com',
+        teamId: 't1',
+        role: 'member',
+      })
+    ).toThrow('auth_generation_required')
+  })
+
   const token = 'dev-external-rest-api-token'
   const service = 'external-rest-api'
   const userSessionToken = signExternalSessionToken({
@@ -77,6 +99,7 @@ describe('routes/profile', () => {
     email: 'u@example.com',
     teamId: 't1',
     role: 'member',
+    authGeneration: 1,
   })
   const rpcAccessToken = signRpcAccessToken({
     sub: 'u1',
@@ -114,6 +137,12 @@ describe('routes/profile', () => {
       windowStartMs: Date.now(),
       count: 1,
     })
+    dbMock.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('lifecycle_state')) {
+        return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
   })
 
   function mountInternalRoutes(app: express.Express, gateway: unknown) {
@@ -123,6 +152,10 @@ describe('routes/profile', () => {
   }
 
   function accessCatalogGateway() {
+    const hosts = [
+      { metadata: { name: 'agent-a', namespace: 'mcp-host' }, spec: { enabled: true } },
+      { metadata: { name: 'agent-b', namespace: 'mcp-host' }, spec: { enabled: true } },
+    ]
     return {
       listResource: vi.fn(async (plural: string) => {
         if (plural === 'contexts') {
@@ -132,12 +165,17 @@ describe('routes/profile', () => {
           ]
         }
         if (plural === 'hosts') {
-          return [
-            { metadata: { name: 'agent-a' }, spec: { enabled: true } },
-            { metadata: { name: 'agent-b' }, spec: { enabled: true } },
-          ]
+          return hosts
         }
         return []
+      }),
+      getResource: vi.fn(async (plural: string, name: string) => {
+        if (plural !== 'hosts') {
+          throw Object.assign(new Error('not-found'), { statusCode: 404 })
+        }
+        const host = hosts.find(candidate => candidate.metadata.name === name)
+        if (!host) throw Object.assign(new Error('not-found'), { statusCode: 404 })
+        return host
       }),
     }
   }
@@ -294,6 +332,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
 
     await withInternalServiceAuth(request(app).post('/external/auth/verify'))
@@ -510,7 +549,17 @@ describe('routes/profile', () => {
       .expect({
         userId: 'u1',
         agentNames: ['agent-a'],
-        agents: [{ name: 'agent-a', contextRef: null, mcpServers: [] }],
+        agents: [
+          {
+            name: 'agent-a',
+            namespace: 'mcp-host',
+            displayName: 'agent-a',
+            active: true,
+            gfsSubject: { type: 'host', id: '1st:mcp-host/agent-a' },
+            contextRef: null,
+            mcpServers: [],
+          },
+        ],
       })
 
     await withInternalServiceAuthAndUserSession(request(app).get('/external/teams/t1/contexts'))
@@ -523,10 +572,68 @@ describe('routes/profile', () => {
         teamId: 't1',
         agentNames: ['agent-a', 'agent-b'],
         agents: [
-          { name: 'agent-a', contextRef: null, mcpServers: [] },
-          { name: 'agent-b', contextRef: null, mcpServers: [] },
+          {
+            name: 'agent-a',
+            namespace: 'mcp-host',
+            displayName: 'agent-a',
+            active: true,
+            gfsSubject: { type: 'host', id: '1st:mcp-host/agent-a' },
+            contextRef: null,
+            mcpServers: [],
+          },
+          {
+            name: 'agent-b',
+            namespace: 'mcp-host',
+            displayName: 'agent-b',
+            active: true,
+            gfsSubject: { type: 'host', id: '1st:mcp-host/agent-b' },
+            contextRef: null,
+            mcpServers: [],
+          },
         ],
       })
+  })
+
+  it('preserves user and team names-only access when Host enrichment has a transient failure', async () => {
+    svc.getUserAgents.mockResolvedValue({
+      userId: 'u1',
+      agentNames: ['agent-a', 'agent-stale'],
+    })
+    svc.getTeamAgents.mockResolvedValue({
+      teamId: 't1',
+      agentNames: ['agent-b'],
+    })
+    const transientError = Object.assign(new Error('Kubernetes API unavailable'), {
+      statusCode: 503,
+    })
+    const gateway = accessCatalogGateway()
+    gateway.getResource.mockRejectedValue(transientError)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, gateway)
+
+    await withInternalServiceAuthAndUserSession(request(app).get('/external/users/u1/agents'))
+      .expect(200)
+      .expect({
+        userId: 'u1',
+        agentNames: ['agent-a', 'agent-stale'],
+        agents: [],
+      })
+
+    await withInternalServiceAuthAndUserSession(request(app).get('/external/teams/t1/agents'))
+      .expect(200)
+      .expect({ teamId: 't1', agentNames: ['agent-b'], agents: [] })
+
+    expect(gateway.listResource).not.toHaveBeenCalledWith('hosts', 'mcp-host')
+    expect(gateway.getResource.mock.calls.map(call => call[1])).toEqual([
+      'agent-a',
+      'agent-stale',
+      'agent-b',
+    ])
+    expect(warn).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
   })
 
   it('verifies session token server-side for rpc token issuance', async () => {
@@ -544,6 +651,7 @@ describe('routes/profile', () => {
       email: 'user@example.com',
       teamId: 'team-from-claims',
       role: 'member',
+      authGeneration: 1,
     })
 
     const app = express()
@@ -584,6 +692,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
     svc.getUserAgents.mockResolvedValue({
       userId: 'user-teamless',
@@ -629,6 +738,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
     svc.getUserAgents.mockResolvedValue({
       userId: 'user-teamless',
@@ -659,6 +769,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
     sandboxUiScopeMock.userHasUiBearingRecipeAccess.mockResolvedValue(true)
     rpcMock.issueRpcAccessToken.mockReturnValue({
@@ -710,6 +821,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
 
     const app = express()
@@ -735,6 +847,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
 
     const app = express()
@@ -760,6 +873,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
 
     const app = express()
@@ -785,6 +899,7 @@ describe('routes/profile', () => {
       email: 'teamless@example.com',
       teamId: null,
       role: 'member',
+      authGeneration: 1,
     })
     svc.getUserAgents.mockResolvedValue({
       userId: 'user-teamless',
@@ -829,8 +944,10 @@ describe('routes/profile', () => {
         email: 'user@example.com',
         name: 'User',
         picture: 'https://example.com/avatar.png',
+        authGeneration: 1,
       },
       membership: { team_id: 't1', team_name: 'team', role: 'member' },
+      authGeneration: 1,
     })
 
     const app = express()

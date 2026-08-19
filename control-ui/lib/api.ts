@@ -55,6 +55,10 @@ export type Metadata = {
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
 const ADMIN_TOKEN_STORAGE_KEY = 'controlUiAdminToken'
 const API_REQUEST_TIMEOUT_MS = 30000
+// Legacy JSON GFS uploads send file bytes base64-encoded inside a request body. The
+// v2 path uses binary indexed parts and does not use this timeout/body contract;
+// this constant remains only for the compatibility helper and old API callers.
+export const GFS_UPLOAD_TIMEOUT_MS = 300000
 const inFlightGetRequests = new Map<string, Promise<unknown>>()
 let sessionEpoch = 0
 type ApiRequestOptions = {
@@ -81,7 +85,7 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
   return JSON.parse(text)
 }
 
-function formatApiError(res: Response, text: string): Error {
+export function formatApiError(res: Response, text: string): Error {
   let detail = text
   let parsedBody: Record<string, unknown> | null = null
   try {
@@ -102,16 +106,22 @@ function formatApiError(res: Response, text: string): Error {
             ? 'Desktop App password must be between 8 and 256 characters.'
             : detail === 'password must be between 8 and 256 characters'
               ? 'Password must be between 8 and 256 characters.'
-              : // Exact match is correct HERE: control-ui calls control-api directly,
-                // so a member-registration 503 arrives as the bare { error: '<code>' }
-                // body. profile-ui reaches these same codes through external-rest-api,
-                // whose error middleware wraps any 5xx into { message: '...: <code>' },
-                // so it must use .includes() instead — the two matchers differ on purpose.
-                detail === 'member_registration_unavailable'
-                ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
-                : detail === 'member_registration_misconfigured'
-                  ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
-                  : detail
+              : detail === 'precondition_failed'
+                ? 'This item changed since it was loaded. Reload the page, review the latest state, and try again.'
+                : detail === 'agent_grant_precondition_required'
+                  ? 'Agent access could not be updated because the page did not include its current access state. Reload the page and try again.'
+                  : detail === 'deleted_agent_history_limit_exceeded'
+                    ? 'Agent access was not updated because the deleted-agent history limit was reached. No existing history was removed. Reload the page, review the current access, and try again.'
+                    : // Exact match is correct HERE: control-ui calls control-api directly,
+                      // so a member-registration 503 arrives as the bare { error: '<code>' }
+                      // body. profile-ui reaches these same codes through external-rest-api,
+                      // whose error middleware wraps any 5xx into { message: '...: <code>' },
+                      // so it must use .includes() instead — the two matchers differ on purpose.
+                      detail === 'member_registration_unavailable'
+                      ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
+                      : detail === 'member_registration_misconfigured'
+                        ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
+                        : detail
   const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
   ;(error as Error & { status?: number }).status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can
@@ -155,10 +165,15 @@ async function apiPublicPost<T>(path: string, body: unknown): Promise<T> {
 
 async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs: number = API_REQUEST_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS)
+  // A non-positive or non-finite override means "use the default", never "abort
+  // immediately" — this matches the server proxy's resolveProxyTimeoutMs semantics.
+  const effectiveTimeoutMs =
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : API_REQUEST_TIMEOUT_MS
+  const timeoutId = window.setTimeout(() => controller.abort(), effectiveTimeoutMs)
   const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
   try {
     return await fetch(input, {
@@ -243,17 +258,22 @@ export async function apiSend(
   path: string,
   body?: unknown,
   query: Record<string, string | undefined> = {},
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  options: { timeoutMs?: number } = {}
 ) {
-  const res = await fetchWithTimeout(`${API_BASE}${path}${qs(query)}`, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders(),
-      ...extraHeaders,
+  const res = await fetchWithTimeout(
+    `${API_BASE}${path}${qs(query)}`,
+    {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+        ...extraHeaders,
+      },
+      body: body ? JSON.stringify(body) : undefined,
     },
-    body: body ? JSON.stringify(body) : undefined,
-  })
+    options.timeoutMs
+  )
   if (!res.ok) {
     const text = await res.text()
     if (res.status === 401) {
@@ -522,6 +542,17 @@ export type ControlAdminListItem = {
   status: 'active' | 'disabled' | 'pending_password'
   passwordPending?: boolean
   invitationId?: string
+  gfsOperatorLink?: {
+    desktopUserId: string
+    controlAdminId: string
+    source: 'initial_setup' | 'unknown'
+    createdAt: string | null
+    status: 'active' | 'inactive_admin' | 'revoked' | 'error'
+    generation?: number | null
+    rowVersion?: number | null
+    revocationReason?: string | null
+  } | null
+  gfsOperatorLinkStatus?: 'none' | 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
   createdAt: string
 }
@@ -608,6 +639,56 @@ export async function cancelControlAdminInvitation(invitationId: string): Promis
 export async function deleteControlAdmin(adminId: string): Promise<{ deleted: true }> {
   return apiSend('DELETE', `/api/v1/admin/control-admins/${adminId}`) as Promise<{
     deleted: true
+  }>
+}
+
+export async function revokeControlAdminGfsOperatorLink(
+  adminId: string,
+  payload: { rowVersion?: number | null; reason?: string } = {}
+): Promise<{
+  revoked: boolean
+  gfsOperatorLinkStatus: 'revoked'
+  controlAdminId: string
+  desktopUserId: string | null
+  generation?: number | null
+  rowVersion?: number | null
+}> {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link`,
+    payload
+  ) as Promise<{
+    revoked: boolean
+    gfsOperatorLinkStatus: 'revoked'
+    controlAdminId: string
+    desktopUserId: string | null
+    generation?: number | null
+    rowVersion?: number | null
+  }>
+}
+
+export async function reactivateControlAdminGfsOperatorLink(
+  adminId: string,
+  payload: { rowVersion: number; reason: string }
+): Promise<{
+  reactivated: boolean
+  gfsOperatorLinkStatus: 'active' | 'revoked'
+  controlAdminId: string
+  desktopUserId: string | null
+  generation?: number | null
+  rowVersion?: number | null
+}> {
+  return apiSend(
+    'POST',
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link/reactivate`,
+    payload
+  ) as Promise<{
+    reactivated: boolean
+    gfsOperatorLinkStatus: 'active' | 'revoked'
+    controlAdminId: string
+    desktopUserId: string | null
+    generation?: number | null
+    rowVersion?: number | null
   }>
 }
 
@@ -758,6 +839,9 @@ export type ContextSharedFileSystemStatus = {
 }
 export type ContextSpec = {
   contextId: string
+  // Editable, human-visible name (free text). Optional/new: existing contexts
+  // won't have it, so consumers fall back to `metadata.name`.
+  displayName?: string
   description?: string
   mcpServers: string[]
   sharedFileSystems?: ContextSharedFileSystemRef[]
@@ -786,9 +870,26 @@ export type HostResource = {
     conditions?: HostStatusCondition[]
   }
 }
+/**
+ * Condition entry on `status.conditions[]` of the McpServer CRD, as written by
+ * the HCC reconciler (host-context-controller/src/reconciler.ts). `status` is
+ * the K8s-standard string tri-state, not a boolean. `lastTransitionTime` only
+ * advances when `status` itself changes (writeStatusCondition) — the UI relies
+ * on that to tell "this rollout" apart from a stale prior condition (issue #223,
+ * Fase 3 requisito 6).
+ */
+export type McpServerCondition = {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason: string
+  message: string
+  lastTransitionTime: string
+}
+
 export type McpServerResource = {
   metadata?: Metadata
   spec?: AnyRecord
+  status?: { conditions?: McpServerCondition[] }
 }
 export type ContextUser = {
   id: string
@@ -815,10 +916,14 @@ export type TeamContextAccess = {
 export type UserAgentAccess = {
   userId: string
   agentNames: string[]
+  deletedAgentNames: string[]
+  deletedHistoryLimit: number
 }
 export type TeamAgentAccess = {
   teamId: string
   agentNames: string[]
+  deletedAgentNames: string[]
+  deletedHistoryLimit: number
 }
 export type TeamMember = {
   id: string
@@ -859,6 +964,16 @@ export type AdminUser = {
 // `keys` are the Secret's data-key NAMES only (never values); the detail bundle
 // populates them via listHostSecrets. Optional for compat with older payloads.
 export type HostSecretResource = { name: string; keys?: string[] }
+
+/**
+ * Host/LLM Secret metadata only. `keys` are Kubernetes data-key names; values
+ * are never returned. SDK target editors use this rather than recipe-scoped
+ * sandbox secrets because promptBridge credentials resolve from host Secrets.
+ */
+export async function listLlmHostSecrets() {
+  return apiGet('/api/v1/admin/secrets') as Promise<{ items?: HostSecretResource[] }>
+}
+
 export type HostDetailBundle = {
   host: HostResource
   contexts: ContextResource[]
@@ -962,7 +1077,10 @@ export async function createContext(payload: { metadata: { name: string }; spec:
   return apiSend('POST', '/api/v1/admin/contexts', payload) as Promise<ContextResource>
 }
 
-export async function updateContext(name: string, payload: { spec: ContextSpec }) {
+export async function updateContext(
+  name: string,
+  payload: { metadata: { resourceVersion: string }; spec: ContextSpec }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/contexts/${encodeURIComponent(name)}`,
@@ -1307,6 +1425,29 @@ export async function deleteMcpSecret(name: string) {
   }>
 }
 
+/**
+ * Rotates one or more keys on an EXISTING MCP Server Secret (issue #223).
+ * `data` carries only the keys the operator wants to rotate — every other key
+ * already on the Secret survives untouched (server-side merge-patch). The
+ * response is names-only: `keys` lists the resulting key names (never
+ * values), and `affectedConnectors` names every McpServer whose
+ * `spec.envSecret.name` matches this Secret, so the UI can tell the operator
+ * exactly what is about to restart. Saving does NOT restart anything itself —
+ * the HCC's SecretInformer reacts to the Secret change and rolls the affected
+ * Deployments; the caller must poll getMcpServer() for DeploymentReady to know
+ * whether the rollout actually landed (see control-ui/components/UpdateConnectorCredentials).
+ */
+export async function updateMcpSecret(name: string, data: Record<string, string>) {
+  return apiSend('PUT', `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`, {
+    data,
+  }) as Promise<{
+    name: string
+    namespace: string
+    keys: string[]
+    affectedConnectors: string[]
+  }>
+}
+
 export type RecipeSecretOwnership =
   | { kind: 'shared' }
   | { kind: 'owner-recipe'; recipeName: string }
@@ -1581,24 +1722,192 @@ export async function createLlmModel(input: CreateLlmModelInput) {
   return apiSend('POST', '/api/v1/admin/llm-models', input) as Promise<LlmAllowedModel>
 }
 
-export async function updateLlmModel(id: string, input: UpdateLlmModelInput) {
+// A disable (PUT enabled→false) or delete of a referenced model is gated by
+// control-api (Fase 3): without `?force` it answers 409 `model_in_use` with the
+// impact. Passing `{ force: true }` appends `?force=true`, which the operator
+// confirms only after seeing that impact — never automatically.
+export async function updateLlmModel(
+  id: string,
+  input: UpdateLlmModelInput,
+  opts: { force?: boolean } = {}
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
-    input
+    input,
+    opts.force ? { force: 'true' } : {}
   ) as Promise<LlmAllowedModel>
 }
 
-export async function deleteLlmModel(id: string) {
-  return apiSend('DELETE', `/api/v1/admin/llm-models/${encodeURIComponent(id)}`)
+export async function deleteLlmModel(id: string, opts: { force?: boolean } = {}) {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
+    undefined,
+    opts.force ? { force: 'true' } : {}
+  )
+}
+
+// ── Model references, 409 impact + operator attention feed ─────────────────
+// See control-api/src/services/llmAttention.ts and llmModelImpact.ts. The 409
+// `model_in_use` impact body (Fase 3) and each attention item (Fase 5, Pieza C)
+// carry the SAME `hostsAffected`/`grantsAffected` shape, so both surfaces render
+// the references identically.
+
+/** A Host CR that references a (provider, model) pair, with the matched roles. */
+export type ModelHostReference = {
+  namespace: string
+  name: string
+  // 'primary' | 'allowedModels' | 'fallback' — kept as string[] so an unknown
+  // role from a newer backend renders rather than being dropped.
+  roles: string[]
+}
+
+/** A capability grant that references a (provider, model) pair. */
+export type ModelGrantReference = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  capabilityFamily: string
+}
+
+/** Live references to a (provider, model) pair, shared by both surfaces. */
+export type ModelReferences = {
+  hostsAffected: ModelHostReference[]
+  grantsAffected: ModelGrantReference[]
+}
+
+/**
+ * One actionable operator-attention item. `kind` is an OPEN string union — today
+ * only `'stale_model_referenced'`; the banner switches on it and ignores kinds
+ * it does not recognize. `displayName` is optional (omitted, not null).
+ */
+export type AdminAttentionItem = ModelReferences & {
+  kind: string
+  provider: string
+  model: string
+  displayName?: string
+}
+
+/** The `GET /admin/attention` response contract consumed by the banner. */
+export type AdminAttentionReport = {
+  items: AdminAttentionItem[]
+  generatedAt: string
+}
+
+/** The 409 `model_in_use` impact body (Fase 3): the model plus its references. */
+export type ModelInUseImpact = ModelReferences & {
+  provider: string
+  model: string
+}
+
+function coerceModelHostReferences(raw: unknown): ModelHostReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (typeof rec.namespace !== 'string' || typeof rec.name !== 'string') return []
+    const roles = Array.isArray(rec.roles)
+      ? rec.roles.filter((r): r is string => typeof r === 'string')
+      : []
+    return [{ namespace: rec.namespace, name: rec.name, roles }]
+  })
+}
+
+function coerceModelGrantReferences(raw: unknown): ModelGrantReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (
+      typeof rec.id !== 'string' ||
+      typeof rec.recipeNamespace !== 'string' ||
+      typeof rec.recipeName !== 'string' ||
+      typeof rec.capabilityFamily !== 'string'
+    ) {
+      return []
+    }
+    return [
+      {
+        id: rec.id,
+        recipeNamespace: rec.recipeNamespace,
+        recipeName: rec.recipeName,
+        capabilityFamily: rec.capabilityFamily,
+      },
+    ]
+  })
+}
+
+// Keep every item whose (kind, provider, model) are strings — including unknown
+// kinds, so the banner (not the fetch layer) decides what to render. Malformed
+// items are dropped rather than tumbling the whole feed.
+function coerceAttentionItem(raw: unknown): AdminAttentionItem[] {
+  if (!raw || typeof raw !== 'object') return []
+  const rec = raw as Record<string, unknown>
+  if (
+    typeof rec.kind !== 'string' ||
+    typeof rec.provider !== 'string' ||
+    typeof rec.model !== 'string'
+  ) {
+    return []
+  }
+  const item: AdminAttentionItem = {
+    kind: rec.kind,
+    provider: rec.provider,
+    model: rec.model,
+    hostsAffected: coerceModelHostReferences(rec.hostsAffected),
+    grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+  }
+  if (typeof rec.displayName === 'string') item.displayName = rec.displayName
+  return [item]
+}
+
+export async function getAdminAttention(): Promise<AdminAttentionReport> {
+  const raw = (await apiGet('/api/v1/admin/attention')) as {
+    items?: unknown
+    generatedAt?: unknown
+  }
+  return {
+    items: Array.isArray(raw.items) ? raw.items.flatMap(coerceAttentionItem) : [],
+    generatedAt: typeof raw.generatedAt === 'string' ? raw.generatedAt : '',
+  }
+}
+
+/**
+ * When a disable (PUT enabled→false) or delete is rejected with 409
+ * `model_in_use` — the model is still referenced and `?force` was not sent —
+ * returns the impact so the caller can show it and offer a forced retry. Returns
+ * null for any other error. Mirrors `getBudgetsUsingPrice`: reads the structured
+ * `.body` `formatApiError` preserves.
+ */
+export function getModelInUseImpact(err: unknown): ModelInUseImpact | null {
+  if ((err as { status?: number })?.status !== 409) return null
+  const body = apiErrorBody(err)
+  if (!body || body.error !== 'model_in_use') return null
+  const impact = body.impact
+  if (!impact || typeof impact !== 'object') return null
+  const rec = impact as Record<string, unknown>
+  const hostsAffected = coerceModelHostReferences(rec.hostsAffected)
+  const grantsAffected = coerceModelGrantReferences(rec.grantsAffected)
+  // A matched code with an empty/malformed impact would open the "still in use"
+  // confirm with no references to show — fall through to the generic error
+  // banner instead, matching getBudgetsUsingPrice/getUnpricedModelsError.
+  if (hostsAffected.length === 0 && grantsAffected.length === 0) return null
+  return {
+    provider: typeof rec.provider === 'string' ? rec.provider : '',
+    model: typeof rec.model === 'string' ? rec.model : '',
+    hostsAffected,
+    grantsAffected,
+  }
 }
 
 // ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────
 // Discovery pulls the public models.dev catalog into `llm_allowed_models` as
 // `source='discovery', enabled=false`. The operator reviews and enables from a
-// fresh catalog. These wrappers drive the /llm-models/discovery review surface;
-// enable/disable/delete of the discovered rows reuse the existing update/delete
-// routes above (no dedicated discovery mutation endpoint).
+// fresh catalog. These wrappers drive the Discovery Review section on the
+// unified /llm-models surface; enable/disable/delete of discovered rows reuse
+// the existing update/delete routes above (no dedicated discovery mutation
+// endpoint).
 
 // `live` = fetched from the upstream catalog; `vendored` = served from the
 // bundled snapshot fallback (upstream unreachable).
@@ -1800,9 +2109,14 @@ export async function getAdminUserAgents(userId: string) {
   ) as Promise<UserAgentAccess>
 }
 
-export async function updateAdminUserAgents(userId: string, agentNames: string[]) {
+export async function updateAdminUserAgents(
+  userId: string,
+  agentNames: string[],
+  expectedCurrentAgentNames: string[]
+) {
   return apiSend('PUT', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`, {
     agentNames,
+    expectedCurrentAgentNames,
   }) as Promise<UserAgentAccess>
 }
 
@@ -1842,9 +2156,14 @@ export async function getAdminTeamAgents(teamId: string) {
   ) as Promise<TeamAgentAccess>
 }
 
-export async function updateAdminTeamAgents(teamId: string, agentNames: string[]) {
+export async function updateAdminTeamAgents(
+  teamId: string,
+  agentNames: string[],
+  expectedCurrentAgentNames: string[]
+) {
   return apiSend('PUT', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/agents`, {
     agentNames,
+    expectedCurrentAgentNames,
   }) as Promise<TeamAgentAccess>
 }
 
@@ -2000,12 +2319,62 @@ export async function deleteAdminTeam(teamId: string) {
   }>
 }
 
+export type DeleteAdminUserRequest = {
+  /** Persisted with the governed retirement operation for its audit trail. */
+  reason?: string
+  /** Reuse this on a transport retry of the same user action. */
+  idempotencyKey?: string
+  /** Connects the browser request to the Control API retirement audit row. */
+  correlationId?: string
+}
+
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function generateRetirementRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  // The Control API accepts a correlation header only when it is UUID-shaped.
+  // This compatibility branch keeps embedded/legacy browser retries traceable.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, marker => {
+    const nibble = Math.floor(Math.random() * 16)
+    return (marker === 'x' ? nibble : (nibble & 0x3) | 0x8).toString(16)
+  })
+}
+
+/** Creates one stable request identity for all transport retries in a UI operation. */
+export function createDeleteAdminUserRequest(
+  reason = 'control_ui_user_retirement'
+): Required<DeleteAdminUserRequest> {
+  return {
+    reason,
+    idempotencyKey: generateRetirementRequestId(),
+    correlationId: generateRetirementRequestId(),
+  }
+}
+
 /**
- * Hard-deletes the user account (CASCADE on profile and personal access).
- * Team memberships cascade; teams are retained even when this leaves them with no members.
+ * Retires the user through the governed lifecycle contract. A caller may retain
+ * the supplied key when retrying the same action; an ordinary UI action gets a
+ * new request identity and an explicit audit reason.
  */
-export async function deleteAdminUser(userId: string) {
-  return apiSend('DELETE', `/api/v1/admin/users/${encodeURIComponent(userId)}`) as Promise<{
+export async function deleteAdminUser(userId: string, request: DeleteAdminUserRequest = {}) {
+  const idempotencyKey = request.idempotencyKey?.trim() || generateRetirementRequestId()
+  const providedCorrelationId = request.correlationId?.trim() || ''
+  const correlationId = UUID_ANY_RE.test(providedCorrelationId)
+    ? providedCorrelationId.toLowerCase()
+    : generateRetirementRequestId()
+  const reason = request.reason?.trim() || 'control_ui_user_retirement'
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/users/${encodeURIComponent(userId)}`,
+    { reason },
+    {},
+    {
+      'Idempotency-Key': idempotencyKey,
+      'x-correlation-id': correlationId,
+    }
+  ) as Promise<{
     deleted: boolean
     id: string
   }>
@@ -2859,7 +3228,7 @@ export type GrantedToMeItem = {
 // tests, so normalize defensively here — accept camelCase OR snake_case — and
 // hand components one canonical camelCase shape. This keeps the mocked→live
 // transition safe regardless of which the registry emits, and avoids silent
-// empty lists (ShareAccessPanel filters on pluginName) or "@undefined" rows.
+// empty lists (GrantAccessModal filters on pluginName) or "@undefined" rows.
 type RawOrgGrant = {
   id?: string
   pluginName?: string
@@ -3126,8 +3495,24 @@ export type PluginWorkloadSdkModelPolicy = {
   maxCostUsd?: number
 }
 
+export type PluginWorkloadSdkPromptTarget = {
+  targetRef: string
+  provider: string
+  model: string
+  // Identity of a provider-owned secret data key; never a secret value.
+  credentialSlot: string
+}
+
 export type PluginWorkloadSdkQuotaLimits = {
+  /**
+   * @deprecated No longer enforced (issue #348); platform per-minute ENV rate
+   * limits apply. Still returned on legacy grants; never sent by this UI.
+   */
   maxRequestsPerRun?: number
+  /**
+   * @deprecated No longer enforced (issue #348); platform per-minute ENV rate
+   * limits apply. Still returned on legacy grants; never sent by this UI.
+   */
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
@@ -3140,8 +3525,9 @@ export type PluginWorkloadSdkGrant = {
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
   // Explicit provider bound to a promptBridge grant (R1). `null` for older
-  // grants written before the column existed (and for clientNotifications) —
-  // the form falls back to inferProviderFromModels when reading a null provider.
+  // grants written before the column existed (and for clientNotifications).
+  // Null promptBridge grants are legacy/unreviewed; the editor must require an
+  // explicit operator resave and never infer a routable provider from models.
   provider: string | null
   allowedModels: string[]
   allowedEventTypes: string[]
@@ -3150,8 +3536,32 @@ export type PluginWorkloadSdkGrant = {
   allowedCallers: string[]
   quotaLimits: PluginWorkloadSdkQuotaLimits
   modelPolicies: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef: string | null
+  policyState: 'active' | 'legacy_unreviewed' | 'revoking' | 'disabled'
+  revocationId: string | null
+  policyRevision: number
   createdAt: string
   updatedAt: string
+}
+
+export type PluginWorkloadSdkLegacyGrantInventoryItem = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  policyState: string
+  policyRevision: number
+  providerPresent: boolean
+  promptTargetsCount: number
+  defaultTargetRefPresent: boolean
+  reasons: string[]
+}
+
+export type PluginWorkloadSdkLegacyGrantInventory = {
+  totalPromptBridgeGrants: number
+  legacyPromptBridgeGrants: number
+  activationReady: boolean
+  items: PluginWorkloadSdkLegacyGrantInventoryItem[]
 }
 
 export type PluginWorkloadSdkGrantInput = {
@@ -3165,8 +3575,13 @@ export type PluginWorkloadSdkGrantInput = {
   allowedTargetRefs?: string[]
   allowedUserRefs?: string[]
   allowedCallers?: string[]
-  quotaLimits?: PluginWorkloadSdkQuotaLimits
+  // Input type omits the deprecated per-run keys (issue #348): this UI never
+  // sends them and the server strips them on write. The response
+  // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
+  quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
+  promptTargets?: PluginWorkloadSdkPromptTarget[]
+  defaultTargetRef?: string
 }
 
 export type PluginWorkloadSdkQuotaCounter = {
@@ -3210,6 +3625,16 @@ export async function listPluginWorkloadSdkGrants(filter?: {
     recipeNamespace: filter?.recipeNamespace,
     recipeName: filter?.recipeName,
   }) as Promise<{ items?: PluginWorkloadSdkGrant[] }>
+}
+
+export async function getPluginWorkloadSdkLegacyInventory(filter?: {
+  recipeNamespace?: string
+  recipeName?: string
+}): Promise<PluginWorkloadSdkLegacyGrantInventory> {
+  return apiGet('/api/v1/admin/plugin-workload-sdk/legacy-inventory', {
+    recipeNamespace: filter?.recipeNamespace,
+    recipeName: filter?.recipeName,
+  }) as Promise<PluginWorkloadSdkLegacyGrantInventory>
 }
 
 export async function upsertPluginWorkloadSdkGrant(
@@ -3355,29 +3780,66 @@ export async function revokeRegistryApiKey(id: string): Promise<void> {
   await registryCodedRequest('DELETE', `/api/v1/admin/registry/keys/${encodeURIComponent(id)}`)
 }
 
+// ─── Org container images (real repos + tags from the registry) ────────────
+export type OrgImage = {
+  name: string
+  visibility: string
+  createdAt: string
+  tags: string[]
+}
+export async function listOrgImages(): Promise<{ org: string; images: OrgImage[] }> {
+  const raw = (await registryCodedRequest('GET', '/api/v1/admin/registry/images')) as {
+    org?: string
+    images?: OrgImage[]
+  }
+  return { org: raw?.org ?? '', images: raw?.images ?? [] }
+}
+
 // ─── Self-hosted registry connect flow (spec §6.1/§6.3) ───────────────────────
-// Drives control-api's /api/v1/admin/registry/connect endpoints (Plan A1 Task 7,
-// control-api/src/routes/admin/registryConnect.ts). GET polls the registry status
-// endpoint, so state ∈ disconnected|pending|approved|rejected|connected — the panel
-// renders one view per state. Uses registryCodedRequest so it can branch on err.code
-// (not_self_hosted, already_connected, not_pending, claim_expired, claim_rejected).
+// Drives control-api's /api/v1/admin/registry/connect endpoints
+// (control-api/src/routes/admin/registryConnect.ts). GET is READ-ONLY and polls
+// the registry status endpoint, so state ∈ disconnected | pending | connecting |
+// approved | rejected | connected — the panel renders one view per state.
 //
-// GET fields by state: connected → { deploymentId, org }; pending/approved/rejected
-// → { deploymentId, requestedOrgName }; disconnected → {}. All fields optional below.
-// There is NO rejection_reason in the contract.
+// `connecting` means the registry AUTO-APPROVED (open registration) and the
+// inline claim has not completed. It is finished by recoverRegistryConnection(),
+// never by pasting a token — under auto-approval no operator ever sees one.
+// `approved` keeps its original meaning: an operator approved and a human must
+// paste the token they were given out of band.
+//
+// GET fields by state: connected → { deploymentId, org, authEnabled };
+// connecting → { deploymentId, requestedOrgName, authEnabled, recoveryError? };
+// pending/approved/rejected → { deploymentId, requestedOrgName };
+// disconnected → {}. There is NO rejection_reason in the contract.
+//
+// Uses registryCodedRequest so callers can branch on err.code: not_self_hosted,
+// already_connected, recovery_in_progress, not_pending, not_recoverable,
+// org_name_taken, registration_capacity, rate_limited, invalid_contact_email,
+// org_blocklisted, claim_expired, claim_rejected, already_claimed,
+// deployment_suspended, client_unavailable, connection_superseded.
 
 export type RegistryConnectionState =
   | 'disconnected'
   | 'pending'
+  | 'connecting'
   | 'approved'
   | 'rejected'
   | 'connected'
+
+export type RegistryRecoveryError =
+  | 'already_claimed'
+  | 'deployment_suspended'
+  | 'client_unavailable'
+  | 'connection_superseded'
+  | 'claim_expired'
+
 export type RegistryConnectionStatus = {
   state: RegistryConnectionState
   deploymentId?: string
   requestedOrgName?: string
   org?: string
   authEnabled?: boolean
+  recoveryError?: RegistryRecoveryError
 }
 
 export async function getRegistryConnection(): Promise<RegistryConnectionStatus> {
@@ -3407,4 +3869,11 @@ export async function submitRegistryClaim(input: {
 
 export async function disconnectRegistryConnection(): Promise<void> {
   await registryCodedRequest('DELETE', '/api/v1/admin/registry/connect')
+}
+
+export async function recoverRegistryConnection(): Promise<RegistryConnectionStatus> {
+  return registryCodedRequest(
+    'POST',
+    '/api/v1/admin/registry/connect/recover'
+  ) as Promise<RegistryConnectionStatus>
 }

@@ -35,6 +35,8 @@ const config: GfsFactoryConfig = {
   jwtPublicKeyConfigMapKey: 'jwt-public-key',
   pgSecretName: 'gfs-controller-db',
   pgSecretKey: 'connection-string',
+  readerPgSecretName: 'gfs-controller-reader-db',
+  readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
 }
@@ -145,6 +147,78 @@ describe('gfsFactory writer Deployment', () => {
       'gfs-controller-db'
     )
     expect(byName('GFS_JWT_PUBLIC_KEY')?.valueFrom?.configMapKeyRef?.name).toBe('gfs-config')
+    expect(byName('GFS_SYNC_COPY_MAX_OBJECTS')).toBeUndefined()
+    expect(byName('GFS_SYNC_COPY_MAX_BYTES')).toBeUndefined()
+    expect(byName('GFS_SYNC_COPY_TIMEOUT_MS')).toBeUndefined()
+    expect(byName('GFS_MAX_WRITE_BODY_BYTES')).toBeUndefined()
+    expect(byName('GFS_UPLOAD_V2_ENABLED')).toBeUndefined()
+  })
+
+  it('passes configured copy and exact upload-v2 limits to generated workloads', () => {
+    const configured = {
+      ...config,
+      syncCopyMaxObjects: '2500',
+      syncCopyMaxBytes: '',
+      syncCopyTimeoutMs: '45000',
+      maxWriteBodyBytes: '25165824',
+      uploadV2Enabled: 'true',
+      uploadProtocolMaxFileBytes: '1073741824',
+      uploadProductMaxFileBytes: '209715200',
+      uploadMaxFileBytes: '209715200',
+      uploadPreferredChunkBytes: '8388608',
+      uploadMaxChunkBytes: '16777216',
+      uploadMinPartBytes: '1048576',
+      uploadMaxPartCount: '1024',
+      uploadSessionTtlMs: '86400000',
+      uploadCompletedReceiptTtlMs: '86400000',
+      uploadStalePartLeaseMs: '600000',
+      uploadMaxActivePerSubject: '2',
+      uploadMaxActiveGlobal: '8',
+      uploadMaxConcurrentPartsPerSession: '4',
+      uploadMaxConcurrentPartStreamsGlobal: '16',
+      uploadInstabilityFailureThreshold: '3',
+      uploadMaxConcurrentFinalizations: '1',
+      uploadMinFreeBytes: '10737418240',
+      uploadPartTimeoutMs: '300000',
+      uploadFinalizeTimeoutMs: '600000',
+    }
+    const uploadEnv = {
+      GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES: '1073741824',
+      GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES: '209715200',
+      GFS_UPLOAD_MAX_FILE_BYTES: '209715200',
+      GFS_UPLOAD_PREFERRED_CHUNK_BYTES: '8388608',
+      GFS_UPLOAD_MAX_CHUNK_BYTES: '16777216',
+      GFS_UPLOAD_MIN_PART_BYTES: '1048576',
+      GFS_UPLOAD_MAX_PART_COUNT: '1024',
+      GFS_UPLOAD_SESSION_TTL_MS: '86400000',
+      GFS_UPLOAD_COMPLETED_RECEIPT_TTL_MS: '86400000',
+      GFS_UPLOAD_STALE_PART_LEASE_MS: '600000',
+      GFS_UPLOAD_MAX_ACTIVE_PER_SUBJECT: '2',
+      GFS_UPLOAD_MAX_ACTIVE_GLOBAL: '8',
+      GFS_UPLOAD_MAX_CONCURRENT_PARTS_PER_SESSION: '4',
+      GFS_UPLOAD_MAX_CONCURRENT_PART_STREAMS_GLOBAL: '16',
+      GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD: '3',
+      GFS_UPLOAD_MAX_CONCURRENT_FINALIZATIONS: '1',
+      GFS_UPLOAD_MIN_FREE_BYTES: '10737418240',
+      GFS_UPLOAD_PART_TIMEOUT_MS: '300000',
+      GFS_UPLOAD_FINALIZE_TIMEOUT_MS: '600000',
+    } as const
+
+    for (const role of ['writer', 'reader'] as const) {
+      const env =
+        buildDeployment(gfs(), configured, role).spec?.template.spec?.containers[0].env ?? []
+      const byName = (name: string) => env.find(item => item.name === name)
+      expect(byName('GFS_SYNC_COPY_MAX_OBJECTS')?.value).toBe('2500')
+      expect(byName('GFS_SYNC_COPY_MAX_BYTES')?.value).toBe('')
+      expect(byName('GFS_SYNC_COPY_TIMEOUT_MS')?.value).toBe('45000')
+      // The legacy buffered cap remains independent from upload-v2 part limits.
+      expect(byName('GFS_MAX_WRITE_BODY_BYTES')?.value).toBe('25165824')
+      for (const [name, value] of Object.entries(uploadEnv)) {
+        expect(byName(name)?.value).toBe(value)
+      }
+      if (role === 'writer') expect(byName('GFS_UPLOAD_V2_ENABLED')?.value).toBe('true')
+      else expect(byName('GFS_UPLOAD_V2_ENABLED')).toBeUndefined()
+    }
   })
 
   it('runs non-root, drops all caps, read-only rootfs (reconciler owns securityContext)', () => {
@@ -199,6 +273,13 @@ describe('gfsFactory reader Deployment', () => {
     expect(mount?.readOnly).toBe(true)
     const env = dep.spec?.template.spec?.containers[0].env ?? []
     expect(env.find(e => e.name === 'GFS_STORAGE_ROLE')?.value).toBe('reader')
+    expect(env.find(e => e.valueFrom?.secretKeyRef)?.valueFrom?.secretKeyRef?.name).toBe(
+      'gfs-controller-reader-db'
+    )
+    expect(dep.spec?.strategy).toEqual({
+      type: 'RollingUpdate',
+      rollingUpdate: { maxUnavailable: 0, maxSurge: 1 },
+    })
   })
 
   it('requires same-node scheduling with the writer under standard-rwo', () => {

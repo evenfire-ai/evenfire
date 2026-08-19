@@ -1,3 +1,4 @@
+import { isRunnableLlmModelId } from '@clerum/llm-providers'
 import type {
   PluginWorkloadSdkCapabilityStatus,
   RecipePhase,
@@ -20,11 +21,31 @@ export const DEFAULT_IDEMPOTENCY_KEY_PATTERN = '^[a-zA-Z0-9_-]{1,128}$'
 
 /** Condition type owned by the Plugin Workload SDK reconcile pass. */
 export const PLUGIN_WORKLOAD_SDK_CONDITION_TYPE = 'PluginWorkloadSdkCapability'
+export const PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE =
+  'PluginWorkloadSdkProviderUnavailable'
+export const PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE = 'PluginWorkloadSdkPolicyPending'
+
+/**
+ * WorkflowRecipe remains the CRD that carries Plugin Workload SDK, but an SDK
+ * workload is not a workflow. Keep the small set of workflow-only fields
+ * closed when the recipe has no executable steps. CEL is the first line of
+ * defence; this pure check preserves the same boundary for direct and
+ * mixed-version inputs that bypass admission.
+ */
+export const SDK_ONLY_WORKFLOW_FIELDS = ['triggers', 'scheduling', 'coordinatorImage'] as const
 
 function rejectWildcards(field: string, values: string[] | undefined, errors: string[]): void {
   for (const value of values ?? []) {
     if (value.includes('*')) {
       errors.push(`${field} entry "${value}" must not contain wildcards`)
+    }
+  }
+}
+
+function rejectInvalidModels(field: string, values: string[] | undefined, errors: string[]): void {
+  for (const value of values ?? []) {
+    if (!value.includes('*') && !isRunnableLlmModelId(value)) {
+      errors.push(`${field} entry "${value}" has an invalid runnable model id`)
     }
   }
 }
@@ -47,6 +68,28 @@ export function validatePluginWorkloadSdkSpec(spec: WorkflowRecipeSpec): string[
   if (!sdk) return []
 
   const errors: string[] = []
+
+  const hasWorkflowSteps = (spec.steps?.length ?? 0) > 0
+  if (!hasWorkflowSteps) {
+    if (!Array.isArray(spec.workloads) || spec.workloads.length === 0) {
+      errors.push('pluginWorkloadSdk SDK-only recipes require at least one spec.workloads entry')
+    }
+    const configuredWorkflowFields = SDK_ONLY_WORKFLOW_FIELDS.filter(field => {
+      switch (field) {
+        case 'triggers':
+          return spec.triggers !== undefined
+        case 'scheduling':
+          return spec.scheduling !== undefined
+        case 'coordinatorImage':
+          return spec.coordinatorImage !== undefined
+      }
+    })
+    if (configuredWorkflowFields.length > 0) {
+      errors.push(
+        'pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage'
+      )
+    }
+  }
 
   if (!sdk.promptBridge && !sdk.clientNotifications) {
     errors.push(
@@ -75,14 +118,29 @@ export function validatePluginWorkloadSdkSpec(spec: WorkflowRecipeSpec): string[
     sdk.promptBridge?.allowedModels,
     errors
   )
+  rejectInvalidModels(
+    'pluginWorkloadSdk.promptBridge.allowedModels',
+    sdk.promptBridge?.allowedModels,
+    errors
+  )
+
+  if (spec.agent !== undefined) {
+    if (!spec.agent.provider) {
+      errors.push('spec.agent.provider is required when spec.agent is declared')
+    }
+    if (!isRunnableLlmModelId(spec.agent.model)) {
+      errors.push('spec.agent.model must be a valid runnable model id when spec.agent is declared')
+    }
+  }
 
   // promptBridge issues real LLM calls, so the recipe must declare a resolvable
-  // agent (provider + model) — either spec.agent or a step agent. The WRC uses
-  // it to broker the provider API key into the eager mcp-host. clientNotifications
-  // needs no provider, so this rule is scoped to promptBridge only.
+  // agent (provider + model). A stepless SDK recipe uses spec.agent as the
+  // eager mcp-host bootstrap binding; a workflow may instead resolve a step
+  // agent. clientNotifications needs no provider, so this rule is scoped to
+  // promptBridge only.
   if (sdk.promptBridge && !hasResolvableAgent(spec)) {
     errors.push(
-      'pluginWorkloadSdk.promptBridge requires a resolvable agent (spec.agent or a step agent with provider + model)'
+      'pluginWorkloadSdk.promptBridge requires spec.agent or a step agent with provider + model'
     )
   }
 
@@ -124,6 +182,43 @@ export interface PluginWorkloadSdkStatusProjection {
   capability: PluginWorkloadSdkCapabilityStatus | null | undefined
 }
 
+export interface PluginWorkloadSdkBootstrapProofInput {
+  ready: true
+  contractVersion: 2
+  podUid: string
+  provider?: string
+  model?: string
+  policyReady?: boolean
+  policyState?: string
+  policyReason?: string
+  policyRevision?: number
+  policyHash?: string
+  defaultTargetRef?: string
+  defaultProvider?: string
+  defaultModel?: string
+  clientNotificationsPolicyReady?: boolean
+  clientNotificationsPolicyState?: string
+  clientNotificationsPolicyReason?: string
+  verifiedAt: string
+}
+
+/**
+ * JSON merge-patch preserves omitted object members. Keep the status
+ * projection's derived metadata explicit so a validated record cannot leave
+ * stale bootstrap/policy identity behind after a degraded transition.
+ */
+const CLEARED_PLUGIN_WORKLOAD_SDK_METADATA = {
+  validatedAt: null,
+  bootstrapContractVersion: null,
+  bootstrapPodUid: null,
+  bootstrapProvider: null,
+  bootstrapModel: null,
+  policyRevision: null,
+  policyHash: null,
+  defaultTargetRef: null,
+  verifiedAt: null,
+} as const
+
 /**
  * Project `spec.pluginWorkloadSdk` + feature flag + reconcile outcome into
  * the status condition and capability record.
@@ -134,16 +229,40 @@ export interface PluginWorkloadSdkStatusProjection {
  * - reconcile failed → carry forward existing owned conditions untouched and
  *   leave the persisted capability as-is (a transient infra failure must not
  *   flip an already-validated capability)
- * - reconcile succeeded → condition True/Validated, state 'validated'
+ * - eager host identity is ready but the operator prompt policy is absent or
+ *   unusable → condition False/PolicyNotConfigured, state 'awaiting_policy'
+ * - reconcile succeeded with an active prompt policy → condition True/Validated,
+ *   state 'validated'
  */
 export function buildPluginWorkloadSdkStatus(args: {
   spec: WorkflowRecipeSpec
   existingConditions: StatusCondition[] | undefined
   phase: RecipePhase
   featureFlagEnabled: boolean
+  providerUnavailable?: boolean
+  policyPending?: boolean
+  teardownConfirmed?: boolean
+  bootstrapProof?: PluginWorkloadSdkBootstrapProofInput
   now: string
+  /**
+   * The currently-persisted capability (recipe.status.pluginWorkloadSdk), used
+   * to CARRY FORWARD the stable `validatedAt` marker across steady-state
+   * throttle patches (issue #375 R1) instead of resetting it to `now`.
+   */
+  existingCapability?: PluginWorkloadSdkCapabilityStatus | null
 }): PluginWorkloadSdkStatusProjection {
-  const { spec, existingConditions, phase, featureFlagEnabled, now } = args
+  const {
+    spec,
+    existingConditions,
+    phase,
+    featureFlagEnabled,
+    providerUnavailable,
+    policyPending,
+    teardownConfirmed,
+    bootstrapProof,
+    now,
+    existingCapability,
+  } = args
   const sdk = spec.pluginWorkloadSdk
 
   if (!sdk) {
@@ -152,6 +271,17 @@ export function buildPluginWorkloadSdkStatus(args: {
 
   const promptBridge = sdk.promptBridge !== undefined
   const clientNotifications = sdk.clientNotifications !== undefined
+
+  // A failed reconcile must never be projected as a successful disable. In
+  // particular, the SDK kill-switch performs cleanup before this projection;
+  // if cleanup failed, reporting `disabled` could leave an old host reachable
+  // while claiming revocation completed.
+  if (phase === 'failed' && !(teardownConfirmed === true && !featureFlagEnabled)) {
+    const carried = (existingConditions ?? []).filter(
+      c => c.type === PLUGIN_WORKLOAD_SDK_CONDITION_TYPE
+    )
+    return { conditions: carried, capability: undefined }
+  }
 
   if (!featureFlagEnabled) {
     const message = 'Disabled (feature flag off)'
@@ -170,15 +300,112 @@ export function buildPluginWorkloadSdkStatus(args: {
         promptBridge,
         clientNotifications,
         message,
+        ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
       },
     }
   }
 
-  if (phase === 'failed') {
-    const carried = (existingConditions ?? []).filter(
-      c => c.type === PLUGIN_WORKLOAD_SDK_CONDITION_TYPE
-    )
-    return { conditions: carried, capability: undefined }
+  if (providerUnavailable) {
+    const message = 'Capability validated, but the configured provider is unavailable'
+    return {
+      conditions: [
+        {
+          type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+          status: 'False',
+          reason: 'ProviderUnavailable',
+          message,
+          lastTransitionTime: now,
+        },
+        {
+          type: PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+          status: 'True',
+          reason: 'ProviderUnavailable',
+          message,
+          lastTransitionTime: now,
+        },
+      ],
+      capability: {
+        state: 'degraded',
+        promptBridge,
+        clientNotifications,
+        message,
+        ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
+      },
+    }
+  }
+
+  const clientNotificationsPolicyPending =
+    clientNotifications &&
+    bootstrapProof?.ready === true &&
+    bootstrapProof.clientNotificationsPolicyReady !== true
+  if (policyPending || clientNotificationsPolicyPending) {
+    const family = promptBridge && policyPending ? 'promptBridge' : 'clientNotifications'
+    const policyReason =
+      family === 'clientNotifications'
+        ? (bootstrapProof?.clientNotificationsPolicyReason ??
+          bootstrapProof?.clientNotificationsPolicyState ??
+          'unknown')
+        : (bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown')
+    const message =
+      policyReason === 'grant_missing'
+        ? `Plugin Workload SDK ${family} is awaiting an operator grant`
+        : `Plugin Workload SDK ${family} policy is not ready (${policyReason})`
+    return {
+      conditions: [
+        {
+          type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+          status: 'False',
+          reason: 'PolicyNotConfigured',
+          message,
+          lastTransitionTime: now,
+        },
+        {
+          type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+          status: 'True',
+          reason: policyReason,
+          message,
+          lastTransitionTime: now,
+        },
+      ],
+      capability: {
+        state: 'awaiting_policy',
+        promptBridge,
+        clientNotifications,
+        message,
+        ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
+        ...(bootstrapProof
+          ? {
+              bootstrapContractVersion: bootstrapProof.contractVersion,
+              bootstrapPodUid: bootstrapProof.podUid,
+              ...(bootstrapProof.provider ? { bootstrapProvider: bootstrapProof.provider } : {}),
+              ...(bootstrapProof.model ? { bootstrapModel: bootstrapProof.model } : {}),
+              verifiedAt: bootstrapProof.verifiedAt,
+            }
+          : {}),
+      },
+    }
+  }
+
+  if ((promptBridge || clientNotifications) && !bootstrapProof?.ready) {
+    const message = 'Plugin Workload SDK host readiness proof is not ready'
+    return {
+      conditions: [
+        {
+          type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+          status: 'False',
+          reason: 'BootstrapNotReady',
+          message,
+          lastTransitionTime: now,
+        },
+      ],
+      capability: {
+        state: 'degraded',
+        promptBridge,
+        clientNotifications,
+        message,
+        ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
+      },
+    }
   }
 
   const families = [
@@ -187,6 +414,17 @@ export function buildPluginWorkloadSdkStatus(args: {
   ]
     .filter((f): f is string => f !== undefined)
     .join(', ')
+
+  // issue #375 (R1): validatedAt is the stable "first reached validated" marker.
+  // On a steady-state throttle refresh (already validated, only verifiedAt
+  // advances) it must be CARRIED FORWARD, not reset to `now`. Stamp a fresh
+  // `now` ONLY on the real transition into validated — no prior capability, or a
+  // prior state other than 'validated', or a prior validated record that somehow
+  // lacked the marker.
+  const validatedAt =
+    existingCapability?.state === 'validated' && existingCapability.validatedAt
+      ? existingCapability.validatedAt
+      : now
 
   return {
     conditions: [
@@ -202,7 +440,27 @@ export function buildPluginWorkloadSdkStatus(args: {
       state: 'validated',
       promptBridge,
       clientNotifications,
-      validatedAt: now,
+      message: `Capability validated (${families})`,
+      ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
+      validatedAt,
+      ...(bootstrapProof
+        ? {
+            bootstrapContractVersion: bootstrapProof.contractVersion,
+            bootstrapPodUid: bootstrapProof.podUid,
+            ...(bootstrapProof.provider ? { bootstrapProvider: bootstrapProof.provider } : {}),
+            ...(bootstrapProof.model ? { bootstrapModel: bootstrapProof.model } : {}),
+            verifiedAt: bootstrapProof.verifiedAt,
+            ...(bootstrapProof.policyRevision !== undefined
+              ? { policyRevision: bootstrapProof.policyRevision }
+              : {}),
+            ...(bootstrapProof.policyHash !== undefined
+              ? { policyHash: bootstrapProof.policyHash }
+              : {}),
+            ...(bootstrapProof.defaultTargetRef !== undefined
+              ? { defaultTargetRef: bootstrapProof.defaultTargetRef }
+              : {}),
+          }
+        : {}),
     },
   }
 }

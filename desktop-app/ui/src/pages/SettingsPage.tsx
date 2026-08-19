@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import { Button, Field, IconButton, SelectInput, TabButton, TextInput } from '@components/Common'
+import { PluginPermissions } from '@components/PluginPermissions'
 import {
   IconBell,
   IconConnectors,
@@ -33,7 +34,7 @@ import type {
 import type { SettingsPageProps } from './SettingsPage.types'
 
 type NotificationPreferenceSection = 'inApp' | 'desktop'
-type SettingsTab = 'account' | 'appearance' | 'notifications' | 'social' | 'information'
+type SettingsTab = 'account' | 'appearance' | 'notifications' | 'plugins' | 'social' | 'information'
 
 type EndpointDiagnostics = {
   appInfo: DesktopAppInfo | null
@@ -527,6 +528,16 @@ export function SettingsPage({
         >
           Notifications
         </TabButton>
+        <TabButton
+          active={activeSettingsTab === 'plugins'}
+          className="page-tab"
+          id="settings-tab-plugins"
+          role="tab"
+          aria-controls="settings-panel-plugins"
+          onClick={() => setActiveSettingsTab('plugins')}
+        >
+          Plugin permissions
+        </TabButton>
         {hasSocialChannelsAccess ? (
           <TabButton
             active={activeSettingsTab === 'social'}
@@ -570,23 +581,6 @@ export function SettingsPage({
                     <p className="muted">Manage your Evenfire account details in Profile UI.</p>
                   </div>
                 </div>
-                <div className="settings-actions">
-                  <Button
-                    type="button"
-                    color="neutral"
-                    onClick={() =>
-                      void handleOpenProfileSettings({ section: 'profile', action: 'password' })
-                    }
-                  >
-                    Update password
-                  </Button>
-                  <Button
-                    type="button"
-                    onClick={() => void handleOpenProfileSettings({ section: 'profile' })}
-                  >
-                    Edit
-                  </Button>
-                </div>
               </div>
               <div className="settings-form settings-account-summary">
                 <div className="settings-readonly-row">
@@ -597,6 +591,23 @@ export function SettingsPage({
                   <span className="settings-readonly-label">Email</span>
                   <span>{me?.email || email || 'No email'}</span>
                 </div>
+              </div>
+              <div className="settings-actions settings-account-actions">
+                <Button
+                  type="button"
+                  color="neutral"
+                  onClick={() =>
+                    void handleOpenProfileSettings({ section: 'profile', action: 'password' })
+                  }
+                >
+                  Update password
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => void handleOpenProfileSettings({ section: 'profile' })}
+                >
+                  Edit
+                </Button>
               </div>
             </section>
           </section>
@@ -630,6 +641,17 @@ export function SettingsPage({
                 />
               </div>
             </section>
+          </section>
+        ) : null}
+
+        {activeSettingsTab === 'plugins' ? (
+          <section
+            className="settings-tab-panel"
+            id="settings-panel-plugins"
+            role="tabpanel"
+            aria-labelledby="settings-tab-plugins"
+          >
+            <PluginPermissions />
           </section>
         ) : null}
 

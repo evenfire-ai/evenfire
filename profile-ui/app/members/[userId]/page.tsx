@@ -7,6 +7,7 @@ import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { FormField } from '@components/FormField'
+import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
@@ -195,7 +196,12 @@ export default function MemberDetailsPage() {
             </div>
           </header>
 
-          {state === 'loading' ? <div className="message message--plain">Loading...</div> : null}
+          {state === 'loading' ? (
+            <ProfileBodySkeleton
+              label="Loading member details"
+              sections={[{ title: 'Teams and permissions', rows: 4 }]}
+            />
+          ) : null}
           {error ? <div className="message message--error">{error}</div> : null}
           {!memberIsSelf && memberHasUncontrolledTeams ? (
             <div className="message message--warning message--plain">

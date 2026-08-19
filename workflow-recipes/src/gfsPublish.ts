@@ -42,9 +42,9 @@ export interface PublishPlan {
   requiredCheck: { resourceId: string; op: 'write' }
 }
 
-// Control chars (incl. NUL) are never valid — mirrors gfs-controller move.ts /
-// control-api resources.ts so a published name cannot smuggle bytes those paths
-// reject (review finding: name-validator drift).
+// Control chars (incl. NUL) are never valid — keep this aligned with the
+// canonical GFS resource-name validators so publish cannot accept bytes that
+// ordinary resource creation or rename rejects.
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/
 

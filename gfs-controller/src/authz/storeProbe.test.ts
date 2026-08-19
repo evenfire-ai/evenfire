@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  createPermissionStoreProbe,
-  type PingPool,
-  type ProbeClient,
-} from "./storeProbe.js";
+import { type PingPool, type ProbeClient, createPermissionStoreProbe } from "./storeProbe.js";
 
 /**
  * Issue #775: the readiness store check must detect a rotated database
@@ -45,7 +41,7 @@ function fakePool(): PingPool & {
     connect: async () => {
       if (pool.hangConnect) return new Promise<never>(() => undefined);
       if (pool.lateConnectMs > 0) {
-        await new Promise(resolve => setTimeout(resolve, pool.lateConnectMs));
+        await new Promise((resolve) => setTimeout(resolve, pool.lateConnectMs));
       }
       return makeClient();
     },
@@ -61,6 +57,29 @@ interface FakeClientBehavior {
   queryHangs?: boolean;
   canRead?: boolean;
   canAudit?: boolean;
+  immutableSchemaReady?: boolean;
+  canInsertManifests?: boolean;
+  canUpdateManifests?: boolean;
+  canDeleteManifests?: boolean;
+  canInsertResources?: boolean;
+  canUpdateResources?: boolean;
+  auditDecisionEvidenceSchemaReady?: boolean;
+  auditDecisionEvidenceConstraintsReady?: boolean;
+  auditActorCorrelationColumnsReady?: boolean;
+  auditActorCorrelationConstraintReady?: boolean;
+  authorityUsersColumnsReady?: boolean;
+  authorityAdminColumnsReady?: boolean;
+  authorityAdminSessionEpochReady?: boolean;
+  authorityLinksColumnsReady?: boolean;
+  authorityUsersPrivilegesReady?: boolean;
+  authorityAdminPrivilegesReady?: boolean;
+  authorityLinksPrivilegesReady?: boolean;
+  canMutateResources?: boolean;
+  canMutateGrants?: boolean;
+  canMutateShares?: boolean;
+  canMutateManifests?: boolean;
+  canMutateAudit?: boolean;
+  canUpdateAuditSequence?: boolean;
   queryError?: Error;
 }
 
@@ -89,7 +108,41 @@ function fakeClientFactory(behavior: FakeClientBehavior): {
         if (behavior.queryError) throw behavior.queryError;
         return {
           rows: [
-            { can_read: behavior.canRead !== false, can_audit: behavior.canAudit !== false },
+            {
+              can_read: behavior.canRead !== false,
+              can_audit: behavior.canAudit !== false,
+              can_read_blob_key: behavior.immutableSchemaReady !== false,
+              can_read_digest: behavior.immutableSchemaReady !== false,
+              can_read_manifests: behavior.immutableSchemaReady !== false,
+              resource_schema_ready: behavior.immutableSchemaReady !== false,
+              manifest_schema_ready: behavior.immutableSchemaReady !== false,
+              can_insert_manifests: behavior.canInsertManifests !== false,
+              can_update_manifests: behavior.canUpdateManifests !== false,
+              can_delete_manifests: behavior.canDeleteManifests !== false,
+              can_insert_resources: behavior.canInsertResources !== false,
+              can_update_resources: behavior.canUpdateResources !== false,
+              audit_decision_evidence_schema_ready:
+                behavior.auditDecisionEvidenceSchemaReady !== false,
+              audit_decision_evidence_constraints_ready:
+                behavior.auditDecisionEvidenceConstraintsReady !== false,
+              audit_actor_correlation_columns_ready:
+                behavior.auditActorCorrelationColumnsReady !== false,
+              audit_actor_correlation_constraint_ready:
+                behavior.auditActorCorrelationConstraintReady !== false,
+              authority_users_columns_ready: behavior.authorityUsersColumnsReady !== false,
+              authority_admin_columns_ready: behavior.authorityAdminColumnsReady !== false,
+              authority_admin_session_epoch_ready: behavior.authorityAdminSessionEpochReady !== false,
+              authority_links_columns_ready: behavior.authorityLinksColumnsReady !== false,
+              authority_users_privileges_ready: behavior.authorityUsersPrivilegesReady !== false,
+              authority_admin_privileges_ready: behavior.authorityAdminPrivilegesReady !== false,
+              authority_links_privileges_ready: behavior.authorityLinksPrivilegesReady !== false,
+              can_mutate_resources: behavior.canMutateResources === true,
+              can_mutate_grants: behavior.canMutateGrants === true,
+              can_mutate_shares: behavior.canMutateShares === true,
+              can_mutate_manifests: behavior.canMutateManifests === true,
+              can_mutate_audit: behavior.canMutateAudit === true,
+              can_update_audit_sequence: behavior.canUpdateAuditSequence === true,
+            },
           ],
         };
       },
@@ -116,6 +169,7 @@ describe("createPermissionStoreProbe", () => {
       pool: fakePool(),
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => 0,
     });
@@ -128,6 +182,7 @@ describe("createPermissionStoreProbe", () => {
       pool: fakePool(),
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => 0,
     });
@@ -140,11 +195,172 @@ describe("createPermissionStoreProbe", () => {
       pool: fakePool(),
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => 0,
     });
     await expect(probe()).rejects.toThrow(/gfs_audit.*INSERT|INSERT on gfs_audit/s);
   });
+
+  it("rejects a pre-0068 reader schema before serving requests", async () => {
+    const { factory } = fakeClientFactory({ immutableSchemaReady: false });
+    const probe = createPermissionStoreProbe({
+      pool: fakePool(),
+      connectionString: DSN,
+      intervalMs: INTERVAL,
+      storageRole: "reader",
+      clientFactory: factory,
+      now: () => 0,
+    });
+    await expect(probe()).rejects.toThrow(/migration 0068/);
+  });
+
+  it("keeps reader readiness independent of the writer-only manifest schema", async () => {
+    const probeClient = fakeClientFactory({});
+    const probe = createPermissionStoreProbe({
+      pool: fakePool(),
+      connectionString: DSN,
+      intervalMs: INTERVAL,
+      storageRole: "reader",
+      clientFactory: probeClient.factory,
+      now: () => 0,
+    });
+    await expect(probe()).resolves.toBeUndefined();
+    expect(probeClient.lastSql()).not.toContain("manifest_schema_ready");
+    expect(probeClient.lastSql()).not.toContain("candidate_kind, state");
+    expect(probeClient.lastSql()).toContain("FROM pg_attribute");
+    expect(probeClient.lastSql()).toContain("'cached_authorization_source'");
+    expect(probeClient.lastSql()).toContain("gfs_audit_record_type_fields_valid");
+  });
+
+  it("rejects readiness when migration 0096 default or backfill is incomplete", async () => {
+    const { factory } = fakeClientFactory({ authorityAdminSessionEpochReady: false });
+    const probe = createPermissionStoreProbe({
+      pool: fakePool(),
+      connectionString: DSN,
+      intervalMs: INTERVAL,
+      storageRole: "reader",
+      clientFactory: factory,
+      now: () => 0,
+    });
+    await expect(probe()).rejects.toThrow(/0095\/0096/);
+  });
+
+  it.each([
+    ["resource mutation", { canMutateResources: true }],
+    ["grant mutation", { canMutateGrants: true }],
+    ["share mutation", { canMutateShares: true }],
+    ["manifest mutation", { canMutateManifests: true }],
+    ["non-append audit mutation", { canMutateAudit: true }],
+    ["audit sequence update", { canUpdateAuditSequence: true }],
+  ] satisfies Array<[string, FakeClientBehavior]>)(
+    "rejects a reader granted forbidden %s privileges",
+    async (_privilege, behavior) => {
+      const { factory } = fakeClientFactory(behavior);
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole: "reader",
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/reader has forbidden GFS mutation privileges.*0069/s);
+    }
+  );
+
+  it("does not apply reader-only negative privilege checks to the writer", async () => {
+    const { factory } = fakeClientFactory({
+      canMutateResources: true,
+      canMutateManifests: true,
+    });
+    const probe = createPermissionStoreProbe({
+      pool: fakePool(),
+      connectionString: DSN,
+      intervalMs: INTERVAL,
+      storageRole: "writer",
+      clientFactory: factory,
+      now: () => 0,
+    });
+    await expect(probe()).resolves.toBeUndefined();
+  });
+
+  it.each(["actor_on_behalf_of", "desktop_user_id", "authority_source"] as const)(
+    "rejects readiness before 0092 when the required %s audit column is absent or drifted",
+    async (_column) => {
+      const { factory } = fakeClientFactory({ auditActorCorrelationColumnsReady: false });
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole: "reader",
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/migration 0092/);
+    }
+  );
+
+  it.each([
+    ["users columns", { authorityUsersColumnsReady: false }],
+    ["admin columns", { authorityAdminColumnsReady: false }],
+    ["link columns", { authorityLinksColumnsReady: false }],
+    ["users privileges", { authorityUsersPrivilegesReady: false }],
+    ["admin privileges", { authorityAdminPrivilegesReady: false }],
+    ["link privileges", { authorityLinksPrivilegesReady: false }],
+  ] satisfies Array<[string, FakeClientBehavior]>)(
+    "rejects readiness when the 0095 authority projection is missing (%s)",
+    async (_projection, behavior) => {
+      const { factory } = fakeClientFactory(behavior);
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole: "reader",
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/migration 0095/);
+    }
+  );
+
+  it.each(["reader", "writer"] as const)(
+    "rejects a %s when migration 0092 audit actor-correlation constraints are missing or unvalidated",
+    async (storageRole) => {
+      const { factory } = fakeClientFactory({ auditActorCorrelationConstraintReady: false });
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole,
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/migration 0092/);
+    }
+  );
+
+  it.each([
+    ["manifest INSERT", { canInsertManifests: false }],
+    ["manifest UPDATE", { canUpdateManifests: false }],
+    ["manifest DELETE", { canDeleteManifests: false }],
+    ["resource INSERT", { canInsertResources: false }],
+    ["resource UPDATE", { canUpdateResources: false }],
+  ] satisfies Array<[string, FakeClientBehavior]>)(
+    "rejects a writer missing only %s",
+    async (_privilege, behavior) => {
+      const { factory } = fakeClientFactory(behavior);
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole: "writer",
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/writer lacks.*0068/s);
+    }
+  );
 
   it("pins the coherence canary SQL to both least-privilege grants", async () => {
     // Regression guard: gutting COHERENCE_SQL (e.g. SELECT true AS can_read...)
@@ -154,6 +370,7 @@ describe("createPermissionStoreProbe", () => {
       pool: fakePool(),
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "writer",
       clientFactory: probeClient.factory,
       now: () => 0,
     });
@@ -162,6 +379,67 @@ describe("createPermissionStoreProbe", () => {
     expect(sql).toContain("has_table_privilege");
     expect(sql).toMatch(/gfs_resources'\s*,\s*'SELECT'/);
     expect(sql).toMatch(/gfs_audit'\s*,\s*'INSERT'/);
+    expect(sql).toContain("gfs_blob_manifests");
+    expect(sql).toContain("blob_key, content_sha256 FROM gfs_resources WHERE false");
+    expect(sql).toMatch(/gfs_blob_manifests'\s*,\s*'INSERT'/);
+    expect(sql).toMatch(/gfs_blob_manifests'\s*,\s*'UPDATE'/);
+    expect(sql).toMatch(/gfs_blob_manifests'\s*,\s*'DELETE'/);
+    expect(sql).toMatch(/gfs_resources'\s*,\s*'INSERT'/);
+    expect(sql).toMatch(/gfs_resources'\s*,\s*'UPDATE'/);
+    expect(sql).toContain("FROM pg_attribute");
+    expect(sql).toContain("'record_type'");
+    expect(sql).toContain("'actor_on_behalf_of'");
+    expect(sql).toContain("'desktop_user_id'");
+    expect(sql).toContain("'authority_source'");
+    expect(sql).toContain("'matched_subject'");
+    expect(sql).toContain("'authorization_source'");
+    expect(sql).toContain("'cached_authorization_source'");
+    expect(sql).toContain("'mutation_outcome'");
+    expect(sql).toContain("gfs_audit_record_type_valid");
+    expect(sql).toContain("gfs_audit_authorization_source_valid");
+    expect(sql).toContain("gfs_audit_cached_authorization_source_valid");
+    expect(sql).toContain("gfs_audit_mutation_outcome_valid");
+    expect(sql).toContain("gfs_audit_record_type_fields_valid");
+    expect(sql).toContain("gfs_audit_actor_correlation_valid");
+    expect(sql).toContain("convalidated");
+    expect(sql).toContain("pg_get_constraintdef");
+    expect(sql).toContain("actor_on_behalf_ofISNULL");
+    expect(sql).toContain("actor_on_behalf_ofISNOTNULL");
+    expect(sql).toContain("authority_source=''user-session''");
+    expect(sql).toContain("authority_source=''linked-admin''");
+    expect(sql).toContain("desktop_user_idISNULL");
+    expect(sql).toContain("NOT attnotnull");
+    expect(sql).toContain("authority_users_columns_ready");
+    expect(sql).toContain("authority_admin_columns_ready");
+    expect(sql).toContain("authority_admin_session_epoch_ready");
+    expect(sql).toContain("authority_links_columns_ready");
+    expect(sql).toContain("authority_users_privileges_ready");
+    expect(sql).toContain("authority_admin_privileges_ready");
+    expect(sql).toContain("authority_links_privileges_ready");
+    expect(sql).toContain("lifecycle_version");
+    expect(sql).toContain("gfs_desktop_operator_links");
+    expect(sql).not.toContain("can_mutate_resources");
+    expect(sql).not.toContain("can_update_audit_sequence");
+  });
+
+  it("pins the reader coherence canary to every forbidden mutation class", async () => {
+    const probeClient = fakeClientFactory({});
+    const probe = createPermissionStoreProbe({
+      pool: fakePool(),
+      connectionString: DSN,
+      intervalMs: INTERVAL,
+      storageRole: "reader",
+      clientFactory: probeClient.factory,
+      now: () => 0,
+    });
+    await probe();
+    const sql = probeClient.lastSql() ?? "";
+    expect(sql).toMatch(/gfs_resources'\s*,\s*'INSERT, UPDATE, DELETE, TRUNCATE'/);
+    expect(sql).toMatch(/gfs_grants'\s*,\s*'INSERT, UPDATE, DELETE, TRUNCATE'/);
+    expect(sql).toMatch(/gfs_shares'\s*,\s*'INSERT, UPDATE, DELETE, TRUNCATE'/);
+    expect(sql).toMatch(/gfs_blob_manifests'\s*,\s*'INSERT, UPDATE, DELETE, TRUNCATE'/);
+    expect(sql).toMatch(/gfs_audit'\s*,\s*'UPDATE, DELETE, TRUNCATE'/);
+    expect(sql).toMatch(/gfs_audit_sequence_no_seq'\s*,\s*'UPDATE'/);
   });
 
   it("bounds a hanging coherence QUERY with the probe timeout", async () => {
@@ -171,6 +449,7 @@ describe("createPermissionStoreProbe", () => {
       connectionString: DSN,
       intervalMs: INTERVAL,
       connectTimeoutMs: 20,
+      storageRole: "reader",
       clientFactory: hanging.factory,
       now: () => 0,
     });
@@ -190,12 +469,13 @@ describe("createPermissionStoreProbe", () => {
       connectionString: DSN,
       intervalMs: INTERVAL,
       connectTimeoutMs: 10,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => 0,
     });
     await expect(probe()).rejects.toThrow(/pool ping timed out after 10ms/);
     expect(pool.releases).toHaveLength(0); // not settled yet
-    await new Promise(resolve => setTimeout(resolve, 60));
+    await new Promise((resolve) => setTimeout(resolve, 60));
     expect(pool.releases).toHaveLength(1); // late acquire returned to the pool
     expect(pool.releases[0]).toBeUndefined(); // clean release, not a destroy
   });
@@ -210,6 +490,7 @@ describe("createPermissionStoreProbe", () => {
       connectionString: DSN,
       intervalMs: INTERVAL,
       connectTimeoutMs: 15,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => 0,
     });
@@ -227,6 +508,7 @@ describe("createPermissionStoreProbe", () => {
       connectionString: DSN,
       intervalMs: INTERVAL,
       connectTimeoutMs: 20,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => 0,
     });
@@ -241,6 +523,7 @@ describe("createPermissionStoreProbe", () => {
       connectionString: DSN,
       intervalMs: INTERVAL,
       connectTimeoutMs: 20,
+      storageRole: "reader",
       clientFactory: hanging.factory,
       now: () => 0,
     });
@@ -256,6 +539,7 @@ describe("createPermissionStoreProbe", () => {
       pool,
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => t,
     });
@@ -273,6 +557,7 @@ describe("createPermissionStoreProbe", () => {
       pool: fakePool(),
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => t,
     });
@@ -290,6 +575,7 @@ describe("createPermissionStoreProbe", () => {
       pool: fakePool(),
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => 0,
     });
@@ -306,6 +592,7 @@ describe("createPermissionStoreProbe", () => {
       pool,
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: factory,
       now: () => t,
     });
@@ -321,6 +608,7 @@ describe("createPermissionStoreProbe", () => {
       pool: fakePool(),
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: success.factory,
       now: () => 0,
     });
@@ -333,6 +621,7 @@ describe("createPermissionStoreProbe", () => {
       pool: fakePool(),
       connectionString: DSN,
       intervalMs: INTERVAL,
+      storageRole: "reader",
       clientFactory: failing.factory,
       now: () => 0,
     });

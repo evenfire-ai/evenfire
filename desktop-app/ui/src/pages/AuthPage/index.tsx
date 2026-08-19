@@ -1,7 +1,7 @@
 import type { FormEvent } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
-import { Button, Field, IconButton, MenuItem, TextInput } from '@components/Common'
+import { Button, Field, IconButton, MenuItem, StatusBanner, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import {
   LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
@@ -21,12 +21,14 @@ export function AuthPage() {
     authTransitioning,
     runtimeConfigState,
     runtimeConfigMissing,
+    backendSwitchHint,
     setEmail,
     setPassword,
     setRuntimeConfigSetupName,
     setRuntimeConfigSetupExternalRestApiBaseUrl,
     setStatus,
     handlePasswordLogin,
+    handleSwitchLoginBackend,
     handleStartDesktopSetup,
     handleSaveRuntimeConfig,
     handleDeleteRuntimeConfig,
@@ -239,6 +241,27 @@ export function AuthPage() {
             >
               Forgot password
             </button>
+            {backendSwitchHint ? (
+              <StatusBanner tone="warn">
+                <span className="auth-backend-hint">
+                  <span>
+                    Couldn’t reach <strong>{backendSwitchHint.activeLabel}</strong>. A local
+                    Evenfire looks like it’s running — switch to{' '}
+                    <strong>{backendSwitchHint.targetLabel}</strong> and retry?
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="soft"
+                    block
+                    disabled={busy}
+                    onClick={() => void handleSwitchLoginBackend()}
+                  >
+                    {`Switch to ${backendSwitchHint.targetLabel} & retry`}
+                  </Button>
+                </span>
+              </StatusBanner>
+            ) : null}
           </form>
         ) : null}
 

@@ -1,8 +1,10 @@
 import * as k8s from '@kubernetes/client-node'
 import { getErrorCode } from '../reconciler/k8sErrors'
+import { PLUGIN_WORKLOAD_SDK_RUNTIME_CONTRACT_HASH_ANNOTATION } from './podFactory'
 
 export type McpHostPodDriftState = {
   image?: string
+  runtimeContractHash?: string
   deleting: boolean
 }
 
@@ -19,8 +21,11 @@ export async function readMcpHostPodDriftStateIfExists(
   try {
     const pod = await coreApi.readNamespacedPod({ name, namespace })
     const mcpHostContainer = pod.spec?.containers?.find(container => container.name === 'mcp-host')
+    const runtimeContractHash =
+      pod.metadata?.annotations?.[PLUGIN_WORKLOAD_SDK_RUNTIME_CONTRACT_HASH_ANNOTATION]
     return {
       image: mcpHostContainer?.image,
+      ...(runtimeContractHash ? { runtimeContractHash } : {}),
       deleting: Boolean(pod.metadata?.deletionTimestamp),
     }
   } catch (error: unknown) {

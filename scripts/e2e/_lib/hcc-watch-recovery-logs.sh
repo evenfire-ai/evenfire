@@ -2,6 +2,18 @@
 
 # Log capture and causal recovery-cycle assertions for the HCC watch gate.
 
+hcc_log_snapshot_contains() {
+  local snapshot=$1 marker=$2
+  grep -Fq -- "$marker" <<<"$snapshot"
+}
+
+hcc_initial_pass_snapshot_is_active() {
+  local snapshot=$1 start_marker=$2 complete_marker=$3 fail_marker=$4
+  hcc_log_snapshot_contains "$snapshot" "$start_marker" &&
+    ! hcc_log_snapshot_contains "$snapshot" "$complete_marker" &&
+    ! hcc_log_snapshot_contains "$snapshot" "$fail_marker"
+}
+
 hcc_recovery_logs() {
   [ -n "$START_TIME" ] || return 0
   grep -E 'CommunicationChannel|Listing all Hosts|Reconciling [0-9]+ Host|Completed Host reconciliation|Periodic resync' \
@@ -59,7 +71,8 @@ recovery_cycle_used_fresh_host_inventory() {
   hcc_recovery_logs | awk \
     -v target="$cycle" -v host_namespace="$HOST_NS" -v expected="$expected_count" '
     BEGIN {
-      inventory_line = "Reconciling " expected " Host(s) for lifecycle after CommunicationChannel recovery"
+      channel_inventory = "Reconciling " expected " Host(s) for lifecycle after CommunicationChannel recovery"
+      host_inventory = "Reconciling " expected " Host(s) after Host watch recovery convergence"
       succeeded = 0
     }
     /CommunicationChannel watch ended;/ {
@@ -68,7 +81,7 @@ recovery_cycle_used_fresh_host_inventory() {
       if (inside) {
         listed = 0
         recovered = 0
-        inventory_matched = 0
+        completion_mode = ""
       }
       next
     }
@@ -78,15 +91,36 @@ recovery_cycle_used_fresh_host_inventory() {
     inside && /Recovered [0-9]+ CommunicationChannel\(s\) into cache/ {
       recovered = 1
     }
-    inside && index($0, inventory_line) > 0 {
-      inventory_matched = 1
+    inside && listed && recovered && index($0, channel_inventory) > 0 {
+      completion_mode = "channel"
     }
-    inside && /Completed Host reconciliation after CommunicationChannel recovery$/ {
-      succeeded = listed && recovered && inventory_matched
+    inside && listed && recovered && index($0, host_inventory) > 0 {
+      completion_mode = "host"
+    }
+    inside && completion_mode == "channel" &&
+      /Completed Host reconciliation after CommunicationChannel recovery$/ {
+      succeeded = 1
+      exit
+    }
+    inside && completion_mode == "host" &&
+      /Completed Host reconciliation after Host watch recovery convergence$/ {
+      succeeded = 1
       exit
     }
     END {
       exit succeeded ? 0 : 1
     }
   '
+}
+
+wait_recovery_cycle_fresh_host_inventory() {
+  local cycle=$1 expected_count=$2 timeout=$3 elapsed=0
+  while [ "$elapsed" -lt "$timeout" ]; do
+    require_hcc_recovery_log_stream || return 1
+    recovery_cycle_used_fresh_host_inventory "$cycle" "$expected_count" && return 0
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  hcc_recovery_logs >&2
+  return 1
 }

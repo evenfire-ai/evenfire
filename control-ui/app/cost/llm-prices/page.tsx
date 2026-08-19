@@ -3,7 +3,6 @@
 import React, { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { LlmPriceTable } from '@components/LlmPriceTable'
 import { useToast } from '@components/Toast'
@@ -21,14 +20,13 @@ import {
 import { getProviderDisplayLabel } from '@lib/llm'
 
 export default function LlmPricesPage() {
-  const { authState } = useAuth()
   const router = useRouter()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
   const [prices, setPrices] = useState<LlmModelPrice[]>([])
   const [unpriced, setUnpriced] = useState<UnpricedModel[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   // Cost budgets still pinning a price whose delete was rejected with 409.
   const [deleteBlockedBudgets, setDeleteBlockedBudgets] = useState<BudgetRef[] | null>(null)
@@ -94,16 +92,9 @@ export default function LlmPricesPage() {
     }
   }
 
-  function handleAddForUnpriced(model: UnpricedModel) {
-    const query = new URLSearchParams({ provider: model.provider, model: model.model })
-    router.push(CONTROL_ROUTES.costAndUsage.newLlmPrice(Object.fromEntries(query)))
-  }
-
   useEffect(() => {
-    if (authState.isLoggedIn && !authState.isLoading) {
-      void loadAll()
-    }
-  }, [authState.isLoggedIn, authState.isLoading])
+    void loadAll()
+  }, [])
 
   return (
     <>
@@ -133,35 +124,16 @@ export default function LlmPricesPage() {
       ) : null}
       <LlmPriceTable
         items={prices}
-        banner={
-          unpriced.length > 0 ? (
-            <div className="cu-banner cu-banner--warning cu-px-unpriced" role="status">
-              <div className="cu-px-unpriced__text">
-                <strong>{unpriced.length}</strong> model
-                {unpriced.length === 1 ? '' : 's'} seen in usage{' '}
-                {unpriced.length === 1 ? 'has' : 'have'} no enabled price. Cost-unit budgets
-                under-count spend for these until you add a price.
-              </div>
-              <div className="cu-px-unpriced__chips">
-                {unpriced.map(model => (
-                  <button
-                    key={`${model.provider}/${model.model}`}
-                    type="button"
-                    className="cu-px-unpriced__chip"
-                    onClick={() => handleAddForUnpriced(model)}
-                    title={`Add a price for ${getProviderDisplayLabel(model.provider)}/${model.model}`}
-                  >
-                    <span className="cu-px-unpriced__chip-label">
-                      {getProviderDisplayLabel(model.provider)}/{model.model}
-                    </span>
-                    <span className="cu-px-unpriced__chip-cta">Add price</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : null
-        }
+        unpricedItems={unpriced}
         onCreate={() => router.push(CONTROL_ROUTES.costAndUsage.newLlmPrice())}
+        onAddMissingPrice={model =>
+          router.push(
+            CONTROL_ROUTES.costAndUsage.newLlmPrice({
+              provider: model.provider,
+              model: model.model,
+            })
+          )
+        }
         onEdit={id => router.push(CONTROL_ROUTES.costAndUsage.editLlmPrice(id))}
         onDelete={handleDelete}
         onRefresh={loadAll}

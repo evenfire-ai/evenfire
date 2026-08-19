@@ -31,6 +31,12 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
+vi.mock('../HostAccessTab', () => ({
+  HostAccessTab: ({ hostName }: { hostName: string }) => (
+    <div data-testid="access-tab">Access editor for {hostName}</div>
+  ),
+}))
+
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
@@ -98,11 +104,12 @@ describe('HostDetailsPage identity integration', () => {
 
   it('renders the Identity section tab with the current host name', async () => {
     mockParams = { name: 'foo', tab: 'identity' }
-    render(<HostDetailsPage />)
+    const { container } = render(<HostDetailsPage />)
     expect(await screen.findByTestId('identity-tab')).toHaveTextContent('Identity editor for foo')
+    expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
-  it('places Identity as the second agent detail tab', async () => {
+  it('renders the agent detail tabs in order', async () => {
     render(<HostDetailsPage />)
 
     const tabs = await screen.findAllByRole('tab')
@@ -110,27 +117,206 @@ describe('HostDetailsPage identity integration', () => {
     expect(tabs.map(tab => tab.textContent)).toEqual([
       'Overview',
       'Identity',
-      'Contexts',
-      'Env vars',
-      'Member access',
-      'Team access',
+      'Models & creds',
+      'Context',
+      'Access',
+      'Advanced',
     ])
   })
 
-  it('preserves personalization when saving overview changes', async () => {
-    render(<HostDetailsPage />)
+  it('puts Allowed models in place of Model name and spells out Secret reference', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    const { container } = render(<HostDetailsPage />)
+
+    expect(await screen.findByText('Allowed models')).toBeInTheDocument()
+    expect(screen.queryByText('Model name')).not.toBeInTheDocument()
+    expect(screen.getByText('Secret reference')).toBeInTheDocument()
+    expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
+    expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
+    expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    expect(
+      screen.getByLabelText('Allowed models · OpenAI', { selector: '#llm-allowed-openai' })
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Model', { selector: '#llm-primary-model' })).toBeNull()
+    expect(screen.getByLabelText('Secret reference')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Save' }).closest('.cu-agent-detail-toolbar')
+    ).not.toBeNull()
+    expect(container.querySelector('.cu-agent-detail-card .cu-agent-detail-scroll')).not.toBeNull()
+  })
+
+  it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {
+    mockParams = { name: 'foo', tab: 'advanced' }
+    const { container } = render(<HostDetailsPage />)
+
+    expect(await screen.findByLabelText('http_request')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Save' }).closest('.cu-host-approval-section__actions')
+    ).not.toBeNull()
+    expect(container.querySelector('.cu-host-approval-section .cu-section-title')).toBeNull()
+  })
+
+  it('shows editable Type in Overview without Display ID and preserves personalization', async () => {
+    const { container } = render(<HostDetailsPage />)
+    expect(await screen.findByText('Name')).toBeInTheDocument()
+    expect(await screen.findByText('Type')).toBeInTheDocument()
+    expect(screen.queryByText('Display ID')).not.toBeInTheDocument()
+    expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
+    expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
+    expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
+
     const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
     await waitFor(() => expect(overviewEditButton).toBeEnabled())
     fireEvent.click(overviewEditButton)
-    fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
+    fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'stateless' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
     )
-    const payload = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2]
-    expect(payload.spec.host).toBe('foo-updated')
+    const putCall = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
+      c => c[0] === 'PUT' && c[1] === '/api/v1/admin/hosts/foo'
+    )
+    const payload = putCall![2]
+    expect(payload.spec.lifecycle).toEqual({ stateless: true })
     expect(payload.spec.personalization).toEqual(host.spec.personalization)
     expect(payload.spec.approval).toEqual(host.spec.approval)
+  })
+
+  // UT-3 — the identifier is readonly and only the display name (spec.host) is
+  // editable. Saving is a SINGLE PUT that updates spec.host and leaves
+  // metadata.name intact, with ZERO create (POST) / delete (DELETE) calls: the
+  // behavioral proof that the create+migrate+delete rename dance is gone.
+  it('makes the identifier readonly and saves the display name via one PUT (no rename dance)', async () => {
+    render(<HostDetailsPage />)
+
+    const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+    await waitFor(() => expect(overviewEditButton).toBeEnabled())
+    fireEvent.click(overviewEditButton)
+
+    // Identifier ("Name") is present but not editable.
+    const nameField = screen.getByLabelText('Name')
+    expect(nameField).toHaveAttribute('readonly')
+    expect(nameField).toHaveValue('foo')
+
+    // The display name (spec.host) is the editable field.
+    const displayField = screen.getByLabelText('Display name')
+    expect(displayField).toHaveValue('foo-display')
+    fireEvent.change(displayField, { target: { value: 'Product Agents' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+
+    const calls = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls
+    const puts = calls.filter(c => c[0] === 'PUT' && c[1] === '/api/v1/admin/hosts/foo')
+    expect(puts).toHaveLength(1)
+    const payload = puts[0][2]
+    expect(payload.spec.host).toBe('Product Agents')
+    // The identifier is untouched: the PUT targets the same slug and never sets
+    // a different metadata.name.
+    expect(payload.metadata?.name).toBeUndefined()
+
+    // The dance is gone: no create of a new host and no delete of the old one.
+    expect(calls.some(c => c[0] === 'POST')).toBe(false)
+    expect(calls.some(c => c[0] === 'DELETE')).toBe(false)
+    // And the route was never re-navigated to a renamed slug.
+    expect(replaceMock).not.toHaveBeenCalledWith('/agents/Product Agents')
+    expect(pushMock).not.toHaveBeenCalledWith('/agents/Product Agents')
+  })
+
+  // Regression: Cancel must DISCARD the Display-name edit, not carry the stale
+  // draft into the read-only view and the next save. Before the resetOverview
+  // fix, a cancelled "Display name" edit silently persisted on the following
+  // Save (spec.host written to the abandoned value).
+  it('discards a cancelled Display name edit — read-only reverts and a later save keeps the saved value', async () => {
+    render(<HostDetailsPage />)
+
+    const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+    await waitFor(() => expect(overviewEditButton).toBeEnabled())
+    fireEvent.click(overviewEditButton)
+
+    // Type a Display name the operator then abandons.
+    fireEvent.change(screen.getByLabelText('Display name'), {
+      target: { value: 'Discarded Draft' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    // Observable #1 (T4): the read-only view shows the last-SAVED value, not the
+    // abandoned draft.
+    expect(screen.getByText('foo-display')).toBeInTheDocument()
+    expect(screen.queryByText('Discarded Draft')).not.toBeInTheDocument()
+
+    // Re-open Edit and Save without touching Display name again.
+    const [overviewEditButton2] = await screen.findAllByRole('button', { name: 'Edit' })
+    fireEvent.click(overviewEditButton2)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+
+    // Observable #2 (T4, PINNING): the persisted spec.host is the saved value,
+    // NOT the discarded draft. This assertion goes red pre-fix.
+    const putCall = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
+      c => c[0] === 'PUT' && c[1] === '/api/v1/admin/hosts/foo'
+    )
+    expect(putCall![2].spec.host).toBe('foo-display')
+  })
+
+  // Collateral regression: resetOverviewDrafts must NOT clobber a LIVE Context-tab
+  // edit. contextRefDraft is written by both saveHost (Overview) and the Context
+  // tab's own editingContext session; reverting it on Overview Edit-open/Cancel
+  // while that session is open silently discards the operator's in-progress pick.
+  it('preserves a live Context-tab selection across an Overview Edit-open/Cancel', async () => {
+    // Two contexts so the Context tab can switch selection; saved = ctx-a.
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: { ...host, spec: { ...host.spec, contextRef: 'ctx-a' } },
+      contexts: [
+        { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a' } },
+        { metadata: { name: 'ctx-b' }, spec: { contextId: 'ctx-b' } },
+      ],
+      secrets: [{ name: 'openai-secret' }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+
+    // Land on the Context tab, open its edit session, pick a DIFFERENT context.
+    mockParams = { name: 'foo', tab: 'contexts' }
+    const view = render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit context' }))
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ctx-b' } })
+    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('ctx-b')
+
+    // Switch to Overview and fire BOTH resetOverviewDrafts sites: Edit-open, Cancel.
+    mockParams = { name: 'foo' }
+    view.rerender(
+      <ToastProvider>
+        <HostDetailsPage />
+      </ToastProvider>
+    )
+    const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+    await waitFor(() => expect(overviewEditButton).toBeEnabled())
+    fireEvent.click(overviewEditButton)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    // Back on the Context tab (still editing): the in-progress ctx-b must survive.
+    mockParams = { name: 'foo', tab: 'contexts' }
+    view.rerender(
+      <ToastProvider>
+        <HostDetailsPage />
+      </ToastProvider>
+    )
+
+    // PINNING (T4): the Context select still shows the unsaved ctx-b, not the
+    // reverted saved ctx-a. Pre-collateral-fix this reads 'ctx-a'.
+    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('ctx-b')
   })
 })

@@ -140,7 +140,7 @@ export default function CreateTeamPage() {
         .sort((a, b) => a.localeCompare(b))
         .map(agentName => ({
           value: agentName,
-          label: getAgentDisplayName(agentName),
+          label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
     [hosts]
@@ -240,7 +240,7 @@ export default function CreateTeamPage() {
           ? updateAdminTeamContexts(teamId, selectedContextValues)
           : Promise.resolve(),
         selectedAgentValues.length > 0
-          ? updateAdminTeamAgents(teamId, selectedAgentValues)
+          ? updateAdminTeamAgents(teamId, selectedAgentValues, [])
           : Promise.resolve(),
       ])
       showToast('Team created.', { tone: 'success' })

@@ -10,7 +10,13 @@ single LLM key you set in `.env`.
 ## Prerequisites
 
 Docker Desktop with **≥10 GB RAM / 6 CPUs** · `minikube` v1.30+ · `kubectl` ·
-`python3` · Node.js 24+.
+`python3` · Node.js 24+ · `git` · `make` · `ruby` (renders the control-api DB
+migration overlay; ships with macOS, `apt-get install ruby` on Debian/Ubuntu).
+
+Run `make prereqs` (alias `make doctor`) to check every one of these at once —
+it prints the exact install command per platform for anything missing, and
+flags a `.env` without `ADMIN_PASSWORD` or an LLM key. `make minikube-setup`
+runs it automatically first (bypass with `SKIP_PREREQS=true`).
 
 ## Bring the platform up
 
@@ -19,9 +25,33 @@ git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 # edit .env: set ADMIN_PASSWORD (required — no default ships) and ONE LLM key
 # (setup infers the matching provider)
-make minikube-setup     # first run ~5–10 min (image builds dominate); re-run safe
-make minikube-status    # wait for every deployment READY
+MINIKUBE_IMAGE_TAG=latest make minikube-setup   # first run ~15 min (pulling images dominates); re-run safe
+make minikube-status                            # wait for every deployment READY
 ```
+
+The default `minimal` seed is setup-first. Before it logs in as the technical
+bootstrap admin, it consumes `/api/v1/admin/auth/setup`, which atomically
+creates the `admin@evenfire.local` Desktop identity and its `initial_setup`
+GFS operator link when `CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED=true`.
+The seed then verifies that link through the Control API. A rerun may fall back
+to login only when the same active link is present; it fails closed instead of
+creating an unlinked ordinary Desktop member or recreating a revoked link.
+
+**You do not build images.** `make minikube-setup` pulls all 23 service images
+from `ghcr.io/evenfire-ai`, published for `linux/amd64` and `linux/arm64`, so an
+Apple Silicon Mac pulls a native image rather than compiling anything. MCP
+servers stay out of the cluster and are installed on demand from the evenfire
+registry.
+
+`MINIKUBE_IMAGE_TAG=latest` is required today: the manifests pin the next
+release tag, and its images only exist once that release is promoted. Without
+the override the pull fails with a message naming this variable. Drop it after
+the release is cut. If minikube itself fails to start, add
+`MINIKUBE_MEMORY=9216` — the 10240 MB default exceeds a stock Docker Desktop
+ceiling.
+
+To build every image from source instead, use `make minikube-setup-local`
+(equivalently `IMAGE_SOURCE=local`), which needs no tag override.
 
 ## Say hello (desktop app)
 
@@ -33,8 +63,9 @@ make install-all && npm --prefix control-ui install
 npm run ui              # Control UI + Profile UI + Desktop App
 ```
 
-Log in as `admin@evenfire.local` using the `ADMIN_PASSWORD` you set in `.env`,
-message the `chatllm` agent, and ask it to run a command or generate a PDF —
+Log in as `admin@evenfire.local` using the `ADMIN_PASSWORD` you set in `.env`;
+the same account is the initial GFS operator on a fresh self-hosted install.
+Message the `chatllm` agent, and ask it to run a command or generate a PDF —
 then approve the tool call from the chat. The same password logs into the
 Control UI as `admin`. The Desktop App is the client you just used; Control UI
 is the admin console for the same fleet — both are toured in

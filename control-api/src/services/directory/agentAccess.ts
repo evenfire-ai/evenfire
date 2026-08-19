@@ -25,14 +25,22 @@ async function appendAgentAccessChanges(
   })
 }
 
-export async function setUserAgents(userId: string, agentNames: string[], operatorSub: string) {
+export { LinkedItemsPreconditionError as AgentGrantPreconditionError } from '../../shared/generics.js'
+
+export async function setUserAgents(
+  userId: string,
+  agentNames: string[],
+  operatorSub: string,
+  expectedCurrentAgentNames?: string[]
+) {
   const result = await bulkSetLinkedItems(
     'user_agents',
     'user_id',
     userId,
     'agent_name',
     agentNames,
-    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'user', id: userId }, change)
+    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'user', id: userId }, change),
+    { expectedItems: expectedCurrentAgentNames }
   )
   return { userId, agentNames: result.items }
 }
@@ -75,8 +83,10 @@ export async function setAgentUsers(agentName: string, userIds: string[], operat
 export async function getUserAgents(userId: string, db: Pick<DbClient, 'query'> = pool) {
   const result = await db.query(
     `SELECT agent_name
-       FROM user_agents
-      WHERE user_id = $1
+       FROM user_agents ua
+       JOIN users u ON u.id = ua.user_id
+      WHERE ua.user_id = $1
+        AND u.lifecycle_state = 'active'
    ORDER BY agent_name ASC`,
     [userId]
   )
@@ -96,6 +106,7 @@ export async function listUsersByAgent(agentName: string) {
        JOIN users u ON u.id = ua.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
       WHERE ua.agent_name = $1
+        AND u.lifecycle_state = 'active'
    ORDER BY u.email ASC`,
     [resolvedAgentName]
   )
@@ -108,14 +119,20 @@ export async function listUsersByAgent(agentName: string) {
   }))
 }
 
-export async function setTeamAgents(teamId: string, agentNames: string[], operatorSub: string) {
+export async function setTeamAgents(
+  teamId: string,
+  agentNames: string[],
+  operatorSub: string,
+  expectedCurrentAgentNames?: string[]
+) {
   const result = await bulkSetLinkedItems(
     'team_agents',
     'team_id',
     teamId,
     'agent_name',
     agentNames,
-    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'team', id: teamId }, change)
+    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'team', id: teamId }, change),
+    { expectedItems: expectedCurrentAgentNames }
   )
   return { teamId, agentNames: result.items }
 }

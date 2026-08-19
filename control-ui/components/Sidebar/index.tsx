@@ -4,27 +4,21 @@ import { useState } from 'react'
 import Image from 'next/image'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { isPublisherEnabled, usePublishScope } from '../../lib/hooks/usePublishScope'
 import packageJson from '../../package.json'
 import { IconChevronRight } from '../icons'
 import { activeSidebarChildHref } from './activeChild'
-import { SIDEBAR_TABS } from './constants'
+import { SIDEBAR_TABS, SIDEBAR_TAB_ORDER } from './constants'
 import { IconLogout } from './icons'
 import type { SidebarItem, SidebarProps, SidebarTab } from './types'
 
 export function Sidebar({ currentTab, isOpen = false, onNavigate, onLogout }: SidebarProps) {
   const pathname = usePathname()
-  const { scope } = usePublishScope()
-  const publisherEnabled = isPublisherEnabled(scope)
   const [expandedGroups, setExpandedGroups] = useState<Set<SidebarTab>>(
     () => new Set(SIDEBAR_TABS[currentTab].children?.length ? [currentTab] : [])
   )
   const entries = (Object.entries(SIDEBAR_TABS) as Array<[SidebarTab, SidebarItem]>)
-    .filter(
-      ([tabKey, item]) =>
-        !item.hidden && tabKey !== 'settings' && (tabKey !== 'publisher' || publisherEnabled)
-    )
-    .sort(([, first], [, second]) => first.label.localeCompare(second.label))
+    .filter(([tabKey, item]) => !item.hidden && tabKey !== 'settings')
+    .sort(([a], [b]) => SIDEBAR_TAB_ORDER.indexOf(a) - SIDEBAR_TAB_ORDER.indexOf(b))
   const settings = SIDEBAR_TABS.settings
 
   function toggleGroup(tabKey: SidebarTab) {

@@ -4,19 +4,16 @@ import {
   IconAdministrativeTrace,
   IconBroadcast,
   IconCable,
+  IconFolder,
   IconGroupWork,
   IconInfrastructureTrace,
   IconKey,
   IconLlmPrices,
-  IconModelCatalog,
-  IconModelDiscovery,
   IconModels,
   IconOutputs,
-  IconPublish,
   IconRobot,
   IconRunReplay,
   IconSettings,
-  IconSharedFiles,
   IconStore,
   IconTokenBudgets,
   IconTraceDashboard,
@@ -30,7 +27,7 @@ import type { SidebarItem, SidebarTab } from './types'
 export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   hosts: { label: 'Agents', href: CONTROL_ROUTES.agents.root, icon: <IconRobot /> },
   'mcp-servers': {
-    label: 'Connectors',
+    label: 'Installed connectors',
     href: CONTROL_ROUTES.connectors.root,
     icon: <IconCable />,
   },
@@ -41,9 +38,9 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconUsage />,
     children: [
       {
-        label: 'LLM Prices',
-        href: CONTROL_ROUTES.costAndUsage.llmPrices,
-        icon: <IconLlmPrices />,
+        label: 'Usage',
+        href: CONTROL_ROUTES.costAndUsage.usage,
+        icon: <IconUsageHistory />,
       },
       {
         label: 'Token Budgets',
@@ -51,32 +48,27 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
         icon: <IconTokenBudgets />,
       },
       {
-        label: 'Usage',
-        href: CONTROL_ROUTES.costAndUsage.usage,
-        icon: <IconUsageHistory />,
+        label: 'LLM Prices',
+        href: CONTROL_ROUTES.costAndUsage.llmPrices,
+        icon: <IconLlmPrices />,
       },
     ],
   },
   directories: {
-    label: 'Directories',
+    label: 'Files',
     href: CONTROL_ROUTES.agentFiles.root,
-    icon: <IconPaperclip />,
+    icon: <IconFolder />,
     children: [
       {
-        label: 'Agent Files',
-        href: CONTROL_ROUTES.agentFiles.root,
-        icon: <IconSharedFiles />,
+        label: 'Global File System',
+        href: CONTROL_ROUTES.globalFileSystem,
+        icon: <IconPaperclip />,
       },
       {
         label: 'Agent Outputs',
         href: CONTROL_ROUTES.agentOutputs.root,
         icon: <IconOutputs />,
         matchPath: CONTROL_ROUTES.agentOutputs.base,
-      },
-      {
-        label: 'Global File System',
-        href: CONTROL_ROUTES.globalFileSystem,
-        icon: <IconPaperclip />,
       },
     ],
   },
@@ -89,18 +81,6 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     label: 'LLM Models',
     href: CONTROL_ROUTES.llmModels.root,
     icon: <IconModels />,
-    children: [
-      {
-        label: 'Catalog',
-        href: CONTROL_ROUTES.llmModels.root,
-        icon: <IconModelCatalog />,
-      },
-      {
-        label: 'Discovery',
-        href: CONTROL_ROUTES.llmModels.discovery,
-        icon: <IconModelDiscovery />,
-      },
-    ],
   },
   'registry-catalog': {
     label: 'Marketplace',
@@ -108,11 +88,10 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconStore />,
   },
   'workflow-recipes': {
-    label: 'Plugins',
+    label: 'Installed plugins',
     href: CONTROL_ROUTES.plugins.root,
     icon: <IconWorkflow />,
   },
-  publisher: { label: 'Publisher', href: CONTROL_ROUTES.publisher.root, icon: <IconPublish /> },
   'llm-secrets': { label: 'Secrets', href: CONTROL_ROUTES.secrets.llm, icon: <IconKey /> },
   traces: {
     label: 'Traces',
@@ -149,3 +128,19 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   },
   settings: { label: 'Settings', href: CONTROL_ROUTES.settings.ui, icon: <IconSettings /> },
 }
+
+export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
+  'profile-admin',
+  'hosts',
+  'contexts',
+  'registry-catalog',
+  'mcp-servers',
+  'workflow-recipes',
+  'directories',
+  'communication-channels',
+  'llm-models',
+  'llm-secrets',
+  'cost',
+  'traces',
+  'settings',
+]

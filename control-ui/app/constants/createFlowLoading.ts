@@ -4,10 +4,10 @@ export const CREATE_FLOW_LOADING = {
   createAgent: {
     iconKey: 'robot',
     title: 'Create agent',
-    subtitle: 'Provision a new agent with context, channels, and access.',
+    subtitle: 'Provision a new agent with context, credentials, and access.',
     backLabel: 'Back to agents',
-    steps: ['Agent', 'Context', 'Model & Credentials', 'Access', 'Channels'],
-    stepFlowClassName: 'cu-create-step-flow--5',
+    steps: ['Agent', 'Context', 'Model & Credentials', 'Access'],
+    stepFlowClassName: 'cu-create-step-flow--4',
   },
   createCommunicationChannel: {
     iconKey: 'broadcast',
@@ -78,8 +78,8 @@ export const CREATE_FLOW_LOADING = {
     title: 'Install from Marketplace',
     subtitle: 'Install a Marketplace entry into your cluster and bind it to a context.',
     backLabel: 'Back to Marketplace',
-    steps: ['Package', 'Configure', 'Network', 'Install'],
-    stepFlowClassName: 'cu-create-step-flow--4',
+    steps: ['Package', 'Install'],
+    stepFlowClassName: 'cu-create-step-flow--2',
   },
   installPlugin: {
     iconKey: 'workflow',

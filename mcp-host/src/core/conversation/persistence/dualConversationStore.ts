@@ -1,7 +1,9 @@
 /**
  * `DualConversationStore` — shadow-write to two stores for canary validation.
  *
- * Reads come from `memory` (the canonical store during validation).
+ * Hot user-visible reads prefer `memory`, the canonical store during validation.
+ * Durable catalog rows and cold transcripts remain visible when RAM is empty,
+ * while SQLite is also queried for parity so the canary can detect drift.
  * Writes apply to both; parity is recorded via the optional metrics callback.
  * Used when `CLERUM_SESSION_STORE=dual` to validate that the SQLite store
  * produces the same observable behavior as the in-memory store before we
@@ -11,10 +13,14 @@ import { Counter } from 'prom-client'
 import type { ReapedSession } from '../../../db/worker/protocol'
 import type { Conversation, PendingApproval, TurnToolCall } from '../../types'
 import type {
+  ConversationSessionMessages,
+  ConversationSessionSummary,
   ConversationStore,
   EvictCallback,
   GetOrCreateOptions,
   PersistedSessionListing,
+  SessionListQuery,
+  SessionMessagesQuery,
   SessionTokenUsage,
 } from '../conversationStore'
 
@@ -32,6 +38,42 @@ const parityCounter = (() => {
 
 export interface DualStoreMetrics {
   recordParity?: (op: string, match: boolean) => void
+}
+
+const TOKEN_COUNTER_KEYS = new Set([
+  'input_tokens',
+  'output_tokens',
+  'cache_read_tokens',
+  'cache_write_tokens',
+])
+
+const DUAL_CATALOG_FALLBACK_OVERFETCH = 2
+
+function normalizeParityValue(value: unknown, key?: string): unknown {
+  if (value instanceof Date) return value.toISOString()
+  if (Array.isArray(value)) return value.map(entry => normalizeParityValue(entry))
+  if (key === 'cacheTokensReported' && value === false) return undefined
+  if (key && TOKEN_COUNTER_KEYS.has(key) && value === 0) return undefined
+  if (value === null || typeof value !== 'object') return value
+
+  const normalized: Record<string, unknown> = {}
+  for (const entryKey of Object.keys(value).sort()) {
+    const entryValue = normalizeParityValue((value as Record<string, unknown>)[entryKey], entryKey)
+    if (entryValue !== undefined) normalized[entryKey] = entryValue
+  }
+  return normalized
+}
+
+function pagesMatch(left: unknown, right: unknown): boolean {
+  return JSON.stringify(normalizeParityValue(left)) === JSON.stringify(normalizeParityValue(right))
+}
+
+function compareSummaries(
+  left: ConversationSessionSummary,
+  right: ConversationSessionSummary
+): number {
+  const byUpdated = right.lastActivityAt.getTime() - left.lastActivityAt.getTime()
+  return byUpdated || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
 }
 
 export class DualConversationStore implements ConversationStore {
@@ -123,6 +165,70 @@ export class DualConversationStore implements ConversationStore {
       this.memory.prefetchUserSessions(prefix),
       this.sqlite.prefetchUserSessions(prefix),
     ])
+  }
+
+  async listSessionSummariesByPrefix(
+    prefix: string,
+    query: SessionListQuery = {}
+  ): Promise<ConversationSessionSummary[]> {
+    const memList = await this.memory.listSessionSummariesByPrefix(prefix, query)
+    let sqlList: ConversationSessionSummary[]
+    const durableByKey = new Map<string, ConversationSessionSummary>()
+    try {
+      const memoryFillsPage = query.limit !== undefined && memList.length >= query.limit
+      // A full memory page is already canonical, so SQLite is sampled only for
+      // parity. A partial page gets one bounded over-fetch for cold durable rows;
+      // never drain cursor pages in proportion to the total mirrored catalog.
+      const sqliteQuery =
+        query.limit === undefined || memoryFillsPage
+          ? query
+          : { ...query, limit: query.limit * DUAL_CATALOG_FALLBACK_OVERFETCH }
+      sqlList = await this.sqlite.listSessionSummariesByPrefix(prefix, sqliteQuery)
+      for (const summary of sqlList) {
+        if (!this.memory.has(summary.key)) durableByKey.set(summary.key, summary)
+      }
+    } catch {
+      this.recordParity('listSessionSummariesByPrefix', false)
+      return memList
+    }
+
+    const sqlParityPage =
+      query.limit === undefined ? sqlList : sqlList.slice(0, query.limit)
+    this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlParityPage))
+    if (query.limit !== undefined && memList.length >= query.limit) return memList
+    // A live memory copy is canonical even when its timestamp places it outside
+    // this page. Otherwise an older SQLite copy can cross a later cursor and
+    // repeat a key that an earlier page already emitted from memory.
+    const byKey = new Map(durableByKey)
+    for (const summary of memList) byKey.set(summary.key, summary)
+    const merged = Array.from(byKey.values()).sort(compareSummaries)
+    return query.limit === undefined ? merged : merged.slice(0, query.limit)
+  }
+
+  async getSessionMessagesByKey(
+    key: string,
+    prefix: string,
+    query: SessionMessagesQuery = {}
+  ): Promise<ConversationSessionMessages | undefined> {
+    const memPage = await this.memory.getSessionMessagesByKey(key, prefix, query)
+    if (memPage !== undefined) {
+      queueMicrotask(() => {
+        this.sqlite.getSessionMessagesByKey(key, prefix, query).then(
+          sqlPage => this.recordParity('getSessionMessagesByKey', pagesMatch(memPage, sqlPage)),
+          () => this.recordParity('getSessionMessagesByKey', false)
+        )
+      })
+      return memPage
+    }
+
+    try {
+      const sqlPage = await this.sqlite.getSessionMessagesByKey(key, prefix, query)
+      this.recordParity('getSessionMessagesByKey', sqlPage === undefined)
+      return sqlPage
+    } catch (error) {
+      this.recordParity('getSessionMessagesByKey', false)
+      throw error
+    }
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {

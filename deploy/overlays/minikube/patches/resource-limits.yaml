@@ -20,7 +20,9 @@ spec:
               cpu: 50m
               memory: 64Mi
 ---
-# control-api: base is 300m/256Mi — keep but explicitly confirm for minikube
+# control-api: must match base (768Mi) — GFS uploads buffer ~5x the base64 body
+# (a 16MB file = 22.4MB body). 256Mi OOMKilled the pod at 2 concurrent uploads;
+# do NOT reduce below base here or the RC3 fix is inert in minikube.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,12 +36,13 @@ spec:
           resources:
             limits:
               cpu: 200m
-              memory: 256Mi
+              memory: 768Mi
             requests:
               cpu: 25m
-              memory: 64Mi
+              memory: 128Mi
 ---
-# control-ui: base is 300m/256Mi — reduce for minikube
+# control-ui: 512Mi — the /control-api proxy route handler buffers a full
+# arrayBuffer copy (~22.4MB for a 16MB upload) per in-flight request.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,10 +56,10 @@ spec:
           resources:
             limits:
               cpu: 200m
-              memory: 256Mi
+              memory: 512Mi
             requests:
               cpu: 25m
-              memory: 64Mi
+              memory: 128Mi
 ---
 # control-postgres: base is 200m/256Mi — acceptable, reduce request slightly
 apiVersion: apps/v1

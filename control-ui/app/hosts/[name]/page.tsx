@@ -4,28 +4,16 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
-import { SelectionDropdown } from '@components/SelectionDropdown'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { HostApprovalSection } from '../../../components/HostApprovalSection'
-import { HostEnvTable } from '../../../components/HostEnvTable'
+import { HostAccessTab } from '../../../components/HostAccessTab'
+import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconPencil, IconX } from '../../../components/icons'
-import {
-  apiGet,
-  apiSend,
-  getAdminTeamAgents,
-  getAdminUserAgents,
-  getAgentTeams,
-  getAgentUsers,
-  getHost,
-  getHostDetailBundle,
-  updateAdminTeamAgents,
-  updateAdminUserAgents,
-} from '../../../lib/api'
+import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
@@ -46,23 +34,23 @@ import {
   validateLlmPolicy,
   validateLlmSecretData,
 } from '../../../lib/llm'
-import type { ChannelResource, HostTab } from './types'
+import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
-  contexts: 'Contexts',
-  env: 'Env vars',
-  users: 'Member access',
-  teams: 'Team access',
+  model: 'Models & creds',
+  advanced: 'Advanced',
+  contexts: 'Context',
+  access: 'Access',
   identity: 'Identity',
 }
 
 const TAB_SLUGS: Record<HostTab, string> = {
   details: 'overview',
+  model: 'model',
+  advanced: 'advanced',
   contexts: 'contexts',
-  env: 'env-vars',
-  users: 'member-access',
-  teams: 'team-access',
+  access: 'access',
   identity: 'identity',
 }
 
@@ -102,9 +90,8 @@ export default function HostDetailsPage() {
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
 
-  const [showAddUser, setShowAddUser] = useState(false)
-  const [showAddTeam, setShowAddTeam] = useState(false)
   const [editingOverview, setEditingOverview] = useState(false)
+  const [editingModel, setEditingModel] = useState(false)
   const [editingContext, setEditingContext] = useState(false)
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
@@ -113,6 +100,17 @@ export default function HostDetailsPage() {
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
+  // Last server-backed snapshot of the Overview-owned fields, captured at every
+  // (re)load. Cancel (and re-opening Edit) reverts the whole class of Overview
+  // drafts to THIS — the last SAVED state — so a discarded edit (e.g. a Display
+  // name typed then cancelled) can never leak into a later saveHost PUT.
+  const savedOverviewRef = useRef({
+    hostName: routeName,
+    hostDisplay: '',
+    contextRef: '',
+    channels: [] as string[],
+    stateless: false,
+  })
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
   // model is always kept selectable even if it fell out of the allowlist
@@ -152,50 +150,7 @@ export default function HostDetailsPage() {
 
   const [availableContexts, setAvailableContexts] = useState<string[]>([])
   const [availableSecrets, setAvailableSecrets] = useState<string[]>([])
-  const [allUsers, setAllUsers] = useState<
-    Array<{ id: string; email: string; name: string | null; displayName: string | null }>
-  >([])
-  const [allTeams, setAllTeams] = useState<
-    Array<{ id: string; name: string; memberCount: number }>
-  >([])
-  const [usersWithAccess, setUsersWithAccess] = useState<
-    Array<{ id: string; email: string; name: string | null; displayName: string | null }>
-  >([])
-  const [teamsWithAccess, setTeamsWithAccess] = useState<Array<{ id: string; name: string }>>([])
-  const [selectedUserIdsToGrant, setSelectedUserIdsToGrant] = useState<string[]>([])
-  const [selectedTeamIdsToGrant, setSelectedTeamIdsToGrant] = useState<string[]>([])
 
-  const userIdsWithAccess = useMemo(
-    () => new Set(usersWithAccess.map(u => u.id)),
-    [usersWithAccess]
-  )
-  const teamIdsWithAccess = useMemo(
-    () => new Set(teamsWithAccess.map(t => t.id)),
-    [teamsWithAccess]
-  )
-  const memberGrantOptions = useMemo(
-    () =>
-      allUsers
-        .filter(user => !userIdsWithAccess.has(user.id))
-        .map(user => ({
-          value: user.id,
-          label: user.displayName || user.name || user.email || user.id,
-          description: user.email || user.id,
-        })),
-    [allUsers, userIdsWithAccess]
-  )
-  const teamGrantOptions = useMemo(
-    () =>
-      allTeams
-        .filter(team => !teamIdsWithAccess.has(team.id))
-        .map(team => ({
-          value: team.id,
-          label: team.name,
-          badge: team.memberCount === 1 ? '1 member' : `${team.memberCount} members`,
-        })),
-    [allTeams, teamIdsWithAccess]
-  )
-  const hasPendingRename = hostNameDraft.trim() && hostNameDraft.trim() !== routeName
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, providerDraft),
     [allowedCatalog, providerDraft]
@@ -259,55 +214,60 @@ export default function HostDetailsPage() {
     }
   }, [])
 
-  async function loadData() {
+  async function loadData(resetDrafts: 'all' | 'overview' | 'model' | 'none' = 'all') {
     setBusy(true)
     setInitialLoading(true)
     setError('')
     try {
       const detail = await getHostDetailBundle(routeName)
-      const {
-        host,
-        contexts: contextsList,
-        secrets: secretsList,
-        users,
-        teams,
-        agentUsers,
-        agentTeams,
-      } = detail
+      const { host, contexts: contextsList, secrets: secretsList } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
-      setHostNameDraft(String(host.metadata?.name || routeName))
-      setHostDisplayDraft(String(spec.host || host.metadata?.name || routeName))
-      setContextRefDraft(String(spec.contextRef || ''))
+      if (resetDrafts === 'all' || resetDrafts === 'overview') {
+        // Snapshot the saved Overview state so Cancel/Edit can revert to it.
+        const overview = {
+          hostName: String(host.metadata?.name || routeName),
+          hostDisplay: String(spec.host || host.metadata?.name || routeName),
+          contextRef: String(spec.contextRef || ''),
+          channels: Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : [],
+          stateless: spec.lifecycle?.stateless === true,
+        }
+        savedOverviewRef.current = overview
+        setHostNameDraft(overview.hostName)
+        setHostDisplayDraft(overview.hostDisplay)
+        setContextRefDraft(overview.contextRef)
+        setChannelsDraft(overview.channels)
+        setStatelessDraft(overview.stateless)
+      }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
       )
-      setProviderDraft(nextProvider)
-      // Keep the host's saved model verbatim (preexisting resources are not
-      // interrupted); only fall back to a default when the host has no model.
-      const currentModel = String((spec.model as { name?: string } | undefined)?.name || '').trim()
-      setModelNameDraft(
-        currentModel ||
-          resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
-      )
-      setSecretRefDraft(String(spec.secretRef || ''))
-      setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
-      // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
-      // → [] = unrestricted (offers the full global allowlist per provider).
-      setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
-      // Write-only surfaces reset on every load: never pre-fill stored keys.
-      setLlmKeyDraft({})
-      setRetireCandidates([])
-      setChannelsDraft(
-        Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : []
-      )
+      if (resetDrafts === 'all' || resetDrafts === 'model') {
+        setProviderDraft(nextProvider)
+        // Keep the host's saved model verbatim (preexisting resources are not
+        // interrupted); only fall back to a default when the host has no model.
+        const currentModel = String(
+          (spec.model as { name?: string } | undefined)?.name || ''
+        ).trim()
+        setModelNameDraft(
+          currentModel ||
+            resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
+        )
+        setSecretRefDraft(String(spec.secretRef || ''))
+        setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
+        // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
+        // → [] = unrestricted (offers the full global allowlist per provider).
+        setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
+        // Write-only surfaces reset only when this tab is reloaded or saved.
+        setLlmKeyDraft({})
+        setRetireCandidates([])
+      }
       const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
       setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
       const specStateless = spec.lifecycle?.stateless === true
-      setStatelessDraft(specStateless)
       setSavedStateless(specStateless)
       setLifecycleState(String(host.status?.lifecycle?.state ?? ''))
       setLifecycleReason(String(host.status?.lifecycle?.reason ?? ''))
@@ -340,10 +300,6 @@ export default function HostDetailsPage() {
         if (name) keysMap[name] = Array.isArray(item.keys) ? item.keys : []
       }
       setSecretKeysByName(keysMap)
-      setAllUsers(Array.isArray(users) ? users : [])
-      setAllTeams(Array.isArray(teams) ? teams : [])
-      setUsersWithAccess(Array.isArray(agentUsers) ? agentUsers : [])
-      setTeamsWithAccess(Array.isArray(agentTeams) ? agentTeams : [])
     } catch (e) {
       if (!mountedRef.current) return
       setError(e instanceof Error ? e.message : 'Failed to load agent details')
@@ -383,15 +339,102 @@ export default function HostDetailsPage() {
     setLlmPolicyDraft(next)
   }
 
+  // Revert every Overview-owned draft to the last SAVED snapshot. Used by Cancel
+  // and by Edit-open so an edit session always starts from server-backed values
+  // — never a stale draft left behind by a prior discarded edit (any Overview
+  // field, not just Display name: the whole class shares this reset).
+  function resetOverviewDrafts() {
+    const saved = savedOverviewRef.current
+    setHostNameDraft(saved.hostName)
+    setHostDisplayDraft(saved.hostDisplay)
+    // contextRef is written by the Overview save (saveHost), so reset it here to
+    // block a stale leak — EXCEPT while the Context tab has a live edit open: it
+    // is a legitimate concurrent writer of contextRefDraft (its editingContext
+    // session), and reverting an in-progress selection would silently discard it.
+    if (!editingContext) setContextRefDraft(saved.contextRef)
+    setChannelsDraft(saved.channels)
+    setStatelessDraft(saved.stateless)
+  }
+
   async function saveHost(): Promise<boolean> {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
 
+    setBusy(true)
+    setError('')
+    try {
+      // Re-fetch to preserve fields that aren't editable in this form. K8s
+      // replaceNamespacedCustomObject is a full replace, not a merge.
+      const currentHost = await getHost(routeName)
+      const currentLifecycle = currentHost.spec?.lifecycle
+      const currentWorkflowControl = currentHost.spec?.workflowControl
+      // Overview owns only identity/shape fields (name, display, context,
+      // channels, lifecycle). Model, secret, fallback policy and the per-host
+      // model allowlist are owned by the "Model & credentials" tab and are
+      // preserved here via the `...currentHost.spec` spread (full-replace
+      // semantics — omitting them is what keeps them intact).
+      const nextSpec: Record<string, unknown> = {
+        ...currentHost.spec,
+        host: hostDisplayDraft.trim() || nextHostName,
+        contextRef: contextRefDraft.trim(),
+        channels: channelsDraft,
+        // Echo spec.lifecycle explicitly: the admin facade full-replaces the
+        // spec, so leaving lifecycle implicit would strip the stateless flag.
+        ...(statelessDraft || currentLifecycle
+          ? { lifecycle: { ...currentLifecycle, stateless: statelessDraft } }
+          : {}),
+        ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
+          ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
+          : {}),
+      }
+
+      const formResourceVersion = formResourceVersionRef.current
+      await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
+        // AP-6: carry the resourceVersion captured at form load so the API
+        // rejects this save with 409 {error:'conflict'} if the Host changed
+        // while the operator was editing, instead of silently overwriting the
+        // concurrent change with this form's stale echo.
+        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+        spec: nextSpec,
+      })
+      // Refresh server-backed state and this tab's saved values without
+      // clobbering a still-open draft in "Model & credentials".
+      await loadData('overview')
+      showToast('Agent configuration saved.', { tone: 'success' })
+      return true
+    } catch (e) {
+      const status = (e as { status?: number } | null)?.status
+      const code = (e as { code?: string } | null)?.code
+      if (status === 409 && code === 'conflict') {
+        // AP-6 conflict: the Host changed between the form-load read and this
+        // save. The resourceVersion precondition is whole-object (K8s has no
+        // field-level precondition), so the true cause may be another operator's
+        // edit OR the agent's own lifecycle machine ticking (HCC bumping
+        // status.lifecycle / wake-requested on a stateless host). The 409 carries
+        // no field diff, so the message must cover both causes without asserting
+        // the wrong one — while keeping the reload + re-apply recovery.
+        setError(
+          "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
+        )
+      } else {
+        setError(e instanceof Error ? e.message : 'Failed to save agent')
+      }
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Scoped save for the "Model & credentials" tab. Owns provider/model,
+  // secretRef, the opt-in fallback policy, the per-host model allowlist, and
+  // write-only credential rotations/retirements. All other spec fields
+  // (identity, context, channels, lifecycle) are preserved via the
+  // `...currentHost.spec` spread (full-replace semantics).
+  async function saveModelAndCredentials(): Promise<boolean> {
     // Client-side mirror of control-api's write gate (spec R5.3): block a save
     // with an out-of-allowlist fallback model before the round-trip. Skip the
     // check when the allowlist failed to load (`allowedCatalog` empty) — every
-    // model would falsely flag as "not enabled", blocking unrelated Overview
-    // edits on a Host that merely has an llmPolicy; the backend 422 stays the
+    // model would falsely flag as "not enabled"; the backend 422 stays the
     // source of truth for that case (matching how spec.model has no client gate).
     if (llmPolicyDraft && allowedCatalog.length > 0) {
       const policyErrors = validateLlmPolicy(llmPolicyDraft, allowedCatalog)
@@ -424,7 +467,7 @@ export default function HostDetailsPage() {
     // already stored stays allowed. Enforced only when we have real key signal —
     // the Secret listed at least one key OR the operator typed a rotation. An
     // empty/unlisted key set is treated as unknown (the backend stays the source
-    // of truth), so an unrelated Overview edit is never blocked by stale listing.
+    // of truth), so the save is never blocked by stale listing.
     const primaryPresent = (dataKey: string): boolean =>
       (llmKeyDraft[dataKey] ?? '').trim().length > 0 || currentSecretKeys.includes(dataKey)
     const typedAnyCredential = Object.values(llmKeyDraft).some(value => value.trim().length > 0)
@@ -458,29 +501,15 @@ export default function HostDetailsPage() {
     setBusy(true)
     setError('')
     try {
-      // Re-fetch to preserve fields that aren't editable in this form. K8s
-      // replaceNamespacedCustomObject is a full replace, not a merge.
+      // Re-fetch to preserve fields outside this tab's domain (full replace).
       const currentHost = await getHost(routeName)
-      const currentLifecycle = currentHost.spec?.lifecycle
-      const currentWorkflowControl = currentHost.spec?.workflowControl
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
-        host: hostDisplayDraft.trim() || nextHostName,
-        contextRef: contextRefDraft.trim(),
         secretRef: secretRefDraft.trim(),
-        channels: channelsDraft,
         model: {
           provider: providerDraft,
           name: modelNameDraft.trim(),
         },
-        // Echo spec.lifecycle explicitly: the admin facade full-replaces the
-        // spec, so leaving lifecycle implicit would strip the stateless flag.
-        ...(statelessDraft || currentLifecycle
-          ? { lifecycle: { ...currentLifecycle, stateless: statelessDraft } }
-          : {}),
-        ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
-          ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
-          : {}),
       }
       // Opt-in fallback policy: set it when configured, otherwise drop it so a
       // Host with no policy stays exactly as today (full-replace semantics).
@@ -497,128 +526,6 @@ export default function HostDetailsPage() {
         nextSpec.allowedModels = effectiveAllowedModelsSpec
       } else {
         delete nextSpec.allowedModels
-      }
-
-      if (nextHostName !== routeName) {
-        let createdNewHost = false
-        const updatedChannels: Array<{ name: string; previousSpec: ChannelResource['spec'] }> = []
-        const previousUserAgentNamesById = new Map<string, string[]>()
-        const previousTeamAgentNamesById = new Map<string, string[]>()
-        try {
-          await apiSend('POST', '/api/v1/admin/hosts', {
-            metadata: { name: nextHostName },
-            spec: nextSpec,
-          })
-          createdNewHost = true
-
-          const channels = (await apiGet('/api/v1/admin/communication-channels')) as {
-            items?: ChannelResource[]
-          }
-          for (const channel of channels.items || []) {
-            if (String(channel.spec?.hostRef || '').trim() !== routeName) continue
-            const channelName = String(channel.metadata?.name || '').trim()
-            if (!channelName) continue
-            await apiSend(
-              'PUT',
-              `/api/v1/admin/communication-channels/${encodeURIComponent(channelName)}`,
-              {
-                spec: {
-                  ...(channel.spec || {}),
-                  hostRef: nextHostName,
-                },
-              }
-            )
-            updatedChannels.push({ name: channelName, previousSpec: channel.spec })
-          }
-
-          for (const user of usersWithAccess) {
-            const userAccess = await getAdminUserAgents(user.id)
-            const previousAgentNames = (userAccess.agentNames || [])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-            previousUserAgentNamesById.set(user.id, previousAgentNames)
-            const nextAgentNames = Array.from(
-              new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
-            )
-            await updateAdminUserAgents(user.id, nextAgentNames)
-          }
-
-          for (const team of teamsWithAccess) {
-            const teamAccess = await getAdminTeamAgents(team.id)
-            const previousAgentNames = (teamAccess.agentNames || [])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-            previousTeamAgentNamesById.set(team.id, previousAgentNames)
-            const nextAgentNames = Array.from(
-              new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
-            )
-            await updateAdminTeamAgents(team.id, nextAgentNames)
-          }
-
-          await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
-          showToast('Agent renamed and updated.', { tone: 'success' })
-          router.replace(CONTROL_ROUTES.agents.detail(nextHostName))
-          return true
-        } catch (renameError) {
-          const rollbackErrors: string[] = []
-          if (createdNewHost) {
-            for (const [teamId, previousAgentNames] of Array.from(
-              previousTeamAgentNamesById.entries()
-            ).reverse()) {
-              try {
-                await updateAdminTeamAgents(teamId, previousAgentNames)
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`team ${teamId}: ${rollbackMessage}`)
-              }
-            }
-            for (const [userId, previousAgentNames] of Array.from(
-              previousUserAgentNamesById.entries()
-            ).reverse()) {
-              try {
-                await updateAdminUserAgents(userId, previousAgentNames)
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`member ${userId}: ${rollbackMessage}`)
-              }
-            }
-            for (const channel of [...updatedChannels].reverse()) {
-              try {
-                await apiSend(
-                  'PUT',
-                  `/api/v1/admin/communication-channels/${encodeURIComponent(channel.name)}`,
-                  {
-                    spec: {
-                      ...(channel.previousSpec || {}),
-                      hostRef: routeName,
-                    },
-                  }
-                )
-              } catch (rollbackError) {
-                const rollbackMessage =
-                  rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-                rollbackErrors.push(`channel ${channel.name}: ${rollbackMessage}`)
-              }
-            }
-            try {
-              await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(nextHostName)}`)
-            } catch (rollbackError) {
-              const rollbackMessage =
-                rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
-              rollbackErrors.push(`agent ${nextHostName}: ${rollbackMessage}`)
-            }
-          }
-          if (rollbackErrors.length > 0) {
-            const renameMessage =
-              renameError instanceof Error ? renameError.message : 'Failed to rename agent'
-            throw new Error(`${renameMessage} (rollback issues: ${rollbackErrors.join('; ')})`)
-          }
-          throw renameError
-        }
       }
 
       const formResourceVersion = formResourceVersionRef.current
@@ -641,25 +548,22 @@ export default function HostDetailsPage() {
           ...(removeKeys.length > 0 ? { removeKeys } : {}),
         })
       }
-      await loadData()
-      showToast('Agent configuration saved.', { tone: 'success' })
+      // Refresh server-backed state and this tab's saved values without
+      // clobbering a still-open Overview draft.
+      await loadData('model')
+      showToast('Model & credentials saved.', { tone: 'success' })
       return true
     } catch (e) {
       const status = (e as { status?: number } | null)?.status
       const code = (e as { code?: string } | null)?.code
       if (status === 409 && code === 'conflict') {
-        // AP-6 conflict: the Host changed between the form-load read and this
-        // save. The resourceVersion precondition is whole-object (K8s has no
-        // field-level precondition), so the true cause may be another operator's
-        // edit OR the agent's own lifecycle machine ticking (HCC bumping
-        // status.lifecycle / wake-requested on a stateless host). The 409 carries
-        // no field diff, so the message must cover both causes without asserting
-        // the wrong one — while keeping the reload + re-apply recovery.
+        // AP-6 conflict (see saveHost for full rationale): the Host changed
+        // between the form-load read and this save. Reload to re-apply.
         setError(
           "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
         )
       } else {
-        setError(e instanceof Error ? e.message : 'Failed to save agent')
+        setError(e instanceof Error ? e.message : 'Failed to save model & credentials')
       }
       return false
     } finally {
@@ -681,8 +585,9 @@ export default function HostDetailsPage() {
         await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
           spec: nextSpec,
         })
-        // Reload so the section gets fresh initialTools on its next render
-        await loadData()
+        // Reload approval/server state while preserving any drafts left open
+        // in the Overview or Model tabs.
+        await loadData('none')
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to save approval tools')
         // Re-throw so HostApprovalSection.handleSave does NOT exit edit mode
@@ -695,125 +600,6 @@ export default function HostDetailsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [routeName]
   )
-
-  async function grantUserAccess() {
-    if (selectedUserIdsToGrant.length === 0 || hasPendingRename) return
-    setBusy(true)
-    setError('')
-    try {
-      await Promise.all(
-        selectedUserIdsToGrant.map(async userId => {
-          const current = await getAdminUserAgents(userId)
-          const next = Array.from(new Set([...(current.agentNames || []), routeName]))
-          await updateAdminUserAgents(userId, next)
-        })
-      )
-      const grantedUserIds = selectedUserIdsToGrant
-      const grantedUser = allUsers.find(u => u.id === grantedUserIds[0])
-      setSelectedUserIdsToGrant([])
-      const refreshed = await getAgentUsers(routeName)
-      setUsersWithAccess(Array.isArray(refreshed.items) ? refreshed.items : [])
-      showToast(
-        grantedUserIds.length === 1
-          ? `${grantedUser?.displayName || grantedUser?.name || grantedUserIds[0]} can now use this agent.`
-          : `${grantedUserIds.length} members can now use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to grant member access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function revokeUserAccess(userId: string) {
-    if (hasPendingRename) return
-    const user = usersWithAccess.find(item => item.id === userId)
-    const shouldRevoke = await confirm({
-      title: 'Revoke Member Access',
-      message: `Revoke ${user?.displayName || user?.name || user?.email || 'this member'}'s access to ${routeName}?`,
-      confirmLabel: 'Revoke',
-      tone: 'danger',
-    })
-    if (!shouldRevoke) return
-
-    setBusy(true)
-    setError('')
-    try {
-      const current = await getAdminUserAgents(userId)
-      const next = (current.agentNames || []).filter(name => name !== routeName)
-      await updateAdminUserAgents(userId, next)
-      const removedUser = usersWithAccess.find(u => u.id === userId)
-      setUsersWithAccess(prev => prev.filter(u => u.id !== userId))
-      showToast(
-        `${removedUser?.displayName || removedUser?.name || userId} can no longer use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to revoke member access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function grantTeamAccess() {
-    if (selectedTeamIdsToGrant.length === 0 || hasPendingRename) return
-    setBusy(true)
-    setError('')
-    try {
-      await Promise.all(
-        selectedTeamIdsToGrant.map(async teamId => {
-          const current = await getAdminTeamAgents(teamId)
-          const next = Array.from(new Set([...(current.agentNames || []), routeName]))
-          await updateAdminTeamAgents(teamId, next)
-        })
-      )
-      const grantedTeamIds = selectedTeamIdsToGrant
-      const grantedTeam = allTeams.find(t => t.id === grantedTeamIds[0])
-      setSelectedTeamIdsToGrant([])
-      const refreshed = await getAgentTeams(routeName)
-      setTeamsWithAccess(Array.isArray(refreshed.items) ? refreshed.items : [])
-      showToast(
-        grantedTeamIds.length === 1
-          ? `${grantedTeam?.name || grantedTeamIds[0]} can now use this agent.`
-          : `${grantedTeamIds.length} teams can now use this agent.`,
-        { tone: 'success' }
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to grant team access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function revokeTeamAccess(teamId: string) {
-    if (hasPendingRename) return
-    const team = teamsWithAccess.find(item => item.id === teamId)
-    const shouldRevoke = await confirm({
-      title: 'Revoke Team Access',
-      message: `Revoke ${team?.name || 'this team'}'s access to ${routeName}?`,
-      confirmLabel: 'Revoke',
-      tone: 'danger',
-    })
-    if (!shouldRevoke) return
-
-    setBusy(true)
-    setError('')
-    try {
-      const current = await getAdminTeamAgents(teamId)
-      const next = (current.agentNames || []).filter(name => name !== routeName)
-      await updateAdminTeamAgents(teamId, next)
-      const removedTeam = teamsWithAccess.find(t => t.id === teamId)
-      setTeamsWithAccess(prev => prev.filter(team => team.id !== teamId))
-      showToast(`${removedTeam?.name || teamId} can no longer use this agent.`, {
-        tone: 'success',
-      })
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to revoke team access')
-    } finally {
-      setBusy(false)
-    }
-  }
 
   async function deleteAgentPermanently() {
     setDeletingAgent(true)
@@ -837,18 +623,16 @@ export default function HostDetailsPage() {
       backLabel="Back to agents"
       error={error}
       icon={<IconRobot />}
-      notice={
-        hasPendingRename ? (
-          <div className="cu-banner cu-banner--warning">
-            Save agent rename before changing user or team access.
-          </div>
-        ) : null
-      }
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
       subtitle="Configuration and access for this agent."
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
+      contentClassName={
+        activeTab === 'advanced' || (activeTab === 'model' && editingModel)
+          ? 'cu-agent-detail-card'
+          : undefined
+      }
       tabs={HOST_TABS.map(tab => ({
         value: tab,
         label: TAB_LABELS[tab],
@@ -856,147 +640,263 @@ export default function HostDetailsPage() {
       }))}
       title={`Agent: ${routeName}`}
     >
-      {activeTab === 'details' && (
-        <>
-          {statelessRejectionMessage ? (
-            <div className="cu-banner cu-banner--warning" style={{ marginBottom: '1rem' }}>
-              <strong>Stateless mode rejected:</strong> {statelessRejectionMessage}
-            </div>
-          ) : null}
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
-              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                Agent configuration and settings.
-              </p>
-              {savedStateless && lifecycleState ? (
-                <span className="cu-chip">
-                  {`Lifecycle: ${lifecycleState}${
-                    lifecycleReason ? ` — ${friendlyLifecycleReason(lifecycleReason)}` : ''
-                  }`}
-                </span>
-              ) : null}
-            </div>
-            {!editingOverview && (
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setEditingOverview(true)}
-                disabled={busy}
+      <div className="cu-agent-detail-scroll">
+        {activeTab === 'details' && (
+          <>
+            {statelessRejectionMessage ? (
+              <div className="cu-banner cu-banner--warning" style={{ marginBottom: '1rem' }}>
+                <strong>Stateless mode rejected:</strong> {statelessRejectionMessage}
+              </div>
+            ) : null}
+            <div className="cu-agent-detail-heading">
+              <div
+                style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}
               >
-                Edit
-              </button>
-            )}
-          </div>
-          <div className="cu-form-stack">
-            <div className="cu-field">
-              <label htmlFor="host-name">Name</label>
-              {editingOverview ? (
-                <input
-                  id="host-name"
-                  value={hostNameDraft}
-                  onChange={e => setHostNameDraft(e.target.value)}
-                  disabled={busy}
-                  autoFocus
-                />
-              ) : (
-                <div className="cu-field__readonly">{hostNameDraft || routeName}</div>
-              )}
-            </div>
-            <div className="cu-field">
-              <label htmlFor="host-display">Display ID</label>
-              {editingOverview ? (
-                <input
-                  id="host-display"
-                  value={hostDisplayDraft}
-                  onChange={e => setHostDisplayDraft(e.target.value)}
-                  disabled={busy}
-                />
-              ) : (
-                <div className="cu-field__readonly">{hostDisplayDraft || '-'}</div>
-              )}
-            </div>
-            {!editingOverview && (
-              <div className="cu-field">
-                <label htmlFor="host-provider">Model provider</label>
-                <div className="cu-field__readonly">{getProviderLabel(providerDraft)}</div>
+                <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
+                  Agent configuration and settings.
+                </p>
+                {savedStateless && lifecycleState ? (
+                  <span className="cu-chip">
+                    {`Lifecycle: ${lifecycleState}${
+                      lifecycleReason ? ` — ${friendlyLifecycleReason(lifecycleReason)}` : ''
+                    }`}
+                  </span>
+                ) : null}
               </div>
-            )}
-            {!editingOverview && (
-              <div className="cu-field">
-                <label htmlFor="host-model">Model name</label>
-                <div className="cu-field__readonly">{modelNameDraft || '-'}</div>
-              </div>
-            )}
-            <div className="cu-field">
-              <label htmlFor="host-agent-type">Agent type</label>
-              {editingOverview ? (
-                <>
-                  <select
-                    id="host-agent-type"
-                    value={statelessDraft ? 'stateless' : 'stateful'}
-                    onChange={e => setStatelessDraft(e.target.value === 'stateless')}
+              <div className="cu-agent-detail-heading__actions">
+                {editingOverview ? (
+                  <>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => {
+                        // Discard any unsaved Overview edits before leaving edit
+                        // mode, so the read-only view and the next save reflect
+                        // the last SAVED state — not the abandoned draft.
+                        resetOverviewDrafts()
+                        setEditingOverview(false)
+                      }}
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--primary"
+                      onClick={async () => {
+                        // AP-6: stay in edit mode on failure so the operator's
+                        // draft survives alongside the error/conflict banner.
+                        if (await saveHost()) {
+                          setEditingOverview(false)
+                        }
+                      }}
+                      disabled={busy || !hostNameDraft.trim()}
+                    >
+                      {busy ? 'Saving…' : 'Save'}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--ghost cu-btn--sm"
+                    onClick={() => {
+                      // Defensive: start every edit session from the last SAVED
+                      // snapshot, so a stale draft never leaks into this Overview
+                      // save. resetOverviewDrafts deliberately leaves contextRef
+                      // untouched while the Context tab is mid-edit — that tab is a
+                      // legitimate live writer of contextRefDraft, not a stale
+                      // leftover, so its in-progress selection must be preserved.
+                      resetOverviewDrafts()
+                      setEditingOverview(true)
+                    }}
                     disabled={busy}
                   >
-                    <option value="stateful">Stateful (always on)</option>
-                    <option value="stateless">Stateless (suspends when idle)</option>
-                  </select>
-                  <span className="cu-field__hint">
-                    Stateless agents suspend after the idle window and wake on demand. Communication
-                    channels keep stateless agents always-on unless the cluster explicitly enables
-                    wake-on-interaction; desktop still requires a stateful agent.
-                  </span>
-                </>
-              ) : (
-                <div className="cu-field__readonly">
-                  {statelessDraft ? 'Stateless (suspends when idle)' : 'Stateful (always on)'}
-                </div>
-              )}
+                    Edit
+                  </button>
+                )}
+              </div>
             </div>
-            <div className="cu-field" style={{ marginBottom: 0 }}>
-              <label htmlFor="host-secret">Secret ref</label>
-              {editingOverview ? (
-                <select
-                  id="host-secret"
-                  value={secretRefDraft}
-                  onChange={e => setSecretRefDraft(e.target.value)}
+            <div className="cu-form-stack">
+              <div className="cu-field">
+                <label htmlFor="host-name">Name</label>
+                {editingOverview ? (
+                  <>
+                    <input id="host-name" value={hostNameDraft} readOnly />
+                    <span className="cu-field__hint">
+                      This is the agent identifier, not editable.
+                    </span>
+                  </>
+                ) : (
+                  <div className="cu-field__readonly">{hostNameDraft}</div>
+                )}
+              </div>
+              <div className="cu-field">
+                <label htmlFor="host-display">Display name</label>
+                {editingOverview ? (
+                  <input
+                    id="host-display"
+                    value={hostDisplayDraft}
+                    onChange={e => setHostDisplayDraft(e.target.value)}
+                    disabled={busy}
+                    autoFocus
+                  />
+                ) : (
+                  <div className="cu-field__readonly">{hostDisplayDraft}</div>
+                )}
+              </div>
+              <div className="cu-field" style={{ marginBottom: 0 }}>
+                <label htmlFor="host-agent-type">Type</label>
+                {editingOverview ? (
+                  <>
+                    <select
+                      id="host-agent-type"
+                      value={statelessDraft ? 'stateless' : 'stateful'}
+                      onChange={e => setStatelessDraft(e.target.value === 'stateless')}
+                      disabled={busy}
+                    >
+                      <option value="stateful">Stateful (always on)</option>
+                      <option value="stateless">Stateless (suspends when idle)</option>
+                    </select>
+                    <span className="cu-field__hint">
+                      Stateless agents suspend after the idle window and wake on demand.
+                      Communication channels keep stateless agents always-on unless the cluster
+                      explicitly enables wake-on-interaction; desktop still requires a stateful
+                      agent.
+                    </span>
+                  </>
+                ) : (
+                  <div className="cu-field__readonly">
+                    {statelessDraft ? 'Stateless (suspends when idle)' : 'Stateful (always on)'}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {!initialLoading && (
+              <div
+                style={{
+                  marginTop: '2rem',
+                  paddingTop: '1.25rem',
+                  borderTop: '1px solid var(--cu-border)',
+                }}
+              >
+                <p className="cu-section-title" style={{ marginBottom: '0.5rem' }}>
+                  Danger zone
+                </p>
+                <p className="cu-muted" style={{ fontSize: '0.8125rem', marginBottom: '0.75rem' }}>
+                  Permanently delete this agent and its direct access mappings.
+                </p>
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--ghost cu-btn--sm"
+                  style={{ color: 'var(--cu-danger)' }}
+                  onClick={() => {
+                    setDeleteAgentDialogError('')
+                    setShowDeleteAgentConfirm(true)
+                  }}
                   disabled={busy}
                 >
-                  <option value="">Select LLM secret</option>
-                  {availableSecrets.map(secretName => (
-                    <option key={secretName} value={secretName}>
-                      {secretName}
-                    </option>
-                  ))}
-                  {secretRefDraft && !availableSecrets.includes(secretRefDraft) ? (
-                    <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
-                  ) : null}
-                </select>
-              ) : (
-                <div className="cu-field__readonly">{secretRefDraft || '-'}</div>
-              )}
-            </div>
-          </div>
+                  Delete agent...
+                </button>
+              </div>
+            )}
+          </>
+        )}
 
-          <div
-            style={{
-              marginTop: '1.5rem',
-              paddingTop: '1.25rem',
-              borderTop: '1px solid var(--cu-border)',
-            }}
-          >
-            <p className="cu-section-title" style={{ marginBottom: '0.5rem' }}>
-              Model &amp; credentials
-            </p>
-            {editingOverview ? (
+        {activeTab === 'model' && (
+          <>
+            <div className={editingModel ? 'cu-agent-detail-toolbar' : 'cu-agent-detail-heading'}>
+              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
+                Provider, allowed models, fallback policy, and credentials for this agent.
+              </p>
+              <div
+                className={
+                  editingModel
+                    ? 'cu-agent-detail-toolbar__actions'
+                    : 'cu-agent-detail-heading__actions'
+                }
+              >
+                {editingModel ? (
+                  <>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => setEditingModel(false)}
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--primary"
+                      onClick={async () => {
+                        // AP-6: stay in edit mode on failure so the operator's
+                        // draft survives alongside the error/conflict banner.
+                        if (await saveModelAndCredentials()) {
+                          setEditingModel(false)
+                        }
+                      }}
+                      disabled={busy}
+                    >
+                      {busy ? 'Saving…' : 'Save'}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--ghost cu-btn--sm"
+                    onClick={() => setEditingModel(true)}
+                    disabled={busy}
+                  >
+                    Edit
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {!editingModel ? (
+              <div className="cu-form-stack">
+                <div className="cu-field">
+                  <label htmlFor="model-provider">Model provider</label>
+                  <div className="cu-field__readonly">{getProviderLabel(providerDraft)}</div>
+                </div>
+                <div className="cu-field">
+                  <label htmlFor="model-allowed">Allowed models</label>
+                  {allowedModelsSummary.length > 0 ? (
+                    <ul className="cu-llm-policy__summary">
+                      {allowedModelsSummary.map(entry => (
+                        <li key={entry.provider} className="cu-field__readonly">
+                          {getProviderLabel(entry.provider)} · {entry.models.join(', ')}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="cu-field__readonly">
+                      All models — this agent offers every enabled model for its provider(s).
+                    </div>
+                  )}
+                </div>
+                <div className="cu-field">
+                  <label htmlFor="model-secret">Secret reference</label>
+                  <div className="cu-field__readonly">{secretRefDraft || '-'}</div>
+                </div>
+                <div className="cu-field">
+                  <label htmlFor="model-fallback">Fallback policy</label>
+                  {llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0 ? (
+                    <ol className="cu-llm-policy__summary">
+                      {llmPolicyDraft.fallbacks.map((entry, index) => (
+                        <li key={index} className="cu-field__readonly">
+                          {getProviderLabel(entry.provider)} · {entry.model || '-'}
+                          {entry.credentialSlot ? ` · ${entry.credentialSlot}` : ''}
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <div className="cu-field__readonly">No fallback configured.</div>
+                  )}
+                </div>
+              </div>
+            ) : (
               <>
                 {retireCandidates.length > 0 ? (
                   <div className="cu-banner cu-banner--warning" style={{ marginBottom: '0.75rem' }}>
@@ -1014,6 +914,27 @@ export default function HostDetailsPage() {
                     </button>
                   </div>
                 ) : null}
+                <div className="cu-form-stack" style={{ marginBottom: '1rem' }}>
+                  <div className="cu-field">
+                    <label htmlFor="host-secret">Secret reference</label>
+                    <select
+                      id="host-secret"
+                      value={secretRefDraft}
+                      onChange={e => setSecretRefDraft(e.target.value)}
+                      disabled={busy}
+                    >
+                      <option value="">Select LLM secret</option>
+                      {availableSecrets.map(secretName => (
+                        <option key={secretName} value={secretName}>
+                          {secretName}
+                        </option>
+                      ))}
+                      {secretRefDraft && !availableSecrets.includes(secretRefDraft) ? (
+                        <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
+                      ) : null}
+                    </select>
+                  </div>
+                </div>
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
@@ -1028,6 +949,7 @@ export default function HostDetailsPage() {
                   catalog={allowedCatalog}
                   catalogLoading={modelsLoading}
                   catalogError={modelsError}
+                  replacePrimaryModelWithAllowedModels
                   credentials={{
                     draft: llmKeyDraft,
                     onChange: (dataKey, value) =>
@@ -1038,538 +960,118 @@ export default function HostDetailsPage() {
                   disabled={busy}
                 />
               </>
-            ) : llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0 ? (
-              <ol className="cu-llm-policy__summary">
-                {llmPolicyDraft.fallbacks.map((entry, index) => (
-                  <li key={index} className="cu-field__readonly">
-                    {getProviderLabel(entry.provider)} · {entry.model || '-'}
-                    {entry.credentialSlot ? ` · ${entry.credentialSlot}` : ''}
-                  </li>
-                ))}
-              </ol>
-            ) : (
-              <p className="cu-muted" style={{ fontSize: '0.8125rem', margin: 0 }}>
-                No fallback configured.
-              </p>
             )}
-            {!editingOverview ? (
-              <div style={{ marginTop: '0.75rem' }}>
-                <p className="cu-muted" style={{ fontSize: '0.75rem', margin: '0 0 0.35rem' }}>
-                  Allowed models
-                </p>
-                {allowedModelsSummary.length > 0 ? (
-                  <ul className="cu-llm-policy__summary">
-                    {allowedModelsSummary.map(entry => (
-                      <li key={entry.provider} className="cu-field__readonly">
-                        {getProviderLabel(entry.provider)} · {entry.models.join(', ')}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="cu-muted" style={{ fontSize: '0.8125rem', margin: 0 }}>
-                    All models — this agent offers every enabled model for its provider(s).
-                  </p>
-                )}
-              </div>
-            ) : null}
-          </div>
+          </>
+        )}
 
-          {editingOverview && (
-            <div className="cu-save-bar">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setEditingOverview(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  // AP-6: stay in edit mode on failure so the operator's
-                  // draft survives alongside the error/conflict banner.
-                  if (await saveHost()) {
-                    setEditingOverview(false)
-                  }
-                }}
-                disabled={busy || !hostNameDraft.trim()}
-              >
-                {busy ? 'Saving…' : 'Save'}
-              </button>
-            </div>
-          )}
+        {activeTab === 'advanced' && (
+          <HostAdvancedTab
+            busy={busy}
+            hostName={routeName}
+            initialLoading={initialLoading}
+            initialTools={approvalToolsData}
+            onSaveApprovalTools={persistApprovalTools}
+          />
+        )}
 
-          {!initialLoading && (
-            <HostApprovalSection
-              initialTools={approvalToolsData}
-              onSave={persistApprovalTools}
-              busy={busy}
-              canWrite={
-                true /* TODO: wire to actual host:write check if/when per-field RBAC lands */
-              }
-            />
-          )}
-
-          {!initialLoading && (
-            <div
-              style={{
-                marginTop: '2rem',
-                paddingTop: '1.25rem',
-                borderTop: '1px solid var(--cu-border)',
-              }}
-            >
-              <p className="cu-section-title" style={{ marginBottom: '0.5rem' }}>
-                Danger zone
-              </p>
-              <p className="cu-muted" style={{ fontSize: '0.8125rem', marginBottom: '0.75rem' }}>
-                Permanently delete this agent and its direct access mappings.
-              </p>
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                style={{ color: 'var(--cu-danger)' }}
-                onClick={() => {
-                  setDeleteAgentDialogError('')
-                  setShowDeleteAgentConfirm(true)
-                }}
-                disabled={busy}
-              >
-                Delete agent...
-              </button>
-            </div>
-          )}
-        </>
-      )}
-
-      {activeTab === 'contexts' && (
-        <>
-          <p className="cu-muted" style={{ fontSize: '0.875rem', marginBottom: '1rem' }}>
-            Associated context for this agent.
-          </p>
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band cu-table--static-rows">
-              <thead>
-                <tr>
-                  <th>Context</th>
-                  <th className="cu-table__col-actions">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {initialLoading ? (
-                  <tr>
-                    <td colSpan={2} className="cu-empty">
-                      Loading…
-                    </td>
-                  </tr>
-                ) : (
-                  <tr>
-                    <td>
-                      {editingContext ? (
-                        <select
-                          className="cu-input cu-host-context-select"
-                          value={contextRefDraft}
-                          onChange={e => setContextRefDraft(e.target.value)}
-                          disabled={busy}
-                          autoFocus
-                          onKeyDown={e => {
-                            if (e.key === 'Escape') {
-                              setEditingContext(false)
-                            }
-                          }}
-                        >
-                          <option value="">Select context</option>
-                          {availableContexts.map(contextId => (
-                            <option key={contextId} value={contextId}>
-                              {contextId}
-                            </option>
-                          ))}
-                        </select>
-                      ) : contextRefDraft.trim() ? (
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() =>
-                            router.push(CONTROL_ROUTES.contexts.detail(contextRefDraft.trim()))
-                          }
-                        >
-                          {contextRefDraft}
-                        </button>
-                      ) : (
-                        <span className="cu-table__cell-muted">No context selected</span>
-                      )}
-                    </td>
-                    <td className="cu-table__cell-actions">
-                      {editingContext ? (
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          onClick={async () => {
-                            if (await saveHost()) {
-                              setEditingContext(false)
-                            }
-                          }}
-                          disabled={busy}
-                          aria-label="Save context"
-                          title="Save context"
-                        >
-                          <IconCheck width={16} height={16} />
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          onClick={() => setEditingContext(true)}
-                          disabled={busy}
-                          aria-label="Edit context"
-                          title="Edit context"
-                        >
-                          <IconPencil width={16} height={16} />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-
-      {activeTab === 'env' && <HostEnvTable hostRef={routeName} />}
-
-      {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
-
-      {activeTab === 'users' && (
-        <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Grant or revoke which members can use this agent.
+        {activeTab === 'contexts' && (
+          <>
+            <p className="cu-muted" style={{ fontSize: '0.875rem', marginBottom: '1rem' }}>
+              Associated context for this agent.
             </p>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddUser(true)}
-              disabled={busy || hasPendingRename}
-            >
-              Add member
-            </button>
-          </div>
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <th>Member</th>
-                  <th className="cu-table__col-actions">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {initialLoading ? (
-                  [1, 2, 3].map(i => (
-                    <tr key={i}>
-                      <td>
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '10rem' }}
-                        ></div>
-                      </td>
-                      <td></td>
-                    </tr>
-                  ))
-                ) : usersWithAccess.length === 0 ? (
+            <div className="cu-table-wrap">
+              <table className="cu-table cu-table--header-band cu-table--static-rows">
+                <thead>
                   <tr>
-                    <td colSpan={2} className="cu-empty">
-                      No members have access yet.
-                    </td>
+                    <th>Context</th>
+                    <th className="cu-table__col-actions">Actions</th>
                   </tr>
-                ) : (
-                  usersWithAccess.map(user => (
-                    <tr key={user.id}>
-                      <td>
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.user(user.id))}
-                        >
-                          {user.displayName || user.name || user.email}
-                        </button>
+                </thead>
+                <tbody>
+                  {initialLoading ? (
+                    <tr>
+                      <td colSpan={2} className="cu-empty">
+                        Loading…
                       </td>
-                      <td className="cu-table__cell-actions">
-                        <div className="cu-row-actions">
+                    </tr>
+                  ) : (
+                    <tr>
+                      <td>
+                        {editingContext ? (
+                          <select
+                            className="cu-input cu-host-context-select"
+                            value={contextRefDraft}
+                            onChange={e => setContextRefDraft(e.target.value)}
+                            disabled={busy}
+                            autoFocus
+                            onKeyDown={e => {
+                              if (e.key === 'Escape') {
+                                setEditingContext(false)
+                              }
+                            }}
+                          >
+                            <option value="">Select context</option>
+                            {availableContexts.map(contextId => (
+                              <option key={contextId} value={contextId}>
+                                {contextId}
+                              </option>
+                            ))}
+                          </select>
+                        ) : contextRefDraft.trim() ? (
                           <button
                             type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void revokeUserAccess(user.id)}
-                            disabled={busy || hasPendingRename}
-                            title="Revoke"
-                            aria-label="Revoke member access"
+                            className="cu-link"
+                            onClick={() =>
+                              router.push(CONTROL_ROUTES.contexts.detail(contextRefDraft.trim()))
+                            }
                           >
-                            <IconX width={16} height={16} />
+                            {contextRefDraft}
                           </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-
-      {activeTab === 'teams' && (
-        <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Grant or revoke team-level access to this agent.
-            </p>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddTeam(true)}
-              disabled={busy || hasPendingRename}
-            >
-              Add team
-            </button>
-          </div>
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <th>Team</th>
-                  <th className="cu-table__col-actions">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {initialLoading ? (
-                  [1, 2, 3].map(i => (
-                    <tr key={i}>
-                      <td>
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '10rem' }}
-                        ></div>
-                      </td>
-                      <td></td>
-                    </tr>
-                  ))
-                ) : teamsWithAccess.length === 0 ? (
-                  <tr>
-                    <td colSpan={2} className="cu-empty">
-                      No teams have access yet.
-                    </td>
-                  </tr>
-                ) : (
-                  teamsWithAccess.map(team => (
-                    <tr key={team.id}>
-                      <td>
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.team(team.id))}
-                        >
-                          {team.name}
-                        </button>
+                        ) : (
+                          <span className="cu-table__cell-muted">No context selected</span>
+                        )}
                       </td>
                       <td className="cu-table__cell-actions">
-                        <div className="cu-row-actions">
+                        {editingContext ? (
                           <button
                             type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void revokeTeamAccess(team.id)}
-                            disabled={busy || hasPendingRename}
-                            title="Revoke"
-                            aria-label="Revoke team access"
+                            className="cu-btn cu-btn--icon cu-btn--toolbar"
+                            onClick={async () => {
+                              if (await saveHost()) {
+                                setEditingContext(false)
+                              }
+                            }}
+                            disabled={busy}
+                            aria-label="Save context"
+                            title="Save context"
                           >
-                            <IconX width={16} height={16} />
+                            <IconCheck width={16} height={16} />
                           </button>
-                        </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--toolbar"
+                            onClick={() => setEditingContext(true)}
+                            disabled={busy}
+                            aria-label="Edit context"
+                            title="Edit context"
+                          >
+                            <IconPencil width={16} height={16} />
+                          </button>
+                        )}
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-      {showAddUser && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddUser(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-user-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-user-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add member
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddUser(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
+                  )}
+                </tbody>
+              </table>
             </div>
+          </>
+        )}
 
-            <div className="cu-field">
-              <label htmlFor="agent-member-picker">Members</label>
-              <SelectionDropdown
-                id="agent-member-picker"
-                inline
-                value={selectedUserIdsToGrant}
-                onChange={setSelectedUserIdsToGrant}
-                options={memberGrantOptions}
-                placeholder="Select members"
-                searchPlaceholder="Search members..."
-                selectionLabel="Selected members"
-                emptyLabel="No available members."
-                disabled={busy || hasPendingRename}
-              />
-            </div>
+        {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
 
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddUser(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  await grantUserAccess()
-                  setShowAddUser(false)
-                }}
-                disabled={busy || selectedUserIdsToGrant.length === 0 || hasPendingRename}
-              >
-                {selectedUserIdsToGrant.length > 1 ? 'Add members' : 'Add member'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showAddTeam && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddTeam(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-team-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-team-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add team
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="agent-team-picker">Teams</label>
-              <SelectionDropdown
-                id="agent-team-picker"
-                inline
-                value={selectedTeamIdsToGrant}
-                onChange={setSelectedTeamIdsToGrant}
-                options={teamGrantOptions}
-                placeholder="Select teams"
-                searchPlaceholder="Search teams..."
-                selectionLabel="Selected teams"
-                emptyLabel="No available teams."
-                disabled={busy || hasPendingRename}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  await grantTeamAccess()
-                  setShowAddTeam(false)
-                }}
-                disabled={busy || selectedTeamIdsToGrant.length === 0 || hasPendingRename}
-              >
-                {selectedTeamIdsToGrant.length > 1 ? 'Add teams' : 'Add team'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
+        {activeTab === 'access' && <HostAccessTab hostName={routeName} />}
+      </div>
       {showDeleteAgentConfirm && (
         <div
           style={{

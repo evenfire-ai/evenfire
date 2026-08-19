@@ -8,6 +8,7 @@ import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { FormField } from '@components/FormField'
+import { useProfileAccess } from '@components/ProfileAccessContext'
 import { ProfileShell } from '@components/ProfileShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconMembers } from '@components/Sidebar/icons'
@@ -15,7 +16,7 @@ import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
-import { getManageableTeams, inviteManagedMember, isSilentApiError } from '@lib/api'
+import { inviteManagedMember } from '@lib/api'
 import {
   formatTeamRole,
   permissionsForTeamRole,
@@ -42,13 +43,16 @@ const STEP_DETAILS = [
 export default function InviteMemberPage() {
   const router = useRouter()
   const { showToast } = useToast()
+  const {
+    manageableTeams: teams,
+    manageableTeamsError,
+    manageableTeamsLoading: loadingTeams,
+  } = useProfileAccess()
   const hasFocusedInitialFieldRef = useRef(false)
   const [step, setStep] = useState(0)
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
-  const [teams, setTeams] = useState<ManageableTeam[]>([])
   const [inviteRoles, setInviteRoles] = useState<Record<string, Role>>({})
-  const [loadingTeams, setLoadingTeams] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const emailValid = EMAIL_PATTERN.test(email.trim())
@@ -72,27 +76,6 @@ export default function InviteMemberPage() {
   )
   const canSubmit = nameValid && emailValid && selectedTeams.length > 0 && !saving && !loadingTeams
   const canContinue = step === 0 ? nameValid && emailValid : !loadingTeams
-
-  useEffect(() => {
-    let cancelled = false
-    async function loadTeams() {
-      setLoadingTeams(true)
-      setError('')
-      try {
-        const response = await getManageableTeams()
-        if (!cancelled) setTeams(Array.isArray(response.items) ? response.items : [])
-      } catch (nextError) {
-        if (cancelled || isSilentApiError(nextError)) return
-        setError(nextError instanceof Error ? nextError.message : 'Failed to load teams')
-      } finally {
-        if (!cancelled) setLoadingTeams(false)
-      }
-    }
-    void loadTeams()
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   useEffect(() => {
     if (loadingTeams || saving || hasFocusedInitialFieldRef.current) return
@@ -244,6 +227,9 @@ export default function InviteMemberPage() {
                 </div>
               ) : null}
 
+              {manageableTeamsError ? (
+                <div className="message message--error">Failed to load teams</div>
+              ) : null}
               {error ? <div className="message message--error">{error}</div> : null}
 
               <div className="cu-create-actions">

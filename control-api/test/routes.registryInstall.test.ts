@@ -68,6 +68,27 @@ function makeApp(gateway?: MockGateway) {
   return app
 }
 
+/**
+ * Seed the `evenfire-registry-pull` Secret an operator provisions on a managed cluster.
+ *
+ * This file runs in the default `managed` connection mode, where control-api writes that
+ * Secret for nobody — but a platform-registry image still makes the install VERIFY that
+ * the operator's copy is present and usable, and refuse before persisting when it is not
+ * (registryPullSecretService). Without this seed those installs 409, and the suites below
+ * stop being about what they are about: which images get an imagePullSecrets reference.
+ */
+function seedOperatorPullSecret(gw: MockGateway, host: string, namespace = 'mcp-server'): void {
+  const auth = Buffer.from('_:operator-key').toString('base64')
+  gw.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, namespace, {
+    type: 'kubernetes.io/dockerconfigjson',
+    data: {
+      '.dockerconfigjson': Buffer.from(
+        JSON.stringify({ auths: { [host]: { username: '_', password: 'operator-key', auth } } })
+      ).toString('base64'),
+    },
+  })
+}
+
 function internalSiblingRecipeYaml(dns = 'db.sandbox-recipes.svc.cluster.local'): string {
   return JSON.stringify({
     spec: {
@@ -1372,6 +1393,40 @@ describe('POST /admin/registry/install', () => {
       })
       .expect(404)
   })
+
+  it('installing an McpServer preserves spec.displayName on the target context (R4-B4)', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_NONE)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+
+    const gw = new MockGateway('mcp-server')
+    // Seed a context that ALREADY carries displayName plus an existing allowlist
+    // entry — displayName is the additive field the allowlist update must not
+    // drop when it rebuilds the context spec.
+    await gw.createResource('contexts', {
+      metadata: { name: 'ctx-keep' },
+      spec: { contextId: 'ctx-keep', mcpServers: ['srv-other'], displayName: 'Keep Me' },
+    })
+    const app = makeApp(gw)
+
+    await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'ctx-keep',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+      })
+      .expect(201)
+
+    // Observable result (T4): re-read the persisted context. displayName survived
+    // and the new server joined the allowlist alongside the pre-existing one.
+    const ctx = (await gw.getResource('contexts', 'ctx-keep', 'mcp-server')) as {
+      spec: { displayName?: string; mcpServers?: string[] }
+    }
+    expect(ctx.spec.displayName).toBe('Keep Me')
+    expect(ctx.spec.mcpServers).toEqual(['srv-other', 'my-airtable'])
+  })
 })
 
 describe('POST /admin/registry/install — image allowlist enforce (2.3)', () => {
@@ -1436,6 +1491,7 @@ describe('POST /admin/registry/install — evenfire imagePullSecrets attach', ()
       metadata: { name: 'default-context' },
       spec: { contextId: 'default-context', mcpServers: [] },
     })
+    seedOperatorPullSecret(gw, 'example.com')
     return { app: makeApp(gw), gw }
   }
 
@@ -1560,6 +1616,7 @@ describe('POST /admin/registry/install — evenfire imageRef identity (2.5)', ()
       metadata: { name: 'default-context' },
       spec: { contextId: 'default-context', mcpServers: [] },
     })
+    seedOperatorPullSecret(gw, 'example.com')
     return { app: makeApp(gw), gw }
   }
 
@@ -2788,6 +2845,38 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
 
     await request(app).delete('/admin/registry/uninstall/INVALID').expect(400)
   })
+
+  it('uninstalling an McpServer preserves spec.displayName on referencing contexts (R4-B5)', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('mcpservers', {
+      metadata: { name: 'srv-target' },
+      spec: { image: 'test:1.0' },
+    })
+    // Context references the server being uninstalled AND carries displayName —
+    // the additive field the allowlist-pruning rebuild must not drop.
+    await gw.createResource('contexts', {
+      metadata: { name: 'ctx-keep' },
+      spec: {
+        contextId: 'ctx-keep',
+        mcpServers: ['srv-target', 'srv-other'],
+        displayName: 'Keep Me',
+      },
+    })
+    // Suppress makeApp's default installed-srv/ctx1 seed so the store holds only
+    // the fixtures this assertion cares about.
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const { app } = makeApp(gw)
+
+    await request(app).delete('/admin/registry/uninstall/srv-target').expect(200)
+
+    // Observable result (T4): re-read the persisted context. displayName survived
+    // and only the uninstalled server left the allowlist.
+    const ctx = (await gw.getResource('contexts', 'ctx-keep', 'mcp-server')) as {
+      spec: { displayName?: string; mcpServers?: string[] }
+    }
+    expect(ctx.spec.displayName).toBe('Keep Me')
+    expect(ctx.spec.mcpServers).toEqual(['srv-other'])
+  })
 })
 
 // ── Upgrade flow (§9.4) ─────────────────────────────────────────────────────
@@ -3199,6 +3288,7 @@ describe('POST /admin/registry/upgrade — evenfire imagePullSecrets recompute',
         ...existingSpecPatch,
       },
     })
+    seedOperatorPullSecret(gw, 'example.com')
     return { app: makeApp(gw), gw }
   }
 
@@ -3319,6 +3409,7 @@ describe('POST /admin/registry/upgrade — evenfire imageRef identity (2.5)', ()
         },
       },
     })
+    seedOperatorPullSecret(gw, 'example.com')
     return { app: makeApp(gw), gw }
   }
 

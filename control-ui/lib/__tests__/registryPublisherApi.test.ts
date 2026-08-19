@@ -104,7 +104,7 @@ describe('registry publisher api', () => {
 
   // Field-naming tolerance: the control-api proxy forwards registry items
   // verbatim, and the registry catalog convention is snake_case. The wrappers
-  // must normalize either casing to canonical camelCase so ShareAccessPanel's
+  // must normalize either casing to canonical camelCase so GrantAccessModal's
   // pluginName filter and the grant rows don't silently break.
   it('listOrgGrants normalizes snake_case grant items to camelCase', async () => {
     fetchMock.mockResolvedValueOnce(

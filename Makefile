@@ -41,12 +41,15 @@ SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	profile-ui \
 	desktop-app \
+	profile-ui \
 	mcp-servers \
+	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk
 
-# Services that have unit tests (vitest)
+# Services that have unit tests
 TEST_SERVICES := \
 	workflow-approval-request-reader \
 	mcp-host \
@@ -59,15 +62,26 @@ TEST_SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	profile-ui \
 	desktop-app \
 	mcp-servers \
+	packages/desktop-app-links \
 	packages/workflow-runtime-core \
-	packages/workflow-sdk
+	packages/workflow-sdk \
+	packages/network-policy-core
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
 # ── Optional OSS-launch tooling (public snapshot / infra carve) — monorepo-only
 -include Makefile.oss
+
+# ── Prerequisites ────────────────────────────────────────────────────
+.PHONY: prereqs
+prereqs: ## Check every dependency for minikube-setup up front (Docker/minikube/kubectl/node/…) with per-platform install commands
+	@bash scripts/check-prereqs.sh
+
+.PHONY: doctor
+doctor: prereqs ## Alias for 'prereqs'
 
 # ── Install ──────────────────────────────────────────────────────────
 .PHONY: install-git-hooks
@@ -137,18 +151,39 @@ minikube-start: ## Start minikube cluster (starts Docker Desktop if needed)
 minikube-stop: ## Stop minikube cluster
 	minikube stop -p $(MINIKUBE_PROFILE)
 
+# Images come from ghcr by default: `make minikube-setup` on a clean clone
+# pulls ~25 published images instead of building 28 from source. Build
+# everything locally with `make minikube-setup-local` (or IMAGE_SOURCE=local).
+IMAGE_SOURCE ?= ghcr
+
 .PHONY: minikube-setup
-minikube-setup: ## Clean install from scratch (rebuilds the DB; REUSE_DB=true keeps it). SKIP_UIS=true omits Control/Profile UI. Needs ADMIN_PASSWORD in .env.
+minikube-setup: ## Clean install from scratch, PULLING published images (IMAGE_SOURCE=local or `make minikube-setup-local` builds instead). Rebuilds the DB; REUSE_DB=true keeps it. SKIP_UIS=true omits Control/Profile UI. Runs 'prereqs' first (SKIP_PREREQS=true to bypass). Needs ADMIN_PASSWORD in .env.
+	@if [ "$(SKIP_PREREQS)" != "true" ]; then $(MAKE) --no-print-directory prereqs; fi
 	@MINIKUBE_SKIP_UIS="$(SKIP_UIS)" MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" REUSE_DB="$(REUSE_DB)" \
+		IMAGE_SOURCE="$(IMAGE_SOURCE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
 		scripts/minikube/full-setup.sh $(ARGS)
 
+.PHONY: minikube-setup-local
+minikube-setup-local: ## Clean install building every image from source (the pre-2026-08 behaviour; ~20 min on a clean clone). Use when you are changing service code, or when no published image exists for your platform.
+	@$(MAKE) --no-print-directory minikube-setup IMAGE_SOURCE=local
+
 .PHONY: minikube-setup-e2e
-minikube-setup-e2e: ## Full setup + E2E fixtures (test user, e2e-* recipes, demo MCP servers).
+minikube-setup-e2e: ## Full setup + E2E fixtures (test user, e2e-* recipes, demo MCP servers). Pulls published images, then builds the two unpublished E2E coordinator fixtures.
 	@$(MAKE) --no-print-directory minikube-setup SEED_PROFILE=e2e
+	@if [ "$(IMAGE_SOURCE)" = "ghcr" ]; then \
+		echo "Building the two unpublished E2E coordinator fixtures..."; \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e; \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-plugin-sdk-e2e; \
+	fi
 
 .PHONY: minikube-teardown
 minikube-teardown: ## Remove deployments (keep namespaces/CRDs)
 	@scripts/minikube/teardown.sh
+
+.PHONY: minikube-pull-images
+minikube-pull-images: ## Pull ALL published images into minikube at the pinned release tag (MINIKUBE_IMAGE_TAG=<tag> overrides the pin for this run only)
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+		scripts/minikube/pull-images.sh
 
 .PHONY: minikube-build-images
 minikube-build-images: ## Build and load ALL Docker images into minikube (with SHA verification)
@@ -159,8 +194,10 @@ minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator 
 	@scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
 
 .PHONY: minikube-verify-images
-minikube-verify-images: ## Verify all image SHAs match between local Docker and minikube
-	@scripts/minikube/build-images.sh --verify-only
+minikube-verify-images: ## Verify every image the cluster runs is present. The mode comes from deploy/minikube/.image-manifest.json (what was actually built/pulled), not from IMAGE_SOURCE; SEED_PROFILE=e2e also checks the two E2E fixtures.
+	@IMAGE_SOURCE="$(IMAGE_SOURCE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+		MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" \
+		scripts/minikube/build-images.sh --verify-only
 
 .PHONY: minikube-verify
 minikube-verify: ## Verify all McpServers have resolved envSecrets (standalone smoke check)
@@ -186,7 +223,30 @@ minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml w
 .PHONY: minikube-deploy-all
 minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
-	kubectl --context=$(MINIKUBE_PROFILE) kustomize deploy/overlays/minikube | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
+	@CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-gfs-writer-secret.sh
+	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
+	@writer_dsn="$$(kubectl --context=$(MINIKUBE_PROFILE) -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')" || { \
+		echo "[minikube-deploy-all] failed to classify the existing GFS writer Secret; refusing HCC cutover" >&2; exit 1; \
+	}; \
+	if [ -n "$$writer_dsn" ]; then \
+		kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1 || { \
+			echo "[minikube-deploy-all] existing GFS writer detected but control-api is not Ready; refusing HCC cutover" >&2; exit 1; \
+		}; \
+		CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
+	else \
+		echo "[minikube-deploy-all] fresh bootstrap: reader staging deferred until post-migration full-setup (GFSC fail-closed)"; \
+	fi
+	@# THE OVERLAY FOLLOWS THE CLUSTER, NOT THIS SHELL. Hardcoding
+	@# deploy/overlays/minikube applied clerum/*:test image refs to a cluster
+	@# that pulled ghcr release images: nothing ever built those tags there, so
+	@# a deploy/*-only change produced cluster-wide ImagePullBackOff, and a
+	@# pre-gate full-deployment silently flipped a ghcr cluster to local refs
+	@# with no record. image-mode.sh resolves it from what the last image
+	@# acquisition recorded. It runs HERE, after minikube-detect-k8s-api-ip
+	@# above, because an overridden tag renders from a copy of deploy/ that must
+	@# already contain the generated k8s-api-ip.yaml.
+	render_dir="$$(bash scripts/minikube/image-mode.sh --render-dir)" && \
+		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
 	CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-inter-service-tokens.sh
 	$(KC) apply -f deploy/overlays/minikube/instances/
 	@# Kustomize reapplies the persisted mcp-host ConfigMap, which can overwrite
@@ -194,9 +254,8 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# rpc-proxy-secrets after each full overlay apply so Desktop/rpc-proxy/mcp-host
 	@# stay on the same JWT validation key.
 	@$(MAKE) --no-print-directory minikube-sync-auth-key
-	@# The overlay apply may recreate/replace the gfs-controller-db Secret (and
-	@# the one-time transition to the provisioning-owned connection-string key
-	@# removes the legacy empty key from last-applied). When the GFS stack is
+	@# The pre-overlay helper migrates legacy last-applied ownership without
+	@# removing the provisioning-owned connection-string. When the GFS stack is
 	@# deployed AND control-api is Ready (migration 0048 applied), re-provision
 	@# the gfs_controller DSN so gfsc never runs with an empty or stale
 	@# credential (issue #775). Fails loud if provisioning itself fails. When
@@ -205,7 +264,8 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# it after control-api migrations.
 	@if kubectl --context=$(MINIKUBE_PROFILE) get configmap gfs-config -n gfs >/dev/null 2>&1; then \
 		if kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then \
-			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/provision-gfs-db.sh; \
+			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/wait-gfsc-secret-references.sh; \
+			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
 		else \
 			echo "[minikube-deploy-all] control-api not Ready — gfs DSN provisioning DEFERRED to full-setup/pre-gate-sync ordering (gfsc stays fail-closed until then)"; \
 		fi; \
@@ -257,10 +317,11 @@ minikube-restart-deploy: ## Restart a single deployment without rebuilding (usag
 # KEY INVARIANT: After generating new keys, the public key must be in sync across:
 #   1. rpc-proxy-secrets (namespace: rpc-proxy)  → RPC_PROXY_JWT_PUBLIC_KEY
 #   2. mcp-host-config   (namespace: mcp-host)   → CLERUM_AUTH_JWT_PUBLIC_KEY
-#   3. deploy/overlays/minikube/configmaps/mcp-host-config.yaml  (persisted in repo)
+#   3. gfs-config        (namespace: gfs)        → jwt-public-key
+#   4. deploy/overlays/minikube/configmaps/mcp-host-config.yaml  (persisted in repo)
 #
 # Use `make minikube-sync-auth-key` to copy the public key automatically
-# from rpc-proxy-secrets into mcp-host-config after key regeneration.
+# from rpc-proxy-secrets into both runtime ConfigMaps after key regeneration.
 #
 .PHONY: minikube-gen-keys
 minikube-gen-keys: ## Generate JWT signing keys + auto-sync to mcp-host-config
@@ -293,23 +354,16 @@ minikube-apply-secrets: ## Apply all secrets to cluster (LLM keys read from .env
 	else \
 	  echo "Channel file not present; per-Host channel values are managed through Control UI/control-api."; \
 	fi
-	@# LLM API keys — read from the main checkout .env when running from a worktree
-	@ENV_FILE=""; GIT_COMMON_DIR="$$(git rev-parse --git-common-dir 2>/dev/null || true)"; if [ -n "$$GIT_COMMON_DIR" ]; then case "$$GIT_COMMON_DIR" in /*) GIT_COMMON_ABS="$$GIT_COMMON_DIR" ;; *) GIT_COMMON_ABS="$$(cd "$$GIT_COMMON_DIR" && pwd)" ;; esac; MAIN_REPO_DIR="$$(cd "$$GIT_COMMON_ABS/.." && pwd)"; if [ -f "$$MAIN_REPO_DIR/.env" ]; then ENV_FILE="$$MAIN_REPO_DIR/.env"; fi; fi; if [ -z "$$ENV_FILE" ] && [ -f .env ]; then ENV_FILE=".env"; fi; if [ -f "$$ENV_FILE" ]; then set -a && . "$$ENV_FILE" && set +a; fi; \
-	  kubectl --context=$(MINIKUBE_PROFILE) create secret generic chatllm-api-keys \
-	    --namespace=mcp-host \
-	    --from-literal=openai-api-key="$${OPENAI_API_KEY:-sk-test-placeholder-openai-key-00000000000000000000}" \
-	    --from-literal=claude-api-key="$${CLAUDE_API_KEY:-sk-ant-api03-test-placeholder-claude-key-000000000000000000000000000000000000000000000000000000}" \
-	    --from-literal=zai-api-key="$${ZAI_API_KEY:-zai-test-placeholder-zai-key-00000000000000000000}" \
-	    --from-literal=bailian-api-key="$${BAILIAN_API_KEY:-sk-test-placeholder-bailian-key-00000000000000000000}" \
-	    --dry-run=client -o yaml | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
-	@echo "  LLM API keys applied (provider: $${CLERUM_MODEL_PROVIDER:-zai})"
+	@# LLM API keys — all 21 providers from the registry; reads the main checkout
+	@# .env when running from a worktree. Original four keep placeholder fallbacks.
+	@CONTEXT=$(MINIKUBE_PROFILE) bash scripts/minikube/apply-llm-secret.sh
 
 .PHONY: minikube-apply-namespaces
 minikube-apply-namespaces: ## Create all namespaces
 	$(KC) apply -f deploy/base/namespaces.yaml
 
 .PHONY: minikube-sync-auth-key
-minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets -> mcp-host-config only when drift exists
+minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets into runtime ConfigMaps when drift exists
 	@bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE)
 
 .PHONY: minikube-sync-auth-key-if-present
@@ -365,6 +419,33 @@ minikube-pf-all-bg: ## Refresh background port-forwards for gate automation
 .PHONY: minikube-pre-gate-sync
 minikube-pre-gate-sync: ## Enforce minikube sync before a gate (use GATE=<name>)
 	@scripts/minikube/pre-gate-sync.sh --gate "$${GATE:-manual}" $(ARGS)
+
+.PHONY: test-gfs-real-postgres-minikube
+test-gfs-real-postgres-minikube: ## Run GFS T1 real-Postgres suites against a validated branch-owned Minikube profile
+	@CONTEXT="$(MINIKUBE_PROFILE)" bash scripts/e2e/gfs-real-pg-minikube-gate.sh
+
+.PHONY: minikube-t2-preflight
+minikube-t2-preflight: ## Read-only, fail-loud T0/T1/T2 preflight for the explicit branch-owned Minikube profile
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2-preflight.sh
+
+.PHONY: minikube-t2
+minikube-t2: ## Run the local development T0, Real PostgreSQL T1, and exact-head T2 contract
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2.sh
+
+.PHONY: minikube-t2-real-postgres
+minikube-t2-real-postgres: ## Run the explicit local Real PostgreSQL lane without changing CI's DSN contract
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/e2e/minikube-real-postgres.sh
+
+.PHONY: minikube-t2-public-boundary
+minikube-t2-public-boundary: ## Reject secrets, credentials, private URLs, and raw runtime artifacts from the public diff
+	@scripts/tests/test-minikube-t2-public-boundary.sh
+
+.PHONY: minikube-t2-scenarios
+minikube-t2-scenarios: ## Exercise the fail-loud negative cases and transition classifier without a cluster
+	@scripts/tests/test-minikube-t2-scenarios.sh
 
 .PHONY: minikube-verify-network-policy
 minikube-verify-network-policy: ## Prove NetworkPolicy enforcement in clerum-test/minikube before custom-image gates
@@ -663,27 +744,22 @@ minikube-logs: ## Show logs for a service (usage: make minikube-logs SVC=control
 
 .PHONY: minikube-db-reset
 minikube-db-reset: ## Reset control-api postgres (re-enables first-time admin setup)
-	@echo "Scaling down control-api and postgres..."
-	@$(KC) scale deploy/control-api --replicas=0 -n control-plane
-	@$(KC) scale deploy/control-postgres --replicas=0 -n control-plane
-	@echo "Waiting for pods to terminate..."
-	@sleep 6
-	@$(KC) delete pvc control-postgres-data -n control-plane --ignore-not-found --wait=true
-	@echo "Cleaning up Released PVs..."
-	@$(KC) get pv --no-headers 2>/dev/null | grep 'control-postgres' | awk '{print $$1}' | xargs -r $(KC) delete pv 2>/dev/null || true
-	@$(KC) apply -f deploy/base/control-plane/control-postgres.yaml
+	@if [ -z "$(CONTROL_DB_RESET_PVC_UID)" ]; then echo "ERROR: CONTROL_DB_RESET_PVC_UID=<approved UID|none> is required"; exit 1; fi
+	@reset_args="--expected-pvc-uid $(CONTROL_DB_RESET_PVC_UID)"; \
+	 if [ "$(CONTROL_DB_RESET_PVC_UID)" = "none" ]; then reset_args="--expect-no-pvc"; fi; \
+	 if [ "$(CONTROL_DB_RESET_RESUME)" = "true" ]; then reset_args="$$reset_args --resume"; fi; \
+	 CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reset-control-db-storage.sh $$reset_args
+	@$(KC) apply -k deploy/overlays/minikube -l app=control-postgres
 	@echo "Scaling up postgres..."
 	@$(KC) scale deploy/control-postgres --replicas=1 -n control-plane
 	@$(KC) wait --for=condition=Available deploy/control-postgres -n control-plane --timeout=90s
-	@echo "Scaling up control-api..."
-	@$(KC) scale deploy/control-api --replicas=1 -n control-plane
-	@$(KC) wait --for=condition=Available deploy/control-api -n control-plane --timeout=90s
+	@CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/converge-control-db-after-reset.sh \
+	  --overlay deploy/overlays/minikube --job-name control-api-db-migrate-reset
 	@echo "DB reset complete. First-time admin setup is available again."
 
 .PHONY: minikube-seed-test-data
-minikube-seed-test-data: ## Seed E2E user + agent + context on minikube via admin API (idempotent; default password: changeme123!)
-	@PASS=$${TEST_ADMIN_PASSWORD:-$${ADMIN_PASSWORD:-changeme123!}}; \
-	 CONTEXT=$(MINIKUBE_PROFILE) ADMIN_PASSWORD=$$PASS bash scripts/e2e/seed-e2e-data.sh
+minikube-seed-test-data: ## Seed E2E user + agent + context via canonical-root credentials (local fallback only when unset)
+	@CONTEXT=$(MINIKUBE_PROFILE) bash scripts/e2e/seed-e2e-data.sh
 
 .PHONY: minikube-seed-sandbox-ui-test-data
 minikube-seed-sandbox-ui-test-data: ## Seed default sandbox-ui nginx fixture on minikube
@@ -764,9 +840,29 @@ test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-d
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
 
 .PHONY: test-e2e-plugin-workload-sdk
-test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; set E2E_ADMIN_TOKEN for the full happy path)
+test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1)
 	@echo "Running Plugin Workload SDK E2E gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-plugin-workload-sdk.sh
+	@if [ -z "$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" ]; then \
+		echo "Refusing Plugin Workload SDK E2E: explicit Kubernetes context is required" >&2; \
+		exit 1; \
+	fi
+	KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-plugin-workload-sdk.sh
+
+.PHONY: test-e2e-plugin-workload-sdk-desktop
+test-e2e-plugin-workload-sdk-desktop: ## Run the explicit opt-in Electron/WebContentsView Plugin Workload SDK gate
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	test -n "$$ctx" || { echo "Refusing Desktop Plugin Workload SDK E2E: explicit Kubernetes context is required" >&2; exit 1; }; \
+	test "$${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" = 1 || { echo "Refusing Desktop Plugin Workload SDK E2E: set E2E_PLUGIN_SDK_WRITE_CONFIRM=1" >&2; exit 1; }; \
+	test -n "$${CONTROL_UI_BASE_URL:-}" || { echo "CONTROL_UI_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	. scripts/e2e/e2e-lib.sh; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	echo "[E2E-GUARD] Desktop Plugin Workload SDK gate: context=$$ctx; URLs supplied by the branch profile"; \
+	cd desktop-app && KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 npm run build && \
+	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 ./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-sandbox-ui.spec.ts
 
 .PHONY: test-e2e-cron-tab-validation
 test-e2e-cron-tab-validation: ## Run recipe cron tab E2E (set E2E_CRON_TAB_FIX_REQUIRED=1 when the fix must be present)
@@ -838,7 +934,26 @@ test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R
 .PHONY: test-e2e-hcc-communicationchannel-watch-recovery
 test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC watch-recovery fault-injection gate
 	@echo "Running HCC CommunicationChannel watch-recovery gate..."
-	E2E_HCC_WATCH_FAULT_INJECTION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-communicationchannel-watch-recovery.sh
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_WATCH_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-communicationchannel-watch-recovery.sh
+
+.PHONY: test-e2e-hcc-readiness-bootstrap
+test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host fleet pass remains active
+	@echo "Running HCC initial-fleet readiness gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-readiness-bootstrap.sh
+
+.PHONY: test-e2e-hcc-watch-churn-readiness
+test-e2e-hcc-watch-churn-readiness: ## Prove HCC readiness CONVERGES under sustained apiserver watch churn (PR #205 GKE livelock). Positive-only; the livelock RED lives in host-context-controller/src/k8sClient.test.ts. EXPECT_LIVELOCK=1 is refused.
+	@echo "Running HCC watch-churn readiness gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_WATCH_FAULT_INJECTION=1 EXPECT_LIVELOCK=$(EXPECT_LIVELOCK) E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-watch-churn-readiness.sh
+
+.PHONY: test-e2e-hcc-mcp-context-readiness
+test-e2e-hcc-mcp-context-readiness: ## Prove HCC readiness during exact MCP/Context/NetworkPolicy initial convergence
+	@echo "Running HCC MCP/Context/NetworkPolicy readiness gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_MCP_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-mcp-context-readiness.sh
 
 .PHONY: test-e2e-stateless-multinode
 test-e2e-stateless-multinode: ## Run stateless multi-node lane (opt-in: STATELESS_MULTINODE_GATE=1; needs >=2 schedulable nodes; exit 3 = cross-node UNVERIFIED)
@@ -932,4 +1047,3 @@ run-platform-security-gates: ## Execute the revised platform security gate runne
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
-

@@ -6,21 +6,32 @@ import { CreateMcpServerForm } from '../CreateMcpServerForm'
 import { ToastProvider } from '../Toast'
 
 // vi.mock is hoisted before imports; factory runs lazily so references to `api` are safe.
-vi.mock('../../lib/api', () => ({
-  createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
-  createMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
-  deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
-  getContexts: vi.fn().mockResolvedValue({
-    items: [
-      { metadata: { name: 'context1' }, spec: { contextId: 'context1', mcpServers: [] } },
-      { metadata: { name: 'research' }, spec: { contextId: 'research', mcpServers: [] } },
-    ],
-  }),
-  getContext: vi.fn().mockResolvedValue({
-    spec: { contextId: 'context1', mcpServers: [] },
-  }),
-  updateContext: vi.fn().mockResolvedValue({}),
-}))
+vi.mock('../../lib/api', async () => {
+  const { buildContextList, buildContextResource } =
+    await import('../../test/fixtures/contextResource')
+  const context1 = buildContextResource({
+    metadata: { name: 'context1', resourceVersion: 'rv-context1' },
+  })
+  return {
+    createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
+    createMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
+    deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
+    getContexts: vi.fn().mockResolvedValue(
+      buildContextList([
+        context1,
+        buildContextResource({
+          metadata: { name: 'research', resourceVersion: 'rv-research' },
+        }),
+      ])
+    ),
+    getContext: vi.fn().mockResolvedValue(context1),
+    getContextTeams: vi.fn().mockResolvedValue({ items: [] }),
+    getContextUsers: vi.fn().mockResolvedValue({ items: [] }),
+    listOrgImages: vi.fn().mockResolvedValue({ org: 'evenfire-dev', images: [] }),
+    getHosts: vi.fn().mockResolvedValue({ items: [] }),
+    updateContext: vi.fn().mockResolvedValue({}),
+  }
+})
 
 afterEach(() => {
   cleanup()
@@ -32,7 +43,7 @@ function render(children: ReactNode) {
 }
 
 async function fillIdentity(name = 'brave-search') {
-  await waitFor(() => expect(screen.getByRole('button', { name: 'context1' })).toBeInTheDocument())
+  await waitFor(() => expect(api.getContexts).toHaveBeenCalledTimes(1))
   fireEvent.change(screen.getByPlaceholderText('my-mcp-server'), {
     target: { value: name },
   })
@@ -42,18 +53,21 @@ async function fillIdentity(name = 'brave-search') {
   )
 }
 
-function continueToRuntime() {
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-}
-
-function continueToNetwork() {
-  continueToRuntime()
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+function openAdvanced() {
+  fireEvent.click(screen.getByText('Advanced options'))
 }
 
 function continueToSecrets() {
-  continueToNetwork()
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+}
+
+function chooseNoCredentials() {
+  fireEvent.click(screen.getByRole('radio', { name: /No credentials required/ }))
+}
+
+function chooseNewSecret() {
+  fireEvent.click(screen.getByRole('radio', { name: /Create Kubernetes Secret/ }))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,10 +89,14 @@ describe('CreateMcpServerForm — render', () => {
     expect(continueButton).not.toBeDisabled()
   })
 
-  it('loads available contexts into a selector', async () => {
+  it('loads available contexts into the dedicated Context step', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
 
-    await waitFor(() => expect(api.getContexts).toHaveBeenCalledTimes(1))
+    await fillIdentity()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Context access' })).toBeInTheDocument()
+    )
     const contextSelector = screen.getByRole('button', { name: 'context1' })
     fireEvent.click(contextSelector)
 
@@ -86,17 +104,75 @@ describe('CreateMcpServerForm — render', () => {
     expect(screen.getByRole('option', { name: 'research' })).toBeInTheDocument()
   })
 
-  it('uses four connector steps', () => {
+  it('selects an organization image and fills its full registry coordinate', async () => {
+    vi.mocked(api.listOrgImages).mockResolvedValueOnce({
+      org: 'evenfire-dev',
+      images: [
+        {
+          name: 'todoist-mcp-server',
+          visibility: 'private',
+          createdAt: '2026-08-05',
+          tags: ['1.0.0'],
+        },
+      ],
+    })
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+
+    const imageField = await screen.findByPlaceholderText(
+      'us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest'
+    )
+    fireEvent.focus(imageField)
+    fireEvent.click(screen.getByRole('option', { name: 'todoist-mcp-server:1.0.0' }))
+
+    expect(
+      screen.getByDisplayValue('registry.evenfire.ai/evenfire-dev/todoist-mcp-server:1.0.0')
+    ).toBeInTheDocument()
+  })
+
+  it('uses connector, context, and secrets steps', () => {
     const { container } = render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-    expect(container.querySelectorAll('.cu-agent-step-rail__item')).toHaveLength(4)
+    expect(container.querySelectorAll('.cu-agent-step-rail__item')).toHaveLength(3)
+    expect(screen.queryByText('Step 1 of 3')).not.toBeInTheDocument()
     expect(screen.queryByText('Step 1 of 4')).not.toBeInTheDocument()
-    expect(screen.queryByText('Step 1 of 5')).not.toBeInTheDocument()
+  })
+
+  it('previews the selected context access before continuing to secrets', async () => {
+    vi.mocked(api.getContextUsers).mockResolvedValueOnce({
+      items: [{ id: 'user-1', displayName: 'Josue', email: 'josue@example.com', name: 'josue' }],
+    })
+    vi.mocked(api.getContextTeams).mockResolvedValueOnce({
+      items: [{ id: 'team-1', name: 'Development Team' }],
+    })
+    vi.mocked(api.getHosts).mockResolvedValueOnce({
+      items: [{ metadata: { name: 'agents/product' }, spec: { contextRef: 'context1' } }],
+    })
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+
+    await fillIdentity()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    expect(await screen.findByText('Josue')).toBeInTheDocument()
+    expect(screen.getByText('Development Team')).toBeInTheDocument()
+    expect(screen.getByText('product')).toBeInTheDocument()
+  })
+
+  it('hides the advanced options by default and reveals them on toggle', async () => {
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillIdentity()
+    const summary = screen.getByText('Advanced options')
+    const details = summary.closest('details')
+    expect(details).not.toBeNull()
+    expect(details).not.toHaveAttribute('open')
+
+    fireEvent.click(summary)
+
+    expect(details).toHaveAttribute('open')
   })
 
   it('shows the Port field when transport is streamableHttp (default)', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToRuntime()
+    openAdvanced()
     expect(screen.getByDisplayValue('3000')).toBeInTheDocument()
   })
 })
@@ -130,7 +206,7 @@ describe('CreateMcpServerForm — transport', () => {
   it('hides the Port field when transport is set to stdio', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToRuntime()
+    openAdvanced()
     // Port defaults to 3000 and is visible initially
     expect(screen.getByDisplayValue('3000')).toBeInTheDocument()
 
@@ -147,10 +223,23 @@ describe('CreateMcpServerForm — transport', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// envSecret checkbox
+// Credentials
 // ─────────────────────────────────────────────────────────────────────────────
 describe('CreateMcpServerForm — secret reference', () => {
-  it('reveals the Kubernetes Secret Name input when the checkbox is toggled on', async () => {
+  it('requires an explicit credential decision before creation is enabled', async () => {
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillIdentity()
+    continueToSecrets()
+
+    const submit = screen.getByRole('button', { name: 'Create connector' })
+    expect(submit).toBeDisabled()
+
+    chooseNoCredentials()
+
+    expect(submit).not.toBeDisabled()
+  })
+
+  it('reveals the Kubernetes Secret Name input when Create Kubernetes Secret is selected', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
     continueToSecrets()
@@ -158,10 +247,7 @@ describe('CreateMcpServerForm — secret reference', () => {
     // Not visible by default
     expect(screen.queryByPlaceholderText('brave-search-credentials')).not.toBeInTheDocument()
 
-    const checkbox = screen.getByRole('checkbox', {
-      name: /Use Kubernetes Secret for credentials/,
-    })
-    fireEvent.click(checkbox)
+    chooseNewSecret()
 
     expect(screen.getByPlaceholderText('brave-search-credentials')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add Key Mapping' })).toBeInTheDocument()
@@ -188,6 +274,7 @@ describe('CreateMcpServerForm — submit', () => {
   async function fillRequired(name = 'brave-search') {
     await fillIdentity(name)
     continueToSecrets()
+    chooseNoCredentials()
   }
 
   it('calls createMcpServer and adds the server to the Context allowlist on submit', async () => {
@@ -227,6 +314,7 @@ describe('CreateMcpServerForm — submit', () => {
     const updateCall = (api.updateContext as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(updateCall[0]).toBe('context1')
     expect(updateCall[1]).toMatchObject({
+      metadata: { resourceVersion: 'rv-context1' },
       spec: { contextId: 'context1', mcpServers: ['brave-search'] },
     })
 
@@ -238,7 +326,7 @@ describe('CreateMcpServerForm — submit', () => {
   it('submits exact-host egress bindings when configured', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToNetwork()
+    openAdvanced()
 
     fireEvent.change(screen.getByDisplayValue('No external egress (closed by default)'), {
       target: { value: 'exact-host' },
@@ -249,7 +337,9 @@ describe('CreateMcpServerForm — submit', () => {
     fireEvent.change(screen.getByPlaceholderText('443'), {
       target: { value: '443' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    continueToSecrets()
+
+    chooseNoCredentials()
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
     await waitFor(() => expect(submit).not.toBeDisabled())
@@ -267,12 +357,14 @@ describe('CreateMcpServerForm — submit', () => {
   it('submits public-web as one explicit egress class binding', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToNetwork()
+    openAdvanced()
 
     fireEvent.change(screen.getByDisplayValue('No external egress (closed by default)'), {
       target: { value: 'public-web' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    continueToSecrets()
+
+    chooseNoCredentials()
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
     await waitFor(() => expect(submit).not.toBeDisabled())
@@ -288,7 +380,7 @@ describe('CreateMcpServerForm — submit', () => {
   it('submits exact-cidr egress bindings when configured', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity()
-    continueToNetwork()
+    openAdvanced()
 
     fireEvent.change(screen.getByDisplayValue('No external egress (closed by default)'), {
       target: { value: 'exact-cidr' },
@@ -299,7 +391,9 @@ describe('CreateMcpServerForm — submit', () => {
     fireEvent.change(screen.getByPlaceholderText('443'), {
       target: { value: '443' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    continueToSecrets()
+
+    chooseNoCredentials()
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
     await waitFor(() => expect(submit).not.toBeDisabled())
@@ -343,32 +437,25 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
   }
 
   function enableEnvSecret(secretName = 'brave-credentials') {
-    fireEvent.click(screen.getByRole('checkbox', { name: /Use Kubernetes Secret for credentials/ }))
+    chooseNewSecret()
     fireEvent.change(screen.getByPlaceholderText('brave-search-credentials'), {
       target: { value: secretName },
     })
   }
 
-  it('blocks submit when envSecret is enabled but no key rows were added', async () => {
+  it('keeps Create disabled when a Secret has no key mappings', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillRequiredBasics()
     enableEnvSecret()
     // No "Add Key Mapping" click — zero rows total.
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
-
-    await waitFor(() => {
-      expect(
-        screen.getByText('Add at least one key-value pair or disable envSecret')
-      ).toBeInTheDocument()
-    })
+    expect(submit).toBeDisabled()
     expect(api.createMcpSecret).not.toHaveBeenCalled()
     expect(api.createMcpServer).not.toHaveBeenCalled()
   })
 
-  it('blocks submit when key rows are present but all values are empty', async () => {
+  it('keeps Create disabled when a Secret mapping is incomplete', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillRequiredBasics()
     enableEnvSecret()
@@ -381,18 +468,12 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     fireEvent.change(envVarInput, { target: { value: 'BRAVE_API_KEY' } })
 
     const submit = screen.getByRole('button', { name: 'Create connector' })
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
-
-    await waitFor(() => {
-      expect(screen.getByText('All envSecret values must be non-empty')).toBeInTheDocument()
-    })
-    // No network calls must have been made.
+    expect(submit).toBeDisabled()
     expect(api.createMcpSecret).not.toHaveBeenCalled()
     expect(api.createMcpServer).not.toHaveBeenCalled()
   })
 
-  it('blocks submit when all key rows have empty secretKey names', async () => {
+  it('keeps Create disabled when every Secret mapping row is blank', async () => {
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await fillRequiredBasics()
     enableEnvSecret()
@@ -402,14 +483,7 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     // This triggers the "Add at least one key-value pair or disable envSecret"
     // path (meaningfulRows.length === 0).
     const submit = screen.getByRole('button', { name: 'Create connector' })
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
-
-    await waitFor(() => {
-      expect(
-        screen.getByText('Add at least one key-value pair or disable envSecret')
-      ).toBeInTheDocument()
-    })
+    expect(submit).toBeDisabled()
     expect(api.createMcpSecret).not.toHaveBeenCalled()
     expect(api.createMcpServer).not.toHaveBeenCalled()
   })

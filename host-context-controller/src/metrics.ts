@@ -47,9 +47,7 @@ function gauge(options: {
  * (15s), and wake (45s) budgets, plus longer diagnostic tails. Shared by every
  * HCC reconcile/recovery latency histogram.
  */
-const RECONCILE_LATENCY_BUCKETS = [
-  0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120,
-] as const
+const RECONCILE_LATENCY_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120] as const
 
 /** Idempotent Histogram helper mirroring counter()/gauge(). */
 function histogram(options: {
@@ -79,6 +77,30 @@ export const networkPoliciesTotal = gauge({
   name: 'clerum_hcc_networkpolicies_total',
   help: 'Total number of NetworkPolicies managed by HCC',
   labelNames: ['layer'] as const,
+})
+
+export const initialConvergenceRetriesTotal = counter({
+  name: 'clerum_hcc_initial_convergence_retries_total',
+  help: 'Initial background convergence retries scheduled after a failed fleet pass.',
+  labelNames: ['lane'] as const,
+})
+
+export const initialConvergenceLastSuccessTimestampSeconds = gauge({
+  name: 'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+  help: 'Unix timestamp of the last successful initial background convergence pass.',
+  labelNames: ['lane'] as const,
+})
+
+export const networkPolicySafetyPassDurationSeconds = histogram({
+  name: 'clerum_hcc_networkpolicy_safety_pass_duration_seconds',
+  help: 'Seconds until an authoritative NetworkPolicy safety pass has revoked stale allows.',
+  labelNames: ['outcome'] as const,
+})
+
+export const networkPolicySafetyPassPoliciesTotal = counter({
+  name: 'clerum_hcc_networkpolicy_safety_pass_policies_total',
+  help: 'NetworkPolicies listed and revoked by authoritative HCC safety passes.',
+  labelNames: ['operation'] as const,
 })
 
 export const contextReconciliationsTotal = counter({
@@ -202,4 +224,14 @@ export const hostDeleteCleanupTotal = counter({
   name: 'clerum_hcc_host_delete_cleanup_total',
   help: 'Host deletion cleanup by outcome (queued/confirmed/completed/retried/superseded).',
   labelNames: ['outcome'] as const,
+})
+
+// External-egress DNS retry saturation (#205 audit R3-M4 / R2-L1). A binding
+// whose DNS never resolves is retried forever at the capped (maximum) backoff;
+// without this signal the still-denied binding converges nowhere yet stays
+// invisible. Tracks the COUNT of servers pinned at the cap — never a per-server
+// label — so cardinality stays flat regardless of fleet size.
+export const externalEgressRetriesAtCap = gauge({
+  name: 'clerum_hcc_external_egress_retries_at_cap',
+  help: 'McpServers whose external-egress DNS retry is pinned at the capped (maximum) backoff, i.e. repeatedly failing to converge.',
 })

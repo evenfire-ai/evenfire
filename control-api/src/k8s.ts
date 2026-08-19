@@ -8,7 +8,12 @@ import {
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
 import { SecretService } from './services/secretService.js'
-import { ClerumResourceType, HostOverview, SecretUpsertRequest } from './types.js'
+import {
+  ClerumResourceType,
+  HostOverview,
+  SecretPreconditions,
+  SecretUpsertRequest,
+} from './types.js'
 
 /**
  * Namespaces where exec operations are permitted.
@@ -253,9 +258,12 @@ export class K8sGateway {
       }
       spec: Record<string, unknown>
     },
-    namespace?: string
+    namespace?: string,
+    // N1 — forwards an already-read CR snapshot so ResourceService.updateResource
+    // can skip a redundant apiserver GET (see the admin PUT ratchet in resources.ts).
+    options?: Parameters<ResourceService['updateResource']>[4]
   ): Promise<unknown> {
-    return this.resources.updateResource(plural, name, body, namespace)
+    return this.resources.updateResource(plural, name, body, namespace, options)
   }
 
   /**
@@ -394,8 +402,12 @@ export class K8sGateway {
     return this.secrets.createSecret(req)
   }
 
-  async updateSecret(req: SecretUpsertRequest): Promise<unknown> {
-    return this.secrets.updateSecret(req)
+  /** `precondition` makes the replace ownership-bound; see `SecretPreconditions`. */
+  async updateSecret(
+    req: SecretUpsertRequest,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
+    return this.secrets.updateSecret(req, precondition)
   }
 
   async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
@@ -406,8 +418,13 @@ export class K8sGateway {
     return this.secrets.removeSecretKey(req)
   }
 
-  async deleteSecret(name: string, namespace?: string): Promise<unknown> {
-    return this.secrets.deleteSecret(name, namespace)
+  /** `precondition` binds the delete to a specific object; see `SecretPreconditions`. */
+  async deleteSecret(
+    name: string,
+    namespace?: string,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
+    return this.secrets.deleteSecret(name, namespace, precondition)
   }
 
   async getHostOverview(hostName: string, namespace?: string): Promise<HostOverview> {
@@ -494,7 +511,7 @@ export class K8sGateway {
    * "reconcile applied" vs "kubelet is happy" gap).
    *
    * Listed per-namespace, NOT via listPodForAllNamespaces: a cluster-wide
-   * list needs cluster-scoped RBAC that MCC shared tenants do not (and must
+   * list needs cluster-scoped RBAC that managed shared tenants do not (and must
    * not) grant, and the recipe label carries no tenant scoping — an
    * all-namespaces list on a shared cluster would return other tenants'
    * pods for a same-named recipe.
@@ -659,16 +676,21 @@ export type RecipePodInfo = {
   }>
 }
 
-function extractHttpStatus(err: unknown): number | null {
+export function extractHttpStatus(err: unknown): number | null {
   if (!err || typeof err !== 'object') return null
   const maybe = err as {
     statusCode?: number
     code?: number | string
+    httpStatus?: number
     response?: { statusCode?: number; status?: number }
   }
   if (typeof maybe.statusCode === 'number') return maybe.statusCode
   if (typeof maybe.code === 'number') return maybe.code
   if (typeof maybe.code === 'string' && /^\d+$/.test(maybe.code)) return Number(maybe.code)
+  // `.httpStatus` mirrors extractK8sError's chain (http/k8sError.ts): the
+  // service-layer K8sNotFoundError/K8sConflictError expose their status only
+  // there, so read it after code/statusCode or their 404/409 collapses to null.
+  if (typeof maybe.httpStatus === 'number') return maybe.httpStatus
   if (maybe.response && typeof maybe.response.statusCode === 'number')
     return maybe.response.statusCode
   if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status

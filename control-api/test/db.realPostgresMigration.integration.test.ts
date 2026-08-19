@@ -185,6 +185,62 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0067_llm_runtime_access_profiles'
     )
+    expect(secondVersions.rows.map(row => row.version)).toContain(
+      '0094_desktop_user_retirement_lifecycle'
+    )
+    expect(secondVersions.rows.map(row => row.version)).toContain(
+      '0095_gfs_lifecycle_authority_projection'
+    )
+    expect(secondVersions.rows.map(row => row.version)).toContain(
+      '0096_control_admin_session_version_default'
+    )
+
+    const sessionVersionContract = await dbPool.query<{
+      column_default: string | null
+      is_nullable: string
+      constraint_validated: boolean
+    }>(
+      `SELECT column_default,
+              is_nullable,
+              EXISTS (
+                SELECT 1
+                  FROM pg_constraint
+                 WHERE conrelid = 'control_admin_users'::regclass
+                   AND conname = 'control_admin_session_version_positive'
+                   AND convalidated
+              ) AS constraint_validated
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'control_admin_users'
+          AND column_name = 'session_version'`
+    )
+    expect(sessionVersionContract.rows).toEqual([
+      {
+        column_default: '1',
+        is_nullable: 'NO',
+        constraint_validated: true,
+      },
+    ])
+
+    const contractAdminId = randomUUID()
+    await dbPool.query(
+      `INSERT INTO control_admin_users (id, username, password_hash)
+       VALUES ($1, $2, 'migration-test-hash')`,
+      [contractAdminId, `migration-contract-${contractAdminId}`]
+    )
+    const defaultEpoch = await dbPool.query<{ session_version: number }>(
+      `SELECT session_version FROM control_admin_users WHERE id = $1`,
+      [contractAdminId]
+    )
+    expect(defaultEpoch.rows).toEqual([{ session_version: 1 }])
+    await expect(
+      dbPool.query(
+        `INSERT INTO control_admin_users (id, username, password_hash, session_version)
+         VALUES ($1, $2, 'migration-test-hash', 0)`,
+        [randomUUID(), `migration-invalid-${randomUUID()}`]
+      )
+    ).rejects.toThrow(/session_version|control_admin_session_version_positive/)
+    await dbPool.query(`DELETE FROM control_admin_users WHERE id = $1`, [contractAdminId])
 
     await dbPool.query(`
       DELETE FROM schema_migrations
@@ -386,6 +442,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'llm_allowed_models',
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
+      'gfs_desktop_operator_links',
+      'desktop_user_retirement_operations',
     ] as const
     const controlApiRelations = await relationPrivileges(dbPool, 'control_api_runtime')
     const expectedControlApiRelations: Record<string, string[]> = {
@@ -402,12 +460,139 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       llm_allowed_models: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],
+      gfs_desktop_operator_links: ['INSERT', 'SELECT', 'UPDATE'],
+      desktop_user_retirement_operations: ['INSERT', 'SELECT', 'UPDATE'],
     }
     for (const relation of exactControlApiRelations) {
       expectPrivileges(
         [...(controlApiRelations[relation] ?? new Set())],
         expectedControlApiRelations[relation] ?? []
       )
+    }
+    expectPrivileges([...(controlApiRelations.gfs_blob_manifests ?? new Set())], [])
+    expectPrivileges([...(controlApiRelations.gfs_upload_parts ?? new Set())], [])
+    expectPrivileges([...(controlApiRelations.gfs_upload_sessions ?? new Set())], [])
+
+    const linkUserId = randomUUID()
+    const linkAdminId = randomUUID()
+    const linkRuntimeClient = await dbPool.connect()
+    try {
+      await linkRuntimeClient.query('BEGIN')
+      await linkRuntimeClient.query(
+        `INSERT INTO users (id, email, name)
+         VALUES ($1, $2, 'GFS desktop operator privilege test')`,
+        [linkUserId, `gfs-link-${linkUserId}@example.test`]
+      )
+      await linkRuntimeClient.query(
+        `INSERT INTO control_admin_users (
+           id, username, password_hash, role, status
+         ) VALUES ($1, $2, 'gfs-link-test-hash', 'admin', 'active')`,
+        [linkAdminId, `gfs-link-${linkAdminId}`]
+      )
+
+      const privilegeState = await linkRuntimeClient.query<{
+        privilege_name: string
+        allowed: boolean
+      }>(
+        `SELECT privilege.privilege_name,
+                has_table_privilege(
+                  'control_api_runtime',
+                  'public.gfs_desktop_operator_links',
+                  privilege.privilege_name
+                ) AS allowed
+           FROM (VALUES
+             ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
+             ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')
+           ) privilege(privilege_name)
+          ORDER BY privilege.privilege_name`
+      )
+      expect(privilegeState.rows).toEqual([
+        { privilege_name: 'DELETE', allowed: false },
+        { privilege_name: 'INSERT', allowed: true },
+        { privilege_name: 'REFERENCES', allowed: false },
+        { privilege_name: 'SELECT', allowed: true },
+        { privilege_name: 'TRIGGER', allowed: false },
+        { privilege_name: 'TRUNCATE', allowed: false },
+        { privilege_name: 'UPDATE', allowed: true },
+      ])
+
+      await linkRuntimeClient.query('SET LOCAL ROLE control_api_runtime')
+      await linkRuntimeClient.query(
+        `INSERT INTO gfs_desktop_operator_links
+           (id, lineage_id, generation, user_id, control_admin_id, state, source, created_by, row_version)
+         VALUES (gen_random_uuid(), gen_random_uuid(), 1, $1, $2, 'active', 'initial_setup', $2, 1)`,
+        [linkUserId, linkAdminId]
+      )
+      const linked = await linkRuntimeClient.query<{ user_id: string; control_admin_id: string }>(
+        `SELECT user_id::text, control_admin_id::text
+           FROM gfs_desktop_operator_links
+          WHERE user_id = $1`,
+        [linkUserId]
+      )
+      expect(linked.rows).toEqual([{ user_id: linkUserId, control_admin_id: linkAdminId }])
+
+      const lifecycle = await linkRuntimeClient.query<{
+        lifecycle_state: string
+        lifecycle_version: string
+      }>(
+        `SELECT lifecycle_state, lifecycle_version::text AS lifecycle_version
+           FROM users
+          WHERE id = $1`,
+        [linkUserId]
+      )
+      expect(lifecycle.rows).toEqual([{ lifecycle_state: 'active', lifecycle_version: '1' }])
+
+      await linkRuntimeClient.query(
+        `UPDATE gfs_desktop_operator_links
+            SET state = 'revoked', revoked_at = NOW(), revoked_by_type = 'control_admin',
+                revoked_by_id = $2, revoked_by_control_admin_id = $2,
+                revoked_by_desktop_user_id = NULL,
+                revocation_reason = 'privilege-test', row_version = row_version + 1
+          WHERE user_id = $1`,
+        [linkUserId, linkAdminId]
+      )
+
+      const operation = await linkRuntimeClient.query<{ id: string }>(
+        `INSERT INTO desktop_user_retirement_operations(
+           actor_type,
+           actor_control_admin_id,
+           target_user_id,
+           idempotency_key_hash,
+           request_fingerprint,
+           reason,
+           request_id
+         )
+         VALUES ('control_admin', $1, $2, repeat('a', 64), repeat('b', 64), 'privilege-test', 'request-1')
+         RETURNING id::text AS id`,
+        [linkAdminId, linkUserId]
+      )
+      await linkRuntimeClient.query(
+        `UPDATE desktop_user_retirement_operations
+            SET status = 'completed',
+                outcome = 'retired',
+                lifecycle_version = 2,
+                lifecycle_operation_id = id,
+                completed_at = NOW()
+          WHERE id = $1::uuid`,
+        [operation.rows[0]!.id]
+      )
+
+      await linkRuntimeClient.query('SAVEPOINT deny_link_truncate')
+      await expect(
+        linkRuntimeClient.query('TRUNCATE TABLE gfs_desktop_operator_links')
+      ).rejects.toThrow(/permission denied/)
+      await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_truncate')
+
+      await linkRuntimeClient.query('SAVEPOINT deny_link_delete')
+      await expect(
+        linkRuntimeClient.query(`DELETE FROM gfs_desktop_operator_links WHERE user_id = $1`, [
+          linkUserId,
+        ])
+      ).rejects.toThrow(/permission denied/)
+      await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_delete')
+    } finally {
+      await linkRuntimeClient.query('ROLLBACK')
+      linkRuntimeClient.release()
     }
 
     const maintenanceRelations = await relationPrivileges(dbPool, 'trace_maintenance_runtime')

@@ -33,6 +33,24 @@ vi.mock('../../lib/api', () => ({
   getRegistryCatalog: vi.fn(),
   installRecipeFromRegistry: vi.fn(),
 }))
+// The detail page gates edit/remove on capability (§5.4). Default to a curator
+// so the actions menu stays visible for the existing management assertions.
+vi.mock('../../lib/hooks/useRegistryCapability', () => ({
+  useRegistryCapability: () => ({
+    capability: {
+      orgName: 'acme',
+      scope: '@acme',
+      isCurator: true,
+      mode: 'managed',
+      authEnabled: true,
+      connectionState: null,
+      canManageOrg: true,
+    },
+    loading: false,
+    error: false,
+    reload: () => {},
+  }),
+}))
 
 const mockGetRegistryCatalog = vi.mocked(getRegistryCatalog)
 const mockInstallRecipeFromRegistry = vi.mocked(installRecipeFromRegistry)

@@ -72,6 +72,13 @@ function docContaining(docs: string[], substring: string): string {
   return hit
 }
 
+function locationBlock(config: string, marker: string): string {
+  const start = config.indexOf(marker)
+  if (start < 0) throw new Error(`No gateway location containing: ${marker}`)
+  const next = config.indexOf('\n        location ', start + marker.length)
+  return next < 0 ? config.slice(start) : config.slice(start, next)
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -326,6 +333,88 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).not.toContain('/api/v1/external/')
   })
 
+  it('keeps the profile-control-funnel body cap at gfsc write-cap parity (24MiB)', () => {
+    const configmaps = read(`${BASE}/profiles/configmaps.yaml`)
+    const funnelConf = docContaining(yamlDocs(configmaps), 'name: profile-control-funnel-nginx')
+    // nginx defaults client_max_body_size to 1m. Without an explicit cap the
+    // me-path (external-rest-api → funnel → control-api) 413s GFS uploads at
+    // ~1MB, far below the gfsc write cap (GFS_MAX_WRITE_BODY_BYTES = 25165824,
+    // 24MiB) that the operator path already honors end to end.
+    expect(funnelConf).toContain('client_max_body_size 25165824;')
+  })
+
+  it('keeps the GFS v2 part cap chain below the gateway request cap', () => {
+    // Upload v2 is indexed binary streaming: the 200 MiB product boundary is
+    // aggregate session metadata, while every request remains <=16 MiB. The
+    // old base64 ×4/3 invariant belongs only to the legacy JSON path and must not
+    // constrain the v2 product limit.
+    const GFSC_WRITE_CAP = 25165824 // 24 MiB — the funnel + gfsc authoritative cap
+
+    // 1. gfsc's write cap is actually plumbed to the pod. Without this env gfsc
+    //    falls back to its 16 MiB in-code default and a 16 MB file (22.4 MB body)
+    //    hard-413s while the client-side cap says it should have worked.
+    const hccDeployment = read(`${BASE}/control-plane/host-context-controller.yaml`)
+    const gfscCapMatch = hccDeployment.match(
+      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*"?(\d+)"?/
+    )
+    expect(
+      gfscCapMatch,
+      'GFS_MAX_WRITE_BODY_BYTES env must be set on the HCC deployment'
+    ).not.toBeNull()
+    expect(Number(gfscCapMatch![1])).toBe(GFSC_WRITE_CAP)
+
+    // 2. Both clients advertise the same hard binary part cap and product cap.
+    const parseClientCaps = (relPath: string): { product: number; part: number } => {
+      const src = read(relPath)
+      const productMatch = src.match(/GFS_FILE_UPLOAD_MAX_BYTES\s*=\s*([0-9*\s]+)/)
+      const partMatch = src.match(/GFS_FILE_UPLOAD_MAX_PART_BYTES\s*=\s*([0-9*\s]+)/)
+      expect(productMatch, `GFS_FILE_UPLOAD_MAX_BYTES not found in ${relPath}`).not.toBeNull()
+      expect(partMatch, `GFS_FILE_UPLOAD_MAX_PART_BYTES not found in ${relPath}`).not.toBeNull()
+      // Only digits/`*`/spaces are matched, so evaluating the arithmetic is safe.
+      const evaluate = (value: string): number =>
+        Number(value.split('*').reduce((acc, n) => acc * Number(n.trim()), 1))
+      return { product: evaluate(productMatch![1]), part: evaluate(partMatch![1]) }
+    }
+    const webCaps = parseClientCaps('../../control-ui/app/constants/gfsFileUpload.ts')
+    const desktopCaps = parseClientCaps('../../desktop-app/ui/src/constants/gfsFileUpload.ts')
+    expect(webCaps).toEqual(desktopCaps)
+    expect(webCaps.product).toBe(209715200)
+    expect(webCaps.part).toBe(16777216)
+
+    // 3. A v2 binary request fits below the internal 24 MiB cap with headroom;
+    // the aggregate 200 MiB value never becomes a single request body.
+    expect(webCaps.part).toBeLessThan(GFSC_WRITE_CAP)
+  })
+
+  it('keeps control-api memory at >=768Mi in base AND the minikube overlay (RC3 OOM guard)', () => {
+    // RC3: a base64 GFS upload holds ~5 transient body copies; at 256Mi two
+    // concurrent uploads OOMKilled the pod (exit 137). The base fix was inert in
+    // minikube until the overlay was also raised — re-pinning any overlay below
+    // 768Mi silently reintroduces the 7.5MB-PDF OOM, so assert it executably.
+    const controlApiLimitMi = (yaml: string): number => {
+      const doc = yamlDocs(yaml).find(
+        d => /kind:\s*Deployment/.test(d) && /name:\s*control-api\b/.test(d)
+      )
+      expect(doc, 'control-api Deployment not found').toBeTruthy()
+      const m = doc!.match(/limits:[\s\S]*?memory:\s*(\d+)Mi/)
+      expect(m, 'control-api limits.memory (Mi) not found').not.toBeNull()
+      return Number(m![1])
+    }
+    const base = controlApiLimitMi(read(`${BASE}/control-plane/control-api.yaml`))
+    const minikube = controlApiLimitMi(read(`${OVERLAYS}/minikube/patches/resource-limits.yaml`))
+    expect(base).toBeGreaterThanOrEqual(768)
+    expect(minikube).toBeGreaterThanOrEqual(768)
+  })
+
+  it('keeps the Minikube control-api Marketplace on the shared registry', () => {
+    const controlApiConfig = read(`${OVERLAYS}/minikube/configmaps/control-api-config.yaml`)
+
+    expect(controlApiConfig).toContain("CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'")
+    expect(controlApiConfig).not.toContain(
+      "CLERUM_REGISTRY_URL: 'http://registry-api.registry.svc.cluster.local:8085'"
+    )
+  })
+
   it('keeps the stateless heartbeat route POST-only through the mcp-host gateway', () => {
     const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
@@ -334,6 +423,71 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[\s\S]*?limit_except POST/
     )
+  })
+
+  it('routes promptBridge JIT credential tickets through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/credential-ticket'
+    )
+
+    expect(route).toContain('limit_except POST')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  })
+
+  it('routes the Plugin Workload SDK capabilities probe through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location = /api/v1/mcp-host/plugin-workload-sdk/capabilities'
+    )
+
+    expect(route).toContain('limit_except GET')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  })
+
+  it('routes the target-aware Plugin Workload SDK promptBridge v2 endpoint through the gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location = /api/v1/mcp-host/plugin-workload-sdk/prompt-bridge/v2'
+    )
+
+    expect(route).toContain('limit_except POST')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  })
+
+  it('routes SDK-only promptBridge finalization through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'
+    )
+
+    expect(route).toContain('limit_except POST')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  })
+
+  it('routes promptBridge provider-attempt status through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const route = locationBlock(
+      gatewayConf,
+      'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/provider-attempts/[^/]+/status'
+    )
+
+    expect(route).toContain('limit_except POST')
+    expect(route).toContain('proxy_pass http://control_api_upstream;')
+    expect(route).toContain('proxy_set_header Authorization $http_authorization;')
   })
 
   it('keeps governed agent-run ingest POST-only through the mcp-host gateway', () => {

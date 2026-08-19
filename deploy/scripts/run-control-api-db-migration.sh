@@ -350,7 +350,16 @@ build_job_manifest() {
         },
       },
       "spec" => {
-        "backoffLimit" => 0,
+        # Retry a transient migration abort instead of failing the whole deploy.
+        # Migration 0090 takes an EXCLUSIVE lock on agent_run_events with a bounded
+        # lock_timeout; if a concurrent writer (e.g. the trace-retention prune
+        # DELETE) holds its lock past that timeout the Job exits 1. The migration
+        # body is idempotent, so re-running is safe; restartPolicy Never makes each
+        # retry a fresh pod, giving backoffLimit + 1 attempts before the deploy fails.
+        # Note: 3 attempts, each waiting up to the 60s lock_timeout plus pod startup,
+        # can approach the 300s kubectl-wait budget below against a persistently stuck
+        # writer; raise that wait if such contention is expected.
+        "backoffLimit" => 2,
         "ttlSecondsAfterFinished" => 600,
         "template" => {
           "metadata" => {
@@ -434,7 +443,7 @@ runtime_access_contract_values() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { exit 2 }
     $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
-    $2 !~ /^(legacy_dml|upsert|append|read)$/ { exit 4 }
+    $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/ { exit 4 }
     seen[$1]++ { exit 5 }
     {
       count++
@@ -574,11 +583,14 @@ verify_runtime_access_contract() {
          FROM expected_access expected
          JOIN actual_relations actual USING (relation_name)
          CROSS JOIN LATERAL (
+           -- link_lifecycle deliberately permits create plus governed tombstone
+           -- transitions. Physical DELETE remains denied so history cannot be
+           -- erased by the runtime role.
            VALUES
-             ('SELECT', true),
-             ('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append')),
-             ('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert')),
-             ('DELETE', expected.access_profile = 'legacy_dml'),
+             ('SELECT', expected.access_profile != 'none'),
+             ('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle')),
+             ('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert', 'link_lifecycle')),
+             ('DELETE', expected.access_profile IN ('legacy_dml')),
              ('TRUNCATE', false),
              ('REFERENCES', false),
              ('TRIGGER', false)

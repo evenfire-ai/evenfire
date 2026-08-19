@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -75,7 +76,12 @@ async function mapWithConcurrencyLimit<T, R>(
 
 export function createExternalUsersRouter(gateway: K8sGateway): Router {
   const router = Router()
-  router.use('/external/users', requireValidExternalSessionToken)
+  const externalUsersRateLimits = createExternalClientRateLimiters(
+    'users',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
+  router.use('/external/users', ...externalUsersRateLimits, requireValidExternalSessionToken)
 
   router.get(
     '/external/users/:userId/teams',
@@ -217,35 +223,35 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
     async (req, res, next) => {
       try {
         const base = await getUserAgents(req.params.userId)
-        let active: Set<string> | null = null
-        try {
-          active = new Set(await listActiveAgentNames(gateway))
-        } catch (err) {
-          console.warn(
-            `[external/users] agent reconciliation failed for ${req.params.userId}:`,
-            err
-          )
-        }
-        const activeAgentNames = filterAccessValues(base.agentNames, active)
+        // getUserAgents is the authorization boundary. Only its normalized
+        // result may be resolved against Kubernetes; never list hidden Hosts
+        // to build directory DTOs and filter afterward.
+        const authorizedAgentNames = filterAccessValues(base.agentNames, null)
         let agents: Awaited<ReturnType<typeof resolveMcpServersForAgents>> = []
+        let agentNames = authorizedAgentNames
         try {
-          // Authorization model: base.agentNames already reflects which agents
+          // Authorization model: authorizedAgentNames already reflects which agents
           // this user is allowed to use. resolveMcpServersForAgents treats agent
           // access as the gate — no additional context-level scoping needed.
           agents = await resolveMcpServersForAgents(gateway, {
             mcpServersNamespace: config.mcpServersNamespace,
             hostsNamespace: config.hostsNamespace,
-            agentNames: activeAgentNames,
+            agentNames: authorizedAgentNames,
           })
+          // A successful lookup can safely remove genuinely missing or invalid
+          // Hosts. Only the DTOs resolved from the authorized input are used.
+          agentNames = agents.map(agent => agent.name)
         } catch (err) {
-          // Spec §7.2: never fail the catalog purely because K8s listing failed.
+          // Spec §7.2: never fail the catalog purely because Kubernetes is
+          // unavailable. Preserve the names authorized by the directory DB;
+          // omit enriched DTOs because their live Host identity is unverified.
           console.warn(
             `[external/users] MCP server enrichment failed for ${req.params.userId}:`,
             err
           )
           agents = []
         }
-        return res.status(200).json({ ...base, agentNames: activeAgentNames, agents })
+        return res.status(200).json({ ...base, agentNames, agents })
       } catch (error) {
         return next(error)
       }

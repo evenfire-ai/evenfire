@@ -36,6 +36,7 @@ import {
   provisionAdminDesktopWorkspace,
   setInvitationPasswordForUser,
 } from '../../services/directory/index.js'
+import { setupInitialAdminWithDesktopWorkspace } from '../../services/initialAdminSetupService.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 import { signAdminToken } from '../../utils/auth/adminAuthToken.js'
 import {
@@ -153,39 +154,66 @@ export function createAdminAuthRouter(): Router {
       const passwordHash = await bcrypt.hash(password, 12)
       // Only a literal false opts out (fail-safe toward the human first-run
       // flow, where one credential for Control UI + desktop is the feature).
-      // MCC-driven installs send false: the desktop password then comes only
+      // Managed installs send false: the desktop password then comes only
       // from the directory invitation email.
       const seedDesktopPassword = req.body?.seedDesktopPassword !== false
-      const created = await setupInitialAdminCredentials(
-        config.adminBootstrapUsername,
-        email,
-        username,
-        passwordHash
-      )
+      let created
+      if (config.desktopGfsOperatorLinkingEnabled) {
+        try {
+          created = await setupInitialAdminWithDesktopWorkspace({
+            bootstrapUsername: config.adminBootstrapUsername,
+            email,
+            username,
+            passwordHash,
+            displayName: username,
+            agentNames: config.adminDefaultAgentNames,
+            contextIds: config.adminDefaultContextIds,
+            seedPassword: seedDesktopPassword,
+            linkDesktopOperator: true,
+            requestId: req.correlationId ?? null,
+          })
+        } catch (err) {
+          logger.error(
+            { err, email, requestId: req.correlationId ?? null },
+            'self-hosted initial admin setup rolled back; retry is required'
+          )
+          res.status(503).json({ error: 'Initial admin setup is incomplete; retry' })
+          return
+        }
+      } else {
+        created = await setupInitialAdminCredentials(
+          config.adminBootstrapUsername,
+          email,
+          username,
+          passwordHash
+        )
+      }
       if (!created) {
         res.status(409).json({ error: 'Initial admin setup is no longer available' })
         return
       }
 
-      // Best-effort: provision a matching desktop identity (users row + owner
-      // team + default grants; password only when seedDesktopPassword). A
-      // failure here must not block onboarding — the Control UI admin is
-      // already created.
-      try {
-        await provisionAdminDesktopWorkspace({
-          email,
-          displayName: username,
-          passwordHash,
-          agentNames: config.adminDefaultAgentNames,
-          contextIds: config.adminDefaultContextIds,
-          seedPassword: seedDesktopPassword,
-        })
-      } catch (err) {
-        // Intentionally logs only err + email — never passwordHash.
-        logger.error(
-          { err, email },
-          'admin desktop workspace provisioning failed; control admin still created'
-        )
+      if (!config.desktopGfsOperatorLinkingEnabled) {
+        try {
+          await provisionAdminDesktopWorkspace({
+            controlAdminId: created.id,
+            email,
+            displayName: username,
+            passwordHash,
+            agentNames: config.adminDefaultAgentNames,
+            contextIds: config.adminDefaultContextIds,
+            seedPassword: seedDesktopPassword,
+            linkDesktopOperator: false,
+            requestId: req.correlationId ?? null,
+          })
+        } catch (err) {
+          // Managed/base installs retain the existing admin-first onboarding
+          // contract because Desktop operator linking is explicitly disabled.
+          logger.error(
+            { err, email },
+            'admin desktop workspace provisioning failed; control admin still created'
+          )
+        }
       }
 
       const token = signAdminToken(created.id, 'admin', created.sessionVersion)
@@ -586,7 +614,7 @@ export function createAdminAuthRouter(): Router {
           role: admin.role,
         },
         // The recipe-secret namespaces this control-api enforces (see
-        // WORKFLOW_RECIPE_SECRET_NAMESPACES in the recipes route). In an MCC
+        // WORKFLOW_RECIPE_SECRET_NAMESPACES in the recipes route). In a managed
         // per-tenant deployment these are suffixed (sandbox-recipes-<slug> /
         // mcp-server-<slug>); control-ui needs them to write recipe-secret VALUES
         // to the correct namespace at CREATE time (the recipe namespace does not

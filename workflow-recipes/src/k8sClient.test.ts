@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   WorkflowRecipeWatcher,
   controllerErrorTelemetryProjection,
+  externalEgressRefreshIntervalMs,
+  recipeHasExternalExactHostEgress,
   recipeReferencesNamedSecrets,
   reconcileOutcomeTelemetryProjection,
   rotateBrokerTokensOnce,
@@ -264,6 +266,40 @@ describe('shouldPatchRecipeStatus', () => {
     ).toBe(false)
   })
 
+  it('patches a contradictory persisted SDK capability message', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        makeWorkflowRecipe({
+          spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+          status: {
+            phase: 'active',
+            message: 'All workloads deployed',
+            pluginWorkloadSdk: {
+              state: 'validated',
+              promptBridge: true,
+              clientNotifications: false,
+              message: 'promptBridge bootstrap policy proof is not ready',
+            },
+            conditions: [
+              {
+                type: 'PluginWorkloadSdkCapability',
+                status: 'True',
+                reason: 'Validated',
+                message: 'Capability validated (promptBridge)',
+                lastTransitionTime: 'now',
+              },
+            ],
+          },
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+        }
+      )
+    ).toBe(true)
+  })
+
   it('patches when only the persisted workload status projection changes', () => {
     expect(
       shouldPatchRecipeStatus(
@@ -346,6 +382,374 @@ describe('shouldPatchRecipeStatus', () => {
         }
       )
     ).toBe(false)
+  })
+
+  // ── issue #375: publish computed Plugin Workload SDK state transitions ──
+  // The dominant failure mode: the reconciler computes awaiting_policy→validated
+  // but no OTHER observable diff (phase, top-level message, workloads, owned
+  // conditions) changes, so the old shouldPatchRecipeStatus returned false and
+  // the transition was never published — status stayed awaiting_policy for ~40
+  // min. shouldPatchRecipeStatus must now compare the SDK capability projection
+  // carried on result.pluginWorkloadSdkProjection.
+  function validatedProjection() {
+    return {
+      conditions: [],
+      capability: {
+        state: 'validated' as const,
+        promptBridge: true,
+        clientNotifications: false,
+        message: 'Capability validated (promptBridge)',
+        bootstrapPodUid: 'pod-abc',
+        policyRevision: 3,
+        defaultTargetRef: 'primary-openai',
+        validatedAt: new Date().toISOString(),
+        verifiedAt: new Date().toISOString(),
+      },
+    }
+  }
+
+  function sdkRecipe(persistedSdk: Record<string, unknown>): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+      status: {
+        phase: 'active',
+        message: 'All workloads deployed',
+        // No PluginWorkloadSdkCapability condition, so the pre-existing
+        // message-vs-condition guard stays inert and this asserts ONLY the new
+        // projection comparison.
+        pluginWorkloadSdk: persistedSdk as never,
+      },
+    })
+  }
+
+  it('patches a computed awaiting_policy → validated transition (issue #375 incident replica)', () => {
+    // The exact incident shape: phase and top-level message are unchanged, the
+    // ONLY change is the SDK capability state. Before the fix this returned
+    // false and the validated state was never published.
+    // M2 (jozer review): the persisted verifiedAt is FRESH, so the >5-min
+    // throttle branch stays CLOSED and this can only pass through the semantic
+    // field comparisons — a hardcoded stale timestamp made it pass via the
+    // throttle, pinning nothing about the incident's mechanism.
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'awaiting_policy',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
+          verifiedAt: new Date(Date.now() - 10_000).toISOString(),
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: validatedProjection(),
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('refreshes a stale verifiedAt on an otherwise-identical validated projection (throttle open)', () => {
+    const staleVerifiedAt = new Date(Date.now() - 6 * 60_000).toISOString()
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: staleVerifiedAt,
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: validatedProjection(),
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('does not patch a fresh verifiedAt on an identical validated projection (throttle closed / anti-loop)', () => {
+    const freshVerifiedAt = new Date(Date.now() - 10_000).toISOString()
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: freshVerifiedAt,
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: validatedProjection(),
+        }
+      )
+    ).toBe(false)
+  })
+
+  it('patches a computed validated → awaiting_policy transition (revocation symmetry)', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: new Date(Date.now() - 10_000).toISOString(),
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: {
+            conditions: [],
+            capability: {
+              state: 'awaiting_policy' as const,
+              promptBridge: true,
+              clientNotifications: false,
+              message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
+              bootstrapPodUid: 'pod-abc',
+              verifiedAt: new Date().toISOString(),
+            },
+          },
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('does not patch when the SDK projection is semantically unchanged and verifiedAt is fresh', () => {
+    // Anti-loop guard: two back-to-back reconciles with the same computed state
+    // and a still-fresh verifiedAt must NOT keep emitting patches.
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: new Date(Date.now() - 5_000).toISOString(),
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: validatedProjection(),
+        }
+      )
+    ).toBe(false)
+  })
+
+  it('patches an in-place re-bootstrap that only changes bootstrapModel/provider/contractVersion (issue #375 B1)', () => {
+    // A validated promptBridge recipe re-bootstraps in place (SAME pod, same
+    // policyRevision) against a DIFFERENT model/provider — e.g. the operator
+    // corrects the target model. state stays 'validated', message is
+    // families-only, pod/policyRevision unchanged, verifiedAt is fresh (throttle
+    // closed). Only bootstrapModel/provider/contractVersion move — persisted
+    // semantic fields read by control-api at runtime. They MUST force a patch.
+    const freshVerifiedAt = new Date(Date.now() - 10_000).toISOString()
+    expect(
+      shouldPatchRecipeStatus(
+        sdkRecipe({
+          state: 'validated',
+          promptBridge: true,
+          clientNotifications: false,
+          message: 'Capability validated (promptBridge)',
+          bootstrapPodUid: 'pod-abc',
+          bootstrapContractVersion: 2,
+          bootstrapProvider: 'openai',
+          bootstrapModel: 'gpt-5.4-mini',
+          policyRevision: 3,
+          defaultTargetRef: 'primary-openai',
+          verifiedAt: freshVerifiedAt,
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: {
+            conditions: [],
+            capability: {
+              state: 'validated' as const,
+              promptBridge: true,
+              clientNotifications: false,
+              message: 'Capability validated (promptBridge)',
+              bootstrapPodUid: 'pod-abc',
+              bootstrapContractVersion: 2,
+              bootstrapProvider: 'anthropic',
+              bootstrapModel: 'claude-sonnet-4-6',
+              policyRevision: 3,
+              defaultTargetRef: 'primary-openai',
+              verifiedAt: freshVerifiedAt,
+            },
+          },
+        }
+      )
+    ).toBe(true)
+  })
+
+  // Symmetric to #375 (computed-but-not-published): when a recipe DROPS
+  // spec.pluginWorkloadSdk while a capability is still persisted in status, the
+  // projection computes `capability === null` (clear the field). The
+  // `projected === null` branch is the ONLY thing that publishes that clear — a
+  // regression to `return false` there would leave a stale validated/
+  // awaiting_policy record proclaimed forever.
+  it('patches to clear status.pluginWorkloadSdk when the capability is removed from spec', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        makeWorkflowRecipe({
+          spec: { steps: [] },
+          status: {
+            phase: 'active',
+            message: 'All workloads deployed',
+            pluginWorkloadSdk: {
+              state: 'validated',
+              promptBridge: true,
+              clientNotifications: false,
+            } as never,
+          },
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: { conditions: [], capability: null },
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('does not patch when the capability is absent both in the projection and in status', () => {
+    expect(
+      shouldPatchRecipeStatus(
+        makeWorkflowRecipe({
+          spec: { steps: [] },
+          status: { phase: 'active', message: 'All workloads deployed' },
+        }),
+        {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: { conditions: [], capability: null },
+        }
+      )
+    ).toBe(false)
+  })
+
+  // ── issue #375 M2 (jozer review): every projection field comparison is pinned
+  // INDIVIDUALLY. Each case varies exactly ONE field between the persisted
+  // capability and the projection, with a FRESH persisted verifiedAt so the
+  // >5-min throttle branch stays closed — removing that single field's
+  // comparison in pluginWorkloadSdkProjectionChanged turns that case RED.
+  describe('per-field projection comparisons (issue #375 M2)', () => {
+    function persistedBase(): Record<string, unknown> {
+      return {
+        state: 'validated',
+        promptBridge: true,
+        clientNotifications: false,
+        message: 'Capability validated (promptBridge)',
+        policyRevision: 3,
+        policyHash: 'sha256:policy-a',
+        defaultTargetRef: 'primary-openai',
+        bootstrapPodUid: 'pod-abc',
+        bootstrapContractVersion: 2,
+        bootstrapProvider: 'openai',
+        bootstrapModel: 'gpt-5.4-mini',
+        // FRESH: keeps the verifiedAt throttle CLOSED so a `true` can only come
+        // from the varied field's own comparison.
+        verifiedAt: new Date(Date.now() - 10_000).toISOString(),
+      }
+    }
+
+    function projectionFrom(
+      persisted: Record<string, unknown>,
+      override: Record<string, unknown>
+    ): { conditions: never[]; capability: never } {
+      const { verifiedAt: _persistedVerifiedAt, ...semantic } = persisted
+      return {
+        conditions: [],
+        capability: {
+          ...semantic,
+          verifiedAt: new Date().toISOString(),
+          validatedAt: new Date().toISOString(),
+          ...override,
+        } as never,
+      }
+    }
+
+    const cases: Array<[field: string, override: Record<string, unknown>]> = [
+      ['state', { state: 'awaiting_policy' }],
+      ['message', { message: 'Capability validated (promptBridge, clientNotifications)' }],
+      ['policyRevision', { policyRevision: 4 }],
+      ['policyHash', { policyHash: 'sha256:policy-b' }],
+      ['defaultTargetRef', { defaultTargetRef: 'fallback-anthropic' }],
+      ['bootstrapPodUid', { bootstrapPodUid: 'pod-def' }],
+      ['bootstrapContractVersion', { bootstrapContractVersion: null }],
+      ['bootstrapProvider', { bootstrapProvider: 'anthropic' }],
+      ['bootstrapModel', { bootstrapModel: 'claude-sonnet-4-6' }],
+      ['promptBridge', { promptBridge: false }],
+      ['clientNotifications', { clientNotifications: true }],
+    ]
+
+    for (const [field, override] of cases) {
+      it(`a lone ${field} change forces a patch (throttle closed)`, () => {
+        const persisted = persistedBase()
+        expect(
+          shouldPatchRecipeStatus(sdkRecipe(persisted), {
+            phase: 'active',
+            message: 'All workloads deployed',
+            workloadStatuses: [],
+            pluginWorkloadSdkProjection: projectionFrom(persisted, override),
+          })
+        ).toBe(true)
+      })
+    }
+
+    it('control: with NO field varied and a fresh persisted verifiedAt, no patch is emitted', () => {
+      const persisted = persistedBase()
+      expect(
+        shouldPatchRecipeStatus(sdkRecipe(persisted), {
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          pluginWorkloadSdkProjection: projectionFrom(persisted, {}),
+        })
+      ).toBe(false)
+    })
+
+    it('first-ever publish: a computed capability with NOTHING persisted forces a patch', () => {
+      // Pins the `if (!current) return true` branch — the first publish of
+      // status.pluginWorkloadSdk after a recipe declares the capability.
+      expect(
+        shouldPatchRecipeStatus(
+          makeWorkflowRecipe({
+            spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+            status: { phase: 'active', message: 'All workloads deployed' },
+          }),
+          {
+            phase: 'active',
+            message: 'All workloads deployed',
+            workloadStatuses: [],
+            pluginWorkloadSdkProjection: projectionFrom(persistedBase(), {}),
+          }
+        )
+      ).toBe(true)
+    })
   })
 })
 
@@ -483,6 +887,40 @@ describe('runtime credential refresh loop helpers', () => {
     ).toBe(false)
   })
 
+  it('forces timer-driven infrastructure retries past the status-only generation guard', async () => {
+    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    const sdkOnly = makeWorkflowRecipe({
+      metadata: { name: 'sdk-only', namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
+        pluginWorkloadSdk: { promptBridge: {} },
+      },
+      status: { phase: 'active' },
+    })
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      eventQueue: { enqueue: typeof enqueue }
+      handleRecipeEvent: typeof handleRecipeEvent
+      refreshRuntimeCredentialsForInProgressRecipes: () => Promise<void>
+      stopped: boolean
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[sdkOnly.metadata.name, sdkOnly]])
+    internal.eventQueue = { enqueue }
+    internal.handleRecipeEvent = handleRecipeEvent
+    internal.stopped = false
+
+    await internal.refreshRuntimeCredentialsForInProgressRecipes()
+
+    expect(enqueue).toHaveBeenCalledWith(sdkOnly.metadata.name, expect.any(Function))
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', sdkOnly, {
+      forceReconcile: true,
+    })
+  })
+
   it('keeps reconciling a promptBridge SDK recipe with no run so the eager mcp-host stays configured', () => {
     // phase=active, workflowExecution cleared (eager SDK path) — must still requeue.
     expect(
@@ -509,6 +947,21 @@ describe('runtime credential refresh loop helpers', () => {
           spec: {
             steps: [{ id: 's1', instruction: 'ack' }],
             pluginWorkloadSdk: { clientNotifications: { allowedEventTypes: ['e2e.test'] } },
+          },
+          status: { phase: 'active' },
+        })
+      )
+    ).toBe(true)
+  })
+
+  it('keeps reconciling a stepless SDK-only recipe through the full capability lane', () => {
+    expect(
+      workflowNeedsInfrastructureReconcile(
+        makeWorkflowRecipe({
+          spec: {
+            steps: [],
+            workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
+            pluginWorkloadSdk: { promptBridge: {} },
           },
           status: { phase: 'active' },
         })
@@ -594,7 +1047,9 @@ describe('runtime credential refresh loop helpers', () => {
 
     expect(refreshInProgressWorkflowRuntimeCredentials).toHaveBeenCalledWith(initializing)
     expect(enqueue).toHaveBeenCalledWith(initializing.metadata.name, expect.any(Function))
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', initializing)
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', initializing, {
+      forceReconcile: true,
+    })
   })
 })
 
@@ -624,6 +1079,17 @@ describe('workload status refresh loop helpers', () => {
       workflowNeedsWorkloadStatusRefresh(
         makeWorkloadRecipe({
           metadata: { name: 'deleting', namespace: 'sandbox-recipes', deletionTimestamp: 'now' },
+          status: { phase: 'active' },
+        })
+      )
+    ).toBe(false)
+    expect(
+      workflowNeedsWorkloadStatusRefresh(
+        makeWorkloadRecipe({
+          spec: {
+            steps: [],
+            pluginWorkloadSdk: { promptBridge: {} },
+          },
           status: { phase: 'active' },
         })
       )
@@ -1617,5 +2083,797 @@ describe('transient-result requeue (scheduleTransientRetry)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('reconcile failure re-schedules the transient retry chain (issue #375 P2)', () => {
+  // A transient (non-404) throw inside handleRecipeEvent used to log the failure
+  // and return WITHOUT re-arming the per-recipe retry chain, so the 5s self-heal
+  // died on the first error and only the 30s watchdog could recover it. The fix
+  // keeps the loud error log AND re-schedules the bounded backoff retry; the 404
+  // "already gone" branch must still clear and return without a retry.
+  type InternalWatcher = {
+    recipes: Map<string, WorkflowRecipeCRD>
+    transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+    stopped: boolean
+    traceReporter: null
+    dbRunProcessor: null
+    eventQueue: { enqueue: (key: string, task: () => Promise<void>) => Promise<void> }
+    reconciler: {
+      reconcile: ReturnType<typeof vi.fn>
+      isRecipeStillActive: ReturnType<typeof vi.fn>
+      ensureFinalizer: ReturnType<typeof vi.fn>
+      patchStatus: ReturnType<typeof vi.fn>
+    }
+    handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+  }
+
+  function makeInternal(recipe: WorkflowRecipeCRD, reconcileError: unknown): InternalWatcher {
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[recipe.metadata.name, recipe]])
+    internal.transientRetries = new Map()
+    internal.stopped = false
+    internal.traceReporter = null
+    internal.dbRunProcessor = null
+    internal.eventQueue = { enqueue: vi.fn((_key: string, task: () => Promise<void>) => task()) }
+    internal.reconciler = {
+      reconcile: vi.fn().mockRejectedValue(reconcileError),
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      patchStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    return internal
+  }
+
+  function clearRetries(internal: InternalWatcher): void {
+    for (const { timer } of internal.transientRetries.values()) clearTimeout(timer)
+  }
+
+  it('re-arms the transient retry after a non-404 reconcile failure (keeps the loud log)', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const recipe = makeWorkflowRecipe({ metadata: { name: 'flaky', namespace: 'sandbox-recipes' } })
+    const internal = makeInternal(recipe, new Error('control-api unreachable'))
+    try {
+      await internal.handleRecipeEvent('ADDED', recipe)
+
+      // fail-loud preserved: the reconciliation-failed error is still logged.
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Reconciliation failed for "flaky"'),
+        expect.anything()
+      )
+      // NEW: the 5s self-heal chain is re-armed instead of dying on first error.
+      expect(internal.transientRetries.has('flaky')).toBe(true)
+    } finally {
+      clearRetries(internal)
+      errSpy.mockRestore()
+    }
+  })
+
+  it('does not re-arm a retry when the recipe is already gone (404)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const recipe = makeWorkflowRecipe({ metadata: { name: 'gone', namespace: 'sandbox-recipes' } })
+    const internal = makeInternal(recipe, { code: 404 })
+    try {
+      await internal.handleRecipeEvent('ADDED', recipe)
+
+      expect(internal.transientRetries.has('gone')).toBe(false)
+      expect(internal.recipes.has('gone')).toBe(false)
+    } finally {
+      clearRetries(internal)
+      warnSpy.mockRestore()
+    }
+  })
+})
+
+describe('Plugin Workload SDK computed-vs-published state divergence log (issue #375 P4)', () => {
+  // Forensic observability: when the reconciler COMPUTES an SDK capability state
+  // that differs from what is currently published, log old→new and whether a
+  // patch was emitted. This one line would have discriminated H1 (transition
+  // computed but not published) from H2 in minutes during the incident.
+  type InternalWatcher = {
+    recipes: Map<string, WorkflowRecipeCRD>
+    transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+    stopped: boolean
+    traceReporter: null
+    dbRunProcessor: null
+    reconciler: {
+      reconcile: ReturnType<typeof vi.fn>
+      isRecipeStillActive: ReturnType<typeof vi.fn>
+      ensureFinalizer: ReturnType<typeof vi.fn>
+      patchStatus: ReturnType<typeof vi.fn>
+    }
+    handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+  }
+
+  function makeInternal(recipe: WorkflowRecipeCRD, result: unknown): InternalWatcher {
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[recipe.metadata.name, recipe]])
+    internal.transientRetries = new Map()
+    internal.stopped = false
+    internal.traceReporter = null
+    internal.dbRunProcessor = null
+    internal.reconciler = {
+      reconcile: vi.fn().mockResolvedValue(result),
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      patchStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    return internal
+  }
+
+  function sdkRecipe(persistedState: 'awaiting_policy' | 'validated'): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
+      spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+      status: {
+        phase: 'active',
+        message: 'All workloads deployed',
+        pluginWorkloadSdk: {
+          state: persistedState,
+          promptBridge: true,
+          clientNotifications: false,
+        },
+      },
+    })
+  }
+
+  it('logs the old→new SDK state and patchEmitted when the computed state diverges', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const recipe = sdkRecipe('awaiting_policy')
+    const internal = makeInternal(recipe, {
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+      pluginWorkloadSdkProjection: {
+        conditions: [],
+        capability: {
+          state: 'validated' as const,
+          promptBridge: true,
+          clientNotifications: false,
+          verifiedAt: new Date().toISOString(),
+        },
+      },
+    })
+    try {
+      await internal.handleRecipeEvent('ADDED', recipe)
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /Plugin Workload SDK state.*sdk-recipe.*awaiting_policy -> validated.*patchEmitted=true/
+        )
+      )
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  it('does not log a transition when the computed SDK state is unchanged', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const recipe = sdkRecipe('validated')
+    const internal = makeInternal(recipe, {
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+      pluginWorkloadSdkProjection: {
+        conditions: [],
+        capability: {
+          state: 'validated' as const,
+          promptBridge: true,
+          clientNotifications: false,
+          verifiedAt: new Date().toISOString(),
+        },
+      },
+    })
+    try {
+      await internal.handleRecipeEvent('ADDED', recipe)
+      const transitionLogs = logSpy.mock.calls.filter(([msg]) =>
+        String(msg).includes('Plugin Workload SDK state')
+      )
+      expect(transitionLogs).toHaveLength(0)
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+})
+
+describe('grant-update NOTIFY dispatch (issue #375 P3 wiring, H4/H5)', () => {
+  type InternalWatcher = {
+    recipes: Map<string, WorkflowRecipeCRD>
+    eventQueue: { enqueue: ReturnType<typeof vi.fn> }
+    handleRecipeEvent: ReturnType<typeof vi.fn>
+    handleGrantUpdateNotification: (recipeNamespace: string, recipeName: string) => void
+  }
+
+  function makeInternal(recipes: WorkflowRecipeCRD[]): {
+    internal: InternalWatcher
+    tasks: Array<() => Promise<void>>
+  } {
+    const tasks: Array<() => Promise<void>> = []
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map(recipes.map(r => [r.metadata.name, r]))
+    internal.eventQueue = {
+      enqueue: vi.fn((_key: string, task: () => Promise<void>) => {
+        tasks.push(task)
+        return Promise.resolve()
+      }),
+    }
+    internal.handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    return { internal, tasks }
+  }
+
+  it('enqueues a forceReconcile for a matching recipe and reconciles the CURRENT cached recipe (H5)', async () => {
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes', generation: 1 },
+    })
+    const { internal, tasks } = makeInternal([recipe])
+
+    internal.handleGrantUpdateNotification('sandbox-recipes', 'sdk-recipe')
+
+    expect(internal.eventQueue.enqueue).toHaveBeenCalledWith('sdk-recipe', expect.any(Function))
+    expect(tasks).toHaveLength(1)
+
+    // H5: a newer MODIFIED lands before the queued job runs. The job must
+    // reconcile the FRESH cached recipe, not the snapshot captured at NOTIFY time.
+    const fresher = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes', generation: 2 },
+    })
+    internal.recipes.set('sdk-recipe', fresher)
+
+    await tasks[0]()
+
+    expect(internal.handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', fresher, {
+      forceReconcile: true,
+    })
+    expect(internal.handleRecipeEvent).not.toHaveBeenCalledWith('MODIFIED', recipe, {
+      forceReconcile: true,
+    })
+  })
+
+  it('discards and warns on a namespace mismatch — no enqueue (H4)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
+    })
+    const { internal } = makeInternal([recipe])
+    try {
+      internal.handleGrantUpdateNotification('other-namespace', 'sdk-recipe')
+      expect(internal.eventQueue.enqueue).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Discarding grant-update NOTIFY for "other-namespace/sdk-recipe"')
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('discards and warns on an unknown recipe — no enqueue (H4)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { internal } = makeInternal([])
+    try {
+      internal.handleGrantUpdateNotification('sandbox-recipes', 'nope')
+      expect(internal.eventQueue.enqueue).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('unknown recipe'))
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('the queued job re-checks the guard and does nothing if the recipe vanished while queued (H5)', async () => {
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
+    })
+    const { internal, tasks } = makeInternal([recipe])
+
+    internal.handleGrantUpdateNotification('sandbox-recipes', 'sdk-recipe')
+    // Recipe deleted between NOTIFY and job execution.
+    internal.recipes.delete('sdk-recipe')
+
+    await tasks[0]()
+
+    expect(internal.handleRecipeEvent).not.toHaveBeenCalled()
+  })
+})
+
+// issue #299 §3.2/§5 — the periodic external-egress requeue timer. GitHub rotates
+// its api.github.com A record (~15s TTL over 140.82.112.0/20) WITHOUT bumping the
+// WorkflowRecipe CRD generation, so a generation-only reconcile trigger never
+// re-runs the accumulator and the sliding-window set never converges on a fresh
+// IP. This timer re-enqueues cached recipes that declare an exact-host EXTERNAL
+// egress on a fixed cadence so the accumulator folds each new snapshot.
+describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
+  function makeUiEgressRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [{ id: 'ui', type: 'deployment', image: 'clerum/ui:test' }],
+        ui: {
+          workloadRef: 'ui',
+          port: 8080,
+          egress: { external: [{ fqdn: 'api.github.com', port: 443 }] },
+        },
+      },
+    })
+  }
+
+  function makeWorkloadEgressRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [
+          {
+            id: 'api',
+            type: 'deployment',
+            image: 'clerum/api:test',
+            egressBindings: [{ dns: 'api.github.com', port: 443 }],
+          },
+        ],
+      },
+    })
+  }
+
+  function makeClusterLocalOnlyRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [
+          { id: 'db', type: 'deployment', image: 'clerum/db:test' },
+          {
+            id: 'api',
+            type: 'deployment',
+            image: 'clerum/api:test',
+            egressBindings: [{ dns: 'db.sandbox-recipes.svc.cluster.local', port: 5432 }],
+          },
+        ],
+      },
+    })
+  }
+
+  function makeTransportOnlyRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [
+          {
+            id: 'mcp',
+            type: 'deployment',
+            image: 'clerum/mcp:test',
+            transport: { type: 'streamableHttp' },
+            egressBindings: [{ egressClass: 'public-web' }],
+          },
+        ],
+      },
+    })
+  }
+
+  function makePlainRecipe(name: string): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: { name, namespace: 'sandbox-recipes' },
+      spec: {
+        steps: [],
+        workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
+      },
+    })
+  }
+
+  describe('recipeHasExternalExactHostEgress', () => {
+    it('is true for a UI external egress FQDN', () => {
+      expect(recipeHasExternalExactHostEgress(makeUiEgressRecipe('ui'))).toBe(true)
+    })
+
+    it('is true for a non-transport workload egressBinding with an external FQDN', () => {
+      expect(recipeHasExternalExactHostEgress(makeWorkloadEgressRecipe('wl'))).toBe(true)
+    })
+
+    it('is false when the only binding is a cluster-local sibling (not external)', () => {
+      expect(recipeHasExternalExactHostEgress(makeClusterLocalOnlyRecipe('cl'))).toBe(false)
+    })
+
+    it('is false for a transport-only (HCC-delegated) egress workload', () => {
+      // Transport egress is delegated to HCC/McpServer, NOT folded by the WRC
+      // accumulator, so the timer must not select it.
+      expect(recipeHasExternalExactHostEgress(makeTransportOnlyRecipe('tr'))).toBe(false)
+    })
+
+    it('is false for a recipe with no egress at all', () => {
+      expect(recipeHasExternalExactHostEgress(makePlainRecipe('plain'))).toBe(false)
+    })
+
+    it('is false while the recipe is being deleted', () => {
+      const recipe = makeUiEgressRecipe('deleting')
+      recipe.metadata.deletionTimestamp = '2026-08-08T00:00:00Z'
+      expect(recipeHasExternalExactHostEgress(recipe)).toBe(false)
+    })
+
+    it('excludes the UI workload id from the workload-binding scan (it is covered by ui.egress)', () => {
+      // A recipe whose ONLY external binding lives on the ui workload itself must
+      // still resolve true via ui.egress.external, never via the workload scan.
+      const recipe = makeUiEgressRecipe('ui-wl')
+      recipe.spec.workloads = [
+        {
+          id: 'ui',
+          type: 'deployment',
+          image: 'clerum/ui:test',
+          egressBindings: [{ dns: 'db.sandbox-recipes.svc.cluster.local', port: 5432 }],
+        },
+      ]
+      // ui.egress.external drives the true result; the ui workload's own binding
+      // (cluster-local here) is skipped.
+      expect(recipeHasExternalExactHostEgress(recipe)).toBe(true)
+    })
+  })
+
+  describe('externalEgressRefreshIntervalMs', () => {
+    it('returns the configured interval (seconds → ms) when above the floor', () => {
+      expect(
+        externalEgressRefreshIntervalMs({
+          externalEgressRefreshIntervalSeconds: 60,
+          externalEgressRefreshFloorSeconds: 5,
+        })
+      ).toBe(60_000)
+    })
+
+    it('clamps up to the floor when the interval is below it', () => {
+      expect(
+        externalEgressRefreshIntervalMs({
+          externalEgressRefreshIntervalSeconds: 3,
+          externalEgressRefreshFloorSeconds: 5,
+        })
+      ).toBe(5_000)
+    })
+
+    // H2 (issue #299): advance the refresh to <= observed TTL / 2 so a rotating
+    // low-TTL host (GitHub api, TTL ~15s) is sampled every rotation, not every 60s.
+    it('advances to TTL/2 when the observed TTL makes it faster than the configured interval', () => {
+      expect(
+        externalEgressRefreshIntervalMs(
+          { externalEgressRefreshIntervalSeconds: 60, externalEgressRefreshFloorSeconds: 5 },
+          15_000 // observed min TTL 15s → 7.5s refresh
+        )
+      ).toBe(7_500)
+    })
+
+    it('never drops below the floor even for a tiny TTL', () => {
+      expect(
+        externalEgressRefreshIntervalMs(
+          { externalEgressRefreshIntervalSeconds: 60, externalEgressRefreshFloorSeconds: 5 },
+          6_000 // TTL/2 = 3s < floor 5s → floor
+        )
+      ).toBe(5_000)
+    })
+
+    it('keeps the configured interval when the observed TTL is large', () => {
+      expect(
+        externalEgressRefreshIntervalMs(
+          { externalEgressRefreshIntervalSeconds: 60, externalEgressRefreshFloorSeconds: 5 },
+          600_000 // TTL/2 = 300s > interval 60s → interval wins
+        )
+      ).toBe(60_000)
+    })
+
+    it('ignores a non-finite/absent observed TTL (falls back to the configured interval)', () => {
+      expect(
+        externalEgressRefreshIntervalMs(
+          { externalEgressRefreshIntervalSeconds: 60, externalEgressRefreshFloorSeconds: 5 },
+          Infinity
+        )
+      ).toBe(60_000)
+    })
+  })
+
+  type InternalWatcher = {
+    recipes: Map<string, WorkflowRecipeCRD>
+    eventQueue: { enqueue: (key: string, task: () => Promise<void>) => Promise<void> }
+    handleRecipeEvent: (
+      type: string,
+      recipe: WorkflowRecipeCRD,
+      options?: { forceReconcile?: boolean }
+    ) => Promise<void>
+    stopped: boolean
+    config: {
+      externalEgressRefreshIntervalSeconds: number
+      externalEgressRefreshFloorSeconds: number
+    }
+    externalEgressRefreshTimer: ReturnType<typeof setInterval> | null
+    externalEgressRefreshRunning: boolean
+    // H2 (issue #299): the refresh loop reads the reconciler's observed min TTL.
+    reconciler: { externalEgressRefreshMinTtlMs: number }
+    refreshExternalEgressForActiveRecipes: () => Promise<void>
+    startExternalEgressRefreshLoop: () => void
+    stop: () => Promise<void>
+  }
+
+  function makeInternal(recipes: WorkflowRecipeCRD[]) {
+    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map(recipes.map(r => [r.metadata.name, r]))
+    internal.eventQueue = { enqueue }
+    internal.handleRecipeEvent = handleRecipeEvent
+    internal.stopped = false
+    internal.config = {
+      externalEgressRefreshIntervalSeconds: 60,
+      externalEgressRefreshFloorSeconds: 5,
+    }
+    internal.externalEgressRefreshTimer = null
+    internal.externalEgressRefreshRunning = false
+    internal.reconciler = { externalEgressRefreshMinTtlMs: Infinity }
+    return { internal, enqueue, handleRecipeEvent }
+  }
+
+  it('refreshExternalEgressForActiveRecipes re-enqueues ONLY recipes with external exact-host egress', async () => {
+    const { internal, enqueue, handleRecipeEvent } = makeInternal([
+      makeUiEgressRecipe('with-ui-egress'),
+      makeWorkloadEgressRecipe('with-wl-egress'),
+      makePlainRecipe('plain'),
+      makeClusterLocalOnlyRecipe('cluster-local'),
+      makeTransportOnlyRecipe('transport'),
+    ])
+
+    await internal.refreshExternalEgressForActiveRecipes()
+
+    expect(enqueue).toHaveBeenCalledWith('with-ui-egress', expect.any(Function))
+    expect(enqueue).toHaveBeenCalledWith('with-wl-egress', expect.any(Function))
+    expect(enqueue).not.toHaveBeenCalledWith('plain', expect.any(Function))
+    expect(enqueue).not.toHaveBeenCalledWith('cluster-local', expect.any(Function))
+    expect(enqueue).not.toHaveBeenCalledWith('transport', expect.any(Function))
+    expect(enqueue).toHaveBeenCalledTimes(2)
+
+    // A full reconcile is forced (generation is unchanged, so a plain MODIFIED
+    // would short-circuit before the accumulator runs).
+    for (const name of ['with-ui-egress', 'with-wl-egress']) {
+      expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', internal.recipes.get(name), {
+        forceReconcile: true,
+      })
+    }
+  })
+
+  it('refreshExternalEgressForActiveRecipes is a no-op while stopped', async () => {
+    const { internal, enqueue } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+    internal.stopped = true
+    await internal.refreshExternalEgressForActiveRecipes()
+    expect(enqueue).not.toHaveBeenCalled()
+  })
+
+  it('the timer re-enqueues external-egress recipes on each tick at the clamped interval', async () => {
+    vi.useFakeTimers()
+    try {
+      const { internal, handleRecipeEvent } = makeInternal([
+        makeUiEgressRecipe('with-ui-egress'),
+        makePlainRecipe('plain'),
+      ])
+
+      internal.startExternalEgressRefreshLoop()
+      expect(internal.externalEgressRefreshTimer).not.toBeNull()
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
+
+      // 1ms before the 60s interval: nothing has fired.
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(handleRecipeEvent).toHaveBeenCalledWith(
+        'MODIFIED',
+        internal.recipes.get('with-ui-egress'),
+        { forceReconcile: true }
+      )
+
+      // Second tick fires again — the requeue is periodic, not one-shot.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('advances the refresh to TTL/2 when the reconciler has observed a low TTL (H2 wiring)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { internal, handleRecipeEvent } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      // The reconciler observed GitHub's ~15s TTL → the loop must fire at 7.5s,
+      // not the 60s configured interval.
+      internal.reconciler = { externalEgressRefreshMinTtlMs: 15_000 }
+
+      internal.startExternalEgressRefreshLoop()
+      await vi.advanceTimersByTimeAsync(7_499)
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('startExternalEgressRefreshLoop is idempotent (does not create a second timer)', () => {
+    vi.useFakeTimers()
+    try {
+      const { internal } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      internal.startExternalEgressRefreshLoop()
+      const first = internal.externalEgressRefreshTimer
+      internal.startExternalEgressRefreshLoop()
+      expect(internal.externalEgressRefreshTimer).toBe(first)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not start a second refresh pass while one is still running (no concurrent duplicates)', async () => {
+    vi.useFakeTimers()
+    try {
+      // handleRecipeEvent returns a promise that stays pending until we release it,
+      // so the first pass is still in-flight when the second tick fires.
+      let release: (() => void) | undefined
+      const gate = new Promise<void>(resolve => {
+        release = resolve
+      })
+      const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+      const handleRecipeEvent = vi.fn().mockReturnValue(gate)
+      const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+      internal.recipes = new Map([['with-ui-egress', makeUiEgressRecipe('with-ui-egress')]])
+      internal.eventQueue = { enqueue }
+      internal.handleRecipeEvent = handleRecipeEvent
+      internal.stopped = false
+      internal.config = {
+        externalEgressRefreshIntervalSeconds: 60,
+        externalEgressRefreshFloorSeconds: 5,
+      }
+      internal.externalEgressRefreshTimer = null
+      internal.externalEgressRefreshRunning = false
+      internal.reconciler = { externalEgressRefreshMinTtlMs: Infinity }
+
+      internal.startExternalEgressRefreshLoop()
+      await vi.advanceTimersByTimeAsync(60_000) // first tick — pass starts, stays in-flight
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(internal.externalEgressRefreshRunning).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(60_000) // second tick — must be skipped
+      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+
+      release?.()
+      await gate
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stop() clears the refresh timer so no further ticks fire', async () => {
+    vi.useFakeTimers()
+    try {
+      const { internal, handleRecipeEvent } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      // Minimal shape for stop() — every other subsystem is absent in this fixture.
+      const stoppableInternal = internal as unknown as {
+        transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+        runtimeCredentialRefreshTimer: ReturnType<typeof setInterval> | null
+        workloadStatusRefreshTimer: ReturnType<typeof setInterval> | null
+        watchRequest: { abort: () => void } | null
+        secretWatchLoops: { stop: () => void }[]
+        brokerRotationTimer: ReturnType<typeof setInterval> | null
+        dbRunProcessor: { stop: () => Promise<void> } | null
+        traceReporter: null
+      }
+      stoppableInternal.transientRetries = new Map()
+      stoppableInternal.runtimeCredentialRefreshTimer = null
+      stoppableInternal.workloadStatusRefreshTimer = null
+      stoppableInternal.watchRequest = null
+      stoppableInternal.secretWatchLoops = []
+      stoppableInternal.brokerRotationTimer = null
+      stoppableInternal.dbRunProcessor = null
+      stoppableInternal.traceReporter = null
+
+      internal.startExternalEgressRefreshLoop()
+      expect(internal.externalEgressRefreshTimer).not.toBeNull()
+
+      await internal.stop()
+      expect(internal.externalEgressRefreshTimer).toBeNull()
+      expect(internal.stopped).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── issue #375 M1/M4 (jozer review): the REAL constructor + start()/stop()
+// wiring of the grant-update listener. Every prior watcher test hand-installed
+// collaborators onto Object.create(prototype), so removing the constructor
+// wiring or the start()/stop() calls left the whole suite green. These tests
+// construct the real watcher and go RED if:
+//   - the constructor stops creating the listener,
+//   - the listener is handed the SHARED pool instead of its dedicated one (M4),
+//   - `await this.grantUpdateListener.start()` is removed from start(),
+//   - `await this.grantUpdateListener.stop()` is removed from stop().
+describe('WorkflowRecipeWatcher wiring — grant-update listener lifecycle (issue #375 M1/M4)', () => {
+  function makeFakeKubeConfig() {
+    return {
+      makeApiClient: vi.fn(() => ({})),
+    } as unknown as import('@kubernetes/client-node').KubeConfig
+  }
+
+  type ListenerStub = { start: () => Promise<void>; stop: () => Promise<void> }
+  type InternalWatcher = {
+    grantUpdateListener: ListenerStub | null
+    grantUpdateListenerPool: { connect?: unknown; end: () => Promise<void> } | null
+    dbRunProcessor: { start: () => Promise<void>; stop: () => Promise<void> } | null
+    traceReporter: null
+    tryInitializeWorkflow: () => Promise<void>
+    startWatch: () => Promise<void>
+    startSecretWatch: () => Promise<void>
+    startBrokerTokenRotationLoop: () => void
+    startRuntimeCredentialRefreshLoop: () => void
+    startWorkloadStatusRefreshLoop: () => void
+    startExternalEgressRefreshLoop: () => void
+  }
+
+  it('constructor wires a listener backed by a DEDICATED pool — LISTEN never checks out of the shared pool (M4)', async () => {
+    const sharedPool = { connect: vi.fn(), query: vi.fn(), on: vi.fn() }
+    const watcher = new WorkflowRecipeWatcher(makeFakeKubeConfig(), sharedPool as never)
+    const internal = watcher as unknown as InternalWatcher
+
+    expect(internal.grantUpdateListener).not.toBeNull()
+    expect(internal.grantUpdateListenerPool).not.toBeNull()
+    // M4: a lifetime-pinned LISTEN session must not burn one of the shared
+    // pool's 4 slots — the listener owns a dedicated single-connection pool.
+    expect(internal.grantUpdateListenerPool).not.toBe(sharedPool)
+
+    // Behavioral pin: starting the listener checks out of the DEDICATED pool
+    // and never touches the shared one.
+    const fakeClient = {
+      on: vi.fn(),
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      release: vi.fn(),
+      removeAllListeners: vi.fn(),
+    }
+    const dedicatedConnect = vi.fn().mockResolvedValue(fakeClient)
+    ;(internal.grantUpdateListenerPool as { connect?: unknown }).connect = dedicatedConnect
+    await (internal.grantUpdateListener as ListenerStub).start()
+    expect(dedicatedConnect).toHaveBeenCalledTimes(1)
+    expect(sharedPool.connect).not.toHaveBeenCalled()
+    await (internal.grantUpdateListener as ListenerStub).stop()
+  })
+
+  it('does not create the listener (or its pool) without a DB pool', () => {
+    const watcher = new WorkflowRecipeWatcher(makeFakeKubeConfig(), null)
+    const internal = watcher as unknown as InternalWatcher
+    expect(internal.grantUpdateListener).toBeNull()
+    expect(internal.grantUpdateListenerPool).toBeNull()
+  })
+
+  it('start() starts and stop() stops the grant-update listener and ends its dedicated pool (M1)', async () => {
+    const sharedPool = { connect: vi.fn(), query: vi.fn(), on: vi.fn() }
+    const watcher = new WorkflowRecipeWatcher(makeFakeKubeConfig(), sharedPool as never)
+    const internal = watcher as unknown as InternalWatcher
+
+    // Stub the heavy collaborators. The REAL start()/stop() method bodies stay
+    // in play, so neutering the listener wiring inside them goes RED here.
+    internal.tryInitializeWorkflow = vi.fn().mockResolvedValue(undefined)
+    internal.startWatch = vi.fn().mockResolvedValue(undefined)
+    internal.startSecretWatch = vi.fn().mockResolvedValue(undefined)
+    internal.startBrokerTokenRotationLoop = vi.fn()
+    internal.startRuntimeCredentialRefreshLoop = vi.fn()
+    internal.startWorkloadStatusRefreshLoop = vi.fn()
+    internal.startExternalEgressRefreshLoop = vi.fn()
+    internal.dbRunProcessor = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+    }
+    internal.traceReporter = null
+    const listenerStart = vi.fn().mockResolvedValue(undefined)
+    const listenerStop = vi.fn().mockResolvedValue(undefined)
+    internal.grantUpdateListener = { start: listenerStart, stop: listenerStop }
+    const poolEnd = vi.fn().mockResolvedValue(undefined)
+    internal.grantUpdateListenerPool = { end: poolEnd }
+
+    await watcher.start()
+    expect(listenerStart).toHaveBeenCalledTimes(1)
+
+    await watcher.stop()
+    expect(listenerStop).toHaveBeenCalledTimes(1)
+    // M4: the watcher owns the dedicated pool and must close its connection.
+    expect(poolEnd).toHaveBeenCalledTimes(1)
   })
 })

@@ -14,7 +14,7 @@
 import * as k8s from '@kubernetes/client-node'
 import type { Pool } from 'pg'
 import { loadConfig } from './config'
-import { getPool, initDb } from './db'
+import { createGrantUpdateListenerPool, getPool, initDb } from './db'
 import {
   type GovernedTraceReporter,
   type WorkflowInfrastructureTelemetryProjection,
@@ -29,13 +29,21 @@ import {
   type DbRunRow,
   createDbRunProcessor,
 } from './reconciler/dbRunProcessor'
+import {
+  type GrantUpdateListener,
+  createGrantUpdateListener,
+} from './reconciler/grantUpdateListener'
 import { getErrorCode } from './reconciler/k8sErrors'
 import { RecipeEventQueue } from './reconciler/recipeEventQueue'
-import { recipeHasBackgroundAccessClient } from './reconciler/resourceBuilder'
+import {
+  parseClusterLocalFqdn,
+  recipeHasBackgroundAccessClient,
+} from './reconciler/resourceBuilder'
 import { SecretReverseIndex } from './reconciler/secretReverseIndex'
 import { SecretWatcher } from './reconciler/secretWatcher'
 import {
   type ReconcileResult,
+  TRANSIENT_REQUEUE_BASE_MS,
   WorkflowRecipeReconciler,
 } from './reconciler/workflowRecipeReconciler'
 import {
@@ -52,6 +60,18 @@ const MIN_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 5_000
 const MAX_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 30_000
 const WORKLOAD_STATUS_REFRESH_INTERVAL_MS = 30_000
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
+// issue #375: how long a published Plugin Workload SDK `verifiedAt` may age
+// before a steady-state reconcile refreshes it, even when every semantic field
+// is unchanged. `verifiedAt` is recomputed on every bootstrap-proof parse, so
+// without a throttle a fresh timestamp each pass would patch on every reconcile
+// (≤30s) and spin a MODIFIED→reconcile loop. 5 min keeps the liveness signal
+// current while capping steady-state churn at ≤1 patch / 5 min per recipe.
+const VERIFIED_AT_REFRESH_MS = 5 * 60_000
+// Bound the fan-out of the periodic external-egress requeue: the per-recipe
+// eventQueue already serializes each recipe, but without a global cap a refresh
+// pass over N recipes would enqueue N reconciles at once. This caps the number of
+// reconciles started concurrently per pass; the rest queue and drain in order.
+const EXTERNAL_EGRESS_REFRESH_MAX_CONCURRENCY = 8
 
 export interface WorkflowRecipeWatchObject {
   metadata: {
@@ -103,6 +123,18 @@ export function shouldPatchRecipeStatus(
   if (recipe.status?.message !== result.message) return true
   if (workloadStatusesChanged(recipe, result)) return true
 
+  // Merge-patching status maps preserves fields omitted by the next patch.
+  // Keep the SDK capability message aligned with its owned condition so a
+  // previous status-only refresh cannot leave a contradictory
+  // `state=validated` + `message=bootstrap not ready` record behind.
+  if (pluginWorkloadSdkStatusMessageChanged(recipe)) return true
+
+  // issue #375: publish a computed Plugin Workload SDK capability transition
+  // (e.g. awaiting_policy→validated) even when nothing else observable changed.
+  // Without this the reconciler computes the new state but no patch is emitted
+  // and the CRD keeps proclaiming the stale state until an incidental diff.
+  if (pluginWorkloadSdkProjectionChanged(recipe, result)) return true
+
   if (
     ownedConditionsChanged(recipe.status?.conditions, result.internalDependencyConditions, [
       'InternalDependenciesReady',
@@ -116,6 +148,104 @@ export function shouldPatchRecipeStatus(
   if (result.clearWorkflowExecution && recipe.status?.workflowExecution) return true
 
   return false
+}
+
+/**
+ * issue #375: decide whether the freshly-computed Plugin Workload SDK capability
+ * projection (carried on `result.pluginWorkloadSdkProjection`, built once by the
+ * watcher via the reconciler) differs from what is currently persisted in
+ * `status.pluginWorkloadSdk` in a way that must be published.
+ *
+ * Semantic fields are compared explicitly (NEVER a deep-equal that would drag in
+ * timestamps): `state`, `message`, `policyRevision`, `policyHash`,
+ * `defaultTargetRef`, `bootstrapPodUid`, `bootstrapContractVersion`,
+ * `bootstrapProvider`, `bootstrapModel`, and the `promptBridge`/
+ * `clientNotifications` family flags. A change in any of them (e.g.
+ * awaiting_policy→validated on grant creation, validated→awaiting_policy on
+ * revocation, or an in-place re-bootstrap against a corrected model/provider
+ * with the same pod) forces a patch immediately — `bootstrapProvider`/
+ * `bootstrapModel`/`bootstrapContractVersion` are persisted values control-api
+ * reads at runtime, NOT timestamps, so they must not hide behind the
+ * `verifiedAt` throttle.
+ *
+ * `verifiedAt` and `validatedAt` are timestamp-derived and EXCLUDED from
+ * semantic equality — otherwise every reconcile would look "changed". Instead,
+ * when the projection is otherwise identical, `verifiedAt` is refreshed on a
+ * throttle: patch only when the newly-computed `verifiedAt` is strictly NEWER
+ * than the persisted one AND the persisted one is older than
+ * `VERIFIED_AT_REFRESH_MS` (see the inline INVARIANT). The WINDOW clause is the
+ * primary loop-stopper: `verifiedAt` is recomputed fresh on essentially every
+ * proof parse (so the projected timestamp is normally NEWER, not equal), but
+ * right after a refresh `persisted ≈ now`, so `now - persisted` is under the
+ * threshold and no patch fires until the 5-min window reopens — bounding steady
+ * state to ≤1 patch / 5 min. The `projected > persisted` guard is NOT that
+ * bound; it only defends the edge where a future projection carries a STALE
+ * (equal-or-older) timestamp, which must never trigger a patch.
+ *
+ * A `undefined` projection (paths that do not run the SDK lane, e.g. the
+ * workload-status-only refresh) short-circuits to false — that pass has no SDK
+ * opinion and must not force a patch.
+ */
+function pluginWorkloadSdkProjectionChanged(
+  recipe: WorkflowRecipeCRD,
+  result: ReconcileResult,
+  nowMs: number = Date.now()
+): boolean {
+  const projected = result.pluginWorkloadSdkProjection?.capability
+  if (projected === undefined) return false
+  const current = recipe.status?.pluginWorkloadSdk
+  // `null` means the projection wants to CLEAR status.pluginWorkloadSdk
+  // (capability removed from spec). Patch only if something is still persisted.
+  if (projected === null) return current !== undefined
+  if (!current) return true
+
+  const nullable = (value: string | number | null | undefined): string | number | null =>
+    value ?? null
+  if (current.state !== projected.state) return true
+  if (nullable(current.message) !== nullable(projected.message)) return true
+  if (nullable(current.policyRevision) !== nullable(projected.policyRevision)) return true
+  if (nullable(current.policyHash) !== nullable(projected.policyHash)) return true
+  if (nullable(current.defaultTargetRef) !== nullable(projected.defaultTargetRef)) return true
+  if (nullable(current.bootstrapPodUid) !== nullable(projected.bootstrapPodUid)) return true
+  if (nullable(current.bootstrapContractVersion) !== nullable(projected.bootstrapContractVersion))
+    return true
+  if (nullable(current.bootstrapProvider) !== nullable(projected.bootstrapProvider)) return true
+  if (nullable(current.bootstrapModel) !== nullable(projected.bootstrapModel)) return true
+  if (current.promptBridge !== projected.promptBridge) return true
+  if (current.clientNotifications !== projected.clientNotifications) return true
+
+  // Semantic equality holds. Refresh verifiedAt on a throttle so the liveness
+  // signal stays current without a per-reconcile patch loop. INVARIANT: only
+  // refresh when the newly-computed verifiedAt is strictly NEWER than the
+  // persisted one AND the persisted one is older than VERIFIED_AT_REFRESH_MS.
+  // The WINDOW clause (nowMs - persistedMs > VERIFIED_AT_REFRESH_MS) is the
+  // PRIMARY loop-stopper: verifiedAt is recomputed fresh on essentially every
+  // proof parse, so the projected timestamp is normally NEWER — the loop is not
+  // stopped by the two eventually becoming equal. It is stopped because right
+  // after a refresh persistedMs ≈ nowMs, so (nowMs - persistedMs) is under the
+  // threshold and no patch fires until the 5-min window reopens (≤1 patch/5min).
+  // The projectedMs > persistedMs guard is NOT that bound; it only defends the
+  // edge where a future projection carries a STALE (equal-or-older) timestamp,
+  // which must never trigger a patch.
+  if (!projected.verifiedAt) return false
+  if (!current.verifiedAt) return true
+  const projectedMs = Date.parse(projected.verifiedAt)
+  // Cannot reason about an unparseable projected timestamp — do not patch.
+  if (Number.isNaN(projectedMs)) return false
+  const persistedMs = Date.parse(current.verifiedAt)
+  // A corrupt persisted timestamp is refreshed once from a valid projection.
+  if (Number.isNaN(persistedMs)) return true
+  return projectedMs > persistedMs && nowMs - persistedMs > VERIFIED_AT_REFRESH_MS
+}
+
+function pluginWorkloadSdkStatusMessageChanged(recipe: WorkflowRecipeCRD): boolean {
+  const capability = recipe.status?.pluginWorkloadSdk
+  if (!capability) return false
+  const condition = recipe.status?.conditions?.find(
+    candidate => candidate.type === 'PluginWorkloadSdkCapability'
+  )
+  if (typeof condition?.message !== 'string') return false
+  return capability.message !== condition.message
 }
 
 function workflowRunIdForTelemetry(recipe: WorkflowRecipeCRD): string | undefined {
@@ -273,7 +403,15 @@ export function workflowNeedsRuntimeCredentialRefresh(recipe: WorkflowRecipeCRD)
 
 export function workflowNeedsInfrastructureReconcile(recipe: WorkflowRecipeCRD): boolean {
   const isWorkflow = (recipe.spec.steps ?? []).length > 0
-  if (!isWorkflow || recipe.metadata.deletionTimestamp) return false
+  if (recipe.metadata.deletionTimestamp) return false
+
+  // SDK-only recipes are deliberately stepless, but their eager mcp-host and
+  // bootstrap proof still need the full reconciler lane. The generic workload
+  // status-refresh path cannot represent that proof and would overwrite a
+  // validated SDK capability with BootstrapNotReady while leaving phase=active.
+  // Keep this level-triggered retry independent from workflowExecution.
+  if (!isWorkflow && recipe.spec.pluginWorkloadSdk) return true
+  if (!isWorkflow) return false
 
   const workflowPhase = recipe.status?.workflowExecution?.phase
   if (workflowPhase === 'initializing' || workflowPhase === 'recovering') return true
@@ -306,6 +444,10 @@ export function workflowNeedsTerminalRunTeardown(recipe: WorkflowRecipeCRD): boo
 export function workflowNeedsWorkloadStatusRefresh(recipe: WorkflowRecipeCRD): boolean {
   if (recipe.metadata.deletionTimestamp) return false
   if ((recipe.spec.steps ?? []).length > 0) return false
+  // SDK-only recipes have capability state (including the eager bootstrap
+  // proof) that is owned by the full reconciler. A status-only workload read
+  // has no proof to carry and would corrupt the persisted SDK projection.
+  if (recipe.spec.pluginWorkloadSdk) return false
   if ((recipe.spec.workloads ?? []).length === 0) return false
 
   return recipe.status?.phase === 'active' || recipe.status?.phase === 'degraded'
@@ -342,6 +484,90 @@ export function workflowNeedsOwnershipBackstop(recipe: WorkflowRecipeCRD): boole
   if (recipe.metadata.deletionTimestamp) return false
   if ((recipe.spec.steps ?? []).length === 0) return false
   return recipeReferencesNamedSecrets(recipe)
+}
+
+/**
+ * issue #299 §3.2/§5 — does this recipe declare at least one exact-host EXTERNAL
+ * egress target that the WRC accumulator folds into a sliding-window policy?
+ *
+ * Two accumulator-driven sources qualify:
+ *  - `spec.ui.egress.external[]` — sandbox-ui external FQDNs (always exact-host).
+ *  - a NON-transport workload's `egressBindings[]` whose `dns` is an external FQDN
+ *    (i.e. NOT `<svc>.<ns>.svc.cluster.local`). Validation guarantees non-transport
+ *    workloads use exact-host egress, so any external-FQDN binding here is
+ *    exact-host. The UI workload's own bindings are skipped (its egress is declared
+ *    via `spec.ui.egress`, and the reconciler's workload loop skips it too).
+ *
+ * Transport-workload egress is intentionally EXCLUDED: it is delegated to HCC via
+ * the McpServer CRD, not folded by this accumulator, so re-enqueueing on its
+ * account would do no accumulator work.
+ *
+ * The predicate is pure and cheap (no DNS, no apiserver) so the refresh timer can
+ * filter the cached recipe set synchronously each tick.
+ */
+export function recipeHasExternalExactHostEgress(recipe: WorkflowRecipeCRD): boolean {
+  if (recipe.metadata.deletionTimestamp) return false
+  if ((recipe.spec.ui?.egress?.external ?? []).length > 0) return true
+
+  const uiWorkloadId = recipe.spec.ui?.workloadRef
+  return (recipe.spec.workloads ?? []).some(workload => {
+    if (workload.transport) return false
+    if (uiWorkloadId && workload.id === uiWorkloadId) return false
+    return (workload.egressBindings ?? []).some(
+      binding =>
+        Boolean(binding.dns) &&
+        binding.port != null &&
+        parseClusterLocalFqdn(binding.dns as string) === null
+    )
+  })
+}
+
+/**
+ * issue #299 §3.2/§5 — the external-egress refresh cadence in ms.
+ *
+ * `clamp(refreshInterval, floor)`: never tick faster than the floor. `loadConfig`
+ * already enforces `floor <= interval <= overlap/2`, but clamping here keeps the
+ * timer correct even if a caller passes an unvalidated config (tests, future
+ * callers), so a sub-floor interval can never turn the timer into a busy loop.
+ */
+export function externalEgressRefreshIntervalMs(
+  config: {
+    externalEgressRefreshIntervalSeconds: number
+    externalEgressRefreshFloorSeconds: number
+  },
+  minObservedTtlMs = Infinity
+): number {
+  const floorMs = config.externalEgressRefreshFloorSeconds * 1000
+  const configuredMs = config.externalEgressRefreshIntervalSeconds * 1000
+  // H2 (issue #299): advance the refresh to <= observed TTL/2 so a rotating
+  // low-TTL host is sampled every rotation. A finite observed TTL can only make
+  // the refresh FASTER than the configured interval, never slower; the floor is
+  // the hard lower bound to avoid a hot-loop.
+  const ttlAwareMs = Number.isFinite(minObservedTtlMs)
+    ? Math.min(configuredMs, minObservedTtlMs / 2)
+    : configuredMs
+  return Math.max(ttlAwareMs, floorMs)
+}
+
+/**
+ * Run `worker` over `items` with at most `limit` promises in flight at once.
+ * Deterministic worker-pool: `limit` runners pull from a shared cursor until the
+ * list drains. Used to bound the external-egress refresh fan-out.
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let cursor = 0
+  const runnerCount = Math.min(Math.max(limit, 1), items.length)
+  const runners = Array.from({ length: runnerCount }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++]
+      await worker(item)
+    }
+  })
+  await Promise.all(runners)
 }
 
 export interface WorkflowRecipeProvider {
@@ -389,12 +615,27 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private recipes: Map<string, WorkflowRecipeCRD> = new Map()
   private reconciler: WorkflowRecipeReconciler
   private dbRunProcessor: DbRunProcessor | null = null
+  // issue #375 (P3): event-driven grant→WRC nudge. Started only when the WRC has
+  // a DB (same gate as dbRunProcessor); without a DB the listener never starts
+  // and the level-triggered reconcile remains the sole convergence path.
+  private grantUpdateListener: GrantUpdateListener | null = null
+  // issue #375 (M4, jozer review): the LISTEN session pins its client for the
+  // process lifetime, so it gets its OWN single-connection pool and consumes
+  // zero slots of the shared `poolMax` (default 4) pool that dbRunProcessor,
+  // leader election, and run-sync all contend for. Owned (and ended) by this
+  // watcher because it exists solely for the grant-update listener.
+  private grantUpdateListenerPool: Pool | null = null
   private config = loadConfig()
   private stopped = false
   private runtimeCredentialRefreshTimer: ReturnType<typeof setInterval> | null = null
   private runtimeCredentialRefreshRunning = false
   private workloadStatusRefreshTimer: ReturnType<typeof setInterval> | null = null
   private workloadStatusRefreshRunning = false
+  // issue #299 — periodic external-egress requeue. GitHub (and other single-A-record
+  // rotators) change their resolved IP without bumping the CRD generation, so the
+  // accumulator's sliding window only converges if we re-reconcile on a timer.
+  private externalEgressRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  private externalEgressRefreshRunning = false
   private eventQueue = new RecipeEventQueue((key, error) => {
     console.error(`[WR-K8s] Unhandled event failure for "${key}":`, error)
   })
@@ -448,7 +689,55 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           })
         },
       })
+      // issue #375 (P3): on a grant-update NOTIFY, force-reconcile the affected
+      // recipe through the SAME path the 30s watchdog uses. The dispatch body is
+      // a named method so it is unit-testable without standing up a DB.
+      // issue #375 (M4): the listener LISTENs on a DEDICATED single-connection
+      // pool, never the shared one — a lifetime-pinned LISTEN checkout would
+      // permanently burn one of the shared pool's 4 slots (dbRunProcessor
+      // already pins another).
+      this.grantUpdateListenerPool = createGrantUpdateListenerPool(this.config.db)
+      this.grantUpdateListener = createGrantUpdateListener({
+        pool: this.grantUpdateListenerPool,
+        // `capabilityFamily` is accepted for forward-compat and intentionally
+        // unused: the dispatch force-reconciles the whole recipe from the DB
+        // source of truth (all families recomputed), and authorization is
+        // per-invocation in control-api, never derived from the notification.
+        onGrantUpdate: ({ recipeNamespace, recipeName }) =>
+          this.handleGrantUpdateNotification(recipeNamespace, recipeName),
+      })
     }
+  }
+
+  /**
+   * issue #375 (P3): dispatch a grant-update NOTIFY into a forced reconcile of
+   * the affected recipe — the SAME path the 30s watchdog uses. Kept as a named
+   * method (not an inline closure) so it is unit-testable without a live DB.
+   */
+  private handleGrantUpdateNotification(recipeNamespace: string, recipeName: string): void {
+    const known = this.recipes.get(recipeName)
+    if (!known || known.metadata.namespace !== recipeNamespace) {
+      // issue #375 (H4): make the discard diagnosable. control-api's emitted
+      // recipeNamespace and the WRC's watched sandboxNamespace come from
+      // independent env vars; if they ever diverge, 100% of NOTIFYs would be
+      // dropped and the feature would silently degrade to 30s polling. Log names
+      // only — no secrets.
+      console.warn(
+        `[WR-K8s] Discarding grant-update NOTIFY for "${recipeNamespace}/${recipeName}": ` +
+          (known ? `namespace mismatch (watching "${known.metadata.namespace}")` : 'unknown recipe')
+      )
+      return
+    }
+    void this.eventQueue.enqueue(recipeName, () => {
+      // issue #375 (H5): reconcile the CURRENT recipe. A newer MODIFIED may have
+      // landed between NOTIFY receipt and this queued job running
+      // (handleRecipeEvent updates this.recipes), so re-read the cache instead of
+      // closing over the stale snapshot. Re-check the guard on the fresh read —
+      // the recipe may have been deleted, or its namespace changed, while queued.
+      const cached = this.recipes.get(recipeName)
+      if (!cached || cached.metadata.namespace !== recipeNamespace) return Promise.resolve()
+      return this.handleRecipeEvent('MODIFIED', cached, { forceReconcile: true })
+    })
   }
 
   getAllRecipes(): WorkflowRecipeCRD[] {
@@ -509,9 +798,13 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     this.startBrokerTokenRotationLoop()
     this.startRuntimeCredentialRefreshLoop()
     this.startWorkloadStatusRefreshLoop()
+    this.startExternalEgressRefreshLoop()
 
     if (this.dbRunProcessor) {
       await this.dbRunProcessor.start()
+    }
+    if (this.grantUpdateListener) {
+      await this.grantUpdateListener.start()
     }
   }
 
@@ -744,7 +1037,26 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         const result = await this.reconciler.reconcile(recipe)
         // Patch only when observable status changes. This avoids reconcile loops
         // while still allowing active parent recipes to clear stale execution state.
-        if (shouldPatchRecipeStatus(recipe, result)) {
+        const willPatch = shouldPatchRecipeStatus(recipe, result)
+        // issue #375 (P4): surface a computed-vs-published Plugin Workload SDK
+        // state divergence — old→new plus whether a patch was emitted. With P1
+        // this is rare; its value is forensic (it would have discriminated
+        // "transition computed but not published" from "never computed" in
+        // minutes) and it verifies P1 in the field. Only states are logged — no
+        // tokens/secrets (sec-003).
+        const projectedSdkState = result.pluginWorkloadSdkProjection?.capability?.state
+        const persistedSdkState = recipe.status?.pluginWorkloadSdk?.state
+        // The `validated → capability:null` cleanup case is intentionally NOT
+        // forensically logged here (projectedSdkState is undefined for a cleared
+        // capability); its clearing PATCH is still emitted via
+        // `pluginWorkloadSdkProjectionChanged`, so the publish is covered.
+        if (projectedSdkState !== undefined && projectedSdkState !== persistedSdkState) {
+          console.log(
+            `[WR-K8s] Plugin Workload SDK state for "${recipe.metadata.name}": ` +
+              `${persistedSdkState ?? 'none'} -> ${projectedSdkState} (patchEmitted=${willPatch})`
+          )
+        }
+        if (willPatch) {
           await this.reconciler.patchStatus(recipe, result)
           enqueueInfrastructureTelemetryBestEffort(
             this.traceReporter,
@@ -776,6 +1088,16 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           this.traceReporter,
           controllerErrorTelemetryProjection(recipe, error)
         )
+        // issue #375 (P2): a transient (non-404) failure used to return here
+        // WITHOUT re-arming the retry chain, so a thrown reconcile killed the 5s
+        // self-heal and only the 30s watchdog could recover. Re-schedule the
+        // bounded exponential backoff retry so the recipe re-reconciles on its
+        // own; persistent failure still backs off toward TRANSIENT_RETRY_MAX_MS,
+        // with the watchdog as the second net. The 404 branch above already
+        // cleared and returned, so it never reaches here.
+        if (!this.stopped) {
+          this.scheduleTransientRetry(recipe.metadata.name, TRANSIENT_REQUEUE_BASE_MS, false)
+        }
       }
     } else if (type === 'DELETED') {
       // Resource is gone (finalizer already removed) — just clean cache.
@@ -889,6 +1211,82 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     this.workloadStatusRefreshTimer.unref?.()
   }
 
+  /**
+   * issue #299 §3.2/§5 — start the periodic external-egress requeue.
+   *
+   * A recipe's exact-host external egress (`spec.ui.egress.external` or a
+   * non-transport workload's external `egressBindings`) resolves to IPs that a
+   * single-A-record provider (GitHub: api.github.com, ~15s TTL over
+   * 140.82.112.0/20) rotates WITHOUT bumping the CRD generation. Generation-only
+   * reconcile triggers therefore never re-run the accumulator, and the
+   * sliding-window egress set on the NetworkPolicy stops covering the pod's next
+   * resolution. This timer re-enqueues a FULL reconcile (forceReconcile — a plain
+   * MODIFIED would short-circuit as status-only) for every cached recipe with such
+   * egress, so the accumulator folds each fresh DNS snapshot into the window.
+   *
+   * Overlapping passes are impossible by construction: the next delay is armed in
+   * the pass's `.finally`, so a slow pass simply pushes the next tick out rather
+   * than stacking. `externalEgressRefreshRunning` is an in-flight indicator (read
+   * by tests); per-recipe coalescing is handled by the eventQueue.
+   */
+  private startExternalEgressRefreshLoop(): void {
+    if (this.externalEgressRefreshTimer) return
+
+    // Self-rescheduling (not a fixed setInterval) so the delay can advance to
+    // <= observed TTL/2 (H2, issue #299) as low-TTL hosts are seen. Rescheduling
+    // AFTER each pass completes also guarantees no overlapping refreshes.
+    const scheduleNext = (): void => {
+      if (this.stopped) return
+      const delayMs = externalEgressRefreshIntervalMs(
+        this.config,
+        this.reconciler.externalEgressRefreshMinTtlMs
+      )
+      this.externalEgressRefreshTimer = setTimeout(() => {
+        this.externalEgressRefreshRunning = true
+        void this.refreshExternalEgressForActiveRecipes().finally(() => {
+          this.externalEgressRefreshRunning = false
+          scheduleNext()
+        })
+      }, delayMs)
+      this.externalEgressRefreshTimer.unref?.()
+    }
+    scheduleNext()
+  }
+
+  private async refreshExternalEgressForActiveRecipes(): Promise<void> {
+    if (this.stopped) return
+
+    const started = Date.now()
+    const selected = [...this.recipes.keys()].filter(name => {
+      const recipe = this.recipes.get(name)
+      return recipe ? recipeHasExternalExactHostEgress(recipe) : false
+    })
+    if (selected.length === 0) return
+
+    let enqueued = 0
+    await runWithConcurrency(selected, EXTERNAL_EGRESS_REFRESH_MAX_CONCURRENCY, async name => {
+      if (this.stopped) return
+      const latest = this.recipes.get(name)
+      if (!latest) return
+      try {
+        await this.eventQueue.enqueue(name, () =>
+          // Generation is unchanged for a DNS-rotation refresh, so force the full
+          // reconcile; otherwise handleRecipeEvent classifies this synthetic
+          // MODIFIED as status-only and returns before the accumulator runs.
+          this.handleRecipeEvent('MODIFIED', latest, { forceReconcile: true })
+        )
+        enqueued++
+      } catch (error) {
+        console.error(`[WR-K8s] External egress refresh failed for "${name}":`, error)
+      }
+    })
+
+    // Counts and duration only — never the resolved FQDNs/IPs or any Secret.
+    console.log(
+      `[WR-K8s] External egress refresh: re-enqueued ${enqueued}/${selected.length} recipe(s) in ${Date.now() - started}ms`
+    )
+  }
+
   private async refreshWorkloadStatusesForSteadyRecipes(): Promise<void> {
     if (this.stopped) return
 
@@ -957,7 +1355,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         }
         if (workflowNeedsInfrastructureReconcile(latest)) {
           await this.eventQueue.enqueue(recipeName, () =>
-            this.handleRecipeEvent('MODIFIED', latest)
+            // Infrastructure retries are timer-driven with an unchanged CRD
+            // generation. Force the full reconcile; otherwise the watcher
+            // classifies this synthetic MODIFIED event as status-only and
+            // returns before re-running the eager SDK bootstrap lane.
+            this.handleRecipeEvent('MODIFIED', latest, { forceReconcile: true })
           )
         }
       } catch (error) {
@@ -983,6 +1385,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       clearInterval(this.workloadStatusRefreshTimer)
       this.workloadStatusRefreshTimer = null
     }
+    if (this.externalEgressRefreshTimer) {
+      clearTimeout(this.externalEgressRefreshTimer)
+      this.externalEgressRefreshTimer = null
+    }
     if (this.watchRequest) {
       console.log('[WR-K8s] Stopping watch')
       this.watchRequest.abort()
@@ -998,6 +1404,15 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     }
     if (this.dbRunProcessor) {
       await this.dbRunProcessor.stop()
+    }
+    if (this.grantUpdateListener) {
+      await this.grantUpdateListener.stop()
+    }
+    if (this.grantUpdateListenerPool) {
+      // issue #375 (M4): the watcher owns the dedicated LISTEN pool — end it on
+      // shutdown so its single connection is closed with the process.
+      await this.grantUpdateListenerPool.end()
+      this.grantUpdateListenerPool = null
     }
     if (this.traceReporter) {
       const result = await this.traceReporter.stopAndDrain()

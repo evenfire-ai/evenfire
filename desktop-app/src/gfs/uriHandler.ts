@@ -9,6 +9,7 @@
  * form); a human path may carry a trailing -<32hex> rid; otherwise it resolves
  * by path. Diverging from the server grammar would break deep links.
  */
+import { config } from '../config.js'
 
 const RID_RE = /^[0-9a-f]{32}$/
 const TRAILING_RID_RE = /-([0-9a-f]{32})$/
@@ -84,7 +85,7 @@ export interface GfsTransport {
   requestJson<T>(
     method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     url: string,
-    options?: { token?: string; body?: unknown }
+    options?: { token?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal }
   ): Promise<T>
   /** Binary fetch for downloads (resolves to the raw bytes). */
   fetchBytes(url: string, token: string): Promise<ArrayBuffer>
@@ -113,27 +114,42 @@ export interface GfsChildrenPage {
   nextCursor: string | null
 }
 
-export interface GfsAccessibleResource extends GfsResourceView {
-  sources: string[]
-  permissions: string[]
-  coversDescendants: boolean
+export type GfsAccessibleResource = Omit<GfsResourceView, 'drive' | 'parentResourceId'> & {
+  /** Operator-root children omit these ordinary/proxy response fields. */
+  drive?: string
+  parentResourceId?: string | null
+  /** Present on the ordinary Shared-with-me view; root children do not need provenance. */
+  sources?: string[]
+  permissions?: string[]
+  coversDescendants?: boolean
 }
 
 export interface GfsAccessibleResourcesPage {
   items: GfsAccessibleResource[]
   nextCursor: string | null
+  /** Present only when the server resolved this Desktop session as a linked GFS operator. */
+  rootResourceId?: string
+  /** Non-secret renderer mode marker. Absence preserves the ordinary shared-resource view. */
+  view?: 'operator'
 }
 
 /** Grant/share subject grammar (control-api routes/gfs/grants.ts parseSubject). */
 export type GfsSubject =
   | { type: 'user'; id: string }
   | { type: 'team'; id: string }
+  | { type: 'host'; id: string }
   | { type: 'operator' }
 
 export interface GfsGrantInput {
   resourceId: string
   drive?: string
-  subject: GfsSubject
+  /**
+   * One or more grant subjects, sent as the server's bulk `subjects[]` array (up
+   * to 100) in a single atomic PUT. control-api rejects the whole request if any
+   * element is invalid (400 `subjects_invalid` + `invalidIndexes`), so there is
+   * no partial-success outcome — all subjects are granted or none are.
+   */
+  subjects: GfsSubject[]
   permissions: string[]
   inherit?: boolean
 }
@@ -141,9 +157,35 @@ export interface GfsGrantInput {
 export interface GfsShareInput {
   resourceId: string
   drive?: string
-  subject: GfsSubject
+  /** One or more share subjects, sent as the bulk `subjects[]` array (atomic). */
+  subjects: GfsSubject[]
   permissions: string[]
   includeDescendants?: boolean
+}
+
+/**
+ * One ACL row as GET /me/gfs/grants returns it (control-api queryGrantItems).
+ * The `id` is the revoke handle — the grant PUT response carries no ids, so the
+ * UI must list-after-write to learn them. `subject.id` is absent for the
+ * operator sentinel row.
+ */
+export interface GfsGrantListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  inherit: boolean
+}
+
+/** One direct URI-share row as GET /me/gfs/shares returns it. */
+export interface GfsShareListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  includeDescendants: boolean
 }
 
 /** Bits the caller holds on a resource, as the affordances route reports them. */
@@ -183,6 +225,18 @@ export interface GfsDeleteInput {
 const DEFAULT_DRIVE = 'main'
 const TRANSPORT_TOKEN_FIELD = ['tok', 'en'].join('') as 'token'
 
+/** Grant/share ids name ACL rows (control-api routes/gfs UUID_RE). */
+const ACL_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+/**
+ * Shape of a managed host subject id: `<party>:<namespace>/<name>` with k8s
+ * DNS-1123 names (mirrors control-api src/gfs/hostSubject.ts
+ * isValidHostSubjectId). Input shaping only — the server re-validates and
+ * additionally enforces that the target is in the caller's own agent directory.
+ */
+const HOST_SUBJECT_ID_RE =
+  /^(1st|3rd):[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\/[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/
+
 function joinUrl(base: string, path: string): string {
   return `${base.replace(/\/+$/, '')}${path}`
 }
@@ -200,7 +254,8 @@ function unwrap<T>(payload: GfsEnvelope<T>): T {
 async function createGfsResource(
   transport: GfsTransport,
   input: GfsCreateInput,
-  session: string
+  session: string,
+  signal?: AbortSignal
 ): Promise<GfsResourceView> {
   const q = new URLSearchParams()
   q.set('drive', input.drive ?? DEFAULT_DRIVE)
@@ -210,8 +265,16 @@ async function createGfsResource(
   }
   if (input.kind === 'file') body.contentBase64 = input.encodedData ?? ''
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.parentResourceId)}/children?${q.toString()}`
-  const options = { body } as { token?: string; body?: unknown }
+  // Uploads carry a base64 body up to the 16 MB cap (~22.4 MB): use the generous
+  // GFS upload deadline, not the 60s app-wide default that would abort a slow link.
+  const options = { body, timeoutMs: config.gfsUploadTimeoutMs } as {
+    token?: string
+    body?: unknown
+    timeoutMs?: number
+    signal?: AbortSignal
+  }
   options[TRANSPORT_TOKEN_FIELD] = session
+  if (signal) options.signal = signal
   const payload = await transport.requestJson<GfsEnvelope<GfsResourceView>>(
     'POST',
     joinUrl(transport.baseUrl, path),
@@ -223,7 +286,8 @@ async function createGfsResource(
 async function replaceGfsFile(
   transport: GfsTransport,
   input: GfsReplaceInput,
-  session: string
+  session: string,
+  signal?: AbortSignal
 ): Promise<GfsResourceView> {
   const q = new URLSearchParams()
   q.set('drive', input.drive ?? DEFAULT_DRIVE)
@@ -232,8 +296,16 @@ async function replaceGfsFile(
   }
   if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.resourceId)}/content?${q.toString()}`
-  const options = { body } as { token?: string; body?: unknown }
+  // Replace uploads carry the same base64 body as create: use the generous GFS
+  // upload deadline instead of the 60s app-wide default.
+  const options = { body, timeoutMs: config.gfsUploadTimeoutMs } as {
+    token?: string
+    body?: unknown
+    timeoutMs?: number
+    signal?: AbortSignal
+  }
   options[TRANSPORT_TOKEN_FIELD] = session
+  if (signal) options.signal = signal
   const payload = await transport.requestJson<GfsEnvelope<GfsResourceView>>(
     'PUT',
     joinUrl(transport.baseUrl, path),
@@ -379,45 +451,142 @@ export class GfsClient {
    * API error here); the UI affordances only HIDE controls the caller can't use.
    */
   async grant(input: GfsGrantInput, token: string): Promise<void> {
+    try {
+      await this.transport.requestJson(
+        'PUT',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/grants'),
+        {
+          token,
+          body: {
+            drive: input.drive ?? DEFAULT_DRIVE,
+            resourceId: input.resourceId,
+            subjects: input.subjects,
+            permissions: input.permissions,
+            inherit: input.inherit ?? false,
+          },
+        }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+  }
+
+  /**
+   * List a resource's ACL rows ("Who has access"). Server-side, viewing the
+   * ACL requires the same authority as changing it (manage_acl, direct or via
+   * an inheriting ancestor) — a caller without it gets the API's 403, never a
+   * silent empty list. NOT enveloped: the route returns `{items}` directly.
+   */
+  async listGrants(
+    input: { resourceId: string; drive?: string },
+    token: string
+  ): Promise<GfsGrantListItem[]> {
+    const q = new URLSearchParams()
+    q.set('drive', input.drive ?? DEFAULT_DRIVE)
+    q.set('resourceId', input.resourceId)
+    let payload: { items: GfsGrantListItem[] }
+    try {
+      payload = await this.transport.requestJson<{ items: GfsGrantListItem[] }>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/grants?' + q.toString()),
+        { token }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
+      throw new GfsUriError('unexpected gfs grants response: missing items array')
+    }
+    return payload.items
+  }
+
+  /**
+   * Revoke a grant by its ACL row id (learned from listGrants — the grant PUT
+   * response carries no ids). The id is validated as a UUID before the URL is
+   * built so a malformed value can never become a path segment.
+   */
+  async revokeGrant(grantId: string, token: string): Promise<void> {
+    if (!ACL_ID_RE.test(grantId)) {
+      throw new GfsUriError(`grant id must be a UUID: ${JSON.stringify(grantId)}`)
+    }
     await this.transport.requestJson(
-      'PUT',
-      joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/grants'),
-      {
-        token,
-        body: {
-          drive: input.drive ?? DEFAULT_DRIVE,
-          resourceId: input.resourceId,
-          subject: input.subject,
-          permissions: input.permissions,
-          inherit: input.inherit ?? false,
-        },
-      }
+      'DELETE',
+      joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/grants/${encodeURIComponent(grantId)}`),
+      { token }
     )
   }
 
-  /** Create a URI share for a subject (same no-escalation engine, isShare=true). */
+  /** Create a URI share for subjects (same no-escalation engine, isShare=true). */
   async createShare(input: GfsShareInput, token: string): Promise<void> {
-    await this.transport.requestJson(
-      'POST',
-      joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/shares'),
-      {
-        token,
-        body: {
-          drive: input.drive ?? DEFAULT_DRIVE,
-          resourceId: input.resourceId,
-          subject: input.subject,
-          permissions: input.permissions,
-          includeDescendants: input.includeDescendants ?? false,
-        },
-      }
-    )
+    try {
+      await this.transport.requestJson(
+        'POST',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/shares'),
+        {
+          token,
+          body: {
+            drive: input.drive ?? DEFAULT_DRIVE,
+            resourceId: input.resourceId,
+            subjects: input.subjects,
+            permissions: input.permissions,
+            includeDescendants: input.includeDescendants ?? false,
+          },
+        }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
-  async createResource(input: GfsCreateInput, session: string): Promise<GfsResourceView> {
-    return createGfsResource(this.transport, input, session)
+  /** List direct URI shares on one resource. This route is never inferred from grants. */
+  async listShares(
+    input: { resourceId: string; drive?: string },
+    token: string
+  ): Promise<GfsShareListItem[]> {
+    const q = new URLSearchParams()
+    q.set('drive', input.drive ?? DEFAULT_DRIVE)
+    q.set('resourceId', input.resourceId)
+    let payload: { items: GfsShareListItem[] }
+    try {
+      payload = await this.transport.requestJson<{ items: GfsShareListItem[] }>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/shares?' + q.toString()),
+        { token }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
+      throw new GfsUriError('unexpected gfs shares response: missing items array')
+    }
+    return payload.items
   }
 
-  async replaceFile(input: GfsReplaceInput, session: string): Promise<GfsResourceView> {
-    return replaceGfsFile(this.transport, input, session)
+  /** Revoke a direct URI share by the UUID learned from listShares. */
+  async revokeShare(shareId: string, token: string): Promise<void> {
+    if (!ACL_ID_RE.test(shareId)) {
+      throw new GfsUriError(`share id must be a UUID: ${JSON.stringify(shareId)}`)
+    }
+    await this.transport.requestJson(
+      'DELETE',
+      joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/shares/${encodeURIComponent(shareId)}`),
+      { token }
+    )
+  }
+
+  async createResource(
+    input: GfsCreateInput,
+    session: string,
+    signal?: AbortSignal
+  ): Promise<GfsResourceView> {
+    return createGfsResource(this.transport, input, session, signal)
+  }
+
+  async replaceFile(
+    input: GfsReplaceInput,
+    session: string,
+    signal?: AbortSignal
+  ): Promise<GfsResourceView> {
+    return replaceGfsFile(this.transport, input, session, signal)
   }
 
   async renameResource(
@@ -437,20 +606,112 @@ export class GfsClient {
 
 /**
  * Parse a Desktop folder-owner delegation subject. The user plane can delegate
- * only to visible users or teams; operator/host/context targets are reserved for
- * the operator/provisioner contracts and are rejected before the API call. The
- * server re-validates; this is an input-shaping convenience, not a trust point.
+ * to visible users, teams, or the caller's own managed agents
+ * (`host:<party>:<ns>/<name>` — the first `:` splits the type, so the id keeps
+ * its canonical `<party>:<ns>/<name>` form). Operator/context targets stay
+ * reserved for the operator/provisioner contracts and are rejected before the
+ * API call. The server re-validates (grammar AND agent-directory ownership);
+ * this is an input-shaping convenience, not a trust point.
  */
 export function parseSubjectKey(key: string): GfsSubject {
   const trimmed = key.trim()
   const sep = trimmed.indexOf(':')
   if (sep <= 0) {
-    throw new GfsUriError(`subject must be user:<id> or team:<id>: ${JSON.stringify(key)}`)
+    throw new GfsUriError(
+      `subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>: ${JSON.stringify(key)}`
+    )
   }
   const type = trimmed.slice(0, sep)
   const id = trimmed.slice(sep + 1)
+  if (type === 'host') {
+    if (!HOST_SUBJECT_ID_RE.test(id)) {
+      throw new GfsUriError(
+        `host subject must be host:<party>:<ns>/<name> (party 1st|3rd, k8s names): ${JSON.stringify(key)}`
+      )
+    }
+    return { type, id }
+  }
   if ((type !== 'user' && type !== 'team') || id.length === 0) {
-    throw new GfsUriError(`subject must be user:<id> or team:<id>: ${JSON.stringify(key)}`)
+    throw new GfsUriError(
+      `subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>: ${JSON.stringify(key)}`
+    )
   }
   return { type, id }
+}
+
+/**
+ * The structured verdict fields a bulk grant/share/list failure can carry.
+ * control-api reports them as SEPARATE response-body fields — `invalidIndexes`
+ * on a 400/403 (routes/gfs/grants.ts sendGfsGrantError) and `retryAfterSeconds`
+ * on a 429 (middleware/rateLimitMiddleware.ts) — not inside the human message.
+ */
+interface GfsGrantErrorFields {
+  invalidIndexes?: number[]
+  retryAfterSeconds?: number
+}
+
+/**
+ * Pull `invalidIndexes` / `retryAfterSeconds` out of an error response body.
+ *
+ * The body is an OPTIONAL, best-effort supplement: many failures (network,
+ * upstream proxy, plain-text errors) are not JSON, in which case there are
+ * simply no structured fields and the caller re-throws the ORIGINAL error
+ * untouched. This never swallows a failure — `surfaceGfsGrantError` always
+ * re-throws.
+ */
+function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyText)
+  } catch {
+    return {}
+  }
+  if (!parsed || typeof parsed !== 'object') return {}
+  const record = parsed as { invalidIndexes?: unknown; retryAfterSeconds?: unknown }
+  const fields: GfsGrantErrorFields = {}
+  if (Array.isArray(record.invalidIndexes)) {
+    const indexes = record.invalidIndexes.filter(
+      (value): value is number => Number.isInteger(value) && (value as number) >= 0
+    )
+    if (indexes.length > 0) fields.invalidIndexes = indexes
+  }
+  if (Number.isInteger(record.retryAfterSeconds) && (record.retryAfterSeconds as number) >= 0) {
+    fields.retryAfterSeconds = record.retryAfterSeconds as number
+  }
+  return fields
+}
+
+/**
+ * Re-throw a grant/share/list failure with the server's structured verdict
+ * fields embedded in the message.
+ *
+ * The transport (httpClient) throws an `ApiError` that stashes the raw response
+ * body on `.bodyText`, but ONLY the `Error.message` survives the Electron IPC
+ * boundary on the way to the renderer — `.bodyText` is dropped. So a bulk
+ * `subjects_invalid` (which subject failed) or a 429 (`retryAfterSeconds`) would
+ * be invisible to `gfsGrantErrors.ts` in production. We append those fields to
+ * the message in the exact shape that module's regexes parse (`invalidIndexes=[…]`,
+ * `retryAfterSeconds=…`), keeping the original message — and therefore the server
+ * error CODE (`subjects_invalid`, `foreign_agent_forbidden`, `429`, …) — intact.
+ *
+ * When there is nothing structured to surface, the ORIGINAL error propagates
+ * unchanged (fail loud; never swallow the server's verdict).
+ */
+function surfaceGfsGrantError(error: unknown): unknown {
+  const bodyText =
+    error &&
+    typeof error === 'object' &&
+    typeof (error as { bodyText?: unknown }).bodyText === 'string'
+      ? (error as { bodyText: string }).bodyText
+      : ''
+  if (!bodyText) return error
+  const fields = parseGfsGrantErrorFields(bodyText)
+  const parts: string[] = []
+  if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
+  if (fields.retryAfterSeconds !== undefined) {
+    parts.push(`retryAfterSeconds=${fields.retryAfterSeconds}`)
+  }
+  if (parts.length === 0) return error
+  const baseMessage = error instanceof Error ? error.message : String(error ?? '')
+  return new GfsUriError(`${baseMessage} ${parts.join(' ')}`)
 }

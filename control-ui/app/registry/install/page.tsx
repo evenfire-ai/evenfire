@@ -13,13 +13,15 @@ import { EgressEditor } from '@components/EgressEditor'
 import { RegistryInstallForm } from '@components/RegistryInstallForm'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { SelectInput } from '@components/ui'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import { getRegistryEntryVersion, installRecipeFromRegistry } from '@lib/api'
-import type { RegistryEntry } from '@lib/api'
+import type { LlmAllowedModel, RegistryEntry } from '@lib/api'
 import { analyzeWorkflowRecipeEgress } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
+import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import { validateRecipe } from '@lib/recipeValidator'
 
 type TransportWorkloadEditorTarget = {
@@ -113,6 +115,76 @@ function applyWorkflowWorkloadEgress(
   return JSON.stringify(next, null, 2)
 }
 
+// Resolve a model's provider from the operator's authoritative model allowlist
+// (useLlmAllowedModels → /admin/llm-models) — the single source of the exact
+// model→provider mapping. Returns '' when the model isn't in the catalog so the
+// user picks a provider explicitly instead of being handed a wrong guess; this
+// follows the "no hardcoded fallback" rule the rest of the LLM UI uses
+// (lib/llm.ts, spec R4.5.1). A string heuristic mis-derived roughly half the
+// providers (e.g. groq/cerebras/moonshot/perplexity/bailian models → openai).
+export function providerForModel(model: string, catalog: LlmAllowedModel[]): string {
+  return catalog.find(row => row.model === model)?.provider ?? ''
+}
+
+// Distinct providers the operator has enabled, for the override dropdown. Keeps
+// the picker honest — only providers with configured credentials are offered,
+// instead of a static enum of all 21.
+export function enabledProviders(catalog: LlmAllowedModel[]): string[] {
+  const seen = new Set<string>()
+  for (const row of catalog) {
+    if (row.enabled) seen.add(row.provider)
+  }
+  return Array.from(seen).sort()
+}
+
+// A recipe whose plugin SDK enables promptBridge must resolve an agent
+// (spec.agent or a step agent with provider + model) or it fails after install.
+// Exported for direct unit coverage of the agent-resolution rule.
+export function recipeAgentRequirement(parsed: Record<string, unknown> | null): {
+  needsAgent: boolean
+  allowedModels: string[]
+} {
+  if (!isPlainObject(parsed) || !isPlainObject(parsed.spec)) {
+    return { needsAgent: false, allowedModels: [] }
+  }
+  const spec = parsed.spec
+  const sdk = isPlainObject(spec.pluginWorkloadSdk) ? spec.pluginWorkloadSdk : null
+  const promptBridge = sdk && isPlainObject(sdk.promptBridge) ? sdk.promptBridge : null
+  if (!promptBridge) return { needsAgent: false, allowedModels: [] }
+  const agent = isPlainObject(spec.agent) ? spec.agent : null
+  const hasSpecAgent =
+    !!agent && typeof agent.provider === 'string' && typeof agent.model === 'string'
+  // Steps live at spec.steps in the CRD (charts/clerum-crds/crds/workflowrecipe.yaml),
+  // NOT spec.workflow.steps (no such property). Mirror the canonical resolver in
+  // workflow-recipes/src/workflow/agentResolution.ts (resolveMcpHostAgent) so this
+  // wizard check can't drift from the reconciler and silently override a step agent.
+  const steps = Array.isArray(spec.steps) ? spec.steps : []
+  const hasStepAgent = steps.some(
+    s =>
+      isPlainObject(s) &&
+      isPlainObject(s.agent) &&
+      typeof s.agent.provider === 'string' &&
+      typeof s.agent.model === 'string'
+  )
+  const allowedModels = Array.isArray(promptBridge.allowedModels)
+    ? promptBridge.allowedModels.filter((m): m is string => typeof m === 'string')
+    : []
+  return { needsAgent: !(hasSpecAgent || hasStepAgent), allowedModels }
+}
+
+// Inject spec.agent into the parsed recipe, returning the JSON manifest (same
+// serialization the egress editor uses).
+function applyRecipeAgent(
+  parsed: Record<string, unknown>,
+  provider: string,
+  model: string
+): string {
+  const next = JSON.parse(JSON.stringify(parsed)) as Record<string, unknown>
+  if (!isPlainObject(next.spec)) throw new Error('Recipe spec must be an object')
+  next.spec.agent = { provider, model }
+  return JSON.stringify(next, null, 2)
+}
+
 function RegistryRecipeInstallPreview({
   entry,
   onCancel,
@@ -130,6 +202,13 @@ function RegistryRecipeInstallPreview({
   const [recipeText, setRecipeText] = useState(
     typeof entry.recipe_meta?.recipeYaml === 'string' ? entry.recipe_meta.recipeYaml : ''
   )
+  // Agent to inject when the recipe's promptBridge needs one (provider + model).
+  const [agentModel, setAgentModel] = useState('')
+  const [agentProvider, setAgentProvider] = useState('')
+  // Operator-declared model allowlist (/admin/llm-models): the authoritative
+  // model→provider map and the set of providers enabled in this deployment.
+  const { models: llmCatalog } = useLlmAllowedModels()
+  const catalogKey = llmCatalog.map(r => `${r.provider}:${r.model}:${r.enabled}`).join('\n')
 
   useEffect(() => {
     setRecipeText(
@@ -145,6 +224,29 @@ function RegistryRecipeInstallPreview({
     [parseResult.parsed]
   )
   const parsedRecipe = validation?.parsed ?? parseResult.parsed
+  const agentReq = useMemo(
+    () => recipeAgentRequirement((parsedRecipe as Record<string, unknown> | null) ?? null),
+    [parsedRecipe]
+  )
+  const allowedModelsKey = agentReq.allowedModels.join('\n')
+  useEffect(() => {
+    if (agentReq.needsAgent && agentReq.allowedModels.length > 0) {
+      const first = agentReq.allowedModels[0]
+      setAgentModel(first)
+      setAgentProvider(providerForModel(first, llmCatalog))
+    } else {
+      setAgentModel('')
+      setAgentProvider('')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentReq.needsAgent, allowedModelsKey, catalogKey])
+  const agentProviderOptions = useMemo(() => {
+    const opts = enabledProviders(llmCatalog)
+    // Keep the derived/selected provider selectable even if the operator has not
+    // enabled it yet, so the value is never silently dropped from the picker.
+    return agentProvider && !opts.includes(agentProvider) ? [agentProvider, ...opts] : opts
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalogKey, agentProvider])
   const transportEgressTargets = useMemo(
     () => workflowTransportWorkloads(parsedRecipe as Record<string, unknown> | null),
     [parsedRecipe]
@@ -157,12 +259,18 @@ function RegistryRecipeInstallPreview({
     ? (validation?.issues.filter(issue => issue.severity === 'error') ?? [])
     : []
   const egressErrors = egressFindings.filter(finding => finding.severity === 'error')
+  // A promptBridge recipe must resolve an agent before install, or it fails
+  // after install. When the recipe's allowedModels[0] is not in the operator
+  // catalog, providerForModel() returns '' and no spec.agent is injected — so
+  // block the submit until a provider + model are actually chosen.
+  const agentReady = !agentReq.needsAgent || (Boolean(agentProvider) && Boolean(agentModel))
   const canInstall =
     recipeText.length > 0 &&
     !parseResult.error &&
     validationErrors.length === 0 &&
     egressErrors.length === 0 &&
     !egressEditError &&
+    agentReady &&
     !submitting
   const canContinue = step === 0 ? Boolean(recipeText.trim()) && !parseResult.error : canInstall
 
@@ -190,10 +298,15 @@ function RegistryRecipeInstallPreview({
     setSubmitting(true)
     setSubmitError('')
     try {
+      // Inject the chosen agent when the recipe's promptBridge requires one.
+      const manifest =
+        agentReq.needsAgent && agentProvider && agentModel && isPlainObject(parsedRecipe)
+          ? applyRecipeAgent(parsedRecipe, agentProvider, agentModel)
+          : recipeText
       const result = await installRecipeFromRegistry({
         registryEntryName: entry.name,
         registryEntryVersion: entry.version,
-        recipeManifest: recipeText,
+        recipeManifest: manifest,
       })
       showToast(`Installed ${entry.name} v${entry.version}.`, { tone: 'success' })
       onInstalled(result.recipeName)
@@ -229,15 +342,76 @@ function RegistryRecipeInstallPreview({
 
               <div className="cu-card">
                 <div className="cu-card__body">
-                  <strong>
-                    {entry.name} v{entry.version}
-                  </strong>
-                  <p className="cu-muted" style={{ margin: '6px 0 0' }}>
+                  <div className="cu-table-actions cu-registry-install-entry-heading">
+                    <strong>
+                      {entry.name} v{entry.version}
+                    </strong>
+                    {entry.visibility ? (
+                      <span
+                        className={`cu-registry-chip cu-registry-chip--visibility-${entry.visibility}`}
+                      >
+                        {entry.visibility === 'private' ? 'Private' : 'Public'}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="cu-muted cu-registry-install-entry-description">
                     {entry.description}
                   </p>
                 </div>
               </div>
             </div>
+
+            {agentReq.needsAgent ? (
+              <div className="cu-form-section">
+                <div className="cu-form-section__header">
+                  <h3 className="cu-form-section__title">Agent</h3>
+                  <p className="cu-form-section__description">
+                    This plugin uses the prompt bridge, so it needs an LLM agent (provider + model).
+                  </p>
+                </div>
+                <p className="cu-banner cu-banner--warn" role="status">
+                  Pick an agent for this plugin — without one it will fail after install.
+                </p>
+                <div className="cu-field">
+                  <label htmlFor="install-agent-model">Model</label>
+                  <SelectInput
+                    id="install-agent-model"
+                    value={agentModel}
+                    onChange={e => {
+                      const m = e.target.value
+                      setAgentModel(m)
+                      setAgentProvider(providerForModel(m, llmCatalog))
+                    }}
+                  >
+                    {agentReq.allowedModels.length === 0 ? (
+                      <option value="">(no models listed)</option>
+                    ) : null}
+                    {agentReq.allowedModels.map(m => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </SelectInput>
+                </div>
+                <div className="cu-field">
+                  <label htmlFor="install-agent-provider">Provider</label>
+                  <SelectInput
+                    id="install-agent-provider"
+                    value={agentProvider}
+                    onChange={e => setAgentProvider(e.target.value)}
+                  >
+                    {agentProviderOptions.length === 0 ? (
+                      <option value="">(no providers enabled)</option>
+                    ) : null}
+                    {agentProviderOptions.map(p => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </SelectInput>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -246,7 +420,7 @@ function RegistryRecipeInstallPreview({
             {validationErrors.length > 0 ? (
               <div className="cu-banner cu-banner--error" role="alert">
                 This Marketplace recipe cannot be installed until its manifest validates.
-                <ul style={{ margin: '6px 0 0 18px' }}>
+                <ul className="cu-registry-install-validation-list">
                   {validationErrors.slice(0, 5).map(issue => (
                     <li key={`${issue.path}-${issue.message}`}>
                       {issue.path}: {issue.message}
@@ -323,9 +497,17 @@ function RegistryRecipeInstallPreview({
                     }
                   >
                     <strong>{finding.label}</strong>: {finding.message}
-                    <div style={{ marginTop: 4 }}>
+                    <div className="cu-registry-install-egress-detail">
                       Bindings: {finding.bindingCount}. Mode: {finding.mode}.
                     </div>
+                    {finding.targets && finding.targets.length > 0 ? (
+                      <div className="cu-registry-install-egress-detail">
+                        Hosts: {finding.targets.join(', ')}
+                        {finding.ports && finding.ports.length > 0
+                          ? ` · Ports: ${finding.ports.join(', ')}`
+                          : ''}
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -428,6 +610,17 @@ function RegistryInstallPageContent() {
     void loadEntry()
   }, [entryName, entryVersion])
 
+  const isPrivate = entry?.visibility === 'private'
+  const kindLabel = entry?.entry_type === 'recipe' ? 'plugin' : 'connector'
+  // Scoped names are stored as `@org/name`; surface the org for a private entry.
+  const orgScope = entry ? (entry.name.match(/^(@[^/]+)\//)?.[1] ?? null) : null
+  const headerTitle = isPrivate ? `Install a private ${kindLabel}` : 'Install from Marketplace'
+  const headerSubtitle = isPrivate
+    ? `Install ${entry?.name}, a private ${kindLabel} from your organization${
+        orgScope ? ` ${orgScope}` : ''
+      }, into your cluster and bind it to a context.`
+    : 'Install a Marketplace entry into your cluster and bind it to a context.'
+
   return (
     <AuthGate>
       <DashboardLayout isDetailPage>
@@ -442,8 +635,8 @@ function RegistryInstallPageContent() {
             header={
               <CreatePageHeader
                 icon={<IconStore />}
-                title="Install from Marketplace"
-                subtitle="Install a Marketplace entry into your cluster and bind it to a context."
+                title={headerTitle}
+                subtitle={headerSubtitle}
                 backLabel="Back to Marketplace"
                 onBack={() => router.push(CONTROL_ROUTES.marketplace.root)}
               />
@@ -464,7 +657,8 @@ function RegistryInstallPageContent() {
               <RegistryInstallForm
                 entry={entry}
                 onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
-                onInstalled={() => router.push(CONTROL_ROUTES.marketplace.root)}
+                onInstalled={() => undefined}
+                onViewConnectors={() => router.push(CONTROL_ROUTES.connectors.root)}
               />
             ) : null}
           </CreateFlowPanel>

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
@@ -7,16 +8,26 @@ import {
   config,
   deleteDesktopRuntimeConfigOption,
   getActiveEnvKey,
+  getActiveLegacyEnvKeys,
   getDesktopRuntimeConfigState,
   hydrateDesktopRuntimeConfig,
   isDesktopRuntimeConfigured,
+  resolveEnvKey,
   saveDesktopRuntimeConfig,
   selectDesktopRuntimeConfigOption,
 } from './config.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
-import { GfsClient, parseSubjectKey } from './gfs/uriHandler.js'
-import { ApiError, requestJson } from './httpClient.js'
+import {
+  DesktopGfsUploadJob,
+  DesktopUploadCapabilityError,
+  type DesktopUploadInput,
+  type DesktopUploadSession,
+  type DesktopUploadTransport,
+} from './gfs/upload.js'
+import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
+import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
 import { RpcTokenManager } from './rpcTokenManager.js'
 import {
@@ -27,6 +38,7 @@ import {
 import { TokenStore } from './tokenStore.js'
 import {
   AccessCatalog,
+  AgentWithMcpServers,
   ApprovalDecisionResult,
   ContextBreakdownResult,
   DependencyHealth,
@@ -41,6 +53,7 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
+  LoginBackendHint,
   PasswordLoginResult,
   PendingApprovalLite,
   PendingWorkflowApproval,
@@ -50,9 +63,12 @@ import {
   RpcScope,
   SessionLifecycleState,
   SessionMe,
+  SessionMessagesQuery,
   SessionMessagesResult,
   SessionState,
   SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -71,7 +87,42 @@ import {
 // bounded-and-once for that operation (issue #791). control-api intersects the
 // requested scopes against the caller's grants before issuance, so requesting
 // the wake scope never widens a caller who was not granted it.
+// Upper bound for a single backend-reachability probe used by
+// `diagnoseLoginBackend`. Kept short so a post-login-failure diagnosis never
+// makes the failure feel slower than it already did.
+const BACKEND_PROBE_TIMEOUT_MS = 1500
+
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
+const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
+  'PROFILE_UI_BASE_URL must be an origin URL with a root pathname and no search parameters'
+
+function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
+  const value = rawValue.trim()
+  if (!value) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    return null
+  }
+  if (url.pathname !== '/' || url.search) return null
+  url.hash = ''
+  return url.toString().replace(/\/$/, '')
+}
+
+function requireProfileUiBaseUrlForBrowserAction(): string {
+  if (!config.desktopProfileUiBaseUrlExplicit) {
+    return config.desktopProfileUiBaseUrl
+  }
+  const explicitBaseUrl = normalizeExplicitProfileUiBaseUrl(config.desktopProfileUiBaseUrl)
+  if (!explicitBaseUrl) {
+    throw new Error(PROFILE_UI_BASE_URL_ORIGIN_ERROR)
+  }
+  return explicitBaseUrl
+}
 
 /**
  * Finite-operation scope matrix — the single source of truth for the exact
@@ -239,6 +290,507 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = 8000
 // post-`waiting` connection is still caught here (and by the renderer's 30s
 // watchdog).
 const RECONNECT_WAITING_FOR_OPEN_TIMEOUT_MS = 195_000
+const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
+
+const gfsUploadTransport: DesktopUploadTransport = {
+  requestJson,
+  requestPart: async (url, token, headers, body, timeoutMs, signal) => {
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, ...headers },
+      body: body as unknown as BodyInit,
+      // Node's fetch requires this opt-in for a streaming request body.
+      duplex: 'half',
+      signal: withTimeout(signal, timeoutMs),
+    } as RequestInit & { duplex: 'half' })
+    const text = await response.text()
+    return {
+      status: response.status,
+      text,
+      retryAfter: response.headers.get('retry-after') ?? undefined,
+    }
+  },
+}
+
+const LEGACY_GFS_MAX_FILE_BYTES = 16 * 1024 * 1024
+const LEGACY_GFS_READ_BUFFER_BYTES = 1024 * 1024
+
+async function readBoundedLegacyFile(handle: fs.promises.FileHandle): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  let totalBytes = 0
+  for (;;) {
+    const remaining = LEGACY_GFS_MAX_FILE_BYTES + 1 - totalBytes
+    const chunk = Buffer.allocUnsafe(Math.min(LEGACY_GFS_READ_BUFFER_BYTES, remaining))
+    const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, null)
+    if (bytesRead === 0) break
+    totalBytes += bytesRead
+    if (totalBytes > LEGACY_GFS_MAX_FILE_BYTES) {
+      throw new Error(
+        `This writer does not advertise resumable uploads; legacy GFS is limited to ${LEGACY_GFS_MAX_FILE_BYTES} bytes.`
+      )
+    }
+    chunks.push(chunk.subarray(0, bytesRead))
+  }
+  return Buffer.concat(chunks, totalBytes)
+}
+
+export async function legacyEncodedFile(filePath: string): Promise<string> {
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0
+  let handle: fs.promises.FileHandle
+  try {
+    handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | noFollow)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ELOOP') {
+      throw new Error('selected upload path must not be a symbolic link')
+    }
+    throw error
+  }
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) throw new Error('selected upload path is not a regular file')
+    if (info.size > LEGACY_GFS_MAX_FILE_BYTES) {
+      throw new Error(
+        `This writer does not advertise resumable uploads; legacy GFS is limited to ${LEGACY_GFS_MAX_FILE_BYTES} bytes.`
+      )
+    }
+
+    // O_NOFOLLOW is not available on every Electron target. The post-open
+    // lstat/object-identity check is the portable equivalent: a symlink is
+    // rejected and a pathname swap cannot make the already-open descriptor
+    // point at different bytes.
+    const pathInfo = await fs.promises.lstat(filePath)
+    if (pathInfo.isSymbolicLink())
+      throw new Error('selected upload path must not be a symbolic link')
+    if (
+      typeof info.dev === 'number' &&
+      typeof info.ino === 'number' &&
+      typeof pathInfo.dev === 'number' &&
+      typeof pathInfo.ino === 'number' &&
+      (info.dev !== pathInfo.dev || info.ino !== pathInfo.ino)
+    ) {
+      throw new Error('selected upload path changed while it was being opened')
+    }
+    const bytes = await readBoundedLegacyFile(handle)
+    const finalInfo = await handle.stat()
+    if (
+      finalInfo.size !== info.size ||
+      finalInfo.mtimeMs !== info.mtimeMs ||
+      finalInfo.ctimeMs !== info.ctimeMs ||
+      bytes.byteLength !== info.size
+    ) {
+      throw new Error('selected upload file changed while it was being read')
+    }
+    return bytes.toString('base64')
+  } finally {
+    await handle.close()
+  }
+}
+
+function legacyReceipt(
+  resource: GfsResourceView,
+  operation: 'create' | 'replace'
+): DesktopUploadSession {
+  return {
+    uploadId: resource.resourceId,
+    drive: resource.drive,
+    operation,
+    expectedBytes: resource.bytes,
+    partBytes: resource.bytes || 1,
+    partCount: resource.bytes === 0 ? 0 : 1,
+    state: 'completed',
+    contiguousBytes: resource.bytes,
+    committedBytes: resource.bytes,
+    committedPartCount: resource.bytes === 0 ? 0 : 1,
+    activePartCount: 0,
+    expiresAt: new Date(Date.now()).toISOString(),
+    resultResourceId: resource.resourceId,
+    resultVersion: resource.version,
+  }
+}
+
+const DESKTOP_GFS_UPLOAD_STATE_VERSION = 2 as const
+
+type DesktopGfsUploadPersistenceStatus = 'active' | 'paused' | 'failed' | 'suspended_auth'
+
+interface DesktopGfsUploadScope {
+  ownerId: string
+  teamId: string | null
+  environmentKey: string
+  baseUrl: string
+  drive: string
+  authEpoch: number
+}
+
+type DesktopGfsUploadIdentity = Omit<DesktopGfsUploadScope, 'drive' | 'authEpoch'>
+
+interface PersistedDesktopGfsUpload {
+  version: typeof DESKTOP_GFS_UPLOAD_STATE_VERSION
+  uploadId: string
+  filePath: string
+  fileName: string
+  fileSize: number
+  target: {
+    operation: 'create' | 'replace'
+    parentRid?: string
+    resourceRid?: string
+    ifMatch?: number
+  }
+  name: string
+  session: DesktopUploadSession
+  scope: DesktopGfsUploadScope
+  status: DesktopGfsUploadPersistenceStatus
+  updatedAt: string
+}
+
+interface LegacyPersistedDesktopGfsUpload {
+  uploadId: string
+  filePath: string
+  fileName: string
+  fileSize: number
+  target: PersistedDesktopGfsUpload['target']
+  name: string
+  session: DesktopUploadSession
+}
+
+interface QuarantinedDesktopGfsUpload {
+  uploadId: string
+  reason: 'legacy_unscoped' | 'invalid_scope' | 'unsupported_version'
+  quarantinedAt: string
+}
+
+interface DesktopGfsUploadStateFile {
+  version: typeof DESKTOP_GFS_UPLOAD_STATE_VERSION
+  records: PersistedDesktopGfsUpload[]
+  quarantined: QuarantinedDesktopGfsUpload[]
+}
+
+interface DesktopGfsUploadSummary {
+  uploadId: string
+  fileName: string
+  fileSize: number
+  target: PersistedDesktopGfsUpload['target']
+  name: string
+  drive: string
+  status: DesktopGfsUploadPersistenceStatus
+}
+
+const DESKTOP_GFS_UPLOAD_STATE_FILE = 'gfs-upload-sessions.json'
+
+function normalizeDesktopUploadBaseUrl(value: string): string {
+  const url = new URL(String(value || '').trim())
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('GFS upload base URL must use http(s)')
+  }
+  url.hash = ''
+  return url.toString().replace(/\/+$/, '')
+}
+
+function desktopGfsUploadIdentity(me: SessionMe): DesktopGfsUploadIdentity {
+  return {
+    ownerId: me.id,
+    teamId: me.teamId ? String(me.teamId).trim() : null,
+    environmentKey: getActiveEnvKey(),
+    baseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
+  }
+}
+
+function normalizeDesktopUploadDrive(value: string | undefined): string {
+  const drive = String(value ?? 'main').trim()
+  if (!drive) throw new Error('drive_required: GFS uploads require a canonical drive')
+  return drive
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function isDesktopGfsUploadTarget(value: unknown): value is PersistedDesktopGfsUpload['target'] {
+  if (!value || typeof value !== 'object') return false
+  const target = value as Partial<PersistedDesktopGfsUpload['target']>
+  if (target.operation !== 'create' && target.operation !== 'replace') return false
+  if (
+    target.parentRid !== undefined &&
+    (typeof target.parentRid !== 'string' || !target.parentRid.trim())
+  )
+    return false
+  if (
+    target.resourceRid !== undefined &&
+    (typeof target.resourceRid !== 'string' || !target.resourceRid.trim())
+  )
+    return false
+  if (target.ifMatch !== undefined && !isNonNegativeSafeInteger(target.ifMatch)) return false
+  return target.operation === 'create' ? Boolean(target.parentRid) : Boolean(target.resourceRid)
+}
+
+function isDesktopUploadSession(value: unknown): value is DesktopUploadSession {
+  if (!value || typeof value !== 'object') return false
+  const session = value as Partial<DesktopUploadSession>
+  return (
+    typeof session.uploadId === 'string' &&
+    Boolean(session.uploadId.trim()) &&
+    typeof session.drive === 'string' &&
+    session.drive === session.drive.trim() &&
+    Boolean(session.drive) &&
+    (session.operation === 'create' || session.operation === 'replace') &&
+    isNonNegativeSafeInteger(session.expectedBytes) &&
+    isNonNegativeSafeInteger(session.partBytes) &&
+    session.partBytes > 0 &&
+    isNonNegativeSafeInteger(session.partCount) &&
+    typeof session.state === 'string' &&
+    Boolean(session.state) &&
+    isNonNegativeSafeInteger(session.contiguousBytes) &&
+    isNonNegativeSafeInteger(session.committedBytes) &&
+    isNonNegativeSafeInteger(session.committedPartCount) &&
+    isNonNegativeSafeInteger(session.activePartCount) &&
+    typeof session.expiresAt === 'string' &&
+    Boolean(session.expiresAt) &&
+    (session.resultResourceId === undefined || typeof session.resultResourceId === 'string') &&
+    (session.resultVersion === undefined || isNonNegativeSafeInteger(session.resultVersion)) &&
+    (session.resultSha256 === undefined || typeof session.resultSha256 === 'string')
+  )
+}
+
+function canonicalDesktopUploadSession(session: DesktopUploadSession): DesktopUploadSession {
+  return {
+    uploadId: session.uploadId,
+    drive: session.drive,
+    operation: session.operation,
+    expectedBytes: session.expectedBytes,
+    partBytes: session.partBytes,
+    partCount: session.partCount,
+    state: session.state,
+    contiguousBytes: session.contiguousBytes,
+    committedBytes: session.committedBytes,
+    committedPartCount: session.committedPartCount,
+    activePartCount: session.activePartCount,
+    expiresAt: session.expiresAt,
+    ...(session.resultResourceId === undefined
+      ? {}
+      : { resultResourceId: session.resultResourceId }),
+    ...(session.resultVersion === undefined ? {} : { resultVersion: session.resultVersion }),
+    ...(session.resultSha256 === undefined ? {} : { resultSha256: session.resultSha256 }),
+  }
+}
+
+function isLegacyPersistedDesktopGfsUpload(
+  value: unknown
+): value is LegacyPersistedDesktopGfsUpload {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<LegacyPersistedDesktopGfsUpload>
+  return (
+    typeof item.uploadId === 'string' &&
+    typeof item.filePath === 'string' &&
+    typeof item.fileName === 'string' &&
+    isNonNegativeSafeInteger(item.fileSize) &&
+    typeof item.name === 'string' &&
+    isDesktopGfsUploadTarget(item.target) &&
+    isDesktopUploadSession(item.session)
+  )
+}
+
+function isDesktopGfsUploadScope(value: unknown): value is DesktopGfsUploadScope {
+  if (!value || typeof value !== 'object') return false
+  const scope = value as Partial<DesktopGfsUploadScope>
+  if (
+    typeof scope.ownerId !== 'string' ||
+    scope.ownerId !== scope.ownerId.trim() ||
+    !scope.ownerId ||
+    (scope.teamId !== null &&
+      (typeof scope.teamId !== 'string' ||
+        scope.teamId !== scope.teamId.trim() ||
+        !scope.teamId)) ||
+    typeof scope.environmentKey !== 'string' ||
+    scope.environmentKey !== scope.environmentKey.trim() ||
+    !scope.environmentKey ||
+    typeof scope.baseUrl !== 'string' ||
+    typeof scope.drive !== 'string' ||
+    scope.drive !== scope.drive.trim() ||
+    !scope.drive ||
+    !Number.isSafeInteger(scope.authEpoch) ||
+    Number(scope.authEpoch) < 0
+  ) {
+    return false
+  }
+  try {
+    return normalizeDesktopUploadBaseUrl(scope.baseUrl) === scope.baseUrl
+  } catch {
+    return false
+  }
+}
+
+function isPersistedDesktopGfsUpload(value: unknown): value is PersistedDesktopGfsUpload {
+  if (!isLegacyPersistedDesktopGfsUpload(value)) return false
+  const item = value as Partial<PersistedDesktopGfsUpload>
+  return (
+    item.version === DESKTOP_GFS_UPLOAD_STATE_VERSION &&
+    isDesktopGfsUploadScope(item.scope) &&
+    item.uploadId === item.session?.uploadId &&
+    item.fileSize === item.session?.expectedBytes &&
+    item.target?.operation === item.session?.operation &&
+    item.session?.drive === item.scope.drive &&
+    ['active', 'paused', 'failed', 'suspended_auth'].includes(String(item.status)) &&
+    typeof item.updatedAt === 'string'
+  )
+}
+
+function canonicalPersistedDesktopGfsUpload(
+  record: PersistedDesktopGfsUpload
+): PersistedDesktopGfsUpload {
+  return {
+    version: DESKTOP_GFS_UPLOAD_STATE_VERSION,
+    uploadId: record.uploadId,
+    filePath: record.filePath,
+    fileName: record.fileName,
+    fileSize: record.fileSize,
+    target: {
+      operation: record.target.operation,
+      ...(record.target.parentRid === undefined ? {} : { parentRid: record.target.parentRid }),
+      ...(record.target.resourceRid === undefined
+        ? {}
+        : { resourceRid: record.target.resourceRid }),
+      ...(record.target.ifMatch === undefined ? {} : { ifMatch: record.target.ifMatch }),
+    },
+    name: record.name,
+    session: canonicalDesktopUploadSession(record.session),
+    scope: {
+      ownerId: record.scope.ownerId,
+      teamId: record.scope.teamId,
+      environmentKey: record.scope.environmentKey,
+      baseUrl: record.scope.baseUrl,
+      drive: record.scope.drive,
+      authEpoch: record.scope.authEpoch,
+    },
+    status: record.status,
+    updatedAt: record.updatedAt,
+  }
+}
+
+function canonicalQuarantinedDesktopGfsUpload(value: unknown): QuarantinedDesktopGfsUpload | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Partial<QuarantinedDesktopGfsUpload>
+  if (
+    typeof record.uploadId !== 'string' ||
+    !record.uploadId ||
+    !['legacy_unscoped', 'invalid_scope', 'unsupported_version'].includes(String(record.reason)) ||
+    typeof record.quarantinedAt !== 'string' ||
+    !record.quarantinedAt
+  )
+    return null
+  return {
+    uploadId: record.uploadId,
+    reason: record.reason as QuarantinedDesktopGfsUpload['reason'],
+    quarantinedAt: record.quarantinedAt,
+  }
+}
+
+function serializedStateValueChanged(raw: unknown, canonical: unknown): boolean {
+  try {
+    return JSON.stringify(raw) !== JSON.stringify(canonical)
+  } catch {
+    return true
+  }
+}
+
+function sameDesktopGfsUploadScope(
+  left: DesktopGfsUploadScope,
+  right: DesktopGfsUploadScope,
+  options: { includeAuthEpoch?: boolean } = {}
+): boolean {
+  return (
+    left.ownerId === right.ownerId &&
+    left.teamId === right.teamId &&
+    left.environmentKey === right.environmentKey &&
+    left.baseUrl === right.baseUrl &&
+    left.drive === right.drive &&
+    (options.includeAuthEpoch === false || left.authEpoch === right.authEpoch)
+  )
+}
+
+export function migrateDesktopGfsUploadState(value: unknown): {
+  state: DesktopGfsUploadStateFile
+  migrated: boolean
+} {
+  const now = new Date().toISOString()
+  if (Array.isArray(value)) {
+    const quarantined = value
+      .filter(isLegacyPersistedDesktopGfsUpload)
+      .slice(-100)
+      .map(record => ({
+        uploadId: record.uploadId,
+        reason: 'legacy_unscoped' as const,
+        quarantinedAt: now,
+      }))
+    return {
+      state: { version: DESKTOP_GFS_UPLOAD_STATE_VERSION, records: [], quarantined },
+      migrated: true,
+    }
+  }
+  if (!value || typeof value !== 'object') {
+    return {
+      state: { version: DESKTOP_GFS_UPLOAD_STATE_VERSION, records: [], quarantined: [] },
+      migrated: value !== undefined && value !== null,
+    }
+  }
+  const candidate = value as {
+    version?: unknown
+    records?: unknown
+    quarantined?: unknown
+  }
+  if (candidate.version !== DESKTOP_GFS_UPLOAD_STATE_VERSION) {
+    return {
+      state: {
+        version: DESKTOP_GFS_UPLOAD_STATE_VERSION,
+        records: [],
+        quarantined: [
+          {
+            uploadId: 'unknown',
+            reason: 'unsupported_version',
+            quarantinedAt: now,
+          },
+        ],
+      },
+      migrated: true,
+    }
+  }
+  const rawRecords = Array.isArray(candidate.records) ? candidate.records : []
+  const records = rawRecords
+    .filter(isPersistedDesktopGfsUpload)
+    .map(canonicalPersistedDesktopGfsUpload)
+    .slice(-100)
+  const invalid = rawRecords
+    .filter(record => !isPersistedDesktopGfsUpload(record))
+    .slice(-100)
+    .map(record => ({
+      uploadId:
+        record &&
+        typeof record === 'object' &&
+        typeof (record as { uploadId?: unknown }).uploadId === 'string'
+          ? String((record as { uploadId: string }).uploadId)
+          : 'unknown',
+      reason: 'invalid_scope' as const,
+      quarantinedAt: now,
+    }))
+  const rawQuarantined = Array.isArray(candidate.quarantined) ? candidate.quarantined : []
+  const quarantined = rawQuarantined
+    .map(canonicalQuarantinedDesktopGfsUpload)
+    .filter((record): record is QuarantinedDesktopGfsUpload => record !== null)
+    .slice(-100)
+  const recordsChanged =
+    records.length !== rawRecords.length ||
+    records.some((record, index) => serializedStateValueChanged(rawRecords[index], record))
+  const quarantineChanged =
+    !Array.isArray(candidate.quarantined) ||
+    quarantined.length !== rawQuarantined.length ||
+    quarantined.some((record, index) => serializedStateValueChanged(rawQuarantined[index], record))
+  return {
+    state: {
+      version: DESKTOP_GFS_UPLOAD_STATE_VERSION,
+      records,
+      quarantined: [...quarantined, ...invalid].slice(-100),
+    },
+    migrated: recordsChanged || quarantineChanged,
+  }
+}
 
 export class AppService {
   private readonly authClient = new AuthClient()
@@ -262,9 +814,44 @@ export class AppService {
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
+  private profileUiBaseUrlCache: { key: string; value: string } | null = null
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
+  private restoreSavedSessionInFlight: Promise<SessionState> | null = null
+  private savedSessionRestoreAttemptedEnvKey: string | null = null
+  private savedSessionRestoreAttemptedAtMs = 0
+  private logoutInProgress = false
+  private gfsAuthEpoch = 0
+  private gfsDispatchBlocked = true
+  // A transient runWithTeamContext hop temporarily installs another team's
+  // token in sessionToken. Existing GFS jobs keep their captured token and
+  // scope, but new GFS operations must not capture that temporary token.
+  private gfsTransientTeamHopDepth = 0
+  // A finite RPC may temporarily borrow another team session. Keep the
+  // deliberate user-owned GFS scope stable across that hop so in-flight jobs
+  // are not invalidated by the transient `me` value.
+  private gfsScopeIdentity: DesktopGfsUploadIdentity | null = null
+  private gfsUploadStateQueue: Promise<void> = Promise.resolve()
+  private readonly gfsUploadJobs = new Map<
+    string,
+    {
+      job: DesktopGfsUploadJob
+      promise: Promise<DesktopUploadSession>
+      scope: DesktopGfsUploadScope
+    }
+  >()
+  private readonly gfsPendingUploadJobs = new Set<{
+    job: DesktopGfsUploadJob
+    promise: Promise<DesktopUploadSession>
+    scope: DesktopGfsUploadScope
+  }>()
+  private readonly gfsPendingLegacyUploads = new Set<{
+    controller: AbortController
+    promise: Promise<unknown>
+  }>()
+  private sessionGeneration = 0
+  private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
   private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
@@ -325,6 +912,13 @@ export class AppService {
     )
   }
 
+  private static isRejectedStoredSessionError(error: unknown): boolean {
+    return (
+      error instanceof ApiError &&
+      (error.status === 401 || error.status === 403 || error.status === 410)
+    )
+  }
+
   /**
    * Maps rpc-proxy's structured host-availability 503s ({code:'host_waking'}
    * from the wake-and-hold subsystem, {code:'host_draining'} from the mcp-host
@@ -368,14 +962,22 @@ export class AppService {
     }
   }
 
+  private async bindCurrentChatStore(userId: string): Promise<void> {
+    await bindChatStoreForUser(userId, getActiveEnvKey(), {
+      legacyEnvKeys: getActiveLegacyEnvKeys(),
+    })
+  }
+
   private async commitSessionToken(
     token: string,
     options: { refreshMe?: boolean } = {}
   ): Promise<void> {
     const tokenChanged = token !== this.sessionToken
+    if (tokenChanged) this.sessionGeneration += 1
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
+      this.profileUiBaseUrlCache = null
       this.accessCatalog = null
       await this.tokenStore.setSessionToken(token, getActiveEnvKey())
     }
@@ -386,7 +988,7 @@ export class AppService {
         unbindChatStore()
         throw error
       }
-      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+      await this.bindCurrentChatStore(this.me.id)
       this.updateCachedCurrentTeam(this.me.teamId)
     }
   }
@@ -394,17 +996,84 @@ export class AppService {
   private async getCurrentSessionTeamId(token: string): Promise<string> {
     if (this.me?.teamId) return this.me.teamId
     this.me = await this.authClient.getMe(token)
-    await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(this.me.id)
     this.updateCachedCurrentTeam(this.me.teamId)
     return this.me.teamId || ''
   }
 
   private async switchSessionToTeam(teamId: string, token = this.requireSessionToken()) {
+    const releaseTransientHop = this.enterGfsTransientTeamHop()
     const targetTeamId = String(teamId || '').trim()
-    if (!targetTeamId) throw new Error('teamId is required')
-    const switched = await this.authClient.switchTeam(token, targetTeamId)
-    await this.commitSessionToken(switched.token, { refreshMe: true })
-    return switched.token
+    try {
+      if (!targetTeamId) throw new Error('teamId is required')
+      const switchGeneration = this.sessionGeneration
+      if (this.sessionToken !== token || !this.me) {
+        throw new Error('stale_auth_epoch: authenticated team scope changed before switch dispatch')
+      }
+      const previousIdentity =
+        this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+      let switchedToken: string | null = null
+      try {
+        const switched = await this.authClient.switchTeam(token, targetTeamId)
+        switchedToken = switched.token
+        if (this.sessionGeneration !== switchGeneration || this.sessionToken !== token) {
+          throw new Error('stale_auth_epoch: authenticated team scope changed during switch')
+        }
+        await this.commitSessionToken(switched.token, { refreshMe: true })
+        if (!this.me) throw new Error('Team switch ended without an authenticated session')
+        return switched.token
+      } catch (error) {
+        if (!switchedToken && this.sessionToken === token && this.me) {
+          // A failed transient hop leaves the deliberate GFS scope untouched.
+        } else {
+          // Once the auth service has issued a replacement token, the previous
+          // authenticated scope is no longer safe to continue. Fence and
+          // persist its uploads before clearing the partially switched session;
+          // otherwise a failed refresh/restore could leave a job running with a
+          // token whose team ownership is unknown. The fence is best effort:
+          // clearing the in-memory scope and revoking the persisted token must
+          // still happen when its state write is unavailable.
+          try {
+            await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
+          } catch (fenceError) {
+            console.warn(
+              '[AppService] Failed to persist the GFS authentication fence during team switch:',
+              fenceError
+            )
+          }
+          this.clearAuthenticatedSessionState()
+          try {
+            await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+              legacyEnvKeys: getActiveLegacyEnvKeys(),
+            })
+          } catch (clearError) {
+            console.warn(
+              '[AppService] Failed to clear a partially switched team session:',
+              clearError
+            )
+          }
+        }
+        throw error
+      }
+    } finally {
+      releaseTransientHop()
+    }
+  }
+
+  private enterGfsTransientTeamHop(): () => void {
+    this.gfsTransientTeamHopDepth += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.gfsTransientTeamHopDepth = Math.max(0, this.gfsTransientTeamHopDepth - 1)
+    }
+  }
+
+  private assertGfsDispatchAllowed(): void {
+    if (this.gfsTransientTeamHopDepth > 0) {
+      throw new Error('GFS upload dispatch is unavailable during a transient team hop')
+    }
   }
 
   private async runWithTeamContext<T>(
@@ -437,28 +1106,33 @@ export class AppService {
       let activeToken = originalToken
       const shouldSwitch = originalTeamId !== targetTeamId
       const shouldRestore = Boolean(originalTeamId && shouldSwitch)
-
-      if (shouldSwitch) {
-        activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
-      }
+      const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
 
       try {
-        return await operation(activeToken)
-      } catch (error) {
-        operationError = error
-        throw error
-      } finally {
-        if (shouldRestore) {
-          try {
-            await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
-          } catch (restoreError) {
-            if (!operationError) throw restoreError
-            console.warn(
-              '[AppService] Failed to restore team context after operation:',
-              restoreError
-            )
+        if (shouldSwitch) {
+          activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
+        }
+
+        try {
+          return await operation(activeToken)
+        } catch (error) {
+          operationError = error
+          throw error
+        } finally {
+          if (shouldRestore) {
+            try {
+              await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
+            } catch (restoreError) {
+              if (!operationError) throw restoreError
+              console.warn(
+                '[AppService] Failed to restore team context after operation:',
+                restoreError
+              )
+            }
           }
         }
+      } finally {
+        releaseTransientHop?.()
       }
     } finally {
       releaseQueue()
@@ -496,6 +1170,22 @@ export class AppService {
     return matchingEntry?.team.id ?? this.accessCatalog?.teamId ?? null
   }
 
+  /**
+   * Monotonic per sandbox-ui mount. Carried into the SDK surface pin so a
+   * request from a superseded embed can be told apart from the live one
+   * (spec §8.1), mirroring the driver's own `mountGeneration` guard.
+   */
+  private sandboxUiGeneration = 0
+
+  private enqueueSandboxUiLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.sandboxUiLifecycleQueue.then(operation)
+    this.sandboxUiLifecycleQueue = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
   private async issueRpcTokenForHostRefs(
     scopes: RpcScope[],
     hostRefs: string[],
@@ -508,28 +1198,199 @@ export class AppService {
     )
   }
 
-  async initialize(): Promise<SessionState> {
+  private clearAuthenticatedSessionState(): void {
+    this.sessionGeneration += 1
+    this.gfsAuthEpoch += 1
+    this.gfsDispatchBlocked = true
+    this.gfsScopeIdentity = null
+    this.stopAllStreams()
+    this.sessionToken = null
+    this.me = null
+    this.profileUiBaseUrlCache = null
+    this.accessCatalog = null
+    this.teamDirectoryCache = null
+    this.workflowApprovalTeamById.clear()
+    this.workflowTeamByKey.clear()
+    this.rpcTokenManager.clear()
+    unbindChatStore()
+  }
+
+  private activateGfsAuthScope(identityOverride?: DesktopGfsUploadIdentity): void {
+    this.gfsAuthEpoch += 1
+    this.gfsDispatchBlocked = false
+    this.gfsScopeIdentity = identityOverride ?? (this.me ? desktopGfsUploadIdentity(this.me) : null)
+  }
+
+  private currentDesktopGfsUploadScope(
+    driveValue: string | undefined,
+    options: { allowTransientTeamHop?: boolean } = {}
+  ): DesktopGfsUploadScope {
+    if (this.gfsDispatchBlocked || !this.sessionToken || !this.me) {
+      throw new Error('GFS upload dispatch is unavailable without an active authenticated scope')
+    }
+    if (!options.allowTransientTeamHop) this.assertGfsDispatchAllowed()
+    const identity = this.gfsScopeIdentity
+    if (!identity) {
+      throw new Error('GFS upload dispatch is unavailable before scope activation')
+    }
+    return {
+      ...identity,
+      drive: normalizeDesktopUploadDrive(driveValue),
+      authEpoch: this.gfsAuthEpoch,
+    }
+  }
+
+  private assertCurrentDesktopGfsUploadScope(scope: DesktopGfsUploadScope): void {
+    // Existing jobs retain their original token and scope while a finite RPC
+    // borrows another team session. Only new user-facing dispatches are gated.
+    const current = this.currentDesktopGfsUploadScope(scope.drive, { allowTransientTeamHop: true })
+    if (!sameDesktopGfsUploadScope(scope, current)) {
+      throw new Error('stale_auth_epoch: GFS upload no longer belongs to the active scope')
+    }
+  }
+
+  private async suspendDesktopGfsUploadsForAuthBoundary(identityOverride?: {
+    ownerId: string
+    teamId: string | null
+    environmentKey: string
+    baseUrl: string
+  }): Promise<void> {
+    const oldIdentity =
+      identityOverride ??
+      (this.me
+        ? {
+            ownerId: this.me.id,
+            teamId: this.me.teamId ? String(this.me.teamId).trim() : null,
+            environmentKey: getActiveEnvKey(),
+            baseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
+          }
+        : null)
+    this.gfsDispatchBlocked = true
+    this.gfsAuthEpoch += 1
+    const jobs = new Set([
+      ...[...this.gfsUploadJobs.values()].map(entry => entry.job),
+      ...[...this.gfsPendingUploadJobs].map(entry => entry.job),
+    ])
+    const jobSuspensions = [...jobs].map(job => job.suspendForAuth())
+    const legacyUploads = [...this.gfsPendingLegacyUploads]
+    for (const upload of legacyUploads) {
+      upload.controller.abort(new Error('GFS legacy upload suspended by authentication fence'))
+    }
+    await Promise.all([
+      ...jobSuspensions,
+      ...legacyUploads.map(upload => upload.promise.catch(() => undefined)),
+    ])
+    this.gfsUploadJobs.clear()
+    this.gfsPendingUploadJobs.clear()
+    this.gfsPendingLegacyUploads.clear()
+    if (!oldIdentity) return
+    await this.updateDesktopGfsUploadState(state => {
+      const updatedAt = new Date().toISOString()
+      return {
+        ...state,
+        records: state.records.map(record =>
+          record.scope.ownerId === oldIdentity.ownerId &&
+          record.scope.teamId === oldIdentity.teamId &&
+          record.scope.environmentKey === oldIdentity.environmentKey &&
+          record.scope.baseUrl === oldIdentity.baseUrl
+            ? { ...record, status: 'suspended_auth' as const, updatedAt }
+            : record
+        ),
+      }
+    })
+  }
+
+  private async restoreSavedSession(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (this.restoreSavedSessionInFlight) {
+      return await this.restoreSavedSessionInFlight
+    }
+    const restore = this.restoreSavedSessionOnce(options)
+    this.restoreSavedSessionInFlight = restore
+    try {
+      return await restore
+    } finally {
+      // No newer restore can start while this promise is installed, so the
+      // single-flight slot can be cleared unconditionally after it settles.
+      this.restoreSavedSessionInFlight = null
+    }
+  }
+
+  private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (this.logoutInProgress) return { authenticated: false, me: null }
+    const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
-    this.sessionToken = await this.tokenStore.getSessionToken(getActiveEnvKey())
-    if (!this.sessionToken) {
+    const envKey = getActiveEnvKey()
+    const legacyEnvKeys = getActiveLegacyEnvKeys()
+    this.savedSessionRestoreAttemptedEnvKey = envKey
+    this.savedSessionRestoreAttemptedAtMs = Date.now()
+    let token: string | null
+    try {
+      token = await this.tokenStore.getSessionToken(envKey, { legacyEnvKeys })
+    } catch (error) {
+      console.warn('[AppService] Failed to read the saved session token:', error)
+      if (this.sessionGeneration === restoreGeneration) {
+        this.clearAuthenticatedSessionState()
+      }
       return { authenticated: false, me: null }
     }
+    if (this.logoutInProgress) return { authenticated: false, me: null }
+    if (!token) {
+      if (this.sessionGeneration === restoreGeneration) {
+        this.clearAuthenticatedSessionState()
+      }
+      return { authenticated: false, me: null }
+    }
+
+    if (this.sessionGeneration !== restoreGeneration) {
+      return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+    }
+    this.sessionToken = token
     try {
-      this.me = await this.authClient.getMe(this.sessionToken)
-      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+      const restoredMe = await this.authClient.getMe(token)
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      await bindChatStoreForUser(restoredMe.id, envKey, { legacyEnvKeys })
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        if (this.me) {
+          await this.bindCurrentChatStore(this.me.id)
+        } else {
+          unbindChatStore()
+        }
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      this.me = restoredMe
       this.accessCatalog = null
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
       this.workflowTeamByKey.clear()
+      // Persisted uploads are never auto-resumed. The active owner/team/env can
+      // list only its own scoped records and must explicitly resume one, at
+      // which point the record is rebound to this newly activated auth epoch.
+      this.activateGfsAuthScope()
       // Launch-time sandbox-ui partition GC. Fire-and-forget: a failure
       // here must not block the user from logging in. Any network or fs
       // error is logged inside the module.
-      void this.runSandboxUiPartitionGcSafely()
+      if (options.runLaunchMaintenance) {
+        void this.runSandboxUiPartitionGcSafely()
+      }
       return { authenticated: true, me: this.me }
-    } catch {
-      await this.logout()
+    } catch (error) {
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      this.clearAuthenticatedSessionState()
+      if (AppService.isRejectedStoredSessionError(error)) {
+        await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+      } else {
+        console.warn('[AppService] Saved session restore failed; keeping token for retry:', error)
+      }
       return { authenticated: false, me: null }
     }
+  }
+
+  async initialize(): Promise<SessionState> {
+    return this.restoreSavedSession({ runLaunchMaintenance: true })
   }
 
   private async runSandboxUiPartitionGcSafely(): Promise<void> {
@@ -552,18 +1413,53 @@ export class AppService {
     }
   }
 
-  private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
-    const result = await this.authClient.passwordLogin(email, password)
+  private async installAuthenticatedLogin(result: {
+    token: string
+    me: SessionMe
+  }): Promise<SessionState> {
+    const previousToken = this.sessionToken
+    const previousMe = this.me
+    const previousGeneration = this.sessionGeneration
+    const hadAuthenticatedScope = Boolean(previousToken && previousMe)
+    if (hadAuthenticatedScope) {
+      try {
+        await this.suspendDesktopGfsUploadsForAuthBoundary()
+      } catch (error) {
+        if (
+          this.sessionGeneration === previousGeneration &&
+          this.sessionToken === previousToken &&
+          this.me === previousMe
+        ) {
+          this.activateGfsAuthScope()
+        }
+        throw error
+      }
+      if (
+        this.sessionGeneration !== previousGeneration ||
+        this.sessionToken !== previousToken ||
+        this.me !== previousMe
+      ) {
+        throw new Error('stale_auth_epoch: authenticated scope changed during login replacement')
+      }
+    }
+    this.logoutInProgress = false
+    this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
     this.workflowTeamByKey.clear()
     this.rpcTokenManager.clear()
     await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
+    this.activateGfsAuthScope()
     return { authenticated: true, me: result.me }
+  }
+
+  private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
+    const result = await this.authClient.passwordLogin(email, password)
+    return this.installAuthenticatedLogin(result)
   }
 
   async getDependenciesHealth(): Promise<DependencyHealth> {
@@ -600,39 +1496,76 @@ export class AppService {
     return getDesktopRuntimeConfigState()
   }
 
+  private async applyRuntimeEnvironmentChange(operation: () => Promise<void>): Promise<void> {
+    const oldEnvKey = getActiveEnvKey()
+    const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
+    const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
+    const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
+    // Invalidate a restore that may still be awaiting keychain/getMe before it
+    // can bind an old-environment token to the newly selected runtime.
+    this.sessionGeneration += 1
+    if (hadAuthenticatedScope) await this.suspendDesktopGfsUploadsForAuthBoundary()
+    try {
+      await operation()
+    } catch (error) {
+      if (hadAuthenticatedScope && this.sessionToken && this.me) this.activateGfsAuthScope()
+      throw error
+    }
+    const boundaryChanged =
+      getActiveEnvKey() !== oldEnvKey ||
+      normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) !== oldBaseUrl
+    if (boundaryChanged) {
+      this.clearAuthenticatedSessionState()
+      await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+    } else if (hadAuthenticatedScope && this.sessionToken && this.me) {
+      this.activateGfsAuthScope()
+    }
+  }
+
   async selectRuntimeConfig(optionId: string) {
-    await selectDesktopRuntimeConfigOption(optionId)
+    const state = getDesktopRuntimeConfigState()
+    const selected = state.options.find(option => option.id === String(optionId || '').trim())
+    const nextEnvKey = selected
+      ? resolveEnvKey(selected.externalRestApiBaseUrl, selected.rpcProxyBaseUrl)
+      : null
+    const sameUploadBoundary =
+      nextEnvKey === state.envKey &&
+      selected !== undefined &&
+      normalizeDesktopUploadBaseUrl(selected.externalRestApiBaseUrl) ===
+        normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
+    if (sameUploadBoundary) await selectDesktopRuntimeConfigOption(optionId)
+    else await this.applyRuntimeEnvironmentChange(() => selectDesktopRuntimeConfigOption(optionId))
     return getDesktopRuntimeConfigState()
   }
 
   async clearRuntimeConfigSelection() {
-    await clearDesktopRuntimeConfigSelection()
+    await this.applyRuntimeEnvironmentChange(clearDesktopRuntimeConfigSelection)
     return getDesktopRuntimeConfigState()
   }
 
   async saveRuntimeConfig(next: DesktopRuntimeConfig) {
-    await saveDesktopRuntimeConfig(next)
+    const nextEnvKey = resolveEnvKey(next.externalRestApiBaseUrl, next.rpcProxyBaseUrl || '')
+    const sameUploadBoundary =
+      nextEnvKey === getActiveEnvKey() &&
+      normalizeDesktopUploadBaseUrl(next.externalRestApiBaseUrl) ===
+        normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
+    if (sameUploadBoundary) await saveDesktopRuntimeConfig(next)
+    else await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
     await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
     return getDesktopRuntimeConfigState()
   }
 
   async deleteRuntimeConfig(optionId: string) {
-    await deleteDesktopRuntimeConfigOption(optionId)
+    const state = getDesktopRuntimeConfigState()
+    if (state.activeOptionId === String(optionId || '').trim())
+      await this.applyRuntimeEnvironmentChange(() => deleteDesktopRuntimeConfigOption(optionId))
+    else await deleteDesktopRuntimeConfigOption(optionId)
     return getDesktopRuntimeConfigState()
   }
 
   async googleLogin(idToken: string): Promise<SessionState> {
     const result = await this.authClient.googleLogin(idToken)
-    this.sessionToken = result.token
-    this.me = result.me
-    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
-    this.accessCatalog = null
-    this.teamDirectoryCache = null
-    this.workflowApprovalTeamById.clear()
-    this.workflowTeamByKey.clear()
-    this.rpcTokenManager.clear()
-    await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
-    return { authenticated: true, me: result.me }
+    return this.installAuthenticatedLogin(result)
   }
 
   private async openProfileDesktopSetup(email: string): Promise<{
@@ -677,10 +1610,8 @@ export class AppService {
 
   async openForgotPassword(email: string): Promise<{ profileUiUrl: string }> {
     const normalizedEmail = email.trim().toLowerCase()
-    const profileUiUrl = new URL(
-      '/forgot-password',
-      `${config.desktopProfileUiBaseUrl.replace(/\/+$/, '')}/`
-    )
+    const profileUiBaseUrl = requireProfileUiBaseUrlForBrowserAction()
+    const profileUiUrl = new URL('/forgot-password', `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (normalizedEmail) profileUiUrl.searchParams.set('email', normalizedEmail)
     const { shell } = await import('electron')
     await shell.openExternal(profileUiUrl.toString())
@@ -692,16 +1623,7 @@ export class AppService {
     options: ProfileSettingsOpenOptions = {}
   ): Promise<{ profileUiUrl: string }> {
     const normalizedEmail = email.trim().toLowerCase()
-    let profileUiBaseUrl = config.desktopProfileUiBaseUrl
-    if (normalizedEmail) {
-      try {
-        const activation =
-          await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
-        profileUiBaseUrl = activation.profileUiBaseUrl
-      } catch {
-        profileUiBaseUrl = config.desktopProfileUiBaseUrl
-      }
-    }
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(normalizedEmail)
 
     const network = String(options.network || '')
       .trim()
@@ -715,6 +1637,48 @@ export class AppService {
     const { shell } = await import('electron')
     await shell.openExternal(profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
+  }
+
+  private async resolveProfileUiBaseUrl(
+    email?: string,
+    options: { fallbackOnLookupError?: boolean } = {}
+  ): Promise<string> {
+    const { fallbackOnLookupError = true } = options
+    if (config.desktopProfileUiBaseUrlExplicit) {
+      const explicitBaseUrl = normalizeExplicitProfileUiBaseUrl(config.desktopProfileUiBaseUrl)
+      if (!explicitBaseUrl) {
+        throw new Error(PROFILE_UI_BASE_URL_ORIGIN_ERROR)
+      }
+      return explicitBaseUrl
+    }
+    const normalizedEmail = String(email || this.me?.email || '')
+      .trim()
+      .toLowerCase()
+    if (!normalizedEmail) {
+      if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
+      throw new Error('Cannot resolve the Profile UI for this desktop session')
+    }
+    const cacheKey = `${getActiveEnvKey()}:${this.me?.id || ''}:${normalizedEmail}`
+    if (this.profileUiBaseUrlCache?.key === cacheKey) {
+      return this.profileUiBaseUrlCache.value
+    }
+    try {
+      const activation =
+        await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
+      const profileUiBaseUrl = String(activation.profileUiBaseUrl || '').trim()
+      if (!profileUiBaseUrl) {
+        if (!fallbackOnLookupError) {
+          throw new Error('the invitation profile did not provide a Profile UI URL')
+        }
+        return config.desktopProfileUiBaseUrl
+      }
+      this.profileUiBaseUrlCache = { key: cacheKey, value: profileUiBaseUrl }
+      return profileUiBaseUrl
+    } catch (error) {
+      if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Cannot resolve a shareable Profile UI link: ${message}`)
+    }
   }
 
   async completeDesktopSetup(email: string, authorizationToken: string) {
@@ -755,6 +1719,59 @@ export class AppService {
     await this.resolveRuntimeConfigIfNeeded()
 
     return this.completePasswordLogin(normalizedEmail, password)
+  }
+
+  /**
+   * After a login failure, decide whether to offer a one-click "switch to
+   * Localhost and retry". Returns a hint ONLY when all hold:
+   *   - the active runtime profile is NOT already localhost,
+   *   - a local Evenfire external-rest-api answers `/health`, and
+   *   - the active backend does NOT answer `/health` (i.e. the failure looks
+   *     like "pointed at the wrong/dead backend", not a bad password against a
+   *     healthy one).
+   * Self-contained (reads current runtime state + probes reachability), so it
+   * never second-guesses a reachable backend and needs no detail from the
+   * thrown login error. Best-effort and time-bounded — a slow network yields
+   * `null`, never a slower login.
+   */
+  async diagnoseLoginBackend(): Promise<LoginBackendHint | null> {
+    hydrateDesktopRuntimeConfig()
+    const state = getDesktopRuntimeConfigState()
+    if (state.isLocalhost) return null
+
+    const localhostOption = state.options.find(option => option.source === 'localhost')
+    if (!localhostOption?.externalRestApiBaseUrl) return null
+
+    const activeOption = state.options.find(option => option.id === state.activeOptionId) ?? null
+    const activeBaseUrl = activeOption?.externalRestApiBaseUrl || config.externalRestApiBaseUrl
+    // Nothing to switch to if we're already pointed at the localhost origin.
+    if (activeBaseUrl === localhostOption.externalRestApiBaseUrl) return null
+
+    const [localhostReachable, activeReachable] = await Promise.all([
+      this.probeBackendHealthy(localhostOption.externalRestApiBaseUrl),
+      this.probeBackendHealthy(activeBaseUrl),
+    ])
+    if (!localhostReachable || activeReachable) return null
+
+    return {
+      targetOptionId: localhostOption.id,
+      targetLabel: localhostOption.label,
+      activeLabel: activeOption?.label || config.appName || activeBaseUrl,
+    }
+  }
+
+  /** True iff `<baseUrl>/health` returns `{ status: 'ok' }` within the probe bound. */
+  private async probeBackendHealthy(baseUrl: string): Promise<boolean> {
+    if (!baseUrl?.trim()) return false
+    try {
+      const result = await this.authClient.healthAt(
+        baseUrl,
+        AbortSignal.timeout(BACKEND_PROBE_TIMEOUT_MS)
+      )
+      return result?.status === 'ok'
+    } catch {
+      return false
+    }
   }
 
   private async resolveRuntimeConfigIfNeeded(): Promise<void> {
@@ -807,16 +1824,19 @@ export class AppService {
   }
 
   async logout(): Promise<void> {
-    this.stopAllStreams()
-    this.sessionToken = null
-    this.me = null
-    this.accessCatalog = null
-    this.teamDirectoryCache = null
-    this.workflowApprovalTeamById.clear()
-    this.workflowTeamByKey.clear()
-    this.rpcTokenManager.clear()
-    await this.tokenStore.clearSessionToken(getActiveEnvKey())
-    unbindChatStore()
+    this.logoutInProgress = true
+    try {
+      const envKey = getActiveEnvKey()
+      const legacyEnvKeys = getActiveLegacyEnvKeys()
+      await this.suspendDesktopGfsUploadsForAuthBoundary()
+      this.clearAuthenticatedSessionState()
+      await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+      // Grants survive logout (they are keyed by userId), but every cached SDK
+      // result must not: the next user of this machine gets nothing of this one's.
+      tryGetPluginSdkRuntime()?.notifySessionChanged(false)
+    } finally {
+      this.logoutInProgress = false
+    }
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
@@ -854,12 +1874,61 @@ export class AppService {
     return delegationAffordances(new Set(held), isOperator)
   }
 
-  /** Delegate a grant (subjectKey → structured subject). No-escalation is server-side. */
-  async grantGfs(resourceId: string, subjectKey: string, bits: string[], drive?: string) {
+  /**
+   * Delegate a grant to one or more subjects (each subjectKey → structured
+   * subject) in a single atomic bulk PUT. No-escalation is server-side.
+   * `inherit` is renderer-driven (agent grants on directories default it ON so
+   * contained files are covered); omitted means the client's historical `false`.
+   */
+  async grantGfs(
+    resourceId: string,
+    subjectKeys: string[],
+    bits: string[],
+    drive?: string,
+    inherit?: boolean
+  ) {
+    // One atomic bulk PUT for every selected subject (server caps at 100). Each
+    // key is parsed to its structured subject up front, so a single malformed
+    // key fails the whole call before any round-trip — never a partial write.
     await this.gfsClient.grant(
-      { resourceId, drive, subject: parseSubjectKey(subjectKey), permissions: bits },
+      { resourceId, drive, subjects: subjectKeys.map(parseSubjectKey), permissions: bits, inherit },
       this.requireSessionToken()
     )
+  }
+
+  /**
+   * List a resource's ACL rows for the Manage modal. The row `id` is the revoke
+   * handle (the grant PUT response carries no ids). View-ACL = manage-ACL is
+   * enforced server-side; a caller without manage_acl gets the API's 403.
+   */
+  async listGfsGrants(resourceId: string, drive?: string) {
+    return this.gfsClient.listGrants({ resourceId, drive }, this.requireSessionToken())
+  }
+
+  /** Revoke an ACL row by id (id learned from listGfsGrants). */
+  async revokeGfsGrant(grantId: string) {
+    await this.gfsClient.revokeGrant(grantId, this.requireSessionToken())
+  }
+
+  /** List direct URI shares on a resource for the combined access-management view. */
+  async listGfsShares(resourceId: string, drive?: string) {
+    return this.gfsClient.listShares({ resourceId, drive }, this.requireSessionToken())
+  }
+
+  /** Revoke a direct URI share by its server-issued row id. */
+  async revokeGfsShare(shareId: string) {
+    await this.gfsClient.revokeShare(shareId, this.requireSessionToken())
+  }
+
+  /**
+   * The caller's own agents with their canonical GFS host subjects — the grant
+   * targets for per-agent delegation. Served fresh from external-rest-api
+   * GET /me/agents on every call, NOT from the cached name-based AccessCatalog
+   * (which has no gfsSubject and would go stale across reconciliations).
+   */
+  async listMyAgents(): Promise<AgentWithMcpServers[]> {
+    const result = await this.authClient.getMyAgents(this.requireSessionToken())
+    return Array.isArray(result.agents) ? result.agents : []
   }
 
   /**
@@ -867,12 +1936,12 @@ export class AppService {
    * shared capability); the no-escalation engine still requires the caller hold
    * read + share. includeDescendants so a folder share covers its subtree.
    */
-  async createGfsShare(resourceId: string, subjectKey: string, drive?: string) {
+  async createGfsShare(resourceId: string, subjectKeys: string[], drive?: string) {
     await this.gfsClient.createShare(
       {
         resourceId,
         drive,
-        subject: parseSubjectKey(subjectKey),
+        subjects: subjectKeys.map(parseSubjectKey),
         permissions: ['read'],
         includeDescendants: true,
       },
@@ -894,11 +1963,522 @@ export class AppService {
     )
   }
 
+  private async desktopGfsUploadStatePath(): Promise<string> {
+    const { app } = await import('electron')
+    return path.join(app.getPath('userData'), DESKTOP_GFS_UPLOAD_STATE_FILE)
+  }
+
+  private enqueueDesktopGfsUploadState<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.gfsUploadStateQueue.then(operation, operation)
+    this.gfsUploadStateQueue = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
+  private async loadDesktopGfsUploadState(): Promise<{
+    state: DesktopGfsUploadStateFile
+    migrated: boolean
+  }> {
+    try {
+      const raw = await fs.promises.readFile(await this.desktopGfsUploadStatePath(), 'utf8')
+      const parsed = JSON.parse(raw) as unknown
+      return migrateDesktopGfsUploadState(parsed)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return {
+          state: { version: DESKTOP_GFS_UPLOAD_STATE_VERSION, records: [], quarantined: [] },
+          migrated: false,
+        }
+      }
+      console.warn('[AppService] Could not read GFS upload state:', error)
+      return {
+        state: { version: DESKTOP_GFS_UPLOAD_STATE_VERSION, records: [], quarantined: [] },
+        migrated: false,
+      }
+    }
+  }
+
+  private async writeDesktopGfsUploadState(state: DesktopGfsUploadStateFile): Promise<void> {
+    const filePath = await this.desktopGfsUploadStatePath()
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
+    const temporaryPath = `${filePath}.${randomUUID()}.tmp`
+    const records = state.records
+      .filter(isPersistedDesktopGfsUpload)
+      .map(canonicalPersistedDesktopGfsUpload)
+      .slice(-100)
+    const quarantined = state.quarantined
+      .map(canonicalQuarantinedDesktopGfsUpload)
+      .filter((record): record is QuarantinedDesktopGfsUpload => record !== null)
+      .slice(-100)
+    await fs.promises.writeFile(
+      temporaryPath,
+      JSON.stringify({
+        version: DESKTOP_GFS_UPLOAD_STATE_VERSION,
+        records,
+        quarantined,
+      }),
+      { mode: 0o600 }
+    )
+    await fs.promises.rename(temporaryPath, filePath)
+  }
+
+  private hasLiveDesktopGfsUpload(record: PersistedDesktopGfsUpload): boolean {
+    const active = this.gfsUploadJobs.get(record.uploadId)
+    if (active && sameDesktopGfsUploadScope(active.scope, record.scope)) return true
+    return [...this.gfsPendingUploadJobs].some(entry => {
+      const pendingSession = entry.job.snapshot().session
+      return (
+        pendingSession?.uploadId === record.uploadId &&
+        sameDesktopGfsUploadScope(entry.scope, record.scope)
+      )
+    })
+  }
+
+  private async readDesktopGfsUploadState(): Promise<DesktopGfsUploadStateFile> {
+    return this.enqueueDesktopGfsUploadState(async () => {
+      const loaded = await this.loadDesktopGfsUploadState()
+      let suspendedOrphanedActive = false
+      const updatedAt = new Date().toISOString()
+      const state = {
+        ...loaded.state,
+        records: loaded.state.records.map(record => {
+          if (record.status !== 'active' || this.hasLiveDesktopGfsUpload(record)) return record
+          suspendedOrphanedActive = true
+          return { ...record, status: 'suspended_auth' as const, updatedAt }
+        }),
+      }
+      if (loaded.migrated || suspendedOrphanedActive) {
+        await this.writeDesktopGfsUploadState(state)
+      }
+      return state
+    })
+  }
+
+  private async updateDesktopGfsUploadState(
+    update: (state: DesktopGfsUploadStateFile) => DesktopGfsUploadStateFile
+  ): Promise<void> {
+    await this.enqueueDesktopGfsUploadState(async () => {
+      const loaded = await this.loadDesktopGfsUploadState()
+      await this.writeDesktopGfsUploadState(update(loaded.state))
+    })
+  }
+
+  private async persistDesktopGfsUpload(record: PersistedDesktopGfsUpload): Promise<void> {
+    if (!isPersistedDesktopGfsUpload(record)) {
+      throw new Error('Refusing to persist an invalid GFS upload record')
+    }
+    const canonicalRecord = canonicalPersistedDesktopGfsUpload(record)
+    await this.updateDesktopGfsUploadState(state => ({
+      ...state,
+      records: [
+        ...state.records.filter(item => item.uploadId !== canonicalRecord.uploadId),
+        canonicalRecord,
+      ].slice(-100),
+    }))
+  }
+
+  private async clearDesktopGfsUpload(uploadId: string): Promise<void> {
+    await this.updateDesktopGfsUploadState(state => ({
+      ...state,
+      records: state.records.filter(item => item.uploadId !== uploadId),
+    }))
+  }
+
+  private async runScopedLegacyGfsUpload<T>(
+    scope: DesktopGfsUploadScope,
+    operation: (token: string, signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    const controller = new AbortController()
+    const pending = { controller, promise: Promise.resolve() as Promise<unknown> }
+    this.gfsPendingLegacyUploads.add(pending)
+    const promise = (async () => {
+      this.assertCurrentDesktopGfsUploadScope(scope)
+      const result = await operation(this.requireSessionToken(), controller.signal)
+      this.assertCurrentDesktopGfsUploadScope(scope)
+      return result
+    })()
+    pending.promise = promise
+    try {
+      return await promise
+    } finally {
+      this.gfsPendingLegacyUploads.delete(pending)
+    }
+  }
+
+  private async startDesktopGfsUpload(
+    input: Omit<
+      DesktopUploadInput,
+      'transport' | 'token' | 'baseUrl' | 'onPersist' | 'onClearPersisted' | 'assertAuthEpoch'
+    > & { resumeUploadId?: string }
+  ): Promise<DesktopUploadSession> {
+    const scope = this.currentDesktopGfsUploadScope(input.drive)
+    const token = this.requireSessionToken()
+    let scopedInput = { ...input, drive: scope.drive }
+    if (input.resumeUploadId) {
+      const state = await this.readDesktopGfsUploadState()
+      const record = state.records.find(item => item.uploadId === input.resumeUploadId)
+      if (!record || !sameDesktopGfsUploadScope(record.scope, scope, { includeAuthEpoch: false })) {
+        throw new Error('GFS upload session is not available in the active security scope')
+      }
+      if (
+        record.filePath !== input.filePath ||
+        record.name !== input.name ||
+        record.target.operation !== input.operation ||
+        record.target.parentRid !== input.parentRid ||
+        record.target.resourceRid !== input.resourceRid ||
+        record.target.ifMatch !== input.ifMatch ||
+        record.session.drive !== scope.drive
+      ) {
+        throw new Error('GFS upload resume metadata does not match the persisted scoped record')
+      }
+      scopedInput = {
+        ...scopedInput,
+        filePath: record.filePath,
+        name: record.name,
+        operation: record.target.operation,
+        parentRid: record.target.parentRid,
+        resourceRid: record.target.resourceRid,
+        ifMatch: record.target.ifMatch,
+      }
+    }
+    const job = new DesktopGfsUploadJob({
+      ...scopedInput,
+      baseUrl: scope.baseUrl,
+      token,
+      transport: gfsUploadTransport,
+      assertAuthEpoch: () => this.assertCurrentDesktopGfsUploadScope(scope),
+      onPersist: record =>
+        this.persistDesktopGfsUpload({
+          ...record,
+          version: DESKTOP_GFS_UPLOAD_STATE_VERSION,
+          scope,
+          status: record.session.state === 'paused' ? 'paused' : 'active',
+          updatedAt: new Date().toISOString(),
+        }),
+      onClearPersisted: uploadId => this.clearDesktopGfsUpload(uploadId),
+    })
+    const promise = job.start()
+    // Capability/auth failures can reject before a resumable session exists.
+    // Observe that early rejection immediately; once a session exists, the
+    // lifecycle observer below records the durable failed state as usual.
+    void promise.catch(() => undefined)
+    const pending = { job, promise, scope }
+    this.gfsPendingUploadJobs.add(pending)
+    let session: DesktopUploadSession
+    try {
+      session = await job.waitForSession()
+    } finally {
+      this.gfsPendingUploadJobs.delete(pending)
+    }
+    this.assertCurrentDesktopGfsUploadScope(scope)
+    if (session.drive !== scope.drive)
+      throw new Error('upload_drive_mismatch: session does not match the active drive')
+    this.gfsUploadJobs.set(session.uploadId, { job, promise, scope })
+    void promise
+      .then(
+        () => undefined,
+        async error => {
+          const message = String(error instanceof Error ? error.message : error)
+          if (!message.startsWith('stale_auth_epoch:')) {
+            await this.updateDesktopGfsUploadState(state => ({
+              ...state,
+              records: state.records.map(record =>
+                record.uploadId === session.uploadId &&
+                sameDesktopGfsUploadScope(record.scope, scope)
+                  ? { ...record, status: 'failed' as const, updatedAt: new Date().toISOString() }
+                  : record
+              ),
+            }))
+            console.warn('[AppService] GFS upload job failed:', error)
+          }
+          if (this.gfsUploadJobs.get(session.uploadId)?.job === job) {
+            this.gfsUploadJobs.delete(session.uploadId)
+          }
+        }
+      )
+      .catch(error => console.warn('[AppService] Could not persist GFS upload failure:', error))
+    return session
+  }
+
+  async startGfsFileUpload(
+    parentResourceId: string,
+    name: string,
+    filePath: string,
+    drive?: string,
+    resumeUploadId?: string
+  ): Promise<DesktopUploadSession> {
+    const canonicalDrive = normalizeDesktopUploadDrive(drive)
+    const scope = this.currentDesktopGfsUploadScope(canonicalDrive)
+    try {
+      return await this.startDesktopGfsUpload({
+        filePath,
+        name,
+        drive: canonicalDrive,
+        operation: 'create',
+        parentRid: parentResourceId,
+        resumeUploadId,
+      })
+    } catch (error) {
+      // A legacy fallback is valid only for a fresh upload. An explicit resume
+      // must remain a v2 operation so a missing capability cannot silently turn
+      // a persisted session into a second non-resumable resource.
+      if (!(error instanceof DesktopUploadCapabilityError) || resumeUploadId) throw error
+      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+        const encodedData = await legacyEncodedFile(filePath)
+        this.assertCurrentDesktopGfsUploadScope(scope)
+        return this.gfsClient.createResource(
+          { parentResourceId, drive: canonicalDrive, name, kind: 'file', encodedData },
+          token,
+          signal
+        )
+      })
+      return legacyReceipt(resource, 'create')
+    }
+  }
+
+  async startGfsFileReplace(
+    resourceId: string,
+    filePath: string,
+    drive?: string,
+    ifMatch?: number,
+    resumeUploadId?: string
+  ): Promise<DesktopUploadSession> {
+    const canonicalDrive = normalizeDesktopUploadDrive(drive)
+    const scope = this.currentDesktopGfsUploadScope(canonicalDrive)
+    try {
+      return await this.startDesktopGfsUpload({
+        filePath,
+        name: resourceId,
+        drive: canonicalDrive,
+        operation: 'replace',
+        resourceRid: resourceId,
+        ifMatch,
+        resumeUploadId,
+      })
+    } catch (error) {
+      if (!(error instanceof DesktopUploadCapabilityError) || resumeUploadId) throw error
+      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+        const encodedData = await legacyEncodedFile(filePath)
+        this.assertCurrentDesktopGfsUploadScope(scope)
+        return this.gfsClient.replaceFile(
+          { resourceId, drive: canonicalDrive, ifMatch, encodedData },
+          token,
+          signal
+        )
+      })
+      return legacyReceipt(resource, 'replace')
+    }
+  }
+
+  async getGfsUploadSnapshot(uploadId: string, drive?: string) {
+    const entry = this.gfsUploadJobs.get(uploadId)
+    // Snapshot is read-only and an existing job already owns its captured
+    // token/scope. It must remain observable during a finite internal team hop;
+    // only a brand-new user-facing dispatch is fenced by that hop.
+    const scope = this.currentDesktopGfsUploadScope(drive, { allowTransientTeamHop: true })
+    if (entry && sameDesktopGfsUploadScope(entry.scope, scope)) return entry.job.snapshot()
+    const state = await this.readDesktopGfsUploadState()
+    const record = state.records.find(
+      item =>
+        item.uploadId === uploadId &&
+        sameDesktopGfsUploadScope(item.scope, scope, { includeAuthEpoch: false })
+    )
+    if (!record) return null
+    return {
+      // `active` is the persistence marker for a process-owned upload. The
+      // renderer contract describes the same resumable state as `uploading`;
+      // never leak the storage-only marker across the IPC boundary after a
+      // restart.
+      state: record.status === 'active' ? 'uploading' : record.status,
+      session: record.session,
+      uploadedBytes: record.session.committedBytes,
+      totalBytes: record.fileSize,
+    }
+  }
+
+  async pauseGfsUpload(uploadId: string, drive?: string): Promise<DesktopUploadSession> {
+    const entry = this.gfsUploadJobs.get(uploadId)
+    const scope = this.currentDesktopGfsUploadScope(drive, {
+      allowTransientTeamHop: Boolean(entry),
+    })
+    if (!entry || !sameDesktopGfsUploadScope(entry.scope, scope))
+      throw new Error('GFS upload is not active in the current security scope')
+    const session = await entry.job.pause()
+    await this.updateDesktopGfsUploadState(state => ({
+      ...state,
+      records: state.records.map(record =>
+        record.uploadId === uploadId && sameDesktopGfsUploadScope(record.scope, scope)
+          ? { ...record, session, status: 'paused' as const, updatedAt: new Date().toISOString() }
+          : record
+      ),
+    }))
+    return session
+  }
+
+  async resumeGfsUpload(uploadId: string, drive?: string): Promise<DesktopUploadSession> {
+    const entry = this.gfsUploadJobs.get(uploadId)
+    const scope = this.currentDesktopGfsUploadScope(drive, {
+      allowTransientTeamHop: Boolean(entry),
+    })
+    if (entry) {
+      if (!sameDesktopGfsUploadScope(entry.scope, scope))
+        throw new Error('GFS upload is not active in the current security scope')
+      return entry.job.resume()
+    }
+    const state = await this.readDesktopGfsUploadState()
+    const record = state.records.find(
+      item =>
+        item.uploadId === uploadId &&
+        sameDesktopGfsUploadScope(item.scope, scope, { includeAuthEpoch: false })
+    )
+    if (!record) throw new Error('GFS upload session is not available in the active security scope')
+    if (!['suspended_auth', 'paused', 'failed'].includes(record.status)) {
+      throw new Error(`GFS upload cannot be explicitly resumed from ${record.status}`)
+    }
+    return this.startDesktopGfsUpload({
+      filePath: record.filePath,
+      name: record.name,
+      drive: record.scope.drive,
+      operation: record.target.operation,
+      parentRid: record.target.parentRid,
+      resourceRid: record.target.resourceRid,
+      ifMatch: record.target.ifMatch,
+      resumeUploadId: record.uploadId,
+    })
+  }
+
+  async cancelGfsUpload(uploadId: string, drive?: string): Promise<void> {
+    const entry = this.gfsUploadJobs.get(uploadId)
+    const scope = this.currentDesktopGfsUploadScope(drive, {
+      allowTransientTeamHop: Boolean(entry),
+    })
+    if (entry) {
+      if (!sameDesktopGfsUploadScope(entry.scope, scope))
+        throw new Error('GFS upload is not active in the current security scope')
+      await entry.job.cancel()
+      this.gfsUploadJobs.delete(uploadId)
+      return
+    }
+    const state = await this.readDesktopGfsUploadState()
+    const record = state.records.find(
+      item =>
+        item.uploadId === uploadId &&
+        sameDesktopGfsUploadScope(item.scope, scope, { includeAuthEpoch: false })
+    )
+    if (!record) throw new Error('GFS upload session is not available in the active security scope')
+    const url = new URL(
+      `/api/v1/me/gfs/uploads/${encodeURIComponent(uploadId)}`,
+      `${scope.baseUrl}/`
+    )
+    url.searchParams.set('drive', scope.drive)
+    await gfsUploadTransport.requestJson('DELETE', url.toString(), {
+      token: this.requireSessionToken(),
+      timeoutMs: 10 * 60 * 1000,
+    })
+    this.assertCurrentDesktopGfsUploadScope(scope)
+    await this.clearDesktopGfsUpload(uploadId)
+  }
+
+  async listGfsUploadSessions(drive?: string): Promise<DesktopGfsUploadSummary[]> {
+    // Listing persisted state is read-only and must remain available while a
+    // finite internal team hop temporarily borrows another team's token.
+    const scope = this.currentDesktopGfsUploadScope(drive, { allowTransientTeamHop: true })
+    const state = await this.readDesktopGfsUploadState()
+    return state.records
+      .filter(record => sameDesktopGfsUploadScope(record.scope, scope, { includeAuthEpoch: false }))
+      .map(record => ({
+        uploadId: record.uploadId,
+        fileName: record.fileName,
+        fileSize: record.fileSize,
+        target: record.target,
+        name: record.name,
+        drive: record.scope.drive,
+        status: record.status,
+      }))
+  }
+
+  async createGfsFileFromPath(
+    parentResourceId: string,
+    name: string,
+    filePath: string,
+    drive?: string
+  ): Promise<DesktopUploadSession> {
+    const canonicalDrive = normalizeDesktopUploadDrive(drive)
+    const scope = this.currentDesktopGfsUploadScope(canonicalDrive)
+    try {
+      const session = await this.startDesktopGfsUpload({
+        filePath,
+        name,
+        drive: canonicalDrive,
+        operation: 'create',
+        parentRid: parentResourceId,
+      })
+      this.assertCurrentDesktopGfsUploadScope(scope)
+      const entry = this.gfsUploadJobs.get(session.uploadId)
+      if (!entry || !sameDesktopGfsUploadScope(entry.scope, scope)) {
+        throw new Error('stale_auth_epoch: GFS upload left the active security scope')
+      }
+      return await entry.promise
+    } catch (error) {
+      if (!(error instanceof DesktopUploadCapabilityError)) throw error
+      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+        const encodedData = await legacyEncodedFile(filePath)
+        this.assertCurrentDesktopGfsUploadScope(scope)
+        return this.gfsClient.createResource(
+          { parentResourceId, drive: canonicalDrive, name, kind: 'file', encodedData },
+          token,
+          signal
+        )
+      })
+      return legacyReceipt(resource, 'create')
+    }
+  }
+
   async replaceGfsFile(resourceId: string, encodedData: string, drive?: string, ifMatch?: number) {
     return this.gfsClient.replaceFile(
       { resourceId, drive, encodedData, ifMatch },
       this.requireSessionToken()
     )
+  }
+
+  async replaceGfsFileFromPath(
+    resourceId: string,
+    filePath: string,
+    drive?: string,
+    ifMatch?: number
+  ): Promise<DesktopUploadSession> {
+    const canonicalDrive = normalizeDesktopUploadDrive(drive)
+    const scope = this.currentDesktopGfsUploadScope(canonicalDrive)
+    try {
+      const session = await this.startDesktopGfsUpload({
+        filePath,
+        name: resourceId,
+        drive: canonicalDrive,
+        operation: 'replace',
+        resourceRid: resourceId,
+        ifMatch,
+      })
+      this.assertCurrentDesktopGfsUploadScope(scope)
+      const entry = this.gfsUploadJobs.get(session.uploadId)
+      if (!entry || !sameDesktopGfsUploadScope(entry.scope, scope)) {
+        throw new Error('stale_auth_epoch: GFS upload left the active security scope')
+      }
+      return await entry.promise
+    } catch (error) {
+      if (!(error instanceof DesktopUploadCapabilityError)) throw error
+      const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
+        const encodedData = await legacyEncodedFile(filePath)
+        this.assertCurrentDesktopGfsUploadScope(scope)
+        return this.gfsClient.replaceFile(
+          { resourceId, drive: canonicalDrive, ifMatch, encodedData },
+          token,
+          signal
+        )
+      })
+      return legacyReceipt(resource, 'replace')
+    }
   }
 
   async renameGfsResource(resourceId: string, newName: string, drive?: string, ifMatch?: number) {
@@ -920,8 +2500,32 @@ export class AppService {
   }
 
   async getSessionState(): Promise<SessionState> {
-    if (!this.sessionToken || !this.me) return { authenticated: false, me: null }
+    if (!this.sessionToken || !this.me) {
+      if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
+      // createWindow() already performs the saved-token restore before showing
+      // the renderer. Do not immediately repeat a failed 60-second network
+      // attempt from the renderer bootstrap; a new app launch or environment
+      // selection gets a fresh attempt because its service/env key is new.
+      if (
+        this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
+        Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
+      ) {
+        return { authenticated: false, me: null }
+      }
+      return this.restoreSavedSession()
+    }
     return { authenticated: true, me: this.me }
+  }
+
+  /**
+   * Synchronous read of the cached session user id. The plugin SDK broker needs
+   * the current user to key grants and audit lines on every request, and it
+   * cannot await mid-decision without opening a window where a logout races the
+   * consent check. Returns null whenever there is no live session.
+   */
+  getCachedUserId(): string | null {
+    if (!this.sessionToken || !this.me) return null
+    return this.me.id
   }
 
   async listTeams(): Promise<{ currentTeamId: string; items: TeamSummary[] }> {
@@ -1338,20 +2942,59 @@ export class AppService {
   async switchTeam(teamId: string): Promise<SessionState> {
     const targetTeamId = String(teamId || '').trim()
     if (!targetTeamId) throw new Error('teamId is required')
-    // §4.5-3 (GAP-N4 main half): a deliberate team switch tears down every live
-    // stream — the old team's progress/activity/status/notification sockets must
-    // not survive it. Done AFTER the switch SUCCEEDS (silently), mirroring the
-    // renderer, which only calls `resetChat()`/`releaseAll()` once the `team.switch`
-    // IPC resolves (so a FAILED switch leaves both the streams and the trackers
-    // intact rather than a frozen half-torn-down state). Tasks stay alive
-    // server-side and reconverge via reconcile when the user returns to that team.
-    // NOTE: only the user-initiated `switchTeam` closes streams — the transient
-    // per-operation team hops in `runWithTeamContext`/`switchSessionToTeam` (e.g.
-    // minting a cross-team RPC token to decide an approval) must NOT.
-    await this.switchSessionToTeam(targetTeamId)
-    if (!this.me) throw new Error('Team switch ended without an authenticated session')
-    this.stopAllStreams()
-    return { authenticated: true, me: this.me }
+    const previousIdentity =
+      this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+    // Keep the new team token fenced until the old GFS jobs have been
+    // suspended. `switchSessionToTeam` has its own nested gate, but releases
+    // it when the token exchange returns; this outer gate closes that small
+    // interval before the auth-boundary persistence completes.
+    const releaseTransientHop = this.enterGfsTransientTeamHop()
+    try {
+      // §4.5-3 (GAP-N4 main half): a deliberate team switch tears down every live
+      // stream — the old team's progress/activity/status/notification sockets must
+      // not survive it. Done AFTER the switch SUCCEEDS (silently), mirroring the
+      // renderer, which only calls `resetChat()`/`releaseAll()` once the `team.switch`
+      // IPC resolves (so a FAILED switch leaves both the streams and the trackers
+      // intact rather than a frozen half-torn-down state). Tasks stay alive
+      // server-side and reconverge via reconcile when the user returns to that team.
+      // NOTE: only the user-initiated `switchTeam` closes streams — the transient
+      // per-operation team hops in `runWithTeamContext`/`switchSessionToTeam` (e.g.
+      // minting a cross-team RPC token to decide an approval) must NOT.
+      await this.switchSessionToTeam(targetTeamId)
+      if (!this.me) throw new Error('Team switch ended without an authenticated session')
+      // A deliberate user switch is the only team-context boundary that fences
+      // in-flight uploads. Transient runWithTeamContext hops intentionally use
+      // switchSessionToTeam directly and must leave those jobs untouched.
+      try {
+        await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
+      } catch (error) {
+        // The replacement session is already installed at this point. If the
+        // auth-boundary state write fails, do not leave that token/me paired
+        // with a blocked or stale GFS scope. Cleanup remains inside the outer
+        // transient-hop gate, and the original persistence error is preserved.
+        this.clearAuthenticatedSessionState()
+        try {
+          await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+            legacyEnvKeys: getActiveLegacyEnvKeys(),
+          })
+        } catch (clearError) {
+          console.warn(
+            '[AppService] Failed to clear a partially switched team session:',
+            clearError
+          )
+        }
+        throw error
+      }
+      this.activateGfsAuthScope()
+      this.stopAllStreams()
+      // Grants are keyed by userId, not by team, so they carry over — but every
+      // cached org/agents/contexts answer is now about the wrong team. Drop the
+      // cache and tell mounted plugins to refetch (spec §6.2).
+      tryGetPluginSdkRuntime()?.notifySessionChanged(true)
+      return { authenticated: true, me: this.me }
+    } finally {
+      releaseTransientHop()
+    }
   }
 
   async refreshAccessCatalog(): Promise<AccessCatalog> {
@@ -1359,7 +3002,7 @@ export class AppService {
     const token = this.requireSessionToken()
     const me = this.me ?? (await this.authClient.getMe(token))
     this.me = me
-    await bindChatStoreForUser(me.id, getActiveEnvKey())
+    await this.bindCurrentChatStore(me.id)
     const currentTeamId = String(me.teamId || '').trim()
 
     const [userContexts, userAgents, teamContexts, teamAgents] = await Promise.all([
@@ -1392,6 +3035,14 @@ export class AppService {
     const contextMcpServers: Record<string, Array<{ name: string }>> = {}
     const agentContextByName: Record<string, string | null> = {}
     const agentProviderByName: Record<string, string | null> = {}
+    // Visible agent name (Agent CRD `spec.host`, arriving as the wire
+    // `displayName`) keyed by `metadata.name`. This is the single producer
+    // boundary for the desktop catalog: the `|| name` guard lives here only
+    // (mirroring control-api's accessReconciliation `configuredDisplayName ||
+    // name`), so renderer consumers read `agentDisplayByName[name]` directly
+    // without sprinkling `|| name` (spec Decision #6). Filled total over
+    // `agentNames` below so a lookup is never undefined.
+    const agentDisplayByName: Record<string, string> = {}
     const upsertScopedServers = (
       target: Record<string, Array<{ name: string }>>,
       key: string,
@@ -1407,6 +3058,7 @@ export class AppService {
     const collectAgents = (
       agents?: Array<{
         name: string
+        displayName?: string | null
         contextRef?: string | null
         provider?: string | null
         model?: { provider?: string | null } | null
@@ -1417,6 +3069,13 @@ export class AppService {
       for (const a of agents) {
         const agentName = String(a?.name || '').trim()
         if (!agentName) continue
+        const displayNameCandidate = typeof a?.displayName === 'string' ? a.displayName.trim() : ''
+        if (
+          displayNameCandidate &&
+          !Object.prototype.hasOwnProperty.call(agentDisplayByName, agentName)
+        ) {
+          agentDisplayByName[agentName] = displayNameCandidate
+        }
         const contextRef =
           typeof a?.contextRef === 'string' && a.contextRef.trim().length > 0
             ? a.contextRef.trim()
@@ -1456,6 +3115,7 @@ export class AppService {
     const filterAgentDetails = (
       agents?: Array<{
         name: string
+        displayName?: string | null
         contextRef?: string | null
         provider?: string | null
         model?: { provider?: string | null } | null
@@ -1474,6 +3134,12 @@ export class AppService {
       }
       if (!Object.prototype.hasOwnProperty.call(agentProviderByName, agentName)) {
         agentProviderByName[agentName] = null
+      }
+      // Producer-side `|| name` guard (the only one — see Decision #6): an agent
+      // whose wire entry carried no `displayName` (pre-display API build) falls
+      // back to its identifier here so consumers never render an empty label.
+      if (!Object.prototype.hasOwnProperty.call(agentDisplayByName, agentName)) {
+        agentDisplayByName[agentName] = agentName
       }
     }
 
@@ -1494,6 +3160,7 @@ export class AppService {
       ...(hasContextScopedMcp ? { contextMcpServers } : {}),
       agentContextByName,
       agentProviderByName,
+      agentDisplayByName,
     }
     return this.accessCatalog
   }
@@ -2476,25 +4143,15 @@ export class AppService {
 
   async listSessions(
     hostRef: string,
-    hostRefs?: string[]
-  ): Promise<{
-    items: Array<{
-      agent: string
-      chatId: string
-      turnCount: number
-      lastActivityAt: string
-      state?: SessionLifecycleState
-      activeTaskId?: string
-      pendingApproval?: PendingApprovalLite
-      tokens?: SessionTokensLite
-    }>
-  }> {
+    hostRefs?: string[],
+    query: SessionsListQuery = {}
+  ): Promise<SessionsListResult> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
-      return await this.rpcClient.listSessions(rpc.token, targetHostRef)
+      return await this.rpcClient.listSessions(rpc.token, targetHostRef, query)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('401') && message.toLowerCase().includes('missing token')) {
@@ -2511,7 +4168,8 @@ export class AppService {
     hostRef: string,
     agent: string,
     chatId: string,
-    hostRefs?: string[]
+    hostRefs?: string[],
+    query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef || !agent || !chatId) {
@@ -2520,14 +4178,27 @@ export class AppService {
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
-      return await this.rpcClient.loadSessionMessages(rpc.token, targetHostRef, agent, chatId)
+      return await this.rpcClient.loadSessionMessages(
+        rpc.token,
+        targetHostRef,
+        agent,
+        chatId,
+        query
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('401') && message.toLowerCase().includes('missing token')) {
         console.warn(
           '[AppService] Session messages unavailable because the runtime rejected the session token.'
         )
-        return { agent, chatId, turns: [] }
+        return {
+          agent,
+          chatId,
+          turns: [],
+          totalTurns: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        }
       }
       throw error
     }
@@ -2804,10 +4475,27 @@ export class AppService {
    * this). This keeps memory + GPU usage bounded and avoids accidental
    * cross-recipe focus / cookie-jar mixups.
    */
-  async openSandboxUi(args: {
+  openSandboxUi(args: {
     recipeNs: string
     recipeName: string
+    title?: string
     defaultPath?: string
+    routePath?: string
+    bounds: import('./sandboxUiDriver.js').SandboxUiBounds
+    parentWindow: import('electron').BrowserWindow
+    onClosed?: () => void
+    onRefreshError?: (message: string) => void
+    onOauthError?: (message: string) => void
+  }): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args))
+  }
+
+  private async openSandboxUiNow(args: {
+    recipeNs: string
+    recipeName: string
+    title?: string
+    defaultPath?: string
+    routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
     parentWindow: import('electron').BrowserWindow
     onClosed?: () => void
@@ -2817,6 +4505,7 @@ export class AppService {
     const recipeNs = String(args.recipeNs || '').trim()
     const recipeName = String(args.recipeName || '').trim()
     if (!recipeNs || !recipeName) throw new Error('recipeNs and recipeName are required')
+    this.sandboxUiGeneration += 1
     const { setCookie } = await this.mintSandboxUiSession(recipeNs, recipeName)
     const driver = await import('./sandboxUiDriver.js')
     const refreshModule = await import('./sandboxUiSessionRefresh.js')
@@ -2826,13 +4515,24 @@ export class AppService {
       setCookie,
       rpcProxyUrl: config.rpcProxyBaseUrl,
       defaultPath: args.defaultPath,
+      routePath: args.routePath,
       parentWindow: args.parentWindow,
       bounds: args.bounds,
       onClosed: () => {
         // Cancel refresh first so the timer doesn't keep firing against a
         // partition we're about to evict on the next mount.
         refreshModule.cancelSandboxUiRefresh()
+        // Unpin before anything else can observe a dead surface as pinned:
+        // per-mount SDK state (session denials, prompt budget, rate budget)
+        // dies with the mount.
+        tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
         args.onClosed?.()
+      },
+      onGfsOpen: uri => {
+        const active = tryGetPluginSdkRuntime()
+        const surface = driver.getActiveSandboxUi()
+        if (!active || !surface) return
+        void active.openGfsResourceFromNavigation(surface.webContentsId, uri)
       },
       onOauthAuthorize: (oauthClientId, background) => {
         void this.requestSandboxUiOauthAuthorize(
@@ -2848,12 +4548,20 @@ export class AppService {
       },
     })
     const activeView = driver.getActiveSandboxUi()
-    if (!activeView) {
-      // The mount step already threw if it failed; if we still get null
-      // here something racy happened (parent window closed during the
-      // mint).  Bail without arming refresh.
+    if (!activeView || activeView.appRef !== `${recipeNs}/${recipeName}`) {
+      // A queued close or newer mount can invalidate this operation while an
+      // async cookie write is in flight. Do not cross-wire its refresh loop
+      // to whichever recipe is active now.
       return
     }
+    // Pin the surface so the SDK broker can derive this plugin's identity from
+    // `webContents.id` — the plugin never asserts who it is (spec §8.1).
+    tryGetPluginSdkRuntime()?.pinSandboxUiSurface({
+      pluginId: activeView.appRef,
+      pluginTitle: String(args.title || '').trim() || recipeName,
+      webContentsId: activeView.webContentsId,
+      generation: this.sandboxUiGeneration,
+    })
     refreshModule.startSandboxUiRefresh({
       recipeNs,
       recipeName,
@@ -2867,11 +4575,30 @@ export class AppService {
     })
   }
 
-  async closeSandboxUi(): Promise<void> {
+  closeSandboxUi(): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(async () => {
+      const driver = await import('./sandboxUiDriver.js')
+      const refreshModule = await import('./sandboxUiSessionRefresh.js')
+      refreshModule.cancelSandboxUiRefresh()
+      tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
+      await driver.unmountSandboxUiView()
+    })
+  }
+
+  async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
     const driver = await import('./sandboxUiDriver.js')
-    const refreshModule = await import('./sandboxUiSessionRefresh.js')
-    refreshModule.cancelSandboxUiRefresh()
-    await driver.unmountSandboxUiView()
+    const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
+    const location = driver.getActiveSandboxUiLocation()
+    if (!location) throw new Error('No app is currently open')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    return {
+      url: buildSandboxUiWebLink(profileUiBaseUrl, {
+        ...location,
+        teamId: String(teamId || '').trim() || undefined,
+      }),
+    }
   }
 
   // In-place hard-reload of the active embed (user-initiated "Refresh"). The

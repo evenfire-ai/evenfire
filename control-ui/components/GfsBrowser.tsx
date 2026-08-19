@@ -9,7 +9,15 @@ import { useToast } from '@components/Toast'
 import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
 import { Button, TextInput } from '@components/ui'
 import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
-import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
+import {
+  GfsUploadCapabilityError,
+  type GfsUploadJob,
+  type GfsUploadJobInput,
+  type GfsUploadJobSnapshot,
+  assertGfsFileUploadSize,
+  createGfsUploadJob,
+  uploadGfsFileLegacy,
+} from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
@@ -44,6 +52,77 @@ interface Crumb {
 }
 
 const DRIVE = 'main'
+const PENDING_GFS_UPLOAD_KEY = 'evenfire:gfs-upload-v2:pending'
+
+interface PendingGfsUpload {
+  uploadId?: string
+  idempotencyKey?: string
+  fileName: string
+  fileSize: number
+  lastModified: number
+  target: {
+    operation: 'create' | 'replace'
+    parentRid?: string
+    resourceRid?: string
+    ifMatch?: number
+  }
+  name: string
+}
+
+function readPendingGfsUpload(): PendingGfsUpload | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(PENDING_GFS_UPLOAD_KEY) || 'null'
+    ) as Partial<PendingGfsUpload> | null
+    if (
+      !parsed ||
+      (typeof parsed.uploadId !== 'string' && typeof parsed.idempotencyKey !== 'string') ||
+      typeof parsed.fileName !== 'string' ||
+      typeof parsed.fileSize !== 'number' ||
+      typeof parsed.lastModified !== 'number' ||
+      !parsed.target ||
+      typeof parsed.name !== 'string'
+    )
+      return null
+    return parsed as PendingGfsUpload
+  } catch {
+    return null
+  }
+}
+
+function persistPendingGfsUpload(record: PendingGfsUpload): void {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(PENDING_GFS_UPLOAD_KEY, JSON.stringify(record))
+}
+
+function clearPendingGfsUpload(uploadId?: string): void {
+  if (typeof window === 'undefined') return
+  const current = readPendingGfsUpload()
+  if (!uploadId || current?.uploadId === uploadId)
+    window.localStorage.removeItem(PENDING_GFS_UPLOAD_KEY)
+}
+
+function matchingPendingResumeUploadId(
+  file: File,
+  target: GfsUploadJobInput['target'],
+  name: string
+): string | undefined {
+  const pending = readPendingGfsUpload()
+  if (!pending?.uploadId) return undefined
+  if (
+    pending.fileName !== file.name ||
+    pending.fileSize !== file.size ||
+    pending.lastModified !== file.lastModified ||
+    pending.name !== name ||
+    pending.target.operation !== target.operation ||
+    pending.target.parentRid !== target.parentRid ||
+    pending.target.resourceRid !== target.resourceRid ||
+    pending.target.ifMatch !== target.ifMatch
+  )
+    return undefined
+  return pending.uploadId
+}
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
@@ -58,19 +137,6 @@ function formatBytes(bytes: number): string {
   return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${unit}`
 }
 
-async function fileToEncodedData(file: File): Promise<string> {
-  assertGfsFileUploadSize(file.size)
-  const bytes = new Uint8Array(await file.arrayBuffer())
-  assertGfsFileUploadSize(bytes.byteLength)
-  let binary = ''
-  const chunkSize = 0x8000
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    const chunk = bytes.subarray(offset, offset + chunkSize)
-    binary += String.fromCharCode(...chunk)
-  }
-  return btoa(binary)
-}
-
 /**
  * Operator browser for the Global File System. It lists the drive tree through
  * control-api and uses the operator-scoped GFS proxy for create, upload,
@@ -83,14 +149,6 @@ function ridOfResourceId(resourceId: string): string {
 
 function hasDraggedFiles(event: React.DragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
-}
-
-function isDroppedPreviewFile(file: File): boolean {
-  return (
-    file.type.toLowerCase().startsWith('image/') ||
-    gfsImagePreviewMimeType(file.name) !== null ||
-    isGfsMarkdownPreviewFile(file.name)
-  )
 }
 
 function isGfsPreviewFile(fileName: string): boolean {
@@ -111,7 +169,6 @@ export function GfsBrowser(): React.JSX.Element {
   const [renameName, setRenameName] = useState('')
   const [deleteOpen, setDeleteOpen] = useState(false)
   const manageUploadInputRef = useRef<HTMLInputElement | null>(null)
-  const manageReplaceInputRef = useRef<HTMLInputElement | null>(null)
   // New-folder dialog (replaces the native window.prompt flow).
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -119,6 +176,8 @@ export function GfsBrowser(): React.JSX.Element {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [uploadCandidate, setUploadCandidate] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
+  const uploadJobRef = useRef<GfsUploadJob | null>(null)
+  const [uploadSnapshot, setUploadSnapshot] = useState<GfsUploadJobSnapshot | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   const [imagePreview, setImagePreview] = useState<{
@@ -134,6 +193,44 @@ export function GfsBrowser(): React.JSX.Element {
   } | null>(null)
   // Resource IDs currently streaming a download (disables that row's button).
   const [downloadingIds, setDownloadingIds] = useState<ReadonlySet<string>>(() => new Set())
+
+  /**
+   * The uploader already emits the exact aggregate of committed bytes plus
+   * each part's maximum in-flight observation.  Keep a small monotonic guard
+   * only for two stale `uploading` snapshots arriving out of order; terminal
+   * or paused snapshots, and direct progress observations, must be accepted
+   * exactly so a failed retry cannot leave the bar overstated.
+   */
+  const mergeUploadSnapshot = useCallback((next: GfsUploadJobSnapshot): void => {
+    setUploadSnapshot(previous => {
+      if (!previous) return next
+      const previousUploadId = previous.session?.uploadId
+      const nextUploadId = next.session?.uploadId
+      if (
+        (previousUploadId && nextUploadId && previousUploadId !== nextUploadId) ||
+        previous.totalBytes !== next.totalBytes
+      )
+        return next
+      const uploadedBytes =
+        previous.state === 'uploading' && next.state === 'uploading'
+          ? Math.max(previous.uploadedBytes, next.uploadedBytes)
+          : next.uploadedBytes
+      return {
+        ...next,
+        uploadedBytes: Math.min(Math.max(0, uploadedBytes), next.totalBytes),
+      }
+    })
+  }, [])
+
+  const mergeUploadProgress = useCallback((uploadedBytes: number): void => {
+    setUploadSnapshot(previous => {
+      if (!previous) return previous
+      return {
+        ...previous,
+        uploadedBytes: Math.min(Math.max(0, uploadedBytes), previous.totalBytes),
+      }
+    })
+  }, [])
 
   const current = crumbs[crumbs.length - 1]
   const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
@@ -218,6 +315,7 @@ export function GfsBrowser(): React.JSX.Element {
   }
 
   function goToCrumb(index: number): void {
+    if (index === crumbs.length - 1) return
     setLoading(true)
     setCrumbs(crumbs.slice(0, index + 1))
   }
@@ -234,6 +332,84 @@ export function GfsBrowser(): React.JSX.Element {
   async function refreshCurrent(): Promise<void> {
     if (!current) return
     await load(current)
+  }
+
+  async function uploadWithCompatibility(
+    input: GfsUploadJobInput
+  ): Promise<'completed' | 'paused'> {
+    setUploadCandidate(input.file)
+    setUploadOpen(true)
+    setUploading(true)
+    const job = createGfsUploadJob({
+      ...input,
+      onProgress: progress => {
+        mergeUploadProgress(progress.uploadedBytes)
+        input.onProgress?.(progress)
+      },
+      onState: snapshot => {
+        mergeUploadSnapshot(snapshot)
+        input.onState?.(snapshot)
+      },
+      onPersistPending: record => {
+        persistPendingGfsUpload({
+          idempotencyKey: record.idempotencyKey,
+          fileName: record.fileName,
+          fileSize: record.fileSize,
+          lastModified: record.lastModified,
+          target: record.target,
+          name: record.name,
+        })
+        void input.onPersistPending?.(record)
+      },
+      onPersist: record => {
+        persistPendingGfsUpload({
+          uploadId: record.uploadId,
+          fileName: record.fileName,
+          fileSize: record.fileSize,
+          lastModified: record.lastModified,
+          target: record.target,
+          name: record.name,
+        })
+        void input.onPersist?.(record)
+      },
+      onClearPersisted: uploadId => {
+        clearPendingGfsUpload(uploadId)
+        void input.onClearPersisted?.(uploadId)
+      },
+    })
+    uploadJobRef.current = job
+    try {
+      const receipt = await job.start()
+      if (receipt.state === 'paused') {
+        setUploading(false)
+        return 'paused'
+      }
+      setUploadCandidate(null)
+      setUploadOpen(false)
+      setUploadSnapshot(null)
+      uploadJobRef.current = null
+      await refreshCurrent()
+      return 'completed'
+    } catch (error) {
+      if (!(error instanceof GfsUploadCapabilityError)) throw error
+      if (input.resumeUploadId) {
+        throw new GfsUploadCapabilityError(
+          'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+          { cause: error }
+        )
+      }
+      showToast('Resumable upload is unavailable; using the legacy 16 MiB path.', { tone: 'info' })
+      await uploadGfsFileLegacy(input)
+      clearPendingGfsUpload()
+      setUploadCandidate(null)
+      setUploadOpen(false)
+      setUploadSnapshot(null)
+      uploadJobRef.current = null
+      await refreshCurrent()
+      return 'completed'
+    } finally {
+      setUploading(false)
+    }
   }
 
   function openNewFolder(): void {
@@ -268,20 +444,142 @@ export function GfsBrowser(): React.JSX.Element {
     const rid = current?.rid ?? (current?.id ? ridOfResourceId(current.id) : null)
     if (!rid || !file) return
     setUploading(true)
+    let resumeUploadId: string | undefined
     try {
+      assertGfsFileUploadSize(file.size)
       const name = await normalizeGfsResourceName(file.name)
-      await apiSend('POST', `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(rid)}/children`, {
+      const target = { operation: 'create' as const, parentRid: rid }
+      resumeUploadId = matchingPendingResumeUploadId(file, target, name)
+      const job = createGfsUploadJob({
+        file,
         name,
-        kind: 'file',
-        contentBase64: await fileToEncodedData(file),
+        target,
+        resumeUploadId,
+        onPersistPending: record => {
+          persistPendingGfsUpload({
+            idempotencyKey: record.idempotencyKey,
+            fileName: record.fileName,
+            fileSize: record.fileSize,
+            lastModified: record.lastModified,
+            target: record.target,
+            name: record.name,
+          })
+        },
+        onProgress: progress => {
+          mergeUploadProgress(progress.uploadedBytes)
+        },
+        onState: snapshot => mergeUploadSnapshot(snapshot),
+        onPersist: record => {
+          persistPendingGfsUpload({
+            uploadId: record.uploadId,
+            fileName: record.fileName,
+            fileSize: record.fileSize,
+            lastModified: record.lastModified,
+            target: record.target,
+            name: record.name,
+          })
+        },
+        onClearPersisted: uploadId => clearPendingGfsUpload(uploadId),
       })
+      uploadJobRef.current = job
+      const receipt = await job.start()
+      if (receipt.state === 'paused') {
+        setUploading(false)
+        return
+      }
       showToast('File uploaded.', { tone: 'success' })
       setUploadCandidate(null)
       setUploadOpen(false)
+      setUploadSnapshot(null)
+      uploadJobRef.current = null
       await refreshCurrent()
     } catch (err) {
+      if (uploadJobRef.current?.snapshot().state === 'aborted') return
+      if (err instanceof GfsUploadCapabilityError) {
+        if (resumeUploadId) {
+          showToast(
+            'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+            { tone: 'error' }
+          )
+          return
+        }
+        showToast('Resumable upload is unavailable; using the legacy 16 MiB path.', {
+          tone: 'info',
+        })
+        try {
+          const name = await normalizeGfsResourceName(file.name)
+          await uploadGfsFileLegacy({ file, name, target: { operation: 'create', parentRid: rid } })
+          clearPendingGfsUpload()
+          showToast('File uploaded.', { tone: 'success' })
+          setUploadCandidate(null)
+          setUploadOpen(false)
+          setUploadSnapshot(null)
+          uploadJobRef.current = null
+          await refreshCurrent()
+          return
+        } catch (legacyError) {
+          showToast(legacyError instanceof Error ? legacyError.message : 'Could not upload file.', {
+            tone: 'error',
+          })
+          return
+        }
+      }
       showToast(err instanceof Error ? err.message : 'Could not upload file.', { tone: 'error' })
     } finally {
+      setUploading(false)
+    }
+  }
+
+  async function pauseUpload(): Promise<void> {
+    const job = uploadJobRef.current
+    if (!job) return
+    try {
+      await job.pause()
+      setUploading(false)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not pause upload.', { tone: 'error' })
+    }
+  }
+
+  async function resumeUpload(): Promise<void> {
+    const job = uploadJobRef.current
+    if (!job) return
+    setUploading(true)
+    try {
+      const receipt = await job.resume()
+      if (receipt.state === 'completed') {
+        showToast('File uploaded.', { tone: 'success' })
+        setUploadCandidate(null)
+        setUploadOpen(false)
+        setUploadSnapshot(null)
+        uploadJobRef.current = null
+        await refreshCurrent()
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not resume upload.', { tone: 'error' })
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function cancelUpload(): Promise<void> {
+    const job = uploadJobRef.current
+    if (!job) {
+      closeUploadModal()
+      return
+    }
+    try {
+      await job.cancel()
+      setUploading(false)
+      setUploadSnapshot(null)
+      setUploadCandidate(null)
+      setUploadOpen(false)
+      uploadJobRef.current = null
+    } catch (err) {
+      // A finalizer is intentionally not canceled after publication starts;
+      // keep the modal open and expose the stable server error so the user can
+      // reconcile the receipt instead of presenting a false canceled state.
+      showToast(err instanceof Error ? err.message : 'Could not cancel upload.', { tone: 'error' })
       setUploading(false)
     }
   }
@@ -317,23 +615,15 @@ export function GfsBrowser(): React.JSX.Element {
     }
 
     const droppedFiles = Array.from(event.dataTransfer.files || [])
-    const previewFiles = droppedFiles.filter(isDroppedPreviewFile)
-    if (!previewFiles.length) {
-      showToast('Only image and Markdown files can be dropped here.', { tone: 'error' })
+    if (!droppedFiles.length) {
+      showToast('No files were dropped.', { tone: 'error' })
       return
     }
 
-    setDroppedUploadCount(previewFiles.length)
+    setDroppedUploadCount(droppedFiles.length)
     try {
-      for (const file of previewFiles) {
+      for (const file of droppedFiles) {
         await uploadFile(file)
-      }
-      const skippedCount = droppedFiles.length - previewFiles.length
-      if (skippedCount > 0) {
-        showToast(
-          `${skippedCount} unsupported ${skippedCount === 1 ? 'file was' : 'files were'} skipped.`,
-          { tone: 'error' }
-        )
       }
     } finally {
       setDroppedUploadCount(0)
@@ -343,7 +633,11 @@ export function GfsBrowser(): React.JSX.Element {
   function closeUploadModal(): void {
     if (uploading) return
     setUploadOpen(false)
-    setUploadCandidate(null)
+    if (!uploadSnapshot || uploadSnapshot.state !== 'paused') {
+      setUploadCandidate(null)
+      uploadJobRef.current = null
+      setUploadSnapshot(null)
+    }
   }
 
   function openManage(child: GfsChild, mode?: 'rename' | 'delete'): void {
@@ -377,17 +671,23 @@ export function GfsBrowser(): React.JSX.Element {
   async function replaceFile(child: GfsChild, file: File | null | undefined): Promise<void> {
     if (!file) return
     try {
-      await apiSend(
-        'PUT',
-        `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(child.rid)}/content`,
-        {
-          contentBase64: await fileToEncodedData(file),
-          ifMatch: child.version,
-        }
-      )
-      showToast('File replaced.', { tone: 'success' })
-      if (selected?.resourceId === child.resourceId) setSelected(null)
-      await refreshCurrent()
+      const target = {
+        operation: 'replace' as const,
+        resourceRid: child.rid,
+        ifMatch: child.version,
+      }
+      const state = await uploadWithCompatibility({
+        file,
+        name: file.name,
+        target,
+        resumeUploadId: matchingPendingResumeUploadId(file, target, file.name),
+      })
+      if (state === 'completed') {
+        showToast('File replaced.', { tone: 'success' })
+        if (selected?.resourceId === child.resourceId) setSelected(null)
+      } else {
+        showToast('Replace paused. Resume it from the upload panel.', { tone: 'info' })
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not replace file.', { tone: 'error' })
     }
@@ -400,17 +700,15 @@ export function GfsBrowser(): React.JSX.Element {
     if (!file || folder.kind !== 'directory') return
     try {
       const name = await normalizeGfsResourceName(file.name)
-      await apiSend(
-        'POST',
-        `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(folder.rid)}/children`,
-        {
-          name,
-          kind: 'file',
-          contentBase64: await fileToEncodedData(file),
-        }
-      )
-      showToast('File uploaded.', { tone: 'success' })
-      await refreshCurrent()
+      const target = { operation: 'create' as const, parentRid: folder.rid }
+      const state = await uploadWithCompatibility({
+        file,
+        name,
+        target,
+        resumeUploadId: matchingPendingResumeUploadId(file, target, name),
+      })
+      if (state === 'completed') showToast('File uploaded.', { tone: 'success' })
+      else showToast('Upload paused. Resume it from the upload panel.', { tone: 'info' })
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not upload file.', { tone: 'error' })
     }
@@ -464,7 +762,7 @@ export function GfsBrowser(): React.JSX.Element {
         <TablePanelHeader
           title={
             <>
-              <IconFolder /> Global File System
+              <IconPaperclip /> Global File System
             </>
           }
           subtitle="Browse and manage drive resources and access grants from the admin plane."
@@ -475,7 +773,7 @@ export function GfsBrowser(): React.JSX.Element {
             {droppedUploadCount > 0
               ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
               : current?.id
-                ? `Drop images or Markdown files to upload to ${currentLabel}`
+                ? `Drop files to upload to ${currentLabel}`
                 : 'Files cannot be uploaded until a destination folder is available.'}
           </div>
         ) : null}
@@ -493,12 +791,23 @@ export function GfsBrowser(): React.JSX.Element {
                 <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
                   {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
                   <button
-                    className="cu-gfs-breadcrumb__button"
+                    className={`cu-gfs-breadcrumb__button${
+                      crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
+                    }`}
                     type="button"
                     onClick={() => goToCrumb(index)}
                     aria-current={index === crumbs.length - 1 ? 'page' : undefined}
                   >
-                    {crumb.name === '/' ? DRIVE : crumb.name}
+                    {crumb.name === '/' ? (
+                      <>
+                        <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
+                          <IconFolder />
+                        </span>
+                        <span>{DRIVE}</span>
+                      </>
+                    ) : (
+                      crumb.name
+                    )}
                   </button>
                 </span>
               ))}
@@ -717,6 +1026,11 @@ export function GfsBrowser(): React.JSX.Element {
                         setRenameOpen(true)
                         setDeleteOpen(false)
                       }}
+                      onReplace={
+                        selected.kind !== 'directory'
+                          ? file => void replaceFile(selected, file)
+                          : undefined
+                      }
                       onDelete={() => {
                         setDeleteOpen(true)
                         setRenameOpen(false)
@@ -730,11 +1044,7 @@ export function GfsBrowser(): React.JSX.Element {
                   <Button size="sm" onClick={() => manageUploadInputRef.current?.click()}>
                     Upload file
                   </Button>
-                ) : (
-                  <Button size="sm" onClick={() => manageReplaceInputRef.current?.click()}>
-                    Replace file
-                  </Button>
-                )}
+                ) : null}
                 <Button
                   autoFocus
                   className="cu-gfs-manage-dialog__close"
@@ -759,19 +1069,7 @@ export function GfsBrowser(): React.JSX.Element {
                   void uploadFileToFolder(selected, file)
                 }}
               />
-            ) : (
-              <input
-                aria-label={`Replace ${selected.name}`}
-                className="sr-only"
-                ref={manageReplaceInputRef}
-                type="file"
-                onChange={event => {
-                  const file = event.currentTarget.files?.[0]
-                  event.currentTarget.value = ''
-                  void replaceFile(selected, file)
-                }}
-              />
-            )}
+            ) : null}
 
             <div className="cu-gfs-manage-dialog__body">
               <section className="cu-gfs-manage-section cu-gfs-manage-section--access">
@@ -847,10 +1145,22 @@ export function GfsBrowser(): React.JSX.Element {
           fileSummary={
             uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined
           }
-          guidance="GFS uploads are limited to 10 MB per file."
+          guidance="GFS uploads are limited to 200 MiB per file; each request is streamed in 8 MiB parts (16 MiB hard maximum)."
+          progress={
+            uploadSnapshot
+              ? {
+                  uploadedBytes: uploadSnapshot.uploadedBytes,
+                  totalBytes: uploadSnapshot.totalBytes,
+                  state: uploadSnapshot.state,
+                }
+              : undefined
+          }
+          onCancelUpload={() => void cancelUpload()}
           onClose={closeUploadModal}
           onFileChange={setUploadCandidate}
           onUpload={() => void uploadFile(uploadCandidate)}
+          onPauseUpload={() => void pauseUpload()}
+          onResumeUpload={() => void resumeUpload()}
         />
       ) : null}
 

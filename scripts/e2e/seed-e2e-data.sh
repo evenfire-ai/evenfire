@@ -6,7 +6,11 @@
 # desktop-app/test/e2e/* and scripts/e2e/*.sh suites require. User/team and
 # access bindings use the admin API contract. Minikube additionally gets local
 # Desktop password-login credentials, plus optional Plugin Workload SDK demo
-# grants for the grant-driven sandbox-ui notification recipe.
+# grants for the grant-driven sandbox-ui notification recipe. When the recipe
+# is already installed, the same seed also gives the E2E users direct
+# WorkflowRecipe trigger access so the Desktop Apps picker can list its
+# `spec.ui` app. SDK capability grants and Sandbox UI trigger grants are
+# separate authorization contracts.
 #
 # Idempotent: safe to run on every deploy. Re-runs preserve existing state
 # (admin user/team lookup is create-if-missing, PUT /admin/users/:id/
@@ -39,18 +43,33 @@
 #   E2E_PLUGIN_SDK_DEMO_EVENT_TYPE  notification event type (default: fullstack.prompt.notify)
 #   E2E_PLUGIN_SDK_DEMO_CALLER_REF  allowed caller ref (default: backend)
 #   E2E_PLUGIN_SDK_DEMO_MODEL_NAME  promptBridge model grant (default: E2E/CLERUM model)
+#   E2E_PLUGIN_SDK_DEMO_PROVIDER     promptBridge provider (default: E2E/CLERUM provider)
+#   E2E_PLUGIN_SDK_DEMO_TARGET_REF   ordered policy target id (default: primary)
+#   E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT Secret data key owned by provider (derived when omitted)
 #   ADMIN_USERNAME       admin user     (default: admin)
-#   ADMIN_EMAIL          bootstrap email (default: admin@clerum.io)
+#   ADMIN_EMAIL          bootstrap email (default: admin@evenfire.local for
+#                        SEED_PROFILE=minimal, otherwise admin@clerum.io)
 #   ADMIN_PASSWORD       admin pass     (REQUIRED — bootstrap or rotated)
 #   CONTROL_API_NS       ns             (default: control-plane)
 # ======================================================================
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+dotenv_load_canonical_root "${REPO_ROOT}"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
+# shellcheck source=scripts/e2e/minimal-bootstrap-contract.sh
+source "${SCRIPT_DIR}/minimal-bootstrap-contract.sh"
+
 # ─── Config (all overridable) ──────────────────────────────────────────
 CONTEXT="${CONTEXT:-$(kubectl config current-context)}"
 KC="kubectl --context=${CONTEXT}"
 
+SEED_PROFILE="${SEED_PROFILE:-e2e}"
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
 DEV_NAME="${E2E_DEV_LOGIN_NAME:-Test User}"
 DEV_EMAIL_2="${E2E_DEV_LOGIN_EMAIL_2:-test2@clerum.io}"
@@ -83,8 +102,29 @@ AGENT_NAME="${E2E_HOST_REF:-chatllm}"
 CONTEXT_ID="${E2E_CONTEXT_ID:-context1}"
 
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-admin@clerum.io}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+if [ -z "${ADMIN_EMAIL:-}" ]; then
+  if [ "$SEED_PROFILE" = "minimal" ]; then
+    ADMIN_EMAIL="admin@evenfire.local"
+  else
+    ADMIN_EMAIL="admin@clerum.io"
+  fi
+fi
+if [ "$SEED_PROFILE" = "minimal" ]; then
+  ADMIN_EMAIL="$(clerum_canonical_email "$ADMIN_EMAIL")"
+  if [ -n "${E2E_DEV_LOGIN_EMAIL+x}" ]; then
+    DEV_EMAIL="$(clerum_minimal_desktop_email "$ADMIN_EMAIL" "$DEV_EMAIL" true)"
+  else
+    DEV_EMAIL="$(clerum_minimal_desktop_email "$ADMIN_EMAIL" "" false)"
+  fi
+  if ! clerum_minimal_identity_matches "$ADMIN_EMAIL" "$DEV_EMAIL"; then
+    printf '  ERROR: %s\n' "$(clerum_minimal_identity_error "$DEV_EMAIL" "$ADMIN_EMAIL")" >&2
+    exit 1
+  fi
+  if [ -z "${E2E_DEV_LOGIN_NAME:-}" ]; then
+    DEV_NAME="admin"
+  fi
+fi
+ADMIN_PASSWORD="$(e2e_resolve_admin_password "${REPO_ROOT}" || true)"
 DESKTOP_LOGIN_CREDENTIAL="$ADMIN_PASSWORD"
 SEED_DESKTOP_LOGIN="${E2E_SEED_DESKTOP_PASSWORDS:-}"
 SEED_PLUGIN_SDK_DEMO_GRANTS="${E2E_SEED_PLUGIN_SDK_DEMO_GRANTS:-}"
@@ -92,7 +132,23 @@ PLUGIN_SDK_DEMO_RECIPE_NS="${E2E_PLUGIN_SDK_DEMO_RECIPE_NS:-sandbox-recipes}"
 PLUGIN_SDK_DEMO_RECIPE_NAME="${E2E_PLUGIN_SDK_DEMO_RECIPE_NAME:-${E2E_SANDBOX_UI_RECIPE:-evenfire-prompt-notify-app}}"
 PLUGIN_SDK_DEMO_EVENT_TYPE="${E2E_PLUGIN_SDK_DEMO_EVENT_TYPE:-fullstack.prompt.notify}"
 PLUGIN_SDK_DEMO_CALLER_REF="${E2E_PLUGIN_SDK_DEMO_CALLER_REF:-backend}"
-PLUGIN_SDK_DEMO_MODEL_NAME="${E2E_PLUGIN_SDK_DEMO_MODEL_NAME:-${E2E_WORKFLOW_MODEL_NAME:-${CLERUM_MODEL_NAME:-glm-4.7}}}"
+PLUGIN_SDK_DEMO_PROVIDER="${E2E_PLUGIN_SDK_DEMO_PROVIDER:-}"
+if [ -z "$PLUGIN_SDK_DEMO_PROVIDER" ]; then
+  case "${CLERUM_MODEL_PROVIDER:-}" in
+    openai|claude) PLUGIN_SDK_DEMO_PROVIDER="$CLERUM_MODEL_PROVIDER" ;;
+    *) PLUGIN_SDK_DEMO_PROVIDER="openai" ;;
+  esac
+fi
+PLUGIN_SDK_DEMO_MODEL_NAME="${E2E_PLUGIN_SDK_DEMO_MODEL_NAME:-${E2E_WORKFLOW_MODEL_NAME:-}}"
+if [ -z "$PLUGIN_SDK_DEMO_MODEL_NAME" ]; then
+  case "$PLUGIN_SDK_DEMO_PROVIDER" in
+    openai) PLUGIN_SDK_DEMO_MODEL_NAME="gpt-5.4-mini" ;;
+    claude) PLUGIN_SDK_DEMO_MODEL_NAME="claude-sonnet-4-6" ;;
+    *) die "Plugin SDK demo provider '$PLUGIN_SDK_DEMO_PROVIDER' requires explicit E2E_PLUGIN_SDK_DEMO_MODEL_NAME" ;;
+  esac
+fi
+PLUGIN_SDK_DEMO_TARGET_REF="${E2E_PLUGIN_SDK_DEMO_TARGET_REF:-primary}"
+PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="${E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT:-}"
 PLUGIN_SDK_DEMO_PROMPT_MAX="${E2E_PLUGIN_SDK_DEMO_PROMPT_MAX_REQUESTS:-50}"
 PLUGIN_SDK_DEMO_NOTIFICATION_MAX="${E2E_PLUGIN_SDK_DEMO_MAX_NOTIFICATIONS:-25}"
 
@@ -107,6 +163,33 @@ log()  { echo -e "${CYAN}[seed]${NC} $*"; }
 ok()   { echo -e "  ${GREEN}OK${NC} — $*"; }
 warn() { echo -e "  ${YELLOW}WARN${NC} — $*"; }
 die()  { echo -e "  ${RED}ERROR${NC} — $*" >&2; exit 1; }
+
+if [ -z "$PLUGIN_SDK_DEMO_CREDENTIAL_SLOT" ]; then
+  case "$PLUGIN_SDK_DEMO_PROVIDER" in
+    openai) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="openai-api-key" ;;
+    claude) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="claude-api-key" ;;
+    zai) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="zai-api-key" ;;
+    bailian) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="bailian-api-key" ;;
+    vertex) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="vertex-service-account-json" ;;
+    bedrock) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="aws-access-key-id" ;;
+    openrouter) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="openrouter-api-key" ;;
+    gemini) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="gemini-api-key" ;;
+    deepseek) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="deepseek-api-key" ;;
+    groq) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="groq-api-key" ;;
+    together) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="together-api-key" ;;
+    fireworks) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="fireworks-api-key" ;;
+    mistral) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="mistral-api-key" ;;
+    xai) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="xai-api-key" ;;
+    cerebras) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="cerebras-api-key" ;;
+    deepinfra) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="deepinfra-api-key" ;;
+    perplexity) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="perplexity-api-key" ;;
+    moonshot) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="moonshot-api-key" ;;
+    nebius) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="nebius-api-key" ;;
+    novita) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="novita-api-key" ;;
+    azure) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="azure-openai-api-key" ;;
+    *) die "Cannot derive a credential slot for provider '$PLUGIN_SDK_DEMO_PROVIDER'; set E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT explicitly" ;;
+  esac
+fi
 
 is_branch_scoped_minikube_context() {
   case "$CONTEXT" in
@@ -239,9 +322,12 @@ seed_plugin_sdk_demo_grants_if_enabled() {
       --arg ns "$PLUGIN_SDK_DEMO_RECIPE_NS" \
       --arg n "$PLUGIN_SDK_DEMO_RECIPE_NAME" \
       --arg caller "$PLUGIN_SDK_DEMO_CALLER_REF" \
+      --arg provider "$PLUGIN_SDK_DEMO_PROVIDER" \
+      --arg target "$PLUGIN_SDK_DEMO_TARGET_REF" \
+      --arg credentialSlot "$PLUGIN_SDK_DEMO_CREDENTIAL_SLOT" \
       --arg model "$PLUGIN_SDK_DEMO_MODEL_NAME" \
       --argjson max "$PLUGIN_SDK_DEMO_PROMPT_MAX" \
-      '{recipeNamespace:$ns,recipeName:$n,capabilityFamily:"promptBridge",allowedModels:[$model],allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:$max}}')" \
+      '{recipeNamespace:$ns,recipeName:$n,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model],promptTargets:[{targetRef:$target,provider:$provider,model:$model,credentialSlot:$credentialSlot}],defaultTargetRef:$target,allowedCallers:[$caller],quotaLimits:{maxRequestsPerRun:$max}}')" \
     "POST /admin/plugin-workload-sdk/grants promptBridge"
 
   admin_post "$CAPI_BASE/admin/plugin-workload-sdk/grants" \
@@ -255,6 +341,18 @@ seed_plugin_sdk_demo_grants_if_enabled() {
       --argjson max "$PLUGIN_SDK_DEMO_NOTIFICATION_MAX" \
       '{recipeNamespace:$ns,recipeName:$n,capabilityFamily:"clientNotifications",allowedEventTypes:[$ev],allowedUserRefs:[$u1,$u2],allowedCallers:[$caller],quotaLimits:{maxNotificationsPerRun:$max}}')" \
     "POST /admin/plugin-workload-sdk/grants clientNotifications"
+
+  # Sandbox UI discovery is governed by WorkflowRecipe trigger grants, not by
+  # Plugin Workload SDK capability grants. Seed this only when the target
+  # recipe is already installed; full-stack setup invokes this script before
+  # optional application recipes are applied.
+  if $KC -n "$PLUGIN_SDK_DEMO_RECIPE_NS" get workflowrecipe "$PLUGIN_SDK_DEMO_RECIPE_NAME" >/dev/null 2>&1; then
+    admin_put "$CAPI_BASE/admin/workflows/${PLUGIN_SDK_DEMO_RECIPE_NS}/${PLUGIN_SDK_DEMO_RECIPE_NAME}/grants" \
+      "$(jq -cn --arg u1 "$USER_ID" --arg u2 "$USER_ID_2" '{userIds:[$u1,$u2]}')" \
+      "PUT /admin/workflows/${PLUGIN_SDK_DEMO_RECIPE_NS}/${PLUGIN_SDK_DEMO_RECIPE_NAME}/grants"
+  else
+    log "Skipping Sandbox UI trigger grant: ${PLUGIN_SDK_DEMO_RECIPE_NS}/${PLUGIN_SDK_DEMO_RECIPE_NAME} is not installed yet"
+  fi
 
   ok "Plugin Workload SDK demo grants seeded for $DEV_EMAIL and $DEV_EMAIL_2"
 }
@@ -376,45 +474,6 @@ capture_admin_session_cookie() {
   } > "$AUTH_COOKIE_JAR"
 }
 
-# ─── Step 1: Admin login (bootstrap if cluster is fresh) ───────────────
-log "Admin login as '$ADMIN_USERNAME'"
-: > "$AUTH_HEADER_FILE"
-ADMIN_RESP="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
-  -X POST "$CAPI_BASE/admin/auth/login" \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
-    '{username: $u, password: $p}')" || true)"
-ADMIN_BODY="$(echo "$ADMIN_RESP" | sed '$d')"
-ADMIN_CODE="$(echo "$ADMIN_RESP" | tail -n1)"
-
-if [[ "$ADMIN_CODE" =~ ^2 ]]; then
-  capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
-  ok "Admin session cookie obtained"
-else
-  if [ "$ADMIN_CODE" != "401" ]; then
-    die "Admin login failed (status=$ADMIN_CODE body=$ADMIN_BODY)"
-  fi
-  # Fresh cluster → one-shot bootstrap. 409 means an admin already exists but
-  # the password we were given is wrong — that's a real auth failure, surface.
-  log "Login did not return an admin session; attempting first-time bootstrap"
-  : > "$AUTH_HEADER_FILE"
-  SETUP_RESP="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
-    -X POST "$CAPI_BASE/admin/auth/setup" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg e "$ADMIN_EMAIL" --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
-      '{email: $e, username: $u, password: $p}')" || true)"
-  SETUP_BODY="$(echo "$SETUP_RESP" | sed '$d')"
-  SETUP_CODE="$(echo "$SETUP_RESP" | tail -n1)"
-  if [ "$SETUP_CODE" = "409" ]; then
-    die "Admin already exists but login failed — ADMIN_PASSWORD is wrong for user '$ADMIN_USERNAME'"
-  fi
-  if ! [[ "$SETUP_CODE" =~ ^2 ]]; then
-    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
-  fi
-  capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
-  ok "Bootstrapped initial admin '$ADMIN_USERNAME'"
-fi
-
 AUTH_CURL=(-b "$AUTH_COOKIE_JAR" -c "$AUTH_COOKIE_JAR" -H 'Content-Type: application/json')
 
 admin_get() {
@@ -429,6 +488,123 @@ admin_get() {
   fi
 }
 
+login_admin_only() {
+  local resp body code
+  log "Admin login as '$ADMIN_USERNAME'"
+  : > "$AUTH_HEADER_FILE"
+  resp="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{username: $u, password: $p}')" || true)"
+  body="$(echo "$resp" | sed '$d')"
+  code="$(echo "$resp" | tail -n1)"
+  if ! [[ "$code" =~ ^2 ]]; then
+    die "Admin login failed (status=$code body=$body)"
+  fi
+  capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
+  ok "Admin session cookie obtained"
+}
+
+perform_initial_setup() {
+  local response
+  : > "$AUTH_HEADER_FILE"
+  response="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/setup" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg e "$ADMIN_EMAIL" --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{email: $e, username: $u, password: $p}')" || true)"
+  SETUP_BODY="$(echo "$response" | sed '$d')"
+  SETUP_CODE="$(echo "$response" | tail -n1)"
+}
+
+verify_minimal_operator_bootstrap() {
+  local admin_count admin_id status source desktop_user_id link_admin_id
+  ADMIN_GET_BODY=""
+  admin_get "$CAPI_BASE/admin/control-admins" "GET /admin/control-admins"
+  admin_count="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '[.admins[]? | select(.username == $username and ((.email // "") | ascii_downcase) == $email)] | length')"
+  if [ "$admin_count" != "1" ]; then
+    die "Minimal bootstrap did not produce exactly one admin '$ADMIN_USERNAME' with email '$ADMIN_EMAIL'"
+  fi
+  admin_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .id // empty')"
+  status="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.status // "missing"')"
+  source="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.source // "missing"')"
+  desktop_user_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.desktopUserId // empty')"
+  link_admin_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.controlAdminId // empty')"
+  if ! clerum_initial_setup_link_matches "$status" "$source" "$desktop_user_id" "$link_admin_id" "$admin_id"; then
+    # Recovery is only possible by rebuilding the control DB. control-api
+    # stamps last_login_at on every successful admin login and
+    # setupInitialAdminCredentials only matches a bootstrap row whose
+    # last_login_at is still NULL, so once a cluster has logged in without
+    # consuming setup the initial_setup link can never be created on that
+    # database. Say so instead of leaving the operator with a bare refusal.
+    die "Minimal bootstrap is incomplete: expected one active initial_setup Desktop link for '$ADMIN_EMAIL' (status=$status source=$source desktopUserId=${desktop_user_id:-missing} controlAdminId=${link_admin_id:-missing}); refusing ordinary-user fallback. This cluster consumed or bypassed /admin/auth/setup without creating the link, and it cannot be created on the existing database. Rebuild the control DB to recover: re-run 'make minikube-setup' without REUSE_DB/--keep-db (the default rebuilds the DB), passing CONTROL_DB_RESET_PVC_UID when the setup script asks for it."
+  fi
+  ok "Initial admin '$ADMIN_USERNAME' has active initial_setup Desktop operator link (desktopUserId=${desktop_user_id:0:8}…)"
+}
+
+login_first_legacy() {
+  local response body code
+  log "Admin login as '$ADMIN_USERNAME'"
+  : > "$AUTH_HEADER_FILE"
+  response="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{username: $u, password: $p}')" || true)"
+  body="$(echo "$response" | sed '$d')"
+  code="$(echo "$response" | tail -n1)"
+  if [[ "$code" =~ ^2 ]]; then
+    capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
+    ok "Admin session cookie obtained"
+    return
+  fi
+  if [ "$code" != "401" ]; then
+    die "Admin login failed (status=$code body=$body)"
+  fi
+  log "Login did not return an admin session; attempting first-time bootstrap"
+  perform_initial_setup
+  if [ "$SETUP_CODE" = "409" ]; then
+    die "Admin already exists but login failed — ADMIN_PASSWORD is wrong for user '$ADMIN_USERNAME'"
+  fi
+  if ! [[ "$SETUP_CODE" =~ ^2 ]]; then
+    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
+  fi
+  capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
+  ok "Bootstrapped initial admin '$ADMIN_USERNAME'"
+}
+
+# ─── Step 1: Bootstrap before login for the minimal self-hosted path ───
+# A fresh DB contains a technical bootstrap admin whose password already
+# matches ADMIN_PASSWORD. Login-first therefore consumes the one-shot setup
+# eligibility, then the normal /admin/users fallback creates an ordinary
+# Desktop member without the governed initial_setup operator link. Minimal
+# installs must consume setup first; reruns may fall back to login only after
+# proving that the active initial_setup link still exists.
+if [ "$SEED_PROFILE" = "minimal" ]; then
+  log "Minimal self-hosted bootstrap: attempting /admin/auth/setup before any admin login"
+  perform_initial_setup
+  setup_outcome="$(clerum_minimal_setup_outcome "$SETUP_CODE")"
+  if [ "$setup_outcome" = "setup_succeeded" ]; then
+    capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
+    ok "Bootstrapped initial admin '$ADMIN_USERNAME' with Desktop workspace"
+  elif [ "$setup_outcome" = "setup_already_consumed" ]; then
+    log "Initial setup already consumed; validating the existing governed link after login"
+    login_admin_only
+  else
+    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
+  fi
+  verify_minimal_operator_bootstrap
+else
+  login_first_legacy
+fi
+
 admin_post() {
   local url="$1" body="$2" label="$3"
   local resp code
@@ -439,6 +615,19 @@ admin_post() {
     ok "$label → $code"
   else
     die "$label → $code body=$(echo "$resp" | sed '$d')"
+  fi
+}
+
+admin_put() {
+  local url="$1" body="$2" label="$3"
+  local resp code
+  resp="$(curl -sS -w '\n%{http_code}' -X PUT "${url}" "${AUTH_CURL[@]}" -d "${body}" || true)"
+  code="$(echo "${resp}" | tail -n1)"
+  if [[ "${code}" =~ ^2 ]]; then
+    ADMIN_PUT_BODY="$(echo "${resp}" | sed '$d')"
+    ok "${label} → ${code}"
+  else
+    die "${label} → ${code} body=$(echo "${resp}" | sed '$d')"
   fi
 }
 
@@ -454,10 +643,30 @@ put_json() {
   fi
 }
 
+# CAS-aware agent-grant replace. The admin agents endpoints
+# (control-api routes/admin/agentGrants.ts) guard writes with a compare-and-swap:
+# the body must carry expectedCurrentAgentNames, or the server rejects it with
+# 428 agent_grant_precondition_required. We GET the current grant first and send
+# its full stored set (active + deleted history) as the precondition, which keeps
+# the seed idempotent across re-runs. (The parallel contexts endpoints have no
+# such guard, so those still use put_json directly.)
+put_agents() {
+  local url="$1" agent="$2" label="$3"
+  ADMIN_GET_BODY=""
+  admin_get "$url" "GET $label"
+  local expected
+  expected="$(echo "$ADMIN_GET_BODY" | jq -c '([.agentNames[]?] + [.deletedAgentNames[]?])')"
+  put_json "$url" \
+    "$(jq -cn --arg a "$agent" --argjson e "$expected" \
+        '{agentNames: [$a], expectedCurrentAgentNames: $e}')" \
+    "$label"
+}
+
 ensure_seed_user_and_team() {
   local email="$1"
   local name="$2"
   local team_name="${name} team"
+  email="$(clerum_canonical_email "$email")"
 
   ADMIN_GET_BODY=""
   admin_get "$CAPI_BASE/admin/users?$(jq -rn --arg q "$email" '$q|@uri' | sed 's/^/q=/')" \
@@ -498,8 +707,7 @@ TEAM_ID="$ENSURE_TEAM_ID"
 # ─── Step 3: Idempotent user↔agent and user↔context bindings ───────────
 
 log "Binding user $DEV_EMAIL ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-put_json "$CAPI_BASE/admin/users/$USER_ID/agents" \
-  "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+put_agents "$CAPI_BASE/admin/users/$USER_ID/agents" "$AGENT_NAME" \
   "PUT /admin/users/:userId/agents"
 
 put_json "$CAPI_BASE/admin/users/$USER_ID/contexts" \
@@ -509,8 +717,7 @@ put_json "$CAPI_BASE/admin/users/$USER_ID/contexts" \
 # ─── Step 4: Team-level bindings (if the user has a team) ──────────────
 if [ -n "$TEAM_ID" ]; then
   log "Binding team ${TEAM_ID:0:8}… ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-  put_json "$CAPI_BASE/admin/teams/$TEAM_ID/agents" \
-    "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+  put_agents "$CAPI_BASE/admin/teams/$TEAM_ID/agents" "$AGENT_NAME" \
     "PUT /admin/teams/:teamId/agents"
   put_json "$CAPI_BASE/admin/teams/$TEAM_ID/contexts" \
     "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \
@@ -527,8 +734,7 @@ if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
 
   # ─── Step 6: Idempotent user2↔agent and user2↔context bindings ───────
   log "Binding user $DEV_EMAIL_2 ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-  put_json "$CAPI_BASE/admin/users/$USER_ID_2/agents" \
-    "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+  put_agents "$CAPI_BASE/admin/users/$USER_ID_2/agents" "$AGENT_NAME" \
     "PUT /admin/users/:userId2/agents"
 
   put_json "$CAPI_BASE/admin/users/$USER_ID_2/contexts" \
@@ -538,8 +744,7 @@ if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
   # ─── Step 7: Team-level bindings for second user (if the user has a team)
   if [ -n "$TEAM_ID_2" ]; then
     log "Binding team ${TEAM_ID_2:0:8}… ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-    put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/agents" \
-      "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+    put_agents "$CAPI_BASE/admin/teams/$TEAM_ID_2/agents" "$AGENT_NAME" \
       "PUT /admin/teams/:teamId2/agents"
     put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/contexts" \
       "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \

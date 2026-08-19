@@ -111,6 +111,7 @@ export class BedrockConverseDriver implements SingleTurnProvider {
     return {
       content: extractText(response) ?? '',
       usage: mapUsage(response),
+      usage_reported: hasAuthoritativeUsage(response),
       finish_reason: mapStopReason(response.stopReason),
     }
   }
@@ -262,6 +263,21 @@ function mapUsage(response: BedrockConverseResponse): CompletionResponse['usage'
   }
 }
 
+function hasAuthoritativeUsage(response: BedrockConverseResponse): boolean {
+  const usage = response.usage
+  const input = usage?.inputTokens
+  const output = usage?.outputTokens
+  return (
+    usage != null &&
+    typeof input === 'number' &&
+    Number.isInteger(input) &&
+    input >= 0 &&
+    typeof output === 'number' &&
+    Number.isInteger(output) &&
+    output >= 0
+  )
+}
+
 function mapStopReason(reason: string | undefined): FinishReason {
   switch (reason) {
     case 'end_turn':
@@ -295,31 +311,44 @@ export function classifyBedrockError(err: unknown): ClassifiedError {
     $metadata?: { httpStatusCode?: number }
   }
   const message = e.message ?? 'Unknown Bedrock error'
+  // Additive diagnostics threaded to TaskError (spec 02, Pieza A): the HTTP
+  // status from $metadata and the modeled exception name as the provider code.
+  const diag: Pick<ClassifiedError, 'httpStatus' | 'providerCode'> = {
+    httpStatus: e.$metadata?.httpStatusCode,
+    providerCode: e.name,
+  }
 
   switch (e.name) {
     case 'ThrottlingException':
     case 'TooManyRequestsException':
-      return { code: LlmErrorCode.RateLimited, retryable: true, message }
+      return { code: LlmErrorCode.RateLimited, retryable: true, message, ...diag }
     case 'AccessDeniedException':
     case 'UnrecognizedClientException':
     case 'IncompleteSignatureException':
     case 'InvalidSignatureException':
-      return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message }
+      return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message, ...diag }
     case 'ServiceQuotaExceededException':
-      return { code: LlmErrorCode.InsufficientQuota, retryable: false, message }
+      return { code: LlmErrorCode.InsufficientQuota, retryable: false, message, ...diag }
+    case 'ResourceNotFoundException':
+      // Invalid / retired model identifier — non-retryable, NOT a failover
+      // trigger (spec 02 §3.1). The $metadata 404 fallback below covers the
+      // same case when the modeled name is absent.
+      return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
     case 'ValidationException':
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message }
+      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
     case 'ModelTimeoutException':
     case 'ModelNotReadyException':
     case 'ServiceUnavailableException':
     case 'InternalServerException':
-      return { code: LlmErrorCode.ModelOverloaded, retryable: true, message }
+      return { code: LlmErrorCode.ModelOverloaded, retryable: true, message, ...diag }
   }
 
   const status = e.$metadata?.httpStatusCode
   if (status !== undefined) {
+    // Attach the modeled name as providerCode; classifyByHttpStatus already
+    // fills httpStatus from the status we pass.
     const byStatus = classifyByHttpStatus({ status, message })
-    if (byStatus) return byStatus
+    if (byStatus) return { ...byStatus, providerCode: e.name ?? byStatus.providerCode }
   }
   return classifyUnknown(err)
 }

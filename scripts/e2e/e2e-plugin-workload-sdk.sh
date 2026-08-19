@@ -16,51 +16,258 @@
 # session from the seeded admin on an explicitly selected local minikube profile.
 #
 # Usage:
-#   KUBECONTEXT=clerum-test bash scripts/e2e/e2e-plugin-workload-sdk.sh
-#   bash scripts/e2e/e2e-plugin-workload-sdk.sh --cleanup-only
+#   E2E_PLUGIN_SDK_WRITE_CONFIRM=1 KUBECONTEXT=clerum-test \
+#     bash scripts/e2e/e2e-plugin-workload-sdk.sh
+#   E2E_PLUGIN_SDK_WRITE_CONFIRM=1 bash scripts/e2e/e2e-plugin-workload-sdk.sh --cleanup-only
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Resolve the canonical repository environment before sourcing e2e-lib. A
+# secondary worktree normally has no .env of its own; the seeded credentials
+# and provider keys live in the primary checkout. Explicit process values are
+# loaded for general E2E configuration. Admin credentials use the stricter
+# shared resolver below so the primary checkout remains authoritative:
+#
+#   canonical root .env > process environment > safe local test fallback
+#
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+dotenv_load_canonical_root "${REPO_ROOT}"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
 export RECIPE_NS="${RECIPE_NS:-sandbox-recipes}"
+# shellcheck source=e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
 require_safe_kube_context
+
+die() {
+  printf '%s\n' "Plugin Workload SDK E2E error: $*" >&2
+  exit 1
+}
+
+is_local_default_operator_context() {
+  local context=${1:-}
+  if [[ -z "$context" ]]; then
+    context="$(current_e2e_context || true)"
+  fi
+  case "$context" in
+    clerum-test) return 0 ;;
+    clerum-codex-* | clerum-cursor-* | clerum-detached-*)
+      is_branch_scoped_e2e_context "$context"
+      ;;
+    *) return 1 ;;
+  esac
+}
 
 RECIPE_NAME="e2e-plugin-workload-sdk"
 WORKLOAD_ID="sdk-caller"
 EVENT_TYPE="e2e.test.notification"
 E2E_DESKTOP_USER_EMAIL="${E2E_DESKTOP_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}}"
-E2E_WORKFLOW_MODEL_PROVIDER="${E2E_WORKFLOW_MODEL_PROVIDER:-${CLERUM_MODEL_PROVIDER:-zai}}"
-E2E_WORKFLOW_MODEL_NAME="${E2E_WORKFLOW_MODEL_NAME:-${CLERUM_MODEL_NAME:-glm-5.1}}"
+
+# The host-wide CLERUM_MODEL_PROVIDER may legitimately remain Z.AI for other
+# local workloads, but this gate must not silently redirect a paid call. An
+# explicit E2E provider/model is required when the root environment selects an
+# unavailable provider; only an entirely absent provider uses the documented
+# local OpenAI default.
+E2E_WORKFLOW_MODEL_PROVIDER="${E2E_WORKFLOW_MODEL_PROVIDER:-}"
+E2E_WORKFLOW_MODEL_NAME="${E2E_WORKFLOW_MODEL_NAME:-}"
+if [ -z "$E2E_WORKFLOW_MODEL_PROVIDER" ]; then
+  case "${CLERUM_MODEL_PROVIDER:-}" in
+    openai|claude)
+      E2E_WORKFLOW_MODEL_PROVIDER="$CLERUM_MODEL_PROVIDER"
+      if [ -z "$E2E_WORKFLOW_MODEL_NAME" ] && [ -n "${CLERUM_MODEL_NAME:-}" ]; then
+        E2E_WORKFLOW_MODEL_NAME="$CLERUM_MODEL_NAME"
+      fi
+      ;;
+    '')
+      E2E_WORKFLOW_MODEL_PROVIDER="openai"
+      ;;
+    *)
+      die "CLERUM_MODEL_PROVIDER=${CLERUM_MODEL_PROVIDER} is not permitted for this gate while that provider is unavailable; set E2E_WORKFLOW_MODEL_PROVIDER and E2E_WORKFLOW_MODEL_NAME explicitly to OpenAI or Claude"
+      ;;
+  esac
+fi
+if [ -z "$E2E_WORKFLOW_MODEL_NAME" ]; then
+  case "$E2E_WORKFLOW_MODEL_PROVIDER" in
+    openai) E2E_WORKFLOW_MODEL_NAME="gpt-5.4-mini" ;;
+    claude) E2E_WORKFLOW_MODEL_NAME="claude-sonnet-4-6" ;;
+    *) E2E_WORKFLOW_MODEL_NAME="gpt-5.4-mini" ;;
+  esac
+fi
+# promptBridge grants are an ordered, credential-bound policy. The target
+# reference is not a credential value; operators can override both values for
+# a non-default, provider-owned Secret data key without exposing its contents.
+# The gate deliberately carries two distinct providers so selector authorization
+# and ordered fallback are exercised independently of whether either paid
+# provider is available in the local cluster.
+E2E_PROMPT_TARGET_REF="${E2E_PROMPT_TARGET_REF:-primary}"
+E2E_PROMPT_CREDENTIAL_SLOT="${E2E_PROMPT_CREDENTIAL_SLOT:-${E2E_WORKFLOW_CREDENTIAL_SLOT:-}}"
+E2E_PROMPT_FALLBACK_PROVIDER="${E2E_PROMPT_FALLBACK_PROVIDER:-}"
+E2E_PROMPT_FALLBACK_MODEL="${E2E_PROMPT_FALLBACK_MODEL:-}"
+if [ -z "$E2E_PROMPT_FALLBACK_PROVIDER" ]; then
+  if [ "$E2E_WORKFLOW_MODEL_PROVIDER" = "claude" ]; then
+    E2E_PROMPT_FALLBACK_PROVIDER="openai"
+  else
+    E2E_PROMPT_FALLBACK_PROVIDER="claude"
+  fi
+fi
+if [ -z "$E2E_PROMPT_FALLBACK_MODEL" ]; then
+  case "$E2E_PROMPT_FALLBACK_PROVIDER" in
+    openai) E2E_PROMPT_FALLBACK_MODEL="gpt-5.4-mini" ;;
+    claude) E2E_PROMPT_FALLBACK_MODEL="claude-sonnet-4-6" ;;
+    *) E2E_PROMPT_FALLBACK_MODEL="" ;;
+  esac
+fi
+E2E_PROMPT_FALLBACK_TARGET_REF="${E2E_PROMPT_FALLBACK_TARGET_REF:-fallback-${E2E_PROMPT_FALLBACK_PROVIDER}}"
+E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT="${E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT:-}"
 E2E_ADMIN_TOKEN="${E2E_ADMIN_TOKEN:-}"
-# Seeded by scripts/e2e/seed-e2e-data.sh (copies ADMIN_PASSWORD into test users).
-E2E_DESKTOP_PASSWORD="${E2E_DESKTOP_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
 
 load_branch_profile_ports() {
   local ctx="${KUBECONTEXT:-${E2E_K8S_CONTEXT:-}}"
-  local ports_env="${CLERUM_PROFILE_PORTS_ENV:-}"
-  if [ -z "$ports_env" ] && [ -n "$ctx" ]; then
+  local ports_env="${CLERUM_PROFILE_PORTS_ENV:-${E2E_PROFILE_PORTS_ENV:-}}"
+  if [[ "$ctx" =~ ^clerum-(codex|detached)- ]] || [[ "$ctx" =~ ^clerum-.+-[0-9a-f]{7,8}$ ]]; then
+    if [ -z "$ports_env" ]; then
+      die "Branch-owned context ${ctx} requires ports.env generated by clerum/.local-notes/minikube-profiles/branch.mk; set CLERUM_PROFILE_PORTS_ENV or E2E_PROFILE_PORTS_ENV before running this gate"
+    fi
+  elif [ -z "$ports_env" ] && [ -n "$ctx" ]; then
     ports_env="${HOME}/.cache/clerum/minikube-profiles/${ctx}/ports.env"
   fi
-  if [ -f "$ports_env" ]; then
-    # shellcheck disable=SC1090
-    . "$ports_env"
+  if [[ -n "$ports_env" ]]; then
+    [[ -f "$ports_env" ]] || die "profile ports file not found: ${ports_env}"
+    dotenv_load_file "$ports_env"
   fi
 }
 load_branch_profile_ports
-E2E_EXTERNAL_REST_API_URL="${E2E_EXTERNAL_REST_API_URL:-${EXTERNAL_REST_API_URL:-http://127.0.0.1:8091}}"
+# The recipe and Desktop fixture users are seeded from this same resolved
+# credential. The known fallback is local-only and is selected only when none
+# of the supported admin variables exists in the canonical .env or process.
+LOCAL_ADMIN_PASSWORD_FALLBACK=""
+if is_local_default_operator_context; then
+  LOCAL_ADMIN_PASSWORD_FALLBACK="$(printf '%s%s' 'changeme123' '!')"
+fi
+RESOLVED_ADMIN_PASSWORD="$(e2e_resolve_admin_password "${REPO_ROOT}" "${LOCAL_ADMIN_PASSWORD_FALLBACK}" || true)"
+E2E_DESKTOP_PASSWORD="${E2E_DESKTOP_PASSWORD:-${RESOLVED_ADMIN_PASSWORD}}"
+E2E_CONTROL_API_URL="${E2E_CONTROL_API_URL:-${CONTROL_API_URL:-${CONTROL_API_BASE_URL:-http://127.0.0.1:8090}}}"
+E2E_EXTERNAL_REST_API_URL="${E2E_EXTERNAL_REST_API_URL:-${EXTERNAL_REST_API_URL:-${EXTERNAL_REST_API_BASE_URL:-http://127.0.0.1:8091}}}"
+E2E_RPC_PROXY_URL="${E2E_RPC_PROXY_URL:-${RPC_PROXY_URL:-${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}}}"
+MCP_HOST_BASE_URL="${MCP_HOST_BASE_URL:-${MCP_HOST_RUNTIME_BASE_URL:-${MCP_HOST_RUNTIME_URL:-http://127.0.0.1:8080}}}"
+export E2E_CONTROL_API_URL E2E_EXTERNAL_REST_API_URL E2E_RPC_PROXY_URL MCP_HOST_BASE_URL
 FIXTURE="${SCRIPT_DIR}/../../tests/e2e/fixtures/plugin-workload-sdk-recipe.yaml"
 E2E_CREATED_RECIPE=0
 ADMIN_CURL_HTTP_STATUS=""
 ADMIN_CURL_BODY=""
-# Hard ceiling for the entire gate (default 15m). Override with E2E_GATE_MAX_SECONDS.
-E2E_GATE_MAX_SECONDS="${E2E_GATE_MAX_SECONDS:-900}"
+NOTIFICATION_PREF_SNAPSHOT_READY=0
+NOTIFICATION_PREF_SNAPSHOT_EXISTS=0
+NOTIFICATION_PREF_SNAPSHOT_MEDIUM=""
+NOTIFICATION_PREF_SNAPSHOT_FALLBACK=""
+NOTIFICATION_PREF_SNAPSHOT_ACCOUNT=""
+# Hard ceiling for the entire gate (default 10m). Override with
+# E2E_GATE_MAX_SECONDS only to a value no greater than the fail-closed ceiling.
+E2E_GATE_MAX_SECONDS="${E2E_GATE_MAX_SECONDS:-600}"
 E2E_GATE_STARTED_AT=$SECONDS
 # Per-phase wait ceilings (seconds).
 E2E_WAIT_STATUS_VALIDATED="${E2E_WAIT_STATUS_VALIDATED:-120}"
 E2E_WAIT_CALLER_MARKER="${E2E_WAIT_CALLER_MARKER:-180}"
 E2E_WAIT_CALLER_DONE="${E2E_WAIT_CALLER_DONE:-180}"
 E2E_WAIT_NOTIFICATION_ROW="${E2E_WAIT_NOTIFICATION_ROW:-60}"
+# issue #375 (P3): event-driven grant→WRC nudge target latency. A grant change
+# must re-reconcile the recipe via Postgres LISTEN/NOTIFY in ≤10s WITHOUT a WRC
+# restart (the ≤30s watchdog is the backstop, not the mechanism under test).
+E2E_WAIT_NUDGE_VALIDATED="${E2E_WAIT_NUDGE_VALIDATED:-10}"
+
+# Fail closed before creating any fixture if a caller or inherited shell
+# environment asks this gate to wait for an unbounded or human-scale interval.
+# These ceilings keep a broken reconcile/provider path actionable instead of
+# leaving a T2 run apparently idle for tens of minutes.
+E2E_HARD_MAX_GATE_SECONDS=600
+E2E_HARD_MAX_PHASE_WAIT_SECONDS=180
+E2E_HARD_MAX_POLL_INTERVAL_SECONDS=5
+
+validate_bounded_seconds() {
+  local name="$1" value="$2" ceiling="$3"
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || [ "$value" -le 0 ] || [ "$value" -gt "$ceiling" ]; then
+    die "${name}=${value} exceeds the fail-closed ceiling of ${ceiling}s"
+  fi
+}
+
+validate_bounded_seconds E2E_GATE_MAX_SECONDS "$E2E_GATE_MAX_SECONDS" "$E2E_HARD_MAX_GATE_SECONDS"
+validate_bounded_seconds TIMEOUT_POD "$TIMEOUT_POD" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds TIMEOUT_DELETE "$TIMEOUT_DELETE" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds TIMEOUT_DISCOVERY "$TIMEOUT_DISCOVERY" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_STATUS_VALIDATED "$E2E_WAIT_STATUS_VALIDATED" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_CALLER_MARKER "$E2E_WAIT_CALLER_MARKER" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_CALLER_DONE "$E2E_WAIT_CALLER_DONE" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_NOTIFICATION_ROW "$E2E_WAIT_NOTIFICATION_ROW" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds E2E_WAIT_NUDGE_VALIDATED "$E2E_WAIT_NUDGE_VALIDATED" "$E2E_HARD_MAX_PHASE_WAIT_SECONDS"
+validate_bounded_seconds POLL_INTERVAL "$POLL_INTERVAL" "$E2E_HARD_MAX_POLL_INTERVAL_SECONDS"
+
+require_write_confirmation() {
+  if [ "${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" != "1" ]; then
+    printf '%s\n' \
+      'Refusing Plugin Workload SDK E2E: this gate creates grants, calls providers, sends a notification, and changes test-user preferences.' \
+      'Set E2E_PLUGIN_SDK_WRITE_CONFIRM=1 explicitly for the branch-owned local Minikube profile.' >&2
+    return 1
+  fi
+}
+
+for provider in "$E2E_WORKFLOW_MODEL_PROVIDER" "$E2E_PROMPT_FALLBACK_PROVIDER"; do
+  case "$provider" in
+    openai|claude) ;;
+    *)
+      printf 'Plugin Workload SDK E2E only permits OpenAI or Claude targets; got %q\n' "$provider" >&2
+      exit 2
+      ;;
+  esac
+done
+
+default_prompt_credential_slot() {
+  case "$1" in
+    openai) printf '%s\n' 'openai-api-key' ;;
+    claude) printf '%s\n' 'claude-api-key' ;;
+    zai) printf '%s\n' 'zai-api-key' ;;
+    bailian) printf '%s\n' 'bailian-api-key' ;;
+    vertex) printf '%s\n' 'vertex-service-account-json' ;;
+    bedrock) printf '%s\n' 'aws-access-key-id' ;;
+    openrouter) printf '%s\n' 'openrouter-api-key' ;;
+    gemini) printf '%s\n' 'gemini-api-key' ;;
+    deepseek) printf '%s\n' 'deepseek-api-key' ;;
+    groq) printf '%s\n' 'groq-api-key' ;;
+    together) printf '%s\n' 'together-api-key' ;;
+    fireworks) printf '%s\n' 'fireworks-api-key' ;;
+    mistral) printf '%s\n' 'mistral-api-key' ;;
+    xai) printf '%s\n' 'xai-api-key' ;;
+    cerebras) printf '%s\n' 'cerebras-api-key' ;;
+    deepinfra) printf '%s\n' 'deepinfra-api-key' ;;
+    perplexity) printf '%s\n' 'perplexity-api-key' ;;
+    moonshot) printf '%s\n' 'moonshot-api-key' ;;
+    nebius) printf '%s\n' 'nebius-api-key' ;;
+    novita) printf '%s\n' 'novita-api-key' ;;
+    azure) printf '%s\n' 'azure-openai-api-key' ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -z "$E2E_PROMPT_CREDENTIAL_SLOT" ]; then
+  E2E_PROMPT_CREDENTIAL_SLOT="$(default_prompt_credential_slot "$E2E_WORKFLOW_MODEL_PROVIDER")" \
+    || { printf 'Unsupported promptBridge provider %q; set E2E_PROMPT_CREDENTIAL_SLOT explicitly\n' "$E2E_WORKFLOW_MODEL_PROVIDER" >&2; exit 2; }
+fi
+if [ -z "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" ]; then
+  E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT="$(default_prompt_credential_slot "$E2E_PROMPT_FALLBACK_PROVIDER")" \
+    || { printf 'Unsupported promptBridge fallback provider %q; set E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT explicitly\n' "$E2E_PROMPT_FALLBACK_PROVIDER" >&2; exit 2; }
+fi
+if [ "$E2E_WORKFLOW_MODEL_PROVIDER" = "$E2E_PROMPT_FALLBACK_PROVIDER" ]; then
+  if [ "${E2E_PROMPT_ALLOW_SAME_PROVIDER:-0}" = "1" ]; then
+    printf 'promptBridge E2E: primary and fallback share provider %q; proceeding because E2E_PROMPT_ALLOW_SAME_PROVIDER=1 (quota-limited local override — the ordered-fallback policy is still two ordered targets)\n' \
+      "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
+  else
+    printf 'promptBridge E2E requires two distinct providers; got %q for both primary and fallback\n' \
+      "$E2E_WORKFLOW_MODEL_PROVIDER" >&2
+    exit 2
+  fi
+fi
 
 gate_assert_deadline() {
   local phase=${1:-gate}
@@ -72,7 +279,10 @@ gate_assert_deadline() {
 }
 
 stop_sdk_caller_fixture() {
-  kctl delete pod "$caller_pod" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if ! kctl delete pod "$caller_pod" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1; then
+    warn "could not delete sdk-caller pod before recycling it"
+    return 1
+  fi
   if wait_for_pod "$SANDBOX_NS" "clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=${WORKLOAD_ID}" "$TIMEOUT_POD"; then
     caller_pod="$(ready_pod_name "$SANDBOX_NS" "clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=${WORKLOAD_ID}")"
     return 0
@@ -81,9 +291,41 @@ stop_sdk_caller_fixture() {
 }
 
 reset_sdk_runtime_state_for_happy_path() {
-  psql_query "DELETE FROM plugin_workload_sdk_quota_counters WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM plugin_workload_sdk_invocations WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';" >/dev/null 2>&1 || true
+  local cleanup_status=0 count table query
+  local -a delete_queries=(
+    "DELETE FROM plugin_workload_sdk_quota_counters WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_provider_attempts WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_credential_ticket_jtis WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_invocation_attempts WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_invocations WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';"
+  )
+  for query in "${delete_queries[@]}"; do
+    if ! psql_query "$query" >/dev/null; then
+      cleanup_status=1
+      warn "could not reset SDK runtime state before happy path"
+    fi
+  done
+  local -a count_tables=(
+    plugin_workload_sdk_quota_counters
+    plugin_workload_sdk_provider_attempts
+    plugin_workload_sdk_credential_ticket_jtis
+    plugin_workload_sdk_invocation_attempts
+    plugin_workload_sdk_invocations
+  )
+  for table in "${count_tables[@]}"; do
+    query="SELECT count(*) FROM ${table} WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    if ! count="$(psql_query "$query" | tr -d '[:space:]')" || [ "$count" != "0" ]; then
+      cleanup_status=1
+      warn "SDK runtime reset postcondition failed for ${table}"
+    fi
+  done
+  query="SELECT count(*) FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';"
+  if ! count="$(psql_query "$query" | tr -d '[:space:]')" || [ "$count" != "0" ]; then
+    cleanup_status=1
+    warn "SDK notification delivery reset postcondition failed"
+  fi
+  return "$cleanup_status"
 }
 
 wait_for_caller_logs_matching() {
@@ -141,28 +383,99 @@ notifications_desktop_first_enabled() {
 # ─── cleanup ─────────────────────────────────────────────────────────────
 
 cleanup_plugin_workload_sdk_db() {
-  psql_query "DELETE FROM plugin_workload_sdk_quota_counters WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM plugin_workload_sdk_invocations WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM plugin_workload_sdk_grants WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';" >/dev/null 2>&1 || true
-  psql_query "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';" >/dev/null 2>&1 || true
+  local cleanup_status=0 count query label
+  local -a delete_queries=(
+    "DELETE FROM plugin_workload_sdk_quota_counters WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_provider_attempts WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_credential_ticket_jtis WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_invocation_attempts WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_invocations WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM plugin_workload_sdk_grants WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    "DELETE FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';"
+  )
+  for query in "${delete_queries[@]}"; do
+    if ! psql_query "$query" >/dev/null; then
+      cleanup_status=1
+      warn "SDK DB cleanup query failed (recipe=${RECIPE_NS}/${RECIPE_NAME}); refusing to claim a clean fixture"
+    fi
+  done
+
+  local -a count_queries=(
+    "plugin_workload_sdk_quota_counters"
+    "plugin_workload_sdk_invocations"
+    "plugin_workload_sdk_credential_ticket_jtis"
+    "plugin_workload_sdk_invocation_attempts"
+    "plugin_workload_sdk_provider_attempts"
+    "plugin_workload_sdk_grants"
+  )
+  for label in "${count_queries[@]}"; do
+    query="SELECT count(*) FROM ${label} WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}';"
+    if ! count="$(psql_query "$query" | tr -d '[:space:]')"; then
+      cleanup_status=1
+      warn "SDK DB cleanup verification failed for ${label}; refusing to claim zero rows"
+      continue
+    fi
+    if [ "$count" != "0" ]; then
+      cleanup_status=1
+      warn "SDK DB cleanup postcondition failed for ${label}: ${count} rows remain"
+    fi
+  done
+  query="SELECT count(*) FROM notification_deliveries WHERE payload->>'recipeName'='${RECIPE_NAME}' AND payload->>'origin'='plugin_workload_sdk';"
+  if ! count="$(psql_query "$query" | tr -d '[:space:]')"; then
+    cleanup_status=1
+    warn "notification delivery cleanup verification failed; refusing to claim zero rows"
+  elif [ "$count" != "0" ]; then
+    cleanup_status=1
+    warn "notification delivery cleanup postcondition failed: ${count} rows remain"
+  fi
+  return "$cleanup_status"
+}
+
+prune_recipe_owned_resources() {
+  local cleanup_status=0 ns kind
+  # WRC owns the lifecycle sweep, but a failed/aborted reconcile can leave
+  # recipe-labeled SDK NetworkPolicies behind after the WorkflowRecipe is
+  # gone. The gate must not leak those resources into the next run, so prune
+  # only the exact fixture label in the two namespaces it can touch.
+  for ns in "$SANDBOX_NS" "$RECIPE_NS"; do
+    for kind in deployment service secret configmap networkpolicy pod pvc; do
+      kctl delete "$kind" -n "$ns" -l "clerum.io/recipe=${RECIPE_NAME}" \
+        --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
+    done
+  done
+  return "$cleanup_status"
 }
 
 cleanup_sdk_recipe() {
   local cleanup_status=0
-  cleanup_plugin_workload_sdk_db
+  if ! cleanup_plugin_workload_sdk_db; then
+    cleanup_status=1
+  fi
   kctl delete workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
   wait_for_workflowrecipe_deleted "$RECIPE_NS" "$RECIPE_NAME" "$TIMEOUT_DELETE" || cleanup_status=1
-  # WRC sweeps Deployments, Secrets, ConfigMaps and NetworkPolicies by the
-  # recipe label on finalization; give it a moment, then best-effort prune the
-  # named pods that may linger.
-  kctl delete pod "${RECIPE_NAME}-mcp-host" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if ! prune_recipe_owned_resources; then
+    cleanup_status=1
+  fi
   return "$cleanup_status"
 }
 
+# shellcheck disable=SC2329 # Registered below through the EXIT trap.
 cleanup_on_exit() {
   local status=$?
+  # A non-zero abort that no assertion recorded (a prerequisite helper that died
+  # in a command-substitution subshell, a bare `exit` mid-phase, or a `set -e`
+  # abort) would otherwise let print_results claim "All tests passed!" over a run
+  # that skipped later phases. Record it as a real, countable failure first so
+  # the summary — and the gate verdict — stay honest.
+  if [ "$status" -ne 0 ] && [ "${e2e_fail:-0}" -eq 0 ]; then
+    fail "run aborted before completion (exit ${status}) — later phases were skipped; see the log above for the failing step"
+  fi
   if [ "${e2e_total:-0}" -gt 0 ] && [ "${E2E_SUPPRESS_RESULTS:-0}" != "1" ]; then
     print_results || true
+  fi
+  if ! restore_notification_preferences && [ "$status" -eq 0 ]; then
+    fail "notification preference cleanup could not restore the seeded user state"
+    status=1
   fi
   if [ "${E2E_KEEP_RESOURCES:-0}" = "1" ]; then exit "$status"; fi
   if [ "$E2E_CREATED_RECIPE" != "1" ]; then exit "$status"; fi
@@ -173,13 +486,6 @@ cleanup_on_exit() {
   exit "$status"
 }
 
-if [ "${1:-}" = "--cleanup-only" ]; then
-  cleanup_sdk_recipe
-  exit $?
-fi
-
-trap cleanup_on_exit EXIT
-
 # ─── control-api admin helpers (exec curl inside the control-api pod) ─────
 
 control_api_pod() {
@@ -187,28 +493,13 @@ control_api_pod() {
     || ready_pod_name "$CONTROL_NS" "app.kubernetes.io/name=control-api" 2>/dev/null
 }
 
-is_local_default_operator_context() {
-  local context=${1:-}
-  if [[ -z "$context" ]]; then
-    context="$(current_e2e_context || true)"
-  fi
-  case "$context" in
-    clerum-test) return 0 ;;
-    clerum-codex-* | clerum-cursor-* | clerum-detached-*)
-      is_branch_scoped_e2e_context "$context"
-      ;;
-    *) return 1 ;;
-  esac
-}
-
 operator_admin_password() {
-  if [[ -n "${E2E_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$E2E_ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASSWORD:-}" ]]; then printf '%s' "$ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASS:-}" ]]; then printf '%s' "$ADMIN_PASS"; return 0; fi
-  if [[ -n "${TEST_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$TEST_ADMIN_PASSWORD"; return 0; fi
+  if [[ -n "${RESOLVED_ADMIN_PASSWORD:-}" ]]; then
+    printf '%s' "${RESOLVED_ADMIN_PASSWORD}"
+    return 0
+  fi
   is_local_default_operator_context || return 1
-  printf '%s%s' 'changeme123' '!'
-  return 0
+  e2e_resolve_admin_password "${REPO_ROOT}" "$(printf '%s%s' 'changeme123' '!')"
 }
 
 ensure_operator_session() {
@@ -223,7 +514,7 @@ ensure_operator_session() {
 
   # NUL-delimited stdin keeps both credentials out of local and remote argv.
   response="$(
-    printf '%s\0%s' "$admin_username" "$admin_password" \
+    e2e_write_nul_credentials "$admin_username" "$admin_password" \
       | kctl exec -i "$pod" -n "$CONTROL_NS" -- node -e '
     const chunks = []
     process.stdin.on("data", chunk => chunks.push(Buffer.from(chunk)))
@@ -334,6 +625,55 @@ psql_query() {
     -c "$sql" 2>/dev/null
 }
 
+snapshot_notification_preferences() {
+  local row
+  if ! row="$(psql_query "SELECT CASE WHEN preferred_medium IS NULL THEN '<NULL>' ELSE preferred_medium END || '|' || channel_fallback_enabled::text || '|' || CASE WHEN preferred_account_id IS NULL THEN '<NULL>' ELSE preferred_account_id::text END FROM user_notification_preferences WHERE user_id='${USER_REF}'::uuid;")"; then
+    return 1
+  fi
+  if [ -z "$row" ]; then
+    NOTIFICATION_PREF_SNAPSHOT_EXISTS=0
+    NOTIFICATION_PREF_SNAPSHOT_READY=1
+    return 0
+  fi
+  IFS='|' read -r NOTIFICATION_PREF_SNAPSHOT_MEDIUM \
+    NOTIFICATION_PREF_SNAPSHOT_FALLBACK \
+    NOTIFICATION_PREF_SNAPSHOT_ACCOUNT <<< "$row"
+  NOTIFICATION_PREF_SNAPSHOT_EXISTS=1
+  NOTIFICATION_PREF_SNAPSHOT_READY=1
+}
+
+restore_notification_preferences() {
+  if [ "${NOTIFICATION_PREF_SNAPSHOT_READY:-0}" != "1" ]; then
+    return 0
+  fi
+  if [ "${NOTIFICATION_PREF_SNAPSHOT_EXISTS:-0}" != "1" ]; then
+    psql_query "DELETE FROM user_notification_preferences WHERE user_id='${USER_REF}'::uuid;" >/dev/null 2>&1
+    return $?
+  fi
+
+  local medium_sql account_sql
+  if [ "$NOTIFICATION_PREF_SNAPSHOT_MEDIUM" = '<NULL>' ]; then
+    medium_sql='NULL'
+  else
+    medium_sql="'${NOTIFICATION_PREF_SNAPSHOT_MEDIUM}'"
+  fi
+  if [ "$NOTIFICATION_PREF_SNAPSHOT_ACCOUNT" = '<NULL>' ]; then
+    account_sql='NULL'
+  else
+    account_sql="'${NOTIFICATION_PREF_SNAPSHOT_ACCOUNT}'::uuid"
+  fi
+  psql_query "INSERT INTO user_notification_preferences (user_id,preferred_medium,channel_fallback_enabled,preferred_account_id) VALUES ('${USER_REF}'::uuid,${medium_sql},${NOTIFICATION_PREF_SNAPSHOT_FALLBACK},${account_sql}) ON CONFLICT (user_id) DO UPDATE SET preferred_medium=EXCLUDED.preferred_medium,channel_fallback_enabled=EXCLUDED.channel_fallback_enabled,preferred_account_id=EXCLUDED.preferred_account_id,updated_at=NOW();" >/dev/null 2>&1
+}
+
+if [ "${1:-}" = "--cleanup-only" ]; then
+  require_write_confirmation || exit 2
+  cleanup_sdk_recipe
+  exit $?
+fi
+
+require_write_confirmation || exit 2
+trap cleanup_on_exit EXIT
+
 is_psql_true() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     t | true) return 0 ;;
@@ -354,6 +694,41 @@ resolve_e2e_desktop_user_id() {
     | tr -d '[:space:]'
 }
 
+wait_for_sdk_protocol_ready() {
+  local deadline=$((SECONDS + E2E_WAIT_STATUS_VALIDATED))
+  local state=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    gate_assert_deadline "waiting for Plugin Workload SDK identity bootstrap"
+    state=$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)
+    # A missing/unreviewed operator grant is an expected control-plane state,
+    # not a provider outage. The eager host identity is usable enough for the
+    # operator to create the grant; only the later validated state authorizes
+    # prompt traffic.
+    if [ "$state" = "awaiting_policy" ] || [ "$state" = "validated" ]; then
+      printf '%s\n' "$state"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  printf '%s\n' "$state"
+  return 1
+}
+
+wait_for_sdk_policy_validated() {
+  local deadline=$((SECONDS + E2E_WAIT_STATUS_VALIDATED))
+  local state=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    gate_assert_deadline "waiting for status.pluginWorkloadSdk.state=validated after operator grant"
+    state=$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)
+    if [ "$state" = "validated" ]; then
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  printf '%s\n' "$state"
+  return 1
+}
+
 ensure_external_rest_api_reachable() {
   local url="${E2E_EXTERNAL_REST_API_URL}/health"
   if curl -sf -m 5 "$url" >/dev/null 2>&1; then
@@ -364,8 +739,14 @@ ensure_external_rest_api_reachable() {
   if curl -sf -m 5 "$url" >/dev/null 2>&1; then
     return 0
   fi
-  fail "external-rest-api not reachable at ${E2E_EXTERNAL_REST_API_URL} (run branch-profile-pf for ${KUBECONTEXT:-<profile>})"
-  exit 1
+  # This helper runs inside obtain_desktop_session_token's command substitution,
+  # so `exit 1` would only terminate that subshell (aborting the parent via
+  # `set -e` with NO recorded failure) and a `fail` here would bump a counter the
+  # parent shell never sees. Propagate a non-zero RETURN instead and let the
+  # parent-shell caller record the countable, visible failure.
+  printf 'external-rest-api not reachable at %s (run branch-profile-pf for %s)\n' \
+    "${E2E_EXTERNAL_REST_API_URL}" "${KUBECONTEXT:-<profile>}" >&2
+  return 1
 }
 
 obtain_desktop_session_token() {
@@ -373,7 +754,7 @@ obtain_desktop_session_token() {
   if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
-  ensure_external_rest_api_reachable
+  ensure_external_rest_api_reachable || return 1
   response="$(
     printf '%s\0%s' "$email" "$password" \
       | jq -Rs 'split("\u0000") | {email: .[0], password: .[1]}' \
@@ -396,11 +777,47 @@ obtain_desktop_session_token() {
 create_grant() {
   local family=$1 payload
   if [ "$family" = "promptBridge" ]; then
-    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","provider":"'"$E2E_WORKFLOW_MODEL_PROVIDER"'","allowedModels":["'"$E2E_WORKFLOW_MODEL_NAME"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxRequestsPerRun":3}}'
+    payload="$(prompt_grant_payload "$WORKLOAD_ID")"
   else
-    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerRun":10}}'
+    # issue #348: active per-minute override (maxNotificationsPerMinute) drives the
+    # rate-limit gate; the deprecated maxNotificationsPerRun stays on the wire to
+    # exercise the admin validate-but-strip path (it is accepted then stripped).
+    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerMinute":10,"maxNotificationsPerRun":10}}'
   fi
   admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$payload"
+  # admin_curl only reflects transport success; the admin API returns 200 on
+  # accept and 4xx on a rejected policy (e.g. a duplicate provider+model target).
+  # Without this check a rejected grant looks "created" and the real failure only
+  # surfaces far downstream. Fail loud with a grant-specific, HTTP-bearing reason.
+  case "${ADMIN_CURL_HTTP_STATUS:-}" in
+    2[0-9][0-9]) return 0 ;;
+    *)
+      printf 'grant creation (%s) rejected by admin API: HTTP %s\n' \
+        "$family" "${ADMIN_CURL_HTTP_STATUS:-unknown}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# The admin API validates the policy; jq is used here solely to serialize E2E
+# configuration safely, never to carry credential values. `allowedModels` is
+# retained for the compatibility/bootstrap contract, while `promptTargets` is
+# the authorization policy and `defaultTargetRef` must select its first target.
+prompt_grant_payload() {
+  local caller=$1
+  jq -cn \
+    --arg namespace "$RECIPE_NS" \
+    --arg recipe "$RECIPE_NAME" \
+    --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+    --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+    --arg targetRef "$E2E_PROMPT_TARGET_REF" \
+    --arg credentialSlot "$E2E_PROMPT_CREDENTIAL_SLOT" \
+    --arg fallbackProvider "$E2E_PROMPT_FALLBACK_PROVIDER" \
+    --arg fallbackModel "$E2E_PROMPT_FALLBACK_MODEL" \
+    --arg fallbackTargetRef "$E2E_PROMPT_FALLBACK_TARGET_REF" \
+    --arg fallbackCredentialSlot "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" \
+    --arg caller "$caller" \
+    '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model,$fallbackModel],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot},{targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller],quotaLimits:{maxInvocationsPerMinute:4,maxRequestsPerRun:4}}'
 }
 
 # ─── prerequisites ───────────────────────────────────────────────────────
@@ -441,6 +858,7 @@ ok "SDK clientNotifications userRef targets desktop user ${USER_REF}"
 
 sed -e "s/PLACEHOLDER_PROVIDER/${E2E_WORKFLOW_MODEL_PROVIDER}/" \
     -e "s/PLACEHOLDER_MODEL/${E2E_WORKFLOW_MODEL_NAME}/" \
+    -e "s/PLACEHOLDER_FALLBACK_TARGET_REF/${E2E_PROMPT_FALLBACK_TARGET_REF}/" \
     -e "s/PLACEHOLDER_RECIPE_NAME/${RECIPE_NAME}/" \
     -e "s/PLACEHOLDER_USER_REF/${USER_REF}/" \
     "$FIXTURE" | kctl apply -f -
@@ -451,20 +869,13 @@ ok "applied WorkflowRecipe ${RECIPE_NAME}"
 
 header "Infrastructure invariants"
 
-# 1. Capability validated + projected to status.
-status_ok=0
-state=""
-status_deadline=$((SECONDS + E2E_WAIT_STATUS_VALIDATED))
-while [ "$SECONDS" -lt "$status_deadline" ]; do
-  gate_assert_deadline "waiting for status.pluginWorkloadSdk.state=validated"
-  state=$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)
-  if [ "$state" = "validated" ]; then status_ok=1; break; fi
-  sleep "$POLL_INTERVAL"
-done
-if [ "$status_ok" = "1" ]; then
-  ok "status.pluginWorkloadSdk.state == validated"
+# 1. Identity bootstrap is ready. A new recipe normally reports awaiting_policy
+# until the operator grant journey below completes; it must not be forced to
+# manufacture a grant before the eager host can be observed.
+if state="$(wait_for_sdk_protocol_ready)"; then
+  ok "Plugin Workload SDK identity bootstrap ready (state=${state})"
 else
-  fail "status.pluginWorkloadSdk.state did not reach 'validated' (got '${state:-<empty>}')"
+  fail "Plugin Workload SDK identity bootstrap did not reach awaiting_policy/validated (got '${state:-<empty>}')"
   exit 1
 fi
 
@@ -545,13 +956,38 @@ fi
 # NetworkPolicy: a pod in a different namespace cannot reach the SDK port.
 mcp_svc="$(kctl get svc -n "$SANDBOX_NS" -l "clerum.io/recipe=${RECIPE_NAME},clerum.io/component=workflow-mcp-host" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 if [ -n "$mcp_svc" ]; then
-  probe_out="$(kctl run "sdk-np-probe-$$" -n default --rm -i --restart=Never \
-    --image=busybox:1.36 --command --timeout=60s -- \
-    sh -c "nc -z -w5 ${mcp_svc}.${SANDBOX_NS}.svc.cluster.local 8099 && echo OPEN || echo BLOCKED" 2>/dev/null || echo BLOCKED)"
-  if printf "%s" "$probe_out" | grep -q BLOCKED; then
+  # Do not use `kubectl run --rm -i` here.  The attached stdin can remain open
+  # after the probe pod exits (notably with a branch-owned Minikube context),
+  # leaving the whole gate blocked in a command substitution.  Create the pod
+  # detached, observe its terminal phase with a hard deadline, then collect
+  # logs and delete it explicitly.  This keeps the gate fail-closed without
+  # weakening the NetworkPolicy assertion.
+  probe_name="sdk-np-probe-$$"
+  probe_deadline=$((SECONDS + 45))
+  probe_phase=""
+  probe_out=""
+  kctl delete pod "$probe_name" -n default --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if kctl run "$probe_name" -n default --restart=Never --image=busybox:1.36 \
+      --request-timeout=15s --command -- \
+      sh -c "nc -z -w5 ${mcp_svc}.${SANDBOX_NS}.svc.cluster.local 8099 && echo OPEN || echo BLOCKED" \
+      >/dev/null 2>&1; then
+    while [ "$SECONDS" -lt "$probe_deadline" ]; do
+      probe_phase="$(kctl get pod "$probe_name" -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      case "$probe_phase" in
+        Succeeded|Failed) break ;;
+      esac
+      sleep 1
+    done
+    probe_out="$(kctl logs "$probe_name" -n default --tail=20 2>/dev/null || true)"
+  else
+    probe_phase="CreateFailed"
+    probe_out=""
+  fi
+  kctl delete pod "$probe_name" -n default --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if [ "$probe_phase" = "Succeeded" ] && printf "%s" "$probe_out" | grep -q BLOCKED; then
     ok "SDK port 8099 is blocked from the 'default' namespace (NetworkPolicy enforced)"
   else
-    fail "SDK port 8099 was reachable cross-namespace — NetworkPolicy not enforcing"
+    fail "SDK cross-namespace NetworkPolicy probe failed (phase=${probe_phase:-Timeout}; output redacted)"
     exit 1
   fi
 else
@@ -569,25 +1005,58 @@ fi
 
 header "Admin grant guardrails"
 
-wildcard_payload='{"recipeNamespace":"'"$RECIPE_NS"'","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","allowedModels":["*"],"allowedCallers":["'"$WORKLOAD_ID"'"]}'
+wildcard_payload="$(jq -cn \
+  --arg namespace "$RECIPE_NS" \
+  --arg recipe "$RECIPE_NAME" \
+  --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+  --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+  --arg targetRef "$E2E_PROMPT_TARGET_REF" \
+  --arg credentialSlot "$E2E_PROMPT_CREDENTIAL_SLOT" \
+  --arg caller "$WORKLOAD_ID" \
+  '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:["*"],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot}],defaultTargetRef:$targetRef,allowedCallers:[$caller]}')"
 admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$wildcard_payload" >/dev/null || true
 wildcard_status="$ADMIN_CURL_HTTP_STATUS"
 wildcard_body="$ADMIN_CURL_BODY"
 if [ "$wildcard_status" = "400" ] && printf '%s' "$wildcard_body" | grep -q 'wildcard_not_allowed'; then
   ok "admin API rejects wildcard allowlists with wildcard_not_allowed"
 else
-  fail "wildcard grant was not rejected as expected (status=${wildcard_status}, body=${wildcard_body})"
+  fail "wildcard grant was not rejected as expected (HTTP ${wildcard_status:-unknown}; response body redacted)"
   exit 1
 fi
 
-empty_models_payload='{"recipeNamespace":"'"$RECIPE_NS"'","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","allowedModels":[],"allowedCallers":["'"$WORKLOAD_ID"'"]}'
-admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$empty_models_payload" >/dev/null || true
-empty_models_status="$ADMIN_CURL_HTTP_STATUS"
-empty_models_body="$ADMIN_CURL_BODY"
-if [ "$empty_models_status" = "400" ] && printf '%s' "$empty_models_body" | grep -q 'allowedModels must be non-empty'; then
-  ok "admin API rejects promptBridge grants without an explicit model"
+missing_policy_payload="$(jq -cn \
+  --arg namespace "$RECIPE_NS" \
+  --arg recipe "$RECIPE_NAME" \
+  --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+  --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+  --arg caller "$WORKLOAD_ID" \
+  '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model],allowedCallers:[$caller]}')"
+admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$missing_policy_payload" >/dev/null || true
+missing_policy_status="$ADMIN_CURL_HTTP_STATUS"
+missing_policy_body="$ADMIN_CURL_BODY"
+if [ "$missing_policy_status" = "400" ] && printf '%s' "$missing_policy_body" | grep -q 'promptTargets must be a non-empty array'; then
+  ok "admin API rejects promptBridge grants without ordered promptTargets"
 else
-  fail "empty-model promptBridge grant was not rejected as expected (status=${empty_models_status}, body=${empty_models_body})"
+  fail "promptBridge grant without promptTargets was not rejected as expected (HTTP ${missing_policy_status:-unknown}; response body redacted)"
+  exit 1
+fi
+
+missing_default_payload="$(jq -cn \
+  --arg namespace "$RECIPE_NS" \
+  --arg recipe "$RECIPE_NAME" \
+  --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+  --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+  --arg targetRef "$E2E_PROMPT_TARGET_REF" \
+  --arg credentialSlot "$E2E_PROMPT_CREDENTIAL_SLOT" \
+  --arg caller "$WORKLOAD_ID" \
+  '{recipeNamespace:$namespace,recipeName:$recipe,capabilityFamily:"promptBridge",provider:$provider,allowedModels:[$model],promptTargets:[{targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot}],allowedCallers:[$caller]}')"
+admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$missing_default_payload" >/dev/null || true
+missing_default_status="$ADMIN_CURL_HTTP_STATUS"
+missing_default_body="$ADMIN_CURL_BODY"
+if [ "$missing_default_status" = "400" ] && printf '%s' "$missing_default_body" | grep -q 'defaultTargetRef is required'; then
+  ok "admin API rejects promptBridge grants without defaultTargetRef"
+else
+  fail "promptBridge grant without defaultTargetRef was not rejected as expected (HTTP ${missing_default_status:-unknown}; response body redacted)"
   exit 1
 fi
 
@@ -602,8 +1071,65 @@ if ! stop_sdk_caller_fixture; then
 fi
 ok "paused sdk-caller fixture before authorization probes (run=${E2E_PROBE_RUN_ID})"
 
-create_grant promptBridge >/dev/null && ok "created promptBridge grant" || { fail "promptBridge grant creation failed"; exit 1; }
-create_grant clientNotifications >/dev/null && ok "created clientNotifications grant" || { fail "clientNotifications grant creation failed"; exit 1; }
+if create_grant promptBridge >/dev/null; then
+  ok "created promptBridge grant"
+else
+  fail "promptBridge grant creation failed"
+  exit 1
+fi
+# issue #348: prove the admin API accepted the deprecated per-run key on the wire
+# (grant creation returned 200 above) but STRIPPED it, persisting only the active
+# per-minute override. This is the deprecate-and-ignore contract exercised end-to-end.
+persisted_pb_quota="$(psql_query "SELECT quota_limits::text FROM plugin_workload_sdk_grants WHERE recipe_namespace='${RECIPE_NS}' AND recipe_name='${RECIPE_NAME}' AND capability_family='promptBridge';")"
+if printf '%s' "$persisted_pb_quota" | jq -e '(.maxInvocationsPerMinute == 4) and (has("maxRequestsPerRun") | not)' >/dev/null 2>&1; then
+  ok "deprecate-and-strip verified: maxInvocationsPerMinute=4 persisted, deprecated maxRequestsPerRun stripped"
+else
+  fail "persisted promptBridge quota_limits violate deprecate-and-strip (got: ${persisted_pb_quota})"
+  exit 1
+fi
+if create_grant clientNotifications >/dev/null; then
+  ok "created clientNotifications grant"
+else
+  fail "clientNotifications grant creation failed"
+  exit 1
+fi
+
+# The grant is now active and the WRC's next live capability probe must move
+# the recipe from awaiting_policy to validated. This is the point at which the
+# data plane is authorized; protocol readiness alone never authorizes a call.
+if wait_for_sdk_policy_validated; then
+  ok "status.pluginWorkloadSdk.state == validated after operator grants"
+else
+  fail "status.pluginWorkloadSdk.state did not reach 'validated' after operator grants (got '${state:-<empty>}')"
+  exit 1
+fi
+
+# Read back only the persisted policy metadata. This proves the operator's
+# two-provider order/default contract without ever logging a Secret value,
+# bearer token, or credential ticket.
+prompt_grant_readback="$(admin_curl GET "/api/v1/admin/plugin-workload-sdk/grants?recipeNamespace=${RECIPE_NS}&recipeName=${RECIPE_NAME}" || true)"
+if [ "$ADMIN_CURL_HTTP_STATUS" = "200" ] &&
+  printf '%s' "$prompt_grant_readback" | jq -e \
+    --arg provider "$E2E_WORKFLOW_MODEL_PROVIDER" \
+    --arg model "$E2E_WORKFLOW_MODEL_NAME" \
+    --arg targetRef "$E2E_PROMPT_TARGET_REF" \
+    --arg credentialSlot "$E2E_PROMPT_CREDENTIAL_SLOT" \
+    --arg fallbackProvider "$E2E_PROMPT_FALLBACK_PROVIDER" \
+    --arg fallbackModel "$E2E_PROMPT_FALLBACK_MODEL" \
+    --arg fallbackTargetRef "$E2E_PROMPT_FALLBACK_TARGET_REF" \
+    --arg fallbackCredentialSlot "$E2E_PROMPT_FALLBACK_CREDENTIAL_SLOT" \
+    '(.items // []) | map(select(.capabilityFamily == "promptBridge")) | .[0] as $grant |
+      ($grant.provider == $provider) and
+      ($grant.defaultTargetRef == $targetRef) and
+      (($grant.promptTargets // []) | length == 2) and
+      ($grant.promptTargets[0] == {targetRef:$targetRef,provider:$provider,model:$model,credentialSlot:$credentialSlot}) and
+      ($grant.promptTargets[1] == {targetRef:$fallbackTargetRef,provider:$fallbackProvider,model:$fallbackModel,credentialSlot:$fallbackCredentialSlot}) and
+      ((($grant | tojson) | test("secret|token"; "i")) | not)' >/dev/null; then
+  ok "persisted promptBridge policy contains ordered primary + fallback providers without credential material"
+else
+  fail "persisted promptBridge policy did not match the two-provider order/default contract (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}; response body redacted)"
+  exit 1
+fi
 
 # Recipients read endpoint (grant-driven picker): the clientNotifications grant
 # just created carries allowedUserRefs=[USER_REF]. GET /v1/client-notifications/
@@ -654,10 +1180,33 @@ else
   exit 1
 fi
 
-narrow_payload='{"recipeNamespace":"'"$RECIPE_NS"'","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","provider":"'"$E2E_WORKFLOW_MODEL_PROVIDER"'","allowedModels":["'"$E2E_WORKFLOW_MODEL_NAME"'"],"allowedCallers":["e2e-unlisted-caller"],"quotaLimits":{"maxRequestsPerRun":3}}'
+unauthorized_target="$(kctl exec "$caller_pod" -n "$SANDBOX_NS" -- env "E2E_PROBE_RUN_ID=${E2E_PROBE_RUN_ID}" node -e '
+fetch(process.env.PLUGIN_WORKLOAD_SDK_ENDPOINT + "/v1/prompt-bridge", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: "Bearer " + process.env.PLUGIN_WORKLOAD_SDK_TOKEN,
+  },
+  body: JSON.stringify({
+    purpose: "summarization",
+    targetRef: "unauthorized-third-provider",
+    idempotencyKey: "e2e-deny-target-" + process.env.E2E_PROBE_RUN_ID,
+    messages: [{ role: "user", content: "x" }],
+  }),
+}).then(async r => { const b = await r.json().catch(() => ({})); console.log(r.status + ":" + (b.error || "") + ":" + (b.message || "")); process.exit(0) })
+  .catch(() => { console.log("ERR"); process.exit(0) })
+' 2>/dev/null || true)"
+if printf "%s" "$unauthorized_target" | grep -q 'target_not_allowed'; then
+  ok "selector outside the two-provider policy is denied with target_not_allowed"
+else
+  fail "unauthorized provider target was not denied as expected (got '${unauthorized_target}')"
+  exit 1
+fi
+
+narrow_payload="$(prompt_grant_payload 'e2e-unlisted-caller')"
 admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$narrow_payload" >/dev/null || true
 if [ "$ADMIN_CURL_HTTP_STATUS" != "200" ]; then
-  fail "failed to narrow promptBridge grant for caller_not_allowed probe (status=${ADMIN_CURL_HTTP_STATUS}, body=${ADMIN_CURL_BODY})"
+  fail "failed to narrow promptBridge grant for caller_not_allowed probe (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}; response body redacted)"
   exit 1
 fi
 
@@ -692,7 +1241,10 @@ ok "restored promptBridge grant after caller_not_allowed probe"
 
 header "Authorized happy path"
 
-reset_sdk_runtime_state_for_happy_path
+if ! reset_sdk_runtime_state_for_happy_path; then
+  fail "could not prove a clean SDK runtime state before the happy-path fixture"
+  exit 1
+fi
 ok "reset SDK invocation/quota/delivery state before happy-path fixture"
 
 # Restart the caller so the fixture re-runs against the restored grants.
@@ -708,20 +1260,34 @@ logs="$(wait_for_caller_logs_matching E2E_SDK_CLIENT_NOTIFICATION_OK "$E2E_WAIT_
 if printf "%s" "$logs" | grep -q E2E_SDK_PROMPT_BRIDGE_OK; then
   ok "sdk-caller promptBridge call was authorized (invocationId returned)"
 else
-  fail "sdk-caller promptBridge call did not succeed within ${E2E_WAIT_CALLER_MARKER}s: $(printf '%s' "$logs" | grep E2E_SDK_PROMPT_BRIDGE || true)"
+  markers="$(printf '%s' "$logs" | grep -E '^E2E_SDK_(PROMPT_BRIDGE|EXPLICIT_TARGET|CLIENT_NOTIFICATION|IDEMPOTENCY|QUOTA|DONE)_' || true)"
+  fail "sdk-caller promptBridge call did not succeed within ${E2E_WAIT_CALLER_MARKER}s (markers=${markers:-<none>})"
   exit 1
 fi
 
 if printf "%s" "$logs" | grep -q E2E_SDK_CLIENT_NOTIFICATION_OK; then
   ok "sdk-caller clientNotifications call was accepted (notificationId returned)"
 else
-  fail "sdk-caller clientNotifications call did not succeed within ${E2E_WAIT_CALLER_MARKER}s: $(printf '%s' "$logs" | grep E2E_SDK_CLIENT_NOTIFICATION || true)"
+  markers="$(printf '%s' "$logs" | grep -E '^E2E_SDK_(PROMPT_BRIDGE|EXPLICIT_TARGET|CLIENT_NOTIFICATION|IDEMPOTENCY|QUOTA|DONE)_' || true)"
+  fail "sdk-caller clientNotifications call did not succeed within ${E2E_WAIT_CALLER_MARKER}s (markers=${markers:-<none>})"
   exit 1
 fi
 
+# The fixture intentionally exercises the approved selector after the first
+# notification, then idempotency and quota. Waiting for its terminal marker
+# gives the process time to emit those later markers instead of evaluating a
+# partial log snapshot immediately after clientNotifications succeeds.
 logs="$(wait_for_caller_logs_matching E2E_SDK_DONE "$E2E_WAIT_CALLER_DONE" || true)"
 if ! printf "%s" "$logs" | grep -q E2E_SDK_DONE; then
   fail "sdk-caller fixture did not finish within ${E2E_WAIT_CALLER_DONE}s"
+  exit 1
+fi
+
+if printf "%s" "$logs" | grep -q E2E_SDK_EXPLICIT_TARGET_OK; then
+  ok "sdk-caller explicit approved targetRef was served and returned non-empty content"
+else
+  markers="$(printf '%s' "$logs" | grep -E '^E2E_SDK_(PROMPT_BRIDGE|EXPLICIT_TARGET|CLIENT_NOTIFICATION|IDEMPOTENCY|QUOTA|DONE)_' || true)"
+  fail "sdk-caller explicit approved targetRef did not return a served target/content marker (markers=${markers:-<none>})"
   exit 1
 fi
 
@@ -777,17 +1343,23 @@ header "Notification preferences PUT contract"
 
 desktop_session_token="$(obtain_desktop_session_token "$E2E_DESKTOP_USER_EMAIL" "$E2E_DESKTOP_PASSWORD" || true)"
 if [ -z "$desktop_session_token" ]; then
-  fail "could not obtain desktop session token for ${E2E_DESKTOP_USER_EMAIL} (HTTP ${ADMIN_CURL_HTTP_STATUS} via ${E2E_EXTERNAL_REST_API_URL}: ${ADMIN_CURL_BODY})"
+  fail "could not obtain desktop session token for ${E2E_DESKTOP_USER_EMAIL} (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown} via ${E2E_EXTERNAL_REST_API_URL}; response body redacted)"
   exit 1
 fi
 ok "obtained desktop session token for notification-preferences checks"
+
+if ! snapshot_notification_preferences; then
+  fail "could not snapshot notification preferences for ${USER_REF}"
+  exit 1
+fi
+ok "snapshotted notification preferences before the contract PUT checks"
 
 session_curl PUT "/external/me/notification-preferences" "$desktop_session_token" '{"preferredMedium":"telegram"}' >/dev/null || true
 if [ "$ADMIN_CURL_HTTP_STATUS" = "400" ] &&
    printf '%s' "$ADMIN_CURL_BODY" | grep -q 'invalid_channel_fallback_enabled'; then
   ok "partial PUT without channelFallbackEnabled is rejected with invalid_channel_fallback_enabled"
 else
-  fail "partial notification-preferences PUT was not rejected as expected (status=${ADMIN_CURL_HTTP_STATUS}, body=${ADMIN_CURL_BODY})"
+  fail "partial notification-preferences PUT was not rejected as expected (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}; response body redacted)"
   exit 1
 fi
 
@@ -796,13 +1368,13 @@ if [ "$ADMIN_CURL_HTTP_STATUS" = "400" ] &&
    printf '%s' "$ADMIN_CURL_BODY" | grep -q 'invalid_preferred_medium'; then
   ok "partial PUT without preferredMedium is rejected with invalid_preferred_medium"
 else
-  fail "partial notification-preferences PUT without preferredMedium was not rejected as expected (status=${ADMIN_CURL_HTTP_STATUS}, body=${ADMIN_CURL_BODY})"
+  fail "partial notification-preferences PUT without preferredMedium was not rejected as expected (HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}; response body redacted)"
   exit 1
 fi
 
 session_curl PUT "/external/me/notification-preferences" "$desktop_session_token" '{"preferredMedium":null,"channelFallbackEnabled":false}' >/dev/null || true
 if [ "$ADMIN_CURL_HTTP_STATUS" != "200" ]; then
-  fail "full notification-preferences PUT expected HTTP 200, got ${ADMIN_CURL_HTTP_STATUS}: ${ADMIN_CURL_BODY}"
+  fail "full notification-preferences PUT expected HTTP 200, got ${ADMIN_CURL_HTTP_STATUS:-unknown} (response body redacted)"
   exit 1
 fi
 
@@ -827,19 +1399,97 @@ fi
 
 # ─── idempotency + quota enforcement ─────────────────────────────────────
 
-# Idempotency: same idempotencyKey returns same invocationId without consuming quota.
-if printf "%s" "$logs" | grep -q E2E_SDK_IDEMPOTENCY_OK; then
-  ok "idempotency replay returned same invocationId (no extra quota consumed)"
+# Idempotency: a completed prompt replay is guarded before the provider seam.
+# The current public SDK route returns idempotency_conflict because completion
+# content is not persisted for replay; the audit record and quota reservation
+# remain stable, and the fixture's subsequent quota phase proves no second
+# provider charge was made.
+if printf "%s" "$logs" | grep -q E2E_SDK_IDEMPOTENCY_REPLAY_GUARDED; then
+  ok "idempotency replay was guarded without a second provider call or quota charge"
 else
-  fail "idempotency replay did not return same invocationId: $(printf '%s' "$logs" | grep E2E_SDK_IDEMPOTENCY || true)"
+  fail "idempotency replay was not guarded as expected (fixture marker missing; caller logs redacted)"
   exit 1
 fi
 
-# Quota enforcement: N+1 call is rejected after quota exhausted.
+# Per-minute rate limit (issue #348): the 5th call is rejected once the grant's
+# maxInvocationsPerMinute=4 window is exhausted. The wire error code stays
+# `quota_exceeded` (HTTP 429), so the fixture marker names are unchanged.
 if printf "%s" "$logs" | grep -q E2E_SDK_QUOTA_EXCEEDED_OK; then
-  ok "quota enforcement correctly rejected call after 3/3 requests consumed"
+  ok "per-minute rate limit rejected the 5th call after 4/4 invocations in the window"
 else
-  fail "quota enforcement did not reject excess call: $(printf '%s' "$logs" | grep E2E_SDK_QUOTA_EXCEEDED || true)"
+  fail "per-minute rate limit did not reject the 5th call (fixture marker missing; caller logs redacted). If the caller logged E2E_SDK_QUOTA_EXCEEDED_FAIL=*:possible_window_ageout or *:window_overcount, this is the known per-minute 60s-window timing race (issue #348 fixture caveat), not a real enforcement regression — retry on a less loaded cluster or apply the coordinated gate+fixture reset fix."
+  exit 1
+fi
+
+# ─── issue #375 (P3): event-driven grant→WRC nudge ───────────────────────
+# The recipe is validated by now. Prove the grant→WRC nudge accelerates
+# convergence: a grant change must re-reconcile the recipe (bump the published
+# policyRevision, state stays validated) within ≤10s via Postgres LISTEN/NOTIFY,
+# WITHOUT restarting the WRC (the ≤30s watchdog is the backstop, not the path
+# under test). This is an ADDITIVE phase; it does not touch #351's phases.
+header "Plugin Workload SDK grant→WRC event-driven nudge (issue #375 P3)"
+
+# Capture the WRC pod set (by name) so we can assert NO restart drove convergence.
+wrc_pods_before="$(kctl get pods -n "$CONTROL_NS" -o name 2>/dev/null \
+  | grep -E '^pod/workflow-recipes-' | sort | tr '\n' ',' || true)"
+if [ -z "$wrc_pods_before" ]; then
+  fail "could not enumerate workflow-recipes pods before the nudge (selector empty)"
+  exit 1
+fi
+
+nudge_rev_before="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+  -o jsonpath='{.status.pluginWorkloadSdk.policyRevision}' 2>/dev/null || true)"
+nudge_rev_before="${nudge_rev_before:-0}"
+
+# Re-upsert the promptBridge grant. The admin upsert increments policy_revision
+# and (issue #375 P3) emits the transactional grant-update NOTIFY on COMMIT.
+# issue #375 (R5): fail LOUD on a grant re-upsert failure. `|| true` here only
+# guards `set -e` so we can read ADMIN_CURL_HTTP_STATUS; the explicit assert
+# below is the real gate. Without it, an admin-API failure (expired token,
+# control-api 5xx) would fall through to the poll and be misattributed to the
+# nudge under test ("did not accelerate convergence"), hiding the real cause.
+create_grant promptBridge >/dev/null 2>&1 || true
+if [ "$ADMIN_CURL_HTTP_STATUS" != "200" ]; then
+  fail "grant re-upsert failed (admin API HTTP ${ADMIN_CURL_HTTP_STATUS:-unknown}) — cannot test the event-driven nudge"
+  exit 1
+fi
+
+nudge_found=0
+nudge_state=""
+nudge_rev_after=""
+# issue #375 (R1-L4): measure the printed elapsed from the SAME origin as the
+# deadline (post-upsert), so the cosmetic "~Ns (≤Xs)" line cannot exceed the cap.
+nudge_started_at="$SECONDS"
+nudge_deadline=$((SECONDS + E2E_WAIT_NUDGE_VALIDATED))
+while [ "$SECONDS" -lt "$nudge_deadline" ]; do
+  gate_assert_deadline "waiting for event-driven policyRevision bump (issue #375 P3)"
+  nudge_state="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+    -o jsonpath='{.status.pluginWorkloadSdk.state}' 2>/dev/null || true)"
+  nudge_rev_after="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$RECIPE_NS" \
+    -o jsonpath='{.status.pluginWorkloadSdk.policyRevision}' 2>/dev/null || true)"
+  if [ "$nudge_state" = "validated" ] && [ -n "$nudge_rev_after" ] &&
+     [ "$nudge_rev_after" -gt "$nudge_rev_before" ] 2>/dev/null; then
+    nudge_found=1
+    break
+  fi
+  sleep "$POLL_INTERVAL"
+done
+
+nudge_elapsed=$((SECONDS - nudge_started_at))
+if [ "$nudge_found" -eq 1 ]; then
+  ok "grant change re-published (policyRevision ${nudge_rev_before}→${nudge_rev_after}, state=validated) in ~${nudge_elapsed}s via the event-driven nudge (≤${E2E_WAIT_NUDGE_VALIDATED}s)"
+else
+  fail "grant change was NOT re-published within ${E2E_WAIT_NUDGE_VALIDATED}s (state='${nudge_state:-<empty>}', policyRevision '${nudge_rev_before}'→'${nudge_rev_after:-<empty>}'); the LISTEN/NOTIFY nudge did not accelerate convergence"
+  exit 1
+fi
+
+# The acceleration must come from the NOTIFY-driven reconcile, NOT a WRC restart.
+wrc_pods_after="$(kctl get pods -n "$CONTROL_NS" -o name 2>/dev/null \
+  | grep -E '^pod/workflow-recipes-' | sort | tr '\n' ',' || true)"
+if [ "$wrc_pods_after" = "$wrc_pods_before" ]; then
+  ok "WRC was NOT restarted during convergence (pod set unchanged) — convergence was event-driven"
+else
+  fail "WRC pod set changed during the nudge phase (before='${wrc_pods_before}' after='${wrc_pods_after}'); convergence must not depend on a restart"
   exit 1
 fi
 

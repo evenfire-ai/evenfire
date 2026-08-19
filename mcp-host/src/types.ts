@@ -150,6 +150,12 @@ export interface McpServerStatus {
   deployed: boolean
   /** Whether the Deployment has at least one ready replica. */
   ready: boolean
+  /**
+   * Whether ready/deployed came from a current-identity, current-generation
+   * source. Explicit false means admission status is unknown and must not
+   * revoke a live connection. Undefined preserves legacy producer semantics.
+   */
+  authoritative?: boolean
   /** Human-readable status message. */
   message?: string
 }

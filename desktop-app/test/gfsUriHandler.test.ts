@@ -7,6 +7,7 @@ import {
   parseGfsUri,
   parseSubjectKey,
 } from '../src/gfs/uriHandler.js'
+import { ApiError } from '../src/httpClient.js'
 
 /**
  * P2-S06 — Desktop gfs:// resolve + read. Acceptance: a gfs://<drive>/<rid> link
@@ -147,7 +148,7 @@ describe('GfsClient.listChildren', () => {
 })
 
 describe('GfsClient.listAccessible', () => {
-  it('lists readable GFS resources for the current user session', async () => {
+  it('lists readable GFS resources for the current ordinary user session', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,
       data: {
@@ -170,6 +171,38 @@ describe('GfsClient.listAccessible', () => {
       { token: 'tok' }
     )
   })
+
+  it('preserves linked-operator root metadata and root-child shape', async () => {
+    const rootResourceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const operatorChild = {
+      resourceId: RID,
+      rid: RID,
+      gfsUri: `gfs://main/${RID}`,
+      name: 'Projects',
+      kind: 'directory' as const,
+      path: '/Projects',
+      version: 1,
+      bytes: 0,
+    }
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: {
+        items: [operatorChild],
+        nextCursor: null,
+        rootResourceId,
+        view: 'operator',
+      },
+    })) as GfsTransport['requestJson']
+
+    const out = await new GfsClient(transport({ requestJson })).listAccessible('tok')
+
+    expect(out).toEqual({
+      items: [operatorChild],
+      nextCursor: null,
+      rootResourceId,
+      view: 'operator',
+    })
+  })
 })
 
 describe('GfsClient.affordances', () => {
@@ -189,10 +222,44 @@ describe('GfsClient.affordances', () => {
 })
 
 describe('GfsClient.grant', () => {
-  it('PUTs the grant with the structured subject + permissions', async () => {
+  it('PUTs ONE bulk request with the subjects[] array + permissions', async () => {
     const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
     await new GfsClient(transport({ requestJson })).grant(
-      { resourceId: RID, subject: { type: 'user', id: 'u2' }, permissions: ['read', 'write'] },
+      {
+        resourceId: RID,
+        subjects: [
+          { type: 'user', id: 'u2' },
+          { type: 'team', id: 't1' },
+        ],
+        permissions: ['read', 'write'],
+      },
+      'tok'
+    )
+    expect(requestJson).toHaveBeenCalledTimes(1)
+    expect(requestJson).toHaveBeenCalledWith('PUT', 'https://api.example/api/v1/me/gfs/grants', {
+      token: 'tok',
+      body: {
+        drive: 'main',
+        resourceId: RID,
+        subjects: [
+          { type: 'user', id: 'u2' },
+          { type: 'team', id: 't1' },
+        ],
+        permissions: ['read', 'write'],
+        inherit: false,
+      },
+    })
+  })
+
+  it('passes inherit through to the API body (agent folder grants set it true)', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+    await new GfsClient(transport({ requestJson })).grant(
+      {
+        resourceId: RID,
+        subjects: [{ type: 'host', id: '1st:mcp-host/chatllm' }],
+        permissions: ['read'],
+        inherit: true,
+      },
       'tok'
     )
     expect(requestJson).toHaveBeenCalledWith('PUT', 'https://api.example/api/v1/me/gfs/grants', {
@@ -200,27 +267,226 @@ describe('GfsClient.grant', () => {
       body: {
         drive: 'main',
         resourceId: RID,
-        subject: { type: 'user', id: 'u2' },
-        permissions: ['read', 'write'],
-        inherit: false,
+        subjects: [{ type: 'host', id: '1st:mcp-host/chatllm' }],
+        permissions: ['read'],
+        inherit: true,
       },
     })
+  })
+
+  // FIX B — the server reports `invalidIndexes` (subjects_invalid / foreign_agent)
+  // and `retryAfterSeconds` (429) as SEPARATE response-body fields. httpClient
+  // stashes the raw body on ApiError.bodyText, but only `.message` survives the
+  // Electron IPC boundary. GfsClient re-throws with those fields appended in the
+  // exact shape gfsGrantErrors.ts (renderer) parses, so they reach the user.
+  it('embeds invalidIndexes from the error body into the thrown message', async () => {
+    const requestJson = vi.fn(async () => {
+      throw new ApiError(
+        '400 Bad Request: subjects_invalid',
+        400,
+        JSON.stringify({ error: 'subjects_invalid', invalidIndexes: [0, 2] })
+      )
+    }) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).grant(
+        {
+          resourceId: RID,
+          subjects: [
+            { type: 'user', id: 'u2' },
+            { type: 'user', id: 'u3' },
+            { type: 'team', id: 't1' },
+          ],
+          permissions: ['read'],
+        },
+        'tok'
+      )
+    ).rejects.toThrow(/subjects_invalid invalidIndexes=\[0,2\]/)
+  })
+
+  it('leaves the original error untouched when the body carries no structured fields', async () => {
+    const original = new ApiError(
+      '403 Forbidden: escalation_rejected',
+      403,
+      JSON.stringify({ error: 'escalation_rejected' })
+    )
+    const requestJson = vi.fn(async () => {
+      throw original
+    }) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).grant(
+        { resourceId: RID, subjects: [{ type: 'user', id: 'u2' }], permissions: ['read'] },
+        'tok'
+      )
+    ).rejects.toBe(original)
+  })
+})
+
+const GRANT_ID = '11111111-2222-3333-4444-555555555555'
+const SHARE_ID = '66666666-7777-4888-8999-aaaaaaaaaaaa'
+
+const GRANT_ITEM = {
+  id: GRANT_ID,
+  drive: 'main',
+  resourceId: RID,
+  subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+  permissions: ['read', 'write'],
+  inherit: true,
+}
+
+describe('GfsClient.listGrants', () => {
+  it('GETs the resource ACL and unwraps the items array (NOT enveloped)', async () => {
+    const requestJson = vi.fn(async () => ({
+      items: [GRANT_ITEM],
+    })) as GfsTransport['requestJson']
+    const out = await new GfsClient(transport({ requestJson })).listGrants(
+      { resourceId: RID, drive: 'main' },
+      'tok'
+    )
+    expect(out).toEqual([GRANT_ITEM])
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      `https://api.example/api/v1/me/gfs/grants?drive=main&resourceId=${RID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('defaults the drive when omitted', async () => {
+    const requestJson = vi.fn(async () => ({ items: [] })) as GfsTransport['requestJson']
+    await new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      `https://api.example/api/v1/me/gfs/grants?drive=main&resourceId=${RID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('fails loud when the response carries no items array', async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: false,
+      error: { code: 'manage_acl_required', message: 'denied' },
+    })) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+    ).rejects.toBeInstanceOf(GfsUriError)
+  })
+
+  it('embeds retryAfterSeconds from a 429 body so the retry hint reaches the renderer', async () => {
+    const requestJson = vi.fn(async () => {
+      throw new ApiError(
+        '429 Too Many Requests: Too Many Requests',
+        429,
+        JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 45 })
+      )
+    }) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+    ).rejects.toThrow(/429 .*retryAfterSeconds=45/)
+  })
+})
+
+describe('GfsClient.revokeGrant', () => {
+  it('DELETEs the grant by id with the bearer token', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+    await new GfsClient(transport({ requestJson })).revokeGrant(GRANT_ID, 'tok')
+    expect(requestJson).toHaveBeenCalledWith(
+      'DELETE',
+      `https://api.example/api/v1/me/gfs/grants/${GRANT_ID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('rejects a non-UUID grant id before any round-trip (no path injection)', async () => {
+    const t = transport()
+    for (const bad of ['', 'not-a-uuid', '../grants', `${GRANT_ID}/extra`, 'main?x=1']) {
+      await expect(new GfsClient(t).revokeGrant(bad, 'tok')).rejects.toThrow(
+        /grant id must be a UUID/
+      )
+    }
+    expect(t.requestJson).not.toHaveBeenCalled()
+  })
+})
+
+const SHARE_ITEM = {
+  id: SHARE_ID,
+  drive: 'main',
+  resourceId: RID,
+  subject: { type: 'team', id: 'team-1' },
+  permissions: ['read'],
+  includeDescendants: true,
+}
+
+describe('GfsClient.listShares', () => {
+  it('GETs the exact shares route and unwraps its direct items array', async () => {
+    const requestJson = vi.fn(async () => ({ items: [SHARE_ITEM] })) as GfsTransport['requestJson']
+    const out = await new GfsClient(transport({ requestJson })).listShares(
+      { resourceId: RID, drive: 'main' },
+      'tok'
+    )
+
+    expect(out).toEqual([SHARE_ITEM])
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      `https://api.example/api/v1/me/gfs/shares?drive=main&resourceId=${RID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('fails loud when the response carries no items array', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+
+    await expect(
+      new GfsClient(transport({ requestJson })).listShares({ resourceId: RID }, 'tok')
+    ).rejects.toThrow('unexpected gfs shares response: missing items array')
+  })
+})
+
+describe('GfsClient.revokeShare', () => {
+  it('DELETEs the exact share route with the bearer token', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+
+    await new GfsClient(transport({ requestJson })).revokeShare(SHARE_ID, 'tok')
+
+    expect(requestJson).toHaveBeenCalledWith(
+      'DELETE',
+      `https://api.example/api/v1/me/gfs/shares/${SHARE_ID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('rejects a non-UUID share id before any round-trip', async () => {
+    const t = transport()
+
+    await expect(new GfsClient(t).revokeShare('../shares', 'tok')).rejects.toThrow(
+      /share id must be a UUID/
+    )
+    expect(t.requestJson).not.toHaveBeenCalled()
   })
 })
 
 describe('GfsClient.createShare', () => {
-  it('POSTs a read share covering descendants', async () => {
+  it('POSTs ONE bulk read share for the subjects[] array', async () => {
     const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
     await new GfsClient(transport({ requestJson })).createShare(
-      { resourceId: RID, subject: { type: 'team', id: 't1' }, permissions: ['read'] },
+      {
+        resourceId: RID,
+        subjects: [
+          { type: 'team', id: 't1' },
+          { type: 'user', id: 'u2' },
+        ],
+        permissions: ['read'],
+      },
       'tok'
     )
+    expect(requestJson).toHaveBeenCalledTimes(1)
     expect(requestJson).toHaveBeenCalledWith('POST', 'https://api.example/api/v1/me/gfs/shares', {
       token: 'tok',
       body: {
         drive: 'main',
         resourceId: RID,
-        subject: { type: 'team', id: 't1' },
+        subjects: [
+          { type: 'team', id: 't1' },
+          { type: 'user', id: 'u2' },
+        ],
         permissions: ['read'],
         includeDescendants: false,
       },
@@ -244,13 +510,24 @@ describe('GfsClient resource mutations', () => {
       1,
       'POST',
       `https://api.example/api/v1/me/gfs/resources/${RID}/children?drive=main`,
-      { token: 'tok', body: { name: 'docs', kind: 'directory' } }
+      {
+        token: 'tok',
+        body: { name: 'docs', kind: 'directory' },
+        // Assert the concrete 300000, not config.gfsUploadTimeoutMs: vitest treats
+        // {timeoutMs: undefined} as equal to a call without the key, so referencing
+        // config would make this pass vacuously if the field were ever dropped.
+        timeoutMs: 300000,
+      }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
       2,
       'POST',
       `https://api.example/api/v1/me/gfs/resources/${RID}/children?drive=main`,
-      { token: 'tok', body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' } }
+      {
+        token: 'tok',
+        body: { name: 'report.md', kind: 'file', contentBase64: 'aGVsbG8=' },
+        timeoutMs: 300000,
+      }
     )
   })
 
@@ -267,7 +544,11 @@ describe('GfsClient resource mutations', () => {
       1,
       'PUT',
       `https://api.example/api/v1/me/gfs/resources/${RID}/content?drive=main`,
-      { token: 'tok', body: { contentBase64: 'aGVsbG8=', ifMatch: 1 } }
+      {
+        token: 'tok',
+        body: { contentBase64: 'aGVsbG8=', ifMatch: 1 },
+        timeoutMs: 300000,
+      }
     )
     expect(requestJson).toHaveBeenNthCalledWith(
       2,
@@ -290,12 +571,45 @@ describe('parseSubjectKey', () => {
     expect(parseSubjectKey('team:xyz')).toEqual({ type: 'team', id: 'xyz' })
   })
 
+  it('parses managed host subject keys (first colon splits type from the canonical id)', () => {
+    expect(parseSubjectKey('host:1st:mcp-host/chatllm')).toEqual({
+      type: 'host',
+      id: '1st:mcp-host/chatllm',
+    })
+    expect(parseSubjectKey('host:3rd:sandbox-recipes/scraper-0')).toEqual({
+      type: 'host',
+      id: '3rd:sandbox-recipes/scraper-0',
+    })
+  })
+
+  it('rejects host subject keys that fail the server grammar shape', () => {
+    // No party/namespace (pre-822 grammar stays rejected).
+    expect(() => parseSubjectKey('host:chatllm')).toThrow(/host:<party>:<ns>\/<name>/)
+    // Unknown party.
+    expect(() => parseSubjectKey('host:2nd:mcp-host/chatllm')).toThrow(GfsUriError)
+    // Empty namespace or name.
+    expect(() => parseSubjectKey('host:1st:/chatllm')).toThrow(GfsUriError)
+    expect(() => parseSubjectKey('host:1st:mcp-host/')).toThrow(GfsUriError)
+    expect(() => parseSubjectKey('host:')).toThrow(GfsUriError)
+    // Not k8s DNS-1123 names.
+    expect(() => parseSubjectKey('host:1st:MCP-Host/chatllm')).toThrow(GfsUriError)
+    expect(() => parseSubjectKey('host:1st:mcp-host/-chatllm')).toThrow(GfsUriError)
+    // Extra path segment.
+    expect(() => parseSubjectKey('host:1st:mcp-host/a/b')).toThrow(GfsUriError)
+    // Over the 63-char k8s name budget.
+    expect(() => parseSubjectKey(`host:1st:mcp-host/${'a'.repeat(64)}`)).toThrow(GfsUriError)
+    // At the 63-char budget: accepted.
+    expect(parseSubjectKey(`host:1st:mcp-host/${'a'.repeat(63)}`)).toEqual({
+      type: 'host',
+      id: `1st:mcp-host/${'a'.repeat(63)}`,
+    })
+  })
+
   it('rejects malformed and operator/provisioner-only subject keys', () => {
     expect(() => parseSubjectKey('')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('user:')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('bogus:1')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('operator')).toThrow(GfsUriError)
-    expect(() => parseSubjectKey('host:chatllm')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('context:engineering')).toThrow(GfsUriError)
   })
 })

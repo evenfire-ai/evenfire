@@ -1,0 +1,284 @@
+{
+  "images": [
+    {
+      "name": "channel-reader",
+      "path": "channel-reader",
+      "source_paths": ["channel-reader/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "workflow-approval-request-reader",
+      "path": "workflow-approval-request-reader",
+      "source_paths": ["workflow-approval-request-reader/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "control-api",
+      "path": "control-api",
+      "rooted": true,
+      "source_paths": [
+        "control-api/**",
+        "packages/workflow-runtime-core/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/image-policy/**",
+        "packages/display-field/**"
+      ],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "control-ui",
+      "path": "control-ui",
+      "rooted": true,
+      "source_paths": [
+        "control-ui/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/display-field/**"
+      ],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "external-rest-api",
+      "path": "external-rest-api",
+      "source_paths": ["external-rest-api/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "host-context-controller",
+      "path": "host-context-controller",
+      "rooted": true,
+      "source_paths": [
+        "host-context-controller/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/image-policy/**",
+        "packages/network-policy-core/**"
+      ],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "mcp-host",
+      "path": "mcp-host",
+      "rooted": true,
+      "source_paths": ["mcp-host/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "mcp-host-slim",
+      "path": "mcp-host",
+      "dockerfile": "Dockerfile.slim",
+      "rooted": true,
+      "source_paths": ["mcp-host/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "mcp-host-full",
+      "path": "mcp-host",
+      "dockerfile": "Dockerfile.full",
+      "rooted": true,
+      "source_paths": ["mcp-host/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "mcp-host-desktop",
+      "path": "mcp-host",
+      "dockerfile": "Dockerfile.desktop",
+      "rooted": true,
+      "source_paths": ["mcp-host/**"],
+      "published": true,
+      "deployed_to_minikube": false
+    },
+    {
+      "name": "mcp-proxy",
+      "path": "mcp-proxy",
+      "source_paths": ["mcp-proxy/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "gfs-controller",
+      "path": "gfs-controller",
+      "source_paths": ["gfs-controller/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "nginx-egress-proxy",
+      "path": "nginx-egress-proxy",
+      "source_paths": ["nginx-egress-proxy/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "profile-ui",
+      "path": "profile-ui",
+      "rooted": true,
+      "source_paths": ["profile-ui/**", "packages/desktop-app-links/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "rpc-proxy",
+      "path": "rpc-proxy",
+      "source_paths": ["rpc-proxy/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "workflow-recipes",
+      "path": "workflow-recipes",
+      "rooted": true,
+      "source_paths": [
+        "workflow-recipes/**",
+        "packages/workflow-runtime-core/**",
+        "packages/workflow-sdk/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/image-policy/**",
+        "packages/network-policy-core/**",
+        "scripts/e2e/**",
+        "tests/e2e/fixtures/**"
+      ],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "workflow-coordinator",
+      "path": "workflow-recipes",
+      "dockerfile": "Dockerfile.coordinator",
+      "rooted": true,
+      "source_paths": [
+        "workflow-recipes/**",
+        "packages/workflow-runtime-core/**",
+        "packages/workflow-sdk/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/image-policy/**",
+        "packages/network-policy-core/**",
+        "scripts/e2e/**",
+        "tests/e2e/fixtures/**"
+      ],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "workflow-snippet-runner",
+      "path": "workflow-recipes",
+      "rooted": true,
+      "source_paths": [
+        "workflow-recipes/**",
+        "packages/workflow-runtime-core/**",
+        "packages/workflow-sdk/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/image-policy/**",
+        "packages/network-policy-core/**",
+        "scripts/e2e/**",
+        "tests/e2e/fixtures/**"
+      ],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "clerum-workflow-base",
+      "path": "packages/workflow-sdk",
+      "dockerfile": "Dockerfile.base",
+      "rooted": true,
+      "source_paths": [
+        "workflow-recipes/**",
+        "packages/workflow-runtime-core/**",
+        "packages/workflow-sdk/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/image-policy/**",
+        "packages/network-policy-core/**",
+        "scripts/e2e/**",
+        "tests/e2e/fixtures/**"
+      ],
+      "published": true,
+      "deployed_to_minikube": false
+    },
+    {
+      "name": "stdio-bridge",
+      "path": "stdio-bridge",
+      "source_paths": ["stdio-bridge/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "workspace-files-controller",
+      "path": "workspace-files-controller",
+      "source_paths": ["workspace-files-controller/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "airtable-mcp-server",
+      "path": "mcp-servers/airtable",
+      "source_paths": ["mcp-servers/airtable/**"],
+      "published": true,
+      "deployed_to_minikube": false
+    },
+    {
+      "name": "playwright-server",
+      "path": "mcp-servers/playwright",
+      "local_name": "playwright-mcp-server",
+      "source_paths": ["mcp-servers/playwright/**"],
+      "published": true,
+      "deployed_to_minikube": false
+    },
+    {
+      "name": "web-search-mcp",
+      "path": "mcp-servers/web-search",
+      "local_tag": "v1",
+      "source_paths": ["mcp-servers/web-search/**"],
+      "published": true,
+      "deployed_to_minikube": false
+    },
+    {
+      "name": "mock-mcp-server",
+      "path": "tests/e2e/fixtures/mock-mcp-server",
+      "source_paths": ["tests/e2e/fixtures/mock-mcp-server/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "mock-stdio-mcp-server",
+      "path": "tests/e2e/fixtures/mock-stdio-mcp-server",
+      "source_paths": ["tests/e2e/fixtures/mock-stdio-mcp-server/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "webhook-gateway",
+      "path": "webhook-gateway",
+      "source_paths": ["webhook-gateway/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "webhook-proxy",
+      "path": "webhook-proxy",
+      "source_paths": ["webhook-proxy/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "workflow-custom-sdk-e2e",
+      "path": "tests/e2e/fixtures/custom-workflow-coordinator",
+      "published": false,
+      "deployed_to_minikube": true,
+      "e2e_only": true
+    },
+    {
+      "name": "workflow-plugin-sdk-e2e",
+      "path": "tests/e2e/fixtures/workflow-plugin-sdk-e2e",
+      "published": false,
+      "deployed_to_minikube": true,
+      "e2e_only": true
+    }
+  ]
+}

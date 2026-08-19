@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
-import { IconChat, IconClose, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
+import {
+  IconChat,
+  IconClose,
+  IconCopy,
+  IconRefresh,
+  IconSandboxUi,
+} from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
-import type { SandboxUiPageProps } from './SandboxUiPage.types'
-
-type App = {
-  appRef: string
-  title?: string
-  description?: string
-  icon?: string
-  defaultPath: string
-  ready: boolean
-  phase: string | null
-  updatedAt: string | null
-}
+import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
+import type {
+  SandboxUiLaunchApp,
+  SandboxUiPageProps,
+  SandboxUiShortcutOpenResult,
+} from './SandboxUiPage.types'
 
 type PhasePillTone = 'allowed' | 'warning' | 'denied' | 'info' | 'muted'
 
@@ -62,7 +62,7 @@ function statusFromError(err: unknown): { status: number | null; message: string
   return { status: m ? Number(m[1] ?? m[2]) : null, message }
 }
 
-function appLabel(app: App): string {
+function appLabel(app: SandboxUiAppListing): string {
   if (app.title && app.title.trim().length > 0) return app.title.trim()
   return app.appRef
 }
@@ -143,10 +143,12 @@ function useEmbedBounds(
 }
 
 const APP_PAGE_SIZE = 6
+let pendingSandboxUiUnmountCleanup: number | null = null
 
 export function SandboxUiPage({
   boundsRefreshKey = 0,
   conversationOrigin = null,
+  currentTeamId = '',
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
   toastShellOverlayOpen = false,
@@ -157,8 +159,10 @@ export function SandboxUiPage({
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
+  onNotify,
+  onShortcutOpenResult,
 }: SandboxUiPageProps = {}) {
-  const [apps, setApps] = useState<App[] | null>(null)
+  const [apps, setApps] = useState<SandboxUiAppListing[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [launch, setLaunch] = useState<LaunchState>({ kind: 'idle' })
   const [refreshError, setRefreshError] = useState<{ appRef: string; message: string } | null>(null)
@@ -210,24 +214,29 @@ export function SandboxUiPage({
   }, [])
 
   // Tear down the embed when this page unmounts (user navigates away).
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (pendingSandboxUiUnmountCleanup !== null) {
+      window.clearTimeout(pendingSandboxUiUnmountCleanup)
+      pendingSandboxUiUnmountCleanup = null
+    }
     return () => {
-      void window.clerum.sandboxUi.close()
-      onEmbeddedAppBack?.()
+      pendingSandboxUiUnmountCleanup = window.setTimeout(() => {
+        pendingSandboxUiUnmountCleanup = null
+        void window.clerum.sandboxUi.close()
+        onEmbeddedAppBack?.()
+      }, 0)
     }
   }, [onEmbeddedAppBack])
 
   const openApp = useCallback(
-    async (app: {
-      appRef: string
-      label: string
-      icon?: string
-      defaultPath: string
-      ready?: boolean
-    }) => {
-      if (app.ready === false) return
+    async (app: SandboxUiLaunchApp): Promise<SandboxUiShortcutOpenResult> => {
+      if (app.ready === false) {
+        return { status: 'failed', message: 'This app is starting up. Try again in a moment.' }
+      }
       const [recipeNs, recipeName] = app.appRef.split('/', 2)
-      if (!recipeNs || !recipeName) return
+      if (!recipeNs || !recipeName) {
+        return { status: 'failed', message: 'Invalid app reference' }
+      }
       // Transition to 'minting' so the slot div mounts. Wait for the next
       // layout commit so getBoundingClientRect() reflects the slot's real
       // position (otherwise we'd be reading before React has rendered the
@@ -239,6 +248,7 @@ export function SandboxUiPage({
         label: app.label,
         icon: app.icon,
         defaultPath: app.defaultPath,
+        ...(app.routePath ? { routePath: app.routePath } : {}),
       })
       try {
         const rect = await waitForEmbedSlotRect(embedSlotRef)
@@ -249,10 +259,15 @@ export function SandboxUiPage({
         await window.clerum.sandboxUi.open({
           recipeNs,
           recipeName,
+          // Title travels from the trusted app list into consent prompts and
+          // notification attribution. The plugin never gets to name itself.
+          ...(app.label ? { title: app.label } : {}),
           defaultPath: app.defaultPath,
+          ...(app.routePath ? { routePath: app.routePath } : {}),
           bounds,
         })
         setLaunch({ kind: 'mounted', appRef: app.appRef })
+        return { status: 'mounted' }
       } catch (err) {
         const { status, message } = statusFromError(err)
         const userFacing =
@@ -265,13 +280,14 @@ export function SandboxUiPage({
                 : message
         setLaunch({ kind: 'error', appRef: app.appRef, message: userFacing })
         onEmbeddedAppRemoved?.()
+        return { status: 'failed', message: userFacing }
       }
     },
     [onEmbeddedAppOpening, onEmbeddedAppRemoved]
   )
 
   const onOpen = useCallback(
-    async (app: App) => {
+    async (app: SandboxUiAppListing) => {
       await openApp({
         appRef: app.appRef,
         label: appLabel(app),
@@ -301,8 +317,13 @@ export function SandboxUiPage({
 
   const handleBackToConversation = useCallback(async () => {
     if (!conversationOrigin || !onBackToConversation) return
-    await closeEmbed()
-    onBackToConversation()
+    try {
+      await onBackToConversation()
+      await closeEmbed()
+    } catch {
+      // The owner keeps the embedded app open and reports the failed team or
+      // conversation transition without leaving the two views inconsistent.
+    }
   }, [closeEmbed, conversationOrigin, onBackToConversation])
 
   // In-place hard-reload of the embedded app — fetches freshly-arrived
@@ -311,6 +332,16 @@ export function SandboxUiPage({
   const onRefresh = useCallback(() => {
     void window.clerum.sandboxUi.reload()
   }, [])
+
+  const onCopyDeepLink = useCallback(async () => {
+    try {
+      await window.clerum.sandboxUi.copyDeepLink(currentTeamId || undefined)
+      onNotify?.('App link copied to clipboard.', 'success')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      onNotify?.(`Could not copy app link: ${message}`, 'error')
+    }
+  }, [currentTeamId, onNotify])
 
   const onRemoveApp = useCallback(async () => {
     await closeEmbed()
@@ -321,8 +352,10 @@ export function SandboxUiPage({
     if (shortcutOpenRequestId === lastShortcutOpenRequestIdRef.current) return
     lastShortcutOpenRequestIdRef.current = shortcutOpenRequestId
     if (shortcutOpenRequestId <= 0 || !shortcutApp) return
-    void openApp(shortcutApp)
-  }, [openApp, shortcutApp, shortcutOpenRequestId])
+    void openApp(shortcutApp).then(result => {
+      void onShortcutOpenResult?.(shortcutOpenRequestId, result)
+    })
+  }, [onShortcutOpenResult, openApp, shortcutApp, shortcutOpenRequestId])
 
   // Track bounds while mounted; also during 'minting' so onOpen can read
   // the slot's rect AFTER the layout pass that renders the slot div.
@@ -419,18 +452,32 @@ export function SandboxUiPage({
             <span>Back to apps</span>
           </Button>
           {launch.kind === 'mounted' && (
-            <Button
-              color="neutral"
-              variant="soft"
-              size="sm"
-              className="sandbox-ui-refresh-btn"
-              aria-label="Refresh"
-              title="Refresh app content"
-              onClick={onRefresh}
-            >
-              <IconRefresh />
-              <span>Refresh</span>
-            </Button>
+            <>
+              <Button
+                color="neutral"
+                variant="soft"
+                size="sm"
+                className="sandbox-ui-refresh-btn"
+                aria-label="Refresh"
+                title="Refresh app content"
+                onClick={onRefresh}
+              >
+                <IconRefresh />
+                <span>Refresh</span>
+              </Button>
+              <Button
+                color="neutral"
+                variant="soft"
+                size="sm"
+                className="sandbox-ui-copy-link-btn"
+                aria-label="Copy current app link"
+                title="Copy current app link"
+                onClick={() => void onCopyDeepLink()}
+              >
+                <IconCopy />
+                <span>Copy URL</span>
+              </Button>
+            </>
           )}
         </div>
         {showRefreshBanner && (
@@ -520,11 +567,11 @@ export function SandboxUiPage({
     )
   }
 
-  const appIcon = (app: App) =>
+  const appIcon = (app: SandboxUiAppListing) =>
     app.icon ? <img src={app.icon} alt="" width={20} height={20} /> : <IconSandboxUi />
 
-  const appStatusPill = (app: App) => {
-    const pill = phasePill(app.phase)
+  const appStatusPill = (app: SandboxUiAppListing) => {
+    const pill = phasePill(app.phase ?? null)
     return <span className={`apps-status-pill apps-status-pill--${pill.tone}`}>{pill.label}</span>
   }
 
@@ -538,7 +585,7 @@ export function SandboxUiPage({
   )
   const showAppPagination = totalAppPages > 1
 
-  const gridCardProps = (app: App, activatable: boolean, activate: () => void) => {
+  const gridCardProps = (app: SandboxUiAppListing, activatable: boolean, activate: () => void) => {
     if (!activatable) return {}
     return clickableRowProps(activate, { ariaLabel: `Open ${appLabel(app)}` })
   }
@@ -585,7 +632,9 @@ export function SandboxUiPage({
                 </span>
                 <span className="apps-grid__card-title">{appLabel(app)}</span>
                 {appStatusPill(app)}
-                <span className="apps-card-meta__updated">{formatLastUpdated(app.updatedAt)}</span>
+                <span className="apps-card-meta__updated">
+                  {formatLastUpdated(app.updatedAt ?? null)}
+                </span>
                 {app.description ? (
                   <span className="apps-grid__card-desc">{app.description}</span>
                 ) : null}

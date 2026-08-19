@@ -2,10 +2,8 @@
  * E2E -- HostApprovalSection editor flow
  *
  * Validates the per-tool approval override UI on the host detail page:
- *   Scenario 1: Toggle http_request → Skip → Save → override persists
- *               in read-only summary; warning icon visible at edit time.
- *   Scenario 2: Toggle http_request back to Default → Save → section
- *               returns to empty state.
+ *   Scenario 1: Toggle http_request → Skip → Save → override persists.
+ *   Scenario 2: Toggle http_request back to Default → Save → override clears.
  *   Scenario 3: Cancel discards the in-flight shell_exec change.
  *
  * Prerequisites:
@@ -61,26 +59,24 @@ async function login(page: Page) {
 }
 
 /**
- * Click the Edit button in the "Per-tool approval" section header.
- * The button lives in the same flex-row div as the section title <p>.
- * We find the closest ancestor div that directly contains both elements.
+ * Enter edit mode when the embedding surface did not open it by default.
  */
 async function clickSectionEdit(page: Page) {
-  // The flex-row container is the div that directly wraps the <p> and <button>.
-  // All ancestor divs also satisfy `:has(p.cu-section-title)`, so we use .last()
-  // to get the deepest (most specific) match — the flex-row div itself.
-  const flexRow = page
-    .locator('div')
-    .filter({ has: page.locator('p.cu-section-title:has-text("Per-tool approval")') })
-    .last()
-  await flexRow.locator('button:has-text("Edit")').click()
+  if ((await page.locator('#approval-http_request').count()) > 0) return
+  await page
+    .locator('.cu-host-approval-section__actions')
+    .locator('button:has-text("Edit")')
+    .click()
 }
 
 /** Navigate to the host detail page and wait for the Per-tool approval section to load. */
 async function gotoHostDetails(page: Page) {
-  await page.goto(`${BASE_UI}/hosts/${encodeURIComponent(HOST_NAME)}`)
-  // The HostApprovalSection renders after `!initialLoading`, wait for the section header.
-  await page.waitForSelector('text=Per-tool approval', { timeout: 20_000 })
+  // The Per-tool approval editor now lives under the consolidated Advanced
+  // tab. The old `/approvals` slug is still served via a 308 redirect, but
+  // navigating to the canonical URL directly keeps this E2E independent of
+  // that compatibility shim.
+  await page.goto(`${BASE_UI}/hosts/${encodeURIComponent(HOST_NAME)}/advanced`)
+  await page.waitForSelector('.cu-host-approval-section', { timeout: 20_000 })
 }
 
 /**
@@ -135,7 +131,7 @@ test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => 
 
   // ── HAT1. Toggle http_request → Skip → Save ─────────────────────────────
 
-  test('HAT1. Toggle http_request to Skip, Save — override persists in read-only summary with warning icon', async () => {
+  test('HAT1. Toggle http_request to Skip, Save — override persists with warning icon', async () => {
     test.skip(!token, 'Login failed — skipping')
 
     // Start from clean slate
@@ -143,9 +139,6 @@ test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => 
 
     await gotoHostDetails(page)
 
-    // Click Edit in the Per-tool approval section.
-    // The flex-row div that holds the section title also holds the Edit button.
-    // We locate it as the div directly containing both the <p> title and the <button>.
     await clickSectionEdit(page)
 
     // Wait for the edit-mode selects to appear
@@ -172,19 +165,10 @@ test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => 
       .last()
     await saveBtn.click()
 
-    // Wait for the section to return to read-only mode (Edit button reappears)
-    await page.waitForSelector('p.cu-section-title:has-text("Per-tool approval")', {
-      timeout: 15_000,
-    })
-    // Give the page time to re-render after loadData() completes
-    await page.waitForTimeout(2_000)
-
-    // Read-only mode: verify http_request → Skip row is visible
-    const readOnlySummary = page.locator('.cu-access-row')
-    const rowTexts = await readOnlySummary.allTextContents()
-    const httpRequestRow = rowTexts.find(t => t.includes('http_request'))
-    expect(httpRequestRow).toBeTruthy()
-    expect(httpRequestRow).toContain('Skip')
+    await expect(page.locator('#approval-http_request')).toHaveValue('skip')
+    await expect(
+      page.locator('.cu-host-approval-section__actions button:has-text("Save")')
+    ).toBeDisabled()
 
     // Bonus: verify via API that the CRD was patched
     const { status, data } = await api(token, 'GET', `/api/v1/admin/hosts/${HOST_NAME}`)
@@ -200,7 +184,7 @@ test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => 
 
   // ── HAT2. Toggle back to Default → Save → empty state ───────────────────
 
-  test('HAT2. Toggle http_request back to Default, Save — section shows empty state', async () => {
+  test('HAT2. Toggle http_request back to Default, Save — override clears', async () => {
     test.skip(!token, 'Login failed — skipping')
 
     await gotoHostDetails(page)
@@ -230,21 +214,7 @@ test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => 
     // Wait for re-render
     await page.waitForTimeout(2_000)
 
-    // Section should now show the empty state (no overrides)
-    const emptyState = page.locator('.cu-empty:has-text("No per-tool overrides")')
-    // Allow for the possibility the cluster still has other overrides in flight;
-    // what matters is that http_request is NOT in the summary anymore.
-    const readOnlyRows = page.locator('.cu-access-row')
-    const rowCount = await readOnlyRows.count()
-    if (rowCount === 0) {
-      // Ideal: the empty state banner is visible
-      expect(await emptyState.count()).toBeGreaterThan(0)
-    } else {
-      // Some other override exists — confirm http_request is not in the list
-      const texts = await readOnlyRows.allTextContents()
-      const hasHttpRequest = texts.some(t => t.includes('http_request'))
-      expect(hasHttpRequest).toBe(false)
-    }
+    await expect(page.locator('#approval-http_request')).toHaveValue('default')
 
     // API verification
     const { status, data } = await api(token, 'GET', `/api/v1/admin/hosts/${HOST_NAME}`)
@@ -267,14 +237,9 @@ test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => 
     await clearApprovalTools(token)
     await gotoHostDetails(page)
 
-    // Record the current read-only state (expected: empty state or previous overrides)
-    const readOnlyRowsBefore = page.locator('.cu-access-row')
-    const countBefore = await readOnlyRowsBefore.count()
-    const textsBefore = await readOnlyRowsBefore.allTextContents()
-
-    // Click Edit
     await clickSectionEdit(page)
     await page.waitForSelector('#approval-shell_exec', { timeout: 10_000 })
+    const valueBefore = await page.locator('#approval-shell_exec').inputValue()
 
     // Change shell_exec to Skip (a dirty change)
     await page.selectOption('#approval-shell_exec', 'skip')
@@ -282,30 +247,9 @@ test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => 
     // Click Cancel
     await page.locator('button:has-text("Cancel")').last().click()
 
-    // The section should revert to read-only mode immediately — no Save dialog
-    await page.waitForSelector('p.cu-section-title:has-text("Per-tool approval")', {
-      timeout: 10_000,
-    })
-    await page.waitForTimeout(500)
-
-    // Edit button should be visible again (back in read-only mode)
-    const flexRowAfter = page
-      .locator('div')
-      .filter({ has: page.locator('p.cu-section-title:has-text("Per-tool approval")') })
-      .last()
-    const editBtnAfter = flexRowAfter.locator('button:has-text("Edit")')
-    expect(await editBtnAfter.count()).toBeGreaterThan(0)
-
-    // The read-only rows should be the same as before the edit
-    const readOnlyRowsAfter = page.locator('.cu-access-row')
-    const countAfter = await readOnlyRowsAfter.count()
-    const textsAfter = await readOnlyRowsAfter.allTextContents()
-
-    expect(countAfter).toBe(countBefore)
-    expect(textsAfter).toEqual(textsBefore)
-
-    // shell_exec must NOT appear in the read-only summary (was only in draft)
-    const hasShellExecAfter = textsAfter.some(t => t.includes('shell_exec'))
-    expect(hasShellExecAfter).toBe(false)
+    await expect(page.locator('#approval-shell_exec')).toHaveValue(valueBefore)
+    await expect(
+      page.locator('.cu-host-approval-section__actions button:has-text("Save")')
+    ).toBeDisabled()
   })
 })

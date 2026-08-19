@@ -5,16 +5,49 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import {
+  applyGfsUploadCleanupSchema,
+  applyGfsUploadFinalizingSchema,
+  applyGfsUploadSessionSchema,
+} from './services/gfsUploadSchema.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
+  addPluginWorkloadSdkAttemptLedgerColumns,
+  addPluginWorkloadSdkCredentialTicketRuntimeAccess,
+  addPluginWorkloadSdkJitCredentialTicketColumns,
+  addPluginWorkloadSdkNotExecutedSpendOutcome,
+  addPluginWorkloadSdkPolicyReviewProvenance,
+  addPluginWorkloadSdkPromptTargetPolicyColumns,
+  addPluginWorkloadSdkProtocolAndRevocation,
+  addPluginWorkloadSdkProviderAttemptLedger,
   addPluginWorkloadSdkProviderColumn,
+  addPluginWorkloadSdkRevocationEpoch,
+  addPluginWorkloadSdkRuntimeAccess,
+  addPluginWorkloadSdkSpendOutcomeLedger,
+  addPluginWorkloadSdkUsageSourceKind,
   applyPluginWorkloadSdkSchema,
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
+  relaxPluginWorkloadSdkSpendOutcomeHostRef,
+  repairPluginWorkloadSdkLegacyGrantPolicies,
 } from './services/pluginWorkloadSdkSchema.js'
 import { applyRegistryConnectionSchema } from './services/registryConnectionSchema.js'
 
 export type DbClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+}
+
+// issue #375 M3 (jozer review): brand for clients that live INSIDE an open
+// transaction. `DbClient` is structural (`{ query }`), so `Pool` satisfies it
+// and a refactor from the in-transaction `db` to the module-level `pool` still
+// typechecks while silently breaking COMMIT/ROLLBACK coupling (e.g. a
+// transactional `pg_notify` becoming an autocommitted one). The unique-symbol
+// brand cannot be satisfied structurally, so any API that REQUIRES the
+// transaction session (like the grant-update NOTIFY) declares
+// `DbTransactionClient` and the pool no longer compiles there. It remains
+// assignable to `DbClient`, so passing it onward to ordinary helpers is free.
+declare const dbTransactionClientBrand: unique symbol
+export type DbTransactionClient = DbClient & {
+  readonly [dbTransactionClientBrand]: 'transaction'
 }
 
 type DbSessionClient = DbClient & {
@@ -44,6 +77,20 @@ const MIN_CONNECTION_TIMEOUT_MS = 100
 const MAX_CONNECTION_TIMEOUT_MS = 30_000
 const MIN_STATEMENT_TIMEOUT_MS = 100
 const MAX_STATEMENT_TIMEOUT_MS = 30_000
+
+// R1-H3 fase 1 (host↔model serialization). The reductor (llm-model disable/
+// delete) and the referencer (host create/update) both take a per-MODEL-NAME
+// advisory lock and HOLD it across the K8s write (Decisión A of
+// work-tracker/reviews/pr-339/minispec-R1-H3-concurrency.md). While the carrier
+// transaction awaits the K8s API it is idle-in-transaction, so neither
+// statement_timeout nor lock_timeout bounds the lock/connection tenancy — only
+// idle_in_transaction_session_timeout does (adenda A2). We set it per-carrier-
+// transaction (SET LOCAL) so a hung K8s call fails fast and releases the lock +
+// the scarce pool connection (core pool max defaults to 10) instead of pinning
+// them indefinitely.
+const MIN_CARRIER_IDLE_TIMEOUT_MS = 1_000
+const MAX_CARRIER_IDLE_TIMEOUT_MS = 60_000
+const DEFAULT_CARRIER_IDLE_TIMEOUT_MS = 15_000
 
 const DEFAULT_CORE_POOL_MAX = 10
 const DEFAULT_CORE_POOL_IDLE_TIMEOUT_MS = 30_000
@@ -1334,7 +1381,7 @@ async function applyWorkflowRecipeAllowedTeamsAuditSchema(db: DbClient): Promise
 async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
   await db.query(`
     DO $$ BEGIN
-      CREATE TYPE usage_source_kind AS ENUM ('channel','desktop','workflow','cron','unknown');
+      CREATE TYPE usage_source_kind AS ENUM ('channel','desktop','workflow','cron','unknown','plugin_workload_sdk');
     EXCEPTION WHEN duplicate_object THEN NULL;
     END $$;
 
@@ -1374,6 +1421,8 @@ async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
       ON usage_events (llm_secret_name, ts) WHERE llm_secret_name IS NOT NULL;
     ALTER TABLE usage_events
       ADD COLUMN IF NOT EXISTS team_id TEXT;
+    ALTER TABLE usage_events
+      ADD COLUMN IF NOT EXISTS prompt_bridge_metadata JSONB;
     CREATE INDEX IF NOT EXISTS usage_events_team_id_ts_idx
       ON usage_events (team_id, ts) WHERE team_id IS NOT NULL;
 
@@ -1493,6 +1542,14 @@ async function applyUsageTrackingBaseline(db: DbClient): Promise<void> {
       ON usage_daily (team_id, bucket) WHERE team_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS usage_daily_recipe_idx
       ON usage_daily (recipe_name, bucket) WHERE recipe_name IS NOT NULL;
+  `)
+}
+
+/** Adds bounded promptBridge target attribution to the raw usage ledger. */
+async function addPromptBridgeUsageMetadataColumn(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE usage_events
+      ADD COLUMN IF NOT EXISTS prompt_bridge_metadata JSONB;
   `)
 }
 
@@ -2072,9 +2129,10 @@ async function applyUserNotificationPreferencesPreferredAccount(db: DbClient): P
 async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
   // Global File System (gfs) permission store — the governance plane's source
   // of truth for resource metadata, folder grants, URI-bound shares, and the
-  // append-only hash-chained audit log. File bytes live flat by resource_id in
-  // the gfsc-mounted volume; the human path is metadata here (path_cache),
-  // never mirrored on disk. There is deliberately NO tenant_id column —
+  // append-only hash-chained audit log. File bytes use opaque internal
+  // resource-generation keys in the gfsc-mounted volume; the human path is
+  // metadata here (path_cache), never mirrored on disk. There is deliberately
+  // NO tenant_id column —
   // multi-tenancy is the managed edition (P6), not the open core.
   await db.query(`
     CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -2258,6 +2316,703 @@ async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
     REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON gfs_shares FROM gfs_controller;
     REVOKE UPDATE, DELETE, TRUNCATE ON gfs_audit FROM gfs_controller;
     REVOKE DELETE, TRUNCATE ON gfs_resources FROM gfs_controller;
+  `)
+}
+
+/**
+ * Reconcile all Plugin Workload SDK contracts that were edited in-place after
+ * their migrations had already run on long-lived databases. This is one
+ * forward-only migration on purpose: the migration runner never replays a
+ * recorded version, so the repair must be an explicit new step rather than a
+ * re-run of an historical migration.
+ */
+async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise<void> {
+  await db.query(`
+    -- Bound the wait for the table locks so a stuck concurrent writer cannot make
+    -- this migration hang indefinitely. EXCLUSIVE conflicts with the ROW EXCLUSIVE
+    -- that ordinary INSERT/UPDATE/DELETE take (e.g. the trace-retention prune's
+    -- DELETE FROM agent_run_events), so if such a writer holds its lock past this
+    -- timeout the LOCK/DDL below fails loudly (exit 1) rather than stalling. 60s
+    -- sits well above the bounded prune wake-transaction and well below the deploy's
+    -- 300s kubectl-wait budget, so a transient writer is tolerated but a genuinely
+    -- stuck one surfaces fast. The migration Job sets backoffLimit 2 with
+    -- restartPolicy Never (deploy script, same PR), so a transient lock_timeout
+    -- abort re-runs on a fresh pod -- up to 3 attempts -- instead of failing the
+    -- deploy outright; the body is idempotent, so a retry is safe.
+    SET LOCAL lock_timeout = '60s';
+
+    -- Runtime writers do not take the initDb advisory lock. Hold the table locks
+    -- in the same logical order as finalization (invocation -> receipt ->
+    -- provider attempt) before replacing validators or fencing rows.
+    -- EXCLUSIVE MODE (not SHARE ROW EXCLUSIVE) conflicts with the ROW SHARE that
+    -- finalization's SELECT ... FOR UPDATE takes, so a concurrent finalization
+    -- cannot hold row locks and deadlock against the ACCESS EXCLUSIVE that the
+    -- ALTERs below acquire; plain readers (ACCESS SHARE) are still allowed. This
+    -- closes the rolling-deploy race in which a writer could change a row between
+    -- the ambiguity check and the repair UPDATE.
+    LOCK TABLE
+      plugin_workload_sdk_invocations,
+      plugin_workload_sdk_invocation_attempts,
+      plugin_workload_sdk_provider_attempts,
+      agent_run_events
+      IN EXCLUSIVE MODE;
+
+    CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
+    RETURNS BOOLEAN
+    LANGUAGE sql
+    IMMUTABLE
+    SET search_path = pg_catalog, public
+    AS $$
+      SELECT COALESCE(CASE
+        WHEN event_kind IS NULL THEN FALSE
+        WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
+        ELSE jsonb_typeof(value) = 'object'
+         AND octet_length(value::text) <= 16384
+         AND value ?& ARRAY[
+           'request_ref', 'provider', 'model', 'source_kind',
+           'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
+           'cache_tokens_reported'
+         ]
+         AND NOT EXISTS (
+           SELECT 1
+             FROM jsonb_object_keys(value) AS key_name
+            WHERE key_name NOT IN (
+              'request_ref', 'provider', 'model', 'source_kind',
+              'input_tokens', 'output_tokens', 'cache_read_tokens',
+              'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
+            )
+         )
+         AND jsonb_typeof(value->'request_ref') = 'string'
+         AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
+         AND jsonb_typeof(value->'provider') = 'string'
+         AND jsonb_typeof(value->'model') = 'string'
+         AND jsonb_typeof(value->'source_kind') = 'string'
+         AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
+         AND jsonb_typeof(value->'input_tokens') = 'number'
+         AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'output_tokens') = 'number'
+         AND (value->>'output_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_read_tokens') = 'number'
+         AND (value->>'cache_read_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_write_tokens') = 'number'
+         AND (value->>'cache_write_tokens') ~ '^(0|[1-9][0-9]*)$'
+         AND jsonb_typeof(value->'cache_tokens_reported') = 'boolean'
+         AND (
+           NOT (value ? 'iteration')
+           OR (
+             jsonb_typeof(value->'iteration') = 'number'
+             AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+           )
+         )
+         AND (
+           NOT (value ? 'prompt_bridge')
+           OR (
+             jsonb_typeof(value->'prompt_bridge') = 'object'
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value->'prompt_bridge') AS key_name
+                WHERE key_name NOT IN (
+                  'invocation_id', 'attempt_generation', 'target_ref',
+                  'fallback_used', 'attempt_count', 'provider_attempt_id',
+                  'provider_attempt_index'
+                )
+             )
+             AND value->'prompt_bridge' ?& ARRAY[
+               'invocation_id', 'attempt_generation', 'target_ref',
+               'fallback_used', 'attempt_count', 'provider_attempt_id',
+               'provider_attempt_index'
+             ]
+             AND jsonb_typeof(value->'prompt_bridge'->'invocation_id') = 'string'
+             AND jsonb_typeof(value->'prompt_bridge'->'provider_attempt_id') = 'string'
+             AND jsonb_typeof(value->'prompt_bridge'->'attempt_generation') = 'number'
+             AND jsonb_typeof(value->'prompt_bridge'->'provider_attempt_index') = 'number'
+             AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+             AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-4]$'
+             AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+             AND char_length(value->'prompt_bridge'->>'target_ref') BETWEEN 1 AND 256
+             AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+             AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
+             AND (value->'prompt_bridge'->>'attempt_count') ~ '^[1-4]$'
+           )
+         )
+      END, FALSE);
+    $$;
+
+    ALTER FUNCTION governed_trace_safe_metadata(JSONB)
+      SET search_path = pg_catalog, public;
+    ALTER FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      SET search_path = pg_catalog, public;
+
+    REVOKE ALL ON FUNCTION governed_trace_safe_metadata(JSONB)
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    REVOKE ALL ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT EXECUTE ON FUNCTION governed_trace_safe_metadata(JSONB)
+      TO control_api_runtime, trace_maintenance_runtime;
+    GRANT EXECUTE ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+      TO control_api_runtime;
+
+    -- Changing a function body does not recheck rows already accepted by a
+    -- CHECK that calls it, so scan every historical row fail-closed. Run the scan
+    -- FIRST, while only the EXCLUSIVE table lock is held (plain readers still
+    -- allowed), before the DROP/ADD CONSTRAINT below take ACCESS EXCLUSIVE -- this
+    -- keeps the expensive full scan out of the reader-blocking window. On failure
+    -- the message carries a bounded sample of offending (id:event_type) rows so an
+    -- operator can triage from the log. No row is rewritten or deleted: an invalid
+    -- append-only history aborts the whole migration and requires an explicit
+    -- data-governance decision.
+    DO $$
+    DECLARE
+      invalid_count BIGINT := 0;
+      invalid_sample TEXT := '';
+      offending RECORD;
+    BEGIN
+      FOR offending IN
+        SELECT COUNT(*) OVER () AS total, event_id, event_type
+          FROM agent_run_events
+         WHERE governed_trace_safe_agent_run_metadata(event_type, payload_metadata)
+               IS DISTINCT FROM TRUE
+         ORDER BY occurred_at
+         LIMIT 10
+      LOOP
+        invalid_count := offending.total;
+        invalid_sample := invalid_sample
+          || CASE WHEN invalid_sample = '' THEN '' ELSE ', ' END
+          || offending.event_id::text || ':' || offending.event_type;
+      END LOOP;
+      IF invalid_count > 0 THEN
+        RAISE EXCEPTION
+          'cannot reconcile % historical agent_run_events rows with invalid payload metadata (first % shown): %',
+          invalid_count, LEAST(invalid_count, 10), invalid_sample;
+      END IF;
+    END
+    $$;
+
+    -- History is clean: the fail-closed scan above ran under the EXCLUSIVE table
+    -- lock (plain readers proceed) and already proved every row passes, emitting a
+    -- triage sample on failure. Reinstall the named constraint with a single
+    -- validating ADD CONSTRAINT: it takes ACCESS EXCLUSIVE and scans once. A
+    -- NOT VALID + separate VALIDATE would buy nothing here -- applyPendingMigrations
+    -- holds this transaction open until COMMIT, so the ADD's ACCESS EXCLUSIVE (and
+    -- the reader blocking it implies) is held through any later VALIDATE anyway; the
+    -- split would just scan the table a second time under the same lock profile.
+    ALTER TABLE agent_run_events
+      DROP CONSTRAINT IF EXISTS agent_run_events_check;
+    ALTER TABLE agent_run_events
+      DROP CONSTRAINT IF EXISTS agent_run_events_payload_metadata_check;
+    ALTER TABLE agent_run_events
+      ADD CONSTRAINT agent_run_events_check
+      CHECK (governed_trace_safe_agent_run_metadata(event_type, payload_metadata) IS TRUE);
+
+    ALTER TABLE plugin_workload_sdk_invocations
+      ALTER COLUMN contract_version SET DEFAULT 1;
+
+    DO $$
+    DECLARE ambiguous_count BIGINT;
+    BEGIN
+      SELECT COUNT(*)
+        INTO ambiguous_count
+        FROM plugin_workload_sdk_invocations invocations
+       WHERE invocations.contract_version = 2
+         AND invocations.status = 'in_progress'
+         AND invocations.lease_expires_at IS NULL
+         AND EXISTS (
+           SELECT 1
+             FROM plugin_workload_sdk_provider_attempts attempts
+            WHERE attempts.invocation_id = invocations.id
+              AND attempts.attempt_generation = invocations.attempt_generation
+              AND attempts.status IN ('in_progress', 'complete')
+         );
+      IF ambiguous_count > 0 THEN
+        RAISE EXCEPTION
+          'cannot reconcile % v2 invocations without leases with a physical provider attempt',
+          ambiguous_count;
+      END IF;
+    END
+    $$;
+
+    CREATE TEMP TABLE plugin_workload_sdk_runtime_reconciled_invocations (
+      invocation_id UUID PRIMARY KEY,
+      attempt_generation INTEGER NOT NULL
+    ) ON COMMIT DROP;
+
+    INSERT INTO plugin_workload_sdk_runtime_reconciled_invocations (invocation_id, attempt_generation)
+    SELECT id, attempt_generation
+      FROM plugin_workload_sdk_invocations
+     WHERE contract_version = 2
+       AND status = 'in_progress'
+       AND lease_expires_at IS NULL;
+
+    DO $$
+    DECLARE expected_count BIGINT;
+    DECLARE fenced_count BIGINT;
+    BEGIN
+      SELECT COUNT(*)
+        INTO expected_count
+        FROM plugin_workload_sdk_runtime_reconciled_invocations;
+
+      UPDATE plugin_workload_sdk_invocations invocations
+         SET contract_version = 1,
+             status = 'failed',
+             authorization_decision = CASE
+               WHEN authorization_decision = 'authorized' THEN 'migration_interrupted'
+               ELSE authorization_decision
+             END,
+             updated_at = now(),
+             completed_at = COALESCE(completed_at, now()),
+             lease_expires_at = NULL
+       WHERE invocations.id IN (
+         SELECT invocation_id
+           FROM plugin_workload_sdk_runtime_reconciled_invocations
+       )
+         AND invocations.contract_version = 2
+         AND invocations.status = 'in_progress'
+         AND invocations.lease_expires_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM plugin_workload_sdk_provider_attempts attempts
+            WHERE attempts.invocation_id = invocations.id
+              AND attempts.attempt_generation = invocations.attempt_generation
+              AND attempts.status IN ('in_progress', 'complete')
+         );
+
+      GET DIAGNOSTICS fenced_count = ROW_COUNT;
+      -- Belt-and-braces: under the EXCLUSIVE lock held above nothing can change the
+      -- captured set between the snapshot and this UPDATE, and the ambiguity check
+      -- already aborted on any physical attempt, so fenced_count always equals
+      -- expected_count. This guard is defence-in-depth and is not expected to fire.
+      IF fenced_count <> expected_count THEN
+        RAISE EXCEPTION
+          'plugin workload SDK invocation state changed during reconciliation (fenced % of % captured); aborting the migration',
+          fenced_count, expected_count;
+      END IF;
+    END
+    $$;
+
+    UPDATE plugin_workload_sdk_invocation_attempts attempts
+       SET status = 'failed',
+           completed_at = COALESCE(attempts.completed_at, now()),
+           lease_expires_at = NULL
+      FROM plugin_workload_sdk_runtime_reconciled_invocations reconciled
+     WHERE attempts.invocation_id = reconciled.invocation_id
+       AND attempts.attempt_generation = reconciled.attempt_generation
+       AND attempts.status = 'in_progress';
+
+    UPDATE plugin_workload_sdk_provider_attempts attempts
+       SET status = 'failed',
+           completed_at = COALESCE(attempts.completed_at, now()),
+           lease_expires_at = NULL
+      FROM plugin_workload_sdk_runtime_reconciled_invocations reconciled
+     WHERE attempts.invocation_id = reconciled.invocation_id
+       AND attempts.attempt_generation = reconciled.attempt_generation
+       AND attempts.status IN ('reserved', 'in_progress');
+
+    ALTER TABLE plugin_workload_sdk_invocations
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_invocations_v2_lease_check;
+    ALTER TABLE plugin_workload_sdk_invocations
+      ADD CONSTRAINT plugin_workload_sdk_invocations_v2_lease_check
+      CHECK (
+        contract_version = 1
+        OR status <> 'in_progress'
+        OR lease_expires_at IS NOT NULL
+      );
+
+    ALTER TABLE plugin_workload_sdk_provider_attempts
+      DROP CONSTRAINT IF EXISTS plugin_workload_sdk_provider_attempts_status_check;
+    ALTER TABLE plugin_workload_sdk_provider_attempts
+      ADD CONSTRAINT plugin_workload_sdk_provider_attempts_status_check
+      CHECK (status IN ('reserved','in_progress','complete','failed','provider_unavailable','skipped'));
+
+    -- Reset the statement-scoped lock timeout set at the top of this migration.
+    -- applyPendingMigrations runs every pending migration in one transaction, so
+    -- without this a later 0091+ applied in the same batch would silently inherit
+    -- the 60s timeout. 0090 is currently last (so this is latent today), but keep
+    -- the transaction state hygienic for whatever ships next.
+    SET LOCAL lock_timeout = '0';
+  `)
+}
+
+async function applyGfsDesktopOperatorLinksSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    -- Current-state, one-to-one identity link. Revocation is represented by
+    -- deleting this row only after its governed lifecycle event is appended.
+    -- Deliberately no email backfill: link creation always requires both exact
+    -- server-known UUIDs.
+    CREATE TABLE IF NOT EXISTS gfs_desktop_operator_links (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      control_admin_id UUID NOT NULL UNIQUE REFERENCES control_admin_users(id) ON DELETE CASCADE,
+      source TEXT NOT NULL CHECK (source IN ('initial_setup')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    REVOKE ALL ON TABLE gfs_desktop_operator_links FROM PUBLIC;
+    GRANT SELECT, INSERT, DELETE ON TABLE gfs_desktop_operator_links TO control_api_runtime;
+  `)
+}
+
+async function applyGfsAuditActorCorrelationSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE gfs_audit
+      ADD COLUMN IF NOT EXISTS desktop_user_id UUID NULL,
+      ADD COLUMN IF NOT EXISTS authority_source TEXT NULL;
+
+    DO $$ BEGIN
+      ALTER TABLE gfs_audit
+        ADD CONSTRAINT gfs_audit_actor_correlation_valid
+        CHECK (
+          (desktop_user_id IS NULL AND authority_source IS NULL)
+          OR
+          (desktop_user_id IS NOT NULL
+            AND authority_source = 'user-session'
+            AND actor_on_behalf_of IS NULL)
+          OR
+          (desktop_user_id IS NOT NULL
+            AND authority_source = 'linked-admin'
+            AND actor_on_behalf_of IS NOT NULL)
+        );
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS gfs_audit_desktop_user_time_idx
+      ON gfs_audit (desktop_user_id, event_time);
+  `)
+}
+
+/** Preserve operator-link history while making revocation a state transition. */
+async function evolveGfsDesktopOperatorLinksToGenerations(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE gfs_desktop_operator_links
+      ADD COLUMN IF NOT EXISTS id UUID,
+      ADD COLUMN IF NOT EXISTS lineage_id UUID,
+      ADD COLUMN IF NOT EXISTS generation INTEGER,
+      ADD COLUMN IF NOT EXISTS predecessor_id UUID,
+      ADD COLUMN IF NOT EXISTS state TEXT,
+      ADD COLUMN IF NOT EXISTS created_by UUID,
+      ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS revoked_by_type TEXT,
+      ADD COLUMN IF NOT EXISTS revoked_by_id UUID,
+      ADD COLUMN IF NOT EXISTS revocation_reason TEXT,
+      ADD COLUMN IF NOT EXISTS row_version BIGINT;
+
+    UPDATE gfs_desktop_operator_links
+       SET id = COALESCE(id, gen_random_uuid()),
+           lineage_id = COALESCE(lineage_id, gen_random_uuid()),
+           generation = COALESCE(generation, 1),
+           state = COALESCE(state, 'active'),
+           created_by = COALESCE(created_by, control_admin_id),
+           row_version = COALESCE(row_version, 1)
+     WHERE id IS NULL OR lineage_id IS NULL OR generation IS NULL OR state IS NULL
+        OR created_by IS NULL OR row_version IS NULL;
+
+    ALTER TABLE gfs_desktop_operator_links
+      ALTER COLUMN id SET NOT NULL,
+      ALTER COLUMN lineage_id SET NOT NULL,
+      ALTER COLUMN generation SET NOT NULL,
+      ALTER COLUMN state SET NOT NULL,
+      ALTER COLUMN created_by SET NOT NULL,
+      ALTER COLUMN row_version SET NOT NULL;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_pkey;
+    ALTER TABLE gfs_desktop_operator_links ADD PRIMARY KEY (id);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_user_id_key;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_control_admin_id_key;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_predecessor_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_predecessor_id_fkey
+      FOREIGN KEY (predecessor_id) REFERENCES gfs_desktop_operator_links(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_user_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_user_id_fkey
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_control_admin_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_control_admin_id_fkey
+      FOREIGN KEY (control_admin_id) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_created_by_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_created_by_fkey
+      FOREIGN KEY (created_by) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_id_fkey
+      FOREIGN KEY (revoked_by_id) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_generation_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_generation_check CHECK (generation > 0);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_row_version_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_row_version_check CHECK (row_version > 0);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_state_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_state_check CHECK (state IN ('active', 'revoked'));
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_lifecycle_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_lifecycle_check CHECK (
+      (state = 'active' AND revoked_at IS NULL AND revoked_by_type IS NULL AND revoked_by_id IS NULL AND revocation_reason IS NULL)
+      OR (state = 'revoked' AND revoked_at IS NOT NULL AND revoked_by_type = 'control_admin' AND revoked_by_id IS NOT NULL AND revocation_reason IS NOT NULL)
+    );
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_predecessor_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_predecessor_check CHECK (
+      (generation = 1 AND predecessor_id IS NULL) OR (generation > 1 AND predecessor_id IS NOT NULL)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_lineage_generation_key ON gfs_desktop_operator_links(lineage_id, generation);
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_predecessor_key ON gfs_desktop_operator_links(predecessor_id) WHERE predecessor_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_active_user_key ON gfs_desktop_operator_links(user_id) WHERE state = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_active_admin_key ON gfs_desktop_operator_links(control_admin_id) WHERE state = 'active';
+    CREATE INDEX IF NOT EXISTS gfs_desktop_operator_links_revoked_at_idx
+      ON gfs_desktop_operator_links(revoked_at) WHERE state = 'revoked';
+    GRANT SELECT, INSERT, UPDATE ON TABLE gfs_desktop_operator_links TO control_api_runtime;
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE gfs_desktop_operator_links FROM control_api_runtime;
+  `)
+}
+
+/**
+ * Governed Desktop-user retirement is a state transition, not a destructive
+ * shortcut around retained operator-link history.  This remains additive so
+ * historical users are explicitly backfilled into the active lifecycle state.
+ */
+async function applyDesktopUserRetirementLifecycleSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS lifecycle_state TEXT,
+      ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS retirement_reason TEXT,
+      ADD COLUMN IF NOT EXISTS retired_by_type TEXT,
+      ADD COLUMN IF NOT EXISTS retired_by_control_admin_id UUID,
+      ADD COLUMN IF NOT EXISTS retired_by_desktop_user_id UUID,
+      ADD COLUMN IF NOT EXISTS retirement_request_id TEXT,
+      ADD COLUMN IF NOT EXISTS retirement_operation_id UUID,
+      ADD COLUMN IF NOT EXISTS lifecycle_version BIGINT;
+
+    -- Fresh and already-existing users are both active until an explicit
+    -- governed retirement transition records actor, reason, and outcome.
+    UPDATE users
+       SET lifecycle_state = COALESCE(lifecycle_state, 'active'),
+           lifecycle_version = COALESCE(lifecycle_version, 1)
+     WHERE lifecycle_state IS NULL OR lifecycle_version IS NULL;
+
+    ALTER TABLE users
+      ALTER COLUMN lifecycle_state SET DEFAULT 'active',
+      ALTER COLUMN lifecycle_state SET NOT NULL,
+      ALTER COLUMN lifecycle_version SET DEFAULT 1,
+      ALTER COLUMN lifecycle_version SET NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS desktop_user_retirement_operations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      operation TEXT NOT NULL DEFAULT 'retire_desktop_user'
+        CHECK (operation = 'retire_desktop_user'),
+      actor_type TEXT NOT NULL CHECK (actor_type IN ('control_admin', 'platform_user')),
+      actor_control_admin_id UUID NULL,
+      actor_desktop_user_id UUID NULL,
+      target_user_id UUID NOT NULL,
+      idempotency_key_hash TEXT NOT NULL CHECK (idempotency_key_hash ~ '^[0-9a-f]{64}$'),
+      request_fingerprint TEXT NOT NULL CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
+      reason TEXT NOT NULL CHECK (char_length(reason) BETWEEN 1 AND 512),
+      request_id TEXT NULL CHECK (request_id IS NULL OR char_length(request_id) <= 256),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+      outcome TEXT NULL CHECK (outcome IS NULL OR outcome IN ('retired', 'deleted')),
+      lifecycle_version BIGINT NULL CHECK (lifecycle_version IS NULL OR lifecycle_version > 0),
+      lifecycle_operation_id UUID NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ NULL,
+      CHECK (
+        (actor_type = 'control_admin'
+          AND actor_control_admin_id IS NOT NULL
+          AND actor_desktop_user_id IS NULL)
+        OR
+        (actor_type = 'platform_user'
+          AND actor_control_admin_id IS NULL
+          AND actor_desktop_user_id IS NOT NULL)
+      ),
+      CHECK (
+        (status = 'pending'
+          AND outcome IS NULL
+          AND lifecycle_version IS NULL
+          AND lifecycle_operation_id IS NULL
+          AND completed_at IS NULL)
+        OR
+        (status = 'completed'
+          AND outcome IS NOT NULL
+          AND completed_at IS NOT NULL
+          AND (
+            (outcome = 'retired' AND lifecycle_version IS NOT NULL AND lifecycle_operation_id IS NOT NULL)
+            OR
+            (outcome = 'deleted' AND lifecycle_version IS NULL AND lifecycle_operation_id IS NULL)
+          ))
+      )
+    );
+
+    -- The target deliberately has no FK: a legacy-compatible hard-delete for
+    -- a user with no link history must still leave an idempotent outcome record.
+    -- Actor columns remain separate; no caller identity is inferred from UUID shape.
+    CREATE UNIQUE INDEX IF NOT EXISTS desktop_user_retirement_operations_control_admin_key
+      ON desktop_user_retirement_operations
+         (operation, actor_control_admin_id, target_user_id, idempotency_key_hash)
+      WHERE actor_type = 'control_admin';
+    CREATE UNIQUE INDEX IF NOT EXISTS desktop_user_retirement_operations_platform_user_key
+      ON desktop_user_retirement_operations
+         (operation, actor_desktop_user_id, target_user_id, idempotency_key_hash)
+      WHERE actor_type = 'platform_user';
+    CREATE INDEX IF NOT EXISTS desktop_user_retirement_operations_target_idx
+      ON desktop_user_retirement_operations (target_user_id, completed_at DESC);
+
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retired_by_control_admin_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retired_by_control_admin_id_fkey
+      FOREIGN KEY (retired_by_control_admin_id)
+      REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retired_by_desktop_user_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retired_by_desktop_user_id_fkey
+      FOREIGN KEY (retired_by_desktop_user_id)
+      REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retirement_operation_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retirement_operation_id_fkey
+      FOREIGN KEY (retirement_operation_id)
+      REFERENCES desktop_user_retirement_operations(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_lifecycle_version_check;
+    ALTER TABLE users
+      ADD CONSTRAINT users_lifecycle_version_check CHECK (lifecycle_version > 0);
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_lifecycle_state_check;
+    ALTER TABLE users
+      ADD CONSTRAINT users_lifecycle_state_check CHECK (
+        (lifecycle_state = 'active'
+          AND retired_at IS NULL
+          AND retirement_reason IS NULL
+          AND retired_by_type IS NULL
+          AND retired_by_control_admin_id IS NULL
+          AND retired_by_desktop_user_id IS NULL
+          AND retirement_request_id IS NULL
+          AND retirement_operation_id IS NULL)
+        OR
+        (lifecycle_state = 'retired'
+          AND retired_at IS NOT NULL
+          AND char_length(retirement_reason) BETWEEN 1 AND 512
+          AND retirement_operation_id IS NOT NULL
+          AND (
+            (retired_by_type = 'control_admin'
+              AND retired_by_control_admin_id IS NOT NULL
+              AND retired_by_desktop_user_id IS NULL)
+            OR
+            (retired_by_type = 'platform_user'
+              AND retired_by_control_admin_id IS NULL
+              AND retired_by_desktop_user_id IS NOT NULL)
+          ))
+      );
+    CREATE INDEX IF NOT EXISTS users_lifecycle_state_idx ON users (lifecycle_state);
+
+    ALTER TABLE gfs_desktop_operator_links
+      ADD COLUMN IF NOT EXISTS revoked_by_control_admin_id UUID,
+      ADD COLUMN IF NOT EXISTS revoked_by_desktop_user_id UUID;
+
+    -- 0093 could only record a Control Admin in revoked_by_id.  Preserve that
+    -- exact historic actor in the typed column before broadening the union.
+    UPDATE gfs_desktop_operator_links
+       SET revoked_by_control_admin_id = revoked_by_id
+     WHERE state = 'revoked'
+       AND revoked_by_type = 'control_admin'
+       AND revoked_by_control_admin_id IS NULL;
+
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_control_admin_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_control_admin_id_fkey
+      FOREIGN KEY (revoked_by_control_admin_id)
+      REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_desktop_user_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_desktop_user_id_fkey
+      FOREIGN KEY (revoked_by_desktop_user_id)
+      REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_lifecycle_check;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_lifecycle_check CHECK (
+        (state = 'active'
+          AND revoked_at IS NULL
+          AND revoked_by_type IS NULL
+          AND revoked_by_id IS NULL
+          AND revoked_by_control_admin_id IS NULL
+          AND revoked_by_desktop_user_id IS NULL
+          AND revocation_reason IS NULL)
+        OR
+        (state = 'revoked'
+          AND revoked_at IS NOT NULL
+          AND revocation_reason IS NOT NULL
+          AND (
+            (revoked_by_type = 'control_admin'
+              AND revoked_by_id IS NOT NULL
+              AND revoked_by_control_admin_id = revoked_by_id
+              AND revoked_by_desktop_user_id IS NULL)
+            OR
+            (revoked_by_type = 'platform_user'
+              AND revoked_by_id IS NULL
+              AND revoked_by_control_admin_id IS NULL
+              AND revoked_by_desktop_user_id IS NOT NULL)
+          ))
+      );
+
+    GRANT SELECT, INSERT, UPDATE ON TABLE desktop_user_retirement_operations TO control_api_runtime;
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE desktop_user_retirement_operations FROM control_api_runtime;
+  `)
+}
+
+/**
+ * Expose only the authoritative lifecycle/link projection needed by gfsc.
+ * The data-plane resolver must be able to deny a stale bearer directly, but it
+ * must not gain write access to identity or relationship tables.
+ */
+async function applyGfsLifecycleAuthorityProjectionSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    -- Generation zero was the pre-lifecycle default. Normalize existing admins
+    -- before gfsc begins treating session_version as an authorization epoch.
+    UPDATE control_admin_users
+       SET session_version = 1
+     WHERE session_version IS NULL OR session_version < 1;
+
+    REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON users, control_admin_users, gfs_desktop_operator_links
+      FROM gfs_controller, gfs_controller_reader;
+
+    GRANT SELECT (id, lifecycle_state, lifecycle_version)
+      ON users TO gfs_controller, gfs_controller_reader;
+    GRANT SELECT (id, status, session_version)
+      ON control_admin_users TO gfs_controller, gfs_controller_reader;
+    GRANT SELECT (id, lineage_id, generation, user_id, control_admin_id, state, source)
+      ON gfs_desktop_operator_links TO gfs_controller, gfs_controller_reader;
+
+    REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON users, control_admin_users, gfs_desktop_operator_links
+      FROM PUBLIC;
+  `)
+}
+
+/**
+ * The authorization epoch is one-based. Keep this as a new migration rather
+ * than editing the shipped baseline/session-version migrations: existing
+ * installations must receive the same default as fresh installations, and
+ * invitation inserts also stamp the first epoch explicitly.
+ */
+async function applyControlAdminSessionVersionDefaultSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    UPDATE control_admin_users
+       SET session_version = 1
+     WHERE session_version IS NULL OR session_version < 1;
+    ALTER TABLE control_admin_users
+      ALTER COLUMN session_version SET DEFAULT 1,
+      ALTER COLUMN session_version SET NOT NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conrelid = 'control_admin_users'::regclass
+           AND conname = 'control_admin_session_version_positive'
+      ) THEN
+        ALTER TABLE control_admin_users
+          ADD CONSTRAINT control_admin_session_version_positive
+          CHECK (session_version >= 1);
+      END IF;
+    END $$;
   `)
 }
 
@@ -3017,14 +3772,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                 WHERE key_name NOT IN (
                   'request_ref', 'provider', 'model', 'source_kind',
                   'input_tokens', 'output_tokens', 'cache_read_tokens',
-                  'cache_write_tokens', 'iteration'
+                  'cache_write_tokens', 'iteration', 'prompt_bridge'
                 )
              )
              AND jsonb_typeof(value->'request_ref') = 'string'
              AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
              AND jsonb_typeof(value->'provider') = 'string'
              AND jsonb_typeof(value->'model') = 'string'
-             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
              AND jsonb_typeof(value->'source_kind') = 'string'
              AND jsonb_typeof(value->'input_tokens') = 'number'
              AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
@@ -3039,6 +3794,24 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                OR (
                  jsonb_typeof(value->'iteration') = 'number'
                  AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+             AND (
+               NOT (value ? 'prompt_bridge')
+               OR (
+                 jsonb_typeof(value->'prompt_bridge') = 'object'
+                 AND value->'prompt_bridge' ?& ARRAY[
+                   'invocation_id', 'attempt_generation', 'target_ref',
+                   'fallback_used', 'attempt_count', 'provider_attempt_id',
+                   'provider_attempt_index'
+                 ]
+                 AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
+                 AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+                 AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+                 AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
                )
              )
           END;
@@ -4312,7 +5085,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                 WHERE key_name NOT IN (
                   'request_ref', 'provider', 'model', 'source_kind',
                   'input_tokens', 'output_tokens', 'cache_read_tokens',
-                  'cache_write_tokens', 'cache_tokens_reported', 'iteration'
+                  'cache_write_tokens', 'cache_tokens_reported', 'iteration', 'prompt_bridge'
                 )
              )
              AND jsonb_typeof(value->'request_ref') = 'string'
@@ -4320,7 +5093,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
              AND jsonb_typeof(value->'provider') = 'string'
              AND jsonb_typeof(value->'model') = 'string'
              AND jsonb_typeof(value->'source_kind') = 'string'
-             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown', 'plugin_workload_sdk')
              AND jsonb_typeof(value->'input_tokens') = 'number'
              AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
              AND jsonb_typeof(value->'output_tokens') = 'number'
@@ -4335,6 +5108,24 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
                OR (
                  jsonb_typeof(value->'iteration') = 'number'
                  AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+             AND (
+               NOT (value ? 'prompt_bridge')
+               OR (
+                 jsonb_typeof(value->'prompt_bridge') = 'object'
+                 AND value->'prompt_bridge' ?& ARRAY[
+                   'invocation_id', 'attempt_generation', 'target_ref',
+                   'fallback_used', 'attempt_count', 'provider_attempt_id',
+                   'provider_attempt_index'
+                 ]
+                 AND (value->'prompt_bridge'->>'invocation_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_id') ~ '^[0-9a-f-]{36}$'
+                 AND (value->'prompt_bridge'->>'attempt_generation') ~ '^[1-9][0-9]*$'
+                 AND (value->'prompt_bridge'->>'provider_attempt_index') ~ '^[1-9][0-9]*$'
+                 AND jsonb_typeof(value->'prompt_bridge'->'target_ref') = 'string'
+                 AND jsonb_typeof(value->'prompt_bridge'->'fallback_used') = 'boolean'
+                 AND jsonb_typeof(value->'prompt_bridge'->'attempt_count') = 'number'
                )
              )
           END;
@@ -4759,6 +5550,370 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       `)
     },
   },
+  {
+    version: '0071_gfs_immutable_blob_generations',
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE gfs_resources
+          ADD COLUMN IF NOT EXISTS blob_key TEXT NULL,
+          ADD COLUMN IF NOT EXISTS content_sha256 TEXT NULL;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_resources
+            ADD CONSTRAINT gfs_resources_blob_metadata_pair
+            CHECK ((blob_key IS NULL AND content_sha256 IS NULL)
+                OR (blob_key ~ '^[0-9a-f]{32}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    AND split_part(blob_key, '/', 1) = replace(resource_id::text, '-', '')
+                    AND content_sha256 ~ '^[0-9a-f]{64}$'));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS gfs_resources_blob_key_uniq
+          ON gfs_resources (blob_key)
+          WHERE blob_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS gfs_blob_manifests (
+          blob_key TEXT PRIMARY KEY,
+          request_id UUID NOT NULL,
+          resource_id UUID NOT NULL,
+          candidate_kind TEXT NOT NULL DEFAULT 'generation'
+            CHECK (candidate_kind IN ('generation', 'legacy_flat')),
+          content_sha256 TEXT NULL,
+          bytes BIGINT NOT NULL CHECK (bytes >= 0),
+          state TEXT NOT NULL CHECK (state IN ('staged', 'committed', 'deleting')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          CONSTRAINT gfs_blob_manifests_blob_key_valid CHECK (
+            (candidate_kind = 'generation'
+             AND blob_key ~ '^[0-9a-f]{32}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND split_part(blob_key, '/', 1) = replace(resource_id::text, '-', '')
+             AND content_sha256 ~ '^[0-9a-f]{64}$')
+            OR
+            (candidate_kind = 'legacy_flat'
+             AND blob_key = replace(resource_id::text, '-', '')
+             AND content_sha256 IS NULL)
+          )
+        );
+
+        CREATE INDEX IF NOT EXISTS gfs_blob_manifests_cleanup_idx
+          ON gfs_blob_manifests (state, updated_at, blob_key);
+
+        DROP TRIGGER IF EXISTS gfs_resources_perm_invalidate ON gfs_resources;
+        CREATE TRIGGER gfs_resources_perm_invalidate
+          AFTER UPDATE OF parent_resource_id, name, path_cache, deleted_at
+          OR DELETE OR TRUNCATE ON gfs_resources
+          FOR EACH STATEMENT EXECUTE FUNCTION gfs_notify_perm_invalidate();
+
+        GRANT SELECT, INSERT, UPDATE, DELETE ON gfs_blob_manifests TO gfs_controller;
+        GRANT SELECT (blob_key, content_sha256) ON gfs_resources TO gfs_controller;
+      `)
+    },
+  },
+  {
+    version: '0072_gfs_reader_database_role',
+    apply: async db => {
+      await db.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gfs_controller_reader') THEN
+            CREATE ROLE gfs_controller_reader NOLOGIN;
+          END IF;
+        END
+        $$;
+
+        ALTER ROLE gfs_controller_reader
+          NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+        DO $$
+        DECLARE inherited_role RECORD;
+        BEGIN
+          FOR inherited_role IN
+            SELECT granted.rolname
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member_role ON member_role.oid = membership.member
+             WHERE member_role.rolname = 'gfs_controller_reader'
+          LOOP
+            EXECUTE format('REVOKE %I FROM gfs_controller_reader', inherited_role.rolname);
+          END LOOP;
+        END
+        $$;
+
+        REVOKE ALL PRIVILEGES ON gfs_resources, gfs_grants, gfs_shares,
+          gfs_blob_manifests, gfs_audit FROM gfs_controller_reader;
+        REVOKE ALL PRIVILEGES ON SEQUENCE gfs_audit_sequence_no_seq FROM gfs_controller_reader;
+        REVOKE ALL PRIVILEGES ON control_admin_users, team_members FROM gfs_controller_reader;
+
+        GRANT SELECT ON gfs_resources, gfs_grants, gfs_shares TO gfs_controller_reader;
+        GRANT SELECT (id, status) ON control_admin_users TO gfs_controller_reader;
+        GRANT SELECT (team_id, user_id, status) ON team_members TO gfs_controller_reader;
+        GRANT INSERT ON gfs_audit TO gfs_controller_reader;
+        GRANT USAGE, SELECT ON SEQUENCE gfs_audit_sequence_no_seq TO gfs_controller_reader;
+
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON gfs_resources FROM gfs_controller_reader;
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON gfs_grants FROM gfs_controller_reader;
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON gfs_shares FROM gfs_controller_reader;
+        REVOKE ALL PRIVILEGES ON gfs_blob_manifests FROM gfs_controller_reader;
+        REVOKE UPDATE, DELETE, TRUNCATE ON gfs_audit FROM gfs_controller_reader;
+      `)
+    },
+  },
+  {
+    version: '0073_gfs_audit_decision_evidence',
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE gfs_audit
+          ADD COLUMN IF NOT EXISTS record_type TEXT NOT NULL DEFAULT 'legacy',
+          ADD COLUMN IF NOT EXISTS matched_subject TEXT NULL,
+          ADD COLUMN IF NOT EXISTS authorization_source TEXT NULL,
+          ADD COLUMN IF NOT EXISTS cached_authorization_source TEXT NULL,
+          ADD COLUMN IF NOT EXISTS mutation_outcome TEXT NULL;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_record_type_valid
+            CHECK (record_type IN ('legacy', 'authorization_decision', 'mutation_outcome'));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_authorization_source_valid
+            CHECK (authorization_source IS NULL OR authorization_source IN (
+              'direct_grant', 'inherited_grant', 'direct_share',
+              'inherited_share', 'operator', 'cache'
+            ));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_cached_authorization_source_valid
+            CHECK (
+              (authorization_source = 'cache'
+                AND cached_authorization_source IS NOT NULL
+                AND cached_authorization_source IN (
+                  'direct_grant', 'inherited_grant', 'direct_share',
+                  'inherited_share', 'operator'
+                ))
+              OR
+              (authorization_source IS DISTINCT FROM 'cache'
+                AND cached_authorization_source IS NULL)
+            );
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_mutation_outcome_valid
+            CHECK (mutation_outcome IS NULL OR mutation_outcome IN ('succeeded', 'failed'));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_record_type_fields_valid
+            CHECK (
+              (record_type = 'legacy' AND mutation_outcome IS NULL)
+              OR
+              (record_type = 'authorization_decision' AND mutation_outcome IS NULL)
+              OR
+              (record_type = 'mutation_outcome' AND mutation_outcome IS NOT NULL)
+            );
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        GRANT INSERT ON gfs_audit TO gfs_controller, gfs_controller_reader;
+        GRANT USAGE, SELECT ON SEQUENCE gfs_audit_sequence_no_seq
+          TO gfs_controller, gfs_controller_reader;
+        REVOKE UPDATE, DELETE, TRUNCATE ON gfs_audit
+          FROM gfs_controller, gfs_controller_reader;
+      `)
+    },
+  },
+  {
+    version: '0074_gfs_runtime_role_exact_contract',
+    apply: async db => {
+      await db.query(`
+        -- Reconcile existing clusters without changing credential state.
+        -- Deploy provisioning remains the sole credential-state owner.
+        ALTER ROLE gfs_controller
+          NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+        ALTER ROLE gfs_controller_reader
+          NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+        DO $$
+        DECLARE runtime_role TEXT;
+        DECLARE inherited_role RECORD;
+        BEGIN
+          FOREACH runtime_role IN ARRAY ARRAY['gfs_controller', 'gfs_controller_reader']
+          LOOP
+            FOR inherited_role IN
+              SELECT granted.rolname
+                FROM pg_auth_members membership
+                JOIN pg_roles granted ON granted.oid = membership.roleid
+                JOIN pg_roles member_role ON member_role.oid = membership.member
+               WHERE member_role.rolname = runtime_role
+            LOOP
+              EXECUTE format('REVOKE %I FROM %I', inherited_role.rolname, runtime_role);
+            END LOOP;
+          END LOOP;
+        END
+        $$;
+
+        -- Table-level REVOKE does not erase column ACLs in PostgreSQL. Clear
+        -- every column privilege explicitly before rebuilding the envelope.
+        DO $$
+        DECLARE protected_column RECORD;
+        BEGIN
+          FOR protected_column IN
+            SELECT table_name, column_name
+              FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = ANY(ARRAY[
+                 'gfs_resources', 'gfs_grants', 'gfs_shares',
+                 'gfs_blob_manifests', 'gfs_audit',
+                 'control_admin_users', 'team_members'
+               ])
+          LOOP
+            EXECUTE format(
+              'REVOKE SELECT (%1$I), INSERT (%1$I), UPDATE (%1$I), REFERENCES (%1$I) ON TABLE %2$I FROM gfs_controller, gfs_controller_reader, PUBLIC',
+              protected_column.column_name,
+              protected_column.table_name
+            );
+          END LOOP;
+        END
+        $$;
+
+        -- Remove historical or manually-added grants before rebuilding the
+        -- exact writer and reader envelopes. PUBLIC receives no GFS access.
+        REVOKE ALL PRIVILEGES ON gfs_resources, gfs_grants, gfs_shares,
+          gfs_blob_manifests, gfs_audit FROM gfs_controller, gfs_controller_reader, PUBLIC;
+        REVOKE ALL PRIVILEGES ON SEQUENCE gfs_audit_sequence_no_seq
+          FROM gfs_controller, gfs_controller_reader, PUBLIC;
+        REVOKE ALL PRIVILEGES ON control_admin_users, team_members
+          FROM gfs_controller, gfs_controller_reader;
+        REVOKE SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON control_admin_users, team_members
+          FROM PUBLIC;
+
+        GRANT SELECT, INSERT, UPDATE ON gfs_resources TO gfs_controller;
+        GRANT SELECT ON gfs_grants, gfs_shares TO gfs_controller;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON gfs_blob_manifests TO gfs_controller;
+        GRANT INSERT ON gfs_audit TO gfs_controller;
+        GRANT USAGE, SELECT ON SEQUENCE gfs_audit_sequence_no_seq TO gfs_controller;
+
+        GRANT SELECT ON gfs_resources, gfs_grants, gfs_shares TO gfs_controller_reader;
+        GRANT INSERT ON gfs_audit TO gfs_controller_reader;
+        GRANT USAGE, SELECT ON SEQUENCE gfs_audit_sequence_no_seq TO gfs_controller_reader;
+
+        -- Subject resolution is deliberately column-scoped for both roles.
+        GRANT SELECT (id, status) ON control_admin_users
+          TO gfs_controller, gfs_controller_reader;
+        GRANT SELECT (team_id, user_id, status) ON team_members
+          TO gfs_controller, gfs_controller_reader;
+      `)
+    },
+  },
+  {
+    version: '0075_plugin_workload_sdk_prompt_target_policy',
+    apply: addPluginWorkloadSdkPromptTargetPolicyColumns,
+  },
+  {
+    version: '0076_plugin_workload_sdk_jit_credential_tickets',
+    apply: addPluginWorkloadSdkJitCredentialTicketColumns,
+  },
+  {
+    version: '0077_plugin_workload_sdk_usage_attribution',
+    apply: addPromptBridgeUsageMetadataColumn,
+  },
+  {
+    version: '0078_plugin_workload_sdk_attempt_ledger',
+    apply: addPluginWorkloadSdkAttemptLedgerColumns,
+  },
+  {
+    version: '0079_plugin_workload_sdk_usage_source_kind',
+    apply: addPluginWorkloadSdkUsageSourceKind,
+  },
+  {
+    version: '0080_plugin_workload_sdk_protocol_revocation',
+    apply: addPluginWorkloadSdkProtocolAndRevocation,
+  },
+  {
+    version: '0081_plugin_workload_sdk_provider_attempt_ledger',
+    apply: addPluginWorkloadSdkProviderAttemptLedger,
+  },
+  {
+    version: '0082_plugin_workload_sdk_revocation_epoch',
+    apply: addPluginWorkloadSdkRevocationEpoch,
+  },
+  {
+    version: '0083_plugin_workload_sdk_runtime_access',
+    apply: addPluginWorkloadSdkRuntimeAccess,
+  },
+  {
+    version: '0084_plugin_workload_sdk_spend_outcome_ledger',
+    apply: addPluginWorkloadSdkSpendOutcomeLedger,
+  },
+  {
+    version: '0085_plugin_workload_sdk_spend_outcome_host_ref_nullable',
+    apply: relaxPluginWorkloadSdkSpendOutcomeHostRef,
+  },
+  {
+    version: '0086_plugin_workload_sdk_legacy_policy_repair',
+    apply: repairPluginWorkloadSdkLegacyGrantPolicies,
+  },
+  {
+    version: '0087_plugin_workload_sdk_not_executed_spend_outcome',
+    apply: addPluginWorkloadSdkNotExecutedSpendOutcome,
+  },
+  {
+    version: '0088_plugin_workload_sdk_policy_review_provenance',
+    apply: addPluginWorkloadSdkPolicyReviewProvenance,
+  },
+  {
+    version: '0089_plugin_workload_sdk_credential_ticket_runtime_access',
+    apply: addPluginWorkloadSdkCredentialTicketRuntimeAccess,
+  },
+  {
+    version: '0090_plugin_workload_sdk_runtime_contract_reconciliation',
+    apply: reconcilePluginWorkloadSdkRuntimeContracts,
+  },
+  {
+    version: '0091_gfs_desktop_operator_links',
+    apply: applyGfsDesktopOperatorLinksSchema,
+  },
+  {
+    version: '0092_gfs_audit_actor_correlation',
+    apply: applyGfsAuditActorCorrelationSchema,
+  },
+  {
+    version: '0093_gfs_desktop_operator_link_generations',
+    apply: evolveGfsDesktopOperatorLinksToGenerations,
+  },
+  {
+    version: '0094_desktop_user_retirement_lifecycle',
+    apply: applyDesktopUserRetirementLifecycleSchema,
+  },
+  {
+    version: '0095_gfs_lifecycle_authority_projection',
+    apply: applyGfsLifecycleAuthorityProjectionSchema,
+  },
+  {
+    version: '0096_control_admin_session_version_default',
+    apply: applyControlAdminSessionVersionDefaultSchema,
+  },
+  {
+    version: '0097_gfs_upload_sessions',
+    apply: applyGfsUploadSessionSchema,
+  },
+  {
+    version: '0098_gfs_upload_cleanup_receipt',
+    apply: applyGfsUploadCleanupSchema,
+  },
+  {
+    version: '0099_gfs_upload_finalizing_recovery',
+    apply: applyGfsUploadFinalizingSchema,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -4949,17 +6104,103 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
-export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Promise<T> {
+export async function withTransaction<T>(
+  work: (db: DbTransactionClient) => Promise<T>
+): Promise<T> {
   const client = (await pool.connect()) as PoolClient
+  let transactionStarted = false
+  let commitSent = false
+  let releaseError: Error | boolean | undefined
   try {
     await client.query('BEGIN')
-    const result = await work(client)
+    transactionStarted = true
+    // The brand is nominal-only (a declared unique symbol); the checked-out
+    // client IS the transaction session, so this cast is the single blessed
+    // point where the brand is minted (issue #375 M3).
+    const result = await work(client as unknown as DbTransactionClient)
+    commitSent = true
     await client.query('COMMIT')
     return result
   } catch (error) {
-    await client.query('ROLLBACK')
+    if (commitSent || !transactionStarted) {
+      releaseError = error instanceof Error ? error : true
+    } else {
+      try {
+        await client.query('ROLLBACK')
+      } catch (rollbackError) {
+        releaseError = rollbackError instanceof Error ? rollbackError : true
+      }
+    }
     throw error
   } finally {
-    client.release()
+    client.release(releaseError)
   }
+}
+
+// ── R1-H3 fase 1: host↔model write serialization ────────────────────────────
+//
+// A single advisory-lock namespace for the LLM-model availability seam. EVERY
+// writer that can either reduce a model's availability (llm-model disable/delete,
+// the reductor) or create a live reference to it (Host CR create/update, the
+// referencer) takes THIS lock, so the impact enumeration and the mutation/write
+// cannot interleave and strand a reference (INV-1). The lock is derived from ONE
+// place (regla D4) so the two sides can never disagree on the key.
+//
+// GRANULARITY = MODEL NAME, not (provider, model): the impact enumeration matches
+// grants by model name only (`listGrantsReferencingModel`), and an
+// `allowed_models` entry may carry no derivable provider, so a per-pair key would
+// leave that seam unserialized (adenda A1). By name, a disable of (provA, M) and a
+// host-create of (provB, M) merely contend — harmless at admin QPS — while each
+// side's impact recompute is still per-pair, so independent pairs both win.
+const LLM_MODEL_LOCK_NAMESPACE = 'llm-model:'
+
+export const HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
+  'CONTROL_API_HOST_MODEL_WRITE_LOCK_IDLE_TIMEOUT_MS',
+  DEFAULT_CARRIER_IDLE_TIMEOUT_MS,
+  MIN_CARRIER_IDLE_TIMEOUT_MS,
+  MAX_CARRIER_IDLE_TIMEOUT_MS
+)
+
+/**
+ * Take the transaction-scoped advisory lock for one model NAME. Auto-released on
+ * COMMIT/ROLLBACK and on backend death, so it never orphans. Must be a statement
+ * inside an open transaction (`withTransaction`); the caller HOLDS it across the
+ * subsequent impact read + mutation / K8s write.
+ */
+export async function advisoryLockModelName(db: DbTransactionClient, model: string): Promise<void> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+    `${LLM_MODEL_LOCK_NAMESPACE}${model}`,
+  ])
+}
+
+/**
+ * Take the advisory locks for several model NAMES in one transaction. Dedups and
+ * acquires in a TOTAL (ascending) order to preclude deadlock when two operations
+ * reference an overlapping set (adenda A5). A host that references no allowlist
+ * pair acquires nothing (an empty set is a no-op). Key derivation stays in
+ * `advisoryLockModelName` (regla D4).
+ */
+export async function advisoryLockModelNames(
+  db: DbTransactionClient,
+  models: string[]
+): Promise<void> {
+  const ordered = Array.from(new Set(models)).sort()
+  for (const model of ordered) {
+    await advisoryLockModelName(db, model)
+  }
+}
+
+/**
+ * Bound the idle-in-transaction tenancy of a carrier transaction that HOLDS a
+ * model advisory lock across a Kubernetes write (Decisión A / adenda A2). While
+ * the transaction awaits the K8s API no statement runs, so this is the only
+ * timeout that can release the lock + connection if that call hangs. SET LOCAL
+ * scope: reverts on COMMIT/ROLLBACK. The value is milliseconds (the GUC's base
+ * unit) and comes from a bounded env, so it can never inject SQL.
+ */
+export async function boundCarrierTransactionIdleTimeout(
+  db: DbTransactionClient,
+  ms: number = HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS
+): Promise<void> {
+  await db.query(`SELECT set_config('idle_in_transaction_session_timeout', $1, true)`, [String(ms)])
 }

@@ -15,7 +15,14 @@
  *
  * Prerequisites:
  *   - AIRTABLE_API_KEY and AIRTABLE_BASE_ID in .env
- *   - clerum/airtable-mcp-server:test image in minikube
+ *   - The mcp-airtable catalog entry published to the registry. Step A installs
+ *     it, and a registry install copies the entry's imageRef verbatim into
+ *     McpServer.spec.image, so THE ENTRY decides the image -- not the local
+ *     image set. On minikube that entry is seeded by registry-install.spec.ts
+ *     (which the runner executes first) with imageRef clerum/mock-mcp-server:test.
+ *     No clerum/airtable-mcp-server image is required or consulted here; the
+ *     real connector image is published to ghcr and pulled by the kubelet
+ *     wherever the catalog entry points at it.
  *   - Port-forwards: control-ui :3000, control-api :8090
  */
 import { type Page, expect, test } from '@playwright/test'
