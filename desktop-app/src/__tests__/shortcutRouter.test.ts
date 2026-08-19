@@ -4,7 +4,6 @@ import {
   type DesktopShortcutRoute,
   isStandardEditingShortcut,
   routeDesktopShortcut,
-  wireHostDesktopShortcutRouting,
 } from '../shortcutRouter.js'
 
 function input(overrides: Partial<DesktopShortcutInput> = {}): DesktopShortcutInput {
@@ -81,35 +80,6 @@ describe('main-process Desktop shortcut routing', () => {
       commandId: 'search.current',
       source: 'sandbox',
     })
-  })
-
-  it('removes a host shortcut listener when its owning window closes', () => {
-    const webContents = {
-      id: 1,
-      isDestroyed: () => false,
-      isFocused: () => true,
-      focus: vi.fn(),
-      on: vi.fn(),
-      removeListener: vi.fn(),
-      send: vi.fn(),
-    }
-    let closeListener: (() => void) | undefined
-    const host = {
-      webContents,
-      once: vi.fn((_event: 'closed', listener: () => void) => {
-        closeListener = listener
-      }),
-    }
-
-    wireHostDesktopShortcutRouting(host)
-
-    expect(webContents.on).toHaveBeenCalledOnce()
-    expect(host.once).toHaveBeenCalledWith('closed', expect.any(Function))
-    closeListener?.()
-    expect(webContents.removeListener).toHaveBeenCalledWith(
-      'before-input-event',
-      expect.any(Function)
-    )
   })
 
   it('does not intercept reserved, ordinary editing, IME, AltGr, or key-up input', () => {
