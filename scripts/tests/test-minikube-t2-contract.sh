@@ -27,6 +27,11 @@ for code in $required_codes; do
 done
 
 grep -Fq 'kubectl --context=' "$COMMON"
+if grep -Eq 'while IFS= read -r uid pid ppid rest' "$COMMON"; then
+  echo 'FAIL: t2_process_check IFS= prevents UID/PID split' >&2
+  exit 1
+fi
+grep -Fq 'while read -r uid pid ppid rest' "$COMMON"
 grep -Fq 'CONTROL_API_REAL_PG_CONTEXT' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_ADMIN_URL=' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$T1"

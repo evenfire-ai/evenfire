@@ -513,7 +513,8 @@ t2_process_check() {
   safe_profile="$(printf '%s' "$T2_PROFILE" | tr -c 'A-Za-z0-9_.-' '_')"
   # Only real kubectl port-forward processes. A wrapper whose argv merely
   # mentions those words is not a port-forward.
-  while IFS= read -r uid pid ppid rest; do
+  # Default IFS so UID/PID/PPID split. `IFS=` left pid empty and skipped every line.
+  while read -r uid pid ppid rest; do
     [ -n "$pid" ] || continue
     command_line="$uid $pid $ppid $rest"
     [[ "$command_line" == *"$T2_PROFILE"* || "$command_line" == *"$T2_CONTEXT"* ]] || continue
@@ -542,7 +543,7 @@ t2_process_check() {
       T2_NEXT_COMMAND='stop the unrelated profile port-forward or select the owner worktree; do not share it'
       t2_fail PORT_FORWARD_CONFLICT 'a port-forward for this profile is owned by another process'
     fi
-  done < <(ps -ef 2>/dev/null | awk '/(^|\/)kubectl([[:space:]]|$)/ && /[[:space:]]port-forward([[:space:]]|$)/ {print}' || true)
+  done < <(ps -ef 2>/dev/null | awk '/[[:space:]][0-9]+:[0-9]+(\.[0-9]+)?[[:space:]]+([^[:space:]]*\/)?kubectl[[:space:]]+port-forward([[:space:]]|$)/ {print}' || true)
 }
 
 t2_classify_transition() {

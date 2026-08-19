@@ -254,6 +254,19 @@ grep -Fq 'ISOLATED_DSN' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
+grep -Fq 'while read -r uid pid ppid rest' "$COMMON" || fail 't2_process_check must split ps -ef fields'
+grep -Fq 'IFS= read -r uid pid ppid rest' "$COMMON" && fail 'IFS= read disables PID split and silences PORT_FORWARD_CONFLICT'
+grep -Fq '([^[:space:]]*\/)?kubectl[[:space:]]+port-forward' "$COMMON" || fail 't2_process_check awk must match argv0 kubectl, not a wrapper mention'
+bare_pf='user 12345 1 0 10:00 ttys000 0:00 kubectl port-forward --context=clerum-feat-scenario svc/x 8080:80'
+path_pf='user 124 1 0 10:00 ttys000 0:00 /usr/local/bin/kubectl port-forward --context=clerum-feat-scenario svc/y 9090:80'
+wrapper_pf='user 125 1 0 10:00 ttys000 0:00 bash -c echo kubectl port-forward'
+awk_pf='/[[:space:]][0-9]+:[0-9]+(\.[0-9]+)?[[:space:]]+([^[:space:]]*\/)?kubectl[[:space:]]+port-forward([[:space:]]|$)/ {print}'
+printf '%s\n' "$bare_pf" "$path_pf" "$wrapper_pf" | awk "$awk_pf" >"$tmp/pf-awk.out"
+grep -Fq 'kubectl port-forward --context=clerum-feat-scenario svc/x' "$tmp/pf-awk.out" || fail 'awk missed a bare kubectl port-forward'
+grep -Fq '/usr/local/bin/kubectl port-forward' "$tmp/pf-awk.out" || fail 'awk missed a path kubectl port-forward'
+grep -Fq 'bash -c echo kubectl port-forward' "$tmp/pf-awk.out" && fail 'awk matched a wrapper that only mentions kubectl'
+read -r uid pid ppid rest <<<"$bare_pf"
+[ "$pid" = 12345 ] || fail "ps field split left pid='$pid' instead of 12345"
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
 
