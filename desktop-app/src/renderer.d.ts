@@ -1,3 +1,4 @@
+import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type {
   PluginAuditEntryView,
   PluginConsentRequest,
@@ -55,6 +56,11 @@ import {
 declare global {
   interface Window {
     clerum: {
+      shortcuts: {
+        onCommand: (
+          callback: (commandId: DesktopCommandId, source: DesktopCommandSource) => void
+        ) => () => void
+      }
       auth: {
         getSessionState: () => Promise<SessionState>
         getDependenciesHealth: () => Promise<{
@@ -664,6 +670,30 @@ declare global {
         }) => Promise<void>
         setVisible: (visible: boolean) => Promise<void>
         capturePreview: () => Promise<string | null>
+        findInPage: (
+          query: string,
+          options: {
+            operation: 'start' | 'next' | 'previous'
+            clientRequestId: number
+          }
+        ) => Promise<
+          | { status: 'started'; requestId: number }
+          | {
+              status: 'unavailable'
+              reason: 'no-active-view' | 'document-loading' | 'no-session'
+            }
+        >
+        stopFindInPage: () => Promise<void>
+        focusActive: () => Promise<boolean>
+        onFindResult: (
+          callback: (result: {
+            requestId: number
+            clientRequestId: number
+            activeMatchOrdinal: number
+            matches: number
+            finalUpdate: boolean
+          }) => void
+        ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
         onClosed: (callback: (args: { appRef: string }) => void) => () => void
         onRefreshError: (
