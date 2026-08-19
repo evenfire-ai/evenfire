@@ -89,6 +89,7 @@ describe('McpServer generated pod hardening', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
