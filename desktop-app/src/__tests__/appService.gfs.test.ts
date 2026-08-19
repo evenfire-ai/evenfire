@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
-import { mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
@@ -349,6 +349,31 @@ describe('AppService GFS upload security scope', () => {
         'token-a',
         expect.any(AbortSignal)
       )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects above the legacy limit before invoking the fallback request', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-limit-fallback-'))
+    try {
+      const filePath = join(root, 'oversized-legacy.bin')
+      await writeFile(filePath, Buffer.alloc(0))
+      await truncate(filePath, 16 * 1024 * 1024 + 1)
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      service.startDesktopGfsUpload.mockRejectedValue(
+        new DesktopUploadCapabilityError('resumable uploads are disabled')
+      )
+      service.gfsClient = {
+        createResource: vi.fn(),
+        replaceFile: vi.fn(),
+      }
+
+      await expect(
+        service.startGfsFileUpload('parent-rid', 'oversized-legacy.bin', filePath, 'main')
+      ).rejects.toThrow(`legacy GFS is limited to ${16 * 1024 * 1024} bytes`)
+      expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+      expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
     } finally {
       await rm(root, { recursive: true, force: true })
     }

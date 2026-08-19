@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  GFS_LEGACY_UPLOAD_MAX_BYTES,
   GfsUploadJob,
   type GfsUploadStatus,
   assertGfsFileUploadSize,
@@ -7,6 +8,7 @@ import {
   isRetryableUploadStatus,
   normalizeInstabilityFailureThreshold,
   parseRetryAfter,
+  uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
 
 describe('assertGfsFileUploadSize', () => {
@@ -19,6 +21,52 @@ describe('assertGfsFileUploadSize', () => {
     expect(() => assertGfsFileUploadSize(1024 * 1024 * 1024 + 1)).toThrow(
       'GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.'
     )
+  })
+})
+
+describe('uploadGfsFileLegacy', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('rejects above the legacy limit before reading or requesting the legacy upload', async () => {
+    const file = new File([new Uint8Array([1])], 'too-large-for-legacy.bin')
+    Object.defineProperty(file, 'size', { value: GFS_LEGACY_UPLOAD_MAX_BYTES + 1 })
+    const arrayBuffer = vi.spyOn(file, 'arrayBuffer')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      uploadGfsFileLegacy({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-legacy-limit' },
+      })
+    ).rejects.toThrow(`legacy GFS is limited to ${GFS_LEGACY_UPLOAD_MAX_BYTES} bytes`)
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps files within the legacy limit on the existing compatibility path', async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], 'legacy.bin')
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, data: { resourceId: 'legacy-resource' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      uploadGfsFileLegacy({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-legacy-limit' },
+      })
+    ).resolves.toEqual({ ok: true, data: { resourceId: 'legacy-resource' } })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
 
