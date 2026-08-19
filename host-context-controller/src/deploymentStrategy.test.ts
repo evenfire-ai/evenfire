@@ -17,12 +17,16 @@ import path from 'node:path'
  * only way to honour the documented single-writer assumption during a rollout.
  */
 describe('host-context-controller Deployment strategy', () => {
-  const docs = loadAll(
-    readFileSync(
-      path.join(__dirname, '../../deploy/base/control-plane/host-context-controller.yaml'),
-      'utf8'
-    )
-  ) as Array<{ kind?: string; metadata?: { name?: string }; spec?: Record<string, unknown> }>
+  const yamlPath = path.join(
+    __dirname,
+    '../../deploy/base/control-plane/host-context-controller.yaml'
+  )
+  const yamlSource = readFileSync(yamlPath, 'utf8')
+  const docs = loadAll(yamlSource) as Array<{
+    kind?: string
+    metadata?: { name?: string }
+    spec?: Record<string, unknown>
+  }>
 
   const deployment = docs.find(
     d => d?.kind === 'Deployment' && d?.metadata?.name === 'host-context-controller'
@@ -64,5 +68,60 @@ describe('host-context-controller Deployment strategy', () => {
     // merged mitigation. Comes back down once readiness no longer waits on the
     // fleet.
     expect(deployment?.spec?.progressDeadlineSeconds).toBe(1200)
+  })
+
+  /**
+   * evenfire#391 detection-vs-recovery split. The D1b premise is a SET, not
+   * three independent knobs: Recreate (terminate-before-create, zero fallback
+   * replicas) + replicas:1 (single writer) + progressDeadlineSeconds:1200
+   * (detection). Change any one of them and the #391 recovery contract — the
+   * evenfire-infra deploy pipeline performing `rollout undo --to-revision`,
+   * never Kubernetes and never HCC code — is reasoning about a deployment
+   * that no longer exists. These pins fail if the set is broken up or if the
+   * documented ownership/detection-only contract is silently deleted.
+   */
+  describe('evenfire#391 detection-vs-recovery split', () => {
+    it('keeps the D1b premise set together: Recreate + replicas:1 + deadline 1200', () => {
+      // Asserted as one test on purpose: a partial edit (e.g. bumping replicas
+      // while keeping Recreate, or flipping the strategy while keeping the
+      // 1200s deadline) must fail HERE as a broken premise set, not pass three
+      // unrelated single-field tests.
+      const strategy = deployment?.spec?.strategy as
+        | { type?: string; rollingUpdate?: unknown }
+        | undefined
+      expect({
+        replicas: deployment?.spec?.replicas,
+        strategyType: strategy?.type,
+        rollingUpdate: strategy?.rollingUpdate,
+        progressDeadlineSeconds: deployment?.spec?.progressDeadlineSeconds,
+      }).toEqual({
+        replicas: 1,
+        strategyType: 'Recreate',
+        rollingUpdate: undefined,
+        progressDeadlineSeconds: 1200,
+      })
+    })
+
+    it('documents that the progress deadline is DETECTION ONLY and never rolls back', () => {
+      // The deadline flips Progressing=False and fails `kubectl rollout
+      // status`; it does NOT undo anything. If this documented contract is
+      // deleted from the manifest, a future reader will assume Kubernetes
+      // self-heals a botched Recreate rollout — the exact D1b failure mode.
+      expect(yamlSource).toContain('DETECTION ONLY')
+      expect(yamlSource).toContain('it does not roll back')
+      expect(yamlSource).toContain('Kubernetes will not self-heal')
+    })
+
+    it('pins recovery ownership to the evenfire-infra rollout undo (evenfire#391)', () => {
+      // Recovery is owned by the evenfire-infra deploy workflows via
+      // `rollout undo --to-revision` for this Deployment only (evenfire#391).
+      // HCC must NOT grow its own undo runtime, and the manifest must keep
+      // naming the real owner so a silent deletion of the ownership comment
+      // fails loudly here.
+      expect(yamlSource).toContain('evenfire-infra')
+      expect(yamlSource).toContain('rollout undo --to-revision')
+      expect(yamlSource).toContain('evenfire#391')
+      expect(yamlSource).toContain('The deploy job still fails after a successful undo')
+    })
   })
 })

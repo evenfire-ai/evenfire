@@ -123,17 +123,56 @@ grep -Fq 'create_synthetic_fleet' "$GATE" &&
 
 
 # 12. evenfire#391 recovery mode: exclusive with EXPECT_STUCK, undo is the test
-#     action (not cleanup), last-good revision is captured, IMAGE_BROKEN is
-#     cleared after a proven undo, and a no-op undo fails.
+#     action (not cleanup), last-good revision is captured, the pre-undo outage
+#     is the same sustained D1b pin as EXPECT_STUCK, IMAGE_BROKEN is cleared
+#     only AFTER every post-undo proof, and a no-op undo fails.
+recovery_block="$(awk '/FASE D \(recovery, evenfire#391\)/,0' "$GATE")"
+image_clear_line="$(grep -n 'IMAGE_BROKEN=0' <<<"$recovery_block" | head -1 | cut -d: -f1)"
+hold_assert_line="$(grep -n 'post-undo hold' <<<"$recovery_block" | head -1 | cut -d: -f1)"
 grep -Fq 'EXPECT_RECOVERY' "$GATE" &&
   grep -Fq 'EXPECT_STUCK=1 and EXPECT_RECOVERY=1 are exclusive' "$GATE" &&
   grep -Fq 'TEST ACTION' "$GATE" &&
   grep -Fq -- '--to-revision' "$GATE" &&
   grep -Fq 'LAST_GOOD_REVISION' "$GATE" &&
-  grep -Fq 'IMAGE_BROKEN=0' "$GATE" &&
+  grep -Eq 'stuck_maxstreak.*-gt.*ROLLOUT_DOWNTIME_BUDGET_SEC' <<<"$recovery_block" &&
+  grep -Fq '[ "$e2e_fail" -eq 0 ] && IMAGE_BROKEN=0' <<<"$recovery_block" &&
+  [ -n "$image_clear_line" ] && [ -n "$hold_assert_line" ] &&
+  [ "$image_clear_line" -gt "$hold_assert_line" ] &&
   grep -Fq 'undo was a no-op' "$GATE" &&
   ! grep -q 'EXPECT_RECOVERY=1' <<<"$(awk '/^cleanup\(\)/,/^}/' "$GATE")" &&
   pass "EXPECT_RECOVERY undoes to last-good outside cleanup and fails a no-op" ||
-  fail "EXPECT_RECOVERY is missing, shares cleanup, or can pass on a no-op undo"
+  fail "EXPECT_RECOVERY is missing, shares cleanup, skips sustained outage, or clears IMAGE_BROKEN before proofs"
+
+# 13. Makefile entry point: the gate is reachable through the same shaped
+#     target as the sibling HCC gates — fault-injection ack + pre-gate-sync
+#     expectation + explicit profile=context pin, with the exclusive
+#     EXPECT_STUCK/EXPECT_RECOVERY modes surfaced (and documented as
+#     exclusive) rather than hardcoded.
+MAKEFILE="${ROOT}/Makefile"
+make_target_block="$(awk '/^test-e2e-hcc-rollout-readiness:/,/^$/' "$MAKEFILE")"
+grep -Fq '.PHONY: test-e2e-hcc-rollout-readiness' "$MAKEFILE" &&
+  grep -Fq 'E2E_HCC_ROLLOUT_FAULT_INJECTION=1' <<<"$make_target_block" &&
+  grep -Fq 'E2E_EXPECTED_PRE_GATE_GATE' <<<"$make_target_block" &&
+  grep -Fq 'MINIKUBE_PROFILE=$(E2E_KUBECONTEXT)' <<<"$make_target_block" &&
+  grep -Fq 'KUBECONTEXT=$(E2E_KUBECONTEXT)' <<<"$make_target_block" &&
+  grep -Fq 'EXPECT_STUCK=$(EXPECT_STUCK)' <<<"$make_target_block" &&
+  grep -Fq 'EXPECT_RECOVERY=$(EXPECT_RECOVERY)' <<<"$make_target_block" &&
+  grep -Fq 'scripts/e2e/e2e-hcc-rollout-readiness.sh' <<<"$make_target_block" &&
+  grep -Fq 'EXCLUSIVE' <<<"$make_target_block" &&
+  pass "Makefile target test-e2e-hcc-rollout-readiness keeps ack + profile=context + modes + gate invocation" ||
+  fail "Makefile target test-e2e-hcc-rollout-readiness is missing or lost its ack/profile/mode/gate contract"
+
+# 14. Executable guard suite: CI must RUN the cluster-free guard tests (not
+#     only this grep contract), and that suite must actually EXECUTE the gate
+#     — a guards script degraded back to grep would be this file twice.
+GUARDS="${ROOT}/scripts/tests/test-hcc-rollout-readiness-guards.sh"
+CI_WORKFLOW="${ROOT}/.github/workflows/ci-public.yml"
+[ -x "$GUARDS" ] &&
+  bash -n "$GUARDS" &&
+  grep -Fq '"$BASH_BIN" "$GATE"' "$GUARDS" &&
+  grep -Fq 'EXPECT_STUCK=1 and EXPECT_RECOVERY=1 are exclusive.' "$GUARDS" &&
+  grep -Fq 'scripts/tests/test-hcc-rollout-readiness-guards.sh' "$CI_WORKFLOW" &&
+  pass "executable guard suite exists, executes the gate, and is wired into CI" ||
+  fail "guard suite missing/non-executable, no longer executes the gate, or dropped from CI"
 
 exit "$FAIL"

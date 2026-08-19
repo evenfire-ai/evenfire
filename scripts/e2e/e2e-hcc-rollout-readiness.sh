@@ -19,11 +19,14 @@
 #
 # Modes:
 #   EXPECT_RECOVERY=1 — exclusive with EXPECT_STUCK. Botch the image, prove the
-#     D1b 503 outage, then run last-good revision restore as the TEST ACTION
-#     (not cleanup). Recovery must recertify /ready 200, restore the original
-#     image and last-good revision, and replace the botched pod. An undo no-op
-#     is FAIL. After a proven undo, IMAGE_BROKEN=0 so cleanup does not set the
-#     image again. This is the evenfire#391 evidence path.
+#     D1b 503 outage (same sustained-outage pins as EXPECT_STUCK: >=1 503,
+#     zero 503->200, maxstreak > healthy budget), then run last-good revision
+#     restore as the TEST ACTION (not cleanup). Recovery must recertify /ready
+#     200, restore the original image and last-good revision, and replace the
+#     botched pod. An undo no-op is FAIL. IMAGE_BROKEN stays 1 unless every
+#     post-undo proof passed (e2e_fail==0), so a failed image/revision/uid/hold
+#     still lets cleanup restore the original image. This is the evenfire#391
+#     evidence path.
 #   EXPECT_STUCK=0 (default) — healthy rollout via `kubectl rollout restart`.
 #     rollout restart mutates the pod template (restartedAt annotation), which
 #     drives the SAME Deployment machinery — terminate old, then create new —
@@ -463,6 +466,9 @@ else
   [ "$stuck_transitions" -eq 0 ] &&
     ok "no 503->200 transition closed the outage before undo — Kubernetes did NOT self-heal" ||
     fail "the outage closed on its own (${stuck_transitions} 503->200 transition(s)) before undo"
+  [ "$stuck_maxstreak" -gt "$ROLLOUT_DOWNTIME_BUDGET_SEC" ] &&
+    ok "SUSTAINED outage before undo: ${stuck_maxstreak}s continuous 503 (> ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget) — undo recovers D1b, not a blip" ||
+    fail "outage lasted only ${stuck_maxstreak}s and did not exceed the ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget — undo would recover a blip, not D1b"
 
   live_revision_before_undo="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
   [ "$live_revision_before_undo" != "$LAST_GOOD_REVISION" ] ||
@@ -475,7 +481,6 @@ else
     fail "last-known-good revision ${LAST_GOOD_REVISION} did not become Ready"
   wait_until 90 "HCC /ready after undo" hcc_ready_now ||
     fail "HCC /ready did not return 200 after last-good restore"
-  IMAGE_BROKEN=0
 
   recovered_image="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}')"
   recovered_revision="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
@@ -499,6 +504,10 @@ else
   [ "$hold_total" -gt 0 ] && [ "$hold_503" -eq 0 ] &&
     ok "post-undo hold: ${hold_total} samples over ${STABILITY_WINDOW_SEC}s, zero 503" ||
     fail "post-undo hold saw ${hold_503} 503(s) across ${hold_total} sample(s)"
+  # fail() records and continues, so only clear the broken-image flag when
+  # every post-undo proof above actually passed. Otherwise cleanup must still
+  # restore the original image.
+  [ "$e2e_fail" -eq 0 ] && IMAGE_BROKEN=0
 fi
 
 
