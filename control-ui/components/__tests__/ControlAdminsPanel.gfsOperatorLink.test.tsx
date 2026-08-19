@@ -245,6 +245,35 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     expect(mockPush).not.toHaveBeenCalled()
   })
 
+  it('disables member creation until an admin completes password setup', async () => {
+    vi.mocked(getControlAdmins).mockResolvedValueOnce({
+      admins: [
+        {
+          id: 'admin-4',
+          username: 'password-pending',
+          email: 'password-pending@example.com',
+          memberId: null,
+          passwordPending: true,
+          status: 'pending_password',
+          lastLoginAt: null,
+          createdAt: '2026-08-10T11:00:00.000Z',
+        },
+      ],
+      invitations: [],
+    })
+    render(<ControlAdminsPanel />)
+
+    const createMemberButton = await screen.findByRole('button', {
+      name: 'Complete password setup to create member for admin password-pending (password-pending@example.com)',
+    })
+    expect(createMemberButton).toBeDisabled()
+    expect(createMemberButton).toHaveAttribute('title', 'Complete password setup to create member')
+    expect(createMemberButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
+
+    fireEvent.click(createMemberButton)
+    expect(mockPush).not.toHaveBeenCalled()
+  })
+
   it('keeps disabled admin tombstones out of the operational action list after refresh', async () => {
     vi.mocked(getControlAdmins).mockResolvedValueOnce({
       admins: [
