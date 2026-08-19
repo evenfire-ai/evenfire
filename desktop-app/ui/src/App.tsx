@@ -398,13 +398,18 @@ export function App() {
 
   const openChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(true)
-    // Seed the drawer from the conversation the app was opened from, if any, so
-    // "open the drawer" brings that chat back in place — no destroy-and-
-    // reconstitute round-trip. Otherwise reveal whatever tab is already active.
+    // Seed the drawer from the conversation the app was opened from ONLY when
+    // there is no real chat to return to yet (blank active tab). Once a real
+    // conversation is active in the drawer — because the user launched from a
+    // chat, or switched to one via the switcher — reopening must preserve that
+    // last-viewed chat, not jump back to the origin. (The launch path seeds the
+    // origin on first open; this callback only handles subsequent reopens.)
+    const current = chatViewTabsRef.current
+    const active = activeChatViewTab(current)
     const origin = sandboxUiConversationOriginRef.current
-    let next = chatViewTabsRef.current
-    if (origin) {
-      next = openPersistedChatViewTab(next, {
+    let next = current
+    if (origin && active.chatId === null) {
+      next = openPersistedChatViewTab(current, {
         id: nextChatTabId(),
         agentRef: origin.agentName,
         chatId: origin.chatId,
