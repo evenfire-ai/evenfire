@@ -390,7 +390,8 @@ export function ControlAdminsPanel({
                 const memberCreationUnavailable = !admin.email || admin.passwordPending
                 const memberAccessDisabled = !admin.memberId && memberCreationUnavailable
                 const canCreateMember = !admin.memberId && !memberCreationUnavailable
-                const memberAccessLabel = `${memberAccessActionLabel(admin)} for admin ${label}`
+                const memberAccessAction = memberAccessActionLabel(admin)
+                const memberAccessLabel = `${memberAccessAction} for admin ${label}`
                 return (
                   <tr
                     key={admin.id}
@@ -450,7 +451,7 @@ export function ControlAdminsPanel({
                           disabled={memberAccessDisabled}
                           onClick={() => openMemberAccess(admin)}
                           aria-label={memberAccessLabel}
-                          title={memberAccessActionLabel(admin)}
+                          title={memberAccessAction}
                         >
                           <IconUsers createBadge={canCreateMember} relationshipRole="member" />
                         </button>
