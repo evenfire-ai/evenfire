@@ -71,6 +71,15 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
     controller.navItem = item
   })
+  // Faithful to the real vm: selecting an agent/chat moves the primary
+  // `vm.activeChatId`/`selectedAgent` (the reconciler derives the tab from them).
+  const handleSelectChatAgent = vi.fn(
+    (agentName: string, options: { chatId?: string; keepNavItem?: boolean } = {}) => {
+      controller.selectedAgent = agentName
+      controller.activeChatId = options.chatId ?? null
+      if (!options.keepNavItem) controller.navItem = DESKTOP_ROUTES.chat
+    }
+  )
   controller = {
     booting: false,
     initialExperienceLoading: false,
@@ -112,7 +121,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     authTransitioning: false,
     handleEnsureTeamContext: vi.fn(async () => false),
     getCurrentTeamId: vi.fn(() => 'team-a'),
-    handleSelectChatAgent: vi.fn(),
+    handleSelectChatAgent,
     handleNavSelect,
     handleLogout: vi.fn(),
     pushToast: vi.fn(),
@@ -236,4 +245,40 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
   })
+
+  // #2 — reconciler covers the drawer (minispec 04 approach A). The ChatThread
+  // session list moves `vm.activeChatId` via switchToChat WITHOUT touching
+  // chatViewTabs. Simulate that (mutate activeChatId as the vm would) and assert
+  // the drawer switcher re-derives to the displayed chat.
+  it('syncs the drawer switcher when the displayed chat changes outside the tab path', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { rerender } = render(<App />)
+
+    // Launch from chat-1 → drawer opens on chat-1.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
+
+    // The ChatThread session list picks chat-2: switchToChat moves activeChatId
+    // only — no tab-state call. The reconciler must re-derive the switcher.
+    act(() => {
+      currentController.activeChatId = 'chat-2'
+      rerender(<App />)
+    })
+
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
 })

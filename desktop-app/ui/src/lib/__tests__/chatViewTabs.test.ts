@@ -5,8 +5,10 @@ import {
   closeChatViewTab,
   createChatViewTabsState,
   cycleChatViewTab,
+  activeChatViewTab,
   focusBlankChatViewTab,
   openPersistedChatViewTab,
+  reconcileChatViewTabs,
   selectChatViewTabAt,
   selectLastChatViewTab,
 } from '../chatViewTabs'
@@ -110,6 +112,73 @@ describe('chat view tabs', () => {
           ).toHaveLength(1)
         }
       )
+    )
+  })
+})
+
+describe('reconcileChatViewTabs (minispec 04 §4 invariant — property-based)', () => {
+  // An event is "the vm now displays this chat" (chatId null = a blank new chat).
+  const agentArb = fc.constantFrom('alpha', 'beta', 'gamma')
+  const chatArb = fc.option(fc.constantFrom('c1', 'c2', 'c3', 'c4'), { nil: null })
+  const titleArb = fc.option(fc.constantFrom('T1', 'T2'), { nil: undefined })
+  const eventArb = fc.record({ agentRef: agentArb, chatId: chatArb, title: titleArb })
+
+  it('the active tab always reflects the displayed chat; no duplicate persisted tabs', () => {
+    fc.assert(
+      fc.property(fc.array(eventArb, { maxLength: 40 }), events => {
+        let state = createChatViewTabsState('seed', 'alpha')
+        let counter = 0
+        for (const event of events) {
+          state = reconcileChatViewTabs(state, event, `gen-${counter++}`)
+          const active = activeChatViewTab(state)
+          // (1) total order / correct selection: the active tab is the displayed chat.
+          expect(active.agentRef).toBe(event.agentRef)
+          expect(active.chatId).toBe(event.chatId)
+          // (2) no duplicate identifiers among persisted (non-blank) tabs.
+          const seen = new Set<string>()
+          for (const tab of state.tabs) {
+            if (tab.chatId === null) continue
+            const key = `${tab.agentRef}::${tab.chatId}`
+            expect(seen.has(key)).toBe(false)
+            seen.add(key)
+          }
+        }
+      })
+    )
+  })
+
+  it('is idempotent: applying the same event twice equals applying it once (same ref)', () => {
+    fc.assert(
+      fc.property(fc.array(eventArb, { maxLength: 20 }), eventArb, (prefix, event) => {
+        let state = createChatViewTabsState('seed', 'alpha')
+        let counter = 0
+        for (const e of prefix) state = reconcileChatViewTabs(state, e, `p-${counter++}`)
+        const once = reconcileChatViewTabs(state, event, `once`)
+        const twice = reconcileChatViewTabs(once, event, `twice`)
+        // Second application must be a no-op — same reference (setState bails out).
+        expect(twice).toBe(once)
+      })
+    )
+  })
+
+  it('never drops a non-displayed persisted tab that was already open', () => {
+    fc.assert(
+      fc.property(fc.array(eventArb, { maxLength: 30 }), events => {
+        let state = createChatViewTabsState('seed', 'alpha')
+        let counter = 0
+        const everOpened = new Set<string>()
+        for (const event of events) {
+          state = reconcileChatViewTabs(state, event, `g-${counter++}`)
+          if (event.chatId !== null) everOpened.add(`${event.agentRef}::${event.chatId}`)
+          // Every persisted chat ever displayed still has exactly one live tab.
+          for (const key of everOpened) {
+            const [agentRef, chatId] = key.split('::')
+            expect(
+              state.tabs.filter(t => t.agentRef === agentRef && t.chatId === chatId)
+            ).toHaveLength(1)
+          }
+        }
+      })
     )
   })
 })

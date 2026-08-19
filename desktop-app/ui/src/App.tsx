@@ -36,6 +36,7 @@ import {
   cycleChatViewTab,
   focusBlankChatViewTab,
   openPersistedChatViewTab,
+  reconcileChatViewTabs,
   selectChatViewTab,
   selectChatViewTabAt,
   selectLastChatViewTab,
@@ -1182,28 +1183,29 @@ export function App() {
     ]
   )
 
+  // Reconcile `chatViewTabs` (the switcher's source of truth) from the vm's
+  // displayed chat. Runs for the full-screen chat route AND whenever the drawer
+  // is visible (minispec 04, approach A), so any path that moves `vm.activeChatId`
+  // — the ChatThread session list, an opened notification, auto-select, resume —
+  // keeps the drawer's select in sync. `reconcileChatViewTabs` is idempotent, so
+  // this never ping-pongs with the drawer reveal paths and never drives a chat
+  // switch itself.
   React.useEffect(() => {
-    if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent) return
-    if (!vm.activeChatId) {
-      setChatViewTabs(state =>
-        focusBlankChatViewTab(state, nextChatTabId(), vm.selectedAgent as string)
-      )
-      return
+    if ((vm.navItem !== DESKTOP_ROUTES.chat && !chatDrawerVisible) || !vm.selectedAgent) return
+    const conversation = vm.activeChatId
+      ? (vm.chatList.find(chat => chat.id === vm.activeChatId) ??
+        vm.latestChatSessions.find(
+          chat => chat.agentRef === vm.selectedAgent && chat.id === vm.activeChatId
+        ))
+      : undefined
+    const active = {
+      agentRef: vm.selectedAgent as string,
+      chatId: vm.activeChatId ?? null,
+      title: conversation?.title,
     }
-    const conversation =
-      vm.chatList.find(chat => chat.id === vm.activeChatId) ??
-      vm.latestChatSessions.find(
-        chat => chat.agentRef === vm.selectedAgent && chat.id === vm.activeChatId
-      )
-    setChatViewTabs(state =>
-      openPersistedChatViewTab(state, {
-        id: nextChatTabId(),
-        agentRef: vm.selectedAgent as string,
-        chatId: vm.activeChatId as string,
-        title: conversation?.title,
-      })
-    )
+    setChatViewTabs(state => reconcileChatViewTabs(state, active, nextChatTabId()))
   }, [
+    chatDrawerVisible,
     nextChatTabId,
     vm.activeChatId,
     vm.chatList,

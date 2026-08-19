@@ -75,6 +75,66 @@ export function openPersistedChatViewTab(
   return { tabs: [...state.tabs, next], activeTabId: next.id }
 }
 
+/**
+ * Single reconciler for the invariant `chatViewTabs.activeTabId ≡ the displayed
+ * chat` (minispec 04, approach A). `vm.activeChatId` is PRIMARY; the tab state is
+ * DERIVED from it. Used by both the full-screen chat route and the app drawer.
+ *
+ * Hard rules (anti-loop):
+ * - Idempotent: when the active tab already reflects `active` (same agent+chat,
+ *   and the title already matches when one is supplied), it returns the SAME
+ *   `state` reference so `setChatViewTabs` bails out — no re-render, no ping-pong
+ *   with the drawer reveal paths (which dedupe by `(agentRef, chatId)` too).
+ * - Never spawns a duplicate persisted tab (dedupes by `(agentRef, chatId)`).
+ * - Blank branch (`active.chatId === null`): never cascades new blank tabs; it
+ *   keeps the already-active blank tab, only aligning its agent.
+ * - Never drives `switchToChat` — it only derives tab state.
+ */
+export function reconcileChatViewTabs(
+  state: ChatViewTabsState,
+  active: { agentRef: string; chatId: string | null; title?: string } | null,
+  newTabId: string
+): ChatViewTabsState {
+  if (!active || !active.agentRef) return state
+  if (active.chatId === null) {
+    const current = activeChatViewTab(state)
+    if (current.chatId === null) {
+      // Already showing a blank tab — align its agent, never spawn a new one.
+      return current.agentRef === active.agentRef
+        ? state
+        : {
+            tabs: state.tabs.map(tab =>
+              tab.id === current.id ? { ...tab, agentRef: active.agentRef } : tab
+            ),
+            activeTabId: current.id,
+          }
+    }
+    return focusBlankChatViewTab(state, newTabId, active.agentRef)
+  }
+  const existing = state.tabs.find(
+    tab => tab.agentRef === active.agentRef && tab.chatId === active.chatId
+  )
+  const title = active.title?.trim()
+  if (existing) {
+    const isActive = state.activeTabId === existing.id
+    const titleMatches = !title || existing.title === title
+    if (isActive && titleMatches) return state
+    return {
+      tabs:
+        title && existing.title !== title
+          ? state.tabs.map(tab => (tab.id === existing.id ? { ...tab, title } : tab))
+          : state.tabs,
+      activeTabId: existing.id,
+    }
+  }
+  return openPersistedChatViewTab(state, {
+    id: newTabId,
+    agentRef: active.agentRef,
+    chatId: active.chatId,
+    title: active.title,
+  })
+}
+
 export function selectChatViewTab(state: ChatViewTabsState, id: string): ChatViewTabsState {
   return state.tabs.some(tab => tab.id === id) ? { ...state, activeTabId: id } : state
 }
