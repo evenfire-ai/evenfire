@@ -142,9 +142,11 @@ them, so run these two greps and update every hit:
 # 1. every surface that names the current last OpenAI-compatible provider must also name yours
 grep -rn --include='*.sh' --include='*.md' --include='*.ts' --include='*.tsx' \
   --include=Makefile -e 'novita' evenfire/ | grep -vi node_modules
-# 2. the old provider count in prose (e.g. 21 -> 22)
+# 2. the old provider count in prose — substitute the PRE-bump number for <N>
+#    (this repo went 21 -> 22; the next add greps for 22, and so on). `the other
+#    <N>` catches the placeholder-fallback sub-count in apply-llm-secret.sh.
 grep -rn --include='*.sh' --include='*.md' --include='*.ts' --include='*.tsx' \
-  --include=Makefile -e '21 providers' -e 'one of 21' -e 'all 21' evenfire/
+  --include=Makefile -e '<N> providers' -e 'one of <N>' -e 'all <N>' -e 'the other <N>' evenfire/
 ```
 
 Surfaces to update:
