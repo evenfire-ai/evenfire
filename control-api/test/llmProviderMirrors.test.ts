@@ -48,7 +48,9 @@ describe('hand-maintained provider mirrors (shell scripts)', () => {
         const idArms = lines.filter(line => line.trimStart().startsWith(`${id})`))
         expect(idArms.length, `${rel}: missing case arm ${id})`).toBeGreaterThan(0)
         expect(
-          idArms.some(arm => arm.includes(primarySlot)),
+          // Match the arm's CODE only — strip any trailing `# comment` so an
+          // annotated-but-mis-wired arm can't pass on the comment text.
+          idArms.some(arm => arm.split('#')[0].includes(primarySlot)),
           `${rel}: no ${id}) arm resolves ${primarySlot}`
         ).toBe(true)
       }
