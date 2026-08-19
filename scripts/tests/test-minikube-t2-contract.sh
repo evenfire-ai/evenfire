@@ -80,6 +80,27 @@ grep -Fq 'run_np08_hcc_authorization' "$T2"
 grep -Fq "CLERUM_PROFILE_PORTS_ENV=\"\$T2_PORTS_ENV\"" "$T2"
 grep -Fq 'NP08_HCC_AUTHORIZATION PASS' "$T2"
 grep -Fq "NP08_HCC_AUTHORIZATION=\$T2_NP08_HCC_AUTHORIZATION_STATUS" "$T2"
+grep -Fq 'already-synced' "$T2" "$COMMON"
+grep -Fq 'T2_SKIP_LOCK=true T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
+grep -Fq 'T2_SKIP_LOCK=true T2_PLAN_MODE=false T2_PLAN_FILE' "$T2"
+grep -Fq 'T2_PLAN_MODE=false' "$PREFLIGHT"
+grep -Fq -- '--skip-port-forwards' "$T2"
+grep -Fq 't2_lane_completed' "$T2"
+grep -Fq 'T2_T0_STATUS=SKIPPED' "$T2"
+grep -Fq 'T2_T1_STATUS=SKIPPED' "$T2"
+grep -Fq 'REUSE_DB=true' "$T2"
+grep -Fq 'T2_T0_STATUS=NOT_RUN' "$T2"
+grep -Fq 'T2_T1_STATUS=NOT_RUN' "$T2"
+grep -Fq 'T2_HEALTHCHECK_COMMAND' "$T2"
+grep -Fq 'minikube-t2-runtime' "$ROOT/Makefile"
+if ! grep -Fq 'instead of already-synced' "$T2"; then
+  echo 'FAIL: final T2 preflight does not require already-synced' >&2
+  exit 1
+fi
+if grep -Eq 'make minikube-pre-gate-sync GATE=minikube-t2$' "$T2"; then
+  echo 'FAIL: orchestrator pre-gate-sync still starts port-forwards' >&2
+  exit 1
+fi
 
 grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"

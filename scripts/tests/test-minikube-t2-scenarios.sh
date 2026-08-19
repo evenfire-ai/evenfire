@@ -208,6 +208,17 @@ targeted_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUI
   bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$feature_sha")"
 [ "$targeted_state" = targeted-sync ] || fail "service change selected $targeted_state instead of targeted-sync"
 
+printf 'agents\n' >"$repo/AGENTS.md"
+mkdir -p "$repo/scripts/e2e"
+printf 'harness\n' >"$repo/scripts/e2e/gate.sh"
+git -C "$repo" add AGENTS.md scripts/e2e/gate.sh
+git -C "$repo" commit -q -m harness-docs
+docs_sha="$(git -C "$repo" rev-parse HEAD)"
+docs_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIRED=false \
+  T2_ORIGIN_DEV="$base_sha" T2_HEAD="$docs_sha" \
+  bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$docs_sha")"
+[ "$docs_state" = targeted-sync ] || fail "harness/docs change selected $docs_state instead of targeted-sync"
+
 mkdir -p "$repo/deploy"
 printf 'infrastructure\n' >"$repo/deploy/change.txt"
 git -C "$repo" add deploy/change.txt
@@ -217,6 +228,15 @@ full_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIRED=
   T2_ORIGIN_DEV="$base_sha" T2_HEAD="$infra_sha" \
   bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$infra_sha")"
 [ "$full_state" = full-reconcile ] || fail "infrastructure change selected $full_state instead of full-reconcile"
+
+already_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIRED=false \
+  T2_ORIGIN_DEV="$base_sha" T2_HEAD="$infra_sha" \
+  bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; T2_MARKER_MATCHES_HEAD=true; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$infra_sha")"
+[ "$already_state" = already-synced ] || fail "matching marker selected $already_state instead of already-synced"
+
+plan_mode_head="$(env "${marker_env[@]}" T2_PLAN_MODE=true FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"old","worktreeId":"worktree-a","imageSource":"local","imageTag":"test"}}' \
+  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=true; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON")"
+[ "$plan_mode_head" = false ] || fail "planner mode still treated a stale marker as matching HEAD"
 
 evidence="$tmp/evidence.json"
 detail_value="$(printf '%s://%s:%s@%s' postgresql user marker local-db)"

@@ -123,14 +123,22 @@ start_pf() {
   local health_url="${5:-}"
   local log="/tmp/pf-${SAFE_PROFILE}-${name}.log"
   local pidfile="/tmp/pf-${SAFE_PROFILE}-${name}.pid"
+  local profile_pids_dir="${CLERUM_PROFILE_CACHE_ROOT:-${HOME}/.cache/clerum/minikube-profiles}/${PROFILE}/pids"
+  local profile_pidfile="${profile_pids_dir}/${name}.pid"
 
+  mkdir -p "${profile_pids_dir}"
   if [[ -f "${pidfile}" ]]; then
     kill "$(cat "${pidfile}")" 2>/dev/null || true
     rm -f "${pidfile}"
   fi
+  if [[ -f "${profile_pidfile}" ]]; then
+    kill "$(cat "${profile_pidfile}")" 2>/dev/null || true
+    rm -f "${profile_pidfile}"
+  fi
 
   nohup "${KC[@]}" -n "${namespace}" port-forward --address=127.0.0.1 "svc/${service}" "${ports}" >"${log}" 2>&1 </dev/null &
   echo $! >"${pidfile}"
+  echo $! >"${profile_pidfile}"
   PIDS+=("$!")
   echo "  ${name}: pid=$(cat "${pidfile}") ns=${namespace} svc=${service} ports=${ports}"
   sleep 0.2

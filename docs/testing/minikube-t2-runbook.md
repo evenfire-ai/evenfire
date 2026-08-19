@@ -13,18 +13,33 @@ It refuses protected branches, production/GKE/Cloudflare contexts, shared
 profiles, ambiguous ownership, and Kubernetes contexts whose cluster endpoint
 does not resolve to a local Minikube address.
 
-Run the read-only preflight first:
+Run the read-only planner first. It is not T0, T1, or T2. Default
+`T2_PLAN_MODE=false` fails loud on `full-bootstrap` and never calls
+`pre-gate-sync`:
 
 ```bash
 make minikube-t2-preflight MINIKUBE_PROFILE=<generated-profile>
 ```
 
-The full T2 orchestrator uses the same checks and then performs the selected
-state transition:
+The full orchestrator uses the same checks as a planner (`T2_PLAN_MODE=true`
+so `full-bootstrap` is reachable), then performs the selected state
+transition, T0, T1, and the exact-head T2 verdict (`T2_PLAN_MODE=false` and
+the plan must be `already-synced`):
 
 ```bash
 make minikube-t2 MINIKUBE_PROFILE=<generated-profile>
 ```
+
+After T0 and T1 are already green on the same HEAD and owned profile, close
+T2 without re-running those lanes:
+
+```bash
+make minikube-t2-runtime MINIKUBE_PROFILE=<generated-profile>
+```
+
+`make minikube-t2-runtime` is valid only when the pre-gate marker already
+matches HEAD. `make minikube-pre-gate-sync` reconciles the profile; it does
+not emit a T2 verdict.
 
 The profile helper that generated the profile remains the source of truth for
 the profile metadata and random localhost port mapping. Do not copy ports from
@@ -35,24 +50,32 @@ another worktree or use shared fixed ports.
 ### Bootstrap
 
 A missing or uninitialized profile has no trusted pre-gate marker, image
-manifest, or ready PostgreSQL state. The runner reports `BOOTSTRAP_REQUIRED`
-and, when invoked through `make minikube-t2`, runs the supported full setup.
-Bootstrap orders Secret/ConfigMap validation, PostgreSQL readiness, migrations
-and roles, and only then `pre-gate-sync`. It does not delete a PVC by default.
+manifest, or ready PostgreSQL state. Standalone `make minikube-t2-preflight`
+reports `BOOTSTRAP_REQUIRED` and stops. `make minikube-t2` uses planner mode
+(`T2_PLAN_MODE=true`) so that transition is reachable and then runs the
+supported full setup. Bootstrap orders Secret/ConfigMap validation, PostgreSQL
+readiness, migrations and roles, and only then `pre-gate-sync`. It does not
+delete a PVC by default.
 
 ### Targeted sync
 
-An already healthy profile may use a targeted image/deployment update only when
-the marker exactly matches the worktree path and `HEAD`, the image acquisition
-manifest is current, and the diff is limited to a known service source change.
-The affected deployment must become Ready and its user-facing health check must
-pass. This is recorded as a targeted T2, not as a full reconcile.
+When the pre-gate marker already matches the current worktree path and `HEAD`,
+the planner selects `already-synced` and `make minikube-t2` skips setup and
+`pre-gate-sync`. That is the T2-runtime precondition.
+
+An already healthy profile whose marker is stale may use a targeted
+image/deployment update only when the diff since `origin/dev` is limited to a
+known service, package, harness, or documentation change. The affected
+deployment must become Ready and its user-facing health check must pass. This
+is recorded as a targeted sync, not as a full reconcile and not as T2.
 
 ### Full reconcile
 
-Changes to CRDs, manifests, charts, NetworkPolicies, PVC/storage definitions,
-the Minikube overlay, or other infrastructure inputs require a full reconcile.
-The runner refuses to downgrade those changes to a service-only restart.
+Changes under `deploy/` or `charts/` (CRDs, manifests, NetworkPolicies,
+PVC/storage definitions, the Minikube overlay) require a full reconcile when
+the marker does not already match HEAD. Harness, documentation, Makefile, and
+`scripts/e2e` diffs do not force a full reconcile. The runner refuses to
+downgrade a `deploy/` or `charts/` change to a service-only restart.
 
 ## Ownership and concurrency
 
@@ -83,7 +106,12 @@ Never remove a lock with a live owner, and never remove the whole lock root.
 
 The runner checks required namespaces, Services, Secret names, ConfigMap names,
 the `control-postgres` PVC/deployment, all required deployment readiness, the
-image manifest/source, and profile-owned port-forward processes. Secret values
+image manifest/source, and real `kubectl port-forward` processes for this
+profile. Allowed port-forward PIDs live in
+`$HOME/.cache/clerum/minikube-profiles/<profile>/pids/*.pid` (and the
+legacy `/tmp/pf-<profile>-*.pid` files written by `pf-all-stack.sh`).
+`make minikube-t2` invokes `pre-gate-sync` with `--skip-port-forwards` so the
+orchestrator does not plant forwards that fail its own T2 check. Secret values
 are never printed. The local Real PostgreSQL lane resolves the
 `control-postgres` Secret using the explicit context, constructs its admin DSN
 only in process memory, and passes it only to the shared-server suites. Suites
@@ -101,12 +129,19 @@ never share live `control-postgres` (#412). CI continues to use
   Postgres 16; the lane reports `PASS`, `FAIL`, `SKIPPED`, and `NOT_RUN`
   separately and fails on an unavailable DSN, an isolated server that did not
   start, or zero executed tests.
-* **T2** — the exact worktree/`HEAD` is deployed to the owned profile, the
-  cluster is healthy, readiness and health checks pass, and applicable
-  Control UI/Desktop journeys are run through their user-visible paths.
+* **T2** — the final exact-head preflight inside `make minikube-t2` (or
+  `make minikube-t2-runtime`): the marker matches this worktree/`HEAD`, the
+  image manifest is current, PostgreSQL and required namespaces/Services are
+  present, deployments are Ready, and no foreign `kubectl port-forward` owns
+  this profile. User-facing health and Control UI/Desktop Playwright journeys
+  are opt-in via `T2_HEALTHCHECK_COMMAND` / `T2_PLAYWRIGHT_COMMAND` and are
+  recorded as separate evidence statuses (`NOT_RUN` by default;
+  `T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey). Product E2E scripts
+  such as `scripts/e2e/e2e-hcc-rollout-readiness.sh` are not T2.
 
-CI, static tests, T1, T2, and Playwright are separate evidence lanes. A green
-CI job or unit suite is not proof of T2 runtime behavior.
+CI, static tests, T1, T2, Playwright, and product E2E scripts are separate
+evidence lanes. A green CI job or unit suite is not proof of T2 runtime
+behavior. A `T2_PREFLIGHT_PASS` line from the planner is not a T2 verdict.
 
 ## NP-08 security evidence gates
 

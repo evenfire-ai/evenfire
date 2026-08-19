@@ -9,8 +9,16 @@ Labs reference. Use the repository's conventional prefixes instead: `feat/*`,
 `build/*`, `perf/*`, or `revert/*`.
 
 The local Minikube T0/T1/T2 contract is development-only. Follow the
-canonical `make minikube-t2-preflight` and `make minikube-t2` entry points and
-the ownership, secret-safety, and evidence rules in `AGENTS.md`.
+canonical `make minikube-t2-preflight`, `make minikube-t2`, and
+`make minikube-t2-runtime` entry points and the ownership, secret-safety, and
+evidence rules in `AGENTS.md` and `docs/testing/minikube-t2-runbook.md`.
+`make minikube-t2-preflight` is a planner, not a lane verdict. A T2 verdict is
+produced only by the final exact-head preflight inside `make minikube-t2` (or
+`make minikube-t2-runtime` after T0 and T1 are already green on the same HEAD).
+`make minikube-pre-gate-sync` alone is not T2. Playwright and product E2E
+scripts are separate lanes. Follow the rule `.cursor/rules/minikube-t0-t1-t2.mdc`
+and the skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification
+workflow.
 
 ## Logging standard
 

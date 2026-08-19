@@ -43,8 +43,11 @@ T2_ERROR_CODE=""
 T2_NEXT_COMMAND='re-run the canonical command with the verified profile'
 T2_PLAN_STATE=""
 T2_PLAN_REASON=""
+T2_PLAN_MODE="$T2_PLAN_MODE"
+if [ -z "$T2_PLAN_MODE" ]; then T2_PLAN_MODE=false; fi
 T2_BOOTSTRAP_REQUIRED=false
 T2_PROFILE_HEALTHY=false
+T2_MARKER_MATCHES_HEAD=false
 T2_MARKER_JSON=""
 T2_IMAGE_SOURCE=""
 T2_IMAGE_TAG=""
@@ -294,10 +297,22 @@ PY
   )"; then
     case "$marker_values" in
       *ownership*) T2_NEXT_COMMAND='run pre-gate-sync for this worktree/profile, then retry'; t2_fail PROFILE_OWNERSHIP_MISMATCH 'pre-gate marker belongs to another worktree' ;;
-      *head*) T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-pre-gate-sync GATE=minikube-t2"; t2_fail HEAD_MARKER_MISMATCH 'pre-gate marker does not match current HEAD' ;;
+      *head*)
+        # Standalone preflight is fail-loud. The orchestrator planner
+        # (T2_PLAN_MODE=true) must keep going so it can select targeted-sync
+        # or full-reconcile and update the marker.
+        if [ "$T2_PLAN_MODE" = true ]; then
+          T2_MARKER_MATCHES_HEAD=false
+          T2_PLAN_REASON='pre-gate marker does not match current HEAD'
+          return 0
+        fi
+        T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+        t2_fail HEAD_MARKER_MISMATCH 'pre-gate marker does not match current HEAD'
+        ;;
       *) T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"; t2_fail BOOTSTRAP_REQUIRED 'pre-gate marker is incomplete' ;;
     esac
   fi
+  T2_MARKER_MATCHES_HEAD=true
   IFS=$'\t' read -r T2_CLUSTER_FINGERPRINT T2_IMAGE_SOURCE T2_IMAGE_TAG <<< "$marker_values"
 }
 
@@ -493,18 +508,27 @@ PY
 }
 
 t2_process_check() {
-  local process_lines allowed pid command_line pid_file profile_safe
-  process_lines="$(ps -ef 2>/dev/null | awk '/[p]ort-forward/ && /kubectl/ {print}' || true)"
-  [ -z "$process_lines" ] && return 0
-  profile_safe="${T2_PROFILE//[^A-Za-z0-9_.-]/_}"
-  while IFS= read -r command_line; do
-    [ -z "$command_line" ] && continue
+  local uid pid ppid rest command_line comm allowed pid_file recorded_pid
+  local safe_profile
+  safe_profile="$(printf '%s' "$T2_PROFILE" | tr -c 'A-Za-z0-9_.-' '_')"
+  # Only real kubectl port-forward processes. A wrapper whose argv merely
+  # mentions those words is not a port-forward.
+  while IFS= read -r uid pid ppid rest; do
+    [ -n "$pid" ] || continue
+    command_line="$uid $pid $ppid $rest"
     [[ "$command_line" == *"$T2_PROFILE"* || "$command_line" == *"$T2_CONTEXT"* ]] || continue
+    comm="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+    case "$comm" in
+      *kubectl*) ;;
+      *) continue ;;
+    esac
     allowed=false
-    for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid; do
+    for pid_file in \
+      "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid \
+      /tmp/pf-"$safe_profile"-*.pid; do
       [ -f "$pid_file" ] || continue
-      pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
-      [[ -n "$pid" && "$command_line" == *" $pid "* ]] && allowed=true
+      recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+      [ "$recorded_pid" = "$pid" ] && allowed=true
     done
     # pf-all-stack.sh is the canonical gate forwarder and records its child
     # PIDs in /tmp/pf-<profile>-*.pid. Accept those PIDs as profile-owned too;
@@ -518,13 +542,18 @@ t2_process_check() {
       T2_NEXT_COMMAND='stop the unrelated profile port-forward or select the owner worktree; do not share it'
       t2_fail PORT_FORWARD_CONFLICT 'a port-forward for this profile is owned by another process'
     fi
-  done <<< "$process_lines"
+  done < <(ps -ef 2>/dev/null | awk '/(^|\/)kubectl([[:space:]]|$)/ && /[[:space:]]port-forward([[:space:]]|$)/ {print}' || true)
 }
 
 t2_classify_transition() {
   if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
     T2_PLAN_STATE=full-bootstrap
     [ -n "$T2_PLAN_REASON" ] || T2_PLAN_REASON='profile is not bootstrapped'
+    return 0
+  fi
+  if [ "$T2_MARKER_MATCHES_HEAD" = true ]; then
+    T2_PLAN_STATE=already-synced
+    T2_PLAN_REASON='pre-gate marker already matches HEAD'
     return 0
   fi
   local changed infra=false path
@@ -537,7 +566,7 @@ t2_classify_transition() {
   while IFS= read -r path; do
     [ -z "$path" ] && continue
     case "$path" in
-      deploy/*|charts/*|scripts/minikube/*|scripts/e2e/*|Makefile|AGENTS.md|.github/workflows/*)
+      deploy/*|charts/*)
         infra=true
         break
         ;;
@@ -545,10 +574,10 @@ t2_classify_transition() {
   done <<< "$changed"
   if [ "$infra" = true ]; then
     T2_PLAN_STATE=full-reconcile
-    T2_PLAN_REASON='infrastructure, manifest, CRD, policy, storage, or orchestration input changed'
+    T2_PLAN_REASON='infrastructure, manifest, CRD, policy, storage, or overlay input changed'
   else
     T2_PLAN_STATE=targeted-sync
-    T2_PLAN_REASON='changes are limited to service/package source inputs'
+    T2_PLAN_REASON='changes are limited to service, package, harness, or documentation inputs'
   fi
 }
 
