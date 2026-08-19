@@ -2,52 +2,23 @@
 
 import React, { useMemo, useState } from 'react'
 import { getProviderLabel } from '../lib/llm'
-import type { HostItem, HostLifecycleInfo, HostRef } from './HostTable.types'
+import type { HostItem, HostRef } from './HostTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconRobot } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 const HOST_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
-  { key: 'lifecycle', label: 'Lifecycle', width: '10rem' },
   { key: 'context', label: 'Context', width: '20%' },
   { key: 'providers', label: 'Providers', minWidth: '8rem' },
   { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
 ]
-
-function getHostLifecycleInfo(host: HostItem): HostLifecycleInfo {
-  const isStateless = host.spec?.lifecycle?.stateless === true
-  const rejection = host.status?.conditions?.find(
-    condition =>
-      condition.type === 'StatelessEnableRejected' &&
-      String(condition.status || '').toLowerCase() === 'true'
-  )
-  const rejectedReason = String(rejection?.message || rejection?.reason || '').trim()
-  const state = rejection
-    ? 'blocked'
-    : isStateless
-      ? String(host.status?.lifecycle?.state || '').trim()
-      : ''
-  const reason = rejection
-    ? rejectedReason
-    : isStateless
-      ? String(host.status?.lifecycle?.reason || '').trim()
-      : ''
-  const label = isStateless ? 'Stateless' : 'Stateful'
-  const details = [state, reason].filter(Boolean).join(' - ')
-  return {
-    kind: rejection ? 'blocked' : isStateless ? 'stateless' : 'stateful',
-    label,
-    state,
-    reason,
-    title: details ? `${label}: ${details}` : `${label} agent`,
-  }
-}
 
 export function collectProviderIds(spec: Record<string, unknown>): string[] {
   const primary = String((spec.model as { provider?: string } | undefined)?.provider || '').trim()
@@ -70,16 +41,65 @@ export function collectProviderIds(spec: Record<string, unknown>): string[] {
   return out
 }
 
-function HostLifecycleBadge({ lifecycle }: { lifecycle: HostLifecycleInfo }) {
+// Hover card over the context cell. Mirrors the `cu-agent-context-mcp-summary`
+// block the create wizard shows for the selected context — the operator gets
+// the same list of attached MCP servers without navigating away. The card is
+// keyboard-accessible (focus + blur mirror hover) and `role="tooltip"` keeps
+// screen readers in sync with what's visible.
+function ContextMcpHoverCard({
+  contextRef,
+  mcpServers,
+  onOpenContext,
+}: {
+  contextRef: string
+  mcpServers: string[] | undefined
+  onOpenContext: (contextRef: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const hasServers = Array.isArray(mcpServers) && mcpServers.length > 0
+  const cardId = `ctx-mcp-${contextRef}`
+
+  const trigger = (
+    <button
+      type="button"
+      className="cu-link"
+      onClick={e => {
+        e.stopPropagation()
+        onOpenContext(contextRef)
+      }}
+      onKeyDown={e => e.stopPropagation()}
+      aria-describedby={hasServers && open ? cardId : undefined}
+    >
+      {contextRef}
+    </button>
+  )
+
+  if (!hasServers) return trigger
+
   return (
     <span
-      className={`cu-host-lifecycle cu-host-lifecycle--${lifecycle.kind}`}
-      title={lifecycle.title}
-      aria-label={lifecycle.title}
+      className="cu-host-context-hover"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
     >
-      <span className="cu-host-lifecycle__dot" aria-hidden="true" />
-      <span className="cu-host-lifecycle__label">{lifecycle.label}</span>
-      {lifecycle.state ? <span className="cu-host-lifecycle__state">{lifecycle.state}</span> : null}
+      {trigger}
+      {open ? (
+        <div role="tooltip" id={cardId} className="cu-agent-context-mcp-summary">
+          <div className="cu-agent-context-mcp-summary__head">
+            <span>MCP servers</span>
+            <span>{mcpServers.length}</span>
+          </div>
+          <ul className="cu-agent-context-mcp-summary__list">
+            {mcpServers.map(server => (
+              <li key={server} title={server}>
+                {server}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </span>
   )
 }
@@ -94,6 +114,7 @@ export function HostTable({
   onCreateHost,
   refreshing,
   loading,
+  contextsByRef,
 }: {
   items: HostItem[]
   onOpen: (host: HostRef) => void
@@ -104,6 +125,10 @@ export function HostTable({
   onCreateHost: () => void
   refreshing: boolean
   loading?: boolean
+  // contextRef (host.spec.contextRef) → list of attached MCP server names. The
+  // page passes this from the same `/api/v1/admin/contexts` payload the
+  // creation wizard consumes, so the operator sees the same attribution here.
+  contextsByRef?: Record<string, string[]>
 }) {
   const [searchQuery, setSearchQuery] = useState('')
   const rows = useMemo(
@@ -126,20 +151,10 @@ export function HostTable({
     if (!normalizedSearch) return rows
     return rows.filter(({ name, displayName, namespace, item }) => {
       const spec = item.spec || {}
-      const lifecycle = getHostLifecycleInfo(item)
       const contextRef = String(spec.contextRef || '').trim()
       const providers = collectProviderIds(spec)
       const providerLabels = providers.map(id => getProviderLabel(id)).join(' ')
-      return [
-        name,
-        displayName,
-        namespace,
-        lifecycle.label,
-        lifecycle.state,
-        lifecycle.reason,
-        contextRef,
-        providerLabels,
-      ]
+      return [name, displayName, namespace, contextRef, providerLabels]
         .join(' ')
         .toLowerCase()
         .includes(normalizedSearch)
@@ -194,7 +209,7 @@ export function HostTable({
               <TableHeaderRow columns={HOST_COLUMNS} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={5} rows={4} />
+              <SkeletonTableRows columns={4} rows={4} />
             </tbody>
           </table>
         </div>
@@ -214,7 +229,6 @@ export function HostTable({
                 const contextRef = rawContext || '-'
                 const contextClickable = Boolean(rawContext)
                 const providers = collectProviderIds(item.spec || {})
-                const lifecycle = getHostLifecycleInfo(item)
                 const openAgent = () => onOpen({ namespace, name })
                 return (
                   <tr
@@ -237,21 +251,12 @@ export function HostTable({
                       ) : null}
                     </td>
                     <td>
-                      <HostLifecycleBadge lifecycle={lifecycle} />
-                    </td>
-                    <td>
                       {contextClickable ? (
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={e => {
-                            e.stopPropagation()
-                            onOpenContext(rawContext)
-                          }}
-                          onKeyDown={e => e.stopPropagation()}
-                        >
-                          {contextRef}
-                        </button>
+                        <ContextMcpHoverCard
+                          contextRef={contextRef}
+                          mcpServers={contextsByRef?.[rawContext]}
+                          onOpenContext={onOpenContext}
+                        />
                       ) : (
                         <span className="cu-table__cell-muted">{contextRef}</span>
                       )}
@@ -282,18 +287,24 @@ export function HostTable({
                       )}
                     </td>
                     <td className="cu-table__cell-actions" onClick={e => e.stopPropagation()}>
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={() => void onDelete({ namespace, name })}
-                        onKeyDown={e => e.stopPropagation()}
-                        disabled={deletingKey === key}
-                        aria-label={
-                          deletingKey === key ? 'Deleting agent…' : `Remove agent ${name}`
-                        }
-                      >
-                        <IconX width={16} height={16} />
-                      </button>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for agent ${name}`}
+                        horizontalTrigger
+                        actions={[
+                          {
+                            key: 'view',
+                            label: 'View agent details',
+                            onClick: () => onOpen({ namespace, name }),
+                          },
+                          {
+                            key: 'delete',
+                            label: deletingKey === key ? 'Deleting agent…' : 'Delete',
+                            danger: true,
+                            disabled: deletingKey === key,
+                            onClick: () => void onDelete({ namespace, name }),
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 )

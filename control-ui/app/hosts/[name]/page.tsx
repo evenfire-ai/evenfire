@@ -12,10 +12,9 @@ import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
-import { IconCheck, IconPencil, IconX } from '../../../components/icons'
+import { IconCheck, IconMoreHorizontal, IconPencil } from '../../../components/icons'
 import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
-import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
   type HostAllowedModel,
   LLM_EMPTY_TRIGGER_ERROR,
@@ -37,7 +36,6 @@ import {
 import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
-  details: 'Overview',
   model: 'Models & creds',
   advanced: 'Advanced',
   contexts: 'Context',
@@ -46,7 +44,6 @@ const TAB_LABELS: Record<HostTab, string> = {
 }
 
 const TAB_SLUGS: Record<HostTab, string> = {
-  details: 'overview',
   model: 'model',
   advanced: 'advanced',
   contexts: 'contexts',
@@ -58,13 +55,56 @@ function parseHostTab(value: string | undefined): HostTab {
   return HOST_TABS.find(tab => TAB_SLUGS[tab] === value) ?? HOST_DEFAULT_TAB
 }
 
-// Cron×stateless: map the machine-readable suspend-blocked reason to
-// operator-friendly text. Every other reason renders verbatim.
-function friendlyLifecycleReason(reason: string): string {
-  if (reason === 'SuspendBlocked: activeCronSchedules') {
-    return 'Not suspending: active scheduled tasks keep this agent awake'
-  }
-  return reason
+function AgentActionsMenu({ busy, onDelete }: { busy: boolean; onDelete: () => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function handleDocClick(event: MouseEvent) {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false)
+    }
+    function handleEsc(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', handleDocClick)
+    document.addEventListener('keydown', handleEsc)
+    return () => {
+      document.removeEventListener('mousedown', handleDocClick)
+      document.removeEventListener('keydown', handleEsc)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} className="cu-kebab">
+      <button
+        type="button"
+        aria-label="Agent actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="cu-btn cu-btn--icon cu-btn--ghost cu-kebab__trigger"
+        onClick={() => setOpen(value => !value)}
+        disabled={busy}
+      >
+        <IconMoreHorizontal width={16} height={16} />
+      </button>
+      {open ? (
+        <div role="menu" className="cu-kebab__menu">
+          <button
+            type="button"
+            role="menuitem"
+            className="cu-kebab__item cu-kebab__item--danger"
+            onClick={() => {
+              setOpen(false)
+              onDelete()
+            }}
+          >
+            Delete agent
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 export default function HostDetailsPage() {
@@ -78,11 +118,12 @@ export default function HostDetailsPage() {
 
   // AP-6 — resourceVersion of the READ THE EDIT FORM WAS BUILT FROM.
   // Captured at form load (loadData), NOT from the pre-save re-fetch inside
-  // saveHost: the optimistic-concurrency guard must cover the whole human
-  // edit window. Anchoring it to the pre-save re-fetch would only guard the
-  // milliseconds between that re-fetch and the PUT, silently blessing any
-  // concurrent change that landed while the operator was editing — exactly
-  // the stale-echo overwrite AP-6 exists to prevent.
+  // saveContextRef / saveModelAndCredentials: the optimistic-concurrency
+  // guard must cover the whole human edit window. Anchoring it to the
+  // pre-save re-fetch would only guard the milliseconds between that
+  // re-fetch and the PUT, silently blessing any concurrent change that
+  // landed while the operator was editing — exactly the stale-echo overwrite
+  // AP-6 exists to prevent.
   const formResourceVersionRef = useRef('')
 
   const [activeTab, setActiveTab] = useState<HostTab>(() => parseHostTab(params.tab))
@@ -90,27 +131,10 @@ export default function HostDetailsPage() {
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
 
-  const [editingOverview, setEditingOverview] = useState(false)
   const [editingModel, setEditingModel] = useState(false)
   const [editingContext, setEditingContext] = useState(false)
-  const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
-  const [deletingAgent, setDeletingAgent] = useState(false)
-  const [deleteAgentDialogError, setDeleteAgentDialogError] = useState('')
 
-  const [hostNameDraft, setHostNameDraft] = useState(routeName)
-  const [hostDisplayDraft, setHostDisplayDraft] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
-  // Last server-backed snapshot of the Overview-owned fields, captured at every
-  // (re)load. Cancel (and re-opening Edit) reverts the whole class of Overview
-  // drafts to THIS — the last SAVED state — so a discarded edit (e.g. a Display
-  // name typed then cancelled) can never leak into a later saveHost PUT.
-  const savedOverviewRef = useRef({
-    hostName: routeName,
-    hostDisplay: '',
-    contextRef: '',
-    channels: [] as string[],
-    stateless: false,
-  })
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
   // model is always kept selectable even if it fell out of the allowlist
@@ -138,15 +162,9 @@ export default function HostDetailsPage() {
   // Data keys present per LLM Secret name, so the fallback credentialSlot
   // dropdown can offer extra keys (e.g. `claude-api-key-fb1`) — never free text.
   const [secretKeysByName, setSecretKeysByName] = useState<Record<string, string[]>>({})
-  const [channelsDraft, setChannelsDraft] = useState<string[]>([])
   const [approvalToolsData, setApprovalToolsData] = useState<Record<string, boolean> | undefined>(
     undefined
   )
-  const [statelessDraft, setStatelessDraft] = useState(false)
-  const [savedStateless, setSavedStateless] = useState(false)
-  const [lifecycleState, setLifecycleState] = useState('')
-  const [lifecycleReason, setLifecycleReason] = useState('')
-  const [statelessRejectionMessage, setStatelessRejectionMessage] = useState('')
 
   const [availableContexts, setAvailableContexts] = useState<string[]>([])
   const [availableSecrets, setAvailableSecrets] = useState<string[]>([])
@@ -214,7 +232,7 @@ export default function HostDetailsPage() {
     }
   }, [])
 
-  async function loadData(resetDrafts: 'all' | 'overview' | 'model' | 'none' = 'all') {
+  async function loadData(resetDrafts: 'all' | 'context' | 'model' | 'none' = 'all') {
     setBusy(true)
     setInitialLoading(true)
     setError('')
@@ -226,21 +244,8 @@ export default function HostDetailsPage() {
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
-      if (resetDrafts === 'all' || resetDrafts === 'overview') {
-        // Snapshot the saved Overview state so Cancel/Edit can revert to it.
-        const overview = {
-          hostName: String(host.metadata?.name || routeName),
-          hostDisplay: String(spec.host || host.metadata?.name || routeName),
-          contextRef: String(spec.contextRef || ''),
-          channels: Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : [],
-          stateless: spec.lifecycle?.stateless === true,
-        }
-        savedOverviewRef.current = overview
-        setHostNameDraft(overview.hostName)
-        setHostDisplayDraft(overview.hostDisplay)
-        setContextRefDraft(overview.contextRef)
-        setChannelsDraft(overview.channels)
-        setStatelessDraft(overview.stateless)
+      if (resetDrafts === 'all' || resetDrafts === 'context') {
+        setContextRefDraft(String(spec.contextRef || ''))
       }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
@@ -267,22 +272,6 @@ export default function HostDetailsPage() {
       }
       const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
       setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
-      const specStateless = spec.lifecycle?.stateless === true
-      setSavedStateless(specStateless)
-      setLifecycleState(String(host.status?.lifecycle?.state ?? ''))
-      setLifecycleReason(String(host.status?.lifecycle?.reason ?? ''))
-      const rejection = (host.status?.conditions ?? []).find(
-        condition => condition.type === 'StatelessEnableRejected' && condition.status === 'True'
-      )
-      setStatelessRejectionMessage(
-        rejection
-          ? String(
-              rejection.message ||
-                rejection.reason ||
-                'Stateless mode was rejected by the platform.'
-            )
-          : ''
-      )
 
       const contextIds = (contextsList || [])
         .map(item => String(item.spec?.contextId || item.metadata?.name || '').trim())
@@ -339,85 +328,37 @@ export default function HostDetailsPage() {
     setLlmPolicyDraft(next)
   }
 
-  // Revert every Overview-owned draft to the last SAVED snapshot. Used by Cancel
-  // and by Edit-open so an edit session always starts from server-backed values
-  // — never a stale draft left behind by a prior discarded edit (any Overview
-  // field, not just Display name: the whole class shares this reset).
-  function resetOverviewDrafts() {
-    const saved = savedOverviewRef.current
-    setHostNameDraft(saved.hostName)
-    setHostDisplayDraft(saved.hostDisplay)
-    // contextRef is written by the Overview save (saveHost), so reset it here to
-    // block a stale leak — EXCEPT while the Context tab has a live edit open: it
-    // is a legitimate concurrent writer of contextRefDraft (its editingContext
-    // session), and reverting an in-progress selection would silently discard it.
-    if (!editingContext) setContextRefDraft(saved.contextRef)
-    setChannelsDraft(saved.channels)
-    setStatelessDraft(saved.stateless)
-  }
-
-  async function saveHost(): Promise<boolean> {
-    const nextHostName = hostNameDraft.trim()
-    if (!nextHostName) return false
-
+  // Scoped save for the Context tab. Contexts are referenced by name from the
+  // host spec, so the only spec field changed here is `contextRef` — every
+  // other field (model, secret, fallback policy, lifecycle, channels, etc.) is
+  // preserved via the `...currentHost.spec` spread (full-replace semantics).
+  // Carries the form-load resourceVersion so a concurrent edit/lifecycle tick
+  // bounces as 409 conflict instead of silently overwriting the newer state.
+  async function saveContextRef(): Promise<boolean> {
     setBusy(true)
     setError('')
     try {
-      // Re-fetch to preserve fields that aren't editable in this form. K8s
-      // replaceNamespacedCustomObject is a full replace, not a merge.
       const currentHost = await getHost(routeName)
-      const currentLifecycle = currentHost.spec?.lifecycle
-      const currentWorkflowControl = currentHost.spec?.workflowControl
-      // Overview owns only identity/shape fields (name, display, context,
-      // channels, lifecycle). Model, secret, fallback policy and the per-host
-      // model allowlist are owned by the "Model & credentials" tab and are
-      // preserved here via the `...currentHost.spec` spread (full-replace
-      // semantics — omitting them is what keeps them intact).
-      const nextSpec: Record<string, unknown> = {
-        ...currentHost.spec,
-        host: hostDisplayDraft.trim() || nextHostName,
-        contextRef: contextRefDraft.trim(),
-        channels: channelsDraft,
-        // Echo spec.lifecycle explicitly: the admin facade full-replaces the
-        // spec, so leaving lifecycle implicit would strip the stateless flag.
-        ...(statelessDraft || currentLifecycle
-          ? { lifecycle: { ...currentLifecycle, stateless: statelessDraft } }
-          : {}),
-        ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
-          ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
-          : {}),
-      }
-
       const formResourceVersion = formResourceVersionRef.current
       await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-        // AP-6: carry the resourceVersion captured at form load so the API
-        // rejects this save with 409 {error:'conflict'} if the Host changed
-        // while the operator was editing, instead of silently overwriting the
-        // concurrent change with this form's stale echo.
         ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
-        spec: nextSpec,
+        spec: {
+          ...currentHost.spec,
+          contextRef: contextRefDraft.trim(),
+        },
       })
-      // Refresh server-backed state and this tab's saved values without
-      // clobbering a still-open draft in "Model & credentials".
-      await loadData('overview')
-      showToast('Agent configuration saved.', { tone: 'success' })
+      await loadData('context')
+      showToast('Context saved.', { tone: 'success' })
       return true
     } catch (e) {
       const status = (e as { status?: number } | null)?.status
       const code = (e as { code?: string } | null)?.code
       if (status === 409 && code === 'conflict') {
-        // AP-6 conflict: the Host changed between the form-load read and this
-        // save. The resourceVersion precondition is whole-object (K8s has no
-        // field-level precondition), so the true cause may be another operator's
-        // edit OR the agent's own lifecycle machine ticking (HCC bumping
-        // status.lifecycle / wake-requested on a stateless host). The 409 carries
-        // no field diff, so the message must cover both causes without asserting
-        // the wrong one — while keeping the reload + re-apply recovery.
         setError(
           "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
         )
       } else {
-        setError(e instanceof Error ? e.message : 'Failed to save agent')
+        setError(e instanceof Error ? e.message : 'Failed to save context')
       }
       return false
     } finally {
@@ -428,8 +369,8 @@ export default function HostDetailsPage() {
   // Scoped save for the "Model & credentials" tab. Owns provider/model,
   // secretRef, the opt-in fallback policy, the per-host model allowlist, and
   // write-only credential rotations/retirements. All other spec fields
-  // (identity, context, channels, lifecycle) are preserved via the
-  // `...currentHost.spec` spread (full-replace semantics).
+  // (context, lifecycle, channels) are preserved via the `...currentHost.spec`
+  // spread (full-replace semantics).
   async function saveModelAndCredentials(): Promise<boolean> {
     // Client-side mirror of control-api's write gate (spec R5.3): block a save
     // with an out-of-allowlist fallback model before the round-trip. Skip the
@@ -557,7 +498,7 @@ export default function HostDetailsPage() {
       const status = (e as { status?: number } | null)?.status
       const code = (e as { code?: string } | null)?.code
       if (status === 409 && code === 'conflict') {
-        // AP-6 conflict (see saveHost for full rationale): the Host changed
+        // AP-6 conflict (see saveContextRef for full rationale): the Host changed
         // between the form-load read and this save. Reload to re-apply.
         setError(
           "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
@@ -585,8 +526,8 @@ export default function HostDetailsPage() {
         await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
           spec: nextSpec,
         })
-        // Reload approval/server state while preserving any drafts left open
-        // in the Overview or Model tabs.
+        // Reload approval/server state while preserving drafts left open in
+        // the Model or Context tabs.
         await loadData('none')
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to save approval tools')
@@ -601,19 +542,25 @@ export default function HostDetailsPage() {
     [routeName]
   )
 
-  async function deleteAgentPermanently() {
-    setDeletingAgent(true)
-    setDeleteAgentDialogError('')
+  async function handleDeleteAgent() {
+    const shouldDelete = await confirm({
+      title: 'Delete Agent',
+      message: `Delete agent ${routeName}?`,
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    })
+    if (!shouldDelete) return
+
+    setBusy(true)
     setError('')
     try {
       await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
-      setShowDeleteAgentConfirm(false)
       showToast(`Agent ${routeName} deleted.`, { tone: 'success' })
       router.push(CONTROL_ROUTES.agents.root)
     } catch (e) {
-      setDeleteAgentDialogError(e instanceof Error ? e.message : 'Failed to delete agent')
+      setError(e instanceof Error ? e.message : `Failed to delete agent ${routeName}`)
     } finally {
-      setDeletingAgent(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -639,170 +586,9 @@ export default function HostDetailsPage() {
         href: hostTabHref(tab),
       }))}
       title={`Agent: ${routeName}`}
+      titleActions={<AgentActionsMenu busy={busy} onDelete={() => void handleDeleteAgent()} />}
     >
       <div className="cu-agent-detail-scroll">
-        {activeTab === 'details' && (
-          <>
-            {statelessRejectionMessage ? (
-              <div className="cu-banner cu-banner--warning" style={{ marginBottom: '1rem' }}>
-                <strong>Stateless mode rejected:</strong> {statelessRejectionMessage}
-              </div>
-            ) : null}
-            <div className="cu-agent-detail-heading">
-              <div
-                style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}
-              >
-                <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                  Agent configuration and settings.
-                </p>
-                {savedStateless && lifecycleState ? (
-                  <span className="cu-chip">
-                    {`Lifecycle: ${lifecycleState}${
-                      lifecycleReason ? ` — ${friendlyLifecycleReason(lifecycleReason)}` : ''
-                    }`}
-                  </span>
-                ) : null}
-              </div>
-              <div className="cu-agent-detail-heading__actions">
-                {editingOverview ? (
-                  <>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => {
-                        // Discard any unsaved Overview edits before leaving edit
-                        // mode, so the read-only view and the next save reflect
-                        // the last SAVED state — not the abandoned draft.
-                        resetOverviewDrafts()
-                        setEditingOverview(false)
-                      }}
-                      disabled={busy}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary"
-                      onClick={async () => {
-                        // AP-6: stay in edit mode on failure so the operator's
-                        // draft survives alongside the error/conflict banner.
-                        if (await saveHost()) {
-                          setEditingOverview(false)
-                        }
-                      }}
-                      disabled={busy || !hostNameDraft.trim()}
-                    >
-                      {busy ? 'Saving…' : 'Save'}
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--ghost cu-btn--sm"
-                    onClick={() => {
-                      // Defensive: start every edit session from the last SAVED
-                      // snapshot, so a stale draft never leaks into this Overview
-                      // save. resetOverviewDrafts deliberately leaves contextRef
-                      // untouched while the Context tab is mid-edit — that tab is a
-                      // legitimate live writer of contextRefDraft, not a stale
-                      // leftover, so its in-progress selection must be preserved.
-                      resetOverviewDrafts()
-                      setEditingOverview(true)
-                    }}
-                    disabled={busy}
-                  >
-                    Edit
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="cu-form-stack">
-              <div className="cu-field">
-                <label htmlFor="host-name">Name</label>
-                {editingOverview ? (
-                  <>
-                    <input id="host-name" value={hostNameDraft} readOnly />
-                    <span className="cu-field__hint">
-                      This is the agent identifier, not editable.
-                    </span>
-                  </>
-                ) : (
-                  <div className="cu-field__readonly">{hostNameDraft}</div>
-                )}
-              </div>
-              <div className="cu-field">
-                <label htmlFor="host-display">Display name</label>
-                {editingOverview ? (
-                  <input
-                    id="host-display"
-                    value={hostDisplayDraft}
-                    onChange={e => setHostDisplayDraft(e.target.value)}
-                    disabled={busy}
-                    autoFocus
-                  />
-                ) : (
-                  <div className="cu-field__readonly">{hostDisplayDraft}</div>
-                )}
-              </div>
-              <div className="cu-field" style={{ marginBottom: 0 }}>
-                <label htmlFor="host-agent-type">Type</label>
-                {editingOverview ? (
-                  <>
-                    <select
-                      id="host-agent-type"
-                      value={statelessDraft ? 'stateless' : 'stateful'}
-                      onChange={e => setStatelessDraft(e.target.value === 'stateless')}
-                      disabled={busy}
-                    >
-                      <option value="stateful">Stateful (always on)</option>
-                      <option value="stateless">Stateless (suspends when idle)</option>
-                    </select>
-                    <span className="cu-field__hint">
-                      Stateless agents suspend after the idle window and wake on demand.
-                      Communication channels keep stateless agents always-on unless the cluster
-                      explicitly enables wake-on-interaction; desktop still requires a stateful
-                      agent.
-                    </span>
-                  </>
-                ) : (
-                  <div className="cu-field__readonly">
-                    {statelessDraft ? 'Stateless (suspends when idle)' : 'Stateful (always on)'}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {!initialLoading && (
-              <div
-                style={{
-                  marginTop: '2rem',
-                  paddingTop: '1.25rem',
-                  borderTop: '1px solid var(--cu-border)',
-                }}
-              >
-                <p className="cu-section-title" style={{ marginBottom: '0.5rem' }}>
-                  Danger zone
-                </p>
-                <p className="cu-muted" style={{ fontSize: '0.8125rem', marginBottom: '0.75rem' }}>
-                  Permanently delete this agent and its direct access mappings.
-                </p>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                  style={{ color: 'var(--cu-danger)' }}
-                  onClick={() => {
-                    setDeleteAgentDialogError('')
-                    setShowDeleteAgentConfirm(true)
-                  }}
-                  disabled={busy}
-                >
-                  Delete agent...
-                </button>
-              </div>
-            )}
-          </>
-        )}
-
         {activeTab === 'model' && (
           <>
             <div className={editingModel ? 'cu-agent-detail-toolbar' : 'cu-agent-detail-heading'}>
@@ -1037,7 +823,7 @@ export default function HostDetailsPage() {
                             type="button"
                             className="cu-btn cu-btn--icon cu-btn--toolbar"
                             onClick={async () => {
-                              if (await saveHost()) {
+                              if (await saveContextRef()) {
                                 setEditingContext(false)
                               }
                             }}
@@ -1072,74 +858,6 @@ export default function HostDetailsPage() {
 
         {activeTab === 'access' && <HostAccessTab hostName={routeName} />}
       </div>
-      {showDeleteAgentConfirm && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !deletingAgent) setShowDeleteAgentConfirm(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel"
-            style={{ width: 'min(28rem, 96vw)' }}
-            role="alertdialog"
-            aria-labelledby="confirm-delete-agent"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="confirm-delete-agent" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Delete agent permanently?
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowDeleteAgentConfirm(false)}
-                disabled={deletingAgent}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: '0 0 1rem' }}>
-              This removes <strong>{routeName}</strong> and cannot be undone.
-            </p>
-            {deleteAgentDialogError ? (
-              <div className="cu-banner cu-banner--error" style={{ marginBottom: '0.75rem' }}>
-                {deleteAgentDialogError}
-              </div>
-            ) : null}
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowDeleteAgentConfirm(false)}
-                disabled={deletingAgent}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                style={{ background: 'var(--cu-danger)', borderColor: 'var(--cu-danger)' }}
-                onClick={() => void deleteAgentPermanently()}
-                disabled={deletingAgent}
-              >
-                {deletingAgent ? 'Deleting…' : 'Delete agent'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {confirmDialog}
     </DetailPageShell>
   )

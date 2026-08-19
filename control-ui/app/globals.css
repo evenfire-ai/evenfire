@@ -19,14 +19,14 @@
   --cu-link: #8faeff;
   --cu-link-hover: var(--cu-brand-light-blue);
   --cu-color-primary: var(--cu-accent);
-  --cu-danger: #ec7c72;
-  --cu-danger-hover: #f29a91;
+  --cu-danger: #f87171;
+  --cu-danger-hover: #fca5a5;
   --cu-success: #66b88f;
   --cu-warning: #e8c27a;
   --cu-accent-rgb: 67, 119, 250;
   --cu-focus-rgb: 67, 119, 250;
   --cu-success-rgb: 102, 184, 143;
-  --cu-danger-rgb: 236, 124, 114;
+  --cu-danger-rgb: 248, 113, 113;
   --cu-warning-rgb: 232, 194, 122;
   --cu-edge-rgb: 94, 99, 108;
   --cu-panel-rgb: 20, 21, 24;
@@ -1376,14 +1376,19 @@ textarea.cu-input {
 }
 
 .cu-btn--danger {
-  background: linear-gradient(180deg, var(--cu-danger-hover) 0%, var(--cu-danger) 100%);
-  border-color: rgba(var(--cu-danger-rgb), 0.34);
-  color: var(--cu-text-inverse);
+  background: transparent;
+  border-color: rgba(var(--cu-danger-rgb), 0.55);
+  color: var(--cu-danger);
 }
 
 .cu-btn--danger:hover:not(:disabled) {
-  background: linear-gradient(180deg, var(--cu-danger) 0%, var(--cu-danger-hover) 100%);
-  border-color: rgba(var(--cu-danger-rgb), 0.48);
+  background: rgba(var(--cu-danger-rgb), 0.12);
+  border-color: var(--cu-danger);
+  color: var(--cu-danger-hover);
+}
+
+.cu-btn--danger:active:not(:disabled) {
+  background: rgba(var(--cu-danger-rgb), 0.2);
 }
 
 .cu-btn--sm {
@@ -6030,7 +6035,7 @@ textarea.cu-input {
   padding: var(--cu-space-3);
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
-  background: rgba(var(--cu-panel-rgb), 0.35);
+  background: var(--cu-bg-elevated);
 }
 
 .cu-agent-context-mcp-summary__head {
@@ -6061,10 +6066,8 @@ textarea.cu-input {
   display: flex;
   flex-wrap: wrap;
   gap: var(--cu-space-1);
-  max-height: 8rem;
   margin: 0;
   padding: 0;
-  overflow: auto;
   list-style: none;
 }
 
@@ -6072,10 +6075,10 @@ textarea.cu-input {
   max-width: 100%;
   padding: 0.2rem var(--cu-space-2);
   overflow: hidden;
-  border: 1px solid var(--cu-border-subtle);
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
   border-radius: var(--cu-radius-pill);
-  background: var(--cu-bg-elevated);
-  color: var(--cu-text-soft);
+  background: rgba(var(--cu-accent-rgb), 0.14);
+  color: var(--cu-text);
   font-size: 0.75rem;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -7345,6 +7348,26 @@ textarea.cu-input {
 
 .cu-host-context-select {
   width: min(36rem, 100%);
+}
+
+/* Hover card on the Context column — shows the same MCP-server list as the
+   agent-wizard's `cu-agent-context-mcp-summary` block. The wrapper is the
+   positioning context so the absolutely-positioned card sits just below the
+   link instead of clipping against the table cell. */
+.cu-host-context-hover {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+}
+
+.cu-host-context-hover > .cu-agent-context-mcp-summary {
+  position: absolute;
+  top: calc(100% + var(--cu-space-1));
+  left: 0;
+  z-index: 50;
+  min-width: 18rem;
+  max-width: 28rem;
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.18);
 }
 
 .cu-host-env-form--danger {

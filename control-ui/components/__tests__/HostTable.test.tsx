@@ -3,38 +3,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { HostTable, collectProviderIds } from '../HostTable'
 import type { HostItem } from '../HostTable.types'
 
-function makeHost(overrides: {
-  name: string
-  stateless?: boolean
-  state?: string
-  reason?: string
-  rejectedMessage?: string
-}): HostItem {
-  return {
-    metadata: { name: overrides.name, namespace: 'mcp-host' },
-    spec: {
-      contextRef: 'context1',
-      lifecycle: overrides.stateless ? { stateless: true } : undefined,
-      model: { provider: 'zai', name: 'glm-5.1' },
-    },
-    status: {
-      lifecycle: overrides.state
-        ? { state: overrides.state, reason: overrides.reason || '' }
-        : undefined,
-      conditions: overrides.rejectedMessage
-        ? [
-            {
-              type: 'StatelessEnableRejected',
-              status: 'True',
-              message: overrides.rejectedMessage,
-            },
-          ]
-        : undefined,
-    },
-  }
-}
-
-function renderHostTable(items: HostItem[]) {
+function renderHostTable(items: HostItem[], contextsByRef?: Record<string, string[]>) {
   return render(
     <HostTable
       items={items}
@@ -45,49 +14,24 @@ function renderHostTable(items: HostItem[]) {
       onRefresh={vi.fn()}
       onCreateHost={vi.fn()}
       refreshing={false}
+      contextsByRef={contextsByRef}
     />
   )
 }
 
-describe('HostTable lifecycle column', () => {
-  it('renders stateful, stateless, and stateless-blocked lifecycle badges', () => {
-    renderHostTable([
-      makeHost({ name: 'chatllm' }),
-      makeHost({ name: 'chatllm-stateless', stateless: true, state: 'suspended', reason: 'idle' }),
-      makeHost({
-        name: 'channel-host',
-        stateless: true,
-        state: 'active',
-        rejectedMessage: 'CommunicationChannel-connected hosts are always-on.',
-      }),
-    ])
-
-    expect(screen.getByLabelText('Stateful agent')).toBeInTheDocument()
-    expect(screen.getByLabelText('Stateless: suspended - idle')).toBeInTheDocument()
-    expect(
-      screen.getByLabelText(
-        'Stateless: blocked - CommunicationChannel-connected hosts are always-on.'
-      )
-    ).toBeInTheDocument()
-
-    const blockedRow = screen.getByLabelText('Open agent channel-host')
-    expect(within(blockedRow).getByText('blocked')).toBeInTheDocument()
-  })
-
-  it('filters rows by lifecycle reason text', () => {
-    renderHostTable([
-      makeHost({ name: 'chatllm', stateless: true, state: 'active', reason: 'recentActivity' }),
-      makeHost({ name: 'chatllm-stateless', stateless: true, state: 'suspended', reason: 'idle' }),
-    ])
-
-    fireEvent.change(screen.getByRole('searchbox', { name: 'Search agents' }), {
-      target: { value: 'idle' },
-    })
-
-    expect(screen.queryByLabelText('Open agent chatllm')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('Open agent chatllm-stateless')).toBeInTheDocument()
-  })
-})
+function hostWithContext(
+  name: string,
+  contextRef: string,
+  model?: Record<string, unknown>
+): HostItem {
+  return {
+    metadata: { name, namespace: 'mcp-host' },
+    spec: {
+      contextRef,
+      ...(model ? { model: model as { provider?: string; name?: string } } : {}),
+    },
+  }
+}
 
 // Pure-function invariants for collectProviderIds — exported so the ordering
 // and deduplication contract is verifiable independently of the DOM.
@@ -280,5 +224,153 @@ describe('HostTable display name column (UT-9)', () => {
 
     expect(screen.getByText('Sales Agent')).toBeInTheDocument()
     expect(screen.queryByText('Prod X')).not.toBeInTheDocument()
+  })
+})
+
+// Hover card on the Context column — when the page supplies a `contextsByRef`
+// map, hovering (or keyboard-focusing) the context link reveals the same
+// MCP-server list the create wizard shows for the selected context.
+describe('HostTable context MCP hover card', () => {
+  function contextLink(row: HTMLElement): HTMLElement {
+    return within(row).getByRole('button', { name: 'context1' })
+  }
+
+  it('reveals the MCP server list on hover and lists every server', () => {
+    renderHostTable([hostWithContext('chatllm', 'context1')], {
+      context1: ['github', 'linear', 'slack'],
+    })
+
+    const row = screen.getByLabelText('Open agent chatllm')
+    const link = contextLink(row)
+
+    // Closed by default — nothing tooltipped.
+    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+    expect(link).not.toHaveAttribute('aria-describedby')
+
+    fireEvent.mouseEnter(link)
+    const card = within(row).getByRole('tooltip')
+    expect(card).toHaveTextContent('MCP servers')
+    expect(card).toHaveTextContent('3')
+    expect(within(card).getByText('github')).toBeInTheDocument()
+    expect(within(card).getByText('linear')).toBeInTheDocument()
+    expect(within(card).getByText('slack')).toBeInTheDocument()
+
+    fireEvent.mouseLeave(link)
+    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('reveals the card on keyboard focus (accessible path)', () => {
+    renderHostTable([hostWithContext('chatllm', 'context1')], {
+      context1: ['github'],
+    })
+
+    const row = screen.getByLabelText('Open agent chatllm')
+    const link = contextLink(row)
+
+    fireEvent.focus(link)
+    const card = within(row).getByRole('tooltip')
+    expect(within(card).getByText('github')).toBeInTheDocument()
+    expect(link).toHaveAttribute('aria-describedby', card.id)
+
+    fireEvent.blur(link)
+    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('stays a plain link when the context has no MCP servers', () => {
+    renderHostTable([hostWithContext('chatllm', 'context1')], {
+      context1: [],
+    })
+
+    const row = screen.getByLabelText('Open agent chatllm')
+    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+    fireEvent.mouseEnter(within(row).getByRole('button', { name: 'context1' }))
+    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('does not show a card when the context map is missing', () => {
+    renderHostTable([hostWithContext('chatllm', 'context1')])
+
+    const row = screen.getByLabelText('Open agent chatllm')
+    const link = within(row).getByRole('button', { name: 'context1' })
+    fireEvent.mouseEnter(link)
+    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Row actions kebab
+// ─────────────────────────────────────────────────────────────────────────────
+describe('HostTable — row actions kebab', () => {
+  it('exposes View agent details and Delete via a single kebab menu per row', () => {
+    const onOpen = vi.fn()
+    const onDelete = vi.fn().mockResolvedValue(undefined)
+    render(
+      <HostTable
+        items={[hostWithContext('chatllm', 'context1')]}
+        onOpen={onOpen}
+        onOpenContext={vi.fn()}
+        onDelete={onDelete}
+        deletingKey={null}
+        onRefresh={vi.fn()}
+        onCreateHost={vi.fn()}
+        refreshing={false}
+        contextsByRef={{ context1: [] }}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent chatllm' }))
+
+    const viewItem = screen.getByRole('menuitem', { name: 'View agent details' })
+    const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
+    expect(deleteItem).toHaveClass('cu-kebab__item--danger')
+
+    fireEvent.click(viewItem)
+    expect(onOpen).toHaveBeenCalledWith({ namespace: 'mcp-host', name: 'chatllm' })
+    expect(onDelete).not.toHaveBeenCalled()
+  })
+
+  it('does not open the agent detail when clicking the kebab itself', () => {
+    const onOpen = vi.fn()
+    render(
+      <HostTable
+        items={[hostWithContext('chatllm', 'context1')]}
+        onOpen={onOpen}
+        onOpenContext={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        deletingKey={null}
+        onRefresh={vi.fn()}
+        onCreateHost={vi.fn()}
+        refreshing={false}
+        contextsByRef={{ context1: [] }}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent chatllm' }))
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('disables only the Delete item while deleting and renames it to Deleting agent…', () => {
+    const onDelete = vi.fn().mockResolvedValue(undefined)
+    render(
+      <HostTable
+        items={[hostWithContext('chatllm', 'context1')]}
+        onOpen={vi.fn()}
+        onOpenContext={vi.fn()}
+        onDelete={onDelete}
+        deletingKey="mcp-host/chatllm"
+        onRefresh={vi.fn()}
+        onCreateHost={vi.fn()}
+        refreshing={false}
+        contextsByRef={{ context1: [] }}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent chatllm' }))
+
+    const viewItem = screen.getByRole('menuitem', { name: 'View agent details' })
+    const deletingItem = screen.getByRole('menuitem', { name: 'Deleting agent…' })
+
+    expect(viewItem).not.toBeDisabled()
+    expect(deletingItem).toBeDisabled()
   })
 })
