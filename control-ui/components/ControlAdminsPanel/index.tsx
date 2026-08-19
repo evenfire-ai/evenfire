@@ -31,6 +31,13 @@ function formatAdminStatus(status: ControlAdminListItem['status']): string {
   return status
 }
 
+function memberAccessActionLabel(admin: ControlAdminListItem): string {
+  if (admin.memberId) return 'View member'
+  if (!admin.email) return 'Email required to create member'
+  if (admin.passwordPending) return 'Complete password setup to create member'
+  return 'Create member'
+}
+
 export function ControlAdminsPanel({
   highlightedAdminId = '',
   onCountsChange,
@@ -380,6 +387,11 @@ export function ControlAdminsPanel({
               filteredAdmins.map(admin => {
                 const currentAdmin = isCurrentAdmin(admin)
                 const label = admin.email ? `${admin.username} (${admin.email})` : admin.username
+                const memberCreationUnavailable = !admin.email || admin.passwordPending
+                const memberAccessDisabled = !admin.memberId && memberCreationUnavailable
+                const canCreateMember = !admin.memberId && !memberCreationUnavailable
+                const memberAccessAction = memberAccessActionLabel(admin)
+                const memberAccessLabel = `${memberAccessAction} for admin ${label}`
                 return (
                   <tr
                     key={admin.id}
@@ -436,24 +448,12 @@ export function ControlAdminsPanel({
                         <button
                           type="button"
                           className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          disabled={!admin.email || admin.passwordPending}
+                          disabled={memberAccessDisabled}
                           onClick={() => openMemberAccess(admin)}
-                          aria-label={
-                            admin.memberId
-                              ? `Open member for admin ${label}`
-                              : `Create member for admin ${label}`
-                          }
-                          title={
-                            admin.passwordPending
-                              ? 'Admin must finish password setup before member access can be created'
-                              : admin.memberId
-                                ? 'Open matching member'
-                                : admin.email
-                                  ? 'Create member from admin'
-                                  : 'Admin needs an email before member access can be created'
-                          }
+                          aria-label={memberAccessLabel}
+                          title={memberAccessAction}
                         >
-                          <IconUsers />
+                          <IconUsers createBadge={canCreateMember} relationshipRole="member" />
                         </button>
                         {admin.gfsOperatorLink?.status === 'active' ? (
                           <button
