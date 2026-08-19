@@ -52,7 +52,9 @@ describe('host-context-controller Deployment strategy', () => {
 
   it('bounds rollout-stall detection above the worst legitimate startup', () => {
     // Detection only, not recovery: Recreate + replicas:1 means a botched
-    // rollout is healed operationally (kubectl rollout undo), never by K8s.
+    // rollout is healed by the evenfire-infra deploy pipeline
+    // (rollout undo --to-revision; evenfire#391), never by Kubernetes itself.
+    // The deadline stays 1200; this test must not lower it.
     // This deadline just flips Progressing=False / fails `kubectl rollout
     // status` deterministically for observers without their own --timeout. It
     // must exceed the worst legitimate startup, which — until #205 fully

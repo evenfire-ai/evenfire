@@ -121,4 +121,19 @@ grep -Fq 'create_synthetic_fleet' "$GATE" &&
   pass "measured window includes the synthetic clerum-dev-scale fleet" ||
   fail "gate measures a bare cluster and calls it the production window"
 
+
+# 12. evenfire#391 recovery mode: exclusive with EXPECT_STUCK, undo is the test
+#     action (not cleanup), last-good revision is captured, IMAGE_BROKEN is
+#     cleared after a proven undo, and a no-op undo fails.
+grep -Fq 'EXPECT_RECOVERY' "$GATE" &&
+  grep -Fq 'EXPECT_STUCK=1 and EXPECT_RECOVERY=1 are exclusive' "$GATE" &&
+  grep -Fq 'TEST ACTION' "$GATE" &&
+  grep -Fq -- '--to-revision' "$GATE" &&
+  grep -Fq 'LAST_GOOD_REVISION' "$GATE" &&
+  grep -Fq 'IMAGE_BROKEN=0' "$GATE" &&
+  grep -Fq 'undo was a no-op' "$GATE" &&
+  ! grep -q 'EXPECT_RECOVERY=1' <<<"$(awk '/^cleanup\(\)/,/^}/' "$GATE")" &&
+  pass "EXPECT_RECOVERY undoes to last-good outside cleanup and fails a no-op" ||
+  fail "EXPECT_RECOVERY is missing, shares cleanup, or can pass on a no-op undo"
+
 exit "$FAIL"
