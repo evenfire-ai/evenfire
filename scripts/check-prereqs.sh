@@ -274,6 +274,7 @@ perplexity:PERPLEXITY_API_KEY \
 moonshot:MOONSHOT_API_KEY \
 nebius:NEBIUS_API_KEY \
 novita:NOVITA_API_KEY \
+minimax:MINIMAX_API_KEY \
 azure:AZURE_OPENAI_API_KEY"
 
   provider_key_for() {
@@ -298,7 +299,7 @@ azure:AZURE_OPENAI_API_KEY"
     # just can't reach a model until a real key is added — matches the
     # "optional" behavior documented in docs/deploy/minikube.md.
     warn ".env     no LLM key set — setup will boot with placeholders (default zai); the agent can't call a model until you add one"
-    echo    "        Set one of 21 providers in .env (OPENAI_API_KEY / CLAUDE_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY …); setup infers the provider. Full list: docs/deploy/llm-providers.md"
+    echo    "        Set one of 22 providers in .env (OPENAI_API_KEY / CLAUDE_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY …); setup infers the provider. Full list: docs/deploy/llm-providers.md"
   fi
 
   # Provider/key consistency — non-fatal, catches a common mismatch.
