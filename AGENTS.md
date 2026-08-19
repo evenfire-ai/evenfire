@@ -76,7 +76,8 @@ A fresh or uninitialized profile must complete the supported bootstrap before
 incomplete profile. Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by
-silently skipping the suites.
+silently skipping the suites. Suites that drop or rewrite cluster-global roles
+must use the harness throwaway Postgres 16, never the shared `control-postgres`.
 
 T0 (static/unit/contract checks), T1 (real PostgreSQL), T2 (validated runtime),
 CI, and Control UI/Desktop Playwright are separate evidence lanes. One lane

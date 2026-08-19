@@ -11,6 +11,9 @@ source "$PROJECT_DIR/scripts/minikube/t2-common.sh"
 PG_NAMESPACE="$T2_CONTROL_NAMESPACE"
 PG_SERVICE=control-postgres
 PG_SECRET=control-postgres
+# Suites that DROP/ALTER cluster-global roles cannot share live control-postgres
+# (#412). They run against a throwaway Postgres 16 that matches CI.
+T1_ISOLATED_PG_IMAGE="${T1_ISOLATED_PG_IMAGE:-postgres:16-alpine}"
 T1_TIMEOUT="$T2_TIMEOUT_SECONDS"
 T1_TMP_ROOT="$T2_TMP_ROOT"
 if [ -z "$T1_TMP_ROOT" ]; then T1_TMP_ROOT=/tmp; fi
@@ -18,6 +21,9 @@ T1_TMP_DIR=""
 PORT_FORWARD_PID=""
 LOCAL_PORT=""
 ADMIN_DSN=""
+ISOLATED_DSN=""
+ISOLATED_CONTAINER=""
+ISOLATED_PORT=""
 PG_USER=""
 PG_PASSWORD=""
 PG_DATABASE=""
@@ -39,6 +45,13 @@ die_t1() {
   return 1
 }
 
+stop_isolated_postgres() {
+  if [ -n "$ISOLATED_CONTAINER" ]; then
+    docker rm -f "$ISOLATED_CONTAINER" >/dev/null 2>&1 || true
+    ISOLATED_CONTAINER=""
+  fi
+}
+
 cleanup_t1() {
   local status=$?
   if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
@@ -49,6 +62,7 @@ cleanup_t1() {
       wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
     fi
   fi
+  stop_isolated_postgres
   if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi
   exit "$status"
 }
@@ -56,12 +70,16 @@ trap cleanup_t1 EXIT INT TERM
 
 require_t1_commands() {
   local command_name
-  for command_name in npm node; do
+  for command_name in npm node docker; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       T1_NEXT_COMMAND="install or enable $command_name, then re-run the Real PostgreSQL lane"
       die_t1 LOCAL_DEPENDENCY_MISSING "required local dependency is unavailable: $command_name"
     fi
   done
+  if ! docker info >/dev/null 2>&1; then
+    T1_NEXT_COMMAND='start Docker Desktop or the Docker daemon, then re-run T1'
+    die_t1 LOCAL_DEPENDENCY_MISSING 'Docker is required to start the isolated T1 PostgreSQL'
+  fi
 }
 
 secret_field() {
@@ -119,63 +137,158 @@ path.write_text(text)
 PY
 }
 
+list_real_pg_files() {
+  local package="$1"
+  find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
+    ! -name 'realPostgres.requirement.ts' -print | sort
+}
+
+is_isolated_control_api_file() {
+  local path="$1"
+  case "$path" in
+    */db.realPostgresMigration.integration.test.ts|*/gfsReaderRole.realPostgres.integration.test.ts)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+require_isolated_control_api_files() {
+  local relative path
+  for relative in \
+    test/db.realPostgresMigration.integration.test.ts \
+    test/gfsReaderRole.realPostgres.integration.test.ts; do
+    path="$PROJECT_DIR/control-api/$relative"
+    if [ ! -f "$path" ]; then
+      T1_NEXT_COMMAND='restore the isolated Real PostgreSQL suite files, then re-run T1'
+      die_t1 ZERO_TESTS_EXECUTED "isolated suite file missing or renamed: $relative"
+    fi
+    is_isolated_control_api_file "$path" || {
+      T1_NEXT_COMMAND='keep the isolated Real PostgreSQL suite filenames in the T1 harness'
+      die_t1 ZERO_TESTS_EXECUTED "isolated suite file is no longer routed away from control-postgres: $relative"
+    }
+  done
+}
+
+start_isolated_postgres() {
+  ISOLATED_PORT="$(choose_local_port)"
+  ISOLATED_CONTAINER="evenfire-t1-isolated-pg-$$"
+  if ! docker run -d --rm --name "$ISOLATED_CONTAINER" \
+    -e POSTGRES_USER=postgres \
+    -e POSTGRES_DB=postgres \
+    -e POSTGRES_HOST_AUTH_METHOD=trust \
+    -p "127.0.0.1:${ISOLATED_PORT}:5432" \
+    "$T1_ISOLATED_PG_IMAGE" >/dev/null; then
+    ISOLATED_CONTAINER=""
+    T1_NEXT_COMMAND='repair Docker image postgres:16-alpine, then re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'isolated T1 PostgreSQL container failed to start'
+  fi
+  if ! wait_for_tcp "$ISOLATED_PORT"; then
+    T1_NEXT_COMMAND='repair Docker networking for the isolated T1 PostgreSQL, then re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'isolated T1 PostgreSQL did not become reachable'
+  fi
+  local deadline ready=false
+  deadline=$((SECONDS + T1_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if docker exec "$ISOLATED_CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ready" != true ]; then
+    T1_NEXT_COMMAND='inspect the isolated T1 PostgreSQL container, then re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'isolated T1 PostgreSQL did not become ready'
+  fi
+  ISOLATED_DSN="$(printf '%s' "$ISOLATED_PORT" | python3 -c '
+from urllib.parse import quote
+import sys
+port = sys.stdin.read().strip()
+print("postgresql://postgres@127.0.0.1:" + port + "/postgres", end="")
+')"
+}
+
 run_suite() {
-  local package="$1" expected_files log_file json_file stats
-  expected_files="$(find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' ! -name 'realPostgres.requirement.ts' -print | wc -l | tr -d ' ')"
+  local package="$1" lane="$2" admin_url="$3"
+  local expected_files=0 file log_file json_file stats
+  local -a files=() vitest_filters=()
+
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    if [ "$package" = control-api ] && is_isolated_control_api_file "$file"; then
+      [ "$lane" = isolated ] || continue
+    else
+      [ "$lane" = shared ] || continue
+    fi
+    files+=("$file")
+    vitest_filters+=("${file#"$PROJECT_DIR/$package/"}")
+  done < <(list_real_pg_files "$package")
+
+  expected_files="${#files[@]}"
   if ! [[ "$expected_files" =~ ^[1-9][0-9]*$ ]]; then
     T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED "no Real PostgreSQL suites were found under $package"
+    die_t1 ZERO_TESTS_EXECUTED "no Real PostgreSQL suites were found under $package ($lane)"
   fi
-  log_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _).log"
-  json_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _).json"
-  printf '[minikube-t1] running %s Real PostgreSQL suites\n' "$package"
+  if [ -z "$admin_url" ]; then
+    T1_NEXT_COMMAND='repair the T1 PostgreSQL DSN route, then re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE "Real PostgreSQL $lane DSN is empty for $package"
+  fi
+
+  log_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).log"
+  json_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).json"
+  printf '[minikube-t1] running %s %s Real PostgreSQL suites (%s files)\n' \
+    "$package" "$lane" "$expected_files"
   if ! (
     cd "$PROJECT_DIR/$package"
-    CONTROL_API_REAL_PG_ADMIN_URL="$ADMIN_DSN" \
+    CONTROL_API_REAL_PG_ADMIN_URL="$admin_url" \
     CONTROL_API_REAL_PG_REQUIRED=1 FORCE_COLOR=0 NO_COLOR=1 \
-      npm test -- --run realPostgres --reporter=json --outputFile="$json_file"
+      npm test -- --run "${vitest_filters[@]}" --reporter=json --outputFile="$json_file"
   ) >"$log_file" 2>&1; then
     sanitize_file "$log_file"
     sanitize_file "$json_file"
     cat "$log_file" >&2 || true
     cat "$json_file" >&2 || true
     T1_NEXT_COMMAND='repair the first failing Real PostgreSQL suite, then re-run T1 on the same HEAD'
-    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL suite failed in $package"
+    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL suite failed in $package ($lane)"
   fi
   sanitize_file "$log_file"
   sanitize_file "$json_file"
   [ -s "$json_file" ] || {
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package"
+    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package ($lane)"
   }
   stats="$(python3 - "$json_file" "$expected_files" <<'PY'
 import json
 import sys
 result = json.loads(open(sys.argv[1]).read())
 expected = int(sys.argv[2])
-passed_files = int(result.get("numPassedTestSuites") or 0)
+files = result.get("testResults") or []
+passed_files = sum(1 for item in files if item.get("status") == "passed")
 passed_tests = int(result.get("numPassedTests") or 0)
 failed_tests = int(result.get("numFailedTests") or 0)
 pending_files = int(result.get("numPendingTestSuites") or 0)
 pending_tests = int(result.get("numPendingTests") or 0)
 total_tests = int(result.get("numTotalTests") or 0)
 success = bool(result.get("success"))
-print(passed_files, passed_tests, failed_tests, pending_files, pending_tests, total_tests, int(success), expected)
+print(passed_files, passed_tests, failed_tests, pending_files, pending_tests, total_tests, int(success), expected, len(files))
 PY
   )"
-  read -r passed_files passed_tests failed_tests pending_files pending_tests total_tests success expected <<< "$stats"
+  read -r passed_files passed_tests failed_tests pending_files pending_tests total_tests success expected reported_files <<< "$stats"
   T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))
   T1_PASSED_TESTS=$((T1_PASSED_TESTS + passed_tests))
   T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
-  if [ "$success" -ne 1 ] || [ "$passed_files" -ne "$expected" ] || [ "$failed_tests" -ne 0 ]; then
+  if [ "$success" -ne 1 ] || [ "$passed_files" -ne "$expected" ] || [ "$reported_files" -ne "$expected" ] || [ "$failed_tests" -ne 0 ]; then
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
-    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package"
+    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package ($lane)"
   fi
   if [ "$total_tests" -le 0 ] || [ "$passed_tests" -le 0 ] || [ "$pending_files" -ne 0 ] || [ "$pending_tests" -ne 0 ]; then
     T1_NEXT_COMMAND='repair the test selection or database route; a T1 run cannot silently skip suites'
-    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package"
+    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package ($lane)"
   fi
-  printf '[minikube-t1] PASS %s files=%s tests=%s skipped=0\n' "$package" "$passed_files" "$passed_tests"
+  printf '[minikube-t1] PASS %s %s files=%s tests=%s skipped=0\n' \
+    "$package" "$lane" "$passed_files" "$passed_tests"
 }
 
 main() {
@@ -238,10 +351,14 @@ import sys
 user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
 print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.decode(), safe="") + "@127.0.0.1:" + port.decode() + "/postgres", end="")
 ')"
-  run_suite control-api
-  run_suite gfs-controller
+  require_isolated_control_api_files
+  start_isolated_postgres
+  run_suite control-api isolated "$ISOLATED_DSN"
+  run_suite control-api shared "$ADMIN_DSN"
+  run_suite gfs-controller shared "$ADMIN_DSN"
   unset PG_USER PG_PASSWORD PG_DATABASE T1_REDACT_PASSWORD
-  unset ADMIN_DSN
+  unset ADMIN_DSN ISOLATED_DSN
+  stop_isolated_postgres
   T1_STATUS=PASS
   t2_evidence_write T1 PASS "Real PostgreSQL suites passed; tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS"
   t2_evidence_write complete PASS "T1=PASS tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS"
