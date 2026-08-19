@@ -2,6 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import {
+  DESKTOP_COMMANDS,
+  formatDesktopShortcut,
+  platformFromNavigator,
+} from '../../../../src/desktopCommands'
 import { AuthContext } from '../../contexts/AuthContext'
 import type { AuthContextValue } from '../../contexts/AuthContext'
 import { SettingsPage } from '../SettingsPage'
@@ -173,5 +178,35 @@ describe('SettingsPage', () => {
     const auth = (window.clerum as { auth: { getDesktopReleaseStatus: ReturnType<typeof vi.fn> } })
       .auth
     expect(auth.getDesktopReleaseStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders the read-only Shortcuts tab from the authoritative registry', async () => {
+    const user = userEvent.setup()
+    renderSettingsPage()
+
+    await user.click(screen.getByRole('tab', { name: 'Shortcuts' }))
+
+    const visibleCommands = DESKTOP_COMMANDS.filter(
+      command => command.visibleInSettings && command.defaultBinding
+    )
+    expect(screen.getAllByRole('row')).toHaveLength(visibleCommands.length + 1)
+    const platform = platformFromNavigator(navigator.platform)
+    for (const command of visibleCommands) {
+      expect(screen.getByText(command.label)).toBeTruthy()
+      expect(
+        screen.getAllByText(formatDesktopShortcut(command.defaultBinding!, platform)).length
+      ).toBeGreaterThan(0)
+    }
+    expect(screen.queryByRole('button', { name: /save|reset/i })).toBeNull()
+    expect(screen.queryByRole('textbox')).toBeNull()
+  })
+
+  it('opens Shortcuts when requested by a registered command', () => {
+    render(
+      <AuthContext.Provider value={makeAuthValue()}>
+        <SettingsPage {...defaultSettingsProps} shortcutsFocusRequestId={1} />
+      </AuthContext.Provider>
+    )
+    expect(screen.getByRole('tabpanel', { name: 'Shortcuts' })).toBeTruthy()
   })
 })
