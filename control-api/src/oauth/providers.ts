@@ -1,10 +1,20 @@
 /**
- * Known-shape OAuth provider adapters supported by control-api. The string
- * union mirrors the CRD enum (charts/clerum-crds/crds/mcpserver.yaml +
- * workflowrecipe.yaml, provider enums) and the workflow-recipes types.ts
- * `OAuthProvider`. Adding a provider requires updating the CRD enum(s) and the
- * workflow-recipes union. Within control-api, `KNOWN_OAUTH_PROVIDERS` is derived
- * from `ADAPTERS` (single source of truth) — no per-call-site provider lists.
+ * Known-shape OAuth provider adapters supported by control-api. This is the
+ * full control-api ADAPTER SET — NOT the recipe-admissible set. The mcpserver
+ * CRD (`charts/clerum-crds/crds/mcpserver.yaml` `oauth.provider` enum) admits all
+ * of these; the WorkflowRecipe CRD (`workflowrecipe.yaml` `provider` enum)
+ * deliberately admits only the five legacy ones, so monday/clickup/vercel are
+ * mcpserver-only and are rejected at recipe admission — consumers that gate
+ * recipe providers must trust the recipe CRD enum, not this union.
+ *
+ * Adding a provider requires updating, in lockstep, ALL of:
+ *   1. this union + `ADAPTERS` below,
+ *   2. `charts/clerum-crds/crds/mcpserver.yaml` `oauth.provider` enum,
+ *   3. `workflow-recipes/src/types.ts` `OAuthProvider` (+ `workflowrecipe.yaml`
+ *      enum, only if the provider is also recipe-valid),
+ *   4. `host-context-controller/src/types.ts` `McpServerOAuth.provider`.
+ * Within control-api, `KNOWN_OAUTH_PROVIDERS` is derived from `ADAPTERS` (single
+ * source of truth) — no per-call-site provider lists.
  *
  * U2 (spec 06 §U2) adds monday, clickup, vercel. monday + vercel require PKCE
  * (see `usesPkce` / pkce.ts).

@@ -6078,6 +6078,18 @@ async function applyOAuthGrantsOwnerGeneralization(db: DbClient): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS oauth_grants_shared_unique
       ON oauth_grants (owner_kind, recipe_namespace, recipe_name, context_id, oauth_client_id)
       WHERE grant_kind = 'shared';
+    -- NOTE (R1-M2): oauth_grants_service_unique (applyOAuthServiceGrants above)
+    -- is DELIBERATELY left owner-blind — it is NOT recreated here with
+    -- owner_kind, unlike its two siblings (oauth_grants_unique,
+    -- oauth_grants_shared_unique). Rationale: service grants are recipe-only.
+    -- OAuth mcp-servers never create them — resolveServerOAuth only ever derives
+    -- grantScope 'user'|'context' (mcpServerOAuthSpec.ts), so an mcp-server's
+    -- grant_kind is never 'service'. Every service row therefore has
+    -- owner_kind='recipe', making (recipe_namespace, recipe_name, oauth_client_id)
+    -- unique without owner_kind in the key. If a future unit lets an
+    -- owner_kind='mcpserver' row take grant_kind='service', this index MUST gain
+    -- owner_kind (else a service INSERT could DO UPDATE a same-key recipe row's
+    -- tokens — silent cross-owner overwrite).
   `)
 }
 

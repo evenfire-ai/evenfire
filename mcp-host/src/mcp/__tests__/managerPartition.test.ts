@@ -13,6 +13,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
 import type { McpServerInfo } from '../../types'
+import { createBrokerTokenProvider } from '../brokerTokenProvider'
 import type { McpTokenProvider } from '../client'
 import {
   McpManager,
@@ -239,6 +240,83 @@ describe('Identity isolation: A partition never serves B', () => {
     const transportsAfterFirst = sdk.transports.length
     await manager.callTool('gh__do', {}, { userId: 'alice' })
     expect(sdk.transports.length).toBe(transportsAfterFirst)
+  })
+})
+
+// ─── Broker principal binding (PR #319 C2/H1) ────────────────────────────────
+//
+// End-to-end proof of the load-bearing invariant: the userId a tool call
+// carries (options.userId — the authenticated task sender, see
+// toolRegistryAdapter) is the SAME value the mcp-host POSTs to the control-api
+// broker as the grant subject. Composes the REAL manager with the REAL
+// brokerTokenProvider (only the network `fetch` is stubbed); the broker
+// principal is NEVER a hand-minted fixture. control-api trusting that body
+// userId is the documented seam — mcp-host's contract is that it only ever
+// sends the caller's own identity.
+
+describe('Broker principal binding: POST subject is the caller, never crossed', () => {
+  /** Factory wiring the REAL broker provider for user principals, mirroring
+   *  main.ts createMcpTokenProviderFactory grantScope='user': user → broker
+   *  (server, userId); SHARED → token-less catalog representative. Captures every
+   *  broker POST body so the test asserts what identity actually left the host. */
+  function brokerFactory(): {
+    factory: McpTokenProviderFactory
+    bodies: Array<{ mcpServerName?: string; userId?: string; contextId?: string }>
+  } {
+    const bodies: Array<{ mcpServerName?: string; userId?: string; contextId?: string }> = []
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { userId?: string }
+      bodies.push(body)
+      return {
+        status: 200,
+        json: async () => ({ token: `tok-for-${body.userId}`, expiresAt: null }),
+      } as unknown as Response
+    })
+    const factory: McpTokenProviderFactory = (server, principal) =>
+      principal.kind === 'user'
+        ? createBrokerTokenProvider(
+            server,
+            { userId: principal.userId },
+            {
+              gatewayUrl: () => 'http://gateway:8092',
+              controlToken: () => 'control-jwt',
+              fetchImpl: fetchImpl as unknown as typeof fetch,
+            }
+          )
+        : { resolve: async () => undefined, refresh: async () => undefined }
+    return { factory, bodies }
+  }
+
+  it('the userId POSTed to the broker equals the callTool userId (per caller)', async () => {
+    const { factory, bodies } = brokerFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    await manager.addServer(oauthUserServer())
+
+    await manager.callTool('gh__do', {}, { userId: 'alice' })
+    await manager.callTool('gh__do', {}, { userId: 'bob' })
+
+    // Every broker exchange carries exactly the caller's own identity — no other.
+    expect(bodies).toContainEqual({ mcpServerName: 'gh', userId: 'alice' })
+    expect(bodies).toContainEqual({ mcpServerName: 'gh', userId: 'bob' })
+    expect(bodies.every(b => b.userId === 'alice' || b.userId === 'bob')).toBe(true)
+    // Alice's identity is emitted once; bob's connect never POSTs alice's userId.
+    expect(bodies.filter(b => b.userId === 'alice')).toHaveLength(1)
+
+    // And the resolved Bearer lands only on that caller's own connection.
+    const authHeaders = sdk.transports.map(t => t.requestHeaders['Authorization'])
+    expect(authHeaders).toContain('Bearer tok-for-alice')
+    expect(authHeaders).toContain('Bearer tok-for-bob')
+    expect(authHeaders.filter(h => h === 'Bearer tok-for-alice')).toHaveLength(1)
+  })
+
+  it('never POSTs a userId for the token-less SHARED catalog representative', async () => {
+    const { factory, bodies } = brokerFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    // addServer opens the SHARED representative (catalog population) with no user.
+    await manager.addServer(oauthUserServer())
+
+    // No per-user call yet → the representative must not have brokered any grant.
+    expect(bodies).toEqual([])
   })
 })
 

@@ -5,7 +5,7 @@
  */
 import { config } from './config'
 import { hccLogger } from './logger'
-import type { HostWorkflowControlScope } from './types'
+import type { HostRuntimeControlScope } from './types'
 import { signInternalControlJwt } from './utils/internalControlSigner'
 
 export interface McpHostRuntimeTokenResponse {
@@ -40,7 +40,7 @@ type CanonicalMcpHostTokenResponse = {
  */
 export async function issueMcpHostRuntimeTokens(
   hostName: string,
-  workflowControlScopes: HostWorkflowControlScope[] = []
+  workflowControlScopes: HostRuntimeControlScope[] = []
 ): Promise<McpHostRuntimeTokenResponse> {
   const recipeNamespace = config.hccTargetNamespace
   const url = `${config.controlApiBaseUrl}/api/v1/auth/mcp-host/${encodeURIComponent(recipeNamespace)}/${encodeURIComponent(SENTINEL_RECIPE_NAME)}/tokens`

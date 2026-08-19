@@ -30,7 +30,18 @@ export interface McpServerSecretRef {
  */
 export interface McpServerOAuth {
   id: string
-  provider: 'salesforce' | 'slack' | 'notion' | 'microsoft-graph' | 'google'
+  // Full control-api adapter set — must mirror the mcpserver.yaml `oauth.provider`
+  // enum, control-api `providers.ts` `OAuthProvider`, and workflow-recipes
+  // `OAuthProvider`. U2 (spec 06) added monday/clickup/vercel.
+  provider:
+    | 'salesforce'
+    | 'slack'
+    | 'notion'
+    | 'microsoft-graph'
+    | 'google'
+    | 'monday'
+    | 'clickup'
+    | 'vercel'
   clientIdRef: McpServerSecretRef
   clientSecretRef: McpServerSecretRef
   scopes?: string[]
@@ -379,6 +390,8 @@ export interface ContextStatus {
 export interface ContextCRD {
   name: string
   namespace: string
+  uid?: string
+  generation?: number
   spec: ContextSpec
   status?: ContextStatus
 }
@@ -414,6 +427,21 @@ export type HostWorkflowControlScope =
 export interface HostWorkflowControlSpec {
   scopes?: HostWorkflowControlScope[]
 }
+
+/**
+ * Runtime control scopes minted into an mcp-host's control JWT. This is the
+ * DERIVED superset of the user-declarable {@link HostWorkflowControlScope}:
+ * HCC appends `oauth:user-token` for a Host runtime that fronts an enabled
+ * `auth.type: oauth` mcp-server, so the mcp-host can call control-api's OAuth
+ * user-token broker on that connection's behalf.
+ *
+ * `oauth:user-token` is HCC-derived and MUST NEVER be user-declarable: it is
+ * deliberately absent from {@link HostWorkflowControlScope} and from the Host
+ * CRD `spec.workflowControl.scopes` enum. HCC computes it per reconcile from
+ * the referenced Context's McpServer allow-list; nothing writes it back to the
+ * Host CR.
+ */
+export type HostRuntimeControlScope = HostWorkflowControlScope | 'oauth:user-token'
 
 export interface HostSpec {
   host: string
@@ -538,6 +566,12 @@ export interface McpServerStatus {
   ready: boolean
   /** Human-readable status message. */
   message?: string
+  /**
+   * Whether HCC can tie this status to the current McpServer identity and
+   * generation. False means discovery is authoritative but runtime status has
+   * not yet been re-established after controller startup.
+   */
+  authoritative?: boolean
 }
 
 /**

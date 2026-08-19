@@ -108,6 +108,13 @@ class McpToolAdapter implements Tool {
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const startTime = Date.now()
     try {
+      // Principal binding (PR #319 C2/H1): the broker grant subject is ALWAYS
+      // `this.userId` — the authenticated task sender baked in at construction
+      // (taskExecutor threads `task.sourceMessage.sender`, itself bound to the
+      // rpc-proxy edge `auth.sub` in handleMessageRoute). `params` is model /
+      // tool-arg data and is forwarded as the call payload only; it can NEVER
+      // become the identity, so a `userId` field inside `params` cannot spoof
+      // another user's broker token.
       const result = await this.mcpManager.callTool(this.fullName, params, {
         userId: this.userId,
       })

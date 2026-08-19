@@ -429,6 +429,14 @@ export interface SandboxUiSpec {
  * Known-shape OAuth provider adapters baked into control-api. Adding a
  * provider is a control-api change — recipes cannot speak OAuth to
  * arbitrary endpoints. Spec §9.9 / Decision 20.
+ *
+ * R1-L2: this is the full control-api ADAPTER SET (shared with mcp-servers),
+ * NOT the recipe-admissible set. monday/clickup/vercel (U2, spec 06) are
+ * mcpserver-only: the WorkflowRecipe CRD `provider` enum deliberately stays at
+ * the five legacy providers, so a recipe declaring one of the three is rejected
+ * at admission (fail-closed). Do NOT treat membership in this union / a true
+ * `isOAuthProvider` result as "valid for a recipe" — the recipe CRD enum is the
+ * authoritative gate for recipe OAuth clients.
  */
 export type OAuthProvider =
   | 'salesforce'

@@ -5,6 +5,8 @@ import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
   HostReconciler,
+  OAUTH_USER_TOKEN_SCOPE,
+  resolveRuntimeControlScopes,
   resolveWorkflowControlScopes,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
@@ -1937,5 +1939,108 @@ describe('reconcileChannelReaderDeployment — B2: preserve replicas on unsynced
     const replaceBody = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
       .body as k8s.V1Deployment
     expect(replaceBody.spec?.replicas).toBe(1)
+  })
+})
+
+describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
+  // Extract the runtime-token scope arg from the LAST issuer call, sorted for
+  // stable comparison. This is the REAL derive → issuance payload: the mock
+  // captures whatever `resolveWorkflowControlScopesForHost` (the production
+  // derive) actually produced — no hand-minted JWT.
+  function lastIssuedScopes(): string[] {
+    const calls = vi.mocked(issueMcpHostRuntimeTokens).mock.calls
+    const last = calls[calls.length - 1]
+    return [...(last?.[1] ?? [])].sort()
+  }
+
+  // Access the private static scope-hash used for drift detection.
+  const scopeHashOf = (
+    HostReconciler as unknown as {
+      runtimeTokenScopeHash(
+        host: HostCRD,
+        hasChannelIngress?: boolean,
+        frontsOAuthServer?: boolean
+      ): string
+    }
+  ).runtimeTokenScopeHash
+
+  it('requests oauth:user-token through the real issuance payload when the Host fronts an enabled oauth mcp-server', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    // Host CRD carries NO oauth scope — the value is derive-only. HCC learns
+    // the Host fronts an oauth server exclusively from this injected probe.
+    reconciler.setHostFrontsOAuthServer(async () => true)
+
+    await reconciler.reconcile(makeHost())
+
+    // Goes through the REAL derive (resolveWorkflowControlScopesForHost →
+    // resolveRuntimeControlScopes). Without the derive change this scope is
+    // absent and the assertion fails.
+    expect(lastIssuedScopes()).toEqual(
+      [...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES, OAUTH_USER_TOKEN_SCOPE].sort()
+    )
+    expect(lastIssuedScopes()).toContain('oauth:user-token')
+  })
+
+  it('does NOT request oauth:user-token when the Host fronts no oauth mcp-server', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    reconciler.setHostFrontsOAuthServer(async () => false)
+
+    await reconciler.reconcile(makeHost())
+
+    expect(lastIssuedScopes()).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES].sort())
+    expect(lastIssuedScopes()).not.toContain('oauth:user-token')
+  })
+
+  it('defaults to NO oauth:user-token when the probe is unwired', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    // No setHostFrontsOAuthServer — production default is fail-closed false.
+
+    await reconciler.reconcile(makeHost())
+
+    expect(lastIssuedScopes()).not.toContain('oauth:user-token')
+  })
+
+  it('fails closed (no oauth:user-token) when the oauth-server probe throws', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    reconciler.setHostFrontsOAuthServer(async () => {
+      throw new Error('context read failed')
+    })
+
+    await reconciler.reconcile(makeHost())
+
+    expect(lastIssuedScopes()).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES].sort())
+    expect(lastIssuedScopes()).not.toContain('oauth:user-token')
+  })
+
+  it('toggling oauth-server presence changes the runtime-token scope hash (drift re-issues)', () => {
+    const host = makeHost()
+    const withoutOAuth = scopeHashOf(host, true, false)
+    const withOAuth = scopeHashOf(host, true, true)
+    expect(withOAuth).not.toBe(withoutOAuth)
+  })
+
+  it('mint scope set matches the scope-hash input (no mint/hash divergence)', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    reconciler.setHostFrontsOAuthServer(async () => true)
+    const host = makeHost()
+
+    await reconciler.reconcile(host)
+
+    // The scopes minted into the token (issuer payload) must equal the exact
+    // set the drift hash is computed over — both flow through
+    // resolveRuntimeControlScopes, so a hash miss would re-issue forever.
+    const hashInput = [
+      ...resolveRuntimeControlScopes(host.spec.workflowControl, {
+        hasChannelIngress: true,
+        frontsOAuthServer: true,
+      }),
+    ].sort()
+    expect(lastIssuedScopes()).toEqual(hashInput)
+    expect(hashInput).toContain('oauth:user-token')
   })
 })

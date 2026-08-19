@@ -508,6 +508,35 @@ spec:
                   message: "spec.oauth.id is immutable"
                 - rule: "!has(oldSelf.oauth) || !has(self.oauth) || oldSelf.oauth.provider == self.oauth.provider"
                   message: "spec.oauth.provider is immutable"
+                # R1-L1: close the two-step immutability bypass. The rules above
+                # short-circuit on !has(self.oauth), so an UPDATE could (1) drop
+                # spec.oauth, then a second UPDATE (2) re-add it with a different
+                # grantScope/id/provider — oldSelf.oauth now absent, immutability
+                # skipped. Forbidding removal once set blocks step (1), so the
+                # coordinate is truly immutable. Removing OAuth from a server thus
+                # requires delete+recreate — consistent with the `managed` rule.
+                - rule: "!has(oldSelf.oauth) || has(self.oauth)"
+                  message: "spec.oauth cannot be removed once set; delete and recreate the McpServer to change or remove the OAuth identity"
+                # M1 (@alfredolopez80, PR #317): spec.contextRef is the
+                # AUTHORITATIVE shared-identity coordinate for a
+                # grantScope:'context' oauth server — control-api keys the
+                # shared grant by server.spec.contextRef (mcpOauth.ts), NEVER
+                # the request body. Without this rule an actor with `update`
+                # RBAC on the McpServer CR could repoint contextRef ctxA→ctxB
+                # in place and redirect the shared token, defeating the
+                # grantScope/id/provider immutability above. oauth-GUARDED
+                # (!has(oldSelf.oauth) short-circuit) on purpose: contextRef is
+                # required on ALL servers (visibility/allowlisting too), and a
+                # WRC delegation reconcile legitimately re-writes it when an
+                # operator edits the owning WorkflowRecipe.spec.contextRef —
+                # global immutability would wedge that non-oauth flow. The
+                # shared-token threat is oauth-only, so we pin contextRef only
+                # once oauth exists. No two-step drop-oauth bypass: the rule
+                # above forbids removing oauth once set. contextRef is required
+                # → on UPDATE oldSelf/self.contextRef always exist. Transition
+                # rule (oldSelf) → skipped on CREATE.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || self.contextRef == oldSelf.contextRef"
+                  message: "spec.contextRef is immutable; delete and recreate the McpServer to re-parent it to a different Context"
             status:
               type: object
               properties:

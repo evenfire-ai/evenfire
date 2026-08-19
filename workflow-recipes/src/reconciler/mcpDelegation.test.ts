@@ -18,6 +18,7 @@ import {
   preDeployMcpServers,
   transportWorkloadSecretDenied,
   waitForExternalEgressReady,
+  waitForNetworkReady,
 } from './mcpDelegation'
 import type { SecretAccess } from './resourceBuilder'
 import { privateWorkflowContextName } from './workflowContext'
@@ -1347,6 +1348,70 @@ describe('delegateTransportWorkloads', () => {
     expect(mcpServerReplaceCalls.length).toBeGreaterThanOrEqual(1)
   })
 
+  it('Issue #408: drops the carried-over network-ready ack pair from the replace on a spec change', async () => {
+    const MCPSERVER_PLURAL = 'mcpservers'
+    const SPEC_HASH = 'clerum.io/spec-hash'
+    const NETWORK_READY = 'clerum.io/network-ready'
+    const NETWORK_READY_GEN = 'clerum.io/network-ready-observed-generation'
+    const recipe = makeRecipe()
+    let storedMcpServer:
+      | { metadata?: { annotations?: Record<string, string> }; spec?: Record<string, unknown> }
+      | undefined
+
+    const mockCustomApi = {
+      getNamespacedCustomObject: vi.fn().mockImplementation((args: { plural: string }) => {
+        if (args.plural === MCPSERVER_PLURAL && storedMcpServer) {
+          return Promise.resolve(storedMcpServer)
+        }
+        return Promise.reject({ code: 404 })
+      }),
+      createNamespacedCustomObject: vi
+        .fn()
+        .mockImplementation((args: { plural: string; body: unknown }) => {
+          if (args.plural === MCPSERVER_PLURAL) {
+            storedMcpServer = args.body as typeof storedMcpServer
+          }
+          return Promise.resolve({})
+        }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const mockCoreApi = { createNamespacedService: vi.fn().mockResolvedValue({}) }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: mockCoreApi as unknown as DelegationDeps['coreApi'],
+    }
+
+    await delegateTransportWorkloads(deps, recipe, 'mcp-server', new Map())
+    expect(storedMcpServer).toBeDefined()
+
+    // Simulate a prior-generation HCC ack carried on the live object, plus a stale
+    // spec-hash so the desired manifest differs and the replace path is taken.
+    storedMcpServer!.metadata = {
+      ...(storedMcpServer!.metadata ?? {}),
+      annotations: {
+        ...(storedMcpServer!.metadata?.annotations ?? {}),
+        [SPEC_HASH]: 'stale-hash',
+        [NETWORK_READY]: 'true',
+        [NETWORK_READY_GEN]: '1',
+      },
+    }
+    mockCustomApi.replaceNamespacedCustomObject.mockClear()
+    await delegateTransportWorkloads(deps, recipe, 'mcp-server', new Map())
+
+    const replaceCall = mockCustomApi.replaceNamespacedCustomObject.mock.calls.find(
+      (call: unknown[]) => (call[0] as { plural?: string } | undefined)?.plural === MCPSERVER_PLURAL
+    ) as [{ body: { metadata: { annotations: Record<string, string> } } }] | undefined
+    expect(replaceCall).toBeDefined()
+
+    const replacedAnnotations = replaceCall![0].body.metadata.annotations
+    // The stale network ack pair must NOT be carried forward into the new generation.
+    expect(replacedAnnotations[NETWORK_READY]).toBeUndefined()
+    expect(replacedAnnotations[NETWORK_READY_GEN]).toBeUndefined()
+    // Non-network annotations (the freshly stamped spec-hash from the manifest) survive.
+    expect(replacedAnnotations[SPEC_HASH]).toBeDefined()
+    expect(replacedAnnotations[SPEC_HASH]).not.toBe('stale-hash')
+  })
+
   it('does NOT patch shared Context (H-04 isolation — no patchNamespacedCustomObject)', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
@@ -1996,6 +2061,106 @@ describe('waitForExternalEgressReady', () => {
     expect(result.ready).toBe(false)
     expect(result.pending).toEqual(['web-search'])
     expect(result.failed).toEqual([])
+  })
+})
+
+// ─── Issue #408 — waitForNetworkReady must be generation-aware ─────────────────
+// The flat `clerum.io/network-ready: "true"` ack carries no generation. A stale
+// ack carried over from a previous generation must NOT satisfy the gate for the
+// current generation. Mirrors waitForExternalEgressReady's observedGeneration
+// freshness check, but for the annotation pair.
+describe('waitForNetworkReady (Issue #408 generation-aware gate)', () => {
+  it('rejects a network-ready ack stamped for an older generation', async () => {
+    const deps: DelegationDeps = {
+      customApi: {
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: {
+            generation: 2,
+            annotations: {
+              'clerum.io/network-ready': 'true',
+              'clerum.io/network-ready-observed-generation': '1',
+            },
+          },
+        }),
+      } as any,
+      coreApi: {} as any,
+    }
+
+    const result = await waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)
+
+    expect(result.ready).toBe(false)
+    expect(result.pending).toEqual(['srv-a'])
+  })
+
+  it('rejects a network-ready ack that lacks the generation stamp', async () => {
+    const deps: DelegationDeps = {
+      customApi: {
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: {
+            generation: 2,
+            annotations: { 'clerum.io/network-ready': 'true' },
+          },
+        }),
+      } as any,
+      coreApi: {} as any,
+    }
+
+    const result = await waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)
+
+    expect(result.ready).toBe(false)
+    expect(result.pending).toEqual(['srv-a'])
+  })
+
+  it('accepts a network-ready ack stamped for the current generation', async () => {
+    const deps: DelegationDeps = {
+      customApi: {
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: {
+            generation: 2,
+            annotations: {
+              'clerum.io/network-ready': 'true',
+              'clerum.io/network-ready-observed-generation': '2',
+            },
+          },
+        }),
+      } as any,
+      coreApi: {} as any,
+    }
+
+    await expect(waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)).resolves.toEqual({
+      ready: true,
+      pending: [],
+    })
+  })
+
+  it('tolerates a missing (non-numeric) generation and accepts the flat ack', async () => {
+    const deps: DelegationDeps = {
+      customApi: {
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { annotations: { 'clerum.io/network-ready': 'true' } },
+        }),
+      } as any,
+      coreApi: {} as any,
+    }
+
+    await expect(waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)).resolves.toEqual({
+      ready: true,
+      pending: [],
+    })
+  })
+
+  it('treats a 404 (McpServer deleted) as resolved', async () => {
+    const deps: DelegationDeps = {
+      customApi: {
+        getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
+      } as any,
+      coreApi: {} as any,
+    }
+
+    await expect(waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)).resolves.toEqual({
+      ready: true,
+      pending: [],
+    })
   })
 })
 
