@@ -508,6 +508,15 @@ spec:
                   message: "spec.oauth.id is immutable"
                 - rule: "!has(oldSelf.oauth) || !has(self.oauth) || oldSelf.oauth.provider == self.oauth.provider"
                   message: "spec.oauth.provider is immutable"
+                # R1-L1: close the two-step immutability bypass. The rules above
+                # short-circuit on !has(self.oauth), so an UPDATE could (1) drop
+                # spec.oauth, then a second UPDATE (2) re-add it with a different
+                # grantScope/id/provider — oldSelf.oauth now absent, immutability
+                # skipped. Forbidding removal once set blocks step (1), so the
+                # coordinate is truly immutable. Removing OAuth from a server thus
+                # requires delete+recreate — consistent with the `managed` rule.
+                - rule: "!has(oldSelf.oauth) || has(self.oauth)"
+                  message: "spec.oauth cannot be removed once set; delete and recreate the McpServer to change or remove the OAuth identity"
             status:
               type: object
               properties:
