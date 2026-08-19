@@ -37,11 +37,20 @@ describe('hand-maintained provider mirrors (shell scripts)', () => {
   it('both e2e scripts have a provider->slot case arm for every provider', () => {
     const scripts = ['scripts/e2e/e2e-plugin-workload-sdk.sh', 'scripts/e2e/seed-e2e-data.sh']
     for (const rel of scripts) {
-      const script = read(rel)
+      // These scripts have more than one `case` over providers (a model-name
+      // block and a credential-slot block), so match on the arm LINES, not the
+      // whole file: at least one `id)` arm must resolve this provider's slot.
+      // That catches an absent arm and a mis-wired one, while tolerating the
+      // multiple case blocks.
+      const lines = read(rel).split('\n')
       for (const id of PROVIDER_IDS) {
         const primarySlot = PROVIDER_CREDENTIAL_SLOTS[id][0].dataKey
-        expect(script, `${rel}: missing case arm ${id})`).toContain(`${id})`)
-        expect(script, `${rel}: ${id}) arm must resolve ${primarySlot}`).toContain(primarySlot)
+        const idArms = lines.filter(line => line.trimStart().startsWith(`${id})`))
+        expect(idArms.length, `${rel}: missing case arm ${id})`).toBeGreaterThan(0)
+        expect(
+          idArms.some(arm => arm.includes(primarySlot)),
+          `${rel}: no ${id}) arm resolves ${primarySlot}`
+        ).toBe(true)
       }
     }
   })
