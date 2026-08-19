@@ -249,7 +249,7 @@ else
   # At least one LLM key — setup infers the provider from whichever is set.
   #
   # Canonical provider→primary-credential map, mirrored from the registry in
-  # packages/llm-providers/index.cjs (PROVIDER_CREDENTIAL_SLOTS). All 21
+  # packages/llm-providers/index.cjs (PROVIDER_CREDENTIAL_SLOTS). All 22
   # providers; the value is each provider's PRIMARY credential env var (vertex
   # and bedrock also need secondary vars — see the per-provider note below).
   # Keep in sync with that file if providers are added.
