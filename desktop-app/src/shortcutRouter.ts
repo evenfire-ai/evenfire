@@ -21,6 +21,11 @@ export type DesktopShortcutRoute = {
   isCurrentSource?: () => boolean
 }
 
+export type DesktopShortcutHost = {
+  webContents: ShortcutWebContents
+  once(event: 'closed', listener: () => void): unknown
+}
+
 /**
  * Editing chords belong to Chromium/the active app, even if a future command
  * definition accidentally reuses one. Keep this guard independent of DOM
@@ -83,4 +88,13 @@ export function wireDesktopShortcutRouting(route: DesktopShortcutRoute): () => v
   }
   route.sourceWebContents.on('before-input-event', listener)
   return () => route.sourceWebContents.removeListener('before-input-event', listener)
+}
+
+export function wireHostDesktopShortcutRouting(host: DesktopShortcutHost): void {
+  const dispose = wireDesktopShortcutRouting({
+    source: 'host',
+    sourceWebContents: host.webContents,
+    trustedRenderer: host.webContents,
+  })
+  host.once('closed', dispose)
 }
