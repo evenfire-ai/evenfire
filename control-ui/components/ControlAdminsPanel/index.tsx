@@ -387,6 +387,9 @@ export function ControlAdminsPanel({
               filteredAdmins.map(admin => {
                 const currentAdmin = isCurrentAdmin(admin)
                 const label = admin.email ? `${admin.username} (${admin.email})` : admin.username
+                const memberCreationUnavailable = !admin.email || admin.passwordPending
+                const memberAccessDisabled = !admin.memberId && memberCreationUnavailable
+                const canCreateMember = !admin.memberId && !memberCreationUnavailable
                 return (
                   <tr
                     key={admin.id}
@@ -443,12 +446,12 @@ export function ControlAdminsPanel({
                         <button
                           type="button"
                           className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          disabled={!admin.memberId && (!admin.email || admin.passwordPending)}
+                          disabled={memberAccessDisabled}
                           onClick={() => openMemberAccess(admin)}
                           aria-label={memberAccessActionLabel(admin)}
                           title={memberAccessActionLabel(admin)}
                         >
-                          <IconUsers createBadge={!admin.memberId} relationshipRole="member" />
+                          <IconUsers createBadge={canCreateMember} relationshipRole="member" />
                         </button>
                         {admin.gfsOperatorLink?.status === 'active' ? (
                           <button

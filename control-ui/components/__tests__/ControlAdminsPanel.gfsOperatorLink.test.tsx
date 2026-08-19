@@ -235,7 +235,7 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     })
     expect(createMemberButton).toBeDisabled()
     expect(createMemberButton).toHaveAttribute('title', 'Email required to create member')
-    expect(createMemberButton.querySelector('svg')).toHaveAttribute('data-create-badge', 'true')
+    expect(createMemberButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
 
     fireEvent.click(createMemberButton)
     expect(mockPush).not.toHaveBeenCalled()
