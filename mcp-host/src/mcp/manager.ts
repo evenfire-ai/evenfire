@@ -495,16 +495,26 @@ export class McpManager {
         }
       })
     )
-    const succeeded = results.filter(({ result }) => result.ok).length
+    // A probe only counts toward the round's tally when its result is
+    // authoritative for the currently-installed client: never a client swapped
+    // out mid-round, never a stale-error probe that raced a reconnect. This is
+    // the same predicate the status commit below uses, so summary.succeeded /
+    // summary.failed match what was written — a benign mid-round swap can't
+    // inflate `failed` and flip the run's outcome on the series #148 watches.
+    const committed = results.filter(
+      ({ name, client, result }) =>
+        this.clients.get(name) === client && !(!result.ok && result.stale)
+    )
+    const succeeded = committed.filter(({ result }) => result.ok).length
     const summary: McpStatusRefreshSummary = {
       serverCount: entries.length,
       succeeded,
-      failed: entries.length - succeeded,
-      toolCount: results.reduce(
+      failed: committed.length - succeeded,
+      toolCount: committed.reduce(
         (total, { result }) => total + (result.ok ? result.toolCount : 0),
         0
       ),
-      outputSchemaCount: results.reduce(
+      outputSchemaCount: committed.reduce(
         (total, { result }) => total + (result.ok ? result.outputSchemaCount : 0),
         0
       ),
@@ -512,12 +522,7 @@ export class McpManager {
     }
     if (summary.aborted) return summary
 
-    for (const { name, client, result } of results) {
-      // Connection-epoch staleness (dev hardening): never write status for a
-      // client that was swapped out mid-round, and skip stale-error probes that
-      // raced a reconnect — they carry no authoritative signal for this client.
-      if (this.clients.get(name) !== client) continue
-      if (!result.ok && result.stale) continue
+    for (const { name, result } of committed) {
       if (result.ok) {
         this.statusTracker.updateToolCount(name, result.toolCount)
       } else {

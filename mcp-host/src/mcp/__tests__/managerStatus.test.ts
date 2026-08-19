@@ -573,6 +573,27 @@ describe('McpManager.refreshAllServerStatus', () => {
     })
   })
 
+  it('excludes a stale probe from the summary succeeded/failed tally', async () => {
+    const { McpClient } = await import('../client')
+    vi.spyOn(McpClient.prototype, 'connect').mockImplementation(async function (this: any) {
+      this.connected = true
+      this.tools = [{ name: 'tool-1', inputSchema: {}, serverName: 'svc' }]
+    })
+    vi.spyOn(McpClient.prototype, 'probeTools').mockResolvedValue({
+      ok: false,
+      error: new Error('MCP client svc is superseded'),
+      stale: true,
+    })
+    const m = new McpManager()
+    await m.addServer(serverInfo())
+
+    // A stale probe is skipped from the status commit, so it must not count as a
+    // real failure either — otherwise a benign mid-round swap flips the round to
+    // outcome=failed on the series #148's gate watches.
+    const summary = await m.refreshAllServerStatus()
+    expect(summary).toMatchObject({ serverCount: 1, succeeded: 0, failed: 0, aborted: false })
+  })
+
   it('returns an empty summary and is a no-op when no servers are connected', async () => {
     const m = new McpManager()
     await expect(m.refreshAllServerStatus()).resolves.toEqual({
