@@ -440,17 +440,26 @@ export function App() {
   // gesture (notification / approval) must surface the chat IN the drawer — open
   // the drawer and pass `keepNavItem` so the vm swaps the shared <ChatPage>
   // without ejecting to the full-screen chat route. App owns both the embed-live
-  // signal and the drawer-open state, so the wrap lives here.
+  // signal and the drawer-open state, so the wrap lives here. Only open the drawer
+  // for notifications that ACTUALLY surface in it: `handleOpenNotification` routes
+  // `workflow_completed`/`sdk_notification` elsewhere, and a cross-team
+  // agent-conversation ejects to full-screen (a team switch tears the embed down).
+  // Opening the drawer for those would flash it and leave `chatDrawerOpen` stuck.
   const handleOpenNotificationInDrawer = React.useCallback(
     (...args: Parameters<typeof vm.handleOpenNotification>) => {
       const [notification, options] = args
-      if (chatDrawerAvailableRef.current) {
+      const surfacesInDrawer =
+        chatDrawerAvailableRef.current &&
+        notification.kind !== 'workflow_completed' &&
+        notification.kind !== 'sdk_notification' &&
+        (!notification.teamId || notification.teamId === vm.getCurrentTeamId())
+      if (surfacesInDrawer) {
         setChatDrawerOpen(true)
         return vm.handleOpenNotification(notification, { keepNavItem: true })
       }
       return vm.handleOpenNotification(notification, options)
     },
-    [vm.handleOpenNotification]
+    [vm.getCurrentTeamId, vm.handleOpenNotification]
   )
 
   const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {

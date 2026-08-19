@@ -90,9 +90,16 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // otherwise it ejects to the full-screen chat route.
   const handleOpenNotification = vi.fn(
     (
-      notification: { agentName?: string; chatId?: string },
+      notification: { kind?: string; agentName?: string; chatId?: string },
       options: { keepNavItem?: boolean } = {}
     ) => {
+      // Faithful routing: workflow/sdk notifications navigate away (not to the
+      // chat/apps surface) — model them as leaving the agent chat state untouched.
+      if (notification.kind === 'workflow_completed') {
+        controller.navItem = DESKTOP_ROUTES.plugins
+        return Promise.resolve()
+      }
+      if (notification.kind === 'sdk_notification') return Promise.resolve()
       controller.selectedAgent = notification.agentName ?? controller.selectedAgent
       controller.activeChatId = notification.chatId ?? null
       if (!options.keepNavItem) controller.navItem = DESKTOP_ROUTES.chat
@@ -330,7 +337,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     await act(async () => {
       await appHeaderHarness.openNotification?.({
         id: 'n1',
-        kind: 'agent_message',
+        kind: 'approval_required',
         agentName: 'alpha',
         chatId: 'chat-2',
       } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
@@ -347,5 +354,54 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       { keepNavItem: true }
     )
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  // Regression for the C wrap opening the drawer for EVERY notification kind: it
+  // must only open for gestures that actually surface in the drawer, not for the
+  // kinds handleOpenNotification navigates away for (workflow_completed → plugins,
+  // sdk_notification → its target). Otherwise the drawer flashes and chatDrawerOpen
+  // gets stuck true.
+  it('does not open the drawer for notifications that navigate away (workflow / sdk)', async () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: null,
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { rerender } = render(<App />)
+
+    // Launch from the picker (no origin) → app live, apps route, drawer CLOSED.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+
+    // sdk_notification navigates to its own target — must NOT open the drawer.
+    await act(async () => {
+      await appHeaderHarness.openNotification?.({
+        id: 's1',
+        kind: 'sdk_notification',
+      } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+
+    // workflow_completed navigates to plugins; returning to apps must NOT find a
+    // drawer the user never asked for (the "stuck true" symptom).
+    await act(async () => {
+      await appHeaderHarness.openNotification?.({
+        id: 'w1',
+        kind: 'workflow_completed',
+      } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
+    })
+    act(() => {
+      currentController.navItem = DESKTOP_ROUTES.apps
+      rerender(<App />)
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
   })
 })
