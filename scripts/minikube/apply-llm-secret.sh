@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ======================================================================
-# Apply the chatllm-api-keys LLM Secret (all 21 providers)
+# Apply the chatllm-api-keys LLM Secret (all 22 providers)
 # ======================================================================
 #
 # Builds the `chatllm-api-keys` Secret (namespace: mcp-host) from whatever
@@ -86,6 +86,7 @@ SLOTS=(
   "moonshot-api-key|MOONSHOT_API_KEY|"
   "nebius-api-key|NEBIUS_API_KEY|"
   "novita-api-key|NOVITA_API_KEY|"
+  "minimax-api-key|MINIMAX_API_KEY|"
   "azure-openai-api-key|AZURE_OPENAI_API_KEY|"
 )
 
