@@ -5,6 +5,7 @@ import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
+import type { DesktopCommandId } from '../../../src/desktopCommands'
 
 const confirmDialogHarness = vi.hoisted(() => ({
   rendered: vi.fn(),
@@ -15,9 +16,33 @@ const confirmDialogHarness = vi.hoisted(() => ({
   },
 }))
 
+const appHeaderHarness = vi.hoisted(() => ({
+  props: null as null | { searchFocusRequestId?: number; notificationOpenRequestId?: number },
+}))
+
+const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
+
+const commandPaletteHarness = vi.hoisted(() => ({
+  props: null as null | {
+    isEligible: (commandId: DesktopCommandId) => boolean
+    onClose: () => void
+    onExecute: (commandId: DesktopCommandId) => void
+  },
+}))
+
+const sidebarHarness = vi.hoisted(() => ({
+  props: null as null | { toggleRequestId?: number },
+}))
+
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
+    headerShellOverlayOpen?: boolean
     shortcutOpenRequestId?: number
+    localSearchRequestId?: number
+    actionRequest?: {
+      id: number
+      action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+    } | null
     onEmbeddedAppOpening?: (app: {
       appRef: string
       label: string
@@ -25,6 +50,7 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
       defaultPath: string
       routePath?: string
     }) => void
+    onEmbeddedAppMounted?: () => void
     onShortcutOpenResult?: (
       requestId: number,
       result: { status: 'mounted' } | { status: 'failed'; message: string }
@@ -40,7 +66,24 @@ vi.mock('@hooks/useAgentChatActionsValue', () => ({
   useAgentChatActionsValue: () => ({}),
 }))
 
-vi.mock('@components/AppHeader', () => ({ AppHeader: () => null }))
+vi.mock('@components/AppHeader', () => ({
+  AppHeader: (props: NonNullable<typeof appHeaderHarness.props>) => {
+    appHeaderHarness.props = props
+    return null
+  },
+}))
+vi.mock('@components/ChatLocalSearch', () => ({
+  ChatLocalSearch: () => {
+    chatLocalSearchHarness.rendered()
+    return null
+  },
+}))
+vi.mock('@components/CommandPalette', () => ({
+  CommandPalette: (props: NonNullable<typeof commandPaletteHarness.props>) => {
+    commandPaletteHarness.props = props
+    return <div role="dialog" aria-modal="true" aria-label="Command palette" />
+  },
+}))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({
@@ -50,7 +93,12 @@ vi.mock('@components/ConfirmDialog', () => ({
     return null
   },
 }))
-vi.mock('@components/SidebarNav', () => ({ SidebarNav: () => null }))
+vi.mock('@components/SidebarNav', () => ({
+  SidebarNav: (props: NonNullable<typeof sidebarHarness.props>) => {
+    sidebarHarness.props = props
+    return null
+  },
+}))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
@@ -64,7 +112,15 @@ vi.mock('@pages/SandboxUiPage', () => ({
     return null
   },
 }))
-vi.mock('@pages/SettingsPage', () => ({ SettingsPage: () => null }))
+const settingsPageHarness = vi.hoisted(() => ({
+  props: null as null | { shortcutsFocusRequestId?: number },
+}))
+vi.mock('@pages/SettingsPage', () => ({
+  SettingsPage: (props: NonNullable<typeof settingsPageHarness.props>) => {
+    settingsPageHarness.props = props
+    return null
+  },
+}))
 vi.mock('@pages/TeamDetailsPage', () => ({ TeamDetailsPage: () => null }))
 vi.mock('@pages/TeamsPage', () => ({ TeamsPage: () => null }))
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
@@ -138,6 +194,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     getCurrentTeamId: vi.fn(() => liveTeamId),
     handleSelectChatAgent: vi.fn(),
     handleNavSelect,
+    handleLogout: vi.fn(),
     pushToast: vi.fn(),
     setStatus: noop,
     setBooting: noop,
@@ -157,6 +214,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
 describe('App deep-link orchestration', () => {
   let currentController: AppController
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
+  let emitCommand: ((commandId: DesktopCommandId, source?: 'host' | 'sandbox') => void) | null
   const clearPendingDeepLinks = vi.fn().mockResolvedValue(undefined)
   const acknowledgeDeepLink = vi.fn().mockResolvedValue(undefined)
   const listApps = vi.fn().mockResolvedValue({ apps: [] })
@@ -166,18 +224,32 @@ describe('App deep-link orchestration', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     confirmDialogHarness.props = null
+    appHeaderHarness.props = null
+    chatLocalSearchHarness.rendered.mockReset()
+    commandPaletteHarness.props = null
+    settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
+    sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
     listPendingDeepLinks.mockResolvedValue({ links: [] })
     closeSandboxUi.mockResolvedValue(undefined)
     emitDeepLink = null
+    emitCommand = null
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => currentController)
 
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        shortcuts: {
+          onCommand: vi.fn(
+            (callback: (commandId: DesktopCommandId, source: 'host' | 'sandbox') => void) => {
+              emitCommand = (commandId, source = 'host') => callback(commandId, source)
+              return vi.fn()
+            }
+          ),
+        },
         app: {
           rendererReady: vi.fn().mockResolvedValue(undefined),
         },
@@ -187,12 +259,228 @@ describe('App deep-link orchestration', () => {
           clearPendingDeepLinks,
           acknowledgeDeepLink,
           close: closeSandboxUi,
+          focusActive: vi.fn().mockResolvedValue(true),
           onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
             emitDeepLink = callback
             return vi.fn()
           }),
         },
       } as unknown as Window['clerum'],
+    })
+  })
+
+  it('runs registered new-tab and composer-focus commands through existing chat selection', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'alpha',
+    } as Partial<AppController>)
+    render(<App />)
+
+    act(() => emitCommand?.('chat.newTab'))
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
+      selectLatest: false,
+    })
+
+    act(() => emitCommand?.('composer.focus'))
+    expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith('alpha', {
+      selectLatest: false,
+    })
+  })
+
+  it('keeps global and contextual search commands on distinct host surfaces', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+    } as Partial<AppController>)
+    render(<App />)
+
+    act(() => emitCommand?.('search.open'))
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
+    expect(chatLocalSearchHarness.rendered).not.toHaveBeenCalled()
+
+    act(() => emitCommand?.('search.current'))
+    expect(chatLocalSearchHarness.rendered).toHaveBeenCalled()
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
+  })
+
+  it('suppresses application commands while plugin consent owns the app surface', () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    const consent = document.createElement('div')
+    consent.className = 'da-plugin-consent'
+    consent.setAttribute('role', 'dialog')
+    document.body.append(consent)
+
+    act(() => emitCommand?.('search.open'))
+
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(0)
+    consent.remove()
+  })
+
+  it('routes contextual search to the current sandbox app without opening global search', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      selectedAgent: 'alpha',
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+
+    act(() => emitCommand?.('search.current'))
+    expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(0)
+    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    act(() => emitCommand?.('search.current'))
+    expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(1)
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(0)
+
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/replacement',
+        label: 'Replacement app',
+        defaultPath: '/',
+      })
+      sandboxUiPageHarness.props?.onEmbeddedAppMounted?.()
+    })
+    act(() => emitCommand?.('search.current'))
+    expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(2)
+  })
+
+  it('opens the palette, executes eligible registry actions, and captures the sandbox view', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      selectedAgent: 'alpha',
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+      emitCommand?.('commands.open', 'sandbox')
+    })
+
+    expect(commandPaletteHarness.props).not.toBeNull()
+    expect(sandboxUiPageHarness.props?.headerShellOverlayOpen).toBe(true)
+    expect(commandPaletteHarness.props?.isEligible('search.current')).toBe(true)
+
+    act(() => commandPaletteHarness.props?.onExecute('search.open'))
+    expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
+    expect(document.querySelector('[aria-label="Command palette"]')).toBeNull()
+  })
+
+  it('restores native app focus when a sandbox-opened palette is dismissed', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => emitCommand?.('commands.open', 'sandbox'))
+    act(() => commandPaletteHarness.props?.onClose())
+
+    await waitFor(() => expect(window.clerum.sandboxUi.focusActive).toHaveBeenCalledOnce())
+  })
+
+  it('opens Settings Shortcuts through the registered palette action', () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    act(() => emitCommand?.('commands.open'))
+    act(() => commandPaletteHarness.props?.onExecute('settings.shortcuts'))
+
+    expect(currentController.handleNavSelect).toHaveBeenCalledWith(DESKTOP_ROUTES.settings)
+    expect(settingsPageHarness.props?.shortcutsFocusRequestId).toBe(1)
+  })
+
+  it('routes approved core palette actions through their existing owners', () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    act(() => emitCommand?.('commands.open'))
+
+    act(() => commandPaletteHarness.props?.onExecute('settings.open'))
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.settings)
+
+    act(() => commandPaletteHarness.props?.onExecute('navigate.chat'))
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.chat)
+    act(() => commandPaletteHarness.props?.onExecute('navigate.apps'))
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.apps)
+    act(() => commandPaletteHarness.props?.onExecute('navigate.agents'))
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.agents)
+
+    act(() => commandPaletteHarness.props?.onExecute('notifications.open'))
+    expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(1)
+    act(() => commandPaletteHarness.props?.onExecute('auth.logout'))
+    expect(currentController.handleLogout).toHaveBeenCalledOnce()
+  })
+
+  it('routes approved contextual palette actions through shell and app owners', () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    act(() => emitCommand?.('commands.open'))
+
+    for (const [commandId, route] of [
+      ['navigate.plugins', DESKTOP_ROUTES.plugins],
+      ['navigate.contexts', DESKTOP_ROUTES.contexts],
+      ['navigate.teams', DESKTOP_ROUTES.teams],
+      ['navigate.connectors', DESKTOP_ROUTES.connectors],
+      ['navigate.files', DESKTOP_ROUTES.files],
+    ] as const) {
+      act(() => commandPaletteHarness.props?.onExecute(commandId))
+      expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(route)
+    }
+
+    act(() => commandPaletteHarness.props?.onExecute('sidebar.toggle'))
+    expect(sidebarHarness.props?.toggleRequestId).toBe(1)
+
+    currentController.navItem = DESKTOP_ROUTES.apps
+    act(() => emitCommand?.('commands.open'))
+    act(() => {
+      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(false)
+    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(true)
+    act(() => commandPaletteHarness.props?.onExecute('app.refresh'))
+    expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 1, action: 'refresh' })
+    act(() => commandPaletteHarness.props?.onExecute('app.backToApps'))
+    expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 2, action: 'back-to-apps' })
+    expect(commandPaletteHarness.props?.isEligible('app.backToConversation')).toBe(false)
+  })
+
+  it('resets controlled command requests with the authenticated shell lifetime', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    const { rerender } = render(<App />)
+
+    act(() => emitCommand?.('commands.open'))
+    act(() => commandPaletteHarness.props?.onExecute('notifications.open'))
+    act(() => commandPaletteHarness.props?.onExecute('sidebar.toggle'))
+
+    expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(1)
+    expect(sidebarHarness.props?.toggleRequestId).toBe(1)
+
+    currentController = makeController({
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-b:user-b@example.com',
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    rerender(<App />)
+
+    await waitFor(() => {
+      expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(0)
+      expect(sidebarHarness.props?.toggleRequestId).toBe(0)
+      expect(sandboxUiPageHarness.props?.actionRequest).toBeNull()
+      expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(false)
     })
   })
 
