@@ -436,6 +436,23 @@ export function App() {
     }
   }, [closeChatDrawer, openChatDrawer])
 
+  // minispec 04 approach C: while the app embed is live, an "open conversation"
+  // gesture (notification / approval) must surface the chat IN the drawer — open
+  // the drawer and pass `keepNavItem` so the vm swaps the shared <ChatPage>
+  // without ejecting to the full-screen chat route. App owns both the embed-live
+  // signal and the drawer-open state, so the wrap lives here.
+  const handleOpenNotificationInDrawer = React.useCallback(
+    (...args: Parameters<typeof vm.handleOpenNotification>) => {
+      const [notification, options] = args
+      if (chatDrawerAvailableRef.current) {
+        setChatDrawerOpen(true)
+        return vm.handleOpenNotification(notification, { keepNavItem: true })
+      }
+      return vm.handleOpenNotification(notification, options)
+    },
+    [vm.handleOpenNotification]
+  )
+
   const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {
     setChatLocalSearchOpen(false)
     setChatLocalSearchState({ query: '', currentMatch: null })
@@ -1697,7 +1714,7 @@ export function App() {
       removeNotification: vm.removeNotification,
       resolveApprovalNotification: vm.resolveApprovalNotification,
       decideApproval: vm.decideApproval,
-      handleOpenNotification: vm.handleOpenNotification,
+      handleOpenNotification: handleOpenNotificationInDrawer,
       handleApproveNotification: vm.handleApproveNotification,
       handleDenyNotification: vm.handleDenyNotification,
       handleRefreshPendingApprovals: vm.handleRefreshPendingApprovals,
@@ -1709,7 +1726,7 @@ export function App() {
       vm.handleApproveNotification,
       vm.handleDecidePendingApproval,
       vm.handleDenyNotification,
-      vm.handleOpenNotification,
+      handleOpenNotificationInDrawer,
       vm.handleRefreshPendingApprovals,
       vm.markNotificationsRead,
       vm.notificationActionById,

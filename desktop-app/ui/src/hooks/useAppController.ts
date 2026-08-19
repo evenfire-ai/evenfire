@@ -892,17 +892,37 @@ export function useAppController() {
   )
 
   const openAgentConversationTarget = useCallback(
-    async (target: AgentConversationNotificationTarget) => {
+    async (
+      target: AgentConversationNotificationTarget,
+      options: { keepNavItem?: boolean } = {}
+    ) => {
       const targetAgent = String(target.agentName || '').trim()
       if (!targetAgent) return
       const targetChatId = String(target.chatId || '').trim()
       const targetTeamId = String(target.teamId || '').trim()
       const activeTeamId = currentTeamIdRef.current
       const requiresTeamSwitch = Boolean(targetTeamId && targetTeamId !== activeTeamId)
+      // minispec 04 approach C: when the app embed is live (App requests
+      // `keepNavItem`) and no team switch is needed, surface the conversation IN
+      // the drawer instead of ejecting to the full-screen chat route. A team
+      // switch tears the embed down, so that case keeps the full-screen path.
+      const stayInDrawer = Boolean(options.keepNavItem) && !requiresTeamSwitch
 
       try {
         if (requiresTeamSwitch) {
           await ensureTeamContext({ teamId: targetTeamId })
+        }
+
+        if (stayInDrawer) {
+          // handleSelectChatAgent(keepNavItem) sets the active chat without
+          // flipping `navItem` (and imperatively switches for the same-agent
+          // case); the drawer reconciler (approach A) syncs the switcher tab.
+          handleSelectChatAgent(targetAgent, {
+            selectLatest: false,
+            keepNavItem: true,
+            ...(targetChatId ? { chatId: targetChatId } : {}),
+          })
+          return
         }
 
         // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
@@ -944,6 +964,7 @@ export function useAppController() {
       chat.switchToChat,
       ensureTeamContext,
       fullSetStatus,
+      handleSelectChatAgent,
       nav.navItem,
       nav.selectedAgent,
       nav.setNavItem,
@@ -1086,7 +1107,7 @@ export function useAppController() {
 
   // ─── Cross-domain: handleOpenNotification ───
   const handleOpenNotification = useCallback(
-    async (notification: AppNotification) => {
+    async (notification: AppNotification, options: { keepNavItem?: boolean } = {}) => {
       notif.markNotificationRead(notification.id)
       if (notification.kind === 'workflow_completed') {
         await openWorkflowCompletionTarget(notification)
@@ -1096,7 +1117,9 @@ export function useAppController() {
         await openSdkNotificationTarget(notification)
         return
       }
-      await openAgentConversationTarget(notification)
+      // `keepNavItem` (App passes it when the app embed is live) only reaches the
+      // agent-conversation surface — workflow/SDK targets navigate elsewhere.
+      await openAgentConversationTarget(notification, options)
     },
     [
       notif.markNotificationRead,

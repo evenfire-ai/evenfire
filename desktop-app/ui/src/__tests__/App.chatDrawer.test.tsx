@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { useAppController } from '@hooks/useAppController'
 import { App } from '@/App'
 
@@ -22,6 +23,9 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
 }))
 const appHeaderHarness = vi.hoisted(() => ({
   props: null as null | { notificationTrayMode?: 'drawer' | 'overlay' },
+  // Captured from context so tests can drive the "open conversation" gesture the
+  // notification tray fires.
+  openNotification: null as null | ((notification: unknown) => Promise<void>),
 }))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
@@ -29,6 +33,7 @@ vi.mock('@hooks/useAgentChatActionsValue', () => ({ useAgentChatActionsValue: ()
 vi.mock('@components/AppHeader', () => ({
   AppHeader: (props: NonNullable<typeof appHeaderHarness.props>) => {
     appHeaderHarness.props = props
+    appHeaderHarness.openNotification = useNotificationsContext().handleOpenNotification
     return null
   },
 }))
@@ -80,6 +85,20 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       if (!options.keepNavItem) controller.navItem = DESKTOP_ROUTES.chat
     }
   )
+  // Faithful to the real openAgentConversationTarget: `keepNavItem` (passed by
+  // App's drawer-aware wrapper) surfaces the chat WITHOUT flipping navItem;
+  // otherwise it ejects to the full-screen chat route.
+  const handleOpenNotification = vi.fn(
+    (
+      notification: { agentName?: string; chatId?: string },
+      options: { keepNavItem?: boolean } = {}
+    ) => {
+      controller.selectedAgent = notification.agentName ?? controller.selectedAgent
+      controller.activeChatId = notification.chatId ?? null
+      if (!options.keepNavItem) controller.navItem = DESKTOP_ROUTES.chat
+      return Promise.resolve()
+    }
+  )
   controller = {
     booting: false,
     initialExperienceLoading: false,
@@ -122,6 +141,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     handleEnsureTeamContext: vi.fn(async () => false),
     getCurrentTeamId: vi.fn(() => 'team-a'),
     handleSelectChatAgent,
+    handleOpenNotification,
     handleNavSelect,
     handleLogout: vi.fn(),
     pushToast: vi.fn(),
@@ -145,6 +165,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     sidebarHarness.props = null
     sandboxUiPageHarness.props = null
     appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => currentController)
     Object.defineProperty(window, 'clerum', {
@@ -281,4 +302,50 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
   })
 
+  // #3 — open-conversation gesture is drawer-aware (minispec 04 approach C). An
+  // approval on a background chat, opened from the tray, must surface in the
+  // drawer (navItem stays apps) instead of ejecting to the full-screen route.
+  it('surfaces an open-conversation gesture in the drawer instead of ejecting', async () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { rerender } = render(<App />)
+
+    // Launch from chat-1 → drawer open, app live, navItem apps.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+
+    // Open the conversation the approval is on (chat-2, a background chat) via the
+    // notification tray's gesture.
+    await act(async () => {
+      await appHeaderHarness.openNotification?.({
+        id: 'n1',
+        kind: 'agent_message',
+        agentName: 'alpha',
+        chatId: 'chat-2',
+      } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
+    })
+    act(() => rerender(<App />))
+
+    // Observable: the drawer now shows the approval's chat AND we did not eject
+    // to the full-screen chat route.
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(currentController.activeChatId).toBe('chat-2')
+    expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 'chat-2' }),
+      { keepNavItem: true }
+    )
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
 })
