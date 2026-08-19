@@ -18,6 +18,12 @@
 # keeps zero old replicas to fall back on.
 #
 # Modes:
+#   EXPECT_RECOVERY=1 — exclusive with EXPECT_STUCK. Botch the image, prove the
+#     D1b 503 outage, then run last-good revision restore as the TEST ACTION
+#     (not cleanup). Recovery must recertify /ready 200, restore the original
+#     image and last-good revision, and replace the botched pod. An undo no-op
+#     is FAIL. After a proven undo, IMAGE_BROKEN=0 so cleanup does not set the
+#     image again. This is the evenfire#391 evidence path.
 #   EXPECT_STUCK=0 (default) — healthy rollout via `kubectl rollout restart`.
 #     rollout restart mutates the pod template (restartedAt annotation), which
 #     drives the SAME Deployment machinery — terminate old, then create new —
@@ -67,7 +73,7 @@ command -v jq >/dev/null 2>&1 || {
 }
 [ "${E2E_HCC_ROLLOUT_FAULT_INJECTION:-0}" = 1 ] || {
   echo "Set E2E_HCC_ROLLOUT_FAULT_INJECTION=1 to acknowledge that this gate rolls" >&2
-  echo "(and, with EXPECT_STUCK=1, deliberately breaks) the HCC deployment." >&2
+  echo "(and, with EXPECT_STUCK=1 or EXPECT_RECOVERY=1, deliberately breaks) the HCC deployment." >&2
   exit 1
 }
 case "${EXPECT_STUCK:-0}" in
@@ -78,6 +84,18 @@ case "${EXPECT_STUCK:-0}" in
     ;;
 esac
 EXPECT_STUCK="${EXPECT_STUCK:-0}"
+EXPECT_RECOVERY="${EXPECT_RECOVERY:-0}"
+case "${EXPECT_RECOVERY}" in
+  0 | 1) ;;
+  *)
+    echo "EXPECT_RECOVERY must be 0 or 1." >&2
+    exit 1
+    ;;
+esac
+if [ "$EXPECT_STUCK" = 1 ] && [ "$EXPECT_RECOVERY" = 1 ]; then
+  echo "EXPECT_STUCK=1 and EXPECT_RECOVERY=1 are exclusive." >&2
+  exit 1
+fi
 kctl get nodes -o json | jq -e --arg c "$E2E_KUBECONTEXT" \
   'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $c)' >/dev/null ||
   {
@@ -229,7 +247,7 @@ write_evidence_artifact() {
   # sibling churn gate: an empty grep under `set -euo pipefail` must never
   # abort the gate before its verdict).
   {
-    echo "=== mode: EXPECT_STUCK=${EXPECT_STUCK}  fleet=${WITH_SYNTHETIC_FLEET} (${FLEET_CONTEXTS}/${FLEET_MCPSERVERS}/${FLEET_HOSTS}) ==="
+    echo "=== mode: EXPECT_STUCK=${EXPECT_STUCK} EXPECT_RECOVERY=${EXPECT_RECOVERY}  fleet=${WITH_SYNTHETIC_FLEET} (${FLEET_CONTEXTS}/${FLEET_MCPSERVERS}/${FLEET_HOSTS}) ==="
     echo "=== HCC deploy ==="
     kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o wide || true
     echo "=== deployment conditions (progressDeadlineSeconds is DETECTION only) ==="
@@ -322,7 +340,11 @@ OLD_POD_NAME="$(running_hcc_pod)"
 OLD_POD_UID="$(kctl get pod "$OLD_POD_NAME" -n "$HCC_NS" -o jsonpath='{.metadata.uid}')"
 [ -n "$OLD_POD_UID" ] || die "could not pin the pre-rollout pod uid"
 
-if [ "$EXPECT_STUCK" = 0 ]; then
+
+LAST_GOOD_REVISION="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+[ -n "$LAST_GOOD_REVISION" ] || die "could not capture the last-known-good HCC revision"
+
+if [ "$EXPECT_STUCK" = 0 ] && [ "$EXPECT_RECOVERY" = 0 ]; then
   # ── FASE D (healthy): Recreate rollout, sampled at 1Hz end to end ──
   log "Triggering a Recreate rollout (kubectl rollout restart) and sampling /ready at 1Hz"
   kctl rollout restart deployment/"$HCC_DEPLOY" -n "$HCC_NS" >/dev/null
@@ -364,7 +386,7 @@ if [ "$EXPECT_STUCK" = 0 ]; then
   [ "$hold_total" -gt 0 ] && [ "$hold_503" -eq 0 ] &&
     ok "post-rollout hold: ${hold_total} samples over ${STABILITY_WINDOW_SEC}s, zero 503 — the replacement is stable" ||
     fail "post-rollout hold saw ${hold_503} 503(s) across ${hold_total} sample(s) — the replacement did not stabilize"
-else
+elif [ "$EXPECT_STUCK" = 1 ]; then
   # ── FASE D (botched, D1b): roll to an unpullable image and watch the outage ──
   BOTCHED_IMAGE="$(botched_image_ref)"
   log "Botched rollout (D1b): rolling to unpullable image ${BOTCHED_IMAGE}; observing /ready for ${STUCK_OBSERVE_SEC}s"
@@ -406,7 +428,79 @@ else
   [ "$stuck_maxstreak" -gt "$ROLLOUT_DOWNTIME_BUDGET_SEC" ] &&
     ok "SUSTAINED outage measured: ${stuck_maxstreak}s continuous 503 (> ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget) and still open at observation end — recovery requires the manual image rollback cleanup performs (D1b reproduced)" ||
     fail "outage lasted only ${stuck_maxstreak}s and did not exceed the ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget — the botched rollout did not produce the D1b total outage"
+else
+  # ── FASE D (recovery, evenfire#391): botch, prove the outage, then undo ──
+  BOTCHED_IMAGE="$(botched_image_ref)"
+  PRE_BOTCH_UID="$OLD_POD_UID"
+  log "Botched rollout (EXPECT_RECOVERY): observing /ready for ${STUCK_OBSERVE_SEC}s"
+  kctl set image deployment/"$HCC_DEPLOY" -n "$HCC_NS" host-context-controller="$BOTCHED_IMAGE" >/dev/null
+  ROLLOUT_TRIGGERED=1
+  IMAGE_BROKEN=1
+  sample_ready_series "$STUCK_OBSERVE_SEC" stuck 0
+  read -r stuck_total stuck_200 stuck_503 stuck_maxstreak stuck_transitions <<<"$(series_metrics stuck)"
+  deployed_image_now="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}' 2>/dev/null || true)"
+  old_uid_live="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}' 2>/dev/null | grep -cxF "$OLD_POD_UID" || true)"
+  stuck_pod_rows="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\t"}{.status.phase}{"\t"}{.status.containerStatuses[*].state.waiting.reason}{"\n"}{end}' 2>/dev/null || true)"
+  replacement_row="$(awk -F '\t' -v old="$OLD_POD_UID" '$2 != old && $2 != "" { print; exit }' <<<"$stuck_pod_rows")"
+  BOTCHED_POD_UID="$(awk -F '\t' '{ print $2; exit }' <<<"$replacement_row")"
+
+  [ "$stuck_total" -gt 0 ] && ok "sampled /ready ${stuck_total}x across the botched rollout" ||
+    fail "ZERO /ready samples across the botched rollout — the sampler never ran, and a zero-sample run must never pass"
+  [ "$deployed_image_now" = "$BOTCHED_IMAGE" ] &&
+    ok "the botched image is what the Deployment is actually rolling (${BOTCHED_IMAGE})" ||
+    fail "deployment image is '${deployed_image_now:-unset}', not the injected ${BOTCHED_IMAGE}"
+  [ "$old_uid_live" = 0 ] &&
+    ok "Recreate terminated the old HEALTHY pod before any viable replacement existed" ||
+    fail "old pod ${OLD_POD_NAME} is still alive under a Recreate rollout"
+  if [ -n "$replacement_row" ] && grep -Eq 'ErrImagePull|ImagePullBackOff' <<<"$replacement_row"; then
+    ok "replacement pod is pinned by the injected image failure: ${replacement_row}"
+  else
+    fail "no replacement pod pinned in ErrImagePull|ImagePullBackOff (rows: ${stuck_pod_rows:-none})"
+  fi
+  [ "$stuck_503" -ge 1 ] &&
+    ok "the botched rollout bit the readiness path: ${stuck_503} sample(s) at 503" ||
+    fail "zero 503 samples under a botched Recreate rollout — the outage claim is VACUOUS"
+  [ "$stuck_transitions" -eq 0 ] &&
+    ok "no 503->200 transition closed the outage before undo — Kubernetes did NOT self-heal" ||
+    fail "the outage closed on its own (${stuck_transitions} 503->200 transition(s)) before undo"
+
+  live_revision_before_undo="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+  [ "$live_revision_before_undo" != "$LAST_GOOD_REVISION" ] ||
+    fail "live revision ${live_revision_before_undo} still equals last-good ${LAST_GOOD_REVISION} — undo would be a no-op"
+
+  log "TEST ACTION (evenfire#391): rollout undo --to-revision=${LAST_GOOD_REVISION}"
+  kctl rollout undo deployment/"$HCC_DEPLOY" -n "$HCC_NS" --to-revision="$LAST_GOOD_REVISION" >/dev/null ||
+    fail "rollout undo --to-revision=${LAST_GOOD_REVISION} failed"
+  kctl rollout status deployment/"$HCC_DEPLOY" -n "$HCC_NS" --timeout=240s >/dev/null ||
+    fail "last-known-good revision ${LAST_GOOD_REVISION} did not become Ready"
+  wait_until 90 "HCC /ready after undo" hcc_ready_now ||
+    fail "HCC /ready did not return 200 after last-good restore"
+  IMAGE_BROKEN=0
+
+  recovered_image="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}')"
+  recovered_revision="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+  NEW_POD_NAME="$(running_hcc_pod)"
+  NEW_POD_UID="$(kctl get pod "$NEW_POD_NAME" -n "$HCC_NS" -o jsonpath='{.metadata.uid}')"
+  sample_ready_series "$STABILITY_WINDOW_SEC" post-hold 0
+  read -r hold_total _ hold_503 _ _ <<<"$(series_metrics post-hold)"
+  write_evidence_artifact
+
+  [ "$recovered_image" = "$HCC_IMAGE" ] &&
+    ok "undo restored the original image ${HCC_IMAGE}" ||
+    fail "image after undo is '${recovered_image:-unset}', expected ${HCC_IMAGE}"
+  [ "$recovered_revision" != "$live_revision_before_undo" ] &&
+    ok "undo created a new revision ${recovered_revision} from last-good ${LAST_GOOD_REVISION} (was ${live_revision_before_undo})" ||
+    fail "revision after undo is still ${recovered_revision:-unset} — undo was a no-op"
+  if [ -n "$NEW_POD_UID" ] && [ "$NEW_POD_UID" != "$PRE_BOTCH_UID" ] && [ "$NEW_POD_UID" != "$BOTCHED_POD_UID" ]; then
+    ok "recovered pod uid ${NEW_POD_UID} is neither the pre-botch nor the botched pod"
+  else
+    fail "recovered pod uid '${NEW_POD_UID:-none}' matches pre-botch ${PRE_BOTCH_UID} or botched ${BOTCHED_POD_UID:-none} — undo was a no-op"
+  fi
+  [ "$hold_total" -gt 0 ] && [ "$hold_503" -eq 0 ] &&
+    ok "post-undo hold: ${hold_total} samples over ${STABILITY_WINDOW_SEC}s, zero 503" ||
+    fail "post-undo hold saw ${hold_503} 503(s) across ${hold_total} sample(s)"
 fi
+
 
 log "Evidence artifact: ${LOG_ARTIFACT}"
 # cleanup() (EXIT trap) restores the image if broken, waits for re-certification,
