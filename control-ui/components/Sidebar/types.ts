@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 export type SidebarTab =
   | 'hosts'
   | 'contexts'
+  | 'guardrails'
   | 'mcp-servers'
   | 'directories'
   | 'communication-channels'

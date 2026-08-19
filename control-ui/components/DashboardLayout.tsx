@@ -84,6 +84,9 @@ function PersistentDashboardFrame({ children }: Pick<DashboardLayoutProps, 'chil
     if (isControlRouteSection(pathname, CONTROL_ROUTES.connectors.root)) {
       return 'mcp-servers'
     }
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.guardrails.root)) {
+      return 'guardrails'
+    }
     if (isControlRouteSection(pathname, CONTROL_ROUTES.agentFiles.root)) {
       return 'directories'
     }

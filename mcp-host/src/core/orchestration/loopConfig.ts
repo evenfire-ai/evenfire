@@ -1,5 +1,6 @@
 import type { TaskBrakeConfig } from '../../budget/taskBrake'
 import type { ProgressReporter } from '../../progress/types.js'
+import type { ToolLaneGuardrail } from '../guardrails'
 import {
   AgentEventEmitter,
   ContextManageOptions,
@@ -39,6 +40,22 @@ export interface LoopConfig {
   loopController: LoopController
   contextManager: ContextManager
   toolOutputProcessor: ToolOutputProcessor
+
+  /**
+   * Tool-lane guardrail (spec §6). Absent = no guardrails configured = today's
+   * behavior (no-config compatibility, spec §5). Consulted in `executeToolCalls`
+   * before approval/execution: deny → bounded error, ask → suspension,
+   * allow/no_decision → the existing approval path.
+   */
+  guardrails?: ToolLaneGuardrail
+
+  /**
+   * Execution mode for the guardrail lane (spec §6.3): `unattended` when there is
+   * no human to answer an approval (e.g. a cron/autonomous task). A guardrail
+   * `ask` in unattended mode fails safe to deny (`approval_unavailable`).
+   * Absent → treated as interactive.
+   */
+  executionMode?: 'interactive' | 'unattended'
 
   // Progress reporting
   progressReporter?: ProgressReporter
@@ -197,6 +214,7 @@ export function buildLoopConfig(params: {
   maxIterations?: number
   toolTimeout?: number
   toolProgressInterval?: number
+  guardrails?: ToolLaneGuardrail
 }): LoopConfig {
   const dc = new DefaultLoopController()
 
@@ -226,6 +244,7 @@ export function buildLoopConfig(params: {
     contextManager: params.contextManager ?? new DefaultContextManager(),
     toolOutputProcessor:
       params.toolOutputProcessor ?? new DefaultToolOutputProcessor(params.safety),
+    guardrails: params.guardrails,
     progressReporter: params.progressReporter,
     maxIterations: params.maxIterations ?? 10,
     toolTimeout: params.toolTimeout ?? 60000,

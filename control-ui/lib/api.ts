@@ -891,6 +891,27 @@ export type McpServerResource = {
   spec?: AnyRecord
   status?: { conditions?: McpServerCondition[] }
 }
+
+// Installed guardrail hook CRs (LlmHook). Reconciler-written status follows the
+// same conditions[] convention as McpServer, plus hook-specific fields.
+export type LlmHookCondition = {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason?: string
+  message?: string
+  lastTransitionTime?: string
+}
+export type LlmHookStatus = {
+  conditions?: LlmHookCondition[]
+  observedDigest?: string
+  readyReplicas?: number
+  lastReconciled?: string
+}
+export type LlmHookResource = {
+  metadata?: Metadata
+  spec?: AnyRecord
+  status?: LlmHookStatus
+}
 export type ContextUser = {
   id: string
   email: string
@@ -1094,6 +1115,20 @@ export async function deleteContext(name: string) {
 
 export async function getMcpServers() {
   return apiGet('/api/v1/admin/mcp-servers') as Promise<{ items?: McpServerResource[] }>
+}
+
+// ── Installed guardrail hooks (LlmHook CRDs) — read + uninstall ─────────────
+// Creation is via the org-scoped registry install-hook saga, not a raw write.
+export async function getLlmHooks() {
+  return apiGet('/api/v1/admin/llm-hooks') as Promise<{ items?: LlmHookResource[] }>
+}
+
+export async function getLlmHook(name: string) {
+  return apiGet(`/api/v1/admin/llm-hooks/${encodeURIComponent(name)}`) as Promise<LlmHookResource>
+}
+
+export async function deleteLlmHook(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/llm-hooks/${encodeURIComponent(name)}`)
 }
 
 // ── SharedFileSystem CRD admin + per-SFS file browsing ──────────────────
@@ -1722,16 +1757,183 @@ export async function createLlmModel(input: CreateLlmModelInput) {
   return apiSend('POST', '/api/v1/admin/llm-models', input) as Promise<LlmAllowedModel>
 }
 
-export async function updateLlmModel(id: string, input: UpdateLlmModelInput) {
+// A disable (PUT enabled→false) or delete of a referenced model is gated by
+// control-api (Fase 3): without `?force` it answers 409 `model_in_use` with the
+// impact. Passing `{ force: true }` appends `?force=true`, which the operator
+// confirms only after seeing that impact — never automatically.
+export async function updateLlmModel(
+  id: string,
+  input: UpdateLlmModelInput,
+  opts: { force?: boolean } = {}
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
-    input
+    input,
+    opts.force ? { force: 'true' } : {}
   ) as Promise<LlmAllowedModel>
 }
 
-export async function deleteLlmModel(id: string) {
-  return apiSend('DELETE', `/api/v1/admin/llm-models/${encodeURIComponent(id)}`)
+export async function deleteLlmModel(id: string, opts: { force?: boolean } = {}) {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
+    undefined,
+    opts.force ? { force: 'true' } : {}
+  )
+}
+
+// ── Model references, 409 impact + operator attention feed ─────────────────
+// See control-api/src/services/llmAttention.ts and llmModelImpact.ts. The 409
+// `model_in_use` impact body (Fase 3) and each attention item (Fase 5, Pieza C)
+// carry the SAME `hostsAffected`/`grantsAffected` shape, so both surfaces render
+// the references identically.
+
+/** A Host CR that references a (provider, model) pair, with the matched roles. */
+export type ModelHostReference = {
+  namespace: string
+  name: string
+  // 'primary' | 'allowedModels' | 'fallback' — kept as string[] so an unknown
+  // role from a newer backend renders rather than being dropped.
+  roles: string[]
+}
+
+/** A capability grant that references a (provider, model) pair. */
+export type ModelGrantReference = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  capabilityFamily: string
+}
+
+/** Live references to a (provider, model) pair, shared by both surfaces. */
+export type ModelReferences = {
+  hostsAffected: ModelHostReference[]
+  grantsAffected: ModelGrantReference[]
+}
+
+/**
+ * One actionable operator-attention item. `kind` is an OPEN string union — today
+ * only `'stale_model_referenced'`; the banner switches on it and ignores kinds
+ * it does not recognize. `displayName` is optional (omitted, not null).
+ */
+export type AdminAttentionItem = ModelReferences & {
+  kind: string
+  provider: string
+  model: string
+  displayName?: string
+}
+
+/** The `GET /admin/attention` response contract consumed by the banner. */
+export type AdminAttentionReport = {
+  items: AdminAttentionItem[]
+  generatedAt: string
+}
+
+/** The 409 `model_in_use` impact body (Fase 3): the model plus its references. */
+export type ModelInUseImpact = ModelReferences & {
+  provider: string
+  model: string
+}
+
+function coerceModelHostReferences(raw: unknown): ModelHostReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (typeof rec.namespace !== 'string' || typeof rec.name !== 'string') return []
+    const roles = Array.isArray(rec.roles)
+      ? rec.roles.filter((r): r is string => typeof r === 'string')
+      : []
+    return [{ namespace: rec.namespace, name: rec.name, roles }]
+  })
+}
+
+function coerceModelGrantReferences(raw: unknown): ModelGrantReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (
+      typeof rec.id !== 'string' ||
+      typeof rec.recipeNamespace !== 'string' ||
+      typeof rec.recipeName !== 'string' ||
+      typeof rec.capabilityFamily !== 'string'
+    ) {
+      return []
+    }
+    return [
+      {
+        id: rec.id,
+        recipeNamespace: rec.recipeNamespace,
+        recipeName: rec.recipeName,
+        capabilityFamily: rec.capabilityFamily,
+      },
+    ]
+  })
+}
+
+// Keep every item whose (kind, provider, model) are strings — including unknown
+// kinds, so the banner (not the fetch layer) decides what to render. Malformed
+// items are dropped rather than tumbling the whole feed.
+function coerceAttentionItem(raw: unknown): AdminAttentionItem[] {
+  if (!raw || typeof raw !== 'object') return []
+  const rec = raw as Record<string, unknown>
+  if (
+    typeof rec.kind !== 'string' ||
+    typeof rec.provider !== 'string' ||
+    typeof rec.model !== 'string'
+  ) {
+    return []
+  }
+  const item: AdminAttentionItem = {
+    kind: rec.kind,
+    provider: rec.provider,
+    model: rec.model,
+    hostsAffected: coerceModelHostReferences(rec.hostsAffected),
+    grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+  }
+  if (typeof rec.displayName === 'string') item.displayName = rec.displayName
+  return [item]
+}
+
+export async function getAdminAttention(): Promise<AdminAttentionReport> {
+  const raw = (await apiGet('/api/v1/admin/attention')) as {
+    items?: unknown
+    generatedAt?: unknown
+  }
+  return {
+    items: Array.isArray(raw.items) ? raw.items.flatMap(coerceAttentionItem) : [],
+    generatedAt: typeof raw.generatedAt === 'string' ? raw.generatedAt : '',
+  }
+}
+
+/**
+ * When a disable (PUT enabled→false) or delete is rejected with 409
+ * `model_in_use` — the model is still referenced and `?force` was not sent —
+ * returns the impact so the caller can show it and offer a forced retry. Returns
+ * null for any other error. Mirrors `getBudgetsUsingPrice`: reads the structured
+ * `.body` `formatApiError` preserves.
+ */
+export function getModelInUseImpact(err: unknown): ModelInUseImpact | null {
+  if ((err as { status?: number })?.status !== 409) return null
+  const body = apiErrorBody(err)
+  if (!body || body.error !== 'model_in_use') return null
+  const impact = body.impact
+  if (!impact || typeof impact !== 'object') return null
+  const rec = impact as Record<string, unknown>
+  const hostsAffected = coerceModelHostReferences(rec.hostsAffected)
+  const grantsAffected = coerceModelGrantReferences(rec.grantsAffected)
+  // A matched code with an empty/malformed impact would open the "still in use"
+  // confirm with no references to show — fall through to the generic error
+  // banner instead, matching getBudgetsUsingPrice/getUnpricedModelsError.
+  if (hostsAffected.length === 0 && grantsAffected.length === 0) return null
+  return {
+    provider: typeof rec.provider === 'string' ? rec.provider : '',
+    model: typeof rec.model === 'string' ? rec.model : '',
+    hostsAffected,
+    grantsAffected,
+  }
 }
 
 // ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────
@@ -2774,7 +2976,7 @@ export type RegistryEntry = {
   id: string
   name: string
   version: string
-  entry_type: string // "mcp-server" | "recipe"
+  entry_type: string // "mcp-server" | "recipe" | "llm-hook"
   description: string
   author: string
   origin: string
@@ -2800,6 +3002,25 @@ export type RegistryEntry = {
     | (Record<string, unknown> & {
         recipeYaml?: string
         stepCount?: number
+      })
+    | null
+  // Present on `entry_type: "llm-hook"` (guardrail hook) entries. Mirrors the
+  // registry's hook_meta shape: where the hook runs (image/service/remote), which
+  // lifecycle points it hooks, the callback path, its credential schema, default
+  // config, and any egress it requires. See control-api install-hook contract.
+  hook_meta?:
+    | (Record<string, unknown> & {
+        // Exactly one of image | service | remote — each an object, not a string.
+        target?: {
+          image?: { ref?: string; port?: number; security?: { addCapabilities?: string[] } }
+          service?: { name?: string; namespace?: string; port?: number }
+          remote?: { baseUrl?: string }
+        }
+        lifecyclePoints?: string[] // "preCall" | "moderate" | "postCallSuccess" | "onError"
+        path?: string
+        credentialSchema?: CredentialSchema
+        defaultConfig?: Record<string, unknown>
+        requiredEgress?: unknown
       })
     | null
   artifact_refs: Record<string, unknown> | null
@@ -2848,6 +3069,7 @@ export type RegistryInstalledState = {
   catalogKeys: string[]
   serverNames: string[]
   recipeKeys: string[]
+  hookKeys?: string[]
 }
 export type RegistryCatalogResponse = RegistryEntryListResponse & {
   categories: string[]
@@ -2957,6 +3179,49 @@ export async function installRecipeFromRegistry(
   ) as Promise<InstallRecipeFromRegistryResponse>
 }
 
+// Guardrail-hook install: binds a registry `llm-hook` entry to a target Host as an
+// LlmHook CR. Mirrors installFromRegistry / installRecipeFromRegistry but hits the
+// admin install-hook route. Backend enforces trust floor, §8.4 content-egress, the
+// capability ceiling, and the may_deny ⇒ fail-closed rule; error bodies arrive as
+// { error, reason? } (surfaced via the thrown Error's `.body`/`.code`).
+export type HookCapability =
+  | 'may_deny'
+  | 'may_rewrite'
+  | 'may_substitute_result'
+  | 'may_add_context'
+
+export type InstallHookFromRegistryRequest = {
+  hostRef: string
+  registryEntryName: string
+  registryEntryVersion: string
+  capabilities?: HookCapability[]
+  order?: number
+  failMode?: 'open' | 'closed'
+  credentials?: Record<string, string>
+}
+
+export type InstallHookFromRegistryResponse = {
+  hookName: string
+  namespace: string
+  hostRef: string
+  trustLevel: string
+  lifecyclePoints: string[]
+  registryEntry: string
+  registryVersion: string
+  correlationId: string
+  pendingCredentials?: PendingWorkflowCredentialRef[]
+}
+
+export async function installHookFromRegistry(
+  req: InstallHookFromRegistryRequest
+): Promise<InstallHookFromRegistryResponse> {
+  return apiSend(
+    'POST',
+    '/api/v1/admin/registry/install-hook',
+    req
+  ) as Promise<InstallHookFromRegistryResponse>
+}
+
 export type TriggerWorkflowRequest = {
   inputs?: Record<string, unknown>
   intermediateParameters?: Record<string, unknown>
@@ -3029,10 +3294,12 @@ export type OwnedRegistryEntry = {
   version: string
   visibility: 'public' | 'private'
   status: string // "published" | "deprecated" | "removed"
-  entry_type?: string // "mcp-server" | "recipe"
-  // Present ("local"/"remote") for mcp-servers, null/absent for recipes. The
-  // registry's /org/:org/entries returns this but NOT entry_type, so the
-  // Publisher's Type column infers Connector/Plugin from it (see OwnedEntries).
+  // The registry's /org/:org/entries returns the type as `entryType` (camelCase),
+  // NOT `entry_type`; keep both so the Publisher's Type column reads it directly
+  // instead of mis-inferring "Plugin" for llm-hook entries (see OwnedEntries).
+  entryType?: string // "mcp-server" | "recipe" | "llm-hook"
+  entry_type?: string
+  // Present ("local"/"remote") for mcp-servers, null/absent for others.
   serverMode?: string | null
 }
 export type OwnedRegistryEntriesResponse = {

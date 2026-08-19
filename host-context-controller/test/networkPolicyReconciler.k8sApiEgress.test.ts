@@ -34,9 +34,12 @@ describe('ensureK8sApiEgress', () => {
     mockApply.mockClear()
     // ensureDefaultPolicies() also prunes legacy static policies via the
     // networking API directly (not applyNetworkPolicy), so the mocked client
-    // must expose deleteNamespacedNetworkPolicy.
+    // must expose the read-before-delete legacy cleanup path.
     const mockKc = {
       makeApiClient: () => ({
+        readNamespacedNetworkPolicy: vi
+          .fn()
+          .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 })),
         deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
       }),
     } as unknown as k8s.KubeConfig

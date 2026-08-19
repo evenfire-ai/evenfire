@@ -183,7 +183,7 @@ if [ "$STATE_PHASE" = converged ]; then
   fi
   kc -n control-plane scale deployment/host-context-controller --replicas="$HCC_REPLICAS" >/dev/null
   if [ "$HCC_REPLICAS" -gt 0 ]; then
-    kc -n control-plane rollout status deployment/host-context-controller --timeout=180s >/dev/null
+    kc -n control-plane rollout status deployment/host-context-controller --timeout=900s >/dev/null
   fi
   assert_replacement_uid
   delete_reset_state
@@ -264,7 +264,7 @@ kc -n control-plane scale deployment/host-context-controller \
   --replicas="$HCC_REPLICAS" >/dev/null
 if [ "$HCC_REPLICAS" -gt 0 ]; then
   kc -n control-plane rollout status \
-    deployment/host-context-controller --timeout=180s >/dev/null
+    deployment/host-context-controller --timeout=900s >/dev/null
 fi
 assert_replacement_uid
 read_reset_state || fail "cannot reload reset state before completion"

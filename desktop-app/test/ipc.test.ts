@@ -24,6 +24,7 @@ function makeTrustedEvent(senderId = 77) {
   const destroyedCallbacks: Array<() => void> = []
   const sender = {
     id: senderId,
+    isDestroyed: vi.fn(() => false),
     send: vi.fn(),
     once: vi.fn((eventName: string, callback: () => void) => {
       if (eventName === 'destroyed') destroyedCallbacks.push(callback)
@@ -120,6 +121,9 @@ describe('ipc host status stream handlers', () => {
     listMyAgents: vi.fn(),
     createGfsShare: vi.fn(),
     setSandboxUiVisible: vi.fn(),
+    findInActiveSandboxUi: vi.fn().mockResolvedValue(9),
+    stopActiveSandboxUiFind: vi.fn().mockResolvedValue(undefined),
+    focusActiveSandboxUi: vi.fn().mockResolvedValue(true),
   }
 
   beforeEach(async () => {
@@ -154,6 +158,81 @@ describe('ipc host status stream handlers', () => {
     await Promise.resolve(handler?.(event, { visible: false }))
 
     expect(service.setSandboxUiVisible).toHaveBeenCalledWith(false)
+  })
+
+  it('validates and forwards only bounded trusted sandbox find requests', async () => {
+    const { event, sender } = makeTrustedEvent()
+    const handler = testState.handlers.get('sandboxUi:findInPage')
+
+    await expect(
+      Promise.resolve(handler?.(event, { query: '', operation: 'start', clientRequestId: 1 }))
+    ).rejects.toThrow('find query')
+    await expect(
+      Promise.resolve(handler?.(event, { query: 'x', operation: 'sideways', clientRequestId: 1 }))
+    ).rejects.toThrow('operation')
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          query: 'invoice',
+          operation: 'start',
+          clientRequestId: 0,
+        })
+      )
+    ).rejects.toThrow('client request ID')
+    expect(service.findInActiveSandboxUi).not.toHaveBeenCalled()
+
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          query: 'invoice',
+          operation: 'previous',
+          clientRequestId: 4,
+        })
+      )
+    ).resolves.toBe(9)
+    expect(service.findInActiveSandboxUi).toHaveBeenCalledWith(
+      'invoice',
+      'previous',
+      4,
+      expect.any(Function)
+    )
+    const onResult = service.findInActiveSandboxUi.mock.calls.at(-1)?.[3]
+    onResult?.({ requestId: 9, activeMatchOrdinal: 1, matches: 2, finalUpdate: true })
+    expect(sender.send).toHaveBeenCalledWith('sandboxUi:findResult', {
+      requestId: 9,
+      clientRequestId: 4,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
+  })
+
+  it('stops active sandbox find through a trusted sender only', async () => {
+    const handler = testState.handlers.get('sandboxUi:stopFindInPage')
+    await Promise.resolve(handler?.(makeTrustedEvent().event))
+    expect(service.stopActiveSandboxUiFind).toHaveBeenCalledOnce()
+    await expect(
+      Promise.resolve(
+        handler?.({
+          senderFrame: { url: 'https://evil.example.com' },
+          sender: { id: 1, send: vi.fn(), once: vi.fn() },
+        })
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+  })
+
+  it('restores focus to an active sandbox only for the trusted renderer', async () => {
+    const handler = testState.handlers.get('sandboxUi:focusActive')
+    await expect(Promise.resolve(handler?.(makeTrustedEvent().event))).resolves.toBe(true)
+    expect(service.focusActiveSandboxUi).toHaveBeenCalledOnce()
+    await expect(
+      Promise.resolve(
+        handler?.({
+          senderFrame: { url: 'https://evil.example.com' },
+          sender: { id: 1, send: vi.fn(), once: vi.fn() },
+        })
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
   })
 
   it.each([NaN, Infinity, 1.5, 0, -1, Number.MAX_SAFE_INTEGER + 1])(

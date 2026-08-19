@@ -4625,6 +4625,26 @@ export class AppService {
     return captureSandboxUiPreview()
   }
 
+  async findInActiveSandboxUi(
+    query: string,
+    operation: import('./sandboxUiDriver.js').SandboxUiFindOperation,
+    clientRequestId: number,
+    onResult: (result: import('./sandboxUiDriver.js').SandboxUiFindResult) => void
+  ): Promise<import('./sandboxUiDriver.js').SandboxUiFindStartResult> {
+    const { findInActiveSandboxUi } = await import('./sandboxUiDriver.js')
+    return findInActiveSandboxUi(query, operation, clientRequestId, onResult)
+  }
+
+  async stopActiveSandboxUiFind(): Promise<void> {
+    const { stopActiveSandboxUiFind } = await import('./sandboxUiDriver.js')
+    stopActiveSandboxUiFind()
+  }
+
+  async focusActiveSandboxUi(): Promise<boolean> {
+    const { focusActiveSandboxUi } = await import('./sandboxUiDriver.js')
+    return focusActiveSandboxUi()
+  }
+
   /**
    * Embed-side refresh request. The IPC layer hands us the sender's
    * `webContents.id`; we delegate to the refresh module which gates the
