@@ -32,7 +32,7 @@ describe('useAppController — chat drawer keepNavItem', () => {
     uninstallMockClerum()
   })
 
-  it('keeps the apps route when selecting a chat with keepNavItem', async () => {
+  it('keeps the apps route AND loads the requested chat with keepNavItem', async () => {
     installAppControllerClerum({ agentNames: ['agent-x'] })
     const app = renderAppController()
     unmount = app.unmount
@@ -54,10 +54,54 @@ describe('useAppController — chat drawer keepNavItem', () => {
       })
     })
 
-    // The chat controller now targets the requested agent/chat, but the route
-    // stays on `apps` so the live embed survives.
+    // The route stays on `apps` so the live embed survives, AND the requested
+    // conversation actually finishes loading — the observable the user sees, not
+    // a pending selection left stuck spinning (T4).
     expect(app.result.current.selectedAgent).toBe('agent-x')
     expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.apps)
+    await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
+    expect(app.result.current.activeChatId).toBe('chat-1')
+  })
+
+  it('loads the chat when keepNavItem re-selects the already-selected agent without a route change', async () => {
+    // Regression for the drawer-reopen / switcher Blocker: selecting a chat of
+    // the ALREADY-selected agent while staying on `apps` changes neither
+    // `selectedAgent` nor `navItem`, so the agent-selection effect never replays
+    // the pending selection. Without an imperative switch the message list is
+    // wiped and STUCK LOADING — the observable below (chatMessagesLoading stays
+    // true at the parent commit).
+    installAppControllerClerum({ agentNames: ['agent-x'] })
+    const app = renderAppController()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    // Land on `apps` with agent-x already the selected agent.
+    act(() => {
+      app.result.current.handleSelectChatAgent('agent-x', { chatId: 'chat-1', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe('agent-x'))
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.apps)
+    })
+    await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.apps))
+
+    // Now re-select a DIFFERENT chat of the SAME agent, in-drawer (keepNavItem),
+    // with no route change — the case the agent-selection effect cannot cover.
+    act(() => {
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'chat-2',
+        title: 'Second chat',
+        selectLatest: false,
+        keepNavItem: true,
+      })
+    })
+
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(app.result.current.activeChatId).toBe('chat-2')
+    // The chat resolves instead of spinning forever.
+    await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
   })
 
   it('bypasses the same-route fast path with keepNavItem so a concurrent route change survives', async () => {
@@ -91,6 +135,9 @@ describe('useAppController — chat drawer keepNavItem', () => {
     })
 
     expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.apps)
+    // Observable: chat-2 is actually loaded, not stuck spinning (T4).
+    await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
+    expect(app.result.current.activeChatId).toBe('chat-2')
   })
 
   it('navigates to the full-screen chat route without keepNavItem', async () => {

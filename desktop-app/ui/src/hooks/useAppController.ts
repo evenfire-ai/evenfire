@@ -811,9 +811,12 @@ export function useAppController() {
       // the effect replays.
       // `keepNavItem` always takes the pending-selection path below: it is used
       // when the route is changing to (or staying on) a non-chat route (the app
-      // drawer), where the fast path's imperative switch would leave no pending
-      // selection for the agent-selection effect to replay after `navItem`
-      // changes — the effect would then reset `activeChatId` to null.
+      // drawer). The pending selection is what survives a route change — but it is
+      // only replayed when the agent-selection effect re-runs (deps include
+      // `navItem`/`selectedAgent`). When `keepNavItem` selects a chat of the
+      // ALREADY-selected agent WITHOUT a route change (drawer reopen / switcher),
+      // neither dep changes, the effect never replays, and the pending selection
+      // is left stuck loading. That case gets an imperative `switchToChat` below.
       if (
         targetChatId &&
         nav.selectedAgent === agentName &&
@@ -846,6 +849,16 @@ export function useAppController() {
       nav.setSelectedAgentRoute('details')
       nav.setSelectedAgent(agentName)
       if (!options.keepNavItem) nav.setNavItem(DESKTOP_ROUTES.chat)
+      // Drawer same-agent selection: `setSelectedAgent` above is a no-op (same
+      // value) and `navItem` is not flipped, so the agent-selection effect will
+      // not replay to consume the pending selection — load the chat imperatively.
+      // The pending selection is still set above so that when the caller DID
+      // change the route in the same batch (launch-from-chat: chat→apps), the
+      // effect replays into its `specific` branch instead of the reset branch;
+      // both switches target the same chat and `switchToChat` coalesces them.
+      if (options.keepNavItem && targetChatId && nav.selectedAgent === agentName) {
+        void chat.switchToChat(agentName, targetChatId)
+      }
     },
     [
       chat.clearActiveChat,
