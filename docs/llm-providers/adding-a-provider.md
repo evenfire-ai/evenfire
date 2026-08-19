@@ -130,17 +130,53 @@ endpoint from `process.env` at construction. Fail-closed if the endpoint is abse
 | nebius | two brands mid-rename (tokenfactory / studio) | `org/model` namespaced ids |
 | together / novita / nebius | — | `org/model` namespaced ids |
 | gemini (compat) | `…/v1beta/openai/` | beta: unsupported params silently ignored; distinct from `vertex` |
+| minimax | `.io` (international) vs `api.minimaxi.com` (China) host | JWT-shaped api key; portable `[0,2]` temperature (no gating) |
 | azure | per-resource endpoint (env) | `api-key` header; `model` = deployment name |
+
+## Hand-maintained mirrors — not type-checked
+
+Several scripts and docs enumerate the provider list by hand. `tsc` does not guard
+them, so run these two greps and update every hit:
+
+```bash
+# 1. every surface that names the current last OpenAI-compatible provider must also name yours
+grep -rn --include='*.sh' --include='*.md' --include='*.ts' --include='*.tsx' \
+  --include=Makefile -e 'novita' evenfire/ | grep -vi node_modules
+# 2. the old provider count in prose (e.g. 21 -> 22)
+grep -rn --include='*.sh' --include='*.md' --include='*.ts' --include='*.tsx' \
+  --include=Makefile -e '21 providers' -e 'one of 21' -e 'all 21' evenfire/
+```
+
+Surfaces to update:
+- `scripts/minikube/apply-llm-secret.sh` — the `SLOTS` array (`<id>-api-key|<ID>_API_KEY|`).
+- `scripts/check-prereqs.sh` — the `PROVIDER_KEYS` list.
+- `scripts/e2e/e2e-plugin-workload-sdk.sh`, `scripts/e2e/seed-e2e-data.sh` — the
+  provider→credential-slot `case` arms (a `<id>)` arm per single-key provider).
+- `README.md` (repo root) — the provider table.
+- `docs/meta/claims-guardrails.md` — the provider table.
+- `docs/crds/workflowrecipe.md` — the documented `provider` enum.
+- `docs/llms.txt`, `Makefile` — provider-count comments.
 
 ## Checklist
 
+**Type-checked source of truth** (tsc fails if missed):
 - [ ] `packages/llm-providers/index.cjs` — id, slot(s), label, non-secret env
 - [ ] `packages/llm-providers/index.d.ts` — id in the `PROVIDER_IDS` tuple
-- [ ] `mcp-host/registryCore.ts` — `RUNTIME_FIELDS` row (baseURL/defaultModel/tokenizer)
-- [ ] `mcp-host/registry.ts` — `makeProvider` arm (driver path only)
+- [ ] `mcp-host/src/llm/registryCore.ts` — `RUNTIME_FIELDS` row (baseURL/defaultModel/tokenizer)
+- [ ] `mcp-host/src/llm/registry.ts` — `makeProvider` arm (driver path only)
+- [ ] `control-api/src/services/modelsDevClient.ts` — `PROVIDER_KEY_MAP` entry (our id → models.dev key; verify against live `api.json`)
+- [ ] `control-ui/lib/llm.ts` — `LLM_DEFAULT_MODEL_BY_PROVIDER` entry
+
+**Data / assets** (not type-checked, but required for the provider to work end-to-end):
+- [ ] `control-api/src/db.ts` — allowlist seed migration (append-only, idempotent)
+- [ ] `control-api/src/data/modelsDevSnapshot.ts` — vendored offline snapshot block, **derived from live models.dev** (the offline catalog-sync fallback; keys must match `PROVIDER_KEY_MAP`)
 - [ ] `charts/clerum-crds/crds/host.yaml` — both provider enums
 - [ ] `charts/clerum-crds/crds/workflowrecipe.yaml` — enums (single-credential only)
-- [ ] `control-api/src/db.ts` — allowlist seed migration
-- [ ] `control-ui/lib/llm.ts` — `LLM_DEFAULT_MODEL_BY_PROVIDER` entry
-- [ ] param-compat reviewed; tests updated; `tsc --noEmit` clean across services
-- [ ] operator doc updated (`docs/deploy/llm-providers.md`)
+- [ ] `control-ui/public/provider-icons/<id>.svg` — brand icon (the picker renders `/provider-icons/${provider}.svg`; degrades to the label initial if absent). Add a theme-knockout rule in `control-ui/app/globals.css` only if the mark is monochrome.
+
+**Hand-maintained mirrors** (run both greps above, then):
+- [ ] `scripts/minikube/apply-llm-secret.sh` · `scripts/check-prereqs.sh` · both `scripts/e2e/*.sh` case arms
+- [ ] `README.md` · `docs/meta/claims-guardrails.md` · `docs/crds/workflowrecipe.md` · `docs/llms.txt` · `Makefile`
+- [ ] operator doc updated (`docs/deploy/llm-providers.md`) and overview (`docs/llm-providers/README.md`) — counts + tables
+
+**Verify**: param-compat reviewed; tests updated (every count-bearing assertion); `tsc --noEmit` clean across services; the two drift greps return **only** intended hits.
