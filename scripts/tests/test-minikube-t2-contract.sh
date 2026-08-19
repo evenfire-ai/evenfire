@@ -30,6 +30,21 @@ grep -Fq 'kubectl --context=' "$COMMON"
 grep -Fq 'CONTROL_API_REAL_PG_CONTEXT' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_ADMIN_URL=' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$T1"
+grep -Fq 'postgres:16-alpine' "$T1"
+grep -Fq 'db.realPostgresMigration.integration.test.ts' "$T1"
+grep -Fq 'gfsReaderRole.realPostgres.integration.test.ts' "$T1"
+grep -Fq 'start_isolated_postgres' "$T1"
+grep -Fq 'require_isolated_control_api_files' "$T1"
+grep -Fq 'run_suite control-api isolated "$ISOLATED_DSN"' "$T1"
+grep -Fq 'run_suite control-api shared "$ADMIN_DSN"' "$T1"
+if grep -Fq 'run_suite control-api isolated "$ADMIN_DSN"' "$T1"; then
+  echo 'FAIL: migration/role-reset lane points at shared control-postgres' >&2
+  exit 1
+fi
+if grep -Eq 'describe\.skip|pending_tests.*allow|exclude.*realPostgresMigration' "$T1"; then
+  echo 'FAIL: T1 silently excludes or skips the migration suite' >&2
+  exit 1
+fi
 grep -Fq 'T1_REDACT_PASSWORD="${PG_PASSWORD}"' "$T1" || grep -Fq 'T1_REDACT_PASSWORD="$PG_PASSWORD"' "$T1"
 grep -Fq -- '--reporter=json' "$T1"
 grep -Fq 'pending_tests' "$T1"

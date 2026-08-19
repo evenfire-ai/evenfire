@@ -86,17 +86,22 @@ the `control-postgres` PVC/deployment, all required deployment readiness, the
 image manifest/source, and profile-owned port-forward processes. Secret values
 are never printed. The local Real PostgreSQL lane resolves the
 `control-postgres` Secret using the explicit context, constructs its admin DSN
-only in process memory, and passes it only to the test process. CI continues to
-use `CONTROL_API_REAL_PG_ADMIN_URL` unchanged.
+only in process memory, and passes it only to the shared-server suites. Suites
+that drop or rewrite cluster-global roles (`db.realPostgresMigration`,
+`gfsReaderRole`) run against a throwaway `postgres:16-alpine` container so they
+never share live `control-postgres` (#412). CI continues to use
+`CONTROL_API_REAL_PG_ADMIN_URL` unchanged.
 
 ## T0, T1, and T2 boundaries
 
 - **T0** — shell syntax/ShellCheck where available, contract tests, affected
   package builds/typechecks, and `git diff --check`.
-- **T1** — the Real PostgreSQL suites execute against the validated local
-  `control-postgres`; the lane reports `PASS`, `FAIL`, `SKIPPED`, and `NOT_RUN`
-  separately and fails on an unavailable DSN or zero executed tests.
-- **T2** — the exact worktree/`HEAD` is deployed to the owned profile, the
+* **T1** — the Real PostgreSQL suites execute against the validated local
+  `control-postgres`, except the role-reset suites which use an isolated
+  Postgres 16; the lane reports `PASS`, `FAIL`, `SKIPPED`, and `NOT_RUN`
+  separately and fails on an unavailable DSN, an isolated server that did not
+  start, or zero executed tests.
+* **T2** — the exact worktree/`HEAD` is deployed to the owned profile, the
   cluster is healthy, readiness and health checks pass, and applicable
   Control UI/Desktop journeys are run through their user-visible paths.
 
