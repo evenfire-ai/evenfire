@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 880" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+<defs>
+<marker id="aBlue" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#2563eb"/></marker>
+<marker id="aRose" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#dc2626"/></marker>
+<marker id="aViolet" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#7c3aed"/></marker>
+<marker id="aAmber" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#d97706"/></marker>
+<marker id="aGreen" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#059669"/></marker>
+<marker id="aGray" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#64748b"/></marker>
+<filter id="sh" x="-5%" y="-6%" width="110%" height="122%"><feDropShadow dx="0" dy="1.5" stdDeviation="1.8" flood-color="#0f172a" flood-opacity="0.16"/></filter>
+</defs>
+<rect width="1280" height="880" fill="#ffffff"/>
+<text x="40" y="36" font-size="20" font-weight="800" fill="#0f172a">host-context-controller — flows resolved by this PR (#382)</text>
+<text x="40" y="57" font-size="12.5" fill="#64748b">decouple readiness from initial fleet convergence · fail-closed safety · single-writer NetworkPolicy governance</text>
+<text x="40" y="92" font-size="13" font-weight="700" fill="#1d4ed8">1 · Readiness lifecycle — DECOUPLED from fleet convergence</text>
+<rect x="40.0" y="104" width="214" height="92" rx="11" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#sh)"/>
+<text x="147.0" y="127" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">HCC start</text>
+<text x="147.0" y="146" text-anchor="middle" font-size="11" fill="#475569">4 watch lanes start; a failing</text>
+<text x="147.0" y="162" text-anchor="middle" font-size="11" fill="#475569">lane → in-process recovery</text>
+<text x="147.0" y="178" text-anchor="middle" font-size="11" fill="#475569">— does NOT kill the process</text>
+<rect x="286.5" y="104" width="214" height="92" rx="11" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#sh)"/>
+<text x="393.5" y="127" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">4-LIST inventory</text>
+<text x="393.5" y="146" text-anchor="middle" font-size="11" fill="#475569">Context ingress · mcp-host</text>
+<text x="393.5" y="162" text-anchor="middle" font-size="11" fill="#475569">egress · rpc-proxy egress</text>
+<text x="393.5" y="178" text-anchor="middle" font-size="11" fill="#475569">· external egress</text>
+<rect x="533.0" y="104" width="214" height="92" rx="11" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#sh)"/>
+<text x="640.0" y="127" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">Certify safety inventory</text>
+<text x="640.0" y="146" text-anchor="middle" font-size="11" fill="#475569">revokes stale/unprovable allows</text>
+<text x="640.0" y="162" text-anchor="middle" font-size="11" fill="#475569">BEFORE certifying (fail-closed)</text>
+<text x="640.0" y="178" text-anchor="middle" font-size="11" fill="#475569">· anchored to desired revision</text>
+<rect x="779.5" y="104" width="214" height="92" rx="11" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.8" filter="url(#sh)"/>
+<text x="886.5" y="127" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">/ready = 200</text>
+<text x="886.5" y="146" text-anchor="middle" font-size="11" fill="#475569">only if inventory certified</text>
+<text x="886.5" y="162" text-anchor="middle" font-size="11" fill="#475569">and no stale allow</text>
+<text x="886.5" y="178" text-anchor="middle" font-size="11" fill="#475569">survives</text>
+<rect x="1026.0" y="104" width="214" height="92" rx="11" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#sh)"/>
+<text x="1133.0" y="127" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">Additive convergence</text>
+<text x="1133.0" y="146" text-anchor="middle" font-size="11" fill="#475569">fleet converges AFTER</text>
+<text x="1133.0" y="162" text-anchor="middle" font-size="11" fill="#475569">ready — async,</text>
+<text x="1133.0" y="178" text-anchor="middle" font-size="11" fill="#475569">non-blocking</text>
+<line x1="254.0" y1="150.0" x2="286.5" y2="150.0" stroke="#2563eb" stroke-width="2.6" marker-end="url(#aBlue)" stroke-linecap="round"/>
+<rect x="229.05" y="130.0" width="82.4" height="16" rx="4" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>
+<text x="270.25" y="142.0" text-anchor="middle" font-size="10" font-weight="700" fill="#1e293b">inventory</text>
+<line x1="500.5" y1="150.0" x2="533.0" y2="150.0" stroke="#2563eb" stroke-width="2.6" marker-end="url(#aBlue)" stroke-linecap="round"/>
+<rect x="478.75" y="130.0" width="76.0" height="16" rx="4" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>
+<text x="516.75" y="142.0" text-anchor="middle" font-size="10" font-weight="700" fill="#1e293b">certify</text>
+<line x1="747.0" y1="150.0" x2="779.5" y2="150.0" stroke="#2563eb" stroke-width="2.6" marker-end="url(#aBlue)" stroke-linecap="round"/>
+<rect x="738.05" y="130.0" width="50.400000000000006" height="16" rx="4" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>
+<text x="763.25" y="142.0" text-anchor="middle" font-size="10" font-weight="700" fill="#1e293b">/ready</text>
+<line x1="993.5" y1="150.0" x2="1026.0" y2="150.0" stroke="#64748b" stroke-width="2.4" stroke-dasharray="6,4" marker-end="url(#aGray)" stroke-linecap="round"/>
+<rect x="946.15" y="130.0" width="127.2" height="16" rx="4" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>
+<text x="1009.75" y="142.0" text-anchor="middle" font-size="10" font-weight="700" fill="#475569">async · post-ready</text>
+<text x="40" y="275" font-size="13" font-weight="700" fill="#b91c1c">2 · Fail-closed fences (R3 · R4 · J3)</text>
+<rect x="40.0" y="284" width="380.0" height="76" rx="11" fill="#fef2f2" stroke="#dc2626" stroke-width="1.8" filter="url(#sh)"/>
+<text x="230.0" y="307" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">Readiness gate — default () =&gt; false</text>
+<text x="230.0" y="326" text-anchor="middle" font-size="11" fill="#475569">/ready = ready &amp;&amp; providerAuthoritativeFn()</text>
+<text x="230.0" y="342" text-anchor="middle" font-size="11" fill="#475569">throw → 503 · never a wrong 200</text>
+<rect x="450.0" y="284" width="380.0" height="76" rx="11" fill="#fef2f2" stroke="#dc2626" stroke-width="1.8" filter="url(#sh)"/>
+<text x="640.0" y="307" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">G1 — deny without inventory-authority</text>
+<text x="640.0" y="326" text-anchor="middle" font-size="11" fill="#475569">currentWhenUnconfigured() → false + warn</text>
+<text x="640.0" y="342" text-anchor="middle" font-size="11" fill="#475569">dev never builds the reconciler</text>
+<rect x="860.0" y="284" width="380.0" height="76" rx="11" fill="#fef2f2" stroke="#dc2626" stroke-width="1.8" filter="url(#sh)"/>
+<text x="1050.0" y="307" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">F1 — readiness-poll rebind</text>
+<text x="1050.0" y="326" text-anchor="middle" font-size="11" fill="#475569">rebinds isCurrent/server on superseding</text>
+<text x="1050.0" y="342" text-anchor="middle" font-size="11" fill="#475569">reconciles → window never self-destructs</text>
+<text x="40" y="421" font-size="13" font-weight="700" fill="#6d28d9">3 · External-egress DNS — B3 retain/revoke · #299</text>
+<rect x="40" y="438" width="224" height="80" rx="11" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" filter="url(#sh)"/>
+<text x="152.0" y="461" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">Observed DNS binding</text>
+<text x="152.0" y="480" text-anchor="middle" font-size="11" fill="#475569">resolveExternalEgressDns</text>
+<text x="152.0" y="496" text-anchor="middle" font-size="11" fill="#475569">5s timeout + isCurrent fence</text>
+<polygon points="372,436 472,478 372,520 272,478" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8" filter="url(#sh)"/>
+<text x="372" y="475" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">identity</text>
+<text x="372" y="491" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">unchanged?</text>
+<line x1="264" y1="478" x2="272" y2="478" stroke="#7c3aed" stroke-width="2.6" marker-end="url(#aViolet)" stroke-linecap="round"/>
+<rect x="540" y="414" width="306" height="60" rx="11" fill="#ecfdf5" stroke="#059669" stroke-width="1.8" filter="url(#sh)"/>
+<text x="693.0" y="437" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">RETAIN — identity-stable allow</text>
+<text x="693.0" y="456" text-anchor="middle" font-size="11" fill="#475569">same protocol/port/ownership/cidrs</text>
+<text x="693.0" y="472" text-anchor="middle" font-size="11" fill="#475569">· HCC stays Ready (modulo cidr)</text>
+<rect x="540" y="496" width="306" height="60" rx="11" fill="#fef2f2" stroke="#dc2626" stroke-width="1.8" filter="url(#sh)"/>
+<text x="693.0" y="519" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">REVOKE before readiness</text>
+<text x="693.0" y="538" text-anchor="middle" font-size="11" fill="#475569">drift TCP→UDP · port · ownership · zero-cidr</text>
+<text x="693.0" y="554" text-anchor="middle" font-size="11" fill="#475569">→ unprovable → cleanup fail-closed</text>
+<path d="M 472,470 H 506.0 V 444 H 540" fill="none" stroke="#059669" stroke-width="2.6" marker-end="url(#aGreen)" stroke-linejoin="round"/>
+<rect x="423.6" y="415" width="88.80000000000001" height="16" rx="4" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>
+<text x="468" y="427" text-anchor="middle" font-size="10" font-weight="700" fill="#047857">yes · retain</text>
+<path d="M 472,486 H 506.0 V 526 H 540" fill="none" stroke="#dc2626" stroke-width="2.6" marker-end="url(#aRose)" stroke-linejoin="round"/>
+<rect x="417.2" y="523" width="101.60000000000001" height="16" rx="4" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>
+<text x="468" y="535" text-anchor="middle" font-size="10" font-weight="700" fill="#b91c1c">drift · revoke</text>
+<rect x="892" y="430" width="348" height="88" rx="11" fill="#fffbeb" stroke="#d97706" stroke-width="1.8" filter="url(#sh)"/>
+<text x="1066.0" y="453" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">ExternalEgressConvergenceCoordinator</text>
+<text x="1066.0" y="472" text-anchor="middle" font-size="11" fill="#475569">TTL-aware periodic resync (≤ TTL/2, floor)</text>
+<text x="1066.0" y="488" text-anchor="middle" font-size="11" fill="#475569">sliding-window accumulate · provider CIDRs</text>
+<text x="1066.0" y="504" text-anchor="middle" font-size="11" fill="#475569">fence interval ≤ overlap/2 · limiter</text>
+<line x1="846" y1="444" x2="892" y2="460" stroke="#d97706" stroke-width="2.6" marker-end="url(#aAmber)" stroke-linecap="round"/>
+<rect x="821.4" y="425" width="95.2" height="16" rx="4" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>
+<text x="869" y="437" text-anchor="middle" font-size="10" font-weight="700" fill="#b45309">add (additive)</text>
+<text x="40" y="575" font-size="13" font-weight="700" fill="#047857">4 · Rotation seam #223 (preserved) &amp; single-writer deploy invariant</text>
+<rect x="40" y="584" width="236" height="66" rx="11" fill="#ecfdf5" stroke="#059669" stroke-width="1.8" filter="url(#sh)"/>
+<text x="158.0" y="607" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">validateSecret()</text>
+<text x="158.0" y="626" text-anchor="middle" font-size="11" fill="#475569">sha256(canonicalJSON(secret.data))</text>
+<rect x="306" y="584" width="306" height="66" rx="11" fill="#ecfdf5" stroke="#059669" stroke-width="1.8" filter="url(#sh)"/>
+<text x="459.0" y="607" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">ensureDeployment(rev, isCurrent)</text>
+<text x="459.0" y="626" text-anchor="middle" font-size="11" fill="#475569">this PR's fence propagates here</text>
+<rect x="642" y="584" width="300" height="66" rx="11" fill="#ecfdf5" stroke="#059669" stroke-width="1.8" filter="url(#sh)"/>
+<text x="792.0" y="607" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">pod annotation</text>
+<text x="792.0" y="626" text-anchor="middle" font-size="11" fill="#475569">clerum.io/credentials-revision → rolls once</text>
+<line x1="276" y1="617" x2="306" y2="617" stroke="#059669" stroke-width="2.6" marker-end="url(#aGreen)" stroke-linecap="round"/>
+<line x1="612" y1="617" x2="642" y2="617" stroke="#059669" stroke-width="2.6" marker-end="url(#aGreen)" stroke-linecap="round"/>
+<rect x="972" y="584" width="268" height="66" rx="11" fill="#f8fafc" stroke="#475569" stroke-width="1.8" filter="url(#sh)"/>
+<text x="1106.0" y="607" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">Deploy single-writer</text>
+<text x="1106.0" y="626" text-anchor="middle" font-size="11" fill="#475569">strategy: Recreate · replicas 1</text>
+<text x="1106.0" y="642" text-anchor="middle" font-size="11" fill="#475569">· progressDeadlineSeconds 1200</text>
+<text x="40" y="700" font-size="11.5" font-weight="700" fill="#334155">Legend</text>
+<rect x="118" y="688" width="14" height="14" rx="3" fill="#2563eb" opacity="0.9"/>
+<text x="137" y="700" font-size="11" fill="#475569">readiness lifecycle</text>
+<rect x="282.6" y="688" width="14" height="14" rx="3" fill="#dc2626" opacity="0.9"/>
+<text x="301.6" y="700" font-size="11" fill="#475569">fail-closed fence / revoke</text>
+<rect x="492.0" y="688" width="14" height="14" rx="3" fill="#7c3aed" opacity="0.9"/>
+<text x="511.0" y="700" font-size="11" fill="#475569">egress DNS (B3)</text>
+<rect x="631.0" y="688" width="14" height="14" rx="3" fill="#d97706" opacity="0.9"/>
+<text x="650.0" y="700" font-size="11" fill="#475569">coordinator #299</text>
+<rect x="776.4" y="688" width="14" height="14" rx="3" fill="#059669" opacity="0.9"/>
+<text x="795.4" y="700" font-size="11" fill="#475569">retain / rotation #223</text>
+<rect x="960.2" y="688" width="14" height="14" rx="3" fill="#475569" opacity="0.9"/>
+<text x="979.2" y="700" font-size="11" fill="#475569">deploy invariant</text>
+<text x="40" y="858" font-size="10.5" fill="#94a3b8">#382 · /ready certifies an authoritative safety barrier BEFORE fleet convergence · certified by CONTENT identity (desired revision), not CHANNEL identity (watch generation) — survives GKE watch-churn / Premature-close</text>
+</svg>

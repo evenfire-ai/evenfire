@@ -9,6 +9,14 @@ const STATE_ANNOTATION = 'clerum.io/egress-fqdn-state'
 const TARGETS_ANNOTATION = 'clerum.io/egress-fqdn-targets'
 const RESOLVED_AT_ANNOTATION = 'clerum.io/egress-fqdn-resolved-at'
 
+// Pre-deploy network-readiness handshake keys (WRC producer/consumer, HCC producer).
+// Shared here so WRC (workflow-recipes) and HCC (host-context-controller) derive the
+// exact same literals — a divergence becomes a compile error, not a silent 30s
+// fail-open timeout. Consumed by both services' reconcilers.
+const PRE_DEPLOY_ANNOTATION = 'clerum.io/pre-deploy'
+const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
+const NETWORK_READY_GENERATION_ANNOTATION = 'clerum.io/network-ready-observed-generation'
+
 const DEFAULT_PROTOCOL = 'TCP'
 const LEGACY_PORT = 443
 // Upper bound on a DNS TTL (ms) folded into the window (audit M2). A hostile or
@@ -400,6 +408,9 @@ module.exports = {
   STATE_ANNOTATION,
   TARGETS_ANNOTATION,
   RESOLVED_AT_ANNOTATION,
+  PRE_DEPLOY_ANNOTATION,
+  NETWORK_READY_ANNOTATION,
+  NETWORK_READY_GENERATION_ANNOTATION,
   emptyState,
   reconcileEgressState,
   stateHash,
