@@ -573,7 +573,6 @@ export function GfsBrowser(): React.JSX.Element {
               <div className="cu-gfs-list__head" aria-hidden="true">
                 <span />
                 <span>Name</span>
-                <span>Type</span>
                 <span>Size</span>
                 <span className="cu-gfs-list__head-actions">Actions</span>
               </div>
@@ -649,10 +648,6 @@ export function GfsBrowser(): React.JSX.Element {
                             </>
                           )}
                         </span>
-                        <span className="cu-gfs-list__meta">Version {child.version}</span>
-                      </span>
-                      <span className="cu-gfs-list__value">
-                        {child.kind === 'directory' ? 'Folder' : 'File'}
                       </span>
                       <span className="cu-gfs-list__value">
                         {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}

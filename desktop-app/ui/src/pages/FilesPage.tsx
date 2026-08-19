@@ -781,7 +781,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                           ? resource.coversDescendants
                             ? 'Shared folder tree'
                             : 'Folder'
-                          : `${formatSharedFileSize(resource.bytes)} · v${resource.version}`}
+                          : formatSharedFileSize(resource.bytes)}
                       </span>
                     </span>
                     <span className="da-gfs-drive__type da-grid__cell">

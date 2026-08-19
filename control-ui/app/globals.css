@@ -11313,7 +11313,7 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-list-frame {
-  --cu-gfs-list-columns: 2.25rem minmax(12rem, 1fr) minmax(5rem, 0.28fr) minmax(6rem, 0.32fr) 5rem;
+  --cu-gfs-list-columns: 2.25rem minmax(12rem, 1fr) minmax(6rem, 0.32fr) 5rem;
 
   display: flex;
   min-width: 0;
@@ -12235,7 +12235,6 @@ button.cu-gfs-tree__button:focus-visible,
   }
 
   .cu-gfs-list__head > :nth-child(3),
-  .cu-gfs-list__head > :nth-child(4),
   .cu-gfs-list__row > .cu-gfs-list__value {
     display: none;
   }
