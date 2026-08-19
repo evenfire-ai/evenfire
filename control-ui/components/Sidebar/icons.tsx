@@ -7,7 +7,7 @@ type RelationshipRoleIconProps = {
 
 function IconCreateBadge() {
   return (
-    <g aria-hidden="true">
+    <g>
       <circle
         cx="18"
         cy="18"
