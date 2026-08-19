@@ -11,6 +11,11 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import {
+  NETWORK_READY_ANNOTATION,
+  NETWORK_READY_GENERATION_ANNOTATION,
+  PRE_DEPLOY_ANNOTATION,
+} from '@clerum/network-policy-core'
+import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   isPlatformRegistryImage,
 } from '@clerum/workflow-runtime-core'
@@ -439,9 +444,18 @@ async function ensureMcpServer(
       }
 
       // Recipe-owned: safe to replace (idempotent update path).
-      // Merge annotations: existing annotations (e.g. HCC's "network-ready: true") are preserved
-      // as the base; WRC manifest annotations override only the keys they specify.
-      // This prevents WRC updates from erasing HCC-managed annotations during concurrent reconciles.
+      // Merge annotations: existing annotations are preserved as the base; WRC manifest
+      // annotations override only the keys they specify. This prevents WRC updates from
+      // erasing HCC-managed annotations during concurrent reconciles.
+      // EXCEPTION (Issue #408): the pre-deploy network ack pair
+      // (clerum.io/network-ready + clerum.io/network-ready-observed-generation) is dropped
+      // from the carry-over here. This branch runs only when the DESIRED manifest's
+      // spec-hash differs from the stored one (the idempotency gate below returns false and
+      // skips the replace when they match), so a byte-identical desired object is never
+      // rewritten by this path. Dropping the ack is idempotent: HCC re-acks after
+      // re-applying NetworkPolicies for the current generation via its
+      // (annotation !== 'true' || stamped-generation !== current) guard, so a stale ack
+      // cannot satisfy the gate for the new generation.
       const rv = existing.metadata?.resourceVersion
       const existingAnnotations = existing.metadata?.annotations ?? {}
       const manifestAnnotations =
@@ -465,7 +479,14 @@ async function ensureMcpServer(
         return false
       }
 
-      const mergedAnnotations = { ...existingAnnotations, ...manifestAnnotations }
+      const carriedAnnotations: Record<string, string> = { ...existingAnnotations }
+      // Only the network ack pair is dropped. Other HCC-relevant handshake keys
+      // (notably clerum.io/pre-deploy) intentionally carry over from `existing`, even
+      // on the delegate path that does not re-specify them — HCC's re-ack guard keys
+      // off pre-deploy, so this is not the full set of handshake keys, just the ack.
+      delete carriedAnnotations[NETWORK_READY_ANNOTATION]
+      delete carriedAnnotations[NETWORK_READY_GENERATION_ANNOTATION]
+      const mergedAnnotations = { ...carriedAnnotations, ...manifestAnnotations }
       const updatedManifest = {
         ...manifest,
         metadata: {
@@ -771,8 +792,12 @@ export async function ensureRecipeContext(
  *
  * See: PHASE-9-PRE-PRODUCTION-HARDENING.md §GAP 14, Option C
  */
-export const PRE_DEPLOY_ANNOTATION = 'clerum.io/pre-deploy'
-export const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
+// Handshake annotation keys now live in @clerum/network-policy-core (single source of
+// truth shared with HCC — a divergence is a compile error, not a silent 30s timeout).
+// Re-exported here so existing WRC consumers keep importing them from this module.
+// clerum.io/network-ready-observed-generation (Issue #408) is the generation HCC
+// stamps when acking, so WRC can reject a stale ack from a prior generation.
+export { PRE_DEPLOY_ANNOTATION, NETWORK_READY_ANNOTATION, NETWORK_READY_GENERATION_ANNOTATION }
 const NETWORK_READY_POLL_INTERVAL_MS = 1_000
 const NETWORK_READY_TIMEOUT_MS = 30_000
 
@@ -893,6 +918,10 @@ export async function preDeployMcpServers(
  * pre-deployed McpServer CRDs.
  *
  * Polls each McpServer CR until the annotation appears or timeout.
+ * The ack is honored only when HCC's stamped
+ * `clerum.io/network-ready-observed-generation` matches the current
+ * `metadata.generation` (Issue #408) — a stale ack from a prior generation
+ * does not satisfy the gate. A non-numeric generation is tolerated as fresh.
  * Returns true if all are ready, false if timeout.
  */
 export async function waitForNetworkReady(
@@ -916,10 +945,21 @@ export async function waitForNetworkReady(
             namespace,
             plural: MCPSERVER_PLURAL,
             name,
-          })) as { metadata?: { annotations?: Record<string, string> } }
+          })) as {
+            metadata?: { generation?: number; annotations?: Record<string, string> }
+          }
+          // Issue #408: mirror waitForExternalEgressReady's freshness check. The flat
+          // 'true' ack carries no generation, so trust it only when HCC's stamped
+          // generation matches the current one. A non-numeric generation is tolerated
+          // as fresh (same tolerance as the condition-based gate).
+          const annotations = mcpServer.metadata?.annotations
+          const currentGeneration = mcpServer.metadata?.generation
+          const ackFresh =
+            typeof currentGeneration !== 'number' ||
+            annotations?.[NETWORK_READY_GENERATION_ANNOTATION] === String(currentGeneration)
           return {
             name,
-            ready: mcpServer.metadata?.annotations?.[NETWORK_READY_ANNOTATION] === 'true',
+            ready: annotations?.[NETWORK_READY_ANNOTATION] === 'true' && ackFresh,
           }
         } catch (error) {
           // 404 = McpServer deleted externally — treat as resolved
