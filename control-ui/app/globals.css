@@ -1922,6 +1922,66 @@ textarea.cu-input {
   justify-content: flex-end;
 }
 
+.cu-guardrails-table-wrap {
+  container-type: inline-size;
+}
+
+.cu-guardrails-table {
+  min-width: 52rem;
+  --cu-expandable-inset-left: calc(3rem + 0.85rem);
+  --cu-expandable-inset-right: 6rem;
+}
+
+.cu-guardrails-table th:nth-child(1),
+.cu-guardrails-table td:nth-child(1) {
+  width: 3rem;
+}
+
+.cu-guardrails-table th:nth-child(2),
+.cu-guardrails-table td:nth-child(2) {
+  width: 30%;
+  max-width: 30%;
+}
+
+.cu-guardrails-table th:nth-child(4),
+.cu-guardrails-table td:nth-child(4) {
+  width: 5rem;
+}
+
+.cu-guardrails-table th:nth-child(5),
+.cu-guardrails-table td:nth-child(5) {
+  width: 8rem;
+}
+
+.cu-guardrails-table th:nth-child(6),
+.cu-guardrails-table td:nth-child(6) {
+  width: 9rem;
+}
+
+.cu-guardrails-table th:nth-child(7),
+.cu-guardrails-table td:nth-child(7) {
+  width: 6rem;
+  text-align: right;
+}
+
+.cu-guardrails-table td:nth-child(7) .cu-table-actions {
+  justify-content: flex-end;
+}
+
+/* Per-agent Guardrails tab: add-built-in control row + removable hook chip. */
+.cu-guardrails-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+  align-items: center;
+}
+
+.cu-guardrails-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+}
+
 .cu-expandable-row__name,
 .cu-installed-plugin__name {
   color: var(--cu-text);
@@ -4454,6 +4514,68 @@ textarea.cu-input {
 
 .cu-banner--info {
   color: var(--cu-text-soft);
+}
+
+/* Catalog-attention banner (stale-but-referenced models) on /llm-models. */
+.cu-model-attention__lede {
+  margin: 0 0 var(--cu-space-2);
+}
+
+.cu-model-attention__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-3);
+}
+
+.cu-model-attention__head {
+  display: block;
+}
+
+.cu-model-attention__name {
+  font-weight: 600;
+}
+
+.cu-model-attention__meta {
+  color: var(--cu-text-soft);
+}
+
+/* Shared Host/grant reference list (attention banner + 409 impact confirm). */
+.cu-model-refs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-2);
+  margin-top: var(--cu-space-2);
+}
+
+.cu-model-refs__label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.8125rem;
+}
+
+.cu-model-refs__list {
+  list-style: none;
+  margin: var(--cu-space-1) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-1);
+}
+
+.cu-model-refs__item {
+  font-size: 0.8125rem;
+}
+
+.cu-model-refs__meta {
+  color: var(--cu-text-soft);
+}
+
+/* Rich detail block inside a confirm dialog (e.g. the impact reference list). */
+.cu-modal-copy--details {
+  margin-top: var(--cu-space-3);
 }
 
 .cu-toast-stack {

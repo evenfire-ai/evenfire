@@ -1,3 +1,4 @@
+import { serverNameOf } from '../../capabilities/toolCatalogTools'
 import { McpManager } from '../../mcp/manager'
 import { Tool, ToolRegistry } from '../interfaces'
 import { Attachment, ToolDefinition, ToolOutput } from '../types'
@@ -78,7 +79,13 @@ class McpToolAdapter implements Tool {
     private readonly fullName: string,
     private readonly desc: string,
     private readonly schema: Record<string, unknown>,
-    private readonly mcpManager: McpManager
+    private readonly mcpManager: McpManager,
+    /**
+     * Authoritative server name from `McpTool.serverName` (set by the MCP client
+     * at connect). Carried explicitly because `traceDescriptor()` feeds the
+     * tool-lane guardrail identity that `server=` rules match on — see below.
+     */
+    private readonly serverName: string
   ) {}
 
   name() {
@@ -97,10 +104,16 @@ class McpToolAdapter implements Tool {
     return false
   }
   traceDescriptor() {
-    const separator = this.fullName.indexOf('__')
+    // `sourceRef` is the tool-lane guardrail's `server` identity (provenance.ts),
+    // so a `server=` deny rule matches on THIS value. It used to be sliced off the
+    // display name at the first `__`, which is a guess: a server whose own name
+    // contains `__` derives truncated, the rule then fails to match, and a deny
+    // that does not match lets the call through. Registration hands over the
+    // registry's own `serverName` instead — the same value `serverNameOf` uses in
+    // the tool catalog.
     return {
       kind: 'mcp_server_tool' as const,
-      sourceRef: separator > 0 ? this.fullName.slice(0, separator) : null,
+      sourceRef: this.serverName || null,
     }
   }
 
@@ -175,7 +188,9 @@ export class McpToolRegistryAdapter implements ToolRegistry {
    */
   private refresh(): void {
     this.tools.clear()
-    // getAllTools() returns names already prefixed as serverName__toolName
+    // getAllTools() returns names already prefixed as serverName__toolName, and
+    // preserves the authoritative `serverName` alongside it. `serverNameOf` reads
+    // that field and only falls back to parsing the prefix when it is absent.
     const allTools = this.mcpManager.getAllTools()
     for (const mcpTool of allTools) {
       this.tools.set(
@@ -184,7 +199,8 @@ export class McpToolRegistryAdapter implements ToolRegistry {
           mcpTool.name,
           mcpTool.description || '',
           mcpTool.inputSchema || {},
-          this.mcpManager
+          this.mcpManager,
+          serverNameOf(mcpTool)
         )
       )
     }
