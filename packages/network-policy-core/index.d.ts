@@ -130,6 +130,11 @@ export declare const STATE_ANNOTATION: string
 export declare const TARGETS_ANNOTATION: string
 export declare const RESOLVED_AT_ANNOTATION: string
 
+/** Pre-deploy network-readiness handshake annotation keys (shared by WRC and HCC). */
+export declare const PRE_DEPLOY_ANNOTATION: string
+export declare const NETWORK_READY_ANNOTATION: string
+export declare const NETWORK_READY_GENERATION_ANNOTATION: string
+
 /**
  * Classify a DNS failure as 'transient' (resolver/upstream temporarily
  * unavailable → fail-static freeze, H1) or 'permanent' (genuine no-records →

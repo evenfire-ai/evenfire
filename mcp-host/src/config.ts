@@ -83,6 +83,10 @@ export interface Config {
   // silent failures. Must stay well under the desktop's 120s stale threshold.
   mcpStatusHeartbeatInterval: number
 
+  // Per-heartbeat round budget. A stalled MCP server must not retain the
+  // scheduler in-flight forever or cause overlapping rounds.
+  mcpStatusHeartbeatTimeoutMs: number
+
   // Agent configuration
   agentTaskDelay: number
   agentMaxTaskDuration: number
@@ -355,6 +359,27 @@ export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): numb
 }
 
 /**
+ * Parse an MCP status-heartbeat duration. These values participate in the
+ * liveness scheduler, so an explicit typo must fail at boot rather than turn
+ * into an unbounded timer or a silent fallback.
+ */
+export function parseMcpStatusHeartbeatDuration(
+  name: string,
+  raw: string | undefined,
+  defaultValue: number
+): number {
+  if (raw === undefined || raw.trim() === '') return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`[Config] ${name}='${raw}' is not a positive safe integer`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`[Config] ${name}='${raw}' is not a positive safe integer`)
+  }
+  return value
+}
+
+/**
  * Parse CLERUM_HOST_CONFIG JSON for dev mode.
  */
 function parseDevHostConfig(): HostSpec | undefined {
@@ -581,9 +606,15 @@ export const config: Config = {
 
   // MCP status heartbeat. Defaults to 30 seconds so a single missed tick does
   // not trip desktop staleness.
-  mcpStatusHeartbeatInterval: parseInt(
-    getEnv('CLERUM_MCP_STATUS_HEARTBEAT_INTERVAL', '30000')!,
-    10
+  mcpStatusHeartbeatInterval: parseMcpStatusHeartbeatDuration(
+    'CLERUM_MCP_STATUS_HEARTBEAT_INTERVAL',
+    getEnv('CLERUM_MCP_STATUS_HEARTBEAT_INTERVAL'),
+    30_000
+  ),
+  mcpStatusHeartbeatTimeoutMs: parseMcpStatusHeartbeatDuration(
+    'CLERUM_MCP_STATUS_HEARTBEAT_TIMEOUT_MS',
+    getEnv('CLERUM_MCP_STATUS_HEARTBEAT_TIMEOUT_MS'),
+    25_000
   ),
 
   // Agent configuration
