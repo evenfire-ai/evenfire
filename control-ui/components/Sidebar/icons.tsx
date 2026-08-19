@@ -1,5 +1,26 @@
 import React from 'react'
 
+type RelationshipRoleIconProps = {
+  createBadge?: boolean
+  relationshipRole?: 'admin' | 'member'
+}
+
+function IconCreateBadge() {
+  return (
+    <g>
+      <circle
+        cx="18"
+        cy="18"
+        r="4.25"
+        fill="var(--cu-bg-elevated)"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path d="M18 15.75v4.5M15.75 18h4.5" />
+    </g>
+  )
+}
+
 export function IconWorkflow() {
   return (
     <svg
@@ -19,25 +40,6 @@ export function IconWorkflow() {
       <path d="M18.5 5.5l2.5 -2.5" />
       <path d="M10 11l-2 2" />
       <path d="M13 14l-2 2" />
-    </svg>
-  )
-}
-
-export function IconShield() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 3l7 3v5c0 4.5 -3 7.5 -7 9c-4 -1.5 -7 -4.5 -7 -9V6l7 -3z" />
-      <path d="M9 12l2 2l4 -4" />
     </svg>
   )
 }
@@ -370,7 +372,10 @@ export function IconBroadcast() {
   )
 }
 
-export function IconUsers() {
+export function IconUsers({
+  createBadge = false,
+  relationshipRole,
+}: RelationshipRoleIconProps = {}) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -382,10 +387,48 @@ export function IconUsers() {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={relationshipRole ? true : undefined}
+      data-relationship-role={relationshipRole}
+      data-create-badge={createBadge ? 'true' : undefined}
     >
       <path d="M18 21a8 8 0 0 0-16 0" />
       <circle cx="10" cy="8" r="5" />
       <path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3" />
+      {createBadge ? <IconCreateBadge /> : null}
+    </svg>
+  )
+}
+
+export function IconShield({
+  createBadge = false,
+  relationshipRole,
+}: RelationshipRoleIconProps = {}) {
+  const isRelationshipIcon = relationshipRole !== undefined
+
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden={relationshipRole ? true : undefined}
+      data-relationship-role={relationshipRole}
+      data-create-badge={createBadge ? 'true' : undefined}
+    >
+      {isRelationshipIcon ? (
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
+      ) : (
+        <>
+          <path d="M12 3l7 3v5c0 4.5 -3 7.5 -7 9c-4 -1.5 -7 -4.5 -7 -9V6l7 -3z" />
+          <path d="M9 12l2 2l4 -4" />
+        </>
+      )}
+      {createBadge ? <IconCreateBadge /> : null}
     </svg>
   )
 }
