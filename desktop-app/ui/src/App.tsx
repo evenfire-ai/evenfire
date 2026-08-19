@@ -487,8 +487,6 @@ export function App() {
   const isAgentChatView =
     (vm.navItem === DESKTOP_ROUTES.agents && Boolean(vm.selectedAgent)) ||
     (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.selectedAgent))
-  const notificationTrayUsesDrawer = Boolean(activeSandboxUiApp)
-  const appNotificationDrawerOpen = notificationTrayUsesDrawer && headerNotificationTrayOpen
   // The chat drawer coexists with the live app only on the `apps` route. It is
   // an orthogonal boolean axis over the shared `chatViewTabs`/<ChatPage> — never
   // a second tab store, never a foreground/background precedence module.
@@ -496,6 +494,14 @@ export function App() {
   const chatDrawerVisible = chatDrawerAvailable && chatDrawerOpen
   chatDrawerVisibleRef.current = chatDrawerVisible
   chatDrawerAvailableRef.current = chatDrawerAvailable
+  // The notification tray's drawer form occupies the same fixed right-rail rect
+  // as the chat drawer, so it only takes drawer form when the chat drawer is NOT
+  // visible; while the chat drawer is up it reverts to its popover/overlay form
+  // (the existing shell-overlay freeze covers that case) to avoid two stacked
+  // drawers fighting for the same rect. AppHeader's tray open-state is its own
+  // internal `notificationsOpen`, so flipping the mode never closes an open tray.
+  const notificationTrayUsesDrawer = Boolean(activeSandboxUiApp) && !chatDrawerVisible
+  const appNotificationDrawerOpen = notificationTrayUsesDrawer && headerNotificationTrayOpen
   const activeConversationOrigin = React.useMemo<SandboxUiConversationOrigin | null>(() => {
     if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent || !vm.activeChatId) {
       return null

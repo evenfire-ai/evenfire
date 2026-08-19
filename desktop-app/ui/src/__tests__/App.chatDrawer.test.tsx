@@ -20,10 +20,18 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     onEmbeddedAppMounted?: () => void
   },
 }))
+const appHeaderHarness = vi.hoisted(() => ({
+  props: null as null | { notificationTrayMode?: 'drawer' | 'overlay' },
+}))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
 vi.mock('@hooks/useAgentChatActionsValue', () => ({ useAgentChatActionsValue: () => ({}) }))
-vi.mock('@components/AppHeader', () => ({ AppHeader: () => null }))
+vi.mock('@components/AppHeader', () => ({
+  AppHeader: (props: NonNullable<typeof appHeaderHarness.props>) => {
+    appHeaderHarness.props = props
+    return null
+  },
+}))
 vi.mock('@components/ChatLocalSearch', () => ({ ChatLocalSearch: () => null }))
 vi.mock('@components/CommandPalette', () => ({ CommandPalette: () => null }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
@@ -127,6 +135,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     vi.clearAllMocks()
     sidebarHarness.props = null
     sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => currentController)
     Object.defineProperty(window, 'clerum', {
@@ -197,5 +206,34 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  it('reverts the notification tray to overlay form while the chat drawer is visible', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    render(<App />)
+
+    // Launch from chat-1: the chat drawer becomes visible over the live embed.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    // Both drawers share the same fixed right-rail rect, so the notification tray
+    // must NOT use its drawer form while the chat drawer is up — it reverts to the
+    // overlay/popover form (handled by the existing shell-overlay freeze).
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
+
+    // Closing the chat drawer (app still mounted) restores the tray's drawer form.
+    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
   })
 })
