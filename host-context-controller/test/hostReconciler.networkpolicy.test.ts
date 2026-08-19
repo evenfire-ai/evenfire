@@ -22,6 +22,7 @@ vi.mock('../src/config', () => ({
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
     channelsNamespace: 'channels',
+    llmHooksNamespace: 'llm-hooks',
     hostFullReconcileConcurrency: 2,
     channelReaderImage: 'clerum/channel-reader:test',
     channelReaderImagePullPolicy: 'IfNotPresent',
@@ -151,6 +152,12 @@ describe('HostReconciler.ensureChannelReaderEgressNetworkPolicy', () => {
     expect(JSON.stringify(call.body.spec.egress)).not.toContain('control-plane')
   })
 })
+
+// NOTE: the mcp-host→llm-hooks egress policy moved to LlmHookReconciler
+// (per-host, scoped to referenced hook pods — N1/N7); see
+// src/llmHookReconciler.test.ts "per-host egress". HostReconciler still deletes
+// `mcp-host-<host>-egress-llm-hooks` on host delete (covered by the
+// deleteHostNetworkPolicies test below).
 
 describe('HostReconciler.ensureMcpHostIngressNetworkPolicy', () => {
   it('creates the ingress NP in mcp-host namespace with correct selectors', async () => {

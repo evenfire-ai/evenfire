@@ -4,6 +4,12 @@ export const MANAGED_BY_VALUE = 'host-context-controller'
 // WRC-labeled runtimes from unlabeled/user-owned resources.
 export const WRC_MANAGED_BY_VALUE = 'workflow-recipes'
 export const MCPSERVER_LABEL = 'clerum.io/mcpserver'
+// Per-CR label stamped on the LlmHook workload's NetworkPolicy for traceability.
+export const LLMHOOK_LABEL = 'clerum.io/llmhook'
+// Pod-key label on the shared LlmHook Deployment/Service/NetworkPolicy. All
+// hooks that hash to the same pod key co-locate on the pod named from this key
+// and are reference-counted by it for label-owned GC (guardrails phase-4 §3).
+export const HOOK_PODKEY_LABEL = 'clerum.io/hook-pod-key'
 export const POLICY_TYPE_LABEL = 'clerum.io/policy-type'
 export const RECIPE_LABEL = 'clerum.io/recipe'
 export const HOST_LABEL = 'clerum.io/host'
