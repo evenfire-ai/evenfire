@@ -12536,6 +12536,81 @@ pre {
   padding-left: var(--space-4);
 }
 
+/* Chat drawer — Cursor-style chat column beside the live app embed. Reuses the
+   notification drawer's rect-shrink gutter (padding-right on the embed slot's
+   page) so the native WebContentsView shrinks to sit left of the drawer instead
+   of painting over it. */
+.content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-mounted-header) {
+  padding-right: var(--app-header-utilities-width);
+}
+
+.content-panel.content-panel--chat-drawer-open .sandbox-ui-mounted-header {
+  padding-right: 0;
+}
+
+.chat-drawer {
+  position: fixed;
+  top: calc(var(--space-4) + 36px + var(--space-2));
+  right: var(--space-4);
+  bottom: var(--space-4);
+  width: var(--app-notification-drawer-width);
+  z-index: var(--layer-chat-overlay);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-hard);
+  overflow: hidden;
+  /* Anti-flash: reveal only after the embed acknowledges its shrunk bounds,
+     mirroring the notification drawer's bounds-ack gate. */
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-drawer.is-ready {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-drawer__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border-bottom: 1px solid rgba(var(--edge-rgb), 0.24);
+  flex: 0 0 auto;
+}
+
+.chat-drawer__header-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-drawer__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+.chat-drawer__title {
+  display: block;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-drawer__surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
 @media (min-width: 901px) and (max-width: 1220px) {
   .content-panel {
     --app-header-utilities-width: calc(

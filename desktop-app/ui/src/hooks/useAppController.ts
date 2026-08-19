@@ -782,7 +782,17 @@ export function useAppController() {
   const handleSelectChatAgent = useCallback(
     (
       agentName: string,
-      options: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string } = {}
+      options: {
+        selectLatest?: boolean
+        chatId?: string
+        isRemote?: boolean
+        title?: string
+        // When true, drive the chat controller (pending selection + selectedAgent)
+        // WITHOUT flipping `navItem` to the chat route. The chat-drawer coexists
+        // with the live app on the `apps` route and needs to swap the shared
+        // <ChatPage>'s conversation in place, so it must not navigate away.
+        keepNavItem?: boolean
+      } = {}
     ) => {
       if (!agentName) return
       const targetChatId = String(options.chatId || '').trim()
@@ -825,7 +835,7 @@ export function useAppController() {
       }
       nav.setSelectedAgentRoute('details')
       nav.setSelectedAgent(agentName)
-      nav.setNavItem(DESKTOP_ROUTES.chat)
+      if (!options.keepNavItem) nav.setNavItem(DESKTOP_ROUTES.chat)
     },
     [
       chat.clearActiveChat,

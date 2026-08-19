@@ -11,6 +11,7 @@ import {
 } from '@contexts/index'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
+import { ChatDrawer } from '@components/ChatDrawer'
 import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
@@ -255,6 +256,8 @@ export function App() {
   const [headerShellOverlayOpen, setHeaderShellOverlayOpen] = React.useState(false)
   const [headerNotificationTrayOpen, setHeaderNotificationTrayOpen] = React.useState(false)
   const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)
+  const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
+  const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
   const [availableSandboxUiApps, setAvailableSandboxUiApps] = React.useState<ActiveSandboxUiApp[]>(
     []
   )
@@ -268,6 +271,11 @@ export function App() {
     createChatViewTabsState('chat-tab-1')
   )
   const chatViewTabsRef = React.useRef(chatViewTabs)
+  const chatDrawerRef = React.useRef<HTMLElement | null>(null)
+  // Mirrors `chatDrawerVisible` so the chat-tab handlers (which run from stable
+  // callbacks) can tell whether a reveal should target the in-app drawer or the
+  // full-screen chat route without re-binding on every render.
+  const chatDrawerVisibleRef = React.useRef(false)
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
@@ -308,7 +316,21 @@ export function App() {
   }, [])
 
   const revealChatViewTab = React.useCallback(
-    (tab: ChatViewTab) => {
+    (tab: ChatViewTab, inDrawer = chatDrawerVisibleRef.current) => {
+      if (inDrawer) {
+        // Swap the shared <ChatPage>'s conversation in place, keeping the live
+        // app mounted and the `apps` route active. A blank tab with no agent
+        // simply shows the empty composer — there is nothing to navigate to.
+        if (tab.agentRef) {
+          vm.handleSelectChatAgent(
+            tab.agentRef,
+            tab.chatId
+              ? { chatId: tab.chatId, title: tab.title, selectLatest: false, keepNavItem: true }
+              : { selectLatest: false, keepNavItem: true }
+          )
+        }
+        return
+      }
       leaveSandboxForChat()
       if (tab.agentRef) {
         vm.handleSelectChatAgent(
@@ -353,6 +375,26 @@ export function App() {
     setComposerFocusRequestId(value => value + 1)
   }, [nextChatTabId, revealChatViewTab, vm.selectedAgent])
 
+  const openChatDrawer = React.useCallback(() => {
+    setChatDrawerOpen(true)
+    // The ref still reads `false` until the next render commits the open state,
+    // so reveal explicitly in-drawer to swap the shared <ChatPage> in place.
+    revealChatViewTab(activeChatViewTab(chatViewTabsRef.current), true)
+    setComposerFocusRequestId(value => value + 1)
+  }, [revealChatViewTab])
+
+  const closeChatDrawer = React.useCallback(() => {
+    setChatDrawerOpen(false)
+  }, [])
+
+  const toggleChatDrawer = React.useCallback(() => {
+    if (chatDrawerVisibleRef.current) {
+      closeChatDrawer()
+    } else {
+      openChatDrawer()
+    }
+  }, [closeChatDrawer, openChatDrawer])
+
   const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {
     setChatLocalSearchOpen(false)
     setChatLocalSearchState({ query: '', currentMatch: null })
@@ -391,7 +433,13 @@ export function App() {
           })
         : focusBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), agentName)
       setChatViewTabs(next)
-      vm.handleSelectChatAgent(agentName, options)
+      // While the drawer is visible, agent selection (sidebar picker, ChatPage's
+      // auto-select) must swap the drawer's chat in place instead of navigating
+      // to the full-screen chat route and tearing the live app down.
+      vm.handleSelectChatAgent(
+        agentName,
+        chatDrawerVisibleRef.current ? { ...options, keepNavItem: true } : options
+      )
     },
     [nextChatTabId, vm.handleSelectChatAgent]
   )
@@ -401,6 +449,12 @@ export function App() {
     (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.selectedAgent))
   const notificationTrayUsesDrawer = Boolean(activeSandboxUiApp)
   const appNotificationDrawerOpen = notificationTrayUsesDrawer && headerNotificationTrayOpen
+  // The chat drawer coexists with the live app only on the `apps` route. It is
+  // an orthogonal boolean axis over the shared `chatViewTabs`/<ChatPage> — never
+  // a second tab store, never a foreground/background precedence module.
+  const chatDrawerAvailable = vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)
+  const chatDrawerVisible = chatDrawerAvailable && chatDrawerOpen
+  chatDrawerVisibleRef.current = chatDrawerVisible
   const activeConversationOrigin = React.useMemo<SandboxUiConversationOrigin | null>(() => {
     if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent || !vm.activeChatId) {
       return null
@@ -644,9 +698,16 @@ export function App() {
     setNotificationDrawerReady(false)
   }, [activeSandboxUiApp?.appRef, headerNotificationTrayOpen])
 
+  // Re-arm the chat drawer's anti-flash gate whenever it (re)opens or the app
+  // changes, so its DOM is revealed only after the embed finishes shrinking.
+  React.useEffect(() => {
+    setChatDrawerReady(false)
+  }, [activeSandboxUiApp?.appRef, chatDrawerVisible])
+
   const handleSandboxUiBoundsApplied = React.useCallback(() => {
     if (appNotificationDrawerOpen) setNotificationDrawerReady(true)
-  }, [appNotificationDrawerOpen])
+    if (chatDrawerVisible) setChatDrawerReady(true)
+  }, [appNotificationDrawerOpen, chatDrawerVisible])
 
   const launchSandboxUiApp = React.useCallback(
     (app: ActiveSandboxUiApp, conversationOrigin: SandboxUiConversationOrigin | null) => {
@@ -1094,6 +1155,7 @@ export function App() {
     setCommandPaletteOpen(false)
     setCommandPaletteReturnToSandbox(false)
     setSettingsShortcutsRequestId(0)
+    setChatDrawerOpen(false)
   }, [vm.authenticatedPrincipalIdentity])
 
   const desktopCommandContext = React.useMemo(
@@ -1322,7 +1384,7 @@ export function App() {
 
   const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
-  }`
+  }:${chatDrawerVisible ? 'chat-drawer-open' : 'chat-drawer-closed'}`
 
   const pendingSandboxUiConfirmation =
     findPendingSandboxUiDeepLinkAwaitingConfirmation(
@@ -1818,7 +1880,7 @@ export function App() {
                                 appNotificationDrawerOpen
                                   ? ' content-panel--app-notification-drawer-open'
                                   : ''
-                              }`}
+                              }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
                             >
                               <AppHeader
                                 searchFocusRequestId={globalSearchFocusRequestId}
@@ -1868,28 +1930,47 @@ export function App() {
                               )}
                               {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
                               {vm.navItem === DESKTOP_ROUTES.apps && (
-                                <SandboxUiPage
-                                  boundsRefreshKey={sandboxUiBoundsRefreshKey}
-                                  actionRequest={sandboxActionRequest}
-                                  conversationOrigin={sandboxUiConversationOrigin}
-                                  currentTeamId={vm.currentTeamId}
-                                  headerShellOverlayOpen={
-                                    headerShellOverlayOpen || commandPaletteOpen
-                                  }
-                                  sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
-                                  toastShellOverlayOpen={vm.toasts.length > 0}
-                                  shortcutApp={activeSandboxUiApp}
-                                  shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
-                                  localSearchRequestId={sandboxLocalSearchRequestId}
-                                  onBackToConversation={handleSandboxUiBackToConversation}
-                                  onEmbeddedAppOpening={handleSandboxUiOpening}
-                                  onEmbeddedAppMounted={handleSandboxUiMounted}
-                                  onEmbeddedAppBack={handleSandboxUiClosed}
-                                  onEmbeddedAppRemoved={handleSandboxUiRemoved}
-                                  onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
-                                  onNotify={vm.pushToast}
-                                  onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
-                                />
+                                <>
+                                  <SandboxUiPage
+                                    boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                    actionRequest={sandboxActionRequest}
+                                    conversationOrigin={sandboxUiConversationOrigin}
+                                    currentTeamId={vm.currentTeamId}
+                                    headerShellOverlayOpen={
+                                      headerShellOverlayOpen || commandPaletteOpen
+                                    }
+                                    sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                                    toastShellOverlayOpen={vm.toasts.length > 0}
+                                    shortcutApp={activeSandboxUiApp}
+                                    shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
+                                    localSearchRequestId={sandboxLocalSearchRequestId}
+                                    chatDrawerOpen={chatDrawerVisible}
+                                    onToggleChatDrawer={toggleChatDrawer}
+                                    onBackToConversation={handleSandboxUiBackToConversation}
+                                    onEmbeddedAppOpening={handleSandboxUiOpening}
+                                    onEmbeddedAppMounted={handleSandboxUiMounted}
+                                    onEmbeddedAppBack={handleSandboxUiClosed}
+                                    onEmbeddedAppRemoved={handleSandboxUiRemoved}
+                                    onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
+                                    onNotify={vm.pushToast}
+                                    onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
+                                  />
+                                  {chatDrawerVisible && (
+                                    <ChatDrawer
+                                      header={
+                                        <span className="chat-drawer__title">
+                                          {activeChatViewTab(chatViewTabs).title}
+                                        </span>
+                                      }
+                                      onNewChat={handleNewChatViewTab}
+                                      onClose={closeChatDrawer}
+                                      containerRef={chatDrawerRef}
+                                      ready={chatDrawerReady}
+                                    >
+                                      <ChatPage scrollContainerRef={chatDrawerRef} />
+                                    </ChatDrawer>
+                                  )}
+                                </>
                               )}
                               {vm.navItem === DESKTOP_ROUTES.settings && (
                                 <SettingsPage

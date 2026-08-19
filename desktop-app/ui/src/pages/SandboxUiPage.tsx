@@ -159,6 +159,8 @@ export function SandboxUiPage({
   shortcutApp = null,
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
+  chatDrawerOpen = false,
+  onToggleChatDrawer,
   onBackToConversation,
   onEmbeddedAppOpening,
   onEmbeddedAppMounted,
@@ -574,6 +576,21 @@ export function SandboxUiPage({
             <IconClose />
             <span>Back to apps</span>
           </Button>
+          {launch.kind === 'mounted' && onToggleChatDrawer && (
+            <Button
+              color="neutral"
+              variant={chatDrawerOpen ? 'solid' : 'soft'}
+              size="sm"
+              className="sandbox-ui-chat-drawer-btn"
+              aria-label="Toggle chat drawer"
+              aria-pressed={chatDrawerOpen}
+              title="Toggle chat drawer"
+              onClick={onToggleChatDrawer}
+            >
+              <IconChat />
+              <span>Chat</span>
+            </Button>
+          )}
           {launch.kind === 'mounted' && (
             <>
               <Button

@@ -185,6 +185,60 @@ describe('SandboxUiPage', () => {
     expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
   })
 
+  it('exposes a chat-drawer toggle in the mounted header that reflects and drives drawer state', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onToggleChatDrawer = vi.fn()
+
+    const view = render(
+      <SandboxUiPage chatDrawerOpen={false} onToggleChatDrawer={onToggleChatDrawer} />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+
+    const toggle = await screen.findByRole('button', { name: 'Toggle chat drawer' })
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(toggle)
+    expect(onToggleChatDrawer).toHaveBeenCalledTimes(1)
+
+    view.rerender(<SandboxUiPage chatDrawerOpen={true} onToggleChatDrawer={onToggleChatDrawer} />)
+    expect(
+      screen.getByRole('button', { name: 'Toggle chat drawer' }).getAttribute('aria-pressed')
+    ).toBe('true')
+  })
+
+  it('omits the chat-drawer toggle when no toggle handler is provided', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(<SandboxUiPage />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+    expect(screen.queryByRole('button', { name: 'Toggle chat drawer' })).toBeNull()
+  })
+
   it('routes controlled refresh and back requests through mounted-app owners', async () => {
     sandboxUi.listApps.mockResolvedValue({
       apps: [
