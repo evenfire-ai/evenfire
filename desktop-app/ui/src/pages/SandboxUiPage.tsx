@@ -550,15 +550,24 @@ export function SandboxUiPage({
     return (
       <section className="page">
         <div className="sandbox-ui-mounted-header">
-          {conversationOrigin && onBackToConversation ? (
+          {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (
+            // The originating conversation lives in the drawer beside the live
+            // embed now, so "Back to {title}" toggles the drawer instead of
+            // destroying the embed and reconstructing the chat full-screen. When
+            // no drawer toggle is wired it falls back to the destroy-and-
+            // reconstitute path (also reachable via the app.backToConversation
+            // command).
             <Button
               color="neutral"
-              variant="soft"
+              variant={onToggleChatDrawer && chatDrawerOpen ? 'solid' : 'soft'}
               size="sm"
               className="sandbox-ui-conversation-btn"
               aria-label={`Back to ${conversationOrigin.title}`}
+              aria-pressed={onToggleChatDrawer ? chatDrawerOpen : undefined}
               title={`Back to ${conversationOrigin.title}`}
-              onClick={() => void handleBackToConversation()}
+              onClick={
+                onToggleChatDrawer ? onToggleChatDrawer : () => void handleBackToConversation()
+              }
             >
               <IconChat />
               <span>Back to {conversationOrigin.title}</span>
@@ -576,7 +585,8 @@ export function SandboxUiPage({
             <IconClose />
             <span>Back to apps</span>
           </Button>
-          {launch.kind === 'mounted' && onToggleChatDrawer && (
+          {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
+            // No originating conversation to return to — a plain drawer toggle.
             <Button
               color="neutral"
               variant={chatDrawerOpen ? 'solid' : 'soft'}

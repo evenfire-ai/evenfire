@@ -60,6 +60,39 @@ describe('useAppController — chat drawer keepNavItem', () => {
     expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.apps)
   })
 
+  it('bypasses the same-route fast path with keepNavItem so a concurrent route change survives', async () => {
+    installAppControllerClerum({ agentNames: ['agent-x'] })
+    const app = renderAppController()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    // Land on the chat route with the agent selected — this is exactly the state
+    // where the fast path (same agent + same-route + chatId) would fire.
+    act(() => {
+      app.result.current.handleSelectChatAgent('agent-x', { chatId: 'chat-1', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat))
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe('agent-x'))
+
+    // Launch-from-chat batches a route change to `apps` with a keepNavItem chat
+    // selection. `nav.navItem` still reads `chat` when the selection runs, so the
+    // fast path would set navItem back to `chat` and leave no pending selection to
+    // survive the route change. keepNavItem must force the pending-selection path.
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.apps)
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'chat-2',
+        title: 'Seeded from conversation',
+        selectLatest: false,
+        keepNavItem: true,
+      })
+    })
+
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.apps)
+  })
+
   it('navigates to the full-screen chat route without keepNavItem', async () => {
     installAppControllerClerum({ agentNames: ['agent-x'] })
     const app = renderAppController()

@@ -809,7 +809,17 @@ export function useAppController() {
       // the pending-selection path below, which is designed to survive a route
       // change: it sets the active chat synchronously AND records the selection
       // the effect replays.
-      if (targetChatId && nav.selectedAgent === agentName && nav.navItem === DESKTOP_ROUTES.chat) {
+      // `keepNavItem` always takes the pending-selection path below: it is used
+      // when the route is changing to (or staying on) a non-chat route (the app
+      // drawer), where the fast path's imperative switch would leave no pending
+      // selection for the agent-selection effect to replay after `navItem`
+      // changes — the effect would then reset `activeChatId` to null.
+      if (
+        targetChatId &&
+        nav.selectedAgent === agentName &&
+        nav.navItem === DESKTOP_ROUTES.chat &&
+        !options.keepNavItem
+      ) {
         // D.4: switchToChat is now a single unified path (no isRemote) — the
         // server is the source of truth and hydrates server-only chats itself.
         void chat.switchToChat(agentName, targetChatId)

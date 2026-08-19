@@ -282,6 +282,10 @@ export function App() {
   // not mounted yet, so we open the drawer and defer the focus bump until its
   // column commits.
   const pendingChatSwitcherFocusRef = React.useRef(false)
+  // Mirror of the app's originating conversation so the drawer can be seeded
+  // from it inside stable callbacks.
+  const sandboxUiConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
+  sandboxUiConversationOriginRef.current = sandboxUiConversationOrigin
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
@@ -383,11 +387,25 @@ export function App() {
 
   const openChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(true)
+    // Seed the drawer from the conversation the app was opened from, if any, so
+    // "open the drawer" brings that chat back in place — no destroy-and-
+    // reconstitute round-trip. Otherwise reveal whatever tab is already active.
+    const origin = sandboxUiConversationOriginRef.current
+    let next = chatViewTabsRef.current
+    if (origin) {
+      next = openPersistedChatViewTab(next, {
+        id: nextChatTabId(),
+        agentRef: origin.agentName,
+        chatId: origin.chatId,
+        title: origin.title,
+      })
+      setChatViewTabs(next)
+    }
     // The ref still reads `false` until the next render commits the open state,
     // so reveal explicitly in-drawer to swap the shared <ChatPage> in place.
-    revealChatViewTab(activeChatViewTab(chatViewTabsRef.current), true)
+    revealChatViewTab(activeChatViewTab(next), true)
     setComposerFocusRequestId(value => value + 1)
-  }, [revealChatViewTab])
+  }, [nextChatTabId, revealChatViewTab])
 
   const closeChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(false)
@@ -733,9 +751,24 @@ export function App() {
       setActiveSandboxUiApp(app)
       vm.handleNavSelect(DESKTOP_ROUTES.apps)
       setSandboxUiShortcutOpenRequestId(requestId)
+      if (conversationOrigin) {
+        // Opened from a chat: bring that conversation straight into the drawer
+        // instead of the destroy-and-reconstitute round-trip. The embed stays
+        // live; `keepNavItem` (via revealChatViewTab in-drawer) records a pending
+        // selection that survives the `apps` route change and loads the chat.
+        setChatDrawerOpen(true)
+        const next = openPersistedChatViewTab(chatViewTabsRef.current, {
+          id: nextChatTabId(),
+          agentRef: conversationOrigin.agentName,
+          chatId: conversationOrigin.chatId,
+          title: conversationOrigin.title,
+        })
+        setChatViewTabs(next)
+        revealChatViewTab(activeChatViewTab(next), true)
+      }
       return requestId
     },
-    [vm.handleNavSelect]
+    [nextChatTabId, revealChatViewTab, vm.handleNavSelect]
   )
 
   const handleSidebarNavSelect = React.useCallback(
