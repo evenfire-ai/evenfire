@@ -424,6 +424,29 @@ minikube-pre-gate-sync: ## Enforce minikube sync before a gate (use GATE=<name>)
 test-gfs-real-postgres-minikube: ## Run GFS T1 real-Postgres suites against a validated branch-owned Minikube profile
 	@CONTEXT="$(MINIKUBE_PROFILE)" bash scripts/e2e/gfs-real-pg-minikube-gate.sh
 
+.PHONY: minikube-t2-preflight
+minikube-t2-preflight: ## Read-only, fail-loud T0/T1/T2 preflight for the explicit branch-owned Minikube profile
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2-preflight.sh
+
+.PHONY: minikube-t2
+minikube-t2: ## Run the local development T0, Real PostgreSQL T1, and exact-head T2 contract
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2.sh
+
+.PHONY: minikube-t2-real-postgres
+minikube-t2-real-postgres: ## Run the explicit local Real PostgreSQL lane without changing CI's DSN contract
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/e2e/minikube-real-postgres.sh
+
+.PHONY: minikube-t2-public-boundary
+minikube-t2-public-boundary: ## Reject secrets, credentials, private URLs, and raw runtime artifacts from the public diff
+	@scripts/tests/test-minikube-t2-public-boundary.sh
+
+.PHONY: minikube-t2-scenarios
+minikube-t2-scenarios: ## Exercise the fail-loud negative cases and transition classifier without a cluster
+	@scripts/tests/test-minikube-t2-scenarios.sh
+
 .PHONY: minikube-verify-network-policy
 minikube-verify-network-policy: ## Prove NetworkPolicy enforcement in clerum-test/minikube before custom-image gates
 	@CONTEXT="$(MINIKUBE_PROFILE)" scripts/minikube/verify-network-policy-enforcement.sh
@@ -911,7 +934,26 @@ test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R
 .PHONY: test-e2e-hcc-communicationchannel-watch-recovery
 test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC watch-recovery fault-injection gate
 	@echo "Running HCC CommunicationChannel watch-recovery gate..."
-	E2E_HCC_WATCH_FAULT_INJECTION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-communicationchannel-watch-recovery.sh
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_WATCH_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-communicationchannel-watch-recovery.sh
+
+.PHONY: test-e2e-hcc-readiness-bootstrap
+test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host fleet pass remains active
+	@echo "Running HCC initial-fleet readiness gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-readiness-bootstrap.sh
+
+.PHONY: test-e2e-hcc-watch-churn-readiness
+test-e2e-hcc-watch-churn-readiness: ## Prove HCC readiness CONVERGES under sustained apiserver watch churn (PR #205 GKE livelock). Positive-only; the livelock RED lives in host-context-controller/src/k8sClient.test.ts. EXPECT_LIVELOCK=1 is refused.
+	@echo "Running HCC watch-churn readiness gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_WATCH_FAULT_INJECTION=1 EXPECT_LIVELOCK=$(EXPECT_LIVELOCK) E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-watch-churn-readiness.sh
+
+.PHONY: test-e2e-hcc-mcp-context-readiness
+test-e2e-hcc-mcp-context-readiness: ## Prove HCC readiness during exact MCP/Context/NetworkPolicy initial convergence
+	@echo "Running HCC MCP/Context/NetworkPolicy readiness gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_MCP_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-mcp-context-readiness.sh
 
 .PHONY: test-e2e-stateless-multinode
 test-e2e-stateless-multinode: ## Run stateless multi-node lane (opt-in: STATELESS_MULTINODE_GATE=1; needs >=2 schedulable nodes; exit 3 = cross-node UNVERIFIED)

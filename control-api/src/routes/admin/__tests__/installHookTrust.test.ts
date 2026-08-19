@@ -70,6 +70,20 @@ describe('content-bearing classification (§8.4/§8.7)', () => {
     expect(isContentBearingHook(undefined)).toBe(false)
     expect(isContentBearingHook(['somethingElse'])).toBe(false)
   })
+
+  // The tool lane has no metadata projection: preToolUse receives {tool, arguments}
+  // and postToolUse receives the tool result, and remoteToolHook never consults
+  // contentAccess. Classified content-free, a preToolUse-only hook with egress at
+  // low trust passed the gate while reading every tool argument at runtime.
+  it('both tool-lane points are always content-bearing', () => {
+    expect(isContentBearingHook(['preToolUse'])).toBe(true)
+    expect(isContentBearingHook(['postToolUse'])).toBe(true)
+  })
+
+  it('contentAccess: metadata cannot make a tool-lane point content-free', () => {
+    expect(isContentBearingHook(['preToolUse'], 'metadata')).toBe(true)
+    expect(isContentBearingHook(['postToolUse'], 'metadata')).toBe(true)
+  })
 })
 
 describe('content/egress separation gate (§8.4)', () => {
@@ -111,6 +125,43 @@ describe('content/egress separation gate (§8.4)', () => {
     expect(
       contentEgressRequiresHighTrust({
         lifecyclePoints: ['preCall'],
+        hasEgress: false,
+        isRemote: false,
+        trustLevel: 'low',
+      })
+    ).toBe(false)
+  })
+
+  // A tool-lane hook reads tool arguments and results, so egress at low trust is
+  // the same exfiltration shape the LLM-lane points are gated on. Before the tool
+  // points were classified content-bearing this returned false and the install
+  // was admitted.
+  it('preToolUse + egress at low trust → requires high (blocked)', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: ['preToolUse'],
+        hasEgress: true,
+        isRemote: false,
+        trustLevel: 'low',
+      })
+    ).toBe(true)
+  })
+
+  it('postToolUse + remote target at mid trust → requires high (blocked)', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: ['postToolUse'],
+        hasEgress: false,
+        isRemote: true,
+        trustLevel: 'mid',
+      })
+    ).toBe(true)
+  })
+
+  it('a tool-lane hook with no egress at low trust → allowed', () => {
+    expect(
+      contentEgressRequiresHighTrust({
+        lifecyclePoints: ['preToolUse', 'postToolUse'],
         hasEgress: false,
         isRemote: false,
         trustLevel: 'low',

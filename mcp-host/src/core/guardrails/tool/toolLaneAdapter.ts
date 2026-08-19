@@ -20,6 +20,8 @@ import { compileRules, evaluateRules } from './rules'
 export interface ToolLaneGuardrailDeps {
   getAuthToken?: () => string
   fetchImpl?: FetchLike
+  /** Per-call hook deadline (§5 `limits.maxHookTimeoutMs`). Default in `createHookFetcher`. */
+  timeoutMs?: number
 }
 
 /**
@@ -40,6 +42,7 @@ function buildToolLaneHooks(
       createHookFetcher({
         getAuthToken: deps.getAuthToken ?? (() => ''),
         fetchImpl: deps.fetchImpl,
+        timeoutMs: deps.timeoutMs,
       })
     )
     if (d.lifecyclePoints.includes('pre_tool_use')) pre.push(hook)
@@ -92,7 +95,13 @@ export function buildToolLaneGuardrail(
   hookDeps: ToolLaneGuardrailDeps = {}
 ): ToolLaneGuardrail | undefined {
   const compiled = compileRules(config?.rules, config?.limits?.maxRules)
-  const hooks = buildToolLaneHooks(config?.hookDescriptors, hookDeps)
+  // The admin deadline applies to tool-lane hooks too; an explicit hookDeps value
+  // (tests) still wins. NOTE: the per-point byte caps are deliberately NOT wired
+  // here — that is a separate gap from the one this fixes.
+  const hooks = buildToolLaneHooks(config?.hookDescriptors, {
+    ...hookDeps,
+    timeoutMs: hookDeps.timeoutMs ?? config?.limits?.maxHookTimeoutMs,
+  })
   if (!compiled.hasRules && hooks.pre.length === 0 && hooks.post.length === 0) return undefined
 
   const deps: CoreBoundaryDeps<ToolLaneInput, ToolLaneResult, ToolIdentity> = {

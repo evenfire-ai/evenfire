@@ -26,7 +26,9 @@ const mockApply = vi.mocked(applyNetworkPolicy)
 function createMockNetworkingApi() {
   return {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
-    readNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ metadata: {} }),
+    readNamespacedNetworkPolicy: vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 })),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),

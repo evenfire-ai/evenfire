@@ -157,8 +157,15 @@ spec:
                 lifecyclePoints:
                   type: array
                   minItems: 1
-                  maxItems: 4
-                  description: Lifecycle points this hook subscribes to.
+                  maxItems: 6
+                  description: >-
+                    Lifecycle points this hook subscribes to. The first four are the
+                    LLM lane (§8.1); preToolUse/postToolUse are the tool lane (§6.2)
+                    and are accepted here because Host.spec.guardrails.hooks already
+                    keys on them and mcp-host already maps them
+                    (guardrailHookResolver PHASE_TO_POINT). Omitting them made an
+                    installed tool-lane hook unrepresentable: the apiserver rejected
+                    the CR the install saga tried to create.
                   items:
                     type: string
                     enum:
@@ -166,6 +173,8 @@ spec:
                       - moderate
                       - postCallSuccess
                       - onError
+                      - preToolUse
+                      - postToolUse
                 contentAccess:
                   type: string
                   enum:
@@ -176,13 +185,18 @@ spec:
                     the projected non-system messages/response bodies; `metadata` =
                     model+params+usage only, no bodies. moderate/postCallSuccess/
                     onError are inherently content-bearing; only a preCall-only hook
-                    may be `metadata`. Omit to let the platform infer (content points
-                    -> content, preCall-only -> metadata). The install-time content/
-                    egress gate keys on this: a content hook with egress or a remote
-                    target requires trust_level high. NOTE: enforced by the runtime
-                    content projection (target model B, §12.4); until that lands the
-                    field is advisory and the gate treats every message-carrying
-                    point as content-bearing (interim fix A).
+                    may be `metadata` (the CEL rule below rejects the rest, and
+                    install-hook rejects them again with content_access_conflict).
+                    OMITTING THIS FIELD MEANS `content`, not `metadata`: absent is
+                    read as content-bearing by both the install-time gate and the
+                    runtime projection, deliberately, so an unstated projection can
+                    never under-declare what a third-party hook sees. A hook that
+                    must not receive bodies has to say `metadata` explicitly. Two
+                    consequences of the default: a preCall hook that omits this
+                    receives every non-system message, and — because the content/
+                    egress gate keys on the same value — it is admissible with
+                    `egressBindings` or a `remote` target ONLY at trust_level high
+                    (otherwise install fails with content_egress_requires_high_trust).
                 order:
                   type: integer
                   default: 100
@@ -241,10 +255,17 @@ spec:
                 - rule: "!(has(self.capabilities) && self.capabilities.exists(c, c == 'may_deny')) || self.failMode == 'closed'"
                   message: "a deny-authoritative hook (may_deny) must fail closed"
                 # contentAccess: metadata is contradictory for an inherently content-bearing
-                # point. Absent field passes (platform infers), so this is non-breaking for
-                # existing CRs; it only rejects an explicit metadata on moderate/post/onError.
-                - rule: "!has(self.contentAccess) || self.contentAccess == 'content' || !self.lifecyclePoints.exists(p, p == 'moderate' || p == 'postCallSuccess' || p == 'onError')"
-                  message: "contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError (those points are inherently content-bearing)"
+                # point. An absent field passes (absent is read as `content`), so this is
+                # non-breaking for existing CRs; it only rejects an explicit metadata on
+                # a content-bearing point.
+                #
+                # The tool-lane points are listed because the tool lane has no metadata
+                # projection at all: preToolUse receives {tool, arguments} and postToolUse
+                # receives the tool result, and remoteToolHook never consults
+                # contentAccess. Declaring `metadata` there would describe a projection
+                # that does not exist.
+                - rule: "!has(self.contentAccess) || self.contentAccess == 'content' || !self.lifecyclePoints.exists(p, p == 'moderate' || p == 'postCallSuccess' || p == 'onError' || p == 'preToolUse' || p == 'postToolUse')"
+                  message: "contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError/preToolUse/postToolUse (those points are inherently content-bearing)"
             status:
               type: object
               description: >-

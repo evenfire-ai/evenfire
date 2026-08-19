@@ -551,6 +551,22 @@ export type SessionState = {
 
 export type PasswordLoginResult = SessionState
 
+/**
+ * Actionable diagnosis returned after a login failure when the app is pointed at
+ * a backend that isn't answering but a local Evenfire (minikube) IS reachable.
+ * Surfaced as a one-click "switch to Localhost and retry" affordance so a
+ * connection failure against the wrong runtime profile stops reading as a bare
+ * "login failed". Computed by `AppService.diagnoseLoginBackend`.
+ */
+export type LoginBackendHint = {
+  /** Runtime-config option to switch to (the localhost option's id). */
+  targetOptionId: string
+  /** Human label for the switch target, e.g. "Localhost". */
+  targetLabel: string
+  /** Human label for the backend the user is currently pointed at. */
+  activeLabel: string
+}
+
 export type InvitationPreview = {
   id: string
   teamId: string

@@ -1,11 +1,18 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
 import { config } from '../../config.js'
+import {
+  type DbClient,
+  advisoryLockModelNames,
+  boundCarrierTransactionIdleTimeout,
+  withTransaction,
+} from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
+import { getModelAllowlistState, isModelAllowed } from '../../services/llmAllowedModels.js'
 import {
   K8sConflictError,
   K8sNotFoundError,
@@ -22,9 +29,15 @@ import {
   extractK8sStatusCode,
   preserveCommunicationChannelCredentialsSecretRef,
 } from './communicationChannelSpecHelpers.js'
+import { enumerateHostModelReferences } from './hostModelReferences.js'
 import { validateHostSecretRef } from './hostSecrets.js'
-import { validateHostSpec } from './hostSpecValidation.js'
+import { type HostSpecValidationDeps, validateHostSpec } from './hostSpecValidation.js'
+import {
+  type HostSpecIncoherenceToleratedEvent,
+  emitHostSpecIncoherenceTolerated,
+} from './hostWriteGateAudit.js'
 import { collectResourceSpecFieldIssues, validateResourceName } from './resourceFieldValidation.js'
+import type { StaleModelWarning } from './staleModelWarning.js'
 
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
   telegramSettings: ['botHandle', 'replyOnlyWhenMentioned'],
@@ -426,6 +439,39 @@ function resolveResource(param: string): { plural: AdminResourceType; ns: string
   return { plural, ns: resourceNamespace(plural) }
 }
 
+// R1-H3 fase 1: a Host write (create/update) validates its model references and
+// writes the CR INSIDE a carrier transaction that holds the per-model-name
+// advisory lock across the K8s write, so a concurrent llm-model disable/delete
+// cannot strand a reference (INV-1). `validateHostSpec` returning an issue must
+// abort the whole thing WITHOUT persisting: it throws this so `withTransaction`
+// rolls back (releasing the lock) and the caller answers 422 with the issue.
+class HostSpecInvalidError extends Error {
+  constructor(readonly issue: { errors: Array<{ field: string; message: string }> }) {
+    super('host_spec_invalid')
+    this.name = 'HostSpecInvalidError'
+  }
+}
+
+// Every distinct model NAME a Host spec references (primary + allowedModels +
+// fallbacks). Reuses the single Host-reference enumeration (regla D4); the raw
+// model name is what the advisory lock keys on (adenda A1). Dedup + total order
+// are handled by `advisoryLockModelNames`.
+function hostModelLockNames(spec: unknown): string[] {
+  return enumerateHostModelReferences(spec).map(ref => ref.model)
+}
+
+// Bind the Host-spec validation gates to the carrier TRANSACTION client so the
+// allowlist reads happen under the advisory lock, on the same connection. BOTH
+// `isModelAllowed` (the fail-closed gate) AND `getModelAllowlistState` (the
+// stale-warning lookup) are bound — leaving the latter defaulted would let
+// `maybeWarnStale` escape to the global pool under the lock (adenda A3).
+function hostValidationDeps(db: DbClient): HostSpecValidationDeps {
+  return {
+    isModelAllowed: (provider, model) => isModelAllowed(provider, model, db),
+    getModelAllowlistState: (provider, model) => getModelAllowlistState(provider, model, db),
+  }
+}
+
 export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   const router = Router()
 
@@ -467,6 +513,10 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
         credentials?: Record<string, string>
       }
+      // Fase 6 soft-quarantine warnings granted during Host validation, returned
+      // in the 201 body only after the CR persists (below). Empty for every
+      // non-host create.
+      const hostWarnings: StaleModelWarning[] = []
 
       // FIX-A1: validate metadata.name (RFC1123) for ALL plurals BEFORE any spec
       // validation or side effect (e.g. CC credentials Secret creation). An
@@ -584,20 +634,56 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         return
       }
 
-      // Early validation for Host specs — spec.approval.tools shape + R3 model
-      // allowlist enforcement (fail-closed for a declared spec.model.name).
+      // Host create (R1-H3 fase 1): validate + CREATE the CR INSIDE a carrier
+      // transaction that HOLDS the per-model-name advisory lock across the K8s
+      // write, so a concurrent llm-model disable/delete cannot strand the new
+      // reference (INV-1). The impact gate on the reductor side takes the SAME
+      // lock and LISTs Hosts live, so whichever side commits first wins and the
+      // loser re-reads under the lock and aborts.
       if (plural === 'hosts' && body.spec) {
-        const issue = await validateHostSpec(body.spec)
-        if (issue) {
-          res.status(422).json(issue)
-          return
+        const hostSpec = body.spec
+        let created: unknown
+        try {
+          created = await withTransaction(async db => {
+            // Bound idle-in-transaction tenancy first (the lock is held across the
+            // live K8s write), then acquire the model-name locks in total order.
+            await boundCarrierTransactionIdleTimeout(db)
+            await advisoryLockModelNames(db, hostModelLockNames(hostSpec))
+            // Create: no stored CR, so the no-worsening tolerance (Pieza D) can
+            // never apply — a fresh Host may not introduce a disabled model. The
+            // allowlist gates read UNDER the lock (deps bound to `db`).
+            const issue = await validateHostSpec(hostSpec, hostValidationDeps(db), {
+              hostRef: { namespace: ns, name: body.metadata.name },
+              // Fase 6: a fresh Host has no stored CR, so EVERY assignment is new —
+              // a stale enabled model warns (never blocks). Emitted after the CR
+              // lands (below), so a rejected write surfaces no warning.
+              warnings: hostWarnings,
+            })
+            if (issue) throw new HostSpecInvalidError(issue)
+            // Anti-spoofing: an existing secretRef target must be an LLM host
+            // Secret. Kept before the write and inside the lock so precedence
+            // (spec issue → secretRef issue) is byte-identical to before.
+            const secretRefIssue = await validateHostSecretRef(gateway, hostSpec)
+            if (secretRefIssue) throw new HostSpecInvalidError(secretRefIssue)
+            // K8s write INSIDE the held lock: the COMMIT that releases the lock
+            // happens only after the CR is durable.
+            return gateway.createResource(plural, body, ns)
+          })
+        } catch (err) {
+          if (err instanceof HostSpecInvalidError) {
+            res.status(422).json(err.issue)
+            return
+          }
+          throw err
         }
-        // Anti-spoofing: an existing secretRef target must be an LLM host Secret.
-        const secretRefIssue = await validateHostSecretRef(gateway, body.spec)
-        if (secretRefIssue) {
-          res.status(422).json(secretRefIssue)
-          return
-        }
+        res
+          .status(201)
+          .json(
+            hostWarnings.length > 0
+              ? { ...(created as Record<string, unknown>), warnings: hostWarnings }
+              : created
+          )
+        return
       }
 
       // Early validation for McpServer specs — UX safety net + defense-in-depth.
@@ -635,7 +721,15 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         sendPrunedDisplayNameError(res)
         return
       }
-      res.status(201).json(created)
+      // Host CR persisted: attach any Fase 6 warnings additively (older clients
+      // ignore the field). Absent when there is nothing to warn about.
+      res
+        .status(201)
+        .json(
+          hostWarnings.length > 0
+            ? { ...(created as Record<string, unknown>), warnings: hostWarnings }
+            : created
+        )
     })
   )
 
@@ -660,10 +754,21 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
         spec: Record<string, unknown>
       }
+      // Pieza D tolerations granted during Host validation, emitted only after
+      // the CR persists (below). Empty for every non-host / non-tolerated write.
+      const hostTolerations: HostSpecIncoherenceToleratedEvent[] = []
+      // Fase 6 soft-quarantine warnings, returned in the 200 body only after the
+      // CR persists (below). Empty for every non-host / non-stale write.
+      const hostWarnings: StaleModelWarning[] = []
 
-      // N1 — the CR read by the ratchet below is handed to updateResource so a
-      // hosts/contexts PUT reads the apiserver ONCE, not twice (updateResource
-      // already reads `current` internally). Undefined for non hosts/contexts
+      // N1 — the CR read by the ratchet below is the single pre-write read for
+      // hosts + contexts. For CONTEXTS it is handed to updateResource
+      // (preReadCurrent, see below) so the PUT reads the apiserver ONCE, not
+      // twice. For HOSTS it also feeds the Pieza D tolerance (storedHostSpec,
+      // below) — but the host write goes through the carrier transaction, whose
+      // updateResource deliberately reads afresh UNDER the advisory lock (INV-1:
+      // a pre-lock snapshot would reopen the availability race the lock closes),
+      // so preReadCurrent is not used there. Undefined for non hosts/contexts
       // plurals and on the 404 path, where updateResource reads afresh and
       // surfaces the real 404.
       let ratchetCurrent: MutableResourceSnapshot | undefined
@@ -713,17 +818,74 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
       }
 
+      // Host update (R1-H3 fase 1): validate + REPLACE the CR INSIDE a carrier
+      // transaction holding the per-model-name advisory lock across the K8s write,
+      // exactly like create. The revalidation under the lock reuses the SAME
+      // `validateHostSpec` — which already encapsulates the no-worsening tolerance
+      // (Pieza D) — so the tolerance is preserved, not tightened (mini-spec §7).
       if (plural === 'hosts' && body.spec) {
-        const issue = await validateHostSpec(body.spec)
-        if (issue) {
-          res.status(422).json(issue)
-          return
+        const hostSpec = body.spec
+        // The stored CR lets the write gate tolerate a pre-existing
+        // model_not_allowed incoherence this write does not worsen (Pieza D — the
+        // editability trap). Reuse the snapshot the ratchet already read above
+        // (ratchetCurrent) instead of a second getResource: for hosts the ratchet
+        // block always ran (its guard is a superset of this one), so ratchetCurrent
+        // is set, or undefined on the 404 path. If it is absent, tolerance is
+        // skipped (fail-closed: the gate behaves exactly as before this feature).
+        // This snapshot feeds tolerance, not the availability race — the write gate
+        // re-reads fresh under the lock — and the K8s resourceVersion precondition
+        // guards CR-level concurrency.
+        const storedHostSpec: Record<string, unknown> | undefined =
+          recordValue(ratchetCurrent?.spec) ?? undefined
+        let updated: unknown
+        try {
+          updated = await withTransaction(async db => {
+            await boundCarrierTransactionIdleTimeout(db)
+            // Lock the models the INCOMING spec references — a newly added
+            // reference is the only one this write can strand.
+            await advisoryLockModelNames(db, hostModelLockNames(hostSpec))
+            const issue = await validateHostSpec(hostSpec, hostValidationDeps(db), {
+              stored: storedHostSpec,
+              hostRef: { namespace: ns, name: req.params.name },
+              // Sink for tolerations granted by validation; emitted below ONLY
+              // after the CR persists (mini-spec 01), so a secretRef 422 or a K8s
+              // conflict leaves no audit record.
+              tolerations: hostTolerations,
+              // Fase 6 warnings: a NEW assignment of an enabled-but-stale model
+              // warns (never blocks). A live reference already in the stored CR is
+              // not revalidated. Returned in the body only after the CR persists.
+              warnings: hostWarnings,
+            })
+            if (issue) throw new HostSpecInvalidError(issue)
+            const secretRefIssue = await validateHostSecretRef(gateway, hostSpec)
+            if (secretRefIssue) throw new HostSpecInvalidError(secretRefIssue)
+            return gateway.updateResource(plural, req.params.name, body, ns)
+          })
+        } catch (err) {
+          if (err instanceof HostSpecInvalidError) {
+            res.status(422).json(err.issue)
+            return
+          }
+          // AP-6: the caller sent the resourceVersion it read and the resource
+          // changed underneath it. Machine-readable so the UI can tell the operator
+          // to reload — never retried server-side with the stale body.
+          if (err instanceof K8sConflictError) {
+            res.status(409).json({ error: 'conflict', reason: 'resource_changed' })
+            return
+          }
+          throw err
         }
-        const secretRefIssue = await validateHostSecretRef(gateway, body.spec)
-        if (secretRefIssue) {
-          res.status(422).json(secretRefIssue)
-          return
-        }
+        // Host CR persisted: NOW emit any Pieza D tolerations (never before the
+        // write lands, so a K8s conflict/error leaves no audit record).
+        for (const event of hostTolerations) emitHostSpecIncoherenceTolerated(event)
+        res
+          .status(200)
+          .json(
+            hostWarnings.length > 0
+              ? { ...(updated as Record<string, unknown>), warnings: hostWarnings }
+              : updated
+          )
+        return
       }
 
       const isCommunicationChannelUpdate = plural === 'communicationchannels' && body.spec
@@ -779,6 +941,9 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
               preReadCurrent: ratchetCurrent,
             })
           : await gateway.updateResource(plural, req.params.name, updateBody, ns)
+        // Host CR persisted: NOW emit any Pieza D tolerations (never before the
+        // write lands, so a K8s conflict/error leaves no audit record).
+        for (const event of hostTolerations) emitHostSpecIncoherenceTolerated(event)
         if (plural === 'communicationchannels' && body.spec) {
           const missingField = missingPersistedProviderSetting(updateBody.spec, updated)
           if (missingField) {
@@ -807,7 +972,13 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           sendPrunedDisplayNameError(res)
           return
         }
-        res.status(200).json(updated)
+        res
+          .status(200)
+          .json(
+            hostWarnings.length > 0
+              ? { ...(updated as Record<string, unknown>), warnings: hostWarnings }
+              : updated
+          )
       } catch (err) {
         // AP-6: the caller sent the resourceVersion it read and the resource
         // changed underneath it. Machine-readable so the UI can tell the

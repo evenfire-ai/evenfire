@@ -11,7 +11,11 @@ import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
-import { listHostsReferencingHook, syncHookRefsInHosts } from '../../services/hostGuardrailRefs.js'
+import {
+  addHookRefToHost,
+  listHostsReferencingHook,
+  syncHookRefsInHosts,
+} from '../../services/hostGuardrailRefs.js'
 import { createKey, listImages, listKeys, revokeKey } from '../../services/orgApiKeyClient.js'
 import type { RegistryEntry } from '../../services/registryClient.js'
 import {
@@ -108,6 +112,29 @@ export function catalogAnnotations(entryName: string, version: string): Record<s
   }
 }
 
+/**
+ * A digest-pinned image ref: exactly one `@`, immediately followed by
+ * `sha256:<64 hex>` and nothing else.
+ *
+ * Anchoring at the front is what makes it exact. An unanchored `/@sha256:…$/`
+ * also accepts `repo@bar@sha256:…`, and the digest was then read with
+ * `split('@')[1]` — which yields `bar`. That value is written into every Host's
+ * `guardrails.hooks[].digest`, and the Host-side pin is exactly what mcp-host
+ * compares against `status.observedDigest` to detect drift and quarantine a
+ * hook, so a junk pin degrades the check that quarantine depends on.
+ *
+ * Shared by install-hook and upgrade-hook so the two cannot drift apart again —
+ * they did: upgrade was fixed while install kept both halves of the bug.
+ */
+export function isDigestPinnedImageRef(ref: unknown): boolean {
+  return typeof ref === 'string' && /^[^@]+@sha256:[0-9a-f]{64}$/.test(ref)
+}
+
+/** The `sha256:…` digest of a ref that passed `isDigestPinnedImageRef`. */
+export function imageRefDigest(ref: unknown): string | undefined {
+  return isDigestPinnedImageRef(ref) ? (ref as string).split('@').pop() : undefined
+}
+
 const MAX_RECIPE_YAML_SIZE = 100 * 1024 // 100 KB (spec §7.3)
 const DELETE_SETTLE_TIMEOUT_MS = 3_000
 const DELETE_SETTLE_POLL_MS = 100
@@ -134,14 +161,28 @@ const HOOK_TRUST_ORDER: Record<string, number> = { low: 0, mid: 1, high: 2 }
 // Lifecycle points that ALWAYS receive message/response content (§8.4/§8.7). preCall
 // is the one point with two flavors — content-bearing unless the hook declares
 // `contentAccess: metadata` — so it is handled separately in isContentBearingHook.
-const INHERENTLY_CONTENT_POINTS = new Set(['moderate', 'postCallSuccess', 'onError'])
+//
+// The tool-lane points (§6.2) are here because the tool lane has NO metadata
+// projection: preToolUse receives {tool, arguments} and postToolUse receives the
+// tool result, and remoteToolHook never consults contentAccess. Leaving them out
+// classified a preToolUse-only hook as content-free, so a low-trust third-party
+// hook with egressBindings or a remote target passed the content/egress gate
+// while reading every tool argument and result at runtime.
+const INHERENTLY_CONTENT_POINTS = new Set([
+  'moderate',
+  'postCallSuccess',
+  'onError',
+  'preToolUse',
+  'postToolUse',
+])
 
 /**
  * §8.4/§8.7 — does this hook receive message/response CONTENT at any of its
- * lifecycle points? moderate/postCallSuccess/onError always do; preCall does
- * unless it explicitly declared `contentAccess: metadata` (mcp-host's projection
- * enforces the same rule, so the gate and the runtime agree — the two land
- * together, §12.4). Absent contentAccess ⇒ content-bearing (conservative).
+ * lifecycle points? moderate/postCallSuccess/onError and both tool-lane points
+ * always do; preCall does unless it explicitly declared `contentAccess: metadata`
+ * (mcp-host's projection enforces the same rule, so the gate and the runtime
+ * agree — the two land together, §12.4). Absent contentAccess ⇒ content-bearing
+ * (conservative).
  */
 export function isContentBearingHook(
   lifecyclePoints: string[] | undefined,
@@ -346,6 +387,17 @@ function looksLikeCredentialPlaceholder(value: string): boolean {
   ]).has(normalized)
 }
 
+/**
+ * Is a supplied credentials payload something other than a key→value object?
+ * A string passes `typeof x === 'object'`? No — but it DOES survive
+ * `Object.keys()`, which enumerates its character indices, so an unchecked
+ * `credentials: "abc"` reads as three credential names. Both install paths gate
+ * on this so they agree on what a payload is.
+ */
+export function isMalformedCredentialPayload(credentials: unknown): boolean {
+  return typeof credentials !== 'object' || Array.isArray(credentials)
+}
+
 function validateProvidedCredentialPayload(
   schema: RegistryCredentialSchema,
   credentials: RegistryInstallRequest['credentials']
@@ -353,7 +405,7 @@ function validateProvidedCredentialPayload(
   const requiredKeys = schema.keys?.map(k => k.name) ?? []
   if (!schema.required || requiredKeys.length === 0) return { ok: true, secretData: {} }
   if (credentials === undefined || credentials === null) return { ok: true, secretData: {} }
-  if (typeof credentials !== 'object' || Array.isArray(credentials)) {
+  if (isMalformedCredentialPayload(credentials)) {
     return {
       ok: false,
       body: {
@@ -1892,7 +1944,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // Step 7 — image preflight: digest-pinned (§8.2 resolution) + allowlist (§8.5).
         const image = hookMeta.target.image
         if (image) {
-          if (!/@sha256:[0-9a-f]{64}$/.test(image.ref ?? '')) {
+          if (!isDigestPinnedImageRef(image.ref)) {
             res.status(422).json({ error: 'image_ref_not_digest_pinned' })
             return
           }
@@ -1930,6 +1982,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           body.registryEntryVersion
         ).catch(() => null)) as RegistryCredentialSchema | null
         const credRequired = !!credSchema?.required
+        // Reject a non-object payload before Object.keys() enumerates it. Unlike the
+        // McpServer path this cannot lean on validateProvidedCredentialPayload: that
+        // returns early when the schema is not `required`, so a malformed payload
+        // would reach createSecret as stringData. Same error shape as that path.
+        if (body.credentials !== undefined && body.credentials !== null) {
+          if (isMalformedCredentialPayload(body.credentials)) {
+            res.status(400).json({
+              error: 'credential.invalidPayload',
+              message: 'Credentials must be an object keyed by credential name.',
+            })
+            return
+          }
+        }
         const credentials = body.credentials ?? {}
         const secretName = `${crName}-creds`
         let secretCreated = false
@@ -2037,29 +2102,23 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // Step 10 — reference the hook from Host.spec.guardrails.hooks[phase] as
         // {id, digest}. If this fails the hook exists but no Host runs it, so roll
         // the CR (+ Secret) back rather than return a false success.
-        const digest = image?.ref?.includes('@') ? image.ref.split('@')[1] : undefined
+        const digest = imageRefDigest(image?.ref)
         try {
-          const freshHost = (await gateway.getResource(
-            'hosts',
+          // Atomic read→derive→write (shared with the uninstall/upgrade paths):
+          // re-reads the Host, derives the hooks map from THAT read, and sends its
+          // resourceVersion as the replace precondition. Deriving out here and
+          // writing with a plain `updateResource` sends no precondition and replays
+          // a stale map, so a concurrent install/uninstall on the same Host is
+          // silently clobbered — leaving this CR installed but unreferenced, which
+          // reads to the operator as an active guardrail that never runs
+          // (fail-OPEN). Exhausted retries throw into the rollback below rather
+          // than reporting a false success.
+          await addHookRefToHost(
+            gateway,
             body.hostRef,
-            config.hostsNamespace
-          )) as HostShape
-          const g: HostGuardrailsShape = { ...(freshHost.spec?.guardrails ?? {}) }
-          const hooks: Record<string, Array<{ id: string; digest?: string }>> = {
-            ...(g.hooks ?? {}),
-          }
-          for (const phase of hookMeta.lifecyclePoints) {
-            const arr = hooks[phase] ? [...hooks[phase]] : []
-            if (!arr.some(h => h.id === crName)) {
-              arr.push({ id: crName, ...(digest ? { digest } : {}) })
-            }
-            hooks[phase] = arr
-          }
-          g.hooks = hooks
-          await gateway.updateResource(
-            'hosts',
-            body.hostRef,
-            { spec: { ...freshHost.spec, guardrails: g } },
+            crName,
+            hookMeta.lifecyclePoints,
+            digest,
             config.hostsNamespace
           )
         } catch (err) {
@@ -2168,10 +2227,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         }
 
         const llmHooksNs = config.llmHooksNamespace
-        let current: { spec?: Record<string, unknown> }
+        let current: {
+          spec?: Record<string, unknown>
+          metadata?: { annotations?: Record<string, string>; labels?: Record<string, string> }
+        }
         try {
           current = (await gateway.getResource('llmhooks', body.hookName, llmHooksNs)) as {
             spec?: Record<string, unknown>
+            metadata?: { annotations?: Record<string, string>; labels?: Record<string, string> }
           }
         } catch (err) {
           res.status(404).json({
@@ -2180,11 +2243,27 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
+        // The CR must be an upgrade OF THIS ENTRY. The only other cross-check is
+        // target KIND, so naming a different entry silently re-pointed the hook at
+        // another image while it inherited this CR's envSecret, capabilities,
+        // imagePullSecrets and egressBindings — and kept claiming the original
+        // catalog-id. The caller is an admin and so already in the TCB; the point is
+        // that changing a hook's identity should be an explicit uninstall+install,
+        // not a silent side effect of a mistyped entry name.
+        const installedCatalogId = getCatalogId(current.metadata)
+        if (installedCatalogId && installedCatalogId !== body.registryEntryName) {
+          res.status(409).json({
+            error: 'hook_entry_identity_mismatch',
+            reason: `LlmHook "${body.hookName}" was installed from "${installedCatalogId}", not "${body.registryEntryName}" — uninstall and install to change entry`,
+          })
+          return
+        }
+
         // Preflight the new image (digest-pin + allowlist), mirroring install.
         const newImage = hookMeta.target.image
         let newDigest: string | undefined
         if (newImage) {
-          if (!/@sha256:[0-9a-f]{64}$/.test(newImage.ref ?? '')) {
+          if (!isDigestPinnedImageRef(newImage.ref)) {
             res.status(422).json({ error: 'image_ref_not_digest_pinned' })
             return
           }
@@ -2195,7 +2274,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(422).json({ error: 'image_not_allowlisted', reason: newImage.ref })
             return
           }
-          newDigest = newImage.ref?.includes('@') ? newImage.ref.split('@')[1] : undefined
+          newDigest = imageRefDigest(newImage.ref)
         }
 
         // Host-independent admissibility gates — upgrade-hook is the sanctioned
@@ -2259,24 +2338,99 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
-        // Build the upgraded spec: bump the version-shaped fields (image ref,
-        // port, path, lifecyclePoints) from the new hook_meta; PRESERVE the
-        // install-time credential/security wiring (envSecret, imagePullSecrets,
-        // security, egressBindings) and admin-set fields (capabilities/order/
-        // failMode/config) already on the CR.
+        // Capability ceiling, re-checked on every referencing Host. Upgrade cannot
+        // WIDEN capabilities (they are inherited from the CR), but a Host whose
+        // capabilityCeiling was tightened after install would otherwise keep its
+        // over-privileged hook through every subsequent upgrade — install is the
+        // only other place the ceiling is ever enforced.
+        const curCapabilities = Array.isArray((current.spec ?? {}).capabilities)
+          ? ((current.spec ?? {}).capabilities as string[])
+          : []
+        if (curCapabilities.length > 0) {
+          const overCeiling = referencingHosts
+            .map(h => {
+              const ceiling = h.spec?.guardrails?.capabilityCeiling ?? []
+              const outside = curCapabilities.filter(c => !ceiling.includes(c))
+              return outside.length > 0 ? { host: h.metadata?.name, outside } : null
+            })
+            .filter((x): x is { host: string | undefined; outside: string[] } => x !== null)
+          if (overCeiling.length > 0) {
+            res.status(403).json({
+              error: 'capability_exceeds_ceiling',
+              reason: `installed capabilities exceed the Host capabilityCeiling on: ${overCeiling
+                .map(o => `${o.host} (${o.outside.join(', ')})`)
+                .join('; ')}`,
+            })
+            return
+          }
+        }
+
+        // An upgrade is exactly how a hook moves from a public image to a private
+        // platform-registry one; without this the CR persists referencing a pull
+        // secret that does not exist, the request returns 200, and the pod sits in
+        // ImagePullBackOff while status.observedDigest never advances (so mcp-host
+        // sees no digest mismatch and loads the descriptor anyway). Same guard the
+        // recipe upgrade route already carries.
+        const attachPullSecret = shouldAttachEvenfirePullSecret({
+          isLocal: true,
+          image: newImage?.ref,
+          registryUrl: config.registryUrl,
+        })
+        if (attachPullSecret) {
+          try {
+            await ensureRegistryPullSecret(gateway, llmHooksNs)
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
+
+        // Build the upgraded spec from the NEW hook_meta, the same way install does.
+        //
+        // Only `envSecret` and `imagePullSecrets` are genuinely install-time (they
+        // name Secrets this saga mints). `security`, `egressBindings` and
+        // `contentAccess` all come from the registry entry, so they are
+        // VERSION-SHAPED and must move with the version — previously they were
+        // inherited from the old CR while assertHookAdmissible above had already
+        // judged the NEW values, so the gate and the object it guards could disagree:
+        // a v2 that dropped requiredEgress was admitted as egress-free yet kept the
+        // old NetworkPolicy, and a v2 moving contentAccess metadata→content was
+        // admitted as content-bearing while the CR stayed `metadata`, leaving
+        // mcp-host's projection to strip every body — a moderation hook upgraded
+        // into a no-op, with a 200.
         const curSpec = (current.spec ?? {}) as Record<string, unknown>
         const curTarget = (curSpec.target ?? {}) as Record<string, unknown>
         const curImage = (curTarget.image ?? {}) as Record<string, unknown>
+        const hasEgress =
+          Array.isArray(hookMeta.requiredEgress) && hookMeta.requiredEgress.length > 0
         const target: Record<string, unknown> = newImage
-          ? { image: { ...curImage, ref: newImage.ref, port: newImage.port } }
+          ? {
+              image: {
+                ref: newImage.ref,
+                port: newImage.port,
+                ...(newImage.security ? { security: newImage.security } : {}),
+                ...(curImage.envSecret ? { envSecret: curImage.envSecret } : {}),
+                ...(hasEgress ? { egressBindings: hookMeta.requiredEgress } : {}),
+                ...(attachPullSecret
+                  ? { imagePullSecrets: [EVENFIRE_REGISTRY_PULL_SECRET_NAME] }
+                  : curImage.imagePullSecrets
+                    ? { imagePullSecrets: curImage.imagePullSecrets }
+                    : {}),
+              },
+            }
           : hookMeta.target.service
             ? { service: hookMeta.target.service }
             : { remote: hookMeta.target.remote }
+        const { contentAccess: _staleContentAccess, ...curSpecSansContentAccess } = curSpec
         const upgradedSpec: Record<string, unknown> = {
-          ...curSpec,
+          ...curSpecSansContentAccess,
           target,
-          path: hookMeta.path ?? curSpec.path ?? '/',
+          path: hookMeta.path ?? '/',
           lifecyclePoints: hookMeta.lifecyclePoints,
+          ...(hookMeta.contentAccess === 'metadata' || hookMeta.contentAccess === 'content'
+            ? { contentAccess: hookMeta.contentAccess }
+            : {}),
         }
 
         // 1) Update the CR. 2) Move every referencing Host's ref (phases + pinned
@@ -2284,13 +2438,38 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         //    un-synced Hosts still pin the OLD digest → mcp-host quarantines the
         //    hook there (fail-CLOSED, safe) until retried — surface a 207, not a
         //    false success.
-        await updateResourceWithConflictRetry(
-          gateway,
-          'llmhooks',
-          body.hookName,
-          { spec: upgradedSpec },
-          llmHooksNs
-        )
+        // Restamp the catalog annotations. updateResource MERGES metadata.annotations
+        // over current, so omitting metadata left catalog-version pinned at the old
+        // version forever — getInstalledRegistryState builds its hookKeys from exactly
+        // these, so the catalog kept reporting the pre-upgrade version and re-offering
+        // the same upgrade — and left trust-level stale even though trustLevel was
+        // just recomputed above. Both sibling upgrade routes already do this.
+        try {
+          await updateResourceWithConflictRetry(
+            gateway,
+            'llmhooks',
+            body.hookName,
+            {
+              metadata: {
+                annotations: {
+                  ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+                  'clerum.io/trust-level': trustLevel,
+                },
+              },
+              spec: upgradedSpec,
+            },
+            llmHooksNs
+          )
+        } catch (err) {
+          // A CEL rejection (e.g. a contentAccess/lifecyclePoint conflict) surfaced
+          // as an unmapped 500; install maps these.
+          const k8sErr = extractK8sError(err)
+          if (k8sErr) {
+            res.status(k8sErr.status).json({ error: k8sErr.message })
+            return
+          }
+          throw err
+        }
         let syncedHosts: string[]
         try {
           syncedHosts = await syncHookRefsInHosts(
@@ -2305,14 +2484,41 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           res.status(207).json({
             hookName: body.hookName,
             digest: newDigest,
+            registryEntry: body.registryEntryName,
+            registryVersion: body.registryEntryVersion,
+            // Only a may_deny hook denies on a digest mismatch; an advisory hook is
+            // skipped-with-alert and contributes NOTHING, so a rewrite/redaction hook
+            // silently stops applying on un-synced Hosts. Retrying is idempotent.
             warning:
-              'CR upgraded but Host reference sync failed; referencing agents fail-closed until retried',
+              'CR upgraded but Host reference sync failed. Un-synced Hosts still pin the old digest: may_deny hooks fail closed there, advisory hooks are skipped and stop contributing. Retry this call.',
           })
           return
         }
 
-        auditLog('upgrade-hook', { hookName: body.hookName, digest: newDigest, syncedHosts })
-        res.status(200).json({ hookName: body.hookName, digest: newDigest, syncedHosts })
+        // Registry install accounting — install and both sibling upgrades report;
+        // hook upgrades were invisible. Promise.resolve() rather than a bare .catch()
+        // so reporting can never fail an upgrade that already succeeded.
+        const correlationId = crypto.randomUUID()
+        void Promise.resolve(
+          reportInstall(body.registryEntryName, correlationId, body.registryEntryVersion)
+        ).catch(() => {})
+
+        auditLog('upgrade-hook', {
+          hookName: body.hookName,
+          digest: newDigest,
+          registryEntry: body.registryEntryName,
+          registryVersion: body.registryEntryVersion,
+          trustLevel,
+          syncedHosts,
+        })
+        res.status(200).json({
+          hookName: body.hookName,
+          digest: newDigest,
+          registryEntry: body.registryEntryName,
+          registryVersion: body.registryEntryVersion,
+          trustLevel,
+          syncedHosts,
+        })
       })
     )
   }

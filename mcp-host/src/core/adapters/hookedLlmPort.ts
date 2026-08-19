@@ -443,9 +443,13 @@ export function maybeWrapHookedLlmPort(
   const hooks = buildLlmLaneHooks(config?.hookDescriptors, {
     getAuthToken: deps.getAuthToken ?? (() => ''),
     fetchImpl: deps.fetchImpl,
-    // Per-point response caps from the admin limits block (§5); defaults in the fetcher.
+    // Per-point response caps + per-call deadline from the admin limits block (§5);
+    // defaults in the fetcher. The timeout has to travel with the byte caps: left
+    // unwired, `limits.maxHookTimeoutMs` was accepted by the CRD and silently
+    // ignored while its two sibling caps took effect.
     maxOutputBytes: config?.limits?.maxHookOutputBytes,
     maxRewriteBytes: config?.limits?.maxHookRewriteBytes,
+    timeoutMs: config?.limits?.maxHookTimeoutMs,
   })
   const hasHooks =
     hooks.preCall.length > 0 ||

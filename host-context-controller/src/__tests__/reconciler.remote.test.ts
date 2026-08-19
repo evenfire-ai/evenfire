@@ -87,6 +87,7 @@ function buildReconciler(
   customApi: MockCustomApi
 ): McpServerReconciler {
   return new McpServerReconciler({} as k8s.KubeConfig, {
+    assumeInventoryAuthorityWhenUnconfigured: true,
     appsApi: asAppsApi(appsApi),
     coreApi: asCoreApi(coreApi),
     customApi: asCustomApi(customApi),
@@ -171,7 +172,14 @@ function lastPatchedStatusConditions(customApi: MockCustomApi): any[] {
   const calls = customApi.patchNamespacedCustomObjectStatus.mock.calls
   const lastCall = calls[calls.length - 1]?.[0]
   const patch = lastCall?.body
-  const value = Array.isArray(patch) ? patch[0]?.value : undefined
+  const statusAdd = Array.isArray(patch)
+    ? patch.find(
+        candidate =>
+          candidate?.op === 'add' &&
+          (candidate.path === '/status' || candidate.path === '/status/conditions')
+      )
+    : undefined
+  const value = statusAdd?.value
   return Array.isArray(value) ? value : (value?.conditions ?? [])
 }
 
@@ -668,105 +676,6 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
   })
 
-  describe('canonicalizeRemoteEgressProxyImage', () => {
-    it('patches stale remote McpServer spec.image to the platform egress proxy image', async () => {
-      const staleRemote = cloneServer(REMOTE_SERVER, {
-        image: LEGACY_REMOTE_EGRESS_IMAGE,
-      })
-
-      await (reconciler as any).canonicalizeRemoteEgressProxyImage(staleRemote)
-
-      expect(customApi.patchNamespacedCustomObject).toHaveBeenCalledWith(
-        expect.objectContaining({
-          group: 'clerum.io',
-          version: 'v1alpha1',
-          namespace: 'mcp-server',
-          plural: 'mcpservers',
-          name: 'mcp-sentry-remote',
-          body: {
-            spec: {
-              image: 'clerum/nginx-egress-proxy:0.1.0',
-            },
-          },
-        }),
-        expect.objectContaining({
-          middleware: expect.any(Array),
-        })
-      )
-      expect(staleRemote.spec.image).toBe('clerum/nginx-egress-proxy:0.1.0')
-      expect(lastPatchedStatusConditions(customApi)).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'ImageCanonicalized',
-            status: 'True',
-            reason: 'RemoteEgressProxyImageMatches',
-            message: 'Remote McpServer spec.image matches the platform egress proxy image',
-          }),
-        ])
-      )
-    })
-
-    it('does not patch spec for a remote McpServer already using the platform image', async () => {
-      const currentRemote = cloneServer(REMOTE_SERVER)
-
-      await (reconciler as any).canonicalizeRemoteEgressProxyImage(currentRemote)
-
-      expect(customApi.patchNamespacedCustomObject).not.toHaveBeenCalled()
-      expect(lastPatchedStatusConditions(customApi)).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'ImageCanonicalized',
-            status: 'True',
-            reason: 'RemoteEgressProxyImageMatches',
-            message: 'Remote McpServer spec.image matches the platform egress proxy image',
-          }),
-        ])
-      )
-    })
-
-    it('does not patch local McpServers even when their image differs', async () => {
-      const localServer = cloneServer(LOCAL_SERVER, {
-        image: 'clerum/custom-local-mcp:1.2.3',
-      })
-
-      await (reconciler as any).canonicalizeRemoteEgressProxyImage(localServer)
-
-      expect(customApi.patchNamespacedCustomObject).not.toHaveBeenCalled()
-      expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
-      expect(localServer.spec.image).toBe('clerum/custom-local-mcp:1.2.3')
-    })
-
-    it('does not throw and records status when declarative image patching fails', async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-      const staleRemote = cloneServer(REMOTE_SERVER, {
-        image: LEGACY_REMOTE_EGRESS_IMAGE,
-      })
-      customApi.patchNamespacedCustomObject.mockRejectedValueOnce(new Error('rbac denied'))
-
-      await expect(
-        (reconciler as any).canonicalizeRemoteEgressProxyImage(staleRemote)
-      ).resolves.toBeUndefined()
-
-      expect(staleRemote.spec.image).toBe(LEGACY_REMOTE_EGRESS_IMAGE)
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to canonicalize remote McpServer'),
-        expect.any(Error)
-      )
-      expect(lastPatchedStatusConditions(customApi)).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'ImageCanonicalized',
-            status: 'False',
-            reason: 'RemoteEgressProxyImagePatchFailed',
-            message:
-              'Failed to patch remote McpServer spec.image to the platform egress proxy image',
-          }),
-        ])
-      )
-      warn.mockRestore()
-    })
-  })
-
   // ─── Test 3: buildDeployment for local servers ─────────────────────────
 
   describe('buildDeployment for local servers', () => {
@@ -835,16 +744,12 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(cmIndex).toBeLessThan(deployIndex)
     })
 
-    it('should canonicalize stale remote image before syncing ConfigMap and Deployment', async () => {
+    it('should use the platform image without rewriting a divergent remote desired image', async () => {
       const callOrder: string[] = []
       const staleRemote = cloneServer(REMOTE_SERVER, {
         image: LEGACY_REMOTE_EGRESS_IMAGE,
       })
 
-      customApi.patchNamespacedCustomObject.mockImplementation(async () => {
-        callOrder.push('canonicalizeImage')
-        return {}
-      })
       coreApi.createNamespacedConfigMap.mockImplementation(async () => {
         callOrder.push('createConfigMap')
         return {}
@@ -860,23 +765,28 @@ describe('McpServerReconciler remote egress proxy', () => {
 
       await reconciler.reconcile(staleRemote)
 
-      expect(callOrder).toEqual([
-        'canonicalizeImage',
-        'createConfigMap',
-        'createService',
-        'createDeployment',
-      ])
-      expect(staleRemote.spec.image).toBe('clerum/nginx-egress-proxy:0.1.0')
-      expect(customApi.patchNamespacedCustomObject).toHaveBeenCalledWith(
+      expect(callOrder).toEqual(['createConfigMap', 'createService', 'createDeployment'])
+      expect(staleRemote.spec.image).toBe(LEGACY_REMOTE_EGRESS_IMAGE)
+      expect(customApi.patchNamespacedCustomObject).not.toHaveBeenCalledWith(
+        expect.objectContaining({ body: expect.objectContaining({ spec: expect.anything() }) }),
+        expect.anything()
+      )
+      expect(appsApi.createNamespacedDeployment).toHaveBeenCalledWith(
         expect.objectContaining({
-          body: {
-            spec: {
-              image: 'clerum/nginx-egress-proxy:0.1.0',
-            },
-          },
-        }),
-        expect.objectContaining({
-          middleware: expect.any(Array),
+          body: expect.objectContaining({
+            spec: expect.objectContaining({
+              template: expect.objectContaining({
+                spec: expect.objectContaining({
+                  containers: [
+                    expect.objectContaining({
+                      name: 'egress-proxy',
+                      image: 'clerum/nginx-egress-proxy:0.1.0',
+                    }),
+                  ],
+                }),
+              }),
+            }),
+          }),
         })
       )
     })
@@ -1115,6 +1025,12 @@ describe('McpServerReconciler remote egress proxy', () => {
   })
 
   describe('reconcileDelete for remote servers', () => {
+    beforeEach(() => {
+      reconciler.setInventoryAuthority(() => ({ known: true, generation: 1 }))
+      reconciler.setResolveCurrentServer(() => undefined)
+      customApi.getNamespacedCustomObject.mockRejectedValue(make404Error())
+    })
+
     it('should clean up ConfigMap via deleteResources', async () => {
       mockHccOwnedRuntimeReads(appsApi, coreApi)
 
@@ -1136,11 +1052,14 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should clear status tracking after delete', async () => {
+      let current: McpServerCRD | undefined = REMOTE_SERVER
+      reconciler.setResolveCurrentServer(() => current)
       // First reconcile to populate status
       await reconciler.reconcile(REMOTE_SERVER)
       expect(reconciler.getStatus('mcp-sentry-remote').deployed).toBe(true)
 
       // Then delete
+      current = undefined
       await reconciler.reconcileDelete('mcp-sentry-remote', 'mcp-server')
       const status = reconciler.getStatus('mcp-sentry-remote')
       expect(status.deployed).toBe(false)
