@@ -9,6 +9,7 @@ type Config = {
   contextsNamespace: string
   communicationChannelsNamespace: string
   mcpServersNamespace: string
+  llmHooksNamespace: string
   sandboxNamespace: string
   sandboxUiNamespace: string
   secretsNamespace: string
@@ -260,6 +261,8 @@ type Config = {
   // error; enforce mode rejects installs/updates with a disallowed image.
   allowedPluginImagePrefixes: string[]
   enforcePluginImageAllowlist: boolean
+  curatedHookOrgs: string[]
+  defaultHookTrustCap: string
 }
 
 function assertNotPlaceholder(label: string, value: string): void {
@@ -390,6 +393,7 @@ function intervalMsFromEnv(name: string, defaultValue: number, minValue: number)
 // services/llmAllowedModelsConfigMap.ts.
 const HOSTS_NAMESPACE = process.env.CONTROL_API_HOSTS_NAMESPACE || 'mcp-host'
 const MCP_SERVERS_NAMESPACE = process.env.CONTROL_API_MCP_SERVERS_NAMESPACE || 'mcp-server'
+const LLM_HOOKS_NAMESPACE = process.env.CONTROL_API_LLM_HOOKS_NAMESPACE || 'llm-hooks'
 const SANDBOX_NAMESPACE = process.env.CONTROL_API_SANDBOX_NAMESPACE || 'sandbox-recipes'
 const SANDBOX_UI_NAMESPACE = process.env.CONTROL_API_SANDBOX_UI_NAMESPACE || 'sandbox-ui'
 const DEFAULT_MCP_HOST_JWT_MAX_HOST_REFS = 32
@@ -618,6 +622,7 @@ export const config: Config = {
   communicationChannelsNamespace:
     process.env.CONTROL_API_COMMUNICATION_CHANNELS_NAMESPACE || 'channels',
   mcpServersNamespace: MCP_SERVERS_NAMESPACE,
+  llmHooksNamespace: LLM_HOOKS_NAMESPACE,
   sandboxNamespace: SANDBOX_NAMESPACE,
   sandboxUiNamespace: SANDBOX_UI_NAMESPACE,
   secretsNamespace: process.env.CONTROL_API_SECRETS_NAMESPACE || 'mcp-host',
@@ -1041,6 +1046,22 @@ export const config: Config = {
   enforcePluginImageAllowlist:
     (process.env.CONTROL_API_ENFORCE_IMAGE_ALLOWLIST ?? '').toLowerCase() === 'true' ||
     process.env.CONTROL_API_ENFORCE_IMAGE_ALLOWLIST === '1',
+  // Guardrails install-hook trust policy (spec §8.4 / registry gap #1). The
+  // registry's entries.trust_level is publisher-influenced, so the saga only
+  // honors it for CURATED orgs; every other org's hook is capped at
+  // `defaultHookTrustCap` regardless of the column. The cluster's OWN org (from
+  // resolvePublishScope) and official evenfire (`@clerum`/`@evenfire`) are ALWAYS
+  // curated — not listed here — so this env is purely ADDITIVE, for extra
+  // third-party orgs the operator chooses to trust. Empty by default. Case-
+  // sensitive (org scopes carry '@'); NOT parseCsvList (which lowercases).
+  curatedHookOrgs: (process.env.CONTROL_API_CURATED_HOOK_ORGS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+  // Trust ceiling applied to a non-curated org's hook. `mid` lets a self-published
+  // hook clear a `mid` floor but never reach `high` (so it can never unlock the
+  // content+egress combination gated at `high`, §8.4).
+  defaultHookTrustCap: (process.env.CONTROL_API_DEFAULT_HOOK_TRUST_CAP ?? 'mid').toLowerCase(),
 }
 
 // Namespace config validation: fail fast if any namespace is empty.
@@ -1050,6 +1071,7 @@ const NAMESPACE_KEYS: (keyof Config)[] = [
   'contextsNamespace',
   'communicationChannelsNamespace',
   'mcpServersNamespace',
+  'llmHooksNamespace',
   'sandboxNamespace',
   'sandboxUiNamespace',
   'secretsNamespace',

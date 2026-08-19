@@ -891,6 +891,27 @@ export type McpServerResource = {
   spec?: AnyRecord
   status?: { conditions?: McpServerCondition[] }
 }
+
+// Installed guardrail hook CRs (LlmHook). Reconciler-written status follows the
+// same conditions[] convention as McpServer, plus hook-specific fields.
+export type LlmHookCondition = {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason?: string
+  message?: string
+  lastTransitionTime?: string
+}
+export type LlmHookStatus = {
+  conditions?: LlmHookCondition[]
+  observedDigest?: string
+  readyReplicas?: number
+  lastReconciled?: string
+}
+export type LlmHookResource = {
+  metadata?: Metadata
+  spec?: AnyRecord
+  status?: LlmHookStatus
+}
 export type ContextUser = {
   id: string
   email: string
@@ -1094,6 +1115,20 @@ export async function deleteContext(name: string) {
 
 export async function getMcpServers() {
   return apiGet('/api/v1/admin/mcp-servers') as Promise<{ items?: McpServerResource[] }>
+}
+
+// ── Installed guardrail hooks (LlmHook CRDs) — read + uninstall ─────────────
+// Creation is via the org-scoped registry install-hook saga, not a raw write.
+export async function getLlmHooks() {
+  return apiGet('/api/v1/admin/llm-hooks') as Promise<{ items?: LlmHookResource[] }>
+}
+
+export async function getLlmHook(name: string) {
+  return apiGet(`/api/v1/admin/llm-hooks/${encodeURIComponent(name)}`) as Promise<LlmHookResource>
+}
+
+export async function deleteLlmHook(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/llm-hooks/${encodeURIComponent(name)}`)
 }
 
 // ── SharedFileSystem CRD admin + per-SFS file browsing ──────────────────
@@ -2941,7 +2976,7 @@ export type RegistryEntry = {
   id: string
   name: string
   version: string
-  entry_type: string // "mcp-server" | "recipe"
+  entry_type: string // "mcp-server" | "recipe" | "llm-hook"
   description: string
   author: string
   origin: string
@@ -2967,6 +3002,25 @@ export type RegistryEntry = {
     | (Record<string, unknown> & {
         recipeYaml?: string
         stepCount?: number
+      })
+    | null
+  // Present on `entry_type: "llm-hook"` (guardrail hook) entries. Mirrors the
+  // registry's hook_meta shape: where the hook runs (image/service/remote), which
+  // lifecycle points it hooks, the callback path, its credential schema, default
+  // config, and any egress it requires. See control-api install-hook contract.
+  hook_meta?:
+    | (Record<string, unknown> & {
+        // Exactly one of image | service | remote — each an object, not a string.
+        target?: {
+          image?: { ref?: string; port?: number; security?: { addCapabilities?: string[] } }
+          service?: { name?: string; namespace?: string; port?: number }
+          remote?: { baseUrl?: string }
+        }
+        lifecyclePoints?: string[] // "preCall" | "moderate" | "postCallSuccess" | "onError"
+        path?: string
+        credentialSchema?: CredentialSchema
+        defaultConfig?: Record<string, unknown>
+        requiredEgress?: unknown
       })
     | null
   artifact_refs: Record<string, unknown> | null
@@ -3015,6 +3069,7 @@ export type RegistryInstalledState = {
   catalogKeys: string[]
   serverNames: string[]
   recipeKeys: string[]
+  hookKeys?: string[]
 }
 export type RegistryCatalogResponse = RegistryEntryListResponse & {
   categories: string[]
@@ -3124,6 +3179,49 @@ export async function installRecipeFromRegistry(
   ) as Promise<InstallRecipeFromRegistryResponse>
 }
 
+// Guardrail-hook install: binds a registry `llm-hook` entry to a target Host as an
+// LlmHook CR. Mirrors installFromRegistry / installRecipeFromRegistry but hits the
+// admin install-hook route. Backend enforces trust floor, §8.4 content-egress, the
+// capability ceiling, and the may_deny ⇒ fail-closed rule; error bodies arrive as
+// { error, reason? } (surfaced via the thrown Error's `.body`/`.code`).
+export type HookCapability =
+  | 'may_deny'
+  | 'may_rewrite'
+  | 'may_substitute_result'
+  | 'may_add_context'
+
+export type InstallHookFromRegistryRequest = {
+  hostRef: string
+  registryEntryName: string
+  registryEntryVersion: string
+  capabilities?: HookCapability[]
+  order?: number
+  failMode?: 'open' | 'closed'
+  credentials?: Record<string, string>
+}
+
+export type InstallHookFromRegistryResponse = {
+  hookName: string
+  namespace: string
+  hostRef: string
+  trustLevel: string
+  lifecyclePoints: string[]
+  registryEntry: string
+  registryVersion: string
+  correlationId: string
+  pendingCredentials?: PendingWorkflowCredentialRef[]
+}
+
+export async function installHookFromRegistry(
+  req: InstallHookFromRegistryRequest
+): Promise<InstallHookFromRegistryResponse> {
+  return apiSend(
+    'POST',
+    '/api/v1/admin/registry/install-hook',
+    req
+  ) as Promise<InstallHookFromRegistryResponse>
+}
+
 export type TriggerWorkflowRequest = {
   inputs?: Record<string, unknown>
   intermediateParameters?: Record<string, unknown>
@@ -3196,10 +3294,12 @@ export type OwnedRegistryEntry = {
   version: string
   visibility: 'public' | 'private'
   status: string // "published" | "deprecated" | "removed"
-  entry_type?: string // "mcp-server" | "recipe"
-  // Present ("local"/"remote") for mcp-servers, null/absent for recipes. The
-  // registry's /org/:org/entries returns this but NOT entry_type, so the
-  // Publisher's Type column infers Connector/Plugin from it (see OwnedEntries).
+  // The registry's /org/:org/entries returns the type as `entryType` (camelCase),
+  // NOT `entry_type`; keep both so the Publisher's Type column reads it directly
+  // instead of mis-inferring "Plugin" for llm-hook entries (see OwnedEntries).
+  entryType?: string // "mcp-server" | "recipe" | "llm-hook"
+  entry_type?: string
+  // Present ("local"/"remote") for mcp-servers, null/absent for others.
   serverMode?: string | null
 }
 export type OwnedRegistryEntriesResponse = {

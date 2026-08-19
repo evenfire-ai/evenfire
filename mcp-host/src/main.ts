@@ -51,7 +51,11 @@ import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
-import { HostWatcher, getHost } from './k8sClient'
+import {
+  resolveGuardrailHookDescriptors,
+  withResolvedHookDescriptors,
+} from './guardrailHookResolver'
+import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
@@ -66,7 +70,6 @@ import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
 import { McpManager } from './mcp'
-import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import {
   AuthoritativeMcpFleetCoordinator,
   DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
@@ -75,6 +78,7 @@ import {
   replaceAuthoritativeMcpFleet,
   runAuthoritativeMcpInitialization,
 } from './mcp/authoritativeFleet'
+import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
 import {
@@ -165,7 +169,13 @@ let currentPolicy: LlmPolicy | null = null
 let failoverEngine: FailoverEngine | null = null
 let bootFallbackEntry: FallbackEntry | null = null
 let hostWatcher: HostWatcher | null = null
+let llmHookWatcher: LlmHookWatcher | null = null
 let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
+// Periodic guardrail re-resolve — a backstop for dropped LlmHook/Host watch
+// events (the LlmHookWatcher is the primary, immediate path). Host edits also
+// apply immediately via onHostChange.
+let guardrailResolveTimer: ReturnType<typeof setInterval> | null = null
+const GUARDRAIL_RESOLVE_INTERVAL_MS = 300_000
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
 let lastServerState: Map<string, string> = new Map()
@@ -997,6 +1007,26 @@ function stopMcpStatusHeartbeat(): void {
 /**
  * Handle host configuration change.
  */
+/**
+ * Resolve the current Host's installed-hook references (§8.2) into runtime
+ * descriptors and apply them to the agent. Live-callable: run at boot, on every
+ * Host change (onHostChange), on a referenced-LlmHook change (LlmHookWatcher),
+ * and on a periodic backstop tick — so an admin edit takes effect without a pod
+ * restart.
+ */
+async function applyResolvedGuardrails(): Promise<void> {
+  if (!agent) return
+  const hostGuardrails = currentHost?.spec.guardrails ?? config.guardrailsConfig
+  const resolved = await resolveGuardrailHookDescriptors(hostGuardrails, {
+    getLlmHook,
+    llmHooksNamespace: config.llmHooksNamespace,
+  }).catch(err => {
+    console.error('[Main] Guardrail hook resolution failed; running without installed hooks:', err)
+    return []
+  })
+  agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolved))
+}
+
 async function onHostChange(host: HostCRD): Promise<void> {
   console.log(`[Main] Host configuration changed: ${host.name}`)
 
@@ -1050,6 +1080,11 @@ async function onHostChange(host: HostCRD): Promise<void> {
       console.error('[Main] Failed to apply identity files:', err)
     }
   }
+
+  // Re-resolve guardrails so a Host.spec.guardrails edit (added/removed hook,
+  // changed digest, capability/failMode change) takes effect without a restart
+  // (§8.2 "resolution is live").
+  await applyResolvedGuardrails()
 }
 
 /**
@@ -1262,6 +1297,16 @@ async function initializeAgent(): Promise<void> {
   // Phase 6: Set approval config
   const approvalCfg = currentHost?.spec.approval || config.approvalConfig
   agent.setApprovalConfig(approvalCfg)
+
+  // Guardrails (spec §5/§6) — resolve installed-hook references (§8.2) into
+  // runtime descriptors so the LLM lane actually calls the hook pods.
+  await applyResolvedGuardrails()
+  if (!guardrailResolveTimer) {
+    guardrailResolveTimer = setInterval(
+      () => void applyResolvedGuardrails(),
+      GUARDRAIL_RESOLVE_INTERVAL_MS
+    )
+  }
   validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
   console.log(
     `[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'} (policy: ${approvalCfg?.defaultPolicy || 'none/cli_only'})`
@@ -2521,10 +2566,15 @@ async function shutdown(signal: string): Promise<void> {
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
   hostWatcher?.stop()
+  llmHookWatcher?.stop()
   configStore?.stop()
   stopContextMapperPolling()
   stopMcpStatusHeartbeat()
   statelessHeartbeat?.stop()
+  if (guardrailResolveTimer) {
+    clearInterval(guardrailResolveTimer)
+    guardrailResolveTimer = null
+  }
 
   if (agent) {
     await agent.stop()
@@ -2702,6 +2752,23 @@ async function startProductionMode(): Promise<void> {
   // Start watching for Host changes
   hostWatcher = new HostWatcher(config.hostName)
   await hostWatcher.start(onHostChange, onHostDelete)
+
+  // Watch this tenant's LlmHook CRs so a hook-CR edit (caps/path/failMode/target)
+  // that the current Host references re-resolves guardrails live (§8.2), without
+  // a restart. Namespace-scoped, so only this tenant's hooks are surfaced.
+  llmHookWatcher = new LlmHookWatcher()
+  await llmHookWatcher.start(name => {
+    const hooks = (
+      currentHost?.spec.guardrails as { hooks?: Record<string, Array<{ id?: string }>> } | undefined
+    )?.hooks
+    const referenced =
+      !!hooks &&
+      Object.values(hooks).some(refs => Array.isArray(refs) && refs.some(r => r?.id === name))
+    if (referenced) {
+      console.log(`[Main] Referenced LlmHook ${name} changed — re-resolving guardrails`)
+      void applyResolvedGuardrails()
+    }
+  })
 
   // Start MCP status heartbeat (keeps observedAt fresh for the desktop poll;
   // each tick no-ops until the MCP manager exists)
@@ -3047,6 +3114,18 @@ async function main(): Promise<void> {
 // side-effect free allows the authoritative initialization contract to be
 // regression-tested without starting the service.
 if (require.main === module) {
+  // Global crash guards (defense-in-depth): a throw that escapes a stray event
+  // listener (e.g. a transport listener) must be LOGGED, not a silent process
+  // exit. uncaughtException leaves the process in an undefined state, so we log
+  // and exit non-zero for a clean k8s restart; an unhandledRejection is logged
+  // for triage but is not treated as fatal on its own.
+  process.on('uncaughtException', (err, origin) => {
+    console.error(`[Main] FATAL uncaughtException (${origin}):`, err)
+    process.exit(1)
+  })
+  process.on('unhandledRejection', reason => {
+    console.error('[Main] unhandledRejection:', reason)
+  })
   main().catch(error => {
     console.error('[Main] Fatal error:', error)
     process.exit(1)

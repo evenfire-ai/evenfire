@@ -1,0 +1,31 @@
+# Baseline default-deny (INGRESS + EGRESS) for the llm-hooks namespace (§8.2, N3).
+#
+# Every hook pod starts fully isolated — denied all inbound AND all outbound —
+# and reaches (or is reached) only through the narrow allow-policies HCC emits.
+# Without the ingress half, a pod no policy selects is default-ALLOW ingress
+# (the case for `service`-target hooks); without the egress half, a hook could
+# initiate outbound to any pod/namespace/internet (N4/N5).
+#
+# Composes additively with the controller-managed allow-policies:
+#   - image targets:   `llmhook-<podKey>`     admits the referencing mcp-hosts
+#                      (ingress) and permits declared `egressBindings` + scoped
+#                      CoreDNS (egress, only for hooks that declare outbound).
+#   - service targets: `llmhook-svc-<crName>` admits the referencing mcp-hosts.
+# A pure `/v1` responder hook (no egressBindings) gets NO egress — not even DNS
+# (N5, "no implicit DNS"); it still replies to mcp-host on the established
+# inbound connection (connection tracking), which needs no egress rule.
+#
+# Kubelet health/readiness probes originate from the node and are unaffected.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: llm-hooks
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

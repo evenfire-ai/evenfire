@@ -10,7 +10,9 @@ const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
  * state makes HCC invalidate its own authoritative revocation pass under a
  * large startup fleet, coupling /ready to additive runtime convergence again.
  */
-function desiredAnnotations(annotations: Record<string, string> | undefined): Record<string, string> {
+function desiredAnnotations(
+  annotations: Record<string, string> | undefined
+): Record<string, string> {
   if (!annotations?.[NETWORK_READY_ANNOTATION]) return annotations ?? {}
   const { [NETWORK_READY_ANNOTATION]: _networkReady, ...remaining } = annotations
   return remaining
