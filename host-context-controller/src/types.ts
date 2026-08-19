@@ -30,7 +30,18 @@ export interface McpServerSecretRef {
  */
 export interface McpServerOAuth {
   id: string
-  provider: 'salesforce' | 'slack' | 'notion' | 'microsoft-graph' | 'google'
+  // Full control-api adapter set — must mirror the mcpserver.yaml `oauth.provider`
+  // enum, control-api `providers.ts` `OAuthProvider`, and workflow-recipes
+  // `OAuthProvider`. U2 (spec 06) added monday/clickup/vercel.
+  provider:
+    | 'salesforce'
+    | 'slack'
+    | 'notion'
+    | 'microsoft-graph'
+    | 'google'
+    | 'monday'
+    | 'clickup'
+    | 'vercel'
   clientIdRef: McpServerSecretRef
   clientSecretRef: McpServerSecretRef
   scopes?: string[]
