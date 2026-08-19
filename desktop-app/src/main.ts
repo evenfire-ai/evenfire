@@ -17,7 +17,7 @@ import {
   parseSandboxUiDeepLink,
 } from './sandboxUiDeepLinks.js'
 import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
-import { wireDesktopShortcutRouting } from './shortcutRouter.js'
+import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
@@ -303,11 +303,7 @@ async function createWindow(): Promise<void> {
     },
   })
   mainWindow = window
-  wireDesktopShortcutRouting({
-    source: 'host',
-    sourceWebContents: window.webContents,
-    trustedRenderer: window.webContents,
-  })
+  wireHostDesktopShortcutRouting(window)
   mainWindowRendererReady = false
   window.on('closed', () => {
     if (mainWindow === window) {
