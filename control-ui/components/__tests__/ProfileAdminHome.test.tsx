@@ -164,7 +164,9 @@ describe('ProfileAdminHome — members invitations', () => {
 
     await screen.findByLabelText('Open member Accepted Invitee')
 
-    const createAdminButton = screen.getByRole('button', { name: 'Create admin' })
+    const createAdminButton = screen.getByRole('button', {
+      name: 'Create admin for member Accepted Invitee',
+    })
     expect(createAdminButton).toHaveAttribute('title', 'Create admin')
     expect(createAdminButton.querySelector('svg')).toHaveAttribute(
       'data-relationship-role',
@@ -199,7 +201,9 @@ describe('ProfileAdminHome — members invitations', () => {
     })
     renderProfileAdminHome()
 
-    const viewAdminButton = await screen.findByRole('button', { name: 'View admin' })
+    const viewAdminButton = await screen.findByRole('button', {
+      name: 'View admin for member Member',
+    })
     expect(viewAdminButton).toHaveAttribute('title', 'View admin')
     expect(viewAdminButton.querySelector('svg')).toHaveAttribute('data-relationship-role', 'admin')
     expect(viewAdminButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')

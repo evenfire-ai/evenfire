@@ -166,7 +166,9 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
   it('views the matching member from an admin with the destination-role SVG', async () => {
     render(<ControlAdminsPanel />)
 
-    const viewMemberButton = await screen.findByRole('button', { name: 'View member' })
+    const viewMemberButton = await screen.findByRole('button', {
+      name: 'View member for admin initial-admin (admin@example.com)',
+    })
     expect(viewMemberButton).toHaveAttribute('title', 'View member')
     expect(viewMemberButton.querySelector('svg')).toHaveAttribute(
       'data-relationship-role',
@@ -198,7 +200,9 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     })
     render(<ControlAdminsPanel />)
 
-    const createMemberButton = await screen.findByRole('button', { name: 'Create member' })
+    const createMemberButton = await screen.findByRole('button', {
+      name: 'Create member for admin create-member (create-member@example.com)',
+    })
     expect(createMemberButton).toHaveAttribute('title', 'Create member')
     expect(createMemberButton.querySelector('svg')).toHaveAttribute(
       'data-relationship-role',
@@ -231,7 +235,7 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     render(<ControlAdminsPanel />)
 
     const createMemberButton = await screen.findByRole('button', {
-      name: 'Email required to create member',
+      name: 'Email required to create member for admin email-missing',
     })
     expect(createMemberButton).toBeDisabled()
     expect(createMemberButton).toHaveAttribute('title', 'Email required to create member')

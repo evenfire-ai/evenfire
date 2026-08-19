@@ -927,7 +927,9 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                     }}
                                     onKeyDown={event => event.stopPropagation()}
                                     disabled={busy && !loaded}
-                                    aria-label={user.controlAdminId ? 'View admin' : 'Create admin'}
+                                    aria-label={`${
+                                      user.controlAdminId ? 'View admin' : 'Create admin'
+                                    } for member ${user.name || user.email}`}
                                     title={user.controlAdminId ? 'View admin' : 'Create admin'}
                                   >
                                     <IconShield
