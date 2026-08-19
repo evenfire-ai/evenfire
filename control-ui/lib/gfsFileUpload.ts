@@ -28,6 +28,13 @@ const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 300_000
 const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60_000
 const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
+const MEBIBYTE_BYTES = 1024 * 1024
+
+function formatBinaryUploadLimit(byteLength: number): string {
+  return byteLength % MEBIBYTE_BYTES === 0
+    ? `${byteLength / MEBIBYTE_BYTES} MiB`
+    : `${byteLength} bytes`
+}
 
 export function isRetryableUploadStatus(status: number): boolean {
   return GFS_UPLOAD_RETRYABLE_STATUS.has(status)
@@ -1183,7 +1190,7 @@ export class GfsUploadJob {
     if (this.input.file.size > productMaxFileBytes) {
       if (resumable.maxFileBytes === undefined) {
         throw new Error(
-          'GFS uploads use the 200 MiB compatibility limit because the writer omitted maxFileBytes.'
+          `GFS uploads use the ${formatBinaryUploadLimit(GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit because the writer omitted maxFileBytes.`
         )
       }
       throw new Error(`GFS writer limit is ${productMaxFileBytes} bytes for this upload.`)

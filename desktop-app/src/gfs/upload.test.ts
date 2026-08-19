@@ -8,6 +8,7 @@ import {
   isAmbiguousUploadStatus,
   isRetryableUploadStatus,
   normalizeInstabilityFailureThreshold,
+  normalizeUploadProductMaxBytes,
   uploadLocalFile,
 } from './upload.js'
 
@@ -124,12 +125,14 @@ describe('desktop GFS indexed uploader', () => {
     }
   })
 
-  it('uses the 200 MiB compatibility limit when an enabled writer omits maxFileBytes', async () => {
+  it('reports the default compatibility limit when an enabled writer omits maxFileBytes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-missing-limit-'))
     try {
       const filePath = join(root, 'payload.bin')
+      const compatibilityMaxFileBytes = normalizeUploadProductMaxBytes(undefined)
+      const compatibilityLimit = `${compatibilityMaxFileBytes / (1024 * 1024)} MiB`
       await writeFile(filePath, Buffer.alloc(0))
-      await truncate(filePath, 200 * 1024 * 1024 + 1)
+      await truncate(filePath, compatibilityMaxFileBytes + 1)
       let createCalls = 0
       const transport = {
         async requestJson<T>(method: 'GET' | 'POST') {
@@ -153,7 +156,9 @@ describe('desktop GFS indexed uploader', () => {
           parentRid: 'parent-missing-limit',
           transport,
         }).start()
-      ).rejects.toThrow(/200 MiB compatibility limit/)
+      ).rejects.toThrow(
+        `GFS files are limited to the ${compatibilityLimit} compatibility limit because the writer omitted maxFileBytes`
+      )
       expect(createCalls).toBe(0)
     } finally {
       await rm(root, { recursive: true, force: true })

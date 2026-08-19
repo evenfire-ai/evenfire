@@ -7,6 +7,7 @@ import {
   isAmbiguousUploadStatus,
   isRetryableUploadStatus,
   normalizeInstabilityFailureThreshold,
+  normalizeUploadProductMaxBytes,
   parseRetryAfter,
   uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
@@ -270,9 +271,11 @@ describe('GfsUploadJob', () => {
     expect(createCalls).toBe(0)
   })
 
-  it('uses the 200 MiB compatibility limit when an enabled writer omits maxFileBytes', async () => {
+  it('reports the default compatibility limit when an enabled writer omits maxFileBytes', async () => {
     const file = new File([new Uint8Array([1])], 'missing-limit.bin')
-    Object.defineProperty(file, 'size', { value: 200 * 1024 * 1024 + 1 })
+    const compatibilityMaxFileBytes = normalizeUploadProductMaxBytes(undefined)
+    const compatibilityLimit = `${compatibilityMaxFileBytes / (1024 * 1024)} MiB`
+    Object.defineProperty(file, 'size', { value: compatibilityMaxFileBytes + 1 })
     let createCalls = 0
     vi.stubGlobal(
       'fetch',
@@ -293,7 +296,9 @@ describe('GfsUploadJob', () => {
         name: file.name,
         target: { operation: 'create', parentRid: 'parent-missing-limit' },
       }).start()
-    ).rejects.toThrow(/200 MiB compatibility limit/)
+    ).rejects.toThrow(
+      `GFS uploads use the ${compatibilityLimit} compatibility limit because the writer omitted maxFileBytes.`
+    )
     expect(createCalls).toBe(0)
   })
 

@@ -26,6 +26,13 @@ export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
 export const GFS_UPLOAD_SERVICE_RETRY_MAX_ATTEMPTS = 6
 export const GFS_UPLOAD_RETRY_AFTER_CAP_MS = 5_000
 const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
+const MEBIBYTE_BYTES = 1024 * 1024
+
+function formatBinaryUploadLimit(byteLength: number): string {
+  return byteLength % MEBIBYTE_BYTES === 0
+    ? `${byteLength / MEBIBYTE_BYTES} MiB`
+    : `${byteLength} bytes`
+}
 
 export interface DesktopUploadSession {
   uploadId: string
@@ -1391,7 +1398,7 @@ export class DesktopGfsUploadJob {
     if (file.size > productMaxFileBytes) {
       if (resumable.maxFileBytes === undefined) {
         throw new Error(
-          'GFS files are limited to the 200 MiB compatibility limit because the writer omitted maxFileBytes'
+          `GFS files are limited to the ${formatBinaryUploadLimit(GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit because the writer omitted maxFileBytes`
         )
       }
       throw new Error(`GFS files are limited to ${productMaxFileBytes} bytes by the writer`)
