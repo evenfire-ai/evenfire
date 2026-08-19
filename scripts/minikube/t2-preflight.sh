@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Read-only validation and state-transition planner for local Evenfire Minikube.
+# This is not T0, T1, or T2. T2_PLAN_MODE=false (default, make minikube-t2-preflight
+# and the final T2 check) is fail-loud on full-bootstrap or a stale marker.
+# T2_PLAN_MODE=true is only the orchestrator planner so full-bootstrap is reachable.
 # shellcheck disable=SC2269
 set -euo pipefail
 set +x

@@ -38,8 +38,17 @@ cleanup_plan() {
 }
 trap cleanup_plan EXIT
 
+t2_lane_completed() {
+  local status="$1"
+  [ "$status" = PASS ] || [ "$status" = SKIPPED ]
+}
+
 run_t0() {
-  [ "$T2_RUN_T0" = true ] || return 0
+  if [ "$T2_RUN_T0" != true ]; then
+    T2_T0_STATUS=SKIPPED
+    t2_evidence_write T0 SKIPPED 'T2_RUN_T0=false; static lane already certified on this HEAD'
+    return 0
+  fi
   printf '[minikube-t2] T0: shell syntax and contract checks\n'
   git -C "$T2_PROJECT_DIR" diff --check "$T2_ORIGIN_DEV...$T2_HEAD"
   bash -n "$SCRIPT_DIR/t2-common.sh" "$SCRIPT_DIR/t2-preflight.sh" "$SCRIPT_DIR/t2.sh"
@@ -54,7 +63,7 @@ run_t0() {
 
 run_preflight_plan() {
   T2_PLAN_TMP="$(mktemp "$T2_TMP_ROOT/evenfire-t2-plan.XXXXXX")"
-  if ! T2_SKIP_LOCK=true T2_PLAN_MODE=false T2_PLAN_FILE="$T2_PLAN_TMP" \
+  if ! T2_SKIP_LOCK=true T2_PLAN_MODE=true T2_PLAN_FILE="$T2_PLAN_TMP" \
     T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
     CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
     T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
@@ -127,8 +136,11 @@ run_bootstrap_or_reconcile() {
       printf '[minikube-t2] targeted sync: service-only source input changed\n'
       run_targeted_sync
       ;;
+    already-synced)
+      printf '[minikube-t2] already synced: marker matches HEAD; skipping setup\n'
+      ;;
     *)
-      T2_NEXT_COMMAND='re-run make minikube-t2-preflight to select bootstrap, targeted sync, or full reconcile'
+      T2_NEXT_COMMAND='re-run make minikube-t2-preflight to select bootstrap, targeted sync, full reconcile, or already-synced'
       t2_fail BOOTSTRAP_REQUIRED "unknown transition: $T2_PLAN_STATE"
       ;;
   esac
@@ -170,12 +182,20 @@ run_targeted_sync() {
 }
 
 run_pre_gate() {
+  if [ "$T2_PLAN_STATE" = already-synced ]; then
+    printf '[minikube-t2] skipping pre-gate-sync; marker already matches HEAD\n'
+    return 0
+  fi
   printf '[minikube-t2] pre-gate-sync after bootstrap/reconcile\n'
-  MINIKUBE_PROFILE="$T2_PROFILE" make minikube-pre-gate-sync GATE=minikube-t2
+  MINIKUBE_PROFILE="$T2_PROFILE" make minikube-pre-gate-sync GATE=minikube-t2 ARGS='--skip-port-forwards'
 }
 
 run_t1() {
-  [ "$T2_RUN_T1" = true ] || return 0
+  if [ "$T2_RUN_T1" != true ]; then
+    T2_T1_STATUS=SKIPPED
+    t2_evidence_write T1 SKIPPED 'T2_RUN_T1=false; Real PostgreSQL lane already certified on this HEAD'
+    return 0
+  fi
   printf '[minikube-t2] T1: Real PostgreSQL suites\n'
   if T2_SKIP_LOCK=true CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" MINIKUBE_PROFILE="$T2_PROFILE" \
     bash "$T2_PROJECT_DIR/scripts/e2e/minikube-real-postgres.sh" >"$T2_T1_OUTPUT" 2>&1; then
@@ -193,7 +213,8 @@ run_t1() {
 
 run_final_preflight() {
   printf '[minikube-t2] final exact-head readiness preflight\n'
-  if ! T2_SKIP_LOCK=true T2_PLAN_MODE=true T2_PLAN_FILE="$T2_PLAN_TMP" \
+  # Fail-loud: a stale marker or missing bootstrap must not count as T2.
+  if ! T2_SKIP_LOCK=true T2_PLAN_MODE=false T2_PLAN_FILE="$T2_PLAN_TMP" \
     T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
     CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
     T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
@@ -202,6 +223,16 @@ run_final_preflight() {
     cat "$T2_FINAL_PREFLIGHT_OUTPUT" >&2 || true
     T2_NEXT_COMMAND='repair the first reported final preflight condition, then re-run T2 on the same HEAD'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'final exact-head readiness preflight failed'
+  fi
+  T2_PLAN_STATE="$(python3 - "$T2_PLAN_TMP" <<'PY'
+import json
+import sys
+print(json.loads(open(sys.argv[1]).read()).get("state", ""))
+PY
+  )"
+  if [ "$T2_PLAN_STATE" != already-synced ]; then
+    T2_NEXT_COMMAND='re-run make minikube-t2 so pre-gate-sync updates the marker to this HEAD'
+    t2_fail HEAD_MARKER_MISMATCH "final T2 preflight selected $T2_PLAN_STATE instead of already-synced"
   fi
   T2_T2_STATUS=PASS
   t2_evidence_write T2 PASS 'exact marker, image, PostgreSQL, namespace, Service, and deployment readiness passed'
@@ -250,15 +281,19 @@ main() {
   t2_evidence_init
 
   run_t0
-  if [ "$T2_T0_STATUS" != PASS ]; then
+  if ! t2_lane_completed "$T2_T0_STATUS"; then
     T2_NEXT_COMMAND='re-run make minikube-t2 with T2_RUN_T0=true so the static lane is executed'
     t2_fail ZERO_TESTS_EXECUTED 'T0 was not executed'
   fi
   run_preflight_plan
+  if { [ "$T2_RUN_T0" != true ] || [ "$T2_RUN_T1" != true ]; } && [ "$T2_PLAN_STATE" != already-synced ]; then
+    T2_NEXT_COMMAND='run make minikube-t2 so bootstrap/reconcile and T0/T1 execute on this HEAD'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'T2-only mode requires an already-synced exact-head profile'
+  fi
   run_bootstrap_or_reconcile
   run_pre_gate
   run_t1
-  if [ "$T2_T1_STATUS" != PASS ]; then
+  if ! t2_lane_completed "$T2_T1_STATUS"; then
     T2_NEXT_COMMAND='re-run make minikube-t2 with T2_RUN_T1=true so the Real PostgreSQL lane is executed'
     t2_fail ZERO_TESTS_EXECUTED 'T1 was not executed'
   fi

@@ -425,13 +425,19 @@ test-gfs-real-postgres-minikube: ## Run GFS T1 real-Postgres suites against a va
 	@CONTEXT="$(MINIKUBE_PROFILE)" bash scripts/e2e/gfs-real-pg-minikube-gate.sh
 
 .PHONY: minikube-t2-preflight
-minikube-t2-preflight: ## Read-only, fail-loud T0/T1/T2 preflight for the explicit branch-owned Minikube profile
+minikube-t2-preflight: ## Read-only readiness planner (not T0/T1/T2); fail-loud on an unbootstrapped profile
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
 		scripts/minikube/t2-preflight.sh
 
 .PHONY: minikube-t2
-minikube-t2: ## Run the local development T0, Real PostgreSQL T1, and exact-head T2 contract
+minikube-t2: ## Full orchestrator: T0, Real PostgreSQL T1, then exact-head T2
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2.sh
+
+.PHONY: minikube-t2-runtime
+minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile
+	@T2_RUN_T0=false T2_RUN_T1=false \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
 		scripts/minikube/t2.sh
 
 .PHONY: minikube-t2-real-postgres

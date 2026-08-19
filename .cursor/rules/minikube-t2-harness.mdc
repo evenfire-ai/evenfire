@@ -1,0 +1,45 @@
+---
+description: Keep the Minikube T2 harness, its contract tests, docs, rule, and skill in sync when editing harness code
+globs:
+  - scripts/minikube/t2*.sh
+  - scripts/minikube/pf-all-stack.sh
+  - scripts/minikube/pre-gate-sync.sh
+  - scripts/e2e/minikube-real-postgres.sh
+  - scripts/tests/test-minikube-t2-*.sh
+  - Makefile
+alwaysApply: false
+---
+
+# T2 harness change discipline
+
+When editing the T0/T1/T2 harness (these globs), the contract is duplicated in
+docs and guidance. A behavior change here MUST update, in the same change:
+
+- `scripts/tests/test-minikube-t2-contract.sh` and
+  `scripts/tests/test-minikube-t2-scenarios.sh` (they assert harness behavior)
+- `docs/testing/minikube-t2-runbook.md`
+- `.cursor/rules/minikube-t0-t1-t2.mdc` and
+  `.cursor/skills/minikube-t0-t1-t2/` (SKILL.md + reference.md)
+- the T0/T1/T2 sections of `AGENTS.md` and `CLAUDE.md`
+
+Invariants that must never regress:
+
+- Final T2 verdict = `t2.sh run_final_preflight` with `T2_PLAN_MODE=false`
+  and plan state `already-synced`; anything else is `HEAD_MARKER_MISMATCH`.
+- Planner mode `T2_PLAN_MODE=true` exists only inside the orchestrator so
+  `full-bootstrap` is reachable; standalone preflight stays fail-loud.
+- T1 stays fail-loud (no green on unavailable DSN or zero tests); role-reset
+  suites keep the throwaway Postgres 16.
+- `t2.sh` keeps `IMAGE_SOURCE=local` for bootstrap/reconcile and calls
+  `pre-gate-sync` with `--skip-port-forwards`.
+- `t2_process_check` accepts only real `kubectl` (`comm=kubectl`) port-forward
+  PIDs recorded in the profile cache or legacy `/tmp/pf-<profile>-*.pid`.
+- Stable failure codes (`BOOTSTRAP_REQUIRED`, `HEAD_MARKER_MISMATCH`,
+  `PORT_FORWARD_CONFLICT`, `PROFILE_BUSY`, ...) keep their meanings.
+
+Run T0 locally before proposing harness changes:
+
+```bash
+bash scripts/tests/test-minikube-t2-contract.sh
+bash scripts/tests/test-minikube-t2-scenarios.sh
+```

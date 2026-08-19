@@ -41,15 +41,16 @@ Examples: `control-api` / `control-plane` / `control-api`,
 image-only primitive; do not call the all-image builder for a known
 single-service change.
 
-Use `make minikube-pre-gate-sync` for a full T2 gate after T1 passes. It owns
-the cluster fingerprint, migration ordering, rollout checks, and runtime
-marker. It compares the deployed marker to the current worktree, rebuilds only
-the known affected image selectors, and restarts only their deployments. A
-fresh profile, an explicit forced sync, or an unmapped runtime path must fall
-back to the established complete image build. A service-only T2 may use the
-targeted path when the profile is already healthy; record it as a *targeted
-T2* and prove the affected deployment is Ready plus its user-facing health
-endpoint. Do not report that as a full reconcile.
+Use `make minikube-pre-gate-sync` to reconcile the owned profile after T1
+inputs change. It owns the cluster fingerprint, migration ordering, rollout
+checks, and runtime marker. It is not a T2 verdict. It compares the deployed
+marker to the current worktree, rebuilds only the known affected image
+selectors, and restarts only their deployments. A fresh profile, an explicit
+forced sync, or an unmapped runtime path must fall back to the established
+complete image build. A service-only update may use the targeted path when the
+profile is already healthy; record it as a *targeted sync* and prove the
+affected deployment is Ready plus its user-facing health endpoint. Do not
+report that as a full reconcile or as T2.
 
 Expect a full reconcile when deployment manifests, CRDs, charts, network
 policy, or other infrastructure inputs changed; do not replace that safe path
@@ -69,20 +70,41 @@ Use these canonical entry points:
 ```text
 make minikube-t2-preflight
 make minikube-t2
+make minikube-t2-runtime
 ```
 
-A fresh or uninitialized profile must complete the supported bootstrap before
-`pre-gate-sync` is invoked. The preflight refuses to call that sync on an
-incomplete profile. Real PostgreSQL suites are opt-in in the ordinary test
+`make minikube-t2-preflight` is a read-only planner. It is not T0, T1, or T2.
+With the default `T2_PLAN_MODE=false` it fails loud on an unbootstrapped
+profile and does not call `pre-gate-sync`. `make minikube-t2` is the full
+orchestrator: T0, the selected bootstrap/reconcile, T1, then T2. A T2 verdict
+is produced only by the final exact-head preflight inside that orchestrator
+(`T2_PLAN_MODE=false` with plan state `already-synced`; `T2_PLAN_MODE=true` is
+only the internal planner so `full-bootstrap` is reachable).
+`make minikube-pre-gate-sync` alone never constitutes T2 evidence.
+Follow the rule `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
+`.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
+
+After T0 and T1 are already green on the same HEAD and owned profile, close
+T2 with `make minikube-t2-runtime` (`T2_RUN_T0=false T2_RUN_T1=false`). That
+path is valid only when the pre-gate marker already matches HEAD
+(`already-synced`). Do not set those flags to skip an uncertified lane.
+
+A fresh or uninitialized profile must complete the supported bootstrap. The
+standalone preflight refuses to call `pre-gate-sync` on an incomplete profile;
+`make minikube-t2` runs the supported setup when its planner selects
+`full-bootstrap`. Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by
 silently skipping the suites. Suites that drop or rewrite cluster-global roles
 must use the harness throwaway Postgres 16, never the shared `control-postgres`.
 
 T0 (static/unit/contract checks), T1 (real PostgreSQL), T2 (validated runtime),
-CI, and Control UI/Desktop Playwright are separate evidence lanes. One lane
-does not stand in for another. Private operational state, generated ports,
-profile metadata, logs, and evidence belong under the ignored
+CI, Control UI/Desktop Playwright, and product E2E scripts such as
+`scripts/e2e/e2e-hcc-rollout-readiness.sh` are separate evidence lanes. One
+lane does not stand in for another. User-facing health and Playwright journeys
+are opt-in on T2 via `T2_HEALTHCHECK_COMMAND` and `T2_PLAYWRIGHT_COMMAND`
+(`T2_REQUIRE_PLAYWRIGHT=true` to refuse `NOT_RUN`). Private operational state,
+generated ports, profile metadata, logs, and evidence belong under the ignored
 `.local-notes/infra/runs/` path and must never be committed.
 
 ## Desktop Electron installation invariant
