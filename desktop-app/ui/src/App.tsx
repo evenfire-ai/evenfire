@@ -278,6 +278,10 @@ export function App() {
   // callbacks) can tell whether a reveal should target the in-app drawer or the
   // full-screen chat route without re-binding on every render.
   const chatDrawerVisibleRef = React.useRef(false)
+  // Mirrors `chatDrawerAvailable` (app live on the apps route): whenever the app
+  // is in the foreground, "new chat" must open a blank tab in the drawer instead
+  // of tearing the live embed down — even when the drawer is currently closed.
+  const chatDrawerAvailableRef = React.useRef(false)
   // Set when `chat.switcher` fires with the drawer still closed: the switcher is
   // not mounted yet, so we open the drawer and defer the focus bump until its
   // column commits.
@@ -381,7 +385,14 @@ export function App() {
   const handleNewChatViewTab = React.useCallback(() => {
     const next = addBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), vm.selectedAgent)
     setChatViewTabs(next)
-    revealChatViewTab(activeChatViewTab(next))
+    if (chatDrawerAvailableRef.current) {
+      // App in foreground: open the blank chat in the drawer, never tear the
+      // live embed down (spec §5.3). Opens the drawer if it was closed.
+      setChatDrawerOpen(true)
+      revealChatViewTab(activeChatViewTab(next), true)
+    } else {
+      revealChatViewTab(activeChatViewTab(next))
+    }
     setComposerFocusRequestId(value => value + 1)
   }, [nextChatTabId, revealChatViewTab, vm.selectedAgent])
 
@@ -479,6 +490,7 @@ export function App() {
   const chatDrawerAvailable = vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)
   const chatDrawerVisible = chatDrawerAvailable && chatDrawerOpen
   chatDrawerVisibleRef.current = chatDrawerVisible
+  chatDrawerAvailableRef.current = chatDrawerAvailable
   const activeConversationOrigin = React.useMemo<SandboxUiConversationOrigin | null>(() => {
     if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent || !vm.activeChatId) {
       return null
