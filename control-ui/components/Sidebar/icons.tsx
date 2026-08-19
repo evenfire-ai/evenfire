@@ -419,7 +419,6 @@ export function IconShield({
       aria-hidden={relationshipRole ? true : undefined}
       data-relationship-role={relationshipRole}
       data-create-badge={createBadge ? 'true' : undefined}
-      data-icon="shield"
     >
       {isRelationshipIcon ? (
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
