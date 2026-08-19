@@ -415,6 +415,21 @@ export interface HostWorkflowControlSpec {
   scopes?: HostWorkflowControlScope[]
 }
 
+/**
+ * Runtime control scopes minted into an mcp-host's control JWT. This is the
+ * DERIVED superset of the user-declarable {@link HostWorkflowControlScope}:
+ * HCC appends `oauth:user-token` for a Host runtime that fronts an enabled
+ * `auth.type: oauth` mcp-server, so the mcp-host can call control-api's OAuth
+ * user-token broker on that connection's behalf.
+ *
+ * `oauth:user-token` is HCC-derived and MUST NEVER be user-declarable: it is
+ * deliberately absent from {@link HostWorkflowControlScope} and from the Host
+ * CRD `spec.workflowControl.scopes` enum. HCC computes it per reconcile from
+ * the referenced Context's McpServer allow-list; nothing writes it back to the
+ * Host CR.
+ */
+export type HostRuntimeControlScope = HostWorkflowControlScope | 'oauth:user-token'
+
 export interface HostSpec {
   host: string
   contextRef: string

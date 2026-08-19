@@ -149,6 +149,7 @@ vi.mock('./hostReconciler', () => ({
     reconcile = vi.fn()
     reconcileDelete = vi.fn()
     setResolveContextMounts = vi.fn()
+    setHostFrontsOAuthServer = vi.fn()
     // §10.4/§10.5 wiring: McpServerWatcher injects the live Host-cache resolver
     // and the watch-authority snapshot into HostReconciler at construction.
     setResolveCurrentHost = vi.fn()
@@ -3918,5 +3919,69 @@ describe('externalEgressResyncDelayMs (issue #299 H2)', () => {
 
   it('clamps a below-floor configured interval up to the floor', () => {
     expect(externalEgressResyncDelayMs(3, 5)).toBe(5_000)
+  })
+})
+
+describe('McpServerWatcher.hostFrontsOAuthServer (oauth:user-token scope probe)', () => {
+  const hostFor = (contextRef: string): HostCRD =>
+    ({
+      name: 'h',
+      namespace: 'mcp-host',
+      spec: { host: 'h', contextRef, secretRef: 's' },
+    }) as HostCRD
+
+  it('returns true when the Context fronts an enabled auth.type=oauth mcp-server', async () => {
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher, 'getServerInfosByContext').mockResolvedValue([
+      {
+        name: 'notion',
+        contextRef: 'ctx',
+        transport: { type: 'streamableHttp' },
+        enabled: true,
+        auth: { type: 'oauth' },
+        status: {},
+      },
+    ] as any)
+    await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(true)
+    watcher.stop()
+  })
+
+  it('returns false for a non-oauth mcp-server', async () => {
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher, 'getServerInfosByContext').mockResolvedValue([
+      {
+        name: 'redis',
+        contextRef: 'ctx',
+        transport: { type: 'streamableHttp' },
+        enabled: true,
+        auth: { type: 'bearer' },
+        status: {},
+      },
+    ] as any)
+    await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(false)
+    watcher.stop()
+  })
+
+  it('returns false for a disabled oauth mcp-server', async () => {
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher, 'getServerInfosByContext').mockResolvedValue([
+      {
+        name: 'notion',
+        contextRef: 'ctx',
+        transport: { type: 'streamableHttp' },
+        enabled: false,
+        auth: { type: 'oauth' },
+        status: {},
+      },
+    ] as any)
+    await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(false)
+    watcher.stop()
+  })
+
+  it('returns false when the Context fronts no servers', async () => {
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher, 'getServerInfosByContext').mockResolvedValue([] as any)
+    await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(false)
+    watcher.stop()
   })
 })
