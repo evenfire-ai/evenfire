@@ -15,6 +15,7 @@ import type { GfsBrokeredAuthority } from '../auth/verify'
 import {
   GFS_UPLOAD_V2_COMPLETE_BODY_MAX_BYTES,
   GFS_UPLOAD_V2_METADATA_BODY_MAX_BYTES,
+  GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES,
   GfsUploadGeometryError,
   type GfsUploadPartGeometry,
   disabledGfsUploadV2Capability,
@@ -539,11 +540,11 @@ export class GfsUploadSessionService {
     if (
       !Number.isSafeInteger(input.sizeBytes) ||
       input.sizeBytes < 0 ||
-      input.sizeBytes > this.deps.config.productMaxFileBytes
+      input.sizeBytes > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
     ) {
       throw new GfsError(
         'payload_too_large',
-        `sizeBytes must be between 0 and ${this.deps.config.productMaxFileBytes}`
+        `sizeBytes must be between 0 and ${GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES}`
       )
     }
     const name = normalizedName(input.name)
@@ -564,8 +565,6 @@ export class GfsUploadSessionService {
     )
     const partBytes = this.deps.config.preferredPartBytes
     const partCount = partCountFor({ expectedBytes: input.sizeBytes, partBytes })
-    if (partCount > this.deps.config.maxPartCount)
-      throw new GfsError('payload_too_large', 'upload part count exceeds the configured maximum')
     const canonicalInput = { ...input, name, parentRid, resourceRid, wholeSha256 }
     const requestFingerprint = canonicalFingerprint(canonicalInput, partBytes, partCount)
     const existing = await this.deps.db.query(
@@ -581,6 +580,14 @@ export class GfsUploadSessionService {
         )
       return { created: false, session: toReceipt(row) }
     }
+    if (input.sizeBytes > this.deps.config.productMaxFileBytes) {
+      throw new GfsError(
+        'payload_too_large',
+        `sizeBytes must be between 0 and ${this.deps.config.productMaxFileBytes}`
+      )
+    }
+    if (partCount > this.deps.config.maxPartCount)
+      throw new GfsError('payload_too_large', 'upload part count exceeds the configured maximum')
     const uploadId = requireUuid(input.uploadId ?? randomUUID(), 'uploadId')
     const expiresAt = new Date(this.now() + this.deps.config.sessionTtlSeconds * 1000)
     const available = this.deps.blobs.availableBytes ? await this.deps.blobs.availableBytes() : null

@@ -23,6 +23,7 @@ type Row = Record<string, unknown>
 class MemoryDb {
   sessions: Row[] = []
   parts: Row[] = []
+  idempotencyLookupCount = 0
   failReconciliationReads = false
   failSessionReconciliationReads = false
 
@@ -31,6 +32,7 @@ class MemoryDb {
     if (sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ') return { rows: [] }
     if (sql.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
     if (sql.startsWith('SELECT * FROM gfs_upload_sessions WHERE owner_subject')) {
+      this.idempotencyLookupCount += 1
       const [owner, drive, key] = values.map(String)
       return {
         rows: this.sessions.filter(
@@ -465,7 +467,7 @@ afterEach(async () => {
 function service(
   db: MemoryDb,
   config: GfsUploadConfig = TEST_CONFIG,
-  overrides: Partial<Pick<UploadSessionServiceDeps, 'now' | 'finalize' | 'tx'>> = {}
+  overrides: Partial<Pick<UploadSessionServiceDeps, 'now' | 'finalize' | 'tx' | 'authorize'>> = {}
 ): GfsUploadSessionService {
   return new GfsUploadSessionService({
     db,
@@ -720,6 +722,69 @@ describe('GfsUploadSessionService', () => {
       expect(duplicate.part.sha256).toBe(checksum(first))
     }
   )
+
+  it('replays an admitted create after the runtime product policy is lowered', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-policy-replay-'))
+    const db = new MemoryDb()
+    const request = {
+      ...principal,
+      operation: 'create' as const,
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'admitted-before-policy-lowering.bin',
+      sizeBytes: 250 * 1024 * 1024,
+      idempotencyKey: '31111111-1111-4111-8111-111111111111',
+    }
+    const admitted = await service(db, {
+      ...CONFIG,
+      productMaxFileBytes: 300 * 1024 * 1024,
+    }).create(request)
+    expect(admitted.created).toBe(true)
+    expect(db.sessions).toHaveLength(1)
+
+    const lowered = service(db, { ...CONFIG, productMaxFileBytes: 100 * 1024 * 1024 })
+    const replay = await lowered.create(request)
+    expect(replay).toMatchObject({
+      created: false,
+      session: { uploadId: admitted.session.uploadId, expectedBytes: request.sizeBytes },
+    })
+    expect(db.sessions).toHaveLength(1)
+
+    await expect(
+      lowered.create({
+        ...request,
+        idempotencyKey: '31111111-1111-4111-8111-111111111112',
+      })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(db.sessions).toHaveLength(1)
+
+    await expect(
+      lowered.create({ ...request, name: 'conflicting-name.bin' })
+    ).rejects.toMatchObject({
+      code: 'idempotency_conflict',
+    })
+    expect(db.sessions).toHaveLength(1)
+
+    const lookupsBeforeUnauthorizedAttempt = db.idempotencyLookupCount
+    const guarded = service(
+      db,
+      { ...CONFIG, productMaxFileBytes: 100 * 1024 * 1024 },
+      {
+        authorize: async input => {
+          if (input.ownerSubject !== principal.ownerSubject) throw new Error('not authorized')
+        },
+      }
+    )
+    await expect(
+      guarded.create({
+        ...request,
+        ownerSubject: 'user-2',
+        primarySubject: 'user-2',
+        sizeBytes: 1,
+      })
+    ).rejects.toThrow('not authorized')
+    expect(db.idempotencyLookupCount).toBe(lookupsBeforeUnauthorizedAttempt)
+    expect(db.sessions).toHaveLength(1)
+  })
 
   it('does not double-decrement active parts after an unknown commit and failed reconciliation', async () => {
     tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-'))
