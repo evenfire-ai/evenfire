@@ -1,0 +1,72 @@
+{
+  "protocolVersion": "codex-subscription-transport.v1",
+  "providerId": "codex-subscription",
+  "authMode": "oauth-broker",
+  "modelCatalogMode": "dynamic",
+  "supportedOperations": [
+    "oauth_browser",
+    "oauth_device",
+    "oauth_refresh",
+    "oauth_revoke",
+    "oauth_reconnect",
+    "catalog_list",
+    "completion_stream",
+    "completion_cancel",
+    "connection_test"
+  ],
+  "origins": {
+    "oauthAuthorize": "https://auth.openai.com/oauth/authorize",
+    "oauthToken": "https://auth.openai.com/oauth/token",
+    "oauthDevice": "https://auth.openai.com/api/accounts/deviceauth",
+    "oauthRevoke": "https://auth.openai.com/oauth/revoke",
+    "catalog": "https://chatgpt.com/backend-api/codex/models",
+    "completions": "https://chatgpt.com/backend-api/codex/responses"
+  },
+  "forbiddenOrigins": [
+    "https://api.openai.com/v1/chat/completions",
+    "http://auth.openai.com/oauth/authorize",
+    "https://127.0.0.1/",
+    "https://169.254.169.254/"
+  ],
+  "redirectPolicy": {
+    "allowHttp": false,
+    "allowCrossOrigin": false,
+    "allowPrivateAddresses": false,
+    "sameOriginOnly": ["https://auth.openai.com", "https://chatgpt.com"]
+  },
+  "oauthScopes": ["openid", "profile", "email", "offline_access"],
+  "limits": {
+    "maxRequestBodyBytes": 1048576,
+    "maxMessages": 128,
+    "maxTools": 32,
+    "maxOutputTokens": 16384,
+    "maxStreamDurationMs": 300000,
+    "maxDeadlineMs": 300000,
+    "maxConcurrentStreams": 8,
+    "maxQueuedRequests": 16,
+    "maxRetriesPerAttempt": 1
+  },
+  "errorTaxonomy": [
+    "insufficient_scope",
+    "no_grant",
+    "model_not_allowed",
+    "budget_denied",
+    "connection_unavailable",
+    "provider_unavailable",
+    "origin_denied",
+    "ticket_invalid",
+    "ticket_replayed",
+    "request_hash_mismatch"
+  ],
+  "termsAndTestAccount": {
+    "automationAuthorized": true,
+    "approvedTestAccountFingerprint": "redacted:deployment-default-pending-live-confirm",
+    "evidenceHash": "sha256:codex-subscription-transport.v1-phase0-public-cli-oauth-2026-08-20",
+    "liveAccountConfirmation": "task-25"
+  },
+  "baseline": {
+    "originDev": "1b845a3d636cc1b766cfcec66bb44a880581014b",
+    "specCitedSha": "7d56b10849458a67b15f7d9a0991fa62604913a3",
+    "driftAudit": "no-credential-owner-data-path-gateway-count-or-token-recipient-change"
+  }
+}
