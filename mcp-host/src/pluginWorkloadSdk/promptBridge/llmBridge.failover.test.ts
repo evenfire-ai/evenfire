@@ -573,4 +573,32 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       )?.value
     ).toBe(1)
   })
+
+  it('authorizes a Codex target without redeeming a credential ticket or leaking secrets', async () => {
+    const codex: PromptBridgeTarget = {
+      targetRef: 'codex-primary',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credentialSlot: '',
+    }
+    const provider = new FakeProvider(async () => ({
+      ...OK,
+      usage_reported: false,
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+    }))
+    const { bridge, credentialCalls, resolver } = makeBridge({ 'gpt-5.1': provider })
+    const issuer = { issue: vi.fn() }
+    const result = await bridge.complete({
+      ...request,
+      targets: [{ target: codex }],
+      credentialTicketIssuer: issuer,
+    })
+    expect(result.servedTarget).toEqual(codex)
+    expect(result.llmSecretName).toBe('')
+    expect(result.content).toBe('ok')
+    expect(issuer.issue).not.toHaveBeenCalled()
+    expect(resolver.resolve).not.toHaveBeenCalled()
+    expect(credentialCalls).toEqual([])
+    expect(JSON.stringify(result)).not.toMatch(/ticket|authorization|refreshToken|accessToken/i)
+  })
 })
