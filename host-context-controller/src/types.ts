@@ -430,7 +430,7 @@ export interface HostGuardrailsSpec {
 export interface HostSpec {
   host: string
   contextRef: string
-  secretRef: string
+  secretRef?: string
   channels?: string[]
   model?: HostModelSpec
   approval?: Record<string, unknown>

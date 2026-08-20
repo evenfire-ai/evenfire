@@ -38,9 +38,16 @@ describe('makeProvider — divergent provider without a factory', () => {
 })
 
 describe('makeProvider — Codex broker', () => {
-  it('fails closed without runtime authorizer/proxy dependencies', () => {
+  it('fails closed when the execution flag is off', () => {
+    delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
+    expect(() => makeProvider('codex-subscription', {})).toThrow(/is disabled/)
+  })
+
+  it('fails closed without runtime authorizer/proxy dependencies when the flag is on', () => {
+    process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
     expect(() => makeProvider('codex-subscription', {})).toThrow(
       /requires an explicit model and runtime authorizer/
     )
+    delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
   })
 })

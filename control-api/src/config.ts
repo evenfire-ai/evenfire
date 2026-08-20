@@ -110,6 +110,9 @@ type Config = {
   // llmCatalogSyncIntervalMs (default 24h), cross-replica-deduped by a session
   // advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
+  // Default OFF. Codex subscription management/admission stays dark until
+  // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
+  codexSubscriptionEnabled: boolean
   llmCatalogSyncIntervalMs: number
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
@@ -773,6 +776,9 @@ export const config: Config = {
   // idiom used by the other crons. This one stays dark until an operator turns
   // it on deliberately.
   llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
+  // Default OFF. Absent or any value other than the exact token `true` keeps
+  // Codex subscription management and admission dark.
+  codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
   // Default 24h. Validated (not merely parsed): the value goes straight into
   // setInterval and each tick opens a Postgres transaction + advisory lock. A
   // 60s floor is orders of magnitude below the default and far above a hot loop.

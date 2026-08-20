@@ -11,6 +11,7 @@ data:
   CLERUM_CONTEXT_MAPPER_URL: "http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081"
   CLERUM_CONTEXT_MAPPER_POLL_INTERVAL: "30000"
   MCP_PROXY_ENABLED: "false"
+  MCP_HOST_CODEX_SUBSCRIPTION_ENABLED: "false"
   MCP_PROXY_URL: "http://mcp-proxy.mcp-server.svc.cluster.local:8083"
   CLERUM_AGENT_TASK_DELAY: "3"
   CLERUM_AGENT_MAX_TASK_DURATION: "1800000"

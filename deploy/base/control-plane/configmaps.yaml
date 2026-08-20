@@ -93,6 +93,8 @@ data:
   # LLM catalog discovery sync cron (spec 09 Fase 4). Non-destructive; code
   # default off. Interval + plausibility floors keep their code defaults.
   LLM_CATALOG_SYNC_CRON_ENABLED: "true"
+  CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: "false"
+  CODEX_LLM_PROXY_EXECUTION_ENABLED: "false"
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -44,7 +44,7 @@ export interface HeartbeatConfig {
 export interface HostSpec {
   host: string
   contextRef: string
-  secretRef: string
+  secretRef?: string
   channels?: string[]
   model?: ModelConfig
   /** Phase 6: Tool approval configuration. */

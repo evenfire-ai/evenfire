@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   type LlmProviderId,
+  PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   isLlmProviderId,
 } from '@clerum/llm-providers'
@@ -48,6 +49,101 @@ function providerSupportsFallbackCredentialSlot(provider: LlmProviderId): boolea
   // JSON) can't be expressed as one extra key. `multiline` is the explicit
   // registry flag (replaces the old `-json`/`_JSON` name heuristic).
   return slots.length === 1 && !slots[0].multiline
+}
+
+function isCodexSubscriptionEnabled(): boolean {
+  return process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true'
+}
+
+type HostLlmTarget = {
+  provider: string
+  field: string
+  credentialSlot?: unknown
+}
+
+function collectHostLlmTargets(spec: Record<string, unknown>): HostLlmTarget[] {
+  const targets: HostLlmTarget[] = []
+  if (isPlainObject(spec.model) && typeof spec.model.provider === 'string') {
+    targets.push({
+      provider: spec.model.provider.trim(),
+      field: 'spec.model.provider',
+    })
+  }
+  if (Array.isArray(spec.allowedModels)) {
+    spec.allowedModels.forEach((entry, i) => {
+      if (isPlainObject(entry) && typeof entry.provider === 'string') {
+        targets.push({
+          provider: entry.provider.trim(),
+          field: `spec.allowedModels[${i}].provider`,
+        })
+      }
+    })
+  }
+  if (isPlainObject(spec.llmPolicy) && Array.isArray(spec.llmPolicy.fallbacks)) {
+    spec.llmPolicy.fallbacks.forEach((entry, i) => {
+      if (!isPlainObject(entry) || typeof entry.provider !== 'string') return
+      targets.push({
+        provider: entry.provider.trim(),
+        field: `spec.llmPolicy.fallbacks[${i}].provider`,
+        credentialSlot: entry.credentialSlot,
+      })
+    })
+  }
+  return targets
+}
+
+function validateCodexBrokerAdmission(
+  spec: Record<string, unknown>
+): { errors: Array<{ field: string; message: string }> } | null {
+  const targets = collectHostLlmTargets(spec)
+  const enabled = isCodexSubscriptionEnabled()
+  for (const target of targets) {
+    if (target.provider !== 'codex-subscription') continue
+    if (!enabled) {
+      return {
+        errors: [
+          {
+            field: target.field,
+            message:
+              'provider "codex-subscription" is disabled (set CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true)',
+          },
+        ],
+      }
+    }
+    if (target.credentialSlot !== undefined) {
+      return {
+        errors: [
+          {
+            field: target.field.replace('.provider', '.credentialSlot'),
+            message:
+              'credentialSlot is not supported for oauth-broker providers; drop credentialSlot',
+          },
+        ],
+      }
+    }
+  }
+
+  const hasBroker = targets.some(
+    target =>
+      isLlmProviderId(target.provider) && PROVIDER_AUTH_MODE[target.provider] === 'oauth-broker'
+  )
+  const hasStatic = targets.some(
+    target =>
+      isLlmProviderId(target.provider) &&
+      PROVIDER_AUTH_MODE[target.provider] === 'static-credentials'
+  )
+  const secretRef = typeof spec.secretRef === 'string' ? spec.secretRef.trim() : ''
+  if (hasBroker && hasStatic && !secretRef) {
+    return {
+      errors: [
+        {
+          field: 'spec.secretRef',
+          message: 'spec.secretRef is required when any static-credentials LLM target is present',
+        },
+      ],
+    }
+  }
+  return null
 }
 
 const HostApprovalSchema = z
@@ -195,6 +291,9 @@ export async function validateHostSpec(
     }
   }
   if (structuralErrors.length > 0) return { errors: structuralErrors }
+
+  const brokerErrors = validateCodexBrokerAdmission(spec)
+  if (brokerErrors) return brokerErrors
 
   // No-worsening tolerance context (Pieza D), computed once and shared by the 3
   // global-allowlist gates below. On create `context.stored` is absent, so
@@ -659,6 +758,16 @@ async function validateLlmPolicy(
       // secret pair) or a multiline service-account JSON (Vertex) — those MUST
       // reuse the primary's credentials. `provider` is already narrowed to a known
       // LlmProviderId above, so the registry lookup is total.
+      if (PROVIDER_AUTH_MODE[provider] === 'oauth-broker') {
+        return {
+          errors: [
+            {
+              field: `${base}.credentialSlot`,
+              message: `${base}.credentialSlot is not supported for oauth-broker providers; drop credentialSlot`,
+            },
+          ],
+        }
+      }
       if (!providerSupportsFallbackCredentialSlot(provider)) {
         return {
           errors: [

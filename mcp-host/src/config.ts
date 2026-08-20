@@ -59,6 +59,9 @@ export interface Config {
   // Dev mode: Model configuration from env vars
   devModelProvider?: LlmProvider
   devModelName?: string
+  // Default OFF. Codex provider construction stays dark until the operator
+  // sets MCP_HOST_CODEX_SUBSCRIPTION_ENABLED=true.
+  codexSubscriptionEnabled: boolean
 
   // Dev mode: MCP servers (parsed from CLERUM_MCP_SERVERS JSON)
   devMcpServers?: McpServerInfo[]
@@ -583,6 +586,7 @@ export const config: Config = {
   // resolveDevModelProvider fail-closes on a set-but-invalid value.
   devModelProvider: devMode ? resolveDevModelProvider(rawDevModelProvider) : undefined,
   devModelName,
+  codexSubscriptionEnabled: process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED === 'true',
 
   // Dev mode MCP servers
   devMcpServers: devMode ? parseDevMcpServers() : undefined,
