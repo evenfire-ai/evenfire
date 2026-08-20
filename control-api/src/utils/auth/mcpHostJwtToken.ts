@@ -148,6 +148,9 @@ export const ALL_MCP_HOST_CONTROL_SCOPES = [
   // (status.pluginWorkloadSdk) declares the SDK; SDK routes reject access
   // tokens without it via scope_denied.
   'plugin-workload-sdk',
+  // Derive-only Codex execution. HCC/WRC may request this after projecting an
+  // eligible broker target. Never add it to user-declarable Host/Recipe CRD fields.
+  'llm:codex:execute',
 ] as const
 
 export type McpHostControlScope = (typeof ALL_MCP_HOST_CONTROL_SCOPES)[number]
