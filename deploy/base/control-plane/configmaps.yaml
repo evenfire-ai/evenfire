@@ -24,6 +24,7 @@ data:
   CONTROL_API_ADMIN_JWT_AUDIENCE: control-ui
   CONTROL_API_ADMIN_JWT_TTL_SECONDS: '3600'
   CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'false'
+  # ClusterIP admin port only. NetworkPolicy admits Control API, not siblings.
   CODEX_LLM_PROXY_ADMIN_URL: http://codex-llm-proxy.control-plane.svc.cluster.local:8081
   CONTROL_API_ADMIN_BOOTSTRAP_USERNAME: admin
   CONTROL_API_ADMIN_BOOTSTRAP_EMAIL: ''
@@ -95,8 +96,6 @@ data:
   # LLM catalog discovery sync cron (spec 09 Fase 4). Non-destructive; code
   # default off. Interval + plausibility floors keep their code defaults.
   LLM_CATALOG_SYNC_CRON_ENABLED: "true"
-  CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: "false"
-  CODEX_LLM_PROXY_EXECUTION_ENABLED: "false"
 ---
 apiVersion: v1
 kind: ConfigMap
