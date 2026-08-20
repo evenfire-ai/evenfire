@@ -201,6 +201,24 @@ grep -q 'required GFS auth source key RPC_PROXY_JWT_PUBLIC_KEY is empty' "${OUT_
 }
 
 : >"${LOG_FILE}"
+if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_SOURCE_KEY_EMPTY=1 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --skip-gfs >"${OUT_FILE}" 2>&1; then
+  echo "FAIL: optional auth sync accepted an empty source key" >&2
+  exit 1
+fi
+grep -q 'auth source key RPC_PROXY_JWT_PUBLIC_KEY is empty; refusing to mutate consumers' "${OUT_FILE}" || {
+  cat "${OUT_FILE}" >&2
+  echo "FAIL: optional auth sync did not fail closed on an empty source key" >&2
+  exit 1
+}
+if grep -Eq '^(patch|rollout restart)' "${LOG_FILE}"; then
+  echo "FAIL: empty source key mutated an auth consumer in optional mode" >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+
+: >"${LOG_FILE}"
 if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
   PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
     --context fake --require-gfs >"${OUT_FILE}" 2>&1; then

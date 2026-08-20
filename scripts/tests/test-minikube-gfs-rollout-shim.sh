@@ -63,9 +63,11 @@ grep -q 'rollout status deployment/gfsc-reader' "$FAKE_KUBECTL_LOG" \
   && fail 'shim leaked the generation-based rollout status to the real kubectl'
 
 # 4. A live unready reader pod blocks the wait until timeout (fail-loud).
+# The explicit 1s caller timeout is honored; the shim must not silently floor
+# it to an unrelated minimum.
 : >"$FAKE_KUBECTL_LOG"
 if PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 FAKE_POD_ROWS='True|\nFalse|\n' \
-  GFS_ROLLOUT_SHIM_MIN_TIMEOUT_SECONDS=1 GFS_READER_WAIT_POLL_SECONDS=0 \
+  GFS_READER_WAIT_POLL_SECONDS=0 \
   kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=1s 2>/dev/null; then
   fail 'shim readiness wait went green with a live unready reader pod'
 fi

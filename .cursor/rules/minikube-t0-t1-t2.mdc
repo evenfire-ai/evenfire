@@ -42,17 +42,19 @@ repository — never mix its PRs or clusters into this lane.
   current-context.
 - Bootstrap/reconcile must build the worktree: `IMAGE_SOURCE=local`.
 - T1 is fail-loud: unavailable DSN or zero executed tests is FAIL, never green.
- The JSON reporter is the suite verdict; a leftover Vitest exit after a
- complete green reporter is not a failed suite. Role-reset suites use the
- throwaway `postgres:16-alpine`, never shared `control-postgres`.
+ The JSON reporter must be complete and green and the Vitest process must also
+ exit zero. Role-reset suites use the throwaway `postgres:16-alpine`, never
+ shared `control-postgres`.
 - Self-healing single run: the orchestrator planner (`T2_PLAN_MODE=true`)
  selects `full-reconcile` (naming the deployment) for a bootstrapped profile
  with an unready required deployment — never `PROFILE_UNHEALTHY` before a
  transition. Standalone preflight and the final exact-head check stay
  fail-loud. T1 restores branch-profile GFS credentials on exit, and
  `pre-gate-sync` provisions GFS serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true`
- and `GFS_RECOVER_ABANDONED_STATE=true` in every plan, so no manual repair
- script sits between plan and verdict. `settle-gfs-reader-rollout.sh` clears
+ and `GFS_RECOVER_ABANDONED_STATE=true` only in the `minikube-t2` transition;
+ other security gates refresh MCP auth with `--skip-gfs` and do not mutate GFS,
+ so no manual repair script sits between plan and verdict.
+ `settle-gfs-reader-rollout.sh` clears
  Ready-reader leftovers (claim, stale ReplicaSets, CrashLoopBackOff pods)
  first, and the `gfs-rollout-shim` PATH prefix replaces the reader
  `rollout status` wait with a readiness poll because HCC's gfsReconciler

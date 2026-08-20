@@ -57,6 +57,11 @@ reconcile="$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
   echo 'FAIL: post-overlay credential reconciliation did not run once per deploy' >&2
   exit 1
 }
+grep -Fq 'GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT"' \
+  "$ROOT/deploy/scripts/provision-gfs-runtime.sh" || {
+  echo 'FAIL: post-overlay credential reconciliation did not carry explicit context authorization' >&2
+  exit 1
+}
 [ "$(grep -Fc "rollout status deployment/host-context-controller --timeout=${HCC_ROLLOUT_TIMEOUT_S}s" "$CALL_LOG")" -eq 3 ] || {
   echo "FAIL: HCC post-overlay rollout did not use its dedicated ${HCC_ROLLOUT_TIMEOUT_S}s timeout" >&2
   exit 1

@@ -16,15 +16,17 @@ evidence rules in `AGENTS.md` and `docs/testing/minikube-t2-runbook.md`.
 produced only by the final exact-head preflight inside `make minikube-t2` (or
 `make minikube-t2-runtime` after T0 and T1 are already green on the same HEAD).
 `make minikube-pre-gate-sync` alone is not T2. Playwright and product E2E
-scripts are separate lanes. T1 judges the JSON reporter (expected files,
-executed/passed, zero failures, zero pending); a leftover Vitest process exit
-after a complete green reporter is not a failed suite. The single run is
+scripts are separate lanes. T1 requires both a complete green JSON reporter
+(expected files, executed/passed, zero failures, zero pending) and a zero
+Vitest process exit; a green reporter cannot hide teardown, worker, OOM, or
+signal failure. The single run is
 self-healing: the orchestrator planner selects `full-reconcile` for a
 bootstrapped profile with an unready deployment (never `PROFILE_UNHEALTHY`
 before a transition), T1 restores branch-profile GFS credentials on exit, and
 `pre-gate-sync` provisions GFS serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true`
-and `GFS_RECOVER_ABANDONED_STATE=true` in every plan; do not insert manual
-repair scripts between runs. Harness GFS reconciles settle Ready-reader
+and `GFS_RECOVER_ABANDONED_STATE=true` only in the `minikube-t2` transition;
+other security gates refresh MCP auth without mutating GFS. Do not insert
+manual repair scripts between runs. Harness GFS reconciles settle Ready-reader
 leftovers first (`settle-gfs-reader-rollout.sh`) and judge reader rollout
 completion by readiness via the `gfs-rollout-shim` PATH prefix, because
 HCC's gfsReconciler strips the `restartedAt` annotation and a

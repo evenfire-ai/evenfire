@@ -240,7 +240,8 @@ restore_gfs_runtime_credentials() {
   # Restore the branch profile before this gate exits so a failed or interrupted
   # T1 run cannot leave GFSC in NOLOGIN and poison the following T2 journey.
   if ! kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
-    return 0
+    printf '[gfs-real-pg-minikube] ERROR: required gfs-controller-db Secret is missing or unreadable; refusing to finish with GFS credentials unreconciled\n' >&2
+    return 1
   fi
   if ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${CONTEXT}" \
     bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then

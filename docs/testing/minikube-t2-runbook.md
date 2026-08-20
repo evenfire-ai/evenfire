@@ -158,17 +158,37 @@ when `gfs-config.jwt-public-key` is empty — the overlay re-applies the base
 ConfigMap with an empty value — so `full-setup.sh` and `pre-gate-sync` re-run
 `scripts/minikube/sync-auth-key.sh` before each GFS reconcile; otherwise no
 new reader pod can start and the readiness wait can only time out.
-`pre-gate-sync`
-provisions GFS serving with the same opt-ins in every sync plan (including
-"no cluster sync required") and, after a successful restore, restarts an
-unready `gfsc-reader`, deletes its live unready pods once, and waits on the
-same readiness contract. `full-setup.sh` on the REUSE_DB / T2 full-reconcile
+`pre-gate-sync` provisions GFS serving with the same opt-ins only in the
+`minikube-t2` transition (including its "no cluster sync required" fast path).
+Other platform security gates refresh MCP auth with `--skip-gfs` and do not
+mutate the GFS plane. After a successful T2 restore, it restarts an unready
+`gfsc-reader`, deletes its live unready pods once, and waits on the same
+readiness contract. `full-setup.sh` on the REUSE_DB / T2 full-reconcile
 path passes the same opt-ins on both GFS reconcile calls, because setup runs
 before pre-gate-sync and must not abort on a NOLOGIN reader or an abandoned
 reader rollout. The recovery helper restores a
 NOLOGIN role only from the committed Secret DSN and still fails loud when
-that credential cannot authenticate; no password is ever invented and no DSN
-is printed.
+that credential cannot authenticate; a missing or unreadable required Secret
+also fails the T1 cleanup instead of producing a green run. No password is
+ever invented and no DSN is printed.
+
+The composed GFS recovery decision table is:
+
+| Observed state | Authoritative action | Safety boundary |
+| --- | --- | --- |
+| `gfs-config` or the GFS reader Deployment is absent | Skip GFS recovery | The profile has no adopted GFS serving plane. |
+| Reader is Ready and the reader Secret says `rollout-running` | `settle-gfs-reader-rollout.sh` marks the claim ready | Preserve the Ready reader; do not trigger a second restart. |
+| A non-current reader ReplicaSet has no Ready pod, including an empty `readyReplicas` field | Scale that ReplicaSet to zero | Never scale the current revision; leave terminating pods alone. |
+| A live reader pod is `CrashLoopBackOff`, unready, and not terminating | Delete that pod once | Kubelet backoff is reset so it can re-read restored credentials. |
+| Desired reader replicas are not Ready, or a live non-terminating reader is unready | Reconcile with the GFS rollout shim, then converge and wait | Do not mark the credential rollout ready from an unready observation. |
+| Source auth Secret/key or GFS ConfigMap is missing/empty during a strict GFS sync | Fail before any consumer patch or restart | `--require-gfs` makes an empty source fail closed. |
+| Caller supplies an explicit reader rollout timeout | Honor that timeout; an omitted timeout defaults to 600 seconds | The shim never silently floors a caller's fail-fast timeout. |
+| Gate is not `minikube-t2` | Refresh MCP auth with `--skip-gfs` only | Security gates cannot patch GFS Secrets/ConfigMaps or delete/restart GFS pods. |
+
+The executable composition contract in
+`scripts/tests/test-minikube-gfs-provision-order.sh` verifies the T2 order
+`sync-auth-key → settle → reconcile-with-shim-on-PATH → converge` and the
+non-T2 scope guard.
 
 ## T0, T1, and T2 boundaries
 
@@ -178,9 +198,10 @@ is printed.
   `control-postgres`, except the role-reset suites which use an isolated
   Postgres 16; the lane reports `PASS`, `FAIL`, `SKIPPED`, and `NOT_RUN`
   separately and fails on an unavailable DSN, an isolated server that did not
-  start, or zero executed tests. The JSON reporter is the suite verdict
-  (expected files, executed/passed, zero failures, zero pending); a leftover
-  Vitest process exit after a complete green reporter is not a failed suite.
+  start, or zero executed tests. The JSON reporter must be complete and green
+  (expected files, executed/passed, zero failures, zero pending), and the
+  Vitest process must also exit zero; a green reporter cannot hide teardown,
+  worker, OOM, or signal failure.
 * **T2** — the final exact-head preflight inside `make minikube-t2` (or
   `make minikube-t2-runtime`): the marker matches this worktree/`HEAD`, the
   image manifest is current, PostgreSQL and required namespaces/Services are

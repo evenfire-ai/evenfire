@@ -131,12 +131,15 @@ restore_workflow_reconciler() {
   fi
   set +e
   log "Restoring workflow reconciler to ${WRC_REPLICAS} replica(s)"
-  ${KC} scale deployment/workflow-recipes -n control-plane --replicas="${WRC_REPLICAS}" >/dev/null
-  ${KC} rollout status deployment/workflow-recipes -n control-plane --timeout=120s >/dev/null
-  local restore_rc=$?
+  local scale_rc=0 rollout_rc=0
+  ${KC} scale deployment/workflow-recipes -n control-plane --replicas="${WRC_REPLICAS}" >/dev/null || scale_rc=$?
+  if [[ "${scale_rc}" -eq 0 ]]; then
+    ${KC} rollout status deployment/workflow-recipes -n control-plane --timeout=120s >/dev/null || rollout_rc=$?
+  fi
   set -e
-  if [[ "${restore_rc}" -ne 0 ]]; then
-    log "WARNING: workflow reconciler did not become Ready during pre-gate cleanup"
+  if [[ "${scale_rc}" -ne 0 || "${rollout_rc}" -ne 0 ]]; then
+    log "ERROR: workflow reconciler restore failed (scale=${scale_rc}, rollout=${rollout_rc}); leaving the writer fence armed"
+    return 1
   fi
   WRC_FENCED=false
 }
@@ -164,12 +167,15 @@ restore_control_api() {
   fi
   set +e
   log "Restoring Control API to ${CONTROL_API_REPLICAS} replica(s)"
-  ${KC} scale deployment/control-api -n control-plane --replicas="${CONTROL_API_REPLICAS}" >/dev/null
-  ${KC} rollout status deployment/control-api -n control-plane --timeout=120s >/dev/null
-  local restore_rc=$?
+  local scale_rc=0 rollout_rc=0
+  ${KC} scale deployment/control-api -n control-plane --replicas="${CONTROL_API_REPLICAS}" >/dev/null || scale_rc=$?
+  if [[ "${scale_rc}" -eq 0 ]]; then
+    ${KC} rollout status deployment/control-api -n control-plane --timeout=120s >/dev/null || rollout_rc=$?
+  fi
   set -e
-  if [[ "${restore_rc}" -ne 0 ]]; then
-    log "WARNING: Control API did not become Ready during pre-gate cleanup"
+  if [[ "${scale_rc}" -ne 0 || "${rollout_rc}" -ne 0 ]]; then
+    log "ERROR: Control API restore failed (scale=${scale_rc}, rollout=${rollout_rc}); leaving the writer fence armed"
+    return 1
   fi
   CONTROL_API_FENCED=false
 }
@@ -340,7 +346,31 @@ sync_mcp_host_auth_key() {
     return 0
   fi
 
-  bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}"
+  bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}" --skip-gfs
+}
+
+sync_gfs_auth_key() {
+  bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}" --require-gfs
+}
+
+settle_gfs_reader_rollout() {
+  T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
+    CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
+    T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
+    CONTEXT="$T2_CONTEXT" \
+      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
+}
+
+reconcile_gfs_credentials() {
+  PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
+    CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
+    T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
+    CONTEXT="$T2_CONTEXT" \
+      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
 }
 
 converge_gfs_reader_after_restore() {
@@ -348,13 +378,34 @@ converge_gfs_reader_after_restore() {
   # already-started pod even after the role is restored. Converging it here
   # keeps the repair inside the single orchestrated run instead of a manual
   # `kubectl rollout restart deploy/gfsc-reader` side quest.
-  local deployment=gfsc-reader desired ready
-  if ! ${KC} get deployment "${deployment}" -n gfs >/dev/null 2>&1; then
+  local deployment=gfsc-reader deployment_probe desired ready
+  if ! deployment_probe="$(${KC} get deployment "${deployment}" -n gfs 2>&1)"; then
+    if [[ "${deployment_probe}" == *NotFound* || "${deployment_probe}" == *"not found"* ]]; then
+      return 0
+    fi
+    log "ERROR: unable to inspect gfs/${deployment} before credential convergence"
+    return 1
+  fi
+  if ! desired="$(${KC} get deployment "${deployment}" -n gfs -o jsonpath='{.spec.replicas}' 2>/dev/null)"; then
+    log "ERROR: unable to read desired replicas for gfs/${deployment}"
+    return 1
+  fi
+  if [[ ! "${desired}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: desired replicas for gfs/${deployment} is not numeric"
+    return 1
+  fi
+  if [[ "${desired}" == "0" ]]; then
     return 0
   fi
-  desired="$(${KC} get deployment "${deployment}" -n gfs -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  ready="$(${KC} get deployment "${deployment}" -n gfs -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  if [[ -z "${desired}" || "${desired}" == "0" || "${ready:-0}" == "${desired}" ]]; then
+  if ! ready="$(${KC} get deployment "${deployment}" -n gfs -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"; then
+    log "ERROR: unable to read Ready replicas for gfs/${deployment}"
+    return 1
+  fi
+  if [[ ! "${ready}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: Ready replicas for gfs/${deployment} is not numeric"
+    return 1
+  fi
+  if [[ "${ready}" == "${desired}" ]]; then
     return 0
   fi
   log "Restarting gfs/${deployment} after credential restore (${ready:-0}/${desired} Ready)"
@@ -379,7 +430,25 @@ converge_gfs_reader_after_restore() {
 }
 
 provision_gfs_serving() {
+  if [[ "${GATE_NAME}" != "minikube-t2" ]]; then
+    # Other platform security gates must retain their read/verify contract.
+    # GFS credential recovery is a T2 transition because it can patch Secrets,
+    # restart GFSC, delete pods, and resume an abandoned rollout claim.
+    log "Skipping GFS serving mutation before ${GATE_NAME}; only minikube-t2 owns GFS recovery"
+    sync_mcp_host_auth_key
+    return 0
+  fi
   if ${KC} get configmap gfs-config -n gfs >/dev/null 2>&1; then
+    local reader_probe
+    if ! reader_probe="$(${KC} get deployment gfsc-reader -n gfs 2>&1)"; then
+      if [[ "${reader_probe}" == *NotFound* || "${reader_probe}" == *"not found"* ]]; then
+        log "Skipping gfs serving provisioning (gfsc-reader not found — GFS reader is not deployed)"
+        sync_mcp_host_auth_key
+        return 0
+      fi
+      log "ERROR: unable to inspect gfs/gfsc-reader before credential recovery"
+      return 1
+    fi
     log "Provisioning gfs serving before ${GATE_NAME}"
     # FAIL LOUD: with the GFS stack deployed, a broken gfs_controller credential
     # means every GFS operation 503s (issue #775). Continuing would burn the
@@ -396,35 +465,28 @@ provision_gfs_serving() {
     # (the overlay re-applies the base ConfigMap with an empty value); a
     # reader pod cannot start without it and any readiness wait would only
     # time out. Re-sync it first; this is a no-op when the key matches.
-    bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}"
+    sync_gfs_auth_key
     # Settle a Ready reader first so reconcile does not restart it and
     # race HCC's gfsReconciler during kubectl rollout status. If reconcile
     # still needs a reader rollout, the gfs-rollout-shim PATH prefix makes
     # that wait judge readiness instead of the template generation HCC keeps
     # rewriting.
-    T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
-    T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
-    CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
-    T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
-    CONTEXT="$T2_CONTEXT" \
-      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
-    if ! PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
-      GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
-      T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
-      T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
-      CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
-      T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
-      CONTEXT="$T2_CONTEXT" \
-      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    if ! settle_gfs_reader_rollout; then
+      log "ERROR: unable to settle the branch-owned GFS reader rollout before credential reconciliation"
+      exit 1
+    fi
+    if ! reconcile_gfs_credentials; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1
     fi
-    converge_gfs_reader_after_restore
+    if ! converge_gfs_reader_after_restore; then
+      log "ERROR: gfs reader did not converge after credential restoration"
+      return 1
+    fi
   else
     log "Skipping gfs serving provisioning (gfs-config not found — GFS stack not deployed)"
+    sync_mcp_host_auth_key
   fi
-
-  sync_mcp_host_auth_key
 }
 
 assert_no_legacy_prompt_bridge_grants() {
@@ -604,9 +666,8 @@ if [[ "${cluster_changed}" == "true" ]]; then
   if ! incremental_requires_database_reconcile; then
     # No schema work is planned, but a role-reset T1 run may still have left
     # the cluster-global GFS runtime roles NOLOGIN while every image and
-    # manifest matched. Serving provisioning is idempotent, so converge it in
-    # every sync plan instead of leaving an unready gfsc-reader to fail the
-    # exact-head T2 preflight after this sync reports success.
+    # manifest matched. The T2 transition owns this idempotent convergence;
+    # security-gate invocations return through the non-mutating guard above.
     provision_gfs_serving
   fi
 
@@ -679,8 +740,8 @@ else
   log "No cluster sync required before ${GATE_NAME}"
   # Images and manifests match, yet the GFS runtime credentials can still be
   # broken (a role-reset T1 leaves the reader NOLOGIN without changing any
-  # fingerprint). Converge serving credentials on every pre-gate pass so a
-  # single orchestrated run repairs them without a manual script.
+  # fingerprint). The T2 fast path repairs them in this single orchestrated
+  # run; non-T2 gates are fenced out by provision_gfs_serving.
   provision_gfs_serving
   assert_no_legacy_prompt_bridge_grants
   ensure_evenfire_registry

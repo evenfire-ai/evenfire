@@ -51,6 +51,19 @@ fi
 grep -Fq 'refusing unverified Kubernetes context' "$reconcile_context_err" \
   || fail 'credential reconciliation did not explain its unverified-context rejection'
 rm -f "$reconcile_context_err"
+reconcile_remote_context_err="$(mktemp)"
+if CONTEXT=gke_unapproved GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=gke_approved \
+  bash deploy/scripts/reconcile-gfs-deploy-credentials.sh 2>"$reconcile_remote_context_err"; then
+  rm -f "$reconcile_remote_context_err"
+  fail 'credential reconciliation accepted a GKE context outside the explicit allowlist'
+fi
+grep -Fq 'explicit authorization and exact ALLOWED_CONTEXTS membership' "$reconcile_remote_context_err" \
+  || fail 'credential reconciliation did not fail closed for an unauthorized GKE context'
+rm -f "$reconcile_remote_context_err"
+grep -Fq 'GFS_REMOTE_RECONCILE_AUTHORIZED' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
+  || fail 'remote GFS reconciliation lacks an explicit authorization gate'
+grep -Fq 'ALLOWED_CONTEXTS' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
+  || fail 'remote GFS reconciliation lacks an exact context allowlist'
 make_block() {
   awk -v target="$1" '$0 ~ "^" target ":" {active=1} active && /^\.PHONY:/ {exit} active {print}' Makefile
 }

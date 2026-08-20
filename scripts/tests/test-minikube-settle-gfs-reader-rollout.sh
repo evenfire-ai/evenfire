@@ -158,7 +158,7 @@ rm -rf "$dir"
 # A leftover non-current ReplicaSet with live unready pods keeps
 # credential_rollout_pending true forever; it must be scaled to 0 while the
 # current-revision ReplicaSet is never touched.
-rs_rows='gfsc-reader-stale|gfsc-reader|1|0|12\ngfsc-reader-current|gfsc-reader|1|0|19\ngfsc-reader-old-empty|gfsc-reader|0|0|11\n'
+rs_rows='gfsc-reader-stale|gfsc-reader|1|0|12\ngfsc-reader-current|gfsc-reader|1|0|19\ngfsc-reader-old-empty|gfsc-reader|0||11\n'
 dir="$(run_settle 1 1 1 1 ready '2026-01-01T00:00:00Z' 1 "$rs_rows" '' 19)"
 grep -q 'scale rs gfsc-reader-stale --replicas=0' "$dir/kubectl.log" \
   || fail 'leftover non-current unready ReplicaSet was not scaled to 0'

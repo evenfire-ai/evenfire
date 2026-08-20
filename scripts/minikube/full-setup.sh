@@ -990,7 +990,7 @@ else
     # wiped by the overlay re-apply). Re-sync it from the live platform
     # Secret before reconcile so a reader pod can actually start; this is a
     # no-op when the key already matches.
-    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}"
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
     # If gfsc-reader is already Ready, settle the leftover claim first so
     # reconcile does not rollout restart and race HCC's gfsReconciler.
     # The gfs-rollout-shim PATH prefix makes any reader rollout wait inside
@@ -1067,7 +1067,7 @@ else
     # The overlay apply above re-declared the base gfs-config with an empty
     # jwt-public-key; re-sync it before any reader pod may need to start,
     # otherwise the reconcile readiness wait can only time out.
-    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}"
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
     CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
     PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
@@ -1384,7 +1384,7 @@ done
 # ----------------------------------------------------------------------
 if $KC get configmap gfs-config -n gfs &>/dev/null; then
   log "Provisioning gfs serving (public key → gfs-config + gfs_controller DB login)..."
-  if ! bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}"; then
+  if ! bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs; then
     err "gfs public-key sync FAILED — gfsc cannot verify tokens. Fix and re-run."
     exit 1
   fi

@@ -33,8 +33,8 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   `npm ci`, generated ports/profile metadata, or anything secret-like. Run
   `make minikube-t2-public-boundary` first.
 - **Do not weaken fail-loud T1**: no green on unavailable DSN, zero executed
-  tests, or silently skipped suites; the JSON reporter is the suite verdict,
-  not a leftover Vitest process exit after a complete green reporter.
+  tests, or silently skipped suites; the JSON reporter must be complete and
+  green, and the Vitest process must also exit zero.
   Role-reset suites stay on the throwaway `postgres:16-alpine` (#412), never
   shared `control-postgres`.
 
@@ -63,8 +63,9 @@ and never copy DSNs or credentials between namespaces or into evidence.
 The harness owns NOLOGIN recovery and abandoned-rollout resume: T1 restores
 branch-profile GFS credentials on exit, and `pre-gate-sync` provisions
 serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` and
-`GFS_RECOVER_ABANDONED_STATE=true` in every plan and restarts an unready
-`gfsc-reader` after restore. A Ready leftover `rollout-running` claim is
+`GFS_RECOVER_ABANDONED_STATE=true` only in the `minikube-t2` transition.
+Other security gates refresh MCP auth with `--skip-gfs` and do not mutate GFS.
+The T2 path restarts an unready `gfsc-reader` after restore. A Ready leftover `rollout-running` claim is
 settled by `scripts/minikube/settle-gfs-reader-rollout.sh` before
 reconcile: it marks the claim ready, scales leftover non-current unready
 reader ReplicaSets to 0, and deletes CrashLoopBackOff reader pods so they
