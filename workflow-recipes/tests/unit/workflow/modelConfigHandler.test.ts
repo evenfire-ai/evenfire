@@ -438,6 +438,33 @@ describe('POST /configure-model — R3 allowlist gate', () => {
     expect(result.status).toBe(202)
   })
 
+  it('configures codex-subscription without reading a Secret', async () => {
+    const allowlist = { 'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }]) }
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, allowlist)
+    const mcpHost = mockMcpHost()
+    const handler = new ModelConfigHandler(k8s, mcpHost)
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+      'http://mcp:8080',
+      'tok'
+    )
+
+    expect(result.status).toBe(202)
+    expect(result.body).toEqual({
+      configured: true,
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+    })
+    expect(k8s.readSecret).not.toHaveBeenCalled()
+    expect(mcpHost.configure).toHaveBeenCalledWith('http://mcp:8080', 'tok', {
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+    })
+    expect(JSON.stringify(result.body)).not.toContain('sk-test')
+    expect(result.body).not.toHaveProperty('apiKey')
+  })
+
   it('rejects a model absent from the allowlist → 403 model_not_allowed', async () => {
     const allowlist = { openai: JSON.stringify([{ model: 'gpt-4' }]) }
     const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, allowlist)

@@ -10,6 +10,7 @@
  * per-attempt broker.
  */
 import {
+  PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
@@ -424,6 +425,48 @@ export class ModelConfigHandler {
       if (opts?.validateDegraded) {
         const degradedError = await opts.validateDegraded()
         if (degradedError) return degradedError
+      }
+    }
+
+    // Broker-backed providers never resolve or mount a Secret. Control API
+    // remains the OAuth custodian; WRC only forwards provider/model identity.
+    if (PROVIDER_AUTH_MODE[req.provider] === 'oauth-broker') {
+      const configureBody: Record<string, unknown> = {
+        provider: req.provider,
+        model: req.model,
+      }
+      if (req.soulStorageRef && this.objectStorage) {
+        try {
+          const content = await this.objectStorage.download(
+            req.soulStorageRef.bucket,
+            req.soulStorageRef.key
+          )
+          if (content) configureBody.soulContent = content
+        } catch {
+          createLogger('wrc', 'model-config-handler').warn(
+            'SOUL download failed — continuing without step SOUL override',
+            { stepId: req.stepId }
+          )
+        }
+      }
+      try {
+        const result = await this.mcpHost.configure(
+          mcpHostEndpoint,
+          wrcConfigureToken,
+          configureBody
+        )
+        if (result.status >= 400) {
+          return {
+            status: 502,
+            body: { error: 'mcp_host configure failed', mcpHostStatus: result.status },
+          }
+        }
+      } catch {
+        return { status: 502, body: { error: 'mcp_host configure unreachable' } }
+      }
+      return {
+        status: 202,
+        body: { configured: true, provider: req.provider, model: req.model },
       }
     }
 
