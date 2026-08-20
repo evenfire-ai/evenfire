@@ -1041,6 +1041,10 @@ export interface HostModelOption {
   name: string
   displayName?: string
   contextWindowTokens?: number
+  /** Last-known catalog row; hidden from new picks unless it is already selected. */
+  stale?: boolean
+  /** Operator-disabled catalog row; hidden from new picks unless it is already selected. */
+  disabled?: boolean
 }
 
 /**
