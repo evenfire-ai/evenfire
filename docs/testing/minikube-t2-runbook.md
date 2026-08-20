@@ -100,13 +100,15 @@ use `CONTROL_API_REAL_PG_ADMIN_URL` unchanged.
 * **T0** — shell syntax/ShellCheck where available, contract tests, affected
   package builds/typechecks, and `git diff --check`.
 * **T1** — most Real PostgreSQL suites execute against the validated local
-  `control-postgres`. Role-reset suites (`db.realPostgresMigration` and
-  `gfsReaderRole`) run against a throwaway `postgres:16-alpine` so they cannot
-  `DROP`/`ALTER` cluster-global roles used by live pods. The runner keeps the
-  JSON reporter for fail-loud counts and the default reporter so hook errors
-  stay visible. T1 restores branch-profile GFS credentials on exit. The lane
-  reports `PASS`, `FAIL`, `SKIPPED`, and `NOT_RUN` separately and fails on an
-  unavailable DSN or zero executed tests.
+  `control-postgres`, one Vitest process per file, so leaked `pg` Pools cannot
+  exhaust `max_connections` through the ephemeral port-forward. Role-reset
+  suites (`db.realPostgresMigration` and `gfsReaderRole`) run against a
+  throwaway `postgres:16-alpine` so they cannot `DROP`/`ALTER` cluster-global
+  roles used by live pods. The runner keeps the JSON reporter for fail-loud
+  counts and the default reporter so hook errors stay visible. T1 restores
+  branch-profile GFS credentials on exit. The lane reports `PASS`, `FAIL`,
+  `SKIPPED`, and `NOT_RUN` separately and fails on an unavailable DSN or zero
+  executed tests.
 * **T2** — the exact worktree/`HEAD` is deployed to the owned profile, the
   cluster is healthy, readiness and health checks pass, and applicable
   Control UI/Desktop journeys are run through their user-visible paths.

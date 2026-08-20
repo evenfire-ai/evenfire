@@ -80,14 +80,7 @@ cleanup_t1() {
   if [ "$T1_CLEANUP_ENABLED" != 1 ]; then
     return 0
   fi
-  if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-    local command_line
-    command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
-    if [[ "$command_line" == *port-forward* && "$command_line" == *svc/control-postgres* ]]; then
-      kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
-      wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
-    fi
-  fi
+  stop_control_postgres_forward
   stop_throwaway_postgres
   if ! restore_gfs_runtime_credentials; then
     status=1
@@ -120,17 +113,20 @@ secret_field() {
   printf '%s' "$encoded" | python3 -c 'import base64,sys; print(base64.b64decode(sys.stdin.buffer.read(), validate=True).decode(), end="")'
 }
 
-wait_for_tcp() {
-  local port="$1" deadline
-  deadline=$((SECONDS + T1_TIMEOUT))
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if python3 - "$port" <<'PY' >/dev/null 2>&1
+tcp_ready() {
+  python3 - "$1" <<'PY' >/dev/null 2>&1
 import socket
 import sys
 with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1):
     pass
 PY
-    then return 0; fi
+}
+
+wait_for_tcp() {
+  local port="$1" deadline
+  deadline=$((SECONDS + T1_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if tcp_ready "$port"; then return 0; fi
     sleep 1
   done
   return 1
@@ -203,43 +199,87 @@ print("postgresql://" + quote("postgres", safe="") + "@127.0.0.1:" + sys.argv[1]
   printf '[minikube-t1] throwaway postgres:16-alpine ready for role-reset suites\n'
 }
 
-run_suite() {
-  local package="$1" admin_dsn="$2" expected_files="$3"
-  shift 3
-  local log_file json_file stats
-  if ! [[ "$expected_files" =~ ^[1-9][0-9]*$ ]]; then
-    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED "no Real PostgreSQL suites were selected under $package"
+stop_control_postgres_forward() {
+  if [ -z "$PORT_FORWARD_PID" ] || ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    PORT_FORWARD_PID=""
+    return 0
   fi
-  log_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _).$$.$RANDOM.log"
-  json_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _).$$.$RANDOM.json"
-  printf '[minikube-t1] running %s Real PostgreSQL suites (%s files)\n' "$package" "$expected_files"
-  # Keep JSON for fail-loud counts. Also keep the default reporter so beforeAll
-  # / hook errors are visible; JSON-only leaves those messages empty.
+  local command_line
+  command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
+  if [[ "$command_line" == *port-forward* &&
+        "$command_line" == *svc/control-postgres* &&
+        ( -z "$LOCAL_PORT" || "$command_line" == *"${LOCAL_PORT}:5432"* ) ]]; then
+    kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+    wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+  fi
+  PORT_FORWARD_PID=""
+}
+
+start_control_postgres_forward() {
+  local attempt reuse_port="$LOCAL_PORT"
+  for attempt in 1 2 3 4 5; do
+    if [ -n "$reuse_port" ]; then
+      LOCAL_PORT="$reuse_port"
+    else
+      LOCAL_PORT="$(choose_local_port)"
+    fi
+    t2_kc -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
+      >"$T1_TMP_DIR/port-forward.log" 2>&1 &
+    PORT_FORWARD_PID=$!
+    if wait_for_tcp "$LOCAL_PORT" && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+      return 0
+    fi
+    stop_control_postgres_forward
+  done
+  sanitize_file "$T1_TMP_DIR/port-forward.log"
+  cat "$T1_TMP_DIR/port-forward.log" >&2 || true
+  T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
+  die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward did not become reachable'
+}
+
+ensure_control_postgres_forward() {
+  if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1 && tcp_ready "$LOCAL_PORT"; then
+    return 0
+  fi
+  stop_control_postgres_forward
+  start_control_postgres_forward
+}
+
+list_real_postgres_files() {
+  local package="$1"
+  find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
+    ! -name 'realPostgres.requirement.ts' ! -path '*/node_modules/*' -print | sort
+}
+
+run_one_file() {
+  local package="$1" admin_dsn="$2" relative_suite="$3"
+  local log_file json_file stats reported_files passed_tests failed_tests pending_files pending_tests total_tests success expected
+  log_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _)-$(printf '%s' "$relative_suite" | tr / _).log"
+  json_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _)-$(printf '%s' "$relative_suite" | tr / _).json"
+  printf '[minikube-t1] running %s/%s\n' "$package" "$relative_suite"
   if ! (
     cd "$PROJECT_DIR/$package"
     CONTROL_API_REAL_PG_ADMIN_URL="$admin_dsn" \
     CONTROL_API_REAL_PG_REQUIRED=1 FORCE_COLOR=0 NO_COLOR=1 \
-      npm test -- --reporter=default --reporter=json --outputFile="$json_file" "$@"
+      npm test -- --reporter=default --reporter=json --outputFile="$json_file" --run "$relative_suite"
   ) >"$log_file" 2>&1; then
     sanitize_file "$log_file"
     sanitize_file "$json_file"
     cat "$log_file" >&2 || true
     cat "$json_file" >&2 || true
     T1_NEXT_COMMAND='repair the first failing Real PostgreSQL suite, then re-run T1 on the same HEAD'
-    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL suite failed in $package"
+    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL suite failed in $package/$relative_suite"
   fi
   sanitize_file "$log_file"
   sanitize_file "$json_file"
   [ -s "$json_file" ] || {
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package"
+    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package/$relative_suite"
   }
-  stats="$(python3 - "$json_file" "$expected_files" <<'PY'
+  stats="$(python3 - "$json_file" <<'PY'
 import json
 import sys
 result = json.loads(open(sys.argv[1]).read())
-expected = int(sys.argv[2])
 reported_files = len(result.get("testResults") or [])
 passed_tests = int(result.get("numPassedTests") or 0)
 failed_tests = int(result.get("numFailedTests") or 0)
@@ -247,26 +287,50 @@ pending_files = int(result.get("numPendingTestSuites") or 0)
 pending_tests = int(result.get("numPendingTests") or 0)
 total_tests = int(result.get("numTotalTests") or 0)
 success = bool(result.get("success"))
-print(reported_files, passed_tests, failed_tests, pending_files, pending_tests, total_tests, int(success), expected)
+print(reported_files, passed_tests, failed_tests, pending_files, pending_tests, total_tests, int(success), 1)
 PY
   )"
   read -r reported_files passed_tests failed_tests pending_files pending_tests total_tests success expected <<< "$stats"
   T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))
   T1_PASSED_TESTS=$((T1_PASSED_TESTS + passed_tests))
   T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
-  if [ "$success" -ne 1 ] || [ "$reported_files" -ne "$expected" ] || [ "$failed_tests" -ne 0 ]; then
+  if [ "$success" -ne 1 ] || [ "$reported_files" -ne 1 ] || [ "$failed_tests" -ne 0 ]; then
+    cat "$log_file" >&2 || true
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
-    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package"
+    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass $package/$relative_suite"
   fi
   if [ "$total_tests" -le 0 ] || [ "$passed_tests" -le 0 ] || [ "$pending_files" -ne 0 ] || [ "$pending_tests" -ne 0 ]; then
     T1_NEXT_COMMAND='repair the test selection or database route; a T1 run cannot silently skip suites'
-    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package"
+    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package/$relative_suite"
   fi
-  printf '[minikube-t1] PASS %s files=%s tests=%s skipped=0\n' "$package" "$reported_files" "$passed_tests"
+  printf '[minikube-t1] PASS %s/%s tests=%s skipped=0\n' "$package" "$relative_suite" "$passed_tests"
+}
+
+# One Vitest process per file. A shared process leaks pg Pools through the
+# control-postgres port-forward until PostgreSQL returns "too many clients already".
+run_isolated_files() {
+  local package="$1" admin_dsn="$2" use_cluster_forward="$3"
+  shift 3
+  local relative_suite expected
+  expected=$#
+  if [ "$expected" -le 0 ]; then
+    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED "no Real PostgreSQL suites were selected under $package"
+  fi
+  printf '[minikube-t1] running %s Real PostgreSQL suites (%s isolated processes)\n' \
+    "$package" "$expected"
+  for relative_suite in "$@"; do
+    if [ "$use_cluster_forward" = 1 ]; then
+      ensure_control_postgres_forward
+    fi
+    run_one_file "$package" "$admin_dsn" "$relative_suite"
+  done
+  printf '[minikube-t1] PASS %s files=%s tests=%s skipped=0\n' "$package" "$expected" "$T1_PASSED_TESTS"
 }
 
 main() {
-  local control_api_total control_api_shared suite_file exclude_args
+  local suite_file abs rel skip role_file
+  local -a shared_files gfs_files
   require_t1_commands
   t2_require_commands
   t2_repo_metadata
@@ -305,22 +369,7 @@ main() {
   fi
   T1_REDACT_PASSWORD="$PG_PASSWORD"
 
-  LOCAL_PORT="$(choose_local_port)"
-  t2_kc -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
-    >"$T1_TMP_DIR/port-forward.log" 2>&1 &
-  PORT_FORWARD_PID=$!
-  if ! wait_for_tcp "$LOCAL_PORT"; then
-    sanitize_file "$T1_TMP_DIR/port-forward.log"
-    cat "$T1_TMP_DIR/port-forward.log" >&2 || true
-    T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
-    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward did not become reachable'
-  fi
-  if ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-    sanitize_file "$T1_TMP_DIR/port-forward.log"
-    cat "$T1_TMP_DIR/port-forward.log" >&2 || true
-    T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
-    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward exited before the T1 lane started'
-  fi
+  start_control_postgres_forward
 
   ADMIN_DSN="$(printf '%s\0%s\0%s' "$PG_USER" "$PG_PASSWORD" "$LOCAL_PORT" | python3 -c '
 from urllib.parse import quote
@@ -329,33 +378,58 @@ user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
 print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.decode(), safe="") + "@127.0.0.1:" + port.decode() + "/postgres", end="")
 ')"
 
-  control_api_total="$(count_real_postgres_files control-api)"
   for suite_file in "${CONTROL_API_ROLE_RESET_SUITES[@]}"; do
     if [ ! -f "$PROJECT_DIR/control-api/$suite_file" ]; then
       T1_NEXT_COMMAND='restore the role-reset Real PostgreSQL suite files, then re-run T1'
       die_t1 ZERO_TESTS_EXECUTED "role-reset suite is missing: $suite_file"
     fi
   done
-  control_api_shared=$((control_api_total - ${#CONTROL_API_ROLE_RESET_SUITES[@]}))
-  if [ "$control_api_shared" -le 0 ]; then
+
+  shared_files=()
+  while IFS= read -r abs; do
+    [ -n "$abs" ] || continue
+    rel="${abs#"$PROJECT_DIR/control-api/"}"
+    skip=0
+    for role_file in "${CONTROL_API_ROLE_RESET_SUITES[@]}"; do
+      if [ "$rel" = "$role_file" ]; then
+        skip=1
+        break
+      fi
+    done
+    [ "$skip" -eq 1 ] && continue
+    shared_files+=("$rel")
+  done < <(list_real_postgres_files control-api)
+  if [ "${#shared_files[@]}" -le 0 ]; then
     T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
     die_t1 ZERO_TESTS_EXECUTED 'role-reset isolation left no shared control-api Real PostgreSQL suites'
   fi
 
+  gfs_files=()
+  while IFS= read -r abs; do
+    [ -n "$abs" ] || continue
+    gfs_files+=("${abs#"$PROJECT_DIR/gfs-controller/"}")
+  done < <(list_real_postgres_files gfs-controller)
+  if [ "${#gfs_files[@]}" -le 0 ]; then
+    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED 'no gfs-controller Real PostgreSQL suites were found'
+  fi
+  if [ "$(count_real_postgres_files control-api)" -ne \
+    "$(( ${#CONTROL_API_ROLE_RESET_SUITES[@]} + ${#shared_files[@]} ))" ]; then
+    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED 'control-api Real PostgreSQL file partition does not cover every suite'
+  fi
+  if [ "$(count_real_postgres_files gfs-controller)" -ne "${#gfs_files[@]}" ]; then
+    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED 'gfs-controller Real PostgreSQL file list is incomplete'
+  fi
+
   start_throwaway_postgres
-  run_suite control-api "$THROWAY_DSN" "${#CONTROL_API_ROLE_RESET_SUITES[@]}" \
-    "${CONTROL_API_ROLE_RESET_SUITES[@]}"
+  run_isolated_files control-api "$THROWAY_DSN" 0 "${CONTROL_API_ROLE_RESET_SUITES[@]}"
   stop_throwaway_postgres
   unset THROWAY_DSN
 
-  exclude_args=()
-  for suite_file in "${CONTROL_API_ROLE_RESET_SUITES[@]}"; do
-    exclude_args+=(--exclude "$suite_file")
-  done
-  run_suite control-api "$ADMIN_DSN" "$control_api_shared" \
-    --run realPostgres "${exclude_args[@]}"
-  run_suite gfs-controller "$ADMIN_DSN" "$(count_real_postgres_files gfs-controller)" \
-    --run realPostgres
+  run_isolated_files control-api "$ADMIN_DSN" 1 "${shared_files[@]}"
+  run_isolated_files gfs-controller "$ADMIN_DSN" 1 "${gfs_files[@]}"
   unset PG_USER PG_PASSWORD PG_DATABASE T1_REDACT_PASSWORD
   unset ADMIN_DSN
   T1_STATUS=PASS

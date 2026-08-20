@@ -223,6 +223,7 @@ grep -Fq 'marker@local-db' "$evidence" && fail 'evidence retained the DSN payloa
 
 grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'ZERO_TESTS_EXECUTED' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
+grep -Fq 'isolated processes' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq -- '--reporter=default' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'postgres:16-alpine' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'test/gfsReaderRole.realPostgres.integration.test.ts' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
