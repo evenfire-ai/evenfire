@@ -1,3 +1,5 @@
+import jwt from 'jsonwebtoken'
+import { config } from '../config.js'
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import {
@@ -161,6 +163,61 @@ export function createUnavailableCodexCatalogTransport(): CodexCatalogTransport 
       return { outcome: 'unavailable' }
     },
   }
+}
+
+export function signCodexAdminPermit(operation: 'catalog_list' | 'connection_test'): string {
+  return jwt.sign(
+    { sub: 'control-api', typ: 'codex-admin-permit', operation },
+    config.adminJwtPrivateKey,
+    {
+      algorithm: 'RS256',
+      issuer: config.adminJwtIssuer,
+      audience: 'codex-llm-proxy-admin',
+      expiresIn: 60,
+    }
+  )
+}
+
+export function createCodexProxyCatalogTransport(deps: {
+  adminBaseUrl: string
+  fetchFn?: typeof fetch
+  signPermit?: (operation: 'catalog_list' | 'connection_test') => string
+}): CodexCatalogTransport {
+  const fetchFn = deps.fetchFn ?? fetch
+  const signPermit = deps.signPermit ?? signCodexAdminPermit
+  return {
+    async listModels(input: { accessToken: string }): Promise<CodexCatalogTransportResult> {
+      const base = deps.adminBaseUrl.replace(/\/+$/, '')
+      const response = await fetchFn(`${base}/internal/admin/v1/codex/models`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${signPermit('catalog_list')}`,
+        },
+        body: JSON.stringify({ accessToken: input.accessToken }),
+      })
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) return { outcome: 'auth-rejected' }
+        return { outcome: 'unavailable' }
+      }
+      const body = (await response.json()) as {
+        outcome?: CodexCatalogOutcome
+        models?: CodexDiscoveredModel[]
+      }
+      if (body.outcome === 'auth-rejected' || body.outcome === 'unavailable') {
+        return { outcome: body.outcome }
+      }
+      return { outcome: 'ready', models: Array.isArray(body.models) ? body.models : [] }
+    },
+  }
+}
+
+export function createCodexCatalogTransportFromEnv(
+  env: NodeJS.ProcessEnv = process.env
+): CodexCatalogTransport {
+  const adminBaseUrl = env.CODEX_LLM_PROXY_ADMIN_URL?.trim() ?? ''
+  if (!adminBaseUrl) return createUnavailableCodexCatalogTransport()
+  return createCodexProxyCatalogTransport({ adminBaseUrl })
 }
 
 async function loadCodexRows(db: DbClient): Promise<CodexCatalogRow[]> {

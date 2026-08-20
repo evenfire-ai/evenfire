@@ -5,15 +5,21 @@ import { z } from 'zod'
 import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
 import { verifyExecutionTicket } from './auth/executionTicketVerifier.js'
 import { verifyPlatformJwt } from './auth/platformJwtVerifier.js'
+import {
+  CodexTransportError,
+  listCodexModels,
+  streamCodexCompletion,
+  testCodexConnection,
+} from './codexTransport.js'
 import type { CodexLlmProxyConfig } from './config.js'
+import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
 import { logger } from './logger.js'
+import { createProxyMetrics } from './metrics.js'
+import { OriginDeniedError } from './originPolicy.js'
+import { RequestLimitError, streamGate } from './requestLimits.js'
 
-const COMPLETION_KEYS = new Set([
-  'executionTicket',
-  'requestHash',
-  'request',
-  'deadlineMs',
-])
+const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
+const ADMIN_KEYS = new Set(['accessToken'])
 
 const completionBodySchema = z
   .object({
@@ -24,12 +30,15 @@ const completionBodySchema = z
   })
   .strict()
 
+const adminBodySchema = z.object({ accessToken: z.string().min(1) }).strict()
+
 function bearer(req: Request): string {
   const raw = String(req.header('authorization') || '')
   return raw.replace(/^bearer\s+/i, '').trim()
 }
 
 function reject(res: Response, status: number, code: string): void {
+  if (res.headersSent) return
   logger.warn({ event: 'codex_proxy_denied', code }, 'request denied')
   res.status(status).json({ error: code })
 }
@@ -48,6 +57,11 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
   reject(res, 500, 'internal_error')
 }
 
+export type ProxyRuntimeDeps = {
+  controlApiClient?: ControlApiClient
+  fetchFn?: typeof fetch
+}
+
 export type ProxyServers = {
   runtime: Server
   admin: Server
@@ -58,9 +72,18 @@ export type ProxyServers = {
   close: () => Promise<void>
 }
 
-export function createProxyApps(config: CodexLlmProxyConfig): ProxyServers {
-  const metrics = new Registry()
-  collectDefaultMetrics({ register: metrics })
+export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeDeps = {}): ProxyServers {
+  const metricsRegistry = new Registry()
+  collectDefaultMetrics({ register: metricsRegistry })
+  const metrics = createProxyMetrics(metricsRegistry)
+  const client =
+    deps.controlApiClient ??
+    new ControlApiClient({
+      baseUrl: config.controlApiBaseUrl,
+      serviceName: config.controlApiServiceName,
+      serviceToken: config.controlApiServiceToken,
+    })
+  const fetchFn = deps.fetchFn ?? fetch
 
   const runtimeApp = express()
   runtimeApp.use(express.json({ limit: config.maxBodyBytes }))
@@ -101,14 +124,56 @@ export function createProxyApps(config: CodexLlmProxyConfig): ProxyServers {
       reject(res, 404, 'disabled')
       return
     }
-    reject(res, 503, 'provider_unavailable')
+
+    void (async () => {
+      const release = await streamGate.acquire()
+      const abort = new AbortController()
+      req.on('close', () => abort.abort())
+      try {
+        res.status(200)
+        res.setHeader('content-type', 'text/event-stream')
+        res.setHeader('cache-control', 'no-cache')
+        const started = Date.now()
+        const result = await streamCodexCompletion({
+          executionTicket: parsed.data.executionTicket,
+          requestHash: parsed.data.requestHash,
+          request: parsed.data.request,
+          deadlineMs: parsed.data.deadlineMs,
+          maxDeadlineMs: config.maxDeadlineMs,
+          ticket: {
+            jti: ticket.jti,
+            hostRef: ticket.hostRef,
+            model: ticket.model,
+            requestHash: ticket.requestHash,
+            providerAttemptId: ticket.providerAttemptId,
+          },
+          signal: abort.signal,
+          redeem: input => client.redeem(input),
+          finalize: input => client.finalize(input),
+          fetchFn,
+          onFrame: frame => {
+            res.write(`data: ${JSON.stringify(frame)}\n\n`)
+          },
+        })
+        res.write(`data: ${JSON.stringify({ type: 'done', outcome: result.outcome })}\n\n`)
+        metrics.observeAttempt(result.outcome, 'completion_stream')
+        metrics.observeStream(Date.now() - started)
+        res.end()
+      } catch (err) {
+        const mapped = mapError(err)
+        metrics.observeAttempt('error', 'completion_stream')
+        reject(res, mapped.status, mapped.code)
+      } finally {
+        release()
+      }
+    })()
   })
   runtimeApp.use((_req, res) => reject(res, 404, 'not_found'))
   runtimeApp.use(boundedErrorHandler)
 
   const adminApp = express()
   adminApp.use(express.json({ limit: config.maxBodyBytes }))
-  const adminHandler = (req: Request, res: Response) => {
+  const adminHandler = (kind: 'models' | 'test') => (req: Request, res: Response) => {
     if (!req.is('application/json')) {
       reject(res, 415, 'unsupported_media_type')
       return
@@ -125,10 +190,33 @@ export function createProxyApps(config: CodexLlmProxyConfig): ProxyServers {
       reject(res, 404, 'disabled')
       return
     }
-    reject(res, 503, 'provider_unavailable')
+    const extra = Object.keys(req.body ?? {}).find(key => !ADMIN_KEYS.has(key))
+    if (extra) {
+      reject(res, 400, 'unknown_field')
+      return
+    }
+    const parsed = adminBodySchema.safeParse(req.body)
+    if (!parsed.success) {
+      reject(res, 400, 'invalid_request')
+      return
+    }
+    void (async () => {
+      try {
+        if (kind === 'models') {
+          const listed = await listCodexModels({ accessToken: parsed.data.accessToken, fetchFn })
+          res.status(200).json(listed)
+          return
+        }
+        const tested = await testCodexConnection({ accessToken: parsed.data.accessToken, fetchFn })
+        res.status(200).json(tested)
+      } catch (err) {
+        const mapped = mapError(err)
+        reject(res, mapped.status, mapped.code)
+      }
+    })()
   }
-  adminApp.post('/internal/admin/v1/codex/models', adminHandler)
-  adminApp.post('/internal/admin/v1/codex/test', adminHandler)
+  adminApp.post('/internal/admin/v1/codex/models', adminHandler('models'))
+  adminApp.post('/internal/admin/v1/codex/test', adminHandler('test'))
   adminApp.use((_req, res) => reject(res, 404, 'not_found'))
   adminApp.use(boundedErrorHandler)
 
@@ -136,8 +224,8 @@ export function createProxyApps(config: CodexLlmProxyConfig): ProxyServers {
   probeApp.get('/healthz', (_req, res) => res.status(200).json({ ok: true }))
   probeApp.get('/readyz', (_req, res) => res.status(200).json({ ok: true }))
   probeApp.get('/metrics', async (_req, res) => {
-    res.set('content-type', metrics.contentType)
-    res.status(200).send(await metrics.metrics())
+    res.set('content-type', metricsRegistry.contentType)
+    res.status(200).send(await metricsRegistry.metrics())
   })
   probeApp.use((_req, res) => reject(res, 404, 'not_found'))
 
@@ -173,6 +261,23 @@ export function startProxy(config: CodexLlmProxyConfig): ProxyServers {
     'codex-llm-proxy listeners ready'
   )
   return servers
+}
+
+function mapError(err: unknown): { status: number; code: string } {
+  if (err instanceof OriginDeniedError) return { status: 403, code: 'origin_denied' }
+  if (err instanceof RequestLimitError) return { status: 503, code: 'provider_unavailable' }
+  if (err instanceof CodexTransportError || err instanceof ControlApiClientError) {
+    const status =
+      err.code === 'request_hash_mismatch' || err.code === 'ticket_invalid' || err.code === 'model_not_allowed'
+        ? 403
+        : err.code === 'disabled'
+          ? 404
+          : err.code === 'ticket_replayed'
+            ? 409
+            : 503
+    return { status, code: err.code }
+  }
+  return { status: 503, code: 'provider_unavailable' }
 }
 
 function closeServer(server: Server): Promise<void> {

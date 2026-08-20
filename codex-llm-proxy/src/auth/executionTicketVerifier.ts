@@ -7,6 +7,7 @@ export type ExecutionTicketClaims = {
   hostRef: string
   model: string
   requestHash: string
+  providerAttemptId: string
 }
 
 export function verifyExecutionTicket(
@@ -24,12 +25,14 @@ export function verifyExecutionTicket(
     if (claims.typ !== 'codex-execution-ticket') return null
     if (typeof claims.jti !== 'string' || typeof claims.hostRef !== 'string') return null
     if (typeof claims.model !== 'string' || typeof claims.requestHash !== 'string') return null
+    if (typeof claims.providerAttemptId !== 'string') return null
     return {
       jti: claims.jti,
       typ: 'codex-execution-ticket',
       hostRef: claims.hostRef,
       model: claims.model,
       requestHash: claims.requestHash,
+      providerAttemptId: claims.providerAttemptId,
     }
   } catch {
     return null
