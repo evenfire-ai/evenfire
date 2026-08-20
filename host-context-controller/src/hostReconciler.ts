@@ -267,6 +267,39 @@ export type ResolveContextMountsFn = (host: HostCRD) => Promise<ResolvedSfsMount
 const CONTEXT_LABEL = 'clerum.io/context'
 const CONTEXT_MOUNT_PATH_PATTERN = /^\/[a-zA-Z0-9_.][a-zA-Z0-9_.\/-]*$/
 const RUNTIME_TOKEN_REVISION_ANNOTATION = 'clerum.io/runtime-token-revision'
+// Rolls the mcp-host pod when Host.spec.guardrails changes. mcp-host re-resolves
+// the guardrails block (installed-hook refs, built-ins, limits) live off its Host
+// watch, but a watch that has lapsed leaves the running agent on the block it last
+// saw; the roll is the delivery path that does not depend on that watch. Stamping
+// a hash of the guardrails spec onto the pod template makes any change flip the
+// template → rolling restart → mcp-host re-reads guardrails at boot. Removal is
+// handled by preserveHostDeploymentAnnotations, since an omitted key would
+// otherwise survive the annotation merge and produce no diff.
+// Mirrors the runtime-token / credentials revision annotations.
+const GUARDRAILS_REVISION_ANNOTATION = 'clerum.io/guardrails-revision'
+
+/**
+ * Deep, key-sorted JSON for a stable content hash. Object keys are sorted at
+ * EVERY level — unlike `canonicalStringify`, which sorts only the top level —
+ * so a guardrails block that differs only in nested key order (e.g. the API
+ * returning `hooks` phases or a hook ref's fields in a different order) hashes
+ * identically and does not roll mcp-host for nothing. Array order is PRESERVED:
+ * hook precedence within a phase is semantic, so reordering it is a real change.
+ */
+function deepStableStringify(value: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(norm)
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        out[k] = norm((v as Record<string, unknown>)[k])
+      }
+      return out
+    }
+    return v
+  }
+  return JSON.stringify(norm(value))
+}
 const RUNTIME_TOKEN_SECRET_REVISION_ANNOTATION = 'clerum.io/runtime-token-secret-revision'
 const RUNTIME_TOKEN_ISSUED_AT_ANNOTATION = 'clerum.io/runtime-token-issued-at'
 const RUNTIME_TOKEN_REFRESH_EXPIRES_AT_ANNOTATION = 'clerum.io/runtime-token-refresh-expires-at'
@@ -2590,6 +2623,18 @@ export class HostReconciler {
     if (runtimeTokenRevision) {
       podAnnotations[RUNTIME_TOKEN_REVISION_ANNOTATION] = runtimeTokenRevision
     }
+    // Roll the mcp-host pod whenever the guardrails block changes. mcp-host does
+    // re-resolve guardrails live, but only while its Host watch is connected, so
+    // the roll is what delivers the change to an agent whose watch has lapsed.
+    // Stamp a hash of the block: present→changed flips the value, and removal
+    // omits the key — which only reaches the pod because
+    // preserveHostDeploymentAnnotations strips it from the merge instead of
+    // letting the live value survive (an omitted key alone produces no diff).
+    if (host.spec.guardrails) {
+      podAnnotations[GUARDRAILS_REVISION_ANNOTATION] = createHash('sha256')
+        .update(deepStableStringify(host.spec.guardrails))
+        .digest('hex')
+    }
 
     // Security context — desktop needs runAsNonRoot: false for s6-overlay init,
     // which is fundamentally incompatible with the `restricted` PodSecurity
@@ -3073,7 +3118,7 @@ export class HostReconciler {
           logPrefix: '[HostReconciler]',
           body: deployment,
           resolveBody: buildDesiredDeployment,
-          mergeExisting: preserveDeploymentAnnotations,
+          mergeExisting: preserveHostDeploymentAnnotations,
           isUpToDate: deploymentMatchesDesired,
           read: () =>
             this.appsApi.readNamespacedDeployment({
@@ -3726,6 +3771,7 @@ export class HostReconciler {
       { name: `mcp-host-${name}-ingress-workflow-approval-reader`, namespace },
       { name: `mcp-host-${name}-ingress-rpc-proxy`, namespace },
       { name: `mcp-host-${name}-egress-gfs`, namespace },
+      { name: `mcp-host-${name}-egress-llm-hooks`, namespace },
       { name: `channel-reader-${name}-egress`, namespace: config.channelsNamespace },
       {
         name: `workflow-approval-reader-${name}-egress-mcp-host`,
@@ -3976,6 +4022,9 @@ export class HostReconciler {
       await this.ensureMcpHostIngressNetworkPolicy(host)
       revalidateHostMutationBoundary()
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
+      // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
+      // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
+      // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
       revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(host)
     } catch (err) {
@@ -4612,25 +4661,32 @@ function deploymentMatchesDesired(desired: k8s.V1Deployment, existing: k8s.V1Dep
 }
 
 /**
- * Preserve operational annotations without retaining the channel-reader
- * revision when HCC intentionally omits it from the desired pod template.
- * That annotation is controller-owned and must be cleared when no backing
- * CommunicationChannel Secret is resolvable.
+ * Preserve operational pod-template annotations (kubectl restart markers,
+ * operator edits) while keeping CONTROLLER-OWNED ones authoritative: a key in
+ * `controllerOwned` that the desired template omits is REMOVED from the merge
+ * rather than surviving from the live object.
+ *
+ * Without this, "the field went away" cannot be expressed at all. The merge is
+ * `{...existing, ...desired}`, so an omitted key keeps its old value, the merged
+ * object then compares equal to what is live, and `replaceWithConflictRetry`
+ * skips the write entirely — no template diff, no rolling restart, no write.
  */
-function preserveChannelReaderDeploymentAnnotations(
+export function preserveDeploymentAnnotationsExcept(
   desired: k8s.V1Deployment,
-  existing: k8s.V1Deployment
+  existing: k8s.V1Deployment,
+  controllerOwned: readonly string[]
 ): k8s.V1Deployment {
   const preserved = preserveDeploymentAnnotations(desired, existing)
   const desiredAnnotations = desired.spec?.template?.metadata?.annotations
-  if (desiredAnnotations?.['clerum.io/credentials-revision'] !== undefined) return preserved
+  const dropped = controllerOwned.filter(key => desiredAnnotations?.[key] === undefined)
+  if (dropped.length === 0) return preserved
 
   const spec = preserved.spec
   const template = spec?.template
   if (!spec || !template) return preserved
 
   const annotations = { ...(template.metadata?.annotations ?? {}) }
-  delete annotations['clerum.io/credentials-revision']
+  for (const key of dropped) delete annotations[key]
   return {
     ...preserved,
     spec: {
@@ -4644,6 +4700,34 @@ function preserveChannelReaderDeploymentAnnotations(
       },
     },
   }
+}
+
+/**
+ * Host Deployment merge. `clerum.io/guardrails-revision` is controller-owned:
+ * dropping the whole `spec.guardrails` block omits it from the desired template,
+ * and that removal MUST reach the pod. mcp-host re-resolves guardrails live, but
+ * only while its Host watch is connected — the pod roll is what delivers the
+ * change to an agent whose watch has lapsed, so a removal that silently produced
+ * no diff left the agent enforcing guardrails the operator had uninstalled.
+ */
+function preserveHostDeploymentAnnotations(
+  desired: k8s.V1Deployment,
+  existing: k8s.V1Deployment
+): k8s.V1Deployment {
+  return preserveDeploymentAnnotationsExcept(desired, existing, [GUARDRAILS_REVISION_ANNOTATION])
+}
+
+/**
+ * Preserve operational annotations without retaining the channel-reader
+ * revision when HCC intentionally omits it from the desired pod template.
+ * That annotation is controller-owned and must be cleared when no backing
+ * CommunicationChannel Secret is resolvable.
+ */
+function preserveChannelReaderDeploymentAnnotations(
+  desired: k8s.V1Deployment,
+  existing: k8s.V1Deployment
+): k8s.V1Deployment {
+  return preserveDeploymentAnnotationsExcept(desired, existing, ['clerum.io/credentials-revision'])
 }
 
 function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): unknown {

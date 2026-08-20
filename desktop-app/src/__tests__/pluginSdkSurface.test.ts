@@ -154,6 +154,14 @@ describe('embed preload contract', () => {
       expect(source, `preload has no wrapper for ${id}`).toContain(`'${id}'`)
     }
   })
+
+  it('does not expose host shortcut or native find privileges to plugin code', async () => {
+    const source = await fs.readFile(PRELOAD_PATH, 'utf8')
+    expect(source).not.toContain('findInPage')
+    expect(source).not.toContain('stopFindInPage')
+    expect(source).not.toContain('focusActive')
+    expect(source).not.toContain('shortcuts:command')
+  })
 })
 
 describe('gfs:// links from an embed', () => {

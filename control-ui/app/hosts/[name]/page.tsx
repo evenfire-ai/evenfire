@@ -9,6 +9,8 @@ import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
+import { HostGuardrailsSection } from '../../../components/HostGuardrailsSection'
+import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
@@ -804,13 +806,25 @@ export default function HostDetailsPage() {
         )}
 
         {activeTab === 'advanced' && (
-          <HostAdvancedTab
-            busy={busy}
-            hostName={routeName}
-            initialLoading={initialLoading}
-            initialTools={approvalToolsData}
-            onSaveApprovalTools={persistApprovalTools}
-          />
+          <>
+            <HostAdvancedTab
+              busy={busy}
+              hostName={routeName}
+              initialLoading={initialLoading}
+              initialTools={approvalToolsData}
+              onSaveApprovalTools={persistApprovalTools}
+            />
+            {!initialLoading && (
+              <HostGuardrailsSection
+                initialGuardrails={guardrailsData}
+                onSave={persistGuardrails}
+                busy={busy}
+                canWrite={
+                  true /* TODO: wire to actual host:write check if/when per-field RBAC lands */
+                }
+              />
+            )}
+          </>
         )}
 
         {activeTab === 'contexts' && (

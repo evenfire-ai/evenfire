@@ -9,6 +9,7 @@ type ResourceType =
   | 'workflowrecipes'
   | 'workflowrecipepolicies'
   | 'sharedfilesystems'
+  | 'llmhooks'
 
 // Mirror the real K8sGateway.createResource signature in src/k8s.ts so the
 // mock cannot diverge from prod: callers must NOT pass a namespace via the
@@ -76,6 +77,7 @@ export class MockGateway {
       workflowrecipes: new Map(),
       workflowrecipepolicies: new Map(),
       sharedfilesystems: new Map(),
+      llmhooks: new Map(),
     }
     this.secretStore = new Map()
     this.endpointsStore = new Map()

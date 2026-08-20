@@ -793,7 +793,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       })
 
-      await expect(rec.reconcileContext(context, { isCurrent: () => true })).rejects.toThrow(/ownership/i)
+      await expect(rec.reconcileContext(context, { isCurrent: () => true })).rejects.toThrow(
+        /ownership/i
+      )
       expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
@@ -831,7 +833,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       })
 
-      await expect(rec.reconcileContext(context, { isCurrent: () => true })).rejects.toThrow(/ownership/i)
+      await expect(rec.reconcileContext(context, { isCurrent: () => true })).rejects.toThrow(
+        /ownership/i
+      )
       expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
@@ -1368,7 +1372,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       })
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(/ownership/i)
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/ownership/i)
       expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
@@ -1400,7 +1406,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       })
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(/ownership/i)
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/ownership/i)
       expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
@@ -1644,7 +1652,9 @@ describe('NetworkPolicyReconciler', () => {
           },
         }
 
-        await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(/stale McpServer/i)
+        await expect(
+          reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+        ).rejects.toThrow(/stale McpServer/i)
 
         expect(mockCustomApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
       }
@@ -1683,7 +1693,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toBe(conflict)
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toBe(conflict)
 
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1713,9 +1725,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(
-        'status update denied'
-      )
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow('status update denied')
 
       expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalled()
@@ -1736,7 +1748,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow('status read denied')
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow('status read denied')
 
       expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
@@ -1796,9 +1810,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(
-        /public-web external egress bindings/
-      )
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/public-web external egress bindings/)
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
@@ -1814,9 +1828,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(
-        /public-web external egress bindings/
-      )
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/public-web external egress bindings/)
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
@@ -2278,9 +2292,9 @@ describe('NetworkPolicyReconciler', () => {
           },
         }
 
-        await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(
-          /External egress reconciliation failed/
-        )
+        await expect(
+          reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+        ).rejects.toThrow(/External egress reconciliation failed/)
       }
 
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -2299,9 +2313,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(
-        /resolved disallowed address/
-      )
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/resolved disallowed address/)
 
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
@@ -2334,9 +2348,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(
-        /private, internal, metadata/
-      )
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/private, internal, metadata/)
 
       expect(dns.resolve4).not.toHaveBeenCalled()
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -2355,9 +2369,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(
-        /resolved disallowed address/
-      )
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/resolved disallowed address/)
 
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
@@ -2412,7 +2426,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow('delete denied')
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow('delete denied')
     })
 
     it('deletes stale policies and fails when DNS resolution for that binding fails', async () => {
@@ -2435,7 +2451,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(/dns timeout/)
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/dns timeout/)
 
       expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
       expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
@@ -2480,9 +2498,9 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(reconciler.reconcileExternalEgress(server, { isCurrent: () => true })).rejects.toThrow(
-        /must declare dns or cidr/
-      )
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(/must declare dns or cidr/)
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
@@ -5385,7 +5403,12 @@ describe('NetworkPolicyReconciler', () => {
       // The scoped delta lane reads this boolean and withholds the certificate,
       // so it is the one caller allowed to take the lost fence as an outcome
       // rather than a throw.
-      expect(await reconciler.reconcileContext(staleContext, { honorsLostFence: true, isCurrent: () => true })).toBe(false)
+      expect(
+        await reconciler.reconcileContext(staleContext, {
+          honorsLostFence: true,
+          isCurrent: () => true,
+        })
+      ).toBe(false)
       expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'ctx-default-alpha', namespace: 'mcp-server' })
       )
@@ -5546,7 +5569,9 @@ describe('NetworkPolicyReconciler', () => {
       const forbidden = Object.assign(new Error('forbidden'), { code: 403 })
       mockApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce(forbidden)
 
-      await expect(reconciler.reconcileContext(staleContext, { isCurrent: () => true })).rejects.toBe(forbidden)
+      await expect(
+        reconciler.reconcileContext(staleContext, { isCurrent: () => true })
+      ).rejects.toBe(forbidden)
     })
 
     it('still certifies when the stale policy was already gone', async () => {

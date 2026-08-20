@@ -32,6 +32,15 @@ export interface Config {
   // Kubernetes namespace where per-Host channel-reader Deployments live
   channelsNamespace: string
 
+  // Kubernetes namespace where LlmHook image workloads (guardrail hook pods)
+  // live and where the LlmHook CRDs are watched.
+  llmHooksNamespace: string
+
+  // Periodic LlmHook fullReconcile interval (seconds). Drives the reference-
+  // counted orphan sweep (guardrails phase-4 §3) and readiness convergence when
+  // a watch drops events. 0 disables.
+  llmHookResyncIntervalSec: number
+
   // Container image used for per-Host channel-reader Deployments
   channelReaderImage: string
 
@@ -521,6 +530,12 @@ export const config: Config = {
   // Per-Host channel-reader Deployments namespace
   channelsNamespace: getEnv('CONTEXT_MAPPER_CHANNELS_NAMESPACE', 'channels')!,
 
+  // LlmHook image-workload / CRD-watch namespace (guardrails phase-4).
+  llmHooksNamespace: getEnv('CONTEXT_MAPPER_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
+
+  // Periodic LlmHook resync (default 5 min, matching hostResyncIntervalSec).
+  llmHookResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_LLM_HOOK_RESYNC_SEC', 300),
+
   // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)
   channelReaderImage: getEnv('CONTEXT_MAPPER_CHANNEL_READER_IMAGE', 'clerum/channel-reader:0.9.5')!,
 
@@ -554,7 +569,16 @@ export const config: Config = {
     },
   },
 
-  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply
+  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply.
+  //
+  // llm-hooks is deliberately NOT listed: this list is a package deal, and its
+  // L1 pass grants namespace-wide DNS (`ensureDnsEgress` uses podSelector: {})
+  // plus HCC-gateway egress to every pod carrying clerum.io/managed-by — which
+  // hook pod templates do. That would hand a pure `/v1` responder the implicit
+  // DNS N5 forbids. The llm-hooks baseline is static instead
+  // (deploy/base/llm-hooks/networkpolicies.yaml: deny-all ingress + egress),
+  // with per-pod-key ingress and scoped CoreDNS emitted by LlmHookReconciler
+  // only for hooks that declare egressBindings.
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
     'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'

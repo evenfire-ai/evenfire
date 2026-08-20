@@ -40,6 +40,7 @@ import {
 import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
+import { LlmHookReconciler, computePodKey, referencedHookIds } from './llmHookReconciler'
 import {
   confirmAuthoritativeMcpServerAbsence,
   isMcpServerStatusOnlyUpdate,
@@ -63,6 +64,8 @@ import {
   GlobalFileSystemSpec,
   HostCRD,
   HostSpec,
+  LlmHookCRD,
+  LlmHookSpec,
   McpServerCRD,
   McpServerInfo,
   McpServerSpec,
@@ -105,6 +108,7 @@ const PLURAL_HOSTS = 'hosts'
 const PLURAL_SHAREDFILESYSTEMS = 'sharedfilesystems'
 const PLURAL_GLOBALFILESYSTEMS = 'globalfilesystems'
 const PLURAL_COMMUNICATIONCHANNELS = 'communicationchannels'
+const PLURAL_LLMHOOKS = 'llmhooks'
 // Before readiness was decoupled, a failed initial McpServer or NetworkPolicy
 // sweep made provider.start() fail and Kubernetes restarted HCC. These retries
 // retain that convergence guarantee now that the sweeps run in the background.
@@ -648,6 +652,53 @@ async function listCommunicationChannelSnapshot(): Promise<CommunicationChannelS
 }
 
 /**
+ * List all LlmHook CRDs in the llm-hooks namespace.
+ */
+export async function listAllLlmHooks(): Promise<LlmHookCRD[]> {
+  if (!customObjectsApi) {
+    throw new Error('K8s client not initialized - are you in dev mode?')
+  }
+  try {
+    console.log(`[K8s] Listing all LlmHooks in namespace ${config.llmHooksNamespace}`)
+    const response = await customObjectsApi.listNamespacedCustomObject({
+      group: GROUP,
+      version: VERSION,
+      namespace: config.llmHooksNamespace,
+      plural: PLURAL_LLMHOOKS,
+    })
+    const list = response as {
+      items: Array<{
+        metadata: {
+          name: string
+          namespace?: string
+          uid?: string
+          generation?: number
+          annotations?: Record<string, string>
+          labels?: Record<string, string>
+        }
+        spec: LlmHookSpec
+        status?: LlmHookCRD['status']
+      }>
+    }
+    const hooks = list.items.map(item => ({
+      name: item.metadata.name,
+      namespace: item.metadata.namespace || config.llmHooksNamespace,
+      uid: item.metadata.uid,
+      generation: item.metadata.generation,
+      annotations: item.metadata.annotations,
+      labels: item.metadata.labels,
+      spec: item.spec,
+      status: item.status,
+    }))
+    console.log(`[K8s] Found ${hooks.length} LlmHook(s)`)
+    return hooks
+  } catch (error) {
+    console.error('[K8s] Failed to list LlmHooks:', error)
+    throw error
+  }
+}
+
+/**
  * Read a Context CRD by contextId.
  * Returns the allowed McpServer names, or null if not found.
  */
@@ -702,12 +753,14 @@ export class McpServerWatcher implements McpServerProvider {
   private sfsWatchRequest: { abort: () => void } | null = null
   private gfsWatchRequest: { abort: () => void } | null = null
   private ccWatchRequest: { abort: () => void } | null = null
+  private llmHookWatchRequest: { abort: () => void } | null = null
   private servers: Map<string, McpServerCRD> = new Map()
   private hosts: Map<string, HostCRD> = new Map()
   private contexts: Map<string, ContextCRD> = new Map()
   private sharedFileSystems: Map<string, SharedFileSystemCRD> = new Map()
   private globalFileSystems: Map<string, GlobalFileSystemCRD> = new Map()
   private communicationChannels: Map<string, CommunicationChannelCRD> = new Map()
+  private llmHooks: Map<string, LlmHookCRD> = new Map()
   private mcpWatchGeneration = 0
   private contextWatchGeneration = 0
   private mcpServerDesiredRevision = 0
@@ -794,6 +847,7 @@ export class McpServerWatcher implements McpServerProvider {
   private reconciler: McpServerReconciler
   private hostReconciler: HostReconciler
   private netPolReconciler: NetworkPolicyReconciler
+  private llmHookReconciler: LlmHookReconciler
   private bindingReconciler: BindingPolicyReconciler
   private sharedFileSystemReconciler: SharedFileSystemReconciler
   private gfsReconciler: GfsReconciler
@@ -844,6 +898,9 @@ export class McpServerWatcher implements McpServerProvider {
   // reported Initializing/Degraded needs a periodic re-reconcile to converge to a
   // truthful Ready. Disabled when interval <= 0 (tests).
   private sfsResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Periodic LlmHook resync: drives the reference-counted orphan sweep and
+  // readiness convergence when the watch drops events (guardrails phase-4 §3).
+  private llmHookResyncTimer: ReturnType<typeof setInterval> | null = null
   // Periodic GlobalFileSystem resync: like SFS, the gfs watch fires only on the
   // CRD changing — not on the gfsc writer Deployment becoming Available — so a
   // GlobalFileSystem stuck at Initializing converges to Ready (and seeds its
@@ -878,6 +935,9 @@ export class McpServerWatcher implements McpServerProvider {
       administrativeOutcomeReporter: this.administrativeOutcomeReporter,
     })
     this.netPolReconciler = new NetworkPolicyReconciler(kc, this.servers)
+    // LlmHook reconciler shares the live hook + host caches so it can recompute
+    // pod-key member sets and the Host→LlmHook reverse index on every reconcile.
+    this.llmHookReconciler = new LlmHookReconciler(kc, this.llmHooks, this.hosts)
     this.bindingReconciler = new BindingPolicyReconciler(kc, config.namespace)
     this.sharedFileSystemReconciler = new SharedFileSystemReconciler(kc)
     // gfs (Global File System) — DISTINCT from SharedFileSystem. The reconcile
@@ -2504,6 +2564,31 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
+   * Trigger a reconcile for any cached image `LlmHook` whose `envSecret` matches
+   * the changed Secret (spec §8.2). A rotation (same name, new contents) leaves
+   * the pod key unchanged but re-stamps the credentials-revision on the pod
+   * template → rolling restart onto the new credential — mirroring
+   * `reconcileByEnvSecret` for McpServer. Driven by the llm-hooks SecretInformer.
+   */
+  async reconcileLlmHookByEnvSecret(secretName: string, secretNamespace: string): Promise<void> {
+    if (secretNamespace !== config.llmHooksNamespace) return
+    for (const hook of this.llmHooks.values()) {
+      if (hook.spec.target?.image?.envSecret !== secretName) continue
+      try {
+        console.log(
+          `[K8s] Re-reconciling LlmHook "${hook.name}" after Secret "${secretName}" change`
+        )
+        // Pod key is unchanged by a contents-only rotation, so pass it as the
+        // previous key (no stale-workload teardown) — the reconcile re-stamps the
+        // credentials-revision and rolls the shared pod.
+        await this.llmHookReconciler.reconcile(hook, computePodKey(hook))
+      } catch (err) {
+        console.error(`[K8s] Secret-triggered LlmHook reconcile failed for "${hook.name}":`, err)
+      }
+    }
+  }
+
+  /**
    * Get all cached servers.
    */
   getAllServers(): McpServerCRD[] {
@@ -2704,6 +2789,27 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
+    // ── LlmHook initial load + reconciliation (guardrails phase-4) ──
+    // Runs AFTER the Host cache is populated so the shared hook pods' NetworkPolicy
+    // ingress reflects the current Host→LlmHook reverse index on the first pass.
+    // The GFS lane and the four pre-existing watches moved to dev's per-resource
+    // background lanes (startGlobalFileSystemBackgroundLane and friends); only the
+    // LlmHook lane is new here, so only it survives this merge.
+    try {
+      const initialHooks = await listAllLlmHooks()
+      for (const hook of initialHooks) {
+        this.llmHooks.set(hook.name, hook)
+      }
+      console.log('[K8s] Running initial LlmHook reconciliation...')
+      await this.llmHookReconciler.fullReconcile(initialHooks)
+    } catch (error) {
+      console.error(
+        '[K8s] Skipping initial LlmHook reconciliation because discovery failed:',
+        error
+      )
+    }
+    await this.startLlmHookWatch()
+
     const resyncSec = config.hostResyncIntervalSec
     if (resyncSec > 0) {
       this.resyncTimer = setInterval(() => {
@@ -2725,6 +2831,18 @@ export class McpServerWatcher implements McpServerProvider {
     } else {
       console.warn(
         '[K8s] SharedFileSystem periodic resync disabled; a SharedFileSystem stuck in Initializing/Degraded will not auto-recover to Ready until another SFS event triggers reconciliation (#592).'
+      )
+    }
+
+    const llmHookResyncSec = config.llmHookResyncIntervalSec
+    if (llmHookResyncSec > 0) {
+      this.llmHookResyncTimer = setInterval(() => {
+        void this.runLlmHookResync()
+      }, llmHookResyncSec * 1000)
+      console.log(`[K8s] LlmHook periodic resync enabled (every ${llmHookResyncSec}s)`)
+    } else {
+      console.warn(
+        '[K8s] LlmHook periodic resync disabled; label-orphaned hook workloads will not be swept until another LlmHook event triggers reconciliation.'
       )
     }
 
@@ -3895,6 +4013,90 @@ export class McpServerWatcher implements McpServerProvider {
     })
   }
 
+  private getLlmHookWatchCallback(): (
+    type: string,
+    apiObj: {
+      metadata: {
+        name: string
+        namespace?: string
+        uid?: string
+        generation?: number
+        annotations?: Record<string, string>
+        labels?: Record<string, string>
+      }
+      spec: LlmHookSpec
+      status?: LlmHookCRD['status']
+    }
+  ) => Promise<void> {
+    return async (type, apiObj) => {
+      const hook: LlmHookCRD = {
+        name: apiObj.metadata.name,
+        namespace: apiObj.metadata.namespace || config.llmHooksNamespace,
+        uid: apiObj.metadata.uid,
+        generation: apiObj.metadata.generation,
+        annotations: apiObj.metadata.annotations,
+        labels: apiObj.metadata.labels,
+        spec: apiObj.spec,
+        status: apiObj.status,
+      }
+
+      console.log(`[K8s] LlmHook watch event: ${type} for ${hook.name}`)
+
+      // Compute the pod key the CR had BEFORE this event so an image bump can
+      // chain teardown of the old pod key with ensure of the new one (§4), and
+      // a delete can GC the workload the CR was a member of.
+      const previous = this.llmHooks.get(hook.name)
+      const previousPodKey = previous ? computePodKey(previous) : null
+
+      if (type === 'ADDED' || type === 'MODIFIED') {
+        this.llmHooks.set(hook.name, hook)
+      } else if (type === 'DELETED') {
+        this.llmHooks.delete(hook.name)
+      }
+
+      try {
+        if (type === 'ADDED' || type === 'MODIFIED') {
+          await this.llmHookReconciler.reconcile(hook, previousPodKey)
+        } else if (type === 'DELETED') {
+          await this.llmHookReconciler.reconcileDelete(hook.name, previousPodKey)
+        }
+      } catch (error) {
+        console.error(`[K8s] LlmHook reconciliation failed for ${hook.name}:`, error)
+      }
+    }
+  }
+
+  /**
+   * Start watching LlmHook CRDs in the llm-hooks namespace.
+   */
+  private async startLlmHookWatch(): Promise<void> {
+    const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.llmHooksNamespace}/${PLURAL_LLMHOOKS}`
+    console.log(`[K8s] Starting LlmHook watch`)
+
+    const watchCallback = this.getLlmHookWatchCallback()
+
+    const doneCallback = (err: Error | null) => {
+      if (this.stopped) return
+      if (err) {
+        console.error('[K8s] LlmHook watch error:', err)
+      }
+      console.log('[K8s] LlmHook watch ended, restarting...')
+      setTimeout(() => this.startLlmHookWatch(), err ? 5000 : 1000)
+    }
+
+    this.llmHookWatchRequest = await this.watch.watch(path, {}, watchCallback, doneCallback)
+  }
+
+  /** Periodic LlmHook resync: full reconcile drives the orphan sweep (§3). */
+  private async runLlmHookResync(): Promise<void> {
+    if (this.stopped) return
+    try {
+      await this.llmHookReconciler.fullReconcile([...this.llmHooks.values()])
+    } catch (error) {
+      console.error('[K8s] LlmHook periodic resync failed:', error)
+    }
+  }
+
   /**
    * Start watching Context CRDs for NetworkPolicy reconciliation.
    */
@@ -4154,6 +4356,10 @@ export class McpServerWatcher implements McpServerProvider {
       // per-event hostWatchRevision counter above.
       const previousHost = this.hosts.get(host.name)
       let hostDesiredStateChanged = false
+      // Same pre-event snapshot, aliased for the Host→LlmHook reverse index: a
+      // removed reference must re-reconcile the (now smaller) NetworkPolicy
+      // ingress set for the affected hook pod keys.
+      const previousHostForHooks = previousHost
       if (eventType === 'ADDED' || eventType === 'MODIFIED') {
         hostDesiredStateChanged =
           previousHost === undefined || !this.sameHostDesiredRevision(previousHost, host)
@@ -4172,6 +4378,36 @@ export class McpServerWatcher implements McpServerProvider {
       } catch (error) {
         console.error(`[K8s] Host reconciliation failed for ${host.name}:`, error)
         this.scheduleHostWatchReconcileRetry(eventType, host, eventRevision)
+      }
+
+      // Fan out to the LlmHook NetworkPolicy ingress (§5): re-reconcile the hook
+      // pod keys this Host references now (or referenced before), so ingress
+      // admits exactly the current set of mcp-hosts.
+      const affectedHookIds = new Set<string>([
+        ...referencedHookIds(previousHostForHooks),
+        ...(eventType === 'DELETED' ? [] : referencedHookIds(host)),
+      ])
+      if (affectedHookIds.size > 0) {
+        try {
+          await this.llmHookReconciler.reconcileNetworkPoliciesForHooks([...affectedHookIds])
+        } catch (error) {
+          console.error(
+            `[K8s] LlmHook NetworkPolicy fan-out after Host "${host.name}" change failed:`,
+            error
+          )
+        }
+      }
+
+      // Keep this Host's scoped egress-to-hooks policy in sync with its CURRENT
+      // references (N1/N7) — in particular the "dropped the last hook reference"
+      // case, where the policy must be removed. On DELETE the Host reconciler's
+      // deleteHostNetworkPolicies removes it by name.
+      if (eventType !== 'DELETED') {
+        try {
+          await this.llmHookReconciler.reconcileHostEgress(host)
+        } catch (error) {
+          console.error(`[K8s] Host egress-to-hooks reconcile for "${host.name}" failed:`, error)
+        }
       }
     }
 
@@ -4248,6 +4484,10 @@ export class McpServerWatcher implements McpServerProvider {
       clearInterval(this.sfsResyncTimer)
       this.sfsResyncTimer = null
     }
+    if (this.llmHookResyncTimer) {
+      clearInterval(this.llmHookResyncTimer)
+      this.llmHookResyncTimer = null
+    }
     if (this.gfsResyncTimer) {
       clearInterval(this.gfsResyncTimer)
       this.gfsResyncTimer = null
@@ -4286,6 +4526,11 @@ export class McpServerWatcher implements McpServerProvider {
       console.log('[K8s] Stopping CommunicationChannel watch')
       this.ccWatchRequest.abort()
       this.ccWatchRequest = null
+    }
+    if (this.llmHookWatchRequest) {
+      console.log('[K8s] Stopping LlmHook watch')
+      this.llmHookWatchRequest.abort()
+      this.llmHookWatchRequest = null
     }
     await Promise.allSettled([
       this.infrastructureTelemetryReporter?.stop(),

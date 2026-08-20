@@ -5,6 +5,15 @@ import { McpServerInfo, McpTool, ToolCallResult } from '../types'
 import { McpClient, type McpToolCallOptions } from './client'
 import { ServerStatusTracker } from './serverStatus'
 
+export interface McpStatusRefreshSummary {
+  serverCount: number
+  succeeded: number
+  failed: number
+  toolCount: number
+  outputSchemaCount: number
+  aborted: boolean
+}
+
 export type McpAdmissionOutcome = 'applied' | 'stale'
 export interface McpAdmissionControl {
   isCurrent?: () => boolean
@@ -451,23 +460,76 @@ export class McpManager {
    * Called by the background heartbeat to keep `observedAt` fresh and to
    * classify refresh failures (spec §4.5 — stay connected, attach reason).
    *
-   * Returns the number of servers probed.
+   * Probes a stable client snapshot. State is written only after every probe
+   * settles; an aborted round never mutates the last known server status.
    */
-  async refreshAllServerStatus(): Promise<number> {
+  async refreshAllServerStatus(options: McpToolCallOptions = {}): Promise<McpStatusRefreshSummary> {
     const entries = [...this.clients.entries()]
-    await Promise.all(
+    if (options.signal?.aborted) {
+      return {
+        serverCount: entries.length,
+        succeeded: 0,
+        failed: 0,
+        toolCount: 0,
+        outputSchemaCount: 0,
+        aborted: true,
+      }
+    }
+
+    const results = await Promise.all(
       entries.map(async ([name, client]) => {
-        const result = await client.probeTools()
-        if (this.clients.get(name) !== client) return
-        if (!result.ok && result.stale) return
-        if (result.ok) {
-          this.statusTracker.updateToolCount(name, result.toolCount)
-        } else {
-          this.statusTracker.updateToolCount(name, 0, { refreshError: result.error })
+        try {
+          return {
+            name,
+            client,
+            // Probes share the round's abort signal directly: the heartbeat owns
+            // round-level cancellation and no per-probe cancellation capability
+            // exists, so wrapping the signal would only fake a seam.
+            result: await client.probeTools({
+              timeoutMs: options.timeoutMs,
+              signal: options.signal,
+            }),
+          }
+        } catch (error) {
+          return { name, client, result: { ok: false as const, error, stale: false } }
         }
       })
     )
-    return entries.length
+    // A probe only counts toward the round's tally when its result is
+    // authoritative for the currently-installed client: never a client swapped
+    // out mid-round, never a stale-error probe that raced a reconnect. This is
+    // the same predicate the status commit below uses, so summary.succeeded /
+    // summary.failed match what was written — a benign mid-round swap can't
+    // inflate `failed` and flip the run's outcome on the series #148 watches.
+    const committed = results.filter(
+      ({ name, client, result }) =>
+        this.clients.get(name) === client && !(!result.ok && result.stale)
+    )
+    const succeeded = committed.filter(({ result }) => result.ok).length
+    const summary: McpStatusRefreshSummary = {
+      serverCount: entries.length,
+      succeeded,
+      failed: committed.length - succeeded,
+      toolCount: committed.reduce(
+        (total, { result }) => total + (result.ok ? result.toolCount : 0),
+        0
+      ),
+      outputSchemaCount: committed.reduce(
+        (total, { result }) => total + (result.ok ? result.outputSchemaCount : 0),
+        0
+      ),
+      aborted: options.signal?.aborted === true,
+    }
+    if (summary.aborted) return summary
+
+    for (const { name, result } of committed) {
+      if (result.ok) {
+        this.statusTracker.updateToolCount(name, result.toolCount)
+      } else {
+        this.statusTracker.updateToolCount(name, 0, { refreshError: result.error })
+      }
+    }
+    return summary
   }
 
   /**
