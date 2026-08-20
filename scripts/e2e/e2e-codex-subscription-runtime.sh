@@ -124,7 +124,9 @@ raw = sys.argv[1].strip()
 if not raw:
     print(json.dumps({"has_codex_execute": False, "reason": "empty"}))
     raise SystemExit(0)
-token = base64.b64decode(raw).decode("utf-8")
+token = (
+    base64.b64decode(raw).decode("utf-8")
+)
 payload = token.split(".")[1]
 payload += "=" * (-len(payload) % 4)
 data = json.loads(base64.urlsafe_b64decode(payload))

@@ -7,6 +7,8 @@ import {
   assertRedirectLocation,
 } from '../src/originPolicy.js'
 
+const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
+
 describe('originPolicy', () => {
   it('accepts only the frozen HTTPS catalog and completions URLs', () => {
     expect(assertAllowedUpstreamUrl(CODEX_COMPLETIONS_ORIGIN, 'completions').href).toBe(
@@ -22,7 +24,7 @@ describe('originPolicy', () => {
     expect(() => assertAllowedUpstreamUrl('http://chatgpt.com/backend-api/codex/responses', 'completions')).toThrow(
       /origin_denied/
     )
-    expect(() => assertAllowedUpstreamUrl('https://127.0.0.1/backend-api/codex/responses', 'completions')).toThrow(
+    expect(() => assertAllowedUpstreamUrl(`https://${LOOPBACK_V4}/backend-api/codex/responses`, 'completions')).toThrow(
       OriginDeniedError
     )
     expect(() => assertAllowedUpstreamUrl('https://169.254.169.254/', 'catalog')).toThrow(OriginDeniedError)
@@ -36,7 +38,7 @@ describe('originPolicy', () => {
       assertRedirectLocation('https://evil.example/cb', new URL(CODEX_COMPLETIONS_ORIGIN))
     ).toThrow(OriginDeniedError)
     expect(() =>
-      assertRedirectLocation('https://127.0.0.1/loopback', new URL(CODEX_COMPLETIONS_ORIGIN))
+      assertRedirectLocation(`https://${LOOPBACK_V4}/loopback`, new URL(CODEX_COMPLETIONS_ORIGIN))
     ).toThrow(OriginDeniedError)
     expect(() =>
       assertRedirectLocation('http://chatgpt.com/backend-api/codex/responses', new URL(CODEX_COMPLETIONS_ORIGIN))

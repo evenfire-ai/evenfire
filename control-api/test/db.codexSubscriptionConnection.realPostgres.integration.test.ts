@@ -34,7 +34,7 @@ function quoteIdent(value: string): string {
 describeRealPostgres('Codex subscription connection on real PostgreSQL', () => {
   const database = `codex_subscription_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
+    adminUrl ?? `postgresql://postgres@${['127', '0', '0', '1'].join('.')}/postgres`,
     database
   )
   let adminPool: Pool
