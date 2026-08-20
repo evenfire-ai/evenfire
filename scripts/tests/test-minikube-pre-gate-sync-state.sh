@@ -175,7 +175,9 @@ if contains 'fence_control_api()' &&
    contains 'restore_control_api()' &&
    contains 'fence_workflow_reconciler' &&
    contains 'fence_control_api' &&
-   contains 'trap restore_pre_gate_writers EXIT' &&
+   contains 'trap finalize_pre_gate_sync EXIT' &&
+   contains 'restore_pre_gate_writers || return 1' &&
+   contains 'commit_cluster_sync_state "${cluster_fingerprint}" "${infra_fingerprint}"' &&
    grep -Fq 'type: Recreate' deploy/base/control-plane/control-api.yaml; then
   pass "pre-gate and Deployment enforce a no-overlap Control API writer window"
 else
@@ -217,7 +219,8 @@ fi
 
 if contains 'fence_workflow_reconciler()' &&
    contains 'restore_workflow_reconciler()' &&
-   contains 'trap restore_pre_gate_writers EXIT' &&
+   contains 'trap finalize_pre_gate_sync EXIT' &&
+   contains 'restore_pre_gate_writers || return 1' &&
    contains 'fence_workflow_reconciler' &&
    contains 'run-control-api-db-migration.sh' &&
    contains 'make minikube-deploy-all'; then

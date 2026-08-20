@@ -25,7 +25,12 @@ for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T0" \
   "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh" \
   "$ROOT/scripts/tests/test-minikube-gfs-provision-order.sh" \
+  "$ROOT/scripts/tests/test-minikube-pre-gate-sync-state.sh" \
   "$ROOT/scripts/tests/test-minikube-pre-gate-restore.sh" \
+  "$ROOT/scripts/tests/test-minikube-sync-auth-key.sh" \
+  "$ROOT/scripts/tests/test-minikube-sync-auth-key-durable.sh" \
+  "$ROOT/scripts/tests/test-minikube-targeted-gfs-sync.sh" \
+  "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"; do
   bash -n "$file"
 done
@@ -499,7 +504,12 @@ bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"
 bash "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh"
 bash "$ROOT/scripts/tests/test-minikube-gfs-provision-order.sh"
+bash "$ROOT/scripts/tests/test-minikube-pre-gate-sync-state.sh"
 bash "$ROOT/scripts/tests/test-minikube-pre-gate-restore.sh"
+bash "$ROOT/scripts/tests/test-minikube-sync-auth-key.sh"
+bash "$ROOT/scripts/tests/test-minikube-sync-auth-key-durable.sh"
+bash "$ROOT/scripts/tests/test-minikube-targeted-gfs-sync.sh"
+bash "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh"
 bash "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"
 
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'

@@ -57,7 +57,11 @@ fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "mcp-host-config" ]]; then
   if has_output_flag "$@"; then
-    printf 'old-key'
+    if [[ "$*" == *auth-key-applied-sha256* ]]; then
+      printf '%s' "${TEST_MCP_APPLIED_HASH:-old-hash}"
+    else
+      printf 'old-key'
+    fi
   fi
   exit 0
 fi
@@ -68,7 +72,11 @@ if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "gfs-config" ]
     exit 1
   fi
   if has_output_flag "$@"; then
-    printf 'old-gfs-key'
+    if [[ "$*" == *auth-key-applied-sha256* ]]; then
+      printf '%s' "${TEST_GFS_APPLIED_HASH:-old-hash}"
+    else
+      printf 'old-gfs-key'
+    fi
   fi
   exit 0
 fi
@@ -93,16 +101,40 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" && "${3:-}" == "gfs-controller-d
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "deployment" && "${3:-}" == "-l" ]]; then
-  [[ "${TEST_GFS_DEPLOYMENTS:-0}" == "1" ]] || exit 0
-  printf 'deployment.apps/gfsc-writer\ndeployment.apps/gfsc-reader\n'
+  printf 'deployment.apps/chatllm\ndeployment.apps/mcp-host\ndeployment.apps/custom-host\n'
   exit 0
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == deployment/* ]]; then
+  if [[ "${2:-}" == "deployment/gfsc-writer" || "${2:-}" == "deployment/gfsc-reader" ]]; then
+    if [[ "${TEST_GFS_DEPLOYMENTS:-0}" != "1" ]]; then
+      printf 'Error from server (NotFound): deployments.apps "%s" not found\n' "${2#deployment/}" >&2
+      exit 1
+    fi
+  fi
   exit 0
 fi
 
-if [[ "${1:-}" == "rollout" && "${2:-}" == "restart" && "${3:-}" == "deployment" && "${4:-}" == "-l" ]]; then
+if [[ "${1:-}" == "get" && "${2:-}" == "pods" ]]; then
+  case "$*" in
+    *app=chatllm*) printf 'chatllm-pod|True|\n' ;;
+    *app=mcp-host*) printf 'mcp-host-pod|True|\n' ;;
+    *app=custom-host*) printf 'custom-host-pod|True|\n' ;;
+    *gfsc-role=writer*) printf 'gfsc-writer-pod|True|\n' ;;
+    *gfsc-role=reader*) printf 'gfsc-reader-pod|True|\n' ;;
+    *) exit 99 ;;
+  esac
+  exit 0
+fi
+
+if [[ "${1:-}" == "exec" ]]; then
+  payload="$(cat)"
+  [[ "${TEST_CONSUMER_KEY_MATCH:-1}" == "1" && "${payload}" == "public-key" ]]
+  exit
+fi
+
+if [[ "${1:-}" == "rollout" && "${2:-}" == "restart" && \
+      ( "${3:-}" == "deployment/gfsc-writer" || "${3:-}" == "deployment/gfsc-reader" ) ]]; then
   [[ "${TEST_GFS_DSN_PRESENT:-0}" == "1" ]] || {
     echo "unexpected gfsc rollout restart before DSN provisioning" >&2
     exit 98
@@ -123,6 +155,12 @@ fi
 if [[ "${1:-}" == "rollout" && "${2:-}" == "restart" && "${3:-}" == "deployment/mcp-host" ]]; then
   restart_count mcp-host >/dev/null
   echo 'deployment.apps/mcp-host restarted'
+  exit 0
+fi
+
+if [[ "${1:-}" == "rollout" && "${2:-}" == "restart" && "${3:-}" == "deployment/custom-host" ]]; then
+  restart_count custom-host >/dev/null
+  echo 'deployment.apps/custom-host restarted'
   exit 0
 fi
 
@@ -159,9 +197,16 @@ if [[ "$(cat "${STATE_DIR}/mcp-host.restart-count")" != "1" ]]; then
   exit 1
 fi
 
+if [[ "$(cat "${STATE_DIR}/custom-host.restart-count")" != "1" ]]; then
+  echo "FAIL: managed custom mcp-host deployment was not restarted" >&2
+  cat "${OUT_FILE}" >&2
+  exit 1
+fi
+
 grep -q 'patch configmap mcp-host-config' "${LOG_FILE}"
 grep -q 'rollout status deployment/chatllm -n mcp-host --timeout=180s' "${LOG_FILE}"
 grep -q 'rollout status deployment/mcp-host -n mcp-host --timeout=180s' "${LOG_FILE}"
+grep -q 'rollout status deployment/custom-host -n mcp-host --timeout=180s' "${LOG_FILE}"
 
 : >"${LOG_FILE}"
 if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_GFS_CONFIG_PRESENT=1 PATH="${TMP_DIR}:$PATH" \
@@ -172,9 +217,9 @@ if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_GFS_CONFI
 fi
 
 grep -q 'patch configmap gfs-config' "${LOG_FILE}"
-grep -q 'Skipping gfsc restart after auth key drift (gfs-controller-db.connection-string not populated yet)' "${OUT_FILE}"
-if grep -q 'rollout restart deployment -l' "${LOG_FILE}"; then
-  echo "FAIL: gfsc restarted before gfs-controller-db DSN was populated" >&2
+grep -q 'No gfsc deployments exist yet; auth key is synced for future pods' "${OUT_FILE}"
+if grep -q 'rollout restart deployment/gfsc-' "${LOG_FILE}"; then
+  echo "FAIL: absent gfsc deployments were restarted" >&2
   cat "${OUT_FILE}" >&2
   exit 1
 fi
@@ -274,10 +319,10 @@ if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
   echo "FAIL: GFS auth sync swallowed a failed rollout status" >&2
   exit 1
 fi
-grep -q 'gfsc deployment deployment.apps/gfsc-writer did not become Ready after auth key drift' "${OUT_FILE}" || {
+grep -q 'gfsc deployment deployment/gfsc-writer did not become Ready after auth key drift' "${OUT_FILE}" || {
   cat "${OUT_FILE}" >&2
   echo "FAIL: GFS rollout failure did not produce a stable diagnostic" >&2
   exit 1
 }
 
-echo "PASS: auth-key sync retries transient rollout restart race and skips gfsc restart until DSN provisioning"
+echo "PASS: auth-key sync retries transient rollout restart race and handles absent gfsc consumers safely"

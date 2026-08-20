@@ -60,4 +60,58 @@ CONTROL_API_FENCED=true
 restore_control_api || fail 'Control API restore rejected a successful scale and rollout'
 [ "$CONTROL_API_FENCED" = false ] || fail 'Control API fence remained armed after a successful restore'
 
-printf 'PASS: pre-gate restores fail closed and preserve writer fences\n'
+# EXIT traps do not propagate their return value in Bash. The pre-gate
+# finalizer must therefore exit explicitly when a last-chance restore fails.
+set +e
+PRE_GATE_SYNC_CONFIG_ONLY=true MINIKUBE_PROFILE=restore-contract IMAGE_SOURCE=local \
+  bash -c '
+    script="$1"; set --; source "$script" >/dev/null
+    restore_pre_gate_writers() { return 31; }
+  ' bash "$ROOT/scripts/minikube/pre-gate-sync.sh" >/dev/null 2>&1
+exit_status=$?
+set -e
+[ "$exit_status" -ne 0 ] || fail 'EXIT cleanup failure was hidden behind a zero pre-gate status'
+
+set +e
+PRE_GATE_SYNC_CONFIG_ONLY=true MINIKUBE_PROFILE=restore-contract IMAGE_SOURCE=local \
+  bash -c '
+    script="$1"; set --; source "$script" >/dev/null
+    restore_pre_gate_writers() { return 0; }
+    t2_lock_release() { return 41; }
+  ' bash "$ROOT/scripts/minikube/pre-gate-sync.sh" >/dev/null 2>&1
+exit_status=$?
+set -e
+[ "$exit_status" -ne 0 ] || fail 'EXIT lock cleanup failure was hidden behind a zero pre-gate status'
+
+set +e
+PRE_GATE_SYNC_CONFIG_ONLY=true MINIKUBE_PROFILE=restore-contract IMAGE_SOURCE=local \
+  bash -c '
+    script="$1"; set --; source "$script" >/dev/null
+    restore_pre_gate_writers() { return 0; }
+    exit 23
+  ' bash "$ROOT/scripts/minikube/pre-gate-sync.sh" >/dev/null 2>&1
+exit_status=$?
+set -e
+[ "$exit_status" -eq 23 ] || fail "EXIT cleanup replaced original failure status 23 with ${exit_status}"
+
+# Exact-head state is committed only after both fenced writers are restored.
+events=""
+restore_pre_gate_writers() { events+="restore "; return 1; }
+persist_cluster_marker() { events+="marker "; }
+persist_state() { events+="state-$1 "; }
+if commit_cluster_sync_state cluster-fingerprint infra-fingerprint; then
+  fail 'cluster sync state committed despite writer restore failure'
+fi
+[ "$events" = "restore " ] || fail "marker/state mutation ran after failed restore: ${events}"
+
+events=""
+restore_pre_gate_writers() { events+="restore "; return 0; }
+commit_cluster_sync_state cluster-fingerprint infra-fingerprint || \
+  fail 'cluster sync state rejected a successful writer restore'
+[ "$events" = "restore marker state-cluster state-infra " ] || \
+  fail "cluster marker was not persisted after restore in the required order: ${events}"
+
+# Leave the sourced script's EXIT finalizer with a successful cleanup stub.
+restore_pre_gate_writers() { return 0; }
+
+printf 'PASS: pre-gate cleanup propagates failures and exact-head state commits only after restore\n'

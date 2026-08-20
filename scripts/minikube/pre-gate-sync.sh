@@ -191,20 +191,51 @@ restore_control_api() {
 }
 
 restore_pre_gate_writers() {
-  local status=$?
+  local status=0
   # Restore Control API first so it can serve the final readiness checks; WRC
   # remains last because it is the consumer that must stay stopped until every
   # migration, writer restart, and legacy-policy gate has completed.
   restore_control_api || status=1
   restore_workflow_reconciler || status=1
-  t2_lock_release "$status" || status=$?
   return "$status"
+}
+
+finalize_pre_gate_sync() {
+  local status=$? restore_status=0
+
+  # An EXIT trap's return value does not replace the script's exit status. Exit
+  # explicitly so a failed writer restore cannot turn a successful sync into a
+  # green exact-head attestation. Disable the trap first to avoid recursion.
+  trap - EXIT
+  if ! restore_pre_gate_writers; then
+    restore_status=1
+  fi
+  if [[ "${status}" -eq 0 && "${restore_status}" -ne 0 ]]; then
+    status=1
+  fi
+  # t2_lock_release returns the status passed to it; pass zero so an existing
+  # non-zero script status is preserved rather than misclassified as a lock
+  # cleanup failure.
+  t2_lock_release 0 || status=1
+  exit "${status}"
+}
+
+commit_cluster_sync_state() {
+  local cluster_fingerprint="$1" infra_fingerprint="$2"
+
+  # The exact-head marker is a certification artifact, not merely progress.
+  # Restore every fenced writer before publishing it so a cleanup failure can
+  # never leave a marker that claims the cluster is ready at this HEAD.
+  restore_pre_gate_writers || return 1
+  persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}" || return 1
+  persist_state cluster "${cluster_fingerprint}" || return 1
+  persist_state infra "${infra_fingerprint}" || return 1
 }
 
 if [ "$PRE_GATE_SYNC_CONFIG_ONLY" != true ]; then
   t2_mutation_lock
 fi
-trap restore_pre_gate_writers EXIT
+trap finalize_pre_gate_sync EXIT
 
 fingerprint_dir() {
   local dir="$1"
@@ -762,9 +793,7 @@ if [[ "${cluster_changed}" == "true" ]]; then
     "${SCRIPT_DIR}/pf-all-stack.sh"
   fi
 
-  persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}"
-  persist_state cluster "${cluster_fingerprint}"
-  persist_state infra "${infra_fingerprint}"
+  commit_cluster_sync_state "${cluster_fingerprint}" "${infra_fingerprint}"
   log "Pre-gate cluster sync complete"
 else
   log "No cluster sync required before ${GATE_NAME}"
