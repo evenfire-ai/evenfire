@@ -541,7 +541,13 @@ describe('GfsBrowser', () => {
       await within(dialog).findByRole('img', { name: 'Preview of avatar.PNG' })
     ).toHaveAttribute('src', 'blob:gfs-image-preview')
     expect(mockGfsFetchFileBlob).toHaveBeenCalledWith('r2')
-    expect((mockCreateObjectUrl.mock.calls[0]?.[0] as Blob).type).toBe('image/png')
+    // Preview modal wraps the fetched blob with the original MIME type so
+    // the dialog <img> loads as that media type; the row thumbnail uses
+    // the raw blob so it appears first in the createObjectURL log.
+    const previewCall = mockCreateObjectUrl.mock.calls.find(
+      call => (call[0] as Blob).type === 'image/png'
+    )
+    expect(previewCall?.[0]).toBeDefined()
 
     const closeButton = within(dialog).getByRole('button', { name: /close image preview/i })
     fireEvent.click(closeButton)
@@ -563,7 +569,9 @@ describe('GfsBrowser', () => {
       items: [child('diagram.svg', 'file', 4)],
       nextCursor: null,
     })
-    mockGfsFetchFileBlob.mockRejectedValueOnce(new Error('preview unavailable'))
+    // Both the row thumbnail and the preview modal hit gfsFetchFileBlob
+    // for the same file; reject both so the preview can show its error.
+    mockGfsFetchFileBlob.mockRejectedValue(new Error('preview unavailable'))
     renderBrowser()
 
     fireEvent.click(await screen.findByRole('button', { name: 'diagram.svg' }))

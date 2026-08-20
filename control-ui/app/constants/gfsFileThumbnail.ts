@@ -1,0 +1,1 @@
+export const GFS_FILE_THUMBNAIL_MAX_BYTES = 1 * 1024 * 1024

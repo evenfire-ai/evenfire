@@ -11524,6 +11524,16 @@ button.cu-gfs-tree__button:focus-visible,
   display: grid;
   place-items: center;
   color: var(--cu-text-muted);
+  overflow: hidden;
+  border-radius: var(--cu-radius-sm);
+}
+
+.cu-gfs-file-thumbnail {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  border-radius: var(--cu-radius-sm);
 }
 
 .cu-gfs-list__meta {
