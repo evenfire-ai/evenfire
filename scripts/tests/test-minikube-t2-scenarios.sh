@@ -286,6 +286,7 @@ grep -Fq 'wait-gfs-reader-ready.sh' "$ROOT/scripts/minikube/pre-gate-sync.sh" ||
 [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB must restore a NOLOGIN GFS role and resume an abandoned reader rollout on both reconcile calls'
 [[ "$(grep -c 'scripts/minikube/settle-gfs-reader-rollout.sh' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB must settle a Ready gfsc-reader leftover rollout claim before both reconciles'
 [[ "$(grep -c 'gfs-rollout-shim' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB reconciles must use the HCC-safe reader rollout wait on both calls'
+[[ "$(grep -c 'sync-auth-key.sh' "$ROOT/scripts/minikube/full-setup.sh")" -ge 3 ]] || fail 'full-setup must re-sync gfs-config.jwt-public-key before both GFS reconciles'
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"

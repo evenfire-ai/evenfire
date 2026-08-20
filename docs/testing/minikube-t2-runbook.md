@@ -153,7 +153,12 @@ revisions until timeout; every harness GFS reconcile therefore runs with the
 `scripts/minikube/gfs-rollout-shim` PATH prefix, which intercepts exactly
 the reader `rollout status` wait and judges readiness instead
 (`scripts/minikube/wait-gfs-reader-ready.sh`: desired replicas Ready and no
-live non-terminating unready reader pod). `pre-gate-sync`
+live non-terminating unready reader pod). A reader pod also fails closed
+when `gfs-config.jwt-public-key` is empty — the overlay re-applies the base
+ConfigMap with an empty value — so `full-setup.sh` and `pre-gate-sync` re-run
+`scripts/minikube/sync-auth-key.sh` before each GFS reconcile; otherwise no
+new reader pod can start and the readiness wait can only time out.
+`pre-gate-sync`
 provisions GFS serving with the same opt-ins in every sync plan (including
 "no cluster sync required") and, after a successful restore, restarts an
 unready `gfsc-reader`, deletes its live unready pods once, and waits on the
