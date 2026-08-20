@@ -77,6 +77,15 @@ the marker does not already match HEAD. Harness, documentation, Makefile, and
 `scripts/e2e` diffs do not force a full reconcile. The runner refuses to
 downgrade a `deploy/` or `charts/` change to a service-only restart.
 
+A bootstrapped profile with an unready required deployment also selects
+`full-reconcile` — but only in the orchestrator planner (`T2_PLAN_MODE=true`),
+with a reason that names the unready deployment. The planner must never stop
+with `PROFILE_UNHEALTHY` before a transition is selected: that turned every
+mid-run failure into a manual repair script followed by another full run.
+The standalone `make minikube-t2-preflight` and the final exact-head T2 check
+(`T2_PLAN_MODE=false`) remain fail-loud if a deployment is still unready
+after the reconcile.
+
 ## Ownership and concurrency
 
 The lock is keyed by repository, branch, `HEAD`, and profile, while the
@@ -122,6 +131,19 @@ that drop or rewrite cluster-global roles (`db.realPostgresMigration`,
 `gfsReaderRole`) run against a throwaway `postgres:16-alpine` container so they
 never share live `control-postgres` (#412). CI continues to use
 `CONTROL_API_REAL_PG_ADMIN_URL` unchanged.
+
+GFS runtime credentials are self-healing inside the single run. The
+gfs-controller shared suites exercise cluster-global role names, so the T1
+lane restores the branch-profile GFS credentials on exit (success, failure,
+or interrupt) using the canonical
+`deploy/scripts/reconcile-gfs-deploy-credentials.sh` with
+`GFS_RESTORE_ACTIVE_NOLOGIN=true` — the same contract as the standalone GFS
+T1 gate. `pre-gate-sync` provisions GFS serving with the same opt-in in every
+sync plan (including "no cluster sync required") and restarts an unready
+`gfsc-reader` after a successful restore. The recovery helper restores a
+NOLOGIN role only from the committed Secret DSN and still fails loud when
+that credential cannot authenticate; no password is ever invented and no DSN
+is printed.
 
 ## T0, T1, and T2 boundaries
 

@@ -33,6 +33,9 @@ T1_NEXT_COMMAND='repair the first reported Real PostgreSQL precondition, then re
 T1_TOTAL_TESTS=0
 T1_PASSED_TESTS=0
 T1_PENDING_TESTS=0
+# Armed just before the Real PostgreSQL suites run. The exit trap must not
+# reconcile cluster credentials for a run that never reached the suites
+# (e.g. a failed precondition, or this file being sourced by a harness test).
 T1_GFS_RESTORE_REQUIRED=false
 
 die_t1() {
@@ -53,6 +56,26 @@ stop_isolated_postgres() {
   fi
 }
 
+restore_gfs_runtime_credentials() {
+  # The gfs-controller shared suites exercise the production role names, which
+  # are cluster-global even when their fixture databases are temporary.
+  # Restore the branch profile before T1 exits — success, failure, or
+  # interruption — so a T1 run cannot leave GFSC NOLOGIN and poison the
+  # following exact-head T2 preflight. Same canonical restore contract as
+  # scripts/e2e/gfs-real-pg-minikube-gate.sh; DSNs stay inside the helper.
+  if [ "$T1_GFS_RESTORE_REQUIRED" != true ] || [ -z "$T2_CONTEXT" ]; then
+    return 0
+  fi
+  if ! t2_kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$T2_CONTEXT" \
+    bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    printf '[minikube-t1] ERROR: failed to restore branch-profile GFS credentials\n' >&2
+    return 1
+  fi
+}
+
 cleanup_t1() {
   local status=$?
   if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
@@ -63,14 +86,8 @@ cleanup_t1() {
       wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
     fi
   fi
-  if [ "$T1_GFS_RESTORE_REQUIRED" = true ] && \
-     ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$T2_CONTEXT" \
-       bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
-    printf '[minikube-t1] ERROR: failed to restore branch-profile GFS credentials\n' >&2
-    status=1
-  fi
-  if ! stop_isolated_postgres; then
-    printf '[minikube-t1] ERROR: failed to remove isolated PostgreSQL container\n' >&2
+  stop_isolated_postgres
+  if ! restore_gfs_runtime_credentials; then
     status=1
   fi
   if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi

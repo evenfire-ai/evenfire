@@ -49,7 +49,7 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | `DEVELOPMENT_SCOPE_REQUIRED` | Preflight/final preflight failed a precondition, or T2-only mode was attempted without `already-synced`. | Repair the first reported condition; if T2-only was refused, run full `make minikube-t2`. |
 | `ZERO_TESTS_EXECUTED` | A lane was configured off or executed nothing (including a required-but-missing Playwright journey). | Re-run with the lane enabled, or supply the required `T2_PLAYWRIGHT_COMMAND`. |
 | `POSTGRES_NOT_READY` | PostgreSQL precondition failed, or a PVC reset was requested without the exact expected UID. | Fix DB readiness; never guess a PVC UID. |
-| `PROFILE_UNHEALTHY` | Opt-in user-facing health command failed. | Fix the failing endpoint, re-run T2 on the same HEAD. |
+| `PROFILE_UNHEALTHY` | A required deployment is unready in a fail-loud check (`T2_PLAN_MODE=false`: standalone preflight or the final exact-head T2), or the opt-in user-facing health command failed. The orchestrator planner never emits this for an unready deployment — it selects `full-reconcile` instead. | Re-run `make minikube-t2` on the same HEAD; the single run reconciles and restores GFS credentials itself. Do not run manual repair scripts between runs. |
 
 ## GFS restore pointers (high level, no secrets)
 
@@ -59,6 +59,13 @@ profile. Restore/DSN provisioning for `gfs` is ordered by full-setup /
 `pre-gate-sync` (it stays fail-closed until `control-api` is Ready — see the
 `minikube-deploy-all` note in the Makefile). Do not hand-provision GFS DSNs,
 and never copy DSNs or credentials between namespaces or into evidence.
+
+The harness owns NOLOGIN recovery: T1 restores branch-profile GFS credentials
+on exit, and `pre-gate-sync` provisions serving with
+`GFS_RESTORE_ACTIVE_NOLOGIN=true` in every plan and restarts an unready
+`gfsc-reader` after restore. Do not run
+`reconcile-gfs-deploy-credentials.sh` or `kubectl rollout restart
+deploy/gfsc-reader` by hand as a T2-repair step — re-run the entry point.
 
 ## Dual-repo note
 

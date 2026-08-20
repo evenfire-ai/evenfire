@@ -92,7 +92,15 @@ path is valid only when the pre-gate marker already matches HEAD
 A fresh or uninitialized profile must complete the supported bootstrap. The
 standalone preflight refuses to call `pre-gate-sync` on an incomplete profile;
 `make minikube-t2` runs the supported setup when its planner selects
-`full-bootstrap`. Real PostgreSQL suites are opt-in in the ordinary test
+`full-bootstrap`. The single run is self-healing: when a bootstrapped profile
+has an unready required deployment, the orchestrator planner selects
+`full-reconcile` (naming the deployment) instead of failing
+`PROFILE_UNHEALTHY` before a transition exists; the T1 lane restores
+branch-profile GFS credentials on exit and `pre-gate-sync` provisions GFS
+serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` in every plan, so no manual
+repair script belongs between plan and verdict. The standalone preflight and
+the final exact-head T2 check stay fail-loud on an unready deployment.
+Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by
 silently skipping the suites. The JSON reporter is the suite verdict; a leftover

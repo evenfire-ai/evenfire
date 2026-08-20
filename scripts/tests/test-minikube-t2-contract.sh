@@ -81,6 +81,28 @@ fi
 grep -Fq 'port-forward' "$T1"
 grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 
+# T1 must restore the branch-profile GFS credentials on the way out with the
+# same canonical script and NOLOGIN opt-in the GFS T1 gate uses, so a T1 run
+# cannot leave gfsc-reader unready and fail the exact-head T2 preflight.
+grep -Fq 'restore_gfs_runtime_credentials' "$T1"
+grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$T1"
+grep -Fq 'reconcile-gfs-deploy-credentials.sh' "$T1"
+grep -Fq 'T1_GFS_RESTORE_REQUIRED=true' "$T1"
+grep -Fq 'T2_UNREADY_DEPLOYMENTS' "$COMMON"
+
+# pre-gate-sync GFS serving provisioning must opt into restoring a NOLOGIN
+# role from the committed Secret DSN, and must run in every sync plan.
+PRE_GATE="$MINIKUBE_DIR/pre-gate-sync.sh"
+if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true'; then
+  echo 'FAIL: provision_gfs_serving does not restore a NOLOGIN GFS role from the committed Secret DSN' >&2
+  exit 1
+fi
+if ! sed -n '/No cluster sync required before/,$p' "$PRE_GATE" | grep -Fq 'provision_gfs_serving'; then
+  echo 'FAIL: pre-gate-sync skips GFS serving convergence when no cluster sync is required' >&2
+  exit 1
+fi
+grep -Fq 'converge_gfs_reader_after_restore' "$PRE_GATE"
+
 if grep -Eq 'make minikube-pre-gate-sync|pre-gate-sync\.sh' "$PREFLIGHT"; then
   echo 'FAIL: preflight invokes pre-gate-sync' >&2
   exit 1

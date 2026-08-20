@@ -300,16 +300,43 @@ sync_mcp_host_auth_key() {
   bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}"
 }
 
+converge_gfs_reader_after_restore() {
+  # A reader whose runtime role was NOLOGIN keeps serving 503 from its
+  # already-started pod even after the role is restored. Converging it here
+  # keeps the repair inside the single orchestrated run instead of a manual
+  # `kubectl rollout restart deploy/gfsc-reader` side quest.
+  local deployment=gfsc-reader desired ready
+  if ! ${KC} get deployment "${deployment}" -n gfs >/dev/null 2>&1; then
+    return 0
+  fi
+  desired="$(${KC} get deployment "${deployment}" -n gfs -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  ready="$(${KC} get deployment "${deployment}" -n gfs -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+  if [[ -z "${desired}" || "${desired}" == "0" || "${ready:-0}" == "${desired}" ]]; then
+    return 0
+  fi
+  log "Restarting gfs/${deployment} after credential restore (${ready:-0}/${desired} Ready)"
+  rollout_restart_with_retry gfs "${deployment}"
+  ${KC} rollout status "deployment/${deployment}" -n gfs --timeout=180s >/dev/null
+}
+
 provision_gfs_serving() {
   if ${KC} get configmap gfs-config -n gfs >/dev/null 2>&1; then
     log "Provisioning gfs serving before ${GATE_NAME}"
     # FAIL LOUD: with the GFS stack deployed, a broken gfs_controller credential
     # means every GFS operation 503s (issue #775). Continuing would burn the
     # whole gate run on a cluster that cannot pass.
-    if ! CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    # GFS_RESTORE_ACTIVE_NOLOGIN=true: a role-reset T1 suite can leave the
+    # cluster-global reader role NOLOGIN. On this local branch-owned profile
+    # the committed Secret DSN is the source of truth, so the recovery helper
+    # may restore the role from it — the same contract the GFS T1 gate already
+    # applies on exit. The helper still fails loud when the restored
+    # credential cannot authenticate; no password is invented here.
+    if ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1
     fi
+    converge_gfs_reader_after_restore
   else
     log "Skipping gfs serving provisioning (gfs-config not found — GFS stack not deployed)"
   fi
@@ -471,6 +498,15 @@ if [[ "${cluster_changed}" == "true" ]]; then
     provision_gfs_serving
   fi
 
+  if ! incremental_requires_database_reconcile; then
+    # No schema work is planned, but a role-reset T1 run may still have left
+    # the cluster-global GFS runtime roles NOLOGIN while every image and
+    # manifest matched. Serving provisioning is idempotent, so converge it in
+    # every sync plan instead of leaving an unready gfsc-reader to fail the
+    # exact-head T2 preflight after this sync reports success.
+    provision_gfs_serving
+  fi
+
   # Schema/control-plane first: only after migrations, runtime roles, and
   # inventory gates have converged may the new consumer workloads be applied or
   # restarted. The workflow reconciler is fenced above for this window.
@@ -552,6 +588,11 @@ if [[ "${cluster_changed}" == "true" ]]; then
   log "Pre-gate cluster sync complete"
 else
   log "No cluster sync required before ${GATE_NAME}"
+  # Images and manifests match, yet the GFS runtime credentials can still be
+  # broken (a role-reset T1 leaves the reader NOLOGIN without changing any
+  # fingerprint). Converge serving credentials on every pre-gate pass so a
+  # single orchestrated run repairs them without a manual script.
+  provision_gfs_serving
   assert_no_legacy_prompt_bridge_grants
   ensure_evenfire_registry
   rollout_if_present control-plane nginx-workflow-approval-gateway

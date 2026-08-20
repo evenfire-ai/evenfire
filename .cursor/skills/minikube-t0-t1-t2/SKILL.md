@@ -54,9 +54,12 @@ transition = full-bootstrap (fresh/uninitialized profile)?
       (its internal planner uses T2_PLAN_MODE=true so full-bootstrap is
       reachable; IMAGE_SOURCE=local is enforced by the orchestrator).
 
-transition = full-reconcile (deploy/* or charts/* changed)?
+transition = full-reconcile (deploy/* or charts/* changed, OR a required
+             deployment is unready on a bootstrapped profile)?
   └── make minikube-t2. Never downgrade an infra change to a
-      service-only restart.
+      service-only restart. An unready deployment is repaired inside the
+      run (planner full-reconcile + pre-gate GFS restore), not by a manual
+      script between runs.
 
 transition = targeted-sync (service-only diff)?
   └── make minikube-t2 performs the targeted deploy; record it as a
@@ -85,6 +88,10 @@ T1 runs inside `make minikube-t2`, or explicitly via
   throwaway `postgres:16-alpine`, never the shared `control-postgres`.
 - The admin DSN is resolved in-process from the cluster Secret; never print,
   export, or persist it.
+- T1 restores branch-profile GFS credentials on exit (canonical
+  `reconcile-gfs-deploy-credentials.sh` with `GFS_RESTORE_ACTIVE_NOLOGIN=true`,
+  same as the GFS T1 gate), so a T1 run cannot leave `gfsc-reader` NOLOGIN
+  and poison the T2 preflight. Do not run that restore by hand.
 
 ## Step 4 — Verdict and evidence reporting
 
