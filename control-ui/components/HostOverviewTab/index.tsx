@@ -2,48 +2,6 @@ import React from 'react'
 import { IconRobot } from '../Sidebar/icons'
 import type { HostOverviewTabProps, HostTabKey } from './types'
 
-function UsersIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="20"
-      height="20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="9" cy="8" r="3.2" />
-      <path d="M2.8 19.4c.4-3 2.9-5.2 6.2-5.2s5.8 2.2 6.2 5.2" />
-      <circle cx="17" cy="6.5" r="2.4" />
-      <path d="M21.2 17c-.3-2.2-2-3.7-4.2-3.7" />
-    </svg>
-  )
-}
-
-function TeamIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="20"
-      height="20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="3.5" y="6" width="17" height="13" rx="2" />
-      <path d="M3.5 10.5h17" />
-      <path d="M8 6V4.5h8V6" />
-      <path d="M9 14h6" />
-    </svg>
-  )
-}
-
 const STATUS_DOT_CLASS: Record<HostOverviewTabProps['statusTone'], string> = {
   active: 'cu-host-overview-status__dot--active',
   inactive: 'cu-host-overview-status__dot--inactive',
@@ -67,16 +25,18 @@ function initialsFor(name: string): string {
   return (first + last).toUpperCase() || '?'
 }
 
-// Each section header is a button that jumps the operator to the matching
-// detail tab. The label keeps the visual rhythm (uppercase, muted) and the
-// chevron telegraphs that it's a navigation affordance.
+// Clickable section header inside an Overview card. The optional `count`
+// badge sits inline with the label so the count reads as part of the
+// section title rather than a separate row.
 function NavHeader({
   label,
   tab,
+  count,
   onNavigate,
 }: {
   label: string
   tab?: HostTabKey
+  count?: number
   onNavigate: (tab: HostTabKey) => void
 }) {
   return (
@@ -88,6 +48,9 @@ function NavHeader({
       aria-label={tab ? `Open ${label}` : undefined}
     >
       <span className="cu-host-overview-nav-header__label">{label}</span>
+      {typeof count === 'number' ? (
+        <span className="cu-host-overview-nav-header__count">{count}</span>
+      ) : null}
       <span className="cu-host-overview-nav-header__chev" aria-hidden="true">
         ›
       </span>
@@ -104,6 +67,20 @@ function ConfigRow({ setting, value }: { setting: string; value: React.ReactNode
   )
 }
 
+function formatTimestamp(value: string): string {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const month = date.toLocaleString('en-US', { month: 'long' })
+  const day = date.getDate()
+  const year = date.getFullYear()
+  let hours = date.getHours()
+  const minutes = date.getMinutes().toString().padStart(2, '0')
+  const meridiem = hours >= 12 ? 'PM' : 'AM'
+  hours = hours % 12 || 12
+  return `${month} ${day}, ${year} • ${hours}:${minutes} ${meridiem}`
+}
+
 export function HostOverviewTab({
   hostName,
   displayName,
@@ -117,7 +94,9 @@ export function HostOverviewTab({
   modelAllowlistLine,
   accessSummary,
   onNavigate,
-}: HostOverviewTabProps) {
+  createdAt,
+  lastUpdated,
+}: HostOverviewTabProps & { createdAt: string; lastUpdated: string }) {
   const shownName = displayName.trim() || hostName
   const contextLabel = contextRef.trim() || '—'
   const hasContext = Boolean(contextRef.trim())
@@ -126,10 +105,12 @@ export function HostOverviewTab({
   return (
     <div className="cu-host-overview">
       <section className="cu-host-overview-identity" aria-label="Agent identity">
-        <div className="cu-host-overview-identity__avatar" aria-hidden="true">
-          <IconRobot />
+        <div className="cu-host-overview-identity__name">
+          <span className="cu-host-overview-identity__icon" aria-hidden="true">
+            <IconRobot />
+          </span>
+          {shownName}
         </div>
-        <div className="cu-host-overview-identity__name">{shownName}</div>
         <div className="cu-host-overview-identity__slug">{hostName}</div>
         <div className="cu-host-overview-identity__status">
           <StatusDot tone={statusTone} />
@@ -188,6 +169,15 @@ export function HostOverviewTab({
             —
           </span>
         )}
+
+        <div className="cu-host-overview-identity__divider" />
+
+        <dl className="cu-host-overview-identity__meta">
+          <dt>Created</dt>
+          <dd>{formatTimestamp(createdAt) || '—'}</dd>
+          <dt>Last updated</dt>
+          <dd>{formatTimestamp(lastUpdated) || '—'}</dd>
+        </dl>
       </section>
 
       <div className="cu-host-overview-right">
@@ -209,9 +199,6 @@ export function HostOverviewTab({
             <div className="cu-host-overview-access__columns">
               <div className="cu-host-overview-access__group">
                 <div className="cu-host-overview-access__head">
-                  <span className="cu-host-overview-access__head-icon" aria-hidden="true">
-                    <UsersIcon />
-                  </span>
                   <span className="cu-host-overview-access__head-label">Members</span>
                   <span className="cu-host-overview-access__head-count">
                     {accessSummary.memberCount}
@@ -235,9 +222,6 @@ export function HostOverviewTab({
 
               <div className="cu-host-overview-access__group">
                 <div className="cu-host-overview-access__head">
-                  <span className="cu-host-overview-access__head-icon" aria-hidden="true">
-                    <TeamIcon />
-                  </span>
                   <span className="cu-host-overview-access__head-label">Teams</span>
                   <span className="cu-host-overview-access__head-count">
                     {accessSummary.teamCount}
@@ -264,12 +248,12 @@ export function HostOverviewTab({
 
         <section className="cu-card" aria-label="Connectors">
           <div className="cu-card__body">
-            <NavHeader label="Connectors" tab="contexts" onNavigate={onNavigate} />
-            <div className="cu-host-overview-mcp__head">
-              <span className="cu-agent-context-mcp-summary__head" style={{ margin: 0 }}>
-                <span>{contextMcpTotal}</span>
-              </span>
-            </div>
+            <NavHeader
+              label="Connectors"
+              tab="contexts"
+              count={contextMcpTotal}
+              onNavigate={onNavigate}
+            />
             {contextMcpServers.length > 0 ? (
               <ul className="cu-host-overview-mcp__list">
                 {contextMcpServers.map(server => (

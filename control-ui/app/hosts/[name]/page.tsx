@@ -862,6 +862,8 @@ export default function HostDetailsPage() {
               .join(', ')}
             accessSummary={accessSummary}
             onNavigate={tab => selectTab(tab)}
+            createdAt={hostCreatedAt}
+            lastUpdated={hostLastUpdated}
           />
         )}
 

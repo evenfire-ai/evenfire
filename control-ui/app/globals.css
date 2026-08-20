@@ -7467,6 +7467,24 @@ textarea.cu-input {
   text-align: center;
 }
 
+.cu-host-overview-identity__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.35em;
+  vertical-align: -0.1em;
+  color: var(--cu-accent);
+  flex-shrink: 0;
+}
+
+.cu-host-overview-identity__icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 .cu-host-overview-identity__avatar {
   display: grid;
   place-items: center;
@@ -7572,6 +7590,19 @@ textarea.cu-input {
 
 .cu-host-overview-nav-header__label {
   flex: 1;
+}
+
+.cu-host-overview-nav-header__count {
+  min-width: 1.5rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-panel-rgb), 0.5);
+  color: var(--cu-text);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
 }
 
 .cu-host-overview-nav-header__chev {

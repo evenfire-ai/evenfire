@@ -20,4 +20,6 @@ export type HostOverviewTabProps = {
   modelAllowlistLine: string
   accessSummary: HostOverviewAccessSummary
   onNavigate: (tab: HostTabKey) => void
+  createdAt: string
+  lastUpdated: string
 }
