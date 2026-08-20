@@ -7632,6 +7632,7 @@ textarea.cu-input {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--cu-space-3);
+  align-items: start;
 }
 
 @media (max-width: 32rem) {
@@ -7649,6 +7650,7 @@ textarea.cu-input {
   display: flex;
   align-items: center;
   gap: var(--cu-space-2);
+  min-height: 1.75rem;
   font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -7688,7 +7690,7 @@ textarea.cu-input {
 
 .cu-host-overview-access__people {
   display: grid;
-  gap: var(--cu-space-1);
+  gap: var(--cu-space-2);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -7698,10 +7700,8 @@ textarea.cu-input {
   display: flex;
   align-items: center;
   gap: var(--cu-space-2);
-  padding: 0.4rem 0.6rem;
-  border: 1px solid var(--cu-border-subtle);
-  border-radius: var(--cu-radius);
-  background: rgba(var(--cu-panel-rgb), 0.35);
+  min-height: 1.75rem;
+  padding: 0.15rem 0;
 }
 
 .cu-host-overview-access__avatar {
@@ -7733,6 +7733,9 @@ textarea.cu-input {
   margin: 0;
   font-size: 0.8125rem;
   color: var(--cu-text-muted);
+  min-height: 1.75rem;
+  display: flex;
+  align-items: center;
 }
 
 .cu-host-overview-mcp__head {
