@@ -587,11 +587,12 @@ const contextMapperPollInterval = parseInt(
 //
 // Crucially, this window ONLY governs the `unavailable` failure class. Identity /
 // authorization failures (401/403 — Host UID change, revoked grant) revoke
-// immediately on the next reachable call and are NOT gated by this value, and a
-// grant change while HCC is healthy is applied by the next successful poll. So
-// raising this ceiling does not delay any real authority revocation and does not
-// widen the NP-08 credential-disclosure surface (which lives entirely in HCC's
-// per-request authorization). See issue #425.
+// immediately on the next reachable call, and a grant change while HCC is healthy
+// is applied by the next successful poll. Raising this ceiling intentionally trades
+// bounded revocation latency during an HCC outage for fleet availability; it does
+// not widen the NP-08 credential-disclosure surface because HCC cannot serve a new
+// credential while unavailable and rechecks live authorization when reachable.
+// See issue #425.
 //
 // Operators may lower it, or raise it up to HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
 // for slower-starting clusters. The minikube e2e lane pins 60000 explicitly so the

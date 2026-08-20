@@ -531,14 +531,16 @@ describe('authoritative poll publication fence', () => {
 describe('context-mapper polling lifecycle', () => {
   it('wires the live manager and configured staleness ceiling into poll failure handling', () => {
     const manager = {}
+    const lastSuccessAt = 1_000
+    const staleNow = lastSuccessAt + config.hccAuthorityMaxStalenessMs
     const revoke = vi.fn()
     const onCallerAuthorizationRejected = vi.fn()
     const onInventoryAuthorityRevoked = vi.fn()
     const onUnavailable = vi.fn()
     const options = createMcpAuthorityPollFailureOptions({
       getManager: () => manager,
-      lastSuccessAt: () => 1_000,
-      now: () => 61_000,
+      lastSuccessAt: () => lastSuccessAt,
+      now: () => staleNow,
       revoke,
       onCallerAuthorizationRejected,
       onInventoryAuthorityRevoked,
@@ -562,8 +564,8 @@ describe('context-mapper polling lifecycle', () => {
       new ContextMapperRequestError(503, 'inventory', false),
       createMcpAuthorityPollFailureOptions({
         getManager: () => null,
-        lastSuccessAt: () => 1_000,
-        now: () => 61_000,
+        lastSuccessAt: () => lastSuccessAt,
+        now: () => staleNow,
         revoke: noManagerRevoke,
         onCallerAuthorizationRejected: vi.fn(),
         onInventoryAuthorityRevoked: vi.fn(),
