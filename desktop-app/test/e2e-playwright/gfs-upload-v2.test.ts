@@ -296,10 +296,14 @@ async function grantFolderToE2eUser(resourceId: string): Promise<void> {
 
 async function exerciseCreate(page: Page, byteLength: number): Promise<void> {
   const fixtureName = uniqueGfsFixtureName(`e2e-gfs-desktop-v2-create-${byteLength}`)
-  const fixture = seedGfsDirectoryFixture(fixtureName)
-  await grantFolderToE2eUser(fixture.resourceId)
-  const source = await createDiskUploadFixture(byteLength, '.parquet', fixtureName)
+  let cleanupFixture: ReturnType<typeof seedGfsDirectoryFixture> | undefined
+  let cleanupSource: Awaited<ReturnType<typeof createDiskUploadFixture>> | undefined
   try {
+    const fixture = seedGfsDirectoryFixture(fixtureName)
+    cleanupFixture = fixture
+    await grantFolderToE2eUser(fixture.resourceId)
+    const source = await createDiskUploadFixture(byteLength, '.parquet', fixtureName)
+    cleanupSource = source
     const { browser, manageDialog } = await openFolder(page, fixture.name)
     await selectFileThroughVisibleAction(
       page,
@@ -333,18 +337,24 @@ async function exerciseCreate(page: Page, byteLength: number): Promise<void> {
       sha256: source.sha256,
     })
   } finally {
-    await removeDiskUploadFixture(source)
-    cleanupGfsFixture(fixtureName)
-    assertGfsFixtureCleaned(fixtureName)
+    if (cleanupSource) await removeDiskUploadFixture(cleanupSource)
+    if (cleanupFixture) {
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
+    }
   }
 }
 
 async function exerciseReplace(page: Page, byteLength: number): Promise<void> {
   const fixtureName = uniqueGfsFixtureName(`e2e-gfs-desktop-v2-replace-${byteLength}`)
-  const fixture = seedGfsFileFixture(fixtureName)
-  await grantFolderToE2eUser(fixture.resourceId)
-  const source = await createDiskUploadFixture(byteLength, '.parquet', fixtureName)
+  let cleanupFixture: ReturnType<typeof seedGfsFileFixture> | undefined
+  let cleanupSource: Awaited<ReturnType<typeof createDiskUploadFixture>> | undefined
   try {
+    const fixture = seedGfsFileFixture(fixtureName)
+    cleanupFixture = fixture
+    await grantFolderToE2eUser(fixture.resourceId)
+    const source = await createDiskUploadFixture(byteLength, '.parquet', fixtureName)
+    cleanupSource = source
     const { browser } = await openFolder(page, fixture.name)
     const before = await getGfsChildResourceSummary({
       parentResourceId: fixture.resourceId,
@@ -398,9 +408,11 @@ async function exerciseReplace(page: Page, byteLength: number): Promise<void> {
       sha256: source.sha256,
     })
   } finally {
-    await removeDiskUploadFixture(source)
-    cleanupGfsFixture(fixtureName)
-    assertGfsFixtureCleaned(fixtureName)
+    if (cleanupSource) await removeDiskUploadFixture(cleanupSource)
+    if (cleanupFixture) {
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
+    }
   }
 }
 
@@ -438,17 +450,25 @@ test.describe('GFS Upload v2 — packaged Desktop runtime product policy', () =>
     const lowerMax = 100 * 1024 * 1024
     const raisedMax = 300 * 1024 * 1024
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-runtime-cap-desktop')
-    const fixture = seedGfsDirectoryFixture(fixtureName)
-    await seedGfsGrant({
-      resourceId: fixture.resourceId,
-      subjectType: 'user',
-      subjectId: getE2EUserId(),
-      permissions: ['read', 'write', 'delete'],
-      inherit: true,
-      grantedBy: 'e2e:gfs-upload-v2-runtime-cap',
-    })
-    const rejectedSource = await createOversizedDiskUploadFixture('.parquet', fixtureName, lowerMax)
+    let cleanupFixture: ReturnType<typeof seedGfsDirectoryFixture> | undefined
+    let cleanupSource: Awaited<ReturnType<typeof createOversizedDiskUploadFixture>> | undefined
     try {
+      const fixture = seedGfsDirectoryFixture(fixtureName)
+      cleanupFixture = fixture
+      await seedGfsGrant({
+        resourceId: fixture.resourceId,
+        subjectType: 'user',
+        subjectId: getE2EUserId(),
+        permissions: ['read', 'write', 'delete'],
+        inherit: true,
+        grantedBy: 'e2e:gfs-upload-v2-runtime-cap',
+      })
+      const rejectedSource = await createOversizedDiskUploadFixture(
+        '.parquet',
+        fixtureName,
+        lowerMax
+      )
+      cleanupSource = rejectedSource
       await setGfsUploadProductMaxBytes(lowerMax)
       await exerciseCreate(appPage, lowerMax)
 
@@ -475,9 +495,11 @@ test.describe('GFS Upload v2 — packaged Desktop runtime product policy', () =>
       try {
         await setGfsUploadProductMaxBytes(previous)
       } finally {
-        await removeDiskUploadFixture(rejectedSource)
-        cleanupGfsFixture(fixtureName)
-        assertGfsFixtureCleaned(fixtureName)
+        if (cleanupSource) await removeDiskUploadFixture(cleanupSource)
+        if (cleanupFixture) {
+          cleanupGfsFixture(fixtureName)
+          assertGfsFixtureCleaned(fixtureName)
+        }
       }
     }
   })
@@ -492,17 +514,21 @@ test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
 
   test('rejects a 209715201-byte file through the visible Desktop action', async ({ appPage }) => {
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-oversize-desktop')
-    const fixture = seedGfsDirectoryFixture(fixtureName)
-    await seedGfsGrant({
-      resourceId: fixture.resourceId,
-      subjectType: 'user',
-      subjectId: getE2EUserId(),
-      permissions: ['read', 'write', 'delete'],
-      inherit: true,
-      grantedBy: 'e2e:gfs-upload-v2-negative',
-    })
-    const source = await createOversizedDiskUploadFixture('.parquet', fixtureName)
+    let cleanupFixture: ReturnType<typeof seedGfsDirectoryFixture> | undefined
+    let cleanupSource: Awaited<ReturnType<typeof createOversizedDiskUploadFixture>> | undefined
     try {
+      const fixture = seedGfsDirectoryFixture(fixtureName)
+      cleanupFixture = fixture
+      await seedGfsGrant({
+        resourceId: fixture.resourceId,
+        subjectType: 'user',
+        subjectId: getE2EUserId(),
+        permissions: ['read', 'write', 'delete'],
+        inherit: true,
+        grantedBy: 'e2e:gfs-upload-v2-negative',
+      })
+      const source = await createOversizedDiskUploadFixture('.parquet', fixtureName)
+      cleanupSource = source
       const { browser, manageDialog } = await openFolder(appPage, fixture.name)
       await selectFileThroughVisibleAction(
         appPage,
@@ -526,26 +552,32 @@ test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
         0
       )
     } finally {
-      await removeDiskUploadFixture(source)
-      cleanupGfsFixture(fixtureName)
-      assertGfsFixtureCleaned(fixtureName)
+      if (cleanupSource) await removeDiskUploadFixture(cleanupSource)
+      if (cleanupFixture) {
+        cleanupGfsFixture(fixtureName)
+        assertGfsFixtureCleaned(fixtureName)
+      }
     }
   })
 
   test('falls back to the legacy path when v2 is disabled', async ({ appPage }) => {
     const previous = await readGfsUploadV2Enabled()
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-legacy-desktop')
-    const fixture = seedGfsDirectoryFixture(fixtureName)
-    await seedGfsGrant({
-      resourceId: fixture.resourceId,
-      subjectType: 'user',
-      subjectId: getE2EUserId(),
-      permissions: ['read', 'write', 'delete'],
-      inherit: true,
-      grantedBy: 'e2e:gfs-upload-v2-negative',
-    })
-    const source = await createDiskUploadFixture(2 * 1024 * 1024, '.bin', fixtureName)
+    let cleanupFixture: ReturnType<typeof seedGfsDirectoryFixture> | undefined
+    let cleanupSource: Awaited<ReturnType<typeof createDiskUploadFixture>> | undefined
     try {
+      const fixture = seedGfsDirectoryFixture(fixtureName)
+      cleanupFixture = fixture
+      await seedGfsGrant({
+        resourceId: fixture.resourceId,
+        subjectType: 'user',
+        subjectId: getE2EUserId(),
+        permissions: ['read', 'write', 'delete'],
+        inherit: true,
+        grantedBy: 'e2e:gfs-upload-v2-negative',
+      })
+      const source = await createDiskUploadFixture(2 * 1024 * 1024, '.bin', fixtureName)
+      cleanupSource = source
       await setGfsUploadV2Enabled(false)
       const { browser, manageDialog } = await openFolder(appPage, fixture.name)
       await selectFileThroughVisibleAction(
@@ -574,26 +606,32 @@ test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
       try {
         await setGfsUploadV2Enabled(previous)
       } finally {
-        await removeDiskUploadFixture(source)
-        cleanupGfsFixture(fixtureName)
-        assertGfsFixtureCleaned(fixtureName)
+        if (cleanupSource) await removeDiskUploadFixture(cleanupSource)
+        if (cleanupFixture) {
+          cleanupGfsFixture(fixtureName)
+          assertGfsFixtureCleaned(fixtureName)
+        }
       }
     }
   })
 
   test('recovers a visible upload after the writer deployment restarts', async ({ appPage }) => {
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-restart-desktop')
-    const fixture = seedGfsDirectoryFixture(fixtureName)
-    await seedGfsGrant({
-      resourceId: fixture.resourceId,
-      subjectType: 'user',
-      subjectId: getE2EUserId(),
-      permissions: ['read', 'write', 'delete'],
-      inherit: true,
-      grantedBy: 'e2e:gfs-upload-v2-negative',
-    })
-    const source = await createDiskUploadFixture(64 * 1024 * 1024, '.bin', fixtureName)
+    let cleanupFixture: ReturnType<typeof seedGfsDirectoryFixture> | undefined
+    let cleanupSource: Awaited<ReturnType<typeof createDiskUploadFixture>> | undefined
     try {
+      const fixture = seedGfsDirectoryFixture(fixtureName)
+      cleanupFixture = fixture
+      await seedGfsGrant({
+        resourceId: fixture.resourceId,
+        subjectType: 'user',
+        subjectId: getE2EUserId(),
+        permissions: ['read', 'write', 'delete'],
+        inherit: true,
+        grantedBy: 'e2e:gfs-upload-v2-negative',
+      })
+      const source = await createDiskUploadFixture(64 * 1024 * 1024, '.bin', fixtureName)
+      cleanupSource = source
       const { browser, manageDialog } = await openFolder(appPage, fixture.name)
       await selectFileThroughVisibleAction(
         appPage,
@@ -619,26 +657,32 @@ test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
         )
         .toMatchObject({ kind: 'file', bytes: source.byteLength, deleted: false })
     } finally {
-      await removeDiskUploadFixture(source)
-      cleanupGfsFixture(fixtureName)
-      assertGfsFixtureCleaned(fixtureName)
+      if (cleanupSource) await removeDiskUploadFixture(cleanupSource)
+      if (cleanupFixture) {
+        cleanupGfsFixture(fixtureName)
+        assertGfsFixtureCleaned(fixtureName)
+      }
     }
   })
 
   test('fails visibly when the user grant is revoked during an upload', async ({ appPage }) => {
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-revoke-desktop')
-    const fixture = seedGfsDirectoryFixture(fixtureName)
-    const userId = getE2EUserId()
-    seedGfsGrant({
-      resourceId: fixture.resourceId,
-      subjectType: 'user',
-      subjectId: userId,
-      permissions: ['read', 'write', 'delete'],
-      inherit: true,
-      grantedBy: 'e2e:gfs-upload-v2-negative',
-    })
-    const source = await createDiskUploadFixture(64 * 1024 * 1024, '.bin', fixtureName)
+    let cleanupFixture: ReturnType<typeof seedGfsDirectoryFixture> | undefined
+    let cleanupSource: Awaited<ReturnType<typeof createDiskUploadFixture>> | undefined
     try {
+      const fixture = seedGfsDirectoryFixture(fixtureName)
+      cleanupFixture = fixture
+      const userId = getE2EUserId()
+      seedGfsGrant({
+        resourceId: fixture.resourceId,
+        subjectType: 'user',
+        subjectId: userId,
+        permissions: ['read', 'write', 'delete'],
+        inherit: true,
+        grantedBy: 'e2e:gfs-upload-v2-negative',
+      })
+      const source = await createDiskUploadFixture(64 * 1024 * 1024, '.bin', fixtureName)
+      cleanupSource = source
       const { browser, manageDialog } = await openFolder(appPage, fixture.name)
       await selectFileThroughVisibleAction(
         appPage,
@@ -664,9 +708,11 @@ test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
         )
         .toBeNull()
     } finally {
-      await removeDiskUploadFixture(source)
-      cleanupGfsFixture(fixtureName)
-      assertGfsFixtureCleaned(fixtureName)
+      if (cleanupSource) await removeDiskUploadFixture(cleanupSource)
+      if (cleanupFixture) {
+        cleanupGfsFixture(fixtureName)
+        assertGfsFixtureCleaned(fixtureName)
+      }
     }
   })
 })
