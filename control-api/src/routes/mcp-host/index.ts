@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { K8sGateway } from '../../k8s.js'
 import type { DirectRunAttributionBindingService } from '../../services/tracing/directRunAttributionBindingService.js'
 import { createMcpHostHostsHeartbeatRoutes } from './hosts-heartbeat.routes.js'
+import { createMcpHostLlmProviderAttemptRoutes } from './llmProviderAttempts.routes.js'
 import { createMcpHostPluginWorkloadSdkRoutes } from './plugin-workload-sdk.routes.js'
 import { createMcpHostRenewalRoutes } from './renewal/index.js'
 import { createUserApprovalRequestsRoutes } from './user-approval-requests.routes.js'
@@ -16,6 +17,7 @@ export function createMcpHostRoutes(
   router.use(createUserApprovalRequestsRoutes(gateway, directRunAttributionBindingService))
   router.use(createMcpHostWorkflowRoutes(gateway))
   router.use(createMcpHostPluginWorkloadSdkRoutes())
+  router.use(createMcpHostLlmProviderAttemptRoutes())
   router.use(createMcpHostHostsHeartbeatRoutes(gateway))
   return router
 }

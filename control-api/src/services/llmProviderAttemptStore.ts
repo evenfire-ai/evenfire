@@ -166,3 +166,16 @@ export async function registerLlmProviderAttemptTicket(
     [input.jti, input.providerAttemptId, input.expiresAt]
   )
 }
+
+export async function getMaxLlmProviderAttemptGeneration(
+  db: DbClient,
+  invocationId: string
+): Promise<number> {
+  const result = await db.query(
+    `SELECT COALESCE(MAX(attempt_generation), 0) AS max_generation
+       FROM llm_provider_attempts
+      WHERE invocation_id = $1`,
+    [invocationId]
+  )
+  return Number((result.rows[0] as { max_generation?: unknown } | undefined)?.max_generation ?? 0)
+}
