@@ -70,6 +70,14 @@ describe('buildConfigMapData', () => {
     // The lifecycle fields never leak into the serialized entry.
     expect(withHash.data.zai).not.toMatch(/source|discovered_at|last_seen_at|stale/)
   })
+
+  it('keeps the content-hash annotation as the drift authority while excluding stale Codex rows', async () => {
+    const source = await import('node:fs').then(fs =>
+      fs.readFileSync(new URL('../src/services/llmAllowedModels.ts', import.meta.url), 'utf8')
+    )
+    expect(source).toContain("NOT (provider = 'codex-subscription' AND stale)")
+    expect(CONTENT_HASH_ANNOTATION).toBe('clerum.io/content-hash')
+  })
 })
 
 describe('LlmAllowedModelsConfigMapWriter', () => {

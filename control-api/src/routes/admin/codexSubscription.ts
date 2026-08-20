@@ -5,6 +5,12 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
+  type CodexCatalogTransport,
+  createUnavailableCodexCatalogTransport,
+  syncCodexSubscriptionCatalog,
+} from '../../services/codexSubscriptionCatalog.js'
+import { loadCodexSubscriptionSecrets } from '../../services/codexSubscriptionConnection.js'
+import {
   type CodexOAuthDeps,
   CodexSubscriptionOAuthError,
   getCodexSubscriptionConnection,
@@ -77,7 +83,9 @@ function sendOAuthError(
   throw err
 }
 
-export function createAdminCodexSubscriptionRouter(): Router {
+export function createAdminCodexSubscriptionRouter(
+  catalogTransport: CodexCatalogTransport = createUnavailableCodexCatalogTransport()
+): Router {
   const router = Router()
 
   router.get(
@@ -138,6 +146,37 @@ export function createAdminCodexSubscriptionRouter(): Router {
       try {
         const connection = await refreshCodexSubscriptionConnection(oauthDeps(req))
         res.status(200).json(connection)
+      } catch (err) {
+        sendOAuthError(res, err)
+      }
+    })
+  )
+
+  router.post(
+    `${BASE}/catalog/sync`,
+    asyncHandler(async (req, res) => {
+      try {
+        if (!config.codexSubscriptionEnabled) {
+          res.status(404).json({ error: 'disabled' })
+          return
+        }
+        const db = dbClient()
+        const secrets = await loadCodexSubscriptionSecrets(
+          db,
+          deriveOAuthEncryptionKey(config.oauthEncryptionKey)
+        )
+        if (!secrets?.accessToken) {
+          res.status(404).json({ error: 'no_grant' })
+          return
+        }
+        const synced = await syncCodexSubscriptionCatalog(db, catalogTransport, secrets.accessToken)
+        res.status(200).json({
+          outcome: synced.outcome,
+          added: synced.added,
+          refreshed: synced.refreshed,
+          staled: synced.staled,
+          connection: synced.connection,
+        })
       } catch (err) {
         sendOAuthError(res, err)
       }
