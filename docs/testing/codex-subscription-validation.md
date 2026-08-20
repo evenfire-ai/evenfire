@@ -4,8 +4,11 @@ Evidence lanes for `codex-subscription`. One lane does not stand in for another.
 
 ## Lanes
 
-- **T0** — unit, schema, hash, contracts, typecheck, lint, build. Includes
-  `make test-codex-subscription-t0` once that aggregator exists.
+- **T0** — unit, schema, hash, contracts, typecheck, lint, build. The
+  aggregator is `make test-codex-subscription-t0`. It fails when a required
+  suite is missing, executes zero tests, reports skipped/todo cases, or
+  exits non-zero. Flag-off compatibility still uses `make test-unit-all`,
+  `make test-contracts`, and `make build-preflight`.
 - **T1** — real PostgreSQL. `CONTROL_API_REAL_PG_REQUIRED=1`. A missing DSN,
   skipped suite, or zero tests is FAIL.
 - **Manifest** — Kustomize, images, ServiceAccount/RBAC, secrets, gateways,
@@ -28,6 +31,8 @@ contract. The freeze test is
 ## Commands
 
 ```bash
+make test-codex-subscription-t0
+
 cd tests/e2e
 npm test -- --run integration/codex-subscription-contract-freeze.test.ts
 ```

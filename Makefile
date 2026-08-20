@@ -120,6 +120,10 @@ test-unit-all: ## Run unit tests across all services
 	fi
 	@echo "All unit tests passed."
 
+.PHONY: test-codex-subscription-t0
+test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
+	@bash scripts/tests/test-codex-subscription-t0.sh
+
 # ── Build Preflight ──────────────────────────────────────────────────
 .PHONY: build-preflight
 build-preflight: ## Run local build preflight across deployable packages
