@@ -150,29 +150,30 @@ function boundedEnvBytesFromSource(
   label = envName
 ): { fallback: number; ceiling: number } {
   const sourceFile = parseTypeScript(source, label)
-  const matches: ts.CallExpression[] = []
+  const properties: ts.PropertyAssignment[] = []
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAssignment(node)) {
       const propertyName =
         ts.isIdentifier(node.name) || ts.isStringLiteral(node.name) ? node.name.text : null
-      if (
-        propertyName === property &&
-        ts.isCallExpression(node.initializer) &&
-        ts.isIdentifier(node.initializer.expression) &&
-        node.initializer.expression.text === 'boundedIntegerFromEnv' &&
-        node.initializer.arguments.length === 3 &&
-        ts.isStringLiteral(node.initializer.arguments[0]) &&
-        node.initializer.arguments[0].text === envName
-      ) {
-        matches.push(node.initializer)
-      }
+      if (propertyName === property) properties.push(node)
     }
     ts.forEachChild(node, visit)
   }
   visit(sourceFile)
-  if (matches.length !== 1)
+  if (properties.length !== 1)
     throw new Error(`${envName} must have exactly one active bounded config in ${label}`)
-  const [, fallback, ceiling] = matches[0].arguments
+  const initializer = properties[0].initializer
+  if (
+    !ts.isCallExpression(initializer) ||
+    !ts.isIdentifier(initializer.expression) ||
+    initializer.expression.text !== 'boundedIntegerFromEnv' ||
+    initializer.arguments.length !== 3 ||
+    !ts.isStringLiteral(initializer.arguments[0]) ||
+    initializer.arguments[0].text !== envName
+  ) {
+    throw new Error(`${envName} must use the expected boundedIntegerFromEnv call in ${label}`)
+  }
+  const [, fallback, ceiling] = initializer.arguments
   return {
     fallback: evaluateStaticByteExpression(fallback, sourceFile, `${label}:${envName}:fallback`),
     ceiling: evaluateStaticByteExpression(ceiling, sourceFile, `${label}:${envName}:ceiling`),
@@ -419,6 +420,54 @@ describe('GFS static byte contract extraction', () => {
     expect(() =>
       boundedEnvBytesFromSource(
         source,
+        'gfsUploadMaxPartBytes',
+        'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
+      )
+    ).toThrow()
+  })
+
+  it.each([
+    ['different env', `gfsUploadMaxPartBytes: boundedIntegerFromEnv('OTHER_MAX_BYTES', 1, 1),`],
+    [
+      'different bounds',
+      `gfsUploadMaxPartBytes: boundedIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES', 1, 1),`,
+    ],
+  ])('rejects duplicate active relay properties with %s', (_label, duplicate) => {
+    const source = `const config = {
+      gfsUploadMaxPartBytes: boundedIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES', 16 * 1024 * 1024, 16 * 1024 * 1024),
+      ${duplicate}
+    }`
+    expect(() =>
+      boundedEnvBytesFromSource(
+        source,
+        'gfsUploadMaxPartBytes',
+        'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
+      )
+    ).toThrow()
+  })
+
+  it('ignores commented duplicates and similarly named unrelated properties', () => {
+    const source = `const config = {
+      // gfsUploadMaxPartBytes: boundedIntegerFromEnv('OTHER_MAX_BYTES', 1, 1),
+      gfsUploadMaxPartBytesExtra: boundedIntegerFromEnv('OTHER_MAX_BYTES', 1, 1),
+      gfsUploadMaxPartBytes: boundedIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES', 16 * 1024 * 1024, 16 * 1024 * 1024),
+    }`
+    expect(
+      boundedEnvBytesFromSource(
+        source,
+        'gfsUploadMaxPartBytes',
+        'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
+      )
+    ).toEqual({ fallback: 16 * 1024 * 1024, ceiling: 16 * 1024 * 1024 })
+  })
+
+  it.each([
+    'gfsUploadMaxPartBytes: 16 * 1024 * 1024,',
+    "gfsUploadMaxPartBytes: boundedIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES', 16 * 1024 * 1024),",
+  ])('rejects malformed or unsupported relay property %s', propertySource => {
+    expect(() =>
+      boundedEnvBytesFromSource(
+        `const config = { ${propertySource} }`,
         'gfsUploadMaxPartBytes',
         'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
       )
