@@ -7628,6 +7628,18 @@ textarea.cu-input {
   gap: var(--cu-space-4);
 }
 
+.cu-host-overview-access__columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--cu-space-3);
+}
+
+@media (max-width: 32rem) {
+  .cu-host-overview-access__columns {
+    grid-template-columns: 1fr;
+  }
+}
+
 .cu-host-overview-access__group {
   display: grid;
   gap: var(--cu-space-2);

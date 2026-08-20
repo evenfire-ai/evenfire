@@ -221,7 +221,6 @@ export function HostOverviewTab({
               <ConfigRow setting="Primary model" value={modelPrimary} />
               <ConfigRow setting="Provider · Model" value={modelProviderLine} />
               <ConfigRow setting="Per-host model allowlist" value={allowlist} />
-              <ConfigRow setting="Assigned context" value={contextLabel} />
             </div>
           </div>
         </section>
@@ -230,56 +229,58 @@ export function HostOverviewTab({
           <div className="cu-card__body">
             <p className="cu-host-overview-section-label">Access</p>
 
-            <div className="cu-host-overview-access__group">
-              <div className="cu-host-overview-access__head">
-                <span className="cu-host-overview-access__head-icon" aria-hidden="true">
-                  <UsersIcon />
-                </span>
-                <span className="cu-host-overview-access__head-label">Members</span>
-                <span className="cu-host-overview-access__head-count">
-                  {accessSummary.memberCount}
-                </span>
+            <div className="cu-host-overview-access__columns">
+              <div className="cu-host-overview-access__group">
+                <div className="cu-host-overview-access__head">
+                  <span className="cu-host-overview-access__head-icon" aria-hidden="true">
+                    <UsersIcon />
+                  </span>
+                  <span className="cu-host-overview-access__head-label">Members</span>
+                  <span className="cu-host-overview-access__head-count">
+                    {accessSummary.memberCount}
+                  </span>
+                </div>
+                {accessSummary.memberNames.length > 0 ? (
+                  <ul className="cu-host-overview-access__people">
+                    {accessSummary.memberNames.map(name => (
+                      <li key={name} className="cu-host-overview-access__person">
+                        <span className="cu-host-overview-access__avatar" aria-hidden="true">
+                          {initialsFor(name)}
+                        </span>
+                        <span className="cu-host-overview-access__person-name">{name}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="cu-host-overview-access__empty">No members yet.</p>
+                )}
               </div>
-              {accessSummary.memberNames.length > 0 ? (
-                <ul className="cu-host-overview-access__people">
-                  {accessSummary.memberNames.map(name => (
-                    <li key={name} className="cu-host-overview-access__person">
-                      <span className="cu-host-overview-access__avatar" aria-hidden="true">
-                        {initialsFor(name)}
-                      </span>
-                      <span className="cu-host-overview-access__person-name">{name}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="cu-host-overview-access__empty">No members yet.</p>
-              )}
-            </div>
 
-            <div className="cu-host-overview-access__group">
-              <div className="cu-host-overview-access__head">
-                <span className="cu-host-overview-access__head-icon" aria-hidden="true">
-                  <TeamIcon />
-                </span>
-                <span className="cu-host-overview-access__head-label">Teams</span>
-                <span className="cu-host-overview-access__head-count">
-                  {accessSummary.teamCount}
-                </span>
+              <div className="cu-host-overview-access__group">
+                <div className="cu-host-overview-access__head">
+                  <span className="cu-host-overview-access__head-icon" aria-hidden="true">
+                    <TeamIcon />
+                  </span>
+                  <span className="cu-host-overview-access__head-label">Teams</span>
+                  <span className="cu-host-overview-access__head-count">
+                    {accessSummary.teamCount}
+                  </span>
+                </div>
+                {accessSummary.teamNames.length > 0 ? (
+                  <ul className="cu-host-overview-access__people">
+                    {accessSummary.teamNames.map(name => (
+                      <li key={name} className="cu-host-overview-access__person">
+                        <span className="cu-host-overview-access__avatar" aria-hidden="true">
+                          {initialsFor(name)}
+                        </span>
+                        <span className="cu-host-overview-access__person-name">{name}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="cu-host-overview-access__empty">No teams yet.</p>
+                )}
               </div>
-              {accessSummary.teamNames.length > 0 ? (
-                <ul className="cu-host-overview-access__people">
-                  {accessSummary.teamNames.map(name => (
-                    <li key={name} className="cu-host-overview-access__person">
-                      <span className="cu-host-overview-access__avatar" aria-hidden="true">
-                        {initialsFor(name)}
-                      </span>
-                      <span className="cu-host-overview-access__person-name">{name}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="cu-host-overview-access__empty">No teams yet.</p>
-              )}
             </div>
           </div>
         </section>
