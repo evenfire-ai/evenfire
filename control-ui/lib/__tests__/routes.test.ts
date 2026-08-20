@@ -27,4 +27,10 @@ describe('CONTROL_ROUTES', () => {
     expect(CONTROL_ROUTES.agentOutputs.root).toBe('/agent-outputs/recipe-artifacts')
     expect(CONTROL_ROUTES.globalFileSystem).toBe('/global-file-system')
   })
+
+  it('exposes the Codex subscription provider path without query tabs', () => {
+    expect(CONTROL_ROUTES.llmModels.codexSubscription).toBe(
+      '/llm-models/providers/codex-subscription'
+    )
+  })
 })

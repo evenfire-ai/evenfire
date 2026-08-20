@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import type { LlmAllowedModel } from '@lib/api'
 import { getLlmModels, getUnpricedModels } from '@lib/api'
+import { loadCodexSubscriptionCapability } from '@lib/codexSubscriptionFeature'
 import { LlmModelsSurface } from '../LlmModelsSurface'
 import { ToastProvider } from '../Toast'
 
@@ -29,6 +30,12 @@ vi.mock('@lib/api', async importOriginal => {
   return { ...actual, getLlmModels: vi.fn(), getUnpricedModels: vi.fn() }
 })
 
+vi.mock('@lib/codexSubscriptionFeature', () => ({
+  loadCodexSubscriptionCapability: vi.fn(),
+  isCodexSubscriptionUiEnabled: (capability: { enabled?: boolean } | null) =>
+    capability?.enabled === true,
+}))
+
 const model: LlmAllowedModel = {
   id: 'model-1',
   provider: 'openai',
@@ -51,6 +58,7 @@ describe('LlmModelsSurface', () => {
     vi.mocked(getUnpricedModels).mockReturnValue(
       new Promise<Awaited<ReturnType<typeof getUnpricedModels>>>(() => undefined)
     )
+    vi.mocked(loadCodexSubscriptionCapability).mockResolvedValue({ enabled: false })
   })
 
   afterEach(() => {
@@ -67,5 +75,31 @@ describe('LlmModelsSurface', () => {
 
     expect(await screen.findByText('Discovery models: 1')).toBeInTheDocument()
     expect(getUnpricedModels).not.toHaveBeenCalled()
+    expect(screen.queryByRole('link', { name: 'Codex subscription' })).not.toBeInTheDocument()
+  })
+
+  it('hides the Codex subscription deep link when Control API capability is absent', async () => {
+    render(
+      <ToastProvider>
+        <LlmModelsSurface activeTab="catalog" />
+      </ToastProvider>
+    )
+
+    expect(await screen.findByText('Model catalog')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Codex subscription' })).not.toBeInTheDocument()
+  })
+
+  it('shows the Codex subscription deep link only after Control API proves the flag', async () => {
+    vi.mocked(loadCodexSubscriptionCapability).mockResolvedValue({ enabled: true })
+    render(
+      <ToastProvider>
+        <LlmModelsSurface activeTab="catalog" />
+      </ToastProvider>
+    )
+
+    expect(await screen.findByRole('link', { name: 'Codex subscription' })).toHaveAttribute(
+      'href',
+      '/llm-models/providers/codex-subscription'
+    )
   })
 })
