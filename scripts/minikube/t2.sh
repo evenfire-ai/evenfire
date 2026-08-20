@@ -362,6 +362,10 @@ main() {
     # reuse these exact-head lanes without pretending that T2 already passed.
     t2_evidence_write lanes PASS 'T0 and T1 completed before runtime T2'
   fi
+  if [ "$T2_RUN_T1" != true ] && [ "$T2_T1_CERTIFIED" != true ]; then
+    T2_NEXT_COMMAND='run make minikube-t2 with T2_RUN_T1=true to create an exact-head T1 attestation'
+    t2_fail CERTIFICATION_REQUIRED 'T1 was skipped without a validated exact-head attestation'
+  fi
   run_final_preflight
   run_np08_hcc_authorization
   run_healthcheck_if_requested
