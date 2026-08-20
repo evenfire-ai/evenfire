@@ -295,6 +295,123 @@ describe('control-ui control-api proxy route', () => {
     })
   })
 
+  describe('concurrent body reads are bounded (pre-auth DoS guard)', () => {
+    const ENV_KEY = 'CONTROL_UI_PROXY_MAX_CONCURRENT_BODY_READS'
+    const path = ['api', 'v1', 'admin', 'x']
+    let savedEnv: string | undefined
+
+    beforeEach(() => {
+      savedEnv = process.env[ENV_KEY]
+    })
+
+    afterEach(() => {
+      if (savedEnv === undefined) delete process.env[ENV_KEY]
+      else process.env[ENV_KEY] = savedEnv
+    })
+
+    // A request whose body stream stays open until the test releases it, so one
+    // reader can be parked mid-read while another request is issued against it.
+    function parkedBodyRequest() {
+      let close!: () => void
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8))
+          close = () => controller.close()
+        },
+      })
+      const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+        method: 'POST',
+        body: stream,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' })
+      return { req, release: () => close() }
+    }
+
+    const settle = () => new Promise(resolve => setTimeout(resolve, 0))
+
+    const jsonRequest = () =>
+      new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ok: true }),
+      })
+
+    it('sheds with 503 while every slot is held, without reaching upstream', async () => {
+      process.env[ENV_KEY] = '1'
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      const parked = parkedBodyRequest()
+      const parkedResponse = POST(parked.req, { params: { path } })
+      await settle()
+
+      const shed = await POST(jsonRequest(), { params: { path } })
+
+      expect(shed.status).toBe(503)
+      expect(shed.headers.get('retry-after')).toBe('1')
+      await expect(shed.json()).resolves.toEqual({ error: 'proxy_busy' })
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      parked.release()
+      await parkedResponse
+    })
+
+    it('releases the slot once the body is read, so the next request is admitted', async () => {
+      process.env[ENV_KEY] = '1'
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      const parked = parkedBodyRequest()
+      const parkedResponse = POST(parked.req, { params: { path } })
+      await settle()
+      parked.release()
+      await parkedResponse
+
+      const admitted = await POST(jsonRequest(), { params: { path } })
+
+      expect(admitted.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('never gates GET, so SSE notification streams cannot be shed', async () => {
+      process.env[ENV_KEY] = '1'
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      const parked = parkedBodyRequest()
+      const parkedResponse = POST(parked.req, { params: { path } })
+      await settle()
+
+      const stream = await GET(
+        new NextRequest('http://localhost:3000/control-api/api/v1/notifications/stream'),
+        { params: { path: ['api', 'v1', 'notifications', 'stream'] } }
+      )
+
+      expect(stream.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
+      parked.release()
+      await parkedResponse
+    })
+
+    it('falls back to the default when the env value is absent, NaN, non-positive, or out-of-range', async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      for (const value of [undefined, 'abc', '0', '-1', '1.5', '99999']) {
+        if (value === undefined) delete process.env[ENV_KEY]
+        else process.env[ENV_KEY] = value
+        const res = await POST(jsonRequest(), { params: { path } })
+        expect(res.status).toBe(200)
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(6)
+    })
+  })
+
   describe('raw GFS part bodies are counted before forwarding', () => {
     const path = [
       'api',

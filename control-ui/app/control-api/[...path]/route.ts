@@ -54,6 +54,32 @@ function resolveMaxBodyBytes(): number {
     : DEFAULT_MAX_BODY_BYTES
 }
 
+// The byte cap above bounds ONE request. It does not bound N of them: because this
+// handler buffers before control-api ever authenticates, concurrent unauthenticated
+// callers each get their own cap-sized allowance, and the product — not the cap — is
+// what the pod has to survive. readBodyCapped holds the chunk list AND allocates a
+// same-size contiguous copy, so peak footprint is ~2x the body per in-flight read;
+// control-ui runs a single replica under a 512Mi limit. Bound the concurrent readers
+// so worst-case buffered memory stays a fixed budget instead of a multiple of load.
+//
+// A slot is held only while the body is being read, never across the upstream round
+// trip, so normal small-JSON mutations occupy one for microseconds and this never
+// throttles upstream concurrency. GET/HEAD (including long-lived SSE notification
+// streams) buffer nothing and are not gated at all.
+const DEFAULT_MAX_CONCURRENT_BODY_READS = 4
+const MAX_CONCURRENT_BODY_READS_CEILING = 1024
+function resolveMaxConcurrentBodyReads(): number {
+  const raw = process.env.CONTROL_UI_PROXY_MAX_CONCURRENT_BODY_READS
+  const parsed = raw ? Number(raw) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_CONCURRENT_BODY_READS_CEILING
+    ? parsed
+    : DEFAULT_MAX_CONCURRENT_BODY_READS
+}
+
+// Module state is per-pod: Next.js route handlers share one Node process, so this
+// counter is the pod's real in-flight body-read count.
+let inFlightBodyReads = 0
+
 // Read the request body without ever buffering more than `cap` bytes: stops and
 // returns 'too-large' as soon as the running total exceeds the cap, so a huge (or
 // content-length-lying) body cannot exhaust memory before it is rejected.
@@ -187,39 +213,54 @@ async function proxyControlApi(
 
   const hasBody = req.method !== 'GET' && req.method !== 'HEAD'
   let body: ArrayBuffer | undefined
-  if (rawUpload) {
-    const declaredChunk = Number(req.headers.get('upload-chunk-length'))
-    if (
-      !Number.isSafeInteger(declaredChunk) ||
-      declaredChunk <= 0 ||
-      declaredChunk > GFS_UPLOAD_MAX_PART_BYTES
-    ) {
-      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+  if (rawUpload || hasBody) {
+    // Shed load rather than queue it: a queued caller still holds a connection and
+    // would buffer the moment a slot frees, so admitting it only defers the spike.
+    if (inFlightBodyReads >= resolveMaxConcurrentBodyReads()) {
+      return NextResponse.json(
+        { error: 'proxy_busy' },
+        { status: 503, headers: { 'retry-after': '1' } }
+      )
     }
-    // Count the actual stream before forwarding it. The header is an admission
-    // hint, not a security boundary: without this bounded read a caller could
-    // declare a small part and stream an unbounded body through the UI proxy.
-    const read = await readBodyCapped(req.body, GFS_UPLOAD_MAX_PART_BYTES)
-    if (read === 'too-large') {
-      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+    inFlightBodyReads += 1
+    try {
+      if (rawUpload) {
+        const declaredChunk = Number(req.headers.get('upload-chunk-length'))
+        if (
+          !Number.isSafeInteger(declaredChunk) ||
+          declaredChunk <= 0 ||
+          declaredChunk > GFS_UPLOAD_MAX_PART_BYTES
+        ) {
+          return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+        }
+        // Count the actual stream before forwarding it. The header is an admission
+        // hint, not a security boundary: without this bounded read a caller could
+        // declare a small part and stream an unbounded body through the UI proxy.
+        const read = await readBodyCapped(req.body, GFS_UPLOAD_MAX_PART_BYTES)
+        if (read === 'too-large') {
+          return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+        }
+        const observedBytes = read?.byteLength ?? 0
+        if (observedBytes !== declaredChunk) {
+          return NextResponse.json({ error: 'upload_length_mismatch' }, { status: 400 })
+        }
+        body = read ?? undefined
+      } else {
+        const cap = resolveMaxBodyBytes()
+        // Fast path: reject a declared-oversize length before reading a single byte.
+        const declared = Number(req.headers.get('content-length'))
+        if (Number.isFinite(declared) && declared > cap) {
+          return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+        }
+        const read = await readBodyCapped(req.body, cap)
+        if (read === 'too-large') {
+          return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+        }
+        body = read ?? undefined
+      }
+    } finally {
+      inFlightBodyReads -= 1
     }
-    const observedBytes = read?.byteLength ?? 0
-    if (observedBytes !== declaredChunk) {
-      return NextResponse.json({ error: 'upload_length_mismatch' }, { status: 400 })
-    }
-    body = read ?? undefined
-  } else if (hasBody) {
-    const cap = resolveMaxBodyBytes()
-    // Fast path: reject a declared-oversize length before reading a single byte.
-    const declared = Number(req.headers.get('content-length'))
-    if (Number.isFinite(declared) && declared > cap) {
-      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
-    }
-    const read = await readBodyCapped(req.body, cap)
-    if (read === 'too-large') {
-      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
-    }
-    body = read ?? undefined
   }
   // Only body-bearing methods (uploads/mutations) get the proxy timeout. GET/HEAD —
   // including long-lived SSE notification streams — rely solely on the client's own
