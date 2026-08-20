@@ -36,6 +36,8 @@ export interface ExpectedGfsRuntimeImageMarker {
   imagesGeneratedAt?: string
 }
 
+export type GfsUploadProductMaxState = { kind: 'absent' } | { kind: 'explicit'; value: number }
+
 /**
  * Local Minikube image mode intentionally has no registry tag. GHCR mode must
  * carry one because it is the immutable image coordinate that proves which
@@ -234,17 +236,77 @@ async function renderedWriterFlag(): Promise<string> {
   ).trim()
 }
 
-async function renderedWriterProductMax(): Promise<string> {
-  return (
-    await kubectl([
-      '-n',
-      GFS_NAMESPACE,
-      'get',
-      `deployment/${GFS_WRITER_DEPLOYMENT}`,
-      '-o',
-      `jsonpath={range .spec.template.spec.containers[*]}{range .env[?(@.name=="${GFS_PRODUCT_MAX_WRITER_ENV}")]}{.value}{end}{end}`,
-    ])
-  ).trim()
+interface RenderedWriterEnv {
+  name?: unknown
+  value?: unknown
+}
+
+interface RenderedWriterDeployment {
+  spec?: {
+    template?: {
+      spec?: {
+        containers?: Array<{ env?: RenderedWriterEnv[] }>
+      }
+    }
+  }
+}
+
+/**
+ * Reads the complete deployment object so an absent env can be distinguished
+ * from a present-but-malformed value. A malformed deployment or duplicate
+ * authoritative env fails closed instead of being treated as the default.
+ */
+export function parseRenderedGfsUploadProductMax(raw: string): string | undefined {
+  let deployment: RenderedWriterDeployment
+  try {
+    deployment = JSON.parse(raw) as RenderedWriterDeployment
+  } catch {
+    throw new Error(`invalid rendered ${GFS_PRODUCT_MAX_WRITER_ENV} deployment JSON`)
+  }
+
+  const containers = deployment.spec?.template?.spec?.containers
+  if (!Array.isArray(containers)) {
+    throw new Error(`invalid rendered ${GFS_PRODUCT_MAX_WRITER_ENV} deployment shape`)
+  }
+  const matches = containers.flatMap(container => {
+    if (container === null || typeof container !== 'object') {
+      throw new Error(`invalid rendered ${GFS_PRODUCT_MAX_WRITER_ENV} container shape`)
+    }
+    if (container.env === undefined) return []
+    if (!Array.isArray(container.env)) {
+      throw new Error(`invalid rendered ${GFS_PRODUCT_MAX_WRITER_ENV} env shape`)
+    }
+    return container.env.filter(env => env?.name === GFS_PRODUCT_MAX_WRITER_ENV)
+  })
+  if (matches.length === 0) return undefined
+  if (matches.length !== 1 || typeof matches[0]?.value !== 'string') {
+    throw new Error(`invalid rendered ${GFS_PRODUCT_MAX_WRITER_ENV} value`)
+  }
+  return matches[0].value
+}
+
+export function parseGfsUploadProductMaxState(raw: string): GfsUploadProductMaxState {
+  const value = parseRenderedGfsUploadProductMax(raw)
+  if (value === undefined) return { kind: 'absent' }
+  return {
+    kind: 'explicit',
+    value: validateGfsUploadProductMaxBytes(parseCanonicalProductMax(value)),
+  }
+}
+
+function parseCanonicalProductMax(value: string): number {
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new Error(
+      `GFS writer rendered an invalid ${GFS_PRODUCT_MAX_WRITER_ENV} value: ${value || '<empty>'}`
+    )
+  }
+  return Number(value)
+}
+
+async function renderedWriterProductMax(): Promise<string | undefined> {
+  return parseRenderedGfsUploadProductMax(
+    await kubectl(['-n', GFS_NAMESPACE, 'get', `deployment/${GFS_WRITER_DEPLOYMENT}`, '-o', 'json'])
+  )
 }
 
 async function waitForRenderedWriterFlag(expected: boolean): Promise<void> {
@@ -261,17 +323,17 @@ async function waitForRenderedWriterFlag(expected: boolean): Promise<void> {
   )
 }
 
-async function waitForRenderedWriterProductMax(expected: number): Promise<void> {
-  const expectedValue = String(expected)
+async function waitForRenderedWriterProductMax(expected: number | undefined): Promise<void> {
+  const expectedValue = expected === undefined ? '<absent>' : String(expected)
   const deadline = Date.now() + 240_000
-  let lastValue = ''
+  let lastValue: string | undefined
   while (Date.now() < deadline) {
     lastValue = await renderedWriterProductMax()
-    if (lastValue === expectedValue) return
+    if (lastValue === (expected === undefined ? undefined : expectedValue)) return
     await new Promise(resolve => setTimeout(resolve, 1_000))
   }
   throw new Error(
-    `GFS Upload v2 product maximum did not converge to ${expectedValue}; observed ${lastValue || '<empty>'}`
+    `GFS Upload v2 product maximum did not converge to ${expectedValue}; observed ${lastValue || '<absent>'}`
   )
 }
 
@@ -341,18 +403,37 @@ export async function readGfsUploadV2Enabled(): Promise<boolean> {
  * reader to converge. The caller must restore the original value in a finally
  * block. This changes policy only; the compiled protocol geometry is untouched.
  */
-export async function setGfsUploadProductMaxBytes(productMaxBytes: number): Promise<void> {
-  const validated = validateGfsUploadProductMaxBytes(productMaxBytes)
+export function buildGfsUploadProductMaxEnvArgs(
+  state: GfsUploadProductMaxState | number
+): string[] {
+  if (typeof state === 'number') {
+    const validated = validateGfsUploadProductMaxBytes(state)
+    return [
+      `${GFS_PRODUCT_MAX_HCC_ENV}=${String(validated)}`,
+      `${GFS_PRODUCT_MAX_HCC_ALIAS_ENV}=${String(validated)}`,
+    ]
+  }
+  if (state.kind === 'absent') {
+    return [`${GFS_PRODUCT_MAX_HCC_ENV}-`, `${GFS_PRODUCT_MAX_HCC_ALIAS_ENV}-`]
+  }
+  if (state.kind === 'explicit') {
+    const validated = validateGfsUploadProductMaxBytes(state.value)
+    return [
+      `${GFS_PRODUCT_MAX_HCC_ENV}=${String(validated)}`,
+      `${GFS_PRODUCT_MAX_HCC_ALIAS_ENV}=${String(validated)}`,
+    ]
+  }
+  throw new Error('invalid GFS Upload v2 product maximum restoration state')
+}
+
+export async function setGfsUploadProductMaxBytes(
+  state: GfsUploadProductMaxState | number
+): Promise<void> {
+  const envArgs = buildGfsUploadProductMaxEnvArgs(state)
+  const expected =
+    typeof state === 'number' ? state : state.kind === 'explicit' ? state.value : undefined
   await assertOwnedRuntimeContext()
-  await kubectl([
-    '-n',
-    HCC_NAMESPACE,
-    'set',
-    'env',
-    `deployment/${HCC_DEPLOYMENT}`,
-    `${GFS_PRODUCT_MAX_HCC_ENV}=${String(validated)}`,
-    `${GFS_PRODUCT_MAX_HCC_ALIAS_ENV}=${String(validated)}`,
-  ])
+  await kubectl(['-n', HCC_NAMESPACE, 'set', 'env', `deployment/${HCC_DEPLOYMENT}`, ...envArgs])
   await kubectl([
     '-n',
     HCC_NAMESPACE,
@@ -361,19 +442,18 @@ export async function setGfsUploadProductMaxBytes(productMaxBytes: number): Prom
     `deployment/${HCC_DEPLOYMENT}`,
     '--timeout=240s',
   ])
-  await waitForRenderedWriterProductMax(validated)
+  await waitForRenderedWriterProductMax(expected)
   await waitForDeployment(GFS_WRITER_DEPLOYMENT)
   await waitForDeployment(GFS_READER_DEPLOYMENT)
 }
 
-export async function readGfsUploadProductMaxBytes(): Promise<number> {
+export async function readGfsUploadProductMaxBytes(): Promise<GfsUploadProductMaxState> {
   const value = await renderedWriterProductMax()
-  if (!/^[1-9]\d*$/.test(value)) {
-    throw new Error(
-      `GFS writer rendered an invalid ${GFS_PRODUCT_MAX_WRITER_ENV} value: ${value || '<empty>'}`
-    )
+  if (value === undefined) return { kind: 'absent' }
+  return {
+    kind: 'explicit',
+    value: validateGfsUploadProductMaxBytes(parseCanonicalProductMax(value)),
   }
-  return validateGfsUploadProductMaxBytes(Number(value))
 }
 
 export async function restartGfsWriter(): Promise<void> {
