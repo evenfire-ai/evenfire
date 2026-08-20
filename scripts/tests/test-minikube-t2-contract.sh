@@ -108,6 +108,10 @@ if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'gfs-rollo
   echo 'FAIL: provision_gfs_serving reconcile does not use the HCC-safe reader rollout wait' >&2
   exit 1
 fi
+if ! sed -n '/^provision_gfs_serving()/,/settle-gfs-reader-rollout.sh/p' "$PRE_GATE" | grep -Fq 'sync-auth-key.sh'; then
+  echo 'FAIL: provision_gfs_serving does not re-sync gfs-config.jwt-public-key before reconcile (an empty key blocks every new reader pod)' >&2
+  exit 1
+fi
 if ! sed -n '/^converge_gfs_reader_after_restore()/,/^}/p' "$PRE_GATE" | grep -Fq 'wait-gfs-reader-ready.sh'; then
   echo 'FAIL: converge_gfs_reader_after_restore still waits on a generation-based rollout status HCC keeps rewriting' >&2
   exit 1
@@ -127,6 +131,10 @@ if [[ "$(grep -c 'scripts/minikube/settle-gfs-reader-rollout.sh' "$ROOT/scripts/
 fi
 if [[ "$(grep -c 'gfs-rollout-shim' "$ROOT/scripts/minikube/full-setup.sh")" -lt 2 ]]; then
   echo 'FAIL: full-setup REUSE_DB reconciles must use the HCC-safe reader rollout wait on both calls' >&2
+  exit 1
+fi
+if [[ "$(grep -c 'sync-auth-key.sh' "$ROOT/scripts/minikube/full-setup.sh")" -lt 3 ]]; then
+  echo 'FAIL: full-setup must re-sync gfs-config.jwt-public-key before both GFS reconciles (the overlay re-applies it empty)' >&2
   exit 1
 fi
 

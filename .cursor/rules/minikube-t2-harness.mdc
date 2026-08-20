@@ -52,6 +52,9 @@ Invariants that must never regress:
   in `scripts/minikube/wait-gfs-reader-ready.sh` (desired replicas Ready and
   no live non-terminating unready reader pod), never a generation wait.
   `pre-gate-sync` reader convergence uses the same readiness contract.
+  Both re-run `sync-auth-key.sh` before each GFS reconcile: the overlay
+  re-applies `gfs-config.jwt-public-key` empty and a reader pod fails
+  closed without it, so the readiness wait could otherwise only time out.
 - T1 stays fail-loud (no green on unavailable DSN or zero tests); the JSON
   reporter is the suite verdict, not a leftover Vitest process exit after a
   complete green reporter. Role-reset suites keep the throwaway Postgres 16.

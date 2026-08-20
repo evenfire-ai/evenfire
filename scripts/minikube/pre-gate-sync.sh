@@ -365,6 +365,11 @@ provision_gfs_serving() {
     # credential cannot authenticate; no password is invented here.
     # GFS_RECOVER_ABANDONED_STATE: a dead prior setup can leave
     # rollout-running; this sync holds the T2 lock, so resume that claim.
+    # An interrupted prior setup can leave gfs-config.jwt-public-key empty
+    # (the overlay re-applies the base ConfigMap with an empty value); a
+    # reader pod cannot start without it and any readiness wait would only
+    # time out. Re-sync it first; this is a no-op when the key matches.
+    bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}"
     # Settle a Ready reader first so reconcile does not restart it and
     # race HCC's gfsReconciler during kubectl rollout status. If reconcile
     # still needs a reader rollout, the gfs-rollout-shim PATH prefix makes

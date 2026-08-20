@@ -73,7 +73,10 @@ gfsReconciler strips the `restartedAt` annotation, so every harness GFS
 reconcile runs with the `scripts/minikube/gfs-rollout-shim` PATH prefix:
 the reader `rollout status` wait is replaced by the readiness poll in
 `scripts/minikube/wait-gfs-reader-ready.sh` instead of chasing the template
-generation HCC keeps rewriting. Do not run
+generation HCC keeps rewriting. `full-setup.sh` and `pre-gate-sync` also
+re-run `sync-auth-key.sh` before each GFS reconcile because the overlay
+re-applies `gfs-config.jwt-public-key` empty and a reader pod fails closed
+without it. Do not run
 `reconcile-gfs-deploy-credentials.sh` or `kubectl rollout restart
 deploy/gfsc-reader` by hand as a T2-repair step — re-run the entry point.
 

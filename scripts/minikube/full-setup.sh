@@ -985,6 +985,12 @@ else
     # reader Secret in rollout-running. This path holds the T2 profile lock,
     # so the prior process is dead; resume that claim instead of asking for
     # a manual retry flag between runs.
+    # A reader pod resolves gfs-config.jwt-public-key at container start and
+    # fails closed when it is empty (a prior interrupted run can leave it
+    # wiped by the overlay re-apply). Re-sync it from the live platform
+    # Secret before reconcile so a reader pod can actually start; this is a
+    # no-op when the key already matches.
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}"
     # If gfsc-reader is already Ready, settle the leftover claim first so
     # reconcile does not rollout restart and race HCC's gfsReconciler.
     # The gfs-rollout-shim PATH prefix makes any reader rollout wait inside
@@ -1058,6 +1064,10 @@ else
     # the split writer/reader templates; reconciling before that lands leaves
     # the staged reader credential rollout-pending and fails the final verify.
     CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
+    # The overlay apply above re-declared the base gfs-config with an empty
+    # jwt-public-key; re-sync it before any reader pod may need to start,
+    # otherwise the reconcile readiness wait can only time out.
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}"
     CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
     PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
