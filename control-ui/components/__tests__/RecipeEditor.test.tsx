@@ -1681,4 +1681,56 @@ describe('RecipeEditor — grants in editor', () => {
     // Inline error surfaces in the grants panel.
     expect(screen.getByText(/could not be saved/)).toBeInTheDocument()
   })
+
+  it('deploys a Codex-only recipe without an LLM secretRef', async () => {
+    const onSaved = vi.fn()
+    render(<RecipeEditor onSaved={onSaved} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: 'Agentic Workflow (Codex Subscription)' },
+    })
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByText('Deploy plugin'))
+    await waitFor(() => expect(api.createRecipe).toHaveBeenCalled())
+    const createPayload = vi.mocked(api.createRecipe).mock.calls[0][0] as {
+      spec: { agent?: { provider?: string; model?: string; secretRef?: unknown } }
+    }
+    expect(createPayload.spec.agent).toEqual({
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+    })
+    expect(createPayload.spec.agent?.secretRef).toBeUndefined()
+    expect(onSaved).toHaveBeenCalled()
+  })
+
+  it('blocks a Codex recipe that still declares an LLM secretRef', async () => {
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: {
+        value: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'codex-with-secret' },
+            spec: {
+              agent: {
+                provider: 'codex-subscription',
+                model: 'gpt-5.1',
+                secretRef: { name: 'codex-oauth', key: 'refreshToken' },
+              },
+              triggers: { onDemand: { allowedActors: ['user'] } },
+              steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+            },
+          },
+          null,
+          2
+        ),
+      },
+    })
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByText('Deploy plugin'))
+    await waitFor(() => {
+      expect(screen.getByText(/must not declare an LLM secretRef/i)).toBeInTheDocument()
+    })
+    expect(api.createRecipe).not.toHaveBeenCalled()
+  })
 })

@@ -138,15 +138,16 @@ export function LlmProviderConfig({
       icon: <LlmProviderIcon provider={provider} label={getProviderLabel(provider)} />,
     }))
     if (primaryModelOutOfAllowlist) {
+      const saved = catalog.find(entry => entry.provider === provider && entry.model === model)
       options.push({
         value: model,
         label: model,
         icon: <LlmProviderIcon provider={provider} label={getProviderLabel(provider)} />,
-        badge: 'out of allowlist',
+        badge: saved?.stale ? 'stale' : saved && !saved.enabled ? 'disabled' : 'out of allowlist',
       })
     }
     return options
-  }, [model, primaryModelOptions, primaryModelOutOfAllowlist, provider])
+  }, [catalog, model, primaryModelOptions, primaryModelOutOfAllowlist, provider])
 
   // Replace every entry for one provider with the operator's new selection,
   // leaving the other providers' subsets untouched. Selecting none removes the

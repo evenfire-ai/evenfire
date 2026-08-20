@@ -28,6 +28,7 @@ import {
   getModelOptions,
   getProviderLabel,
   isProviderUsable,
+  llmChainRequiresSecret,
   normalizeAllowedModels,
   normalizeLlmPolicy,
   normalizeProvider,
@@ -475,10 +476,16 @@ export default function HostDetailsPage() {
     // the Secret listed at least one key OR the operator typed a rotation. An
     // empty/unlisted key set is treated as unknown (the backend stays the source
     // of truth), so the save is never blocked by stale listing.
+    const chainRequiresSecret = llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
+    if (chainRequiresSecret && !secretRefDraft.trim()) {
+      setError('Select an LLM secret for the static-credentials provider in this chain.')
+      return false
+    }
     const primaryPresent = (dataKey: string): boolean =>
       (llmKeyDraft[dataKey] ?? '').trim().length > 0 || currentSecretKeys.includes(dataKey)
     const typedAnyCredential = Object.values(llmKeyDraft).some(value => value.trim().length > 0)
     if (
+      chainRequiresSecret &&
       secretRefDraft.trim() &&
       (currentSecretKeys.length > 0 || typedAnyCredential) &&
       !isProviderUsable(providerDraft, primaryPresent)
@@ -512,11 +519,19 @@ export default function HostDetailsPage() {
       const currentHost = await getHost(routeName)
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
-        secretRef: secretRefDraft.trim(),
         model: {
           provider: providerDraft,
           name: modelNameDraft.trim(),
         },
+      }
+      // Host identity is metadata.name / the route slug. Never persist
+      // hostRef/userId as execution authority on this write.
+      delete nextSpec.hostRef
+      delete nextSpec.userId
+      if (chainRequiresSecret) {
+        nextSpec.secretRef = secretRefDraft.trim()
+      } else {
+        delete nextSpec.secretRef
       }
       // Opt-in fallback policy: set it when configured, otherwise drop it so a
       // Host with no policy stays exactly as today (full-replace semantics).
@@ -547,7 +562,11 @@ export default function HostDetailsPage() {
       // Rotate/retire credentials on the Host's own Secret with merge:true so
       // other providers' stored keys are preserved (spec Topic 1b R5). removeKeys
       // retires the extra slots left behind by removed fallbacks.
-      if (secretRefDraft.trim() && (Object.keys(rotatedData).length > 0 || removeKeys.length > 0)) {
+      if (
+        chainRequiresSecret &&
+        secretRefDraft.trim() &&
+        (Object.keys(rotatedData).length > 0 || removeKeys.length > 0)
+      ) {
         await apiSend('PUT', '/api/v1/admin/secrets', {
           name: secretRefDraft.trim(),
           merge: true,
@@ -928,10 +947,17 @@ export default function HostDetailsPage() {
                     </div>
                   )}
                 </div>
-                <div className="cu-field">
-                  <label htmlFor="model-secret">Secret reference</label>
-                  <div className="cu-field__readonly">{secretRefDraft || '-'}</div>
-                </div>
+                {llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks) ? (
+                  <div className="cu-field">
+                    <label htmlFor="model-secret">Secret reference</label>
+                    <div className="cu-field__readonly">{secretRefDraft || '-'}</div>
+                  </div>
+                ) : (
+                  <div className="cu-field">
+                    <label htmlFor="model-secret">Secret reference</label>
+                    <div className="cu-field__readonly">Broker-backed — no LLM secret required</div>
+                  </div>
+                )}
                 <div className="cu-field">
                   <label htmlFor="model-fallback">Fallback policy</label>
                   {llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0 ? (
@@ -966,27 +992,29 @@ export default function HostDetailsPage() {
                     </button>
                   </div>
                 ) : null}
-                <div className="cu-form-stack" style={{ marginBottom: '1rem' }}>
-                  <div className="cu-field">
-                    <label htmlFor="host-secret">Secret reference</label>
-                    <select
-                      id="host-secret"
-                      value={secretRefDraft}
-                      onChange={e => setSecretRefDraft(e.target.value)}
-                      disabled={busy}
-                    >
-                      <option value="">Select LLM secret</option>
-                      {availableSecrets.map(secretName => (
-                        <option key={secretName} value={secretName}>
-                          {secretName}
-                        </option>
-                      ))}
-                      {secretRefDraft && !availableSecrets.includes(secretRefDraft) ? (
-                        <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
-                      ) : null}
-                    </select>
+                {llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks) ? (
+                  <div className="cu-form-stack" style={{ marginBottom: '1rem' }}>
+                    <div className="cu-field">
+                      <label htmlFor="host-secret">Secret reference</label>
+                      <select
+                        id="host-secret"
+                        value={secretRefDraft}
+                        onChange={e => setSecretRefDraft(e.target.value)}
+                        disabled={busy}
+                      >
+                        <option value="">Select LLM secret</option>
+                        {availableSecrets.map(secretName => (
+                          <option key={secretName} value={secretName}>
+                            {secretName}
+                          </option>
+                        ))}
+                        {secretRefDraft && !availableSecrets.includes(secretRefDraft) ? (
+                          <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
+                        ) : null}
+                      </select>
+                    </div>
                   </div>
-                </div>
+                ) : null}
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
@@ -1002,13 +1030,21 @@ export default function HostDetailsPage() {
                   catalogLoading={modelsLoading}
                   catalogError={modelsError}
                   replacePrimaryModelWithAllowedModels
-                  credentials={{
-                    draft: llmKeyDraft,
-                    onChange: (dataKey, value) =>
-                      setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value })),
-                    existingKeys: currentSecretKeys,
-                  }}
-                  secretKeys={currentSecretKeys}
+                  credentials={
+                    llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
+                      ? {
+                          draft: llmKeyDraft,
+                          onChange: (dataKey, value) =>
+                            setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value })),
+                          existingKeys: currentSecretKeys,
+                        }
+                      : undefined
+                  }
+                  secretKeys={
+                    llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
+                      ? currentSecretKeys
+                      : []
+                  }
                   disabled={busy}
                 />
               </>

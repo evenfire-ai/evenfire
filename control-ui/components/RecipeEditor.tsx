@@ -25,6 +25,7 @@ import {
 } from '../lib/api'
 import { analyzeWorkflowRecipeEgress } from '../lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '../lib/egressModel'
+import { brokerBackedRecipeAuthoringError } from '../lib/llm'
 import { DEFAULT_OPERATOR_DEFAULTS, applyDefaults } from '../lib/recipeDefaults'
 import {
   type RecipeSecretNamespaces,
@@ -284,6 +285,41 @@ const TEMPLATES: RecipeTemplate[] = [
           inputContract: {
             properties: {
               topic: { type: 'string', default: 'latest advances in multi-agent AI systems' },
+            },
+          },
+        },
+      },
+      null,
+      2
+    ),
+  },
+  {
+    label: 'Agentic Workflow (Codex Subscription)',
+    json: JSON.stringify(
+      {
+        apiVersion: 'clerum.io/v1alpha1',
+        kind: 'WorkflowRecipe',
+        metadata: { name: 'codex-subscription-workflow' },
+        spec: {
+          agent: {
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+          },
+          triggers: {
+            onDemand: {
+              allowedActors: ['user', 'autonomous'],
+            },
+          },
+          steps: [
+            {
+              id: 'draft',
+              instruction: 'Draft a concise answer for: {{inputs.topic}}',
+              timeoutSeconds: 600,
+            },
+          ],
+          inputContract: {
+            properties: {
+              topic: { type: 'string', default: 'summarize this change' },
             },
           },
         },
@@ -1656,6 +1692,15 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       // L2 decides if the CRD is structurally and policy-valid. Missing
       // declarative Secret refs come back as pending credentials and do not
       // block creation; real validation errors still fail closed here.
+      const brokerError = brokerBackedRecipeAuthoringError(specToUse)
+      if (brokerError) {
+        setServerValidation({
+          valid: false,
+          errors: [{ field: 'spec.agent', rule: 'codexBrokerAuthoring', message: brokerError }],
+        })
+        return
+      }
+
       setDeployPhase('validating')
       const l2 = await validateRecipeServer(
         {

@@ -5,10 +5,14 @@ import {
   LLM_CREDENTIAL_GROUPS,
   LLM_DEFAULT_MODEL_BY_PROVIDER,
   type LlmModelCatalogEntry,
+  brokerBackedRecipeAuthoringError,
+  budgetUnitAllowedForProviders,
   getAllModelOptions,
   getLlmGroupCompleteness,
   getModelOptions,
   inferProviderFromModels,
+  llmChainRequiresSecret,
+  providerRequiresLlmSecret,
   resolveDefaultModel,
   validateLlmSecretData,
 } from '../llm'
@@ -42,6 +46,19 @@ describe('getModelOptions', () => {
 
   it('returns an empty list for a provider with no rows', () => {
     expect(getModelOptions(CATALOG, 'vertex')).toEqual([])
+  })
+
+  it('hides stale models from new picks unless includeStale is set', () => {
+    const catalog: LlmModelCatalogEntry[] = [
+      { provider: 'codex-subscription', model: 'gpt-5.1', enabled: true },
+      { provider: 'codex-subscription', model: 'old-codex', enabled: true, stale: true },
+      { provider: 'codex-subscription', model: 'disabled-codex', enabled: false },
+    ]
+    expect(getModelOptions(catalog, 'codex-subscription')).toEqual(['gpt-5.1'])
+    expect(getModelOptions(catalog, 'codex-subscription', { includeStale: true })).toEqual([
+      'gpt-5.1',
+      'old-codex',
+    ])
   })
 })
 
@@ -128,7 +145,7 @@ describe('LLM_CREDENTIAL_GROUPS (spec R4.5.1/R4.5.2)', () => {
     expect(codex.slots).toEqual([])
     expect(codex.nonSecretEnv).toEqual([])
     expect(LLM_DEFAULT_MODEL_BY_PROVIDER['codex-subscription']).toBeUndefined()
-    expect(resolveDefaultModel('codex-subscription', ['gpt-5.1'])).toBe('gpt-5.1')
+    expect(resolveDefaultModel('codex-subscription', ['gpt-5.1'])).toBe('')
   })
 })
 
@@ -143,6 +160,15 @@ describe('getLlmGroupCompleteness (spec R4.5.5)', () => {
       usable: false,
     })
     expect(getLlmGroupCompleteness(openai, () => true).usable).toBe(true)
+  })
+
+  it('treats a zero-slot oauth-broker provider as usable without any keys', () => {
+    const codex = LLM_CREDENTIAL_GROUPS.find(g => g.provider === 'codex-subscription')!
+    expect(getLlmGroupCompleteness(codex, () => false)).toEqual({
+      present: 0,
+      total: 0,
+      usable: true,
+    })
   })
 
   it('is usable for Bedrock only when both required slots are present', () => {
@@ -202,5 +228,50 @@ describe('validateLlmSecretData (spec R4.5.3)', () => {
         }),
       })
     ).toEqual([])
+  })
+})
+
+describe('broker-backed authoring helpers', () => {
+  it('requires a Secret only when any static-credentials provider is in the chain', () => {
+    expect(providerRequiresLlmSecret('codex-subscription')).toBe(false)
+    expect(providerRequiresLlmSecret('openai')).toBe(true)
+    expect(llmChainRequiresSecret('codex-subscription')).toBe(false)
+    expect(llmChainRequiresSecret('codex-subscription', [{ provider: 'openai' }])).toBe(true)
+    expect(llmChainRequiresSecret('openai', [{ provider: 'codex-subscription' }])).toBe(true)
+  })
+
+  it('rejects cost-unit budgets when a broker provider is in scope', () => {
+    expect(budgetUnitAllowedForProviders('tokens', ['codex-subscription'])).toBe(true)
+    expect(budgetUnitAllowedForProviders('cost', ['openai'])).toBe(true)
+    expect(budgetUnitAllowedForProviders('cost', ['codex-subscription'])).toBe(false)
+    expect(budgetUnitAllowedForProviders('cost', ['openai', 'codex-subscription'])).toBe(false)
+  })
+
+  it('rejects Codex recipe authoring that omits the model, ships a secretRef, or uses cost', () => {
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+      })
+    ).toBeNull()
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'codex-subscription' },
+      })
+    ).toMatch(/explicit catalog model/)
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: {
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          secretRef: { name: 'codex-oauth', key: 'refresh' },
+        },
+      })
+    ).toMatch(/must not declare an LLM secretRef/)
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+        budget: { unit: 'cost' },
+      })
+    ).toMatch(/unit tokens/)
   })
 })

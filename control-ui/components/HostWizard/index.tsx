@@ -31,6 +31,7 @@ import {
   getProviderLabel,
   getProvidersWithCompleteCredentials,
   isProviderUsable,
+  llmChainRequiresSecret,
   projectCredentialDraft,
   resolveDefaultModel,
   validateLlmSecretData,
@@ -43,7 +44,13 @@ import {
   STEPS,
   STEP_DETAILS,
 } from './constants'
-import type { ContextOption, CreatedResource, HostWizardProps, WizardSelectProps } from './types'
+import type {
+  ContextOption,
+  CreatedResource,
+  HostLlmSecretMode,
+  HostWizardProps,
+  WizardSelectProps,
+} from './types'
 
 // Stateless lifecycle support remains intact in the API and existing-agent UI;
 // only creation through this wizard is temporarily unavailable.
@@ -232,7 +239,7 @@ function isStepValid(
     contextName: string
     selectedExistingContext: string
     selectedMcp: string[]
-    secretMode: 'existing' | 'new'
+    secretMode: HostLlmSecretMode
     existingSecret: string
     newSecretName: string
     llmKeyDraft: Record<string, string>
@@ -251,6 +258,11 @@ function isStepValid(
     return state.contextName.trim().length > 0
   }
   if (stepIndex === 2) {
+    // Broker-only chains (Codex with no static fallback) need an explicit
+    // catalog model and no Secret. Any static primary/fallback still requires
+    // the exact credential slots (existing Secret or a complete new one).
+    if (!state.modelName.trim()) return false
+    if (!llmChainRequiresSecret(state.provider, state.llmPolicy?.fallbacks)) return true
     // New secret: the PRIMARY provider must be usable (asymmetric gate — a
     // fallback missing its key only warns). Cross-slot mistakes (half Bedrock
     // pair, malformed Vertex JSON) anywhere still block. Existing secret: the
@@ -262,13 +274,11 @@ function isStepValid(
       state.llmKeyDraft,
       getActiveCredentialKeys(state.provider, state.llmPolicy)
     )
-    const hasValidSecret =
-      state.secretMode === 'existing'
-        ? state.existingSecret.trim().length > 0
-        : toKebabCase(state.newSecretName).length > 0 &&
+    return state.secretMode === 'existing'
+      ? state.existingSecret.trim().length > 0
+      : toKebabCase(state.newSecretName).length > 0 &&
           primaryCredentialUsable(state.provider, state.llmKeyDraft) &&
           validateLlmSecretData(projectedDraft).length === 0
-    return hasValidSecret && state.modelName.trim().length > 0
   }
   if (stepIndex === 3) return true
   return false
@@ -309,7 +319,7 @@ export function HostWizard({
 
   // Reuse an existing shared Secret by default. Creating an agent-specific Secret
   // remains available when the operator explicitly chooses New credential.
-  const [secretMode, setSecretMode] = useState<'existing' | 'new'>('existing')
+  const [secretMode, setSecretMode] = useState<HostLlmSecretMode>('existing')
   const [existingSecret, setExistingSecret] = useState('')
   const [newSecretName, setNewSecretName] = useState('')
   const [secretNameTouched, setSecretNameTouched] = useState(false)
@@ -386,6 +396,7 @@ export function HostWizard({
     () => getModelOptions(allowedCatalog, provider),
     [allowedCatalog, provider]
   )
+  const chainRequiresSecret = llmChainRequiresSecret(provider, llmPolicy?.fallbacks)
   const handleExistingSecretChange = useCallback(
     (secretName: string) => {
       setExistingSecret(secretName)
@@ -599,21 +610,22 @@ export function HostWizard({
     if (step === 1 && contextMode === 'new' && !contextName.trim())
       return 'Context name is required.'
     if (step === 2 && !modelName.trim()) return 'Model name is required.'
-    if (step === 2 && secretMode === 'existing' && !existingSecret.trim())
-      return 'Select an existing secret.'
-    if (step === 2 && secretMode === 'new' && !toKebabCase(newSecretName)) {
-      return 'For a new secret, set a name.'
-    }
-    if (step === 2 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
-      return `Add the ${getProviderLabel(provider)} credential for the primary model.`
-    }
-    if (step === 2 && secretMode === 'new') {
-      const projected = projectCredentialDraft(
-        llmKeyDraft,
-        getActiveCredentialKeys(provider, llmPolicy)
-      )
-      const slotErrors = validateLlmSecretData(projected)
-      if (slotErrors.length > 0) return slotErrors[0]
+    if (step === 2 && llmChainRequiresSecret(provider, llmPolicy?.fallbacks)) {
+      if (secretMode === 'existing' && !existingSecret.trim()) return 'Select an existing secret.'
+      if (secretMode === 'new' && !toKebabCase(newSecretName)) {
+        return 'For a new secret, set a name.'
+      }
+      if (secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
+        return `Add the ${getProviderLabel(provider)} credential for the primary model.`
+      }
+      if (secretMode === 'new') {
+        const projected = projectCredentialDraft(
+          llmKeyDraft,
+          getActiveCredentialKeys(provider, llmPolicy)
+        )
+        const slotErrors = validateLlmSecretData(projected)
+        if (slotErrors.length > 0) return slotErrors[0]
+      }
     }
     return ''
   }, [
@@ -692,7 +704,7 @@ export function HostWizard({
         contextMode === 'existing' ? selectedContextOption?.contextId || '' : normalizedContextName
       const normalizedSecretName = toKebabCase(newSecretName)
 
-      if (secretMode === 'new') {
+      if (chainRequiresSecret && secretMode === 'new') {
         // Project the draft onto the active domain before writing: only the
         // primary provider's slots ∪ each fallback's effective slot(s) reach the
         // Secret — a key left behind by a since-removed provider is dropped, not
@@ -759,7 +771,9 @@ export function HostWizard({
       const hostSpec: Record<string, unknown> = {
         host: normalizedHostName,
         contextRef: resolvedContextName,
-        secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
+        ...(chainRequiresSecret
+          ? { secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName }
+          : {}),
         channels: [],
         model: {
           provider,
@@ -1054,78 +1068,85 @@ export function HostWizard({
 
         {step === 2 && (
           <div className="cu-form-stack cu-agent-form-stack">
-            <div className="cu-agent-access-section">
-              <strong>Credentials</strong>
-              <span className="cu-muted cu-agent-access-hint">
-                Store this agent&apos;s own LLM credentials, or use a shared secret.
-              </span>
-              <div className="cu-agent-radio-group">
-                <label className="cu-agent-radio cu-agent-radio--card">
-                  <input
-                    type="radio"
-                    checked={secretMode === 'existing'}
-                    onChange={() => setSecretMode('existing')}
-                  />
-                  <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">Use an existing secret</span>
-                    <span className="cu-agent-radio__description">
-                      Select a saved secret that already contains LLM API keys.
-                    </span>
-                  </span>
-                </label>
-                <label className="cu-agent-radio cu-agent-radio--card">
-                  <input
-                    type="radio"
-                    checked={secretMode === 'new'}
-                    onChange={() => setSecretMode('new')}
-                  />
-                  <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">New secret</span>
-                    <span className="cu-agent-radio__description">
-                      Create a new secret for this agent. Its name is derived from the agent name.
-                    </span>
-                  </span>
-                </label>
-              </div>
-              {secretMode === 'existing' ? (
-                <div className="cu-agent-access-section">
-                  <strong>Credential</strong>
-                  <WizardSelect
-                    value={existingSecret}
-                    placeholder="Select secret..."
-                    options={secretOptions}
-                    onChange={handleExistingSecretChange}
-                  />
-                </div>
-              ) : (
-                <Field
-                  description="Auto-named from the agent — edit if you prefer a different name."
-                  label="Secret name"
-                >
-                  <span className="cu-agent-input-shell">
-                    <TextInput
-                      value={newSecretName}
-                      onChange={e => {
-                        setSecretNameTouched(true)
-                        setNewSecretName(toKebabInput(e.target.value))
-                      }}
-                      placeholder="secret-name"
+            {chainRequiresSecret ? (
+              <div className="cu-agent-access-section">
+                <strong>Credentials</strong>
+                <span className="cu-muted cu-agent-access-hint">
+                  Store this agent&apos;s own LLM credentials, or use a shared secret.
+                </span>
+                <div className="cu-agent-radio-group">
+                  <label className="cu-agent-radio cu-agent-radio--card">
+                    <input
+                      type="radio"
+                      checked={secretMode === 'existing'}
+                      onChange={() => setSecretMode('existing')}
                     />
-                    <span
-                      className={cn(
-                        'cu-agent-input-shell__status',
-                        !toKebabCase(newSecretName) && 'cu-agent-input-shell__status--empty'
-                      )}
-                      aria-label={
-                        toKebabCase(newSecretName) ? 'Valid secret name' : 'Secret name empty'
-                      }
-                    >
-                      {toKebabCase(newSecretName) ? <IconCheck width={16} height={16} /> : null}
+                    <span className="cu-agent-radio__copy">
+                      <span className="cu-agent-radio__title">Use an existing secret</span>
+                      <span className="cu-agent-radio__description">
+                        Select a saved secret that already contains LLM API keys.
+                      </span>
                     </span>
-                  </span>
-                </Field>
-              )}
-            </div>
+                  </label>
+                  <label className="cu-agent-radio cu-agent-radio--card">
+                    <input
+                      type="radio"
+                      checked={secretMode === 'new'}
+                      onChange={() => setSecretMode('new')}
+                    />
+                    <span className="cu-agent-radio__copy">
+                      <span className="cu-agent-radio__title">New secret</span>
+                      <span className="cu-agent-radio__description">
+                        Create a new secret for this agent. Its name is derived from the agent name.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+                {secretMode === 'existing' ? (
+                  <div className="cu-agent-access-section">
+                    <strong>Credential</strong>
+                    <WizardSelect
+                      value={existingSecret}
+                      placeholder="Select secret..."
+                      options={secretOptions}
+                      onChange={handleExistingSecretChange}
+                    />
+                  </div>
+                ) : (
+                  <Field
+                    description="Auto-named from the agent — edit if you prefer a different name."
+                    label="Secret name"
+                  >
+                    <span className="cu-agent-input-shell">
+                      <TextInput
+                        value={newSecretName}
+                        onChange={e => {
+                          setSecretNameTouched(true)
+                          setNewSecretName(toKebabInput(e.target.value))
+                        }}
+                        placeholder="secret-name"
+                      />
+                      <span
+                        className={cn(
+                          'cu-agent-input-shell__status',
+                          !toKebabCase(newSecretName) && 'cu-agent-input-shell__status--empty'
+                        )}
+                        aria-label={
+                          toKebabCase(newSecretName) ? 'Valid secret name' : 'Secret name empty'
+                        }
+                      >
+                        {toKebabCase(newSecretName) ? <IconCheck width={16} height={16} /> : null}
+                      </span>
+                    </span>
+                  </Field>
+                )}
+              </div>
+            ) : (
+              <p className="cu-muted cu-agent-access-hint">
+                This provider authenticates through the Codex subscription. No LLM secret is
+                required unless you add a static-credentials fallback.
+              </p>
+            )}
             <LlmProviderConfig
               provider={provider}
               model={modelName}
@@ -1143,7 +1164,7 @@ export function HostWizard({
               modelLabel="Default model"
               showAllowedModels={false}
               credentials={
-                secretMode === 'new'
+                chainRequiresSecret && secretMode === 'new'
                   ? {
                       draft: llmKeyDraft,
                       onChange: (dataKey, value) =>
@@ -1151,7 +1172,7 @@ export function HostWizard({
                     }
                   : undefined
               }
-              secretKeys={secretMode === 'new' ? llmSecretKeys : []}
+              secretKeys={chainRequiresSecret && secretMode === 'new' ? llmSecretKeys : []}
               fallbackProvidersInitiallyCollapsed
               disabled={busy}
             />
