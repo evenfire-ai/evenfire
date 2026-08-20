@@ -30,7 +30,7 @@ increment() {
 }
 
 if [[ "${1:-}" == get && "${2:-}" == secret && "${3:-}" == rpc-proxy-secrets ]]; then
-  [[ "$*" == *jsonpath* ]] && printf 'cHVibGljLWtleQ=='
+  [[ "$*" == *jsonpath* ]] && printf '%s' "${TEST_SOURCE_B64:-cHVibGljLWtleQ==}"
   exit 0
 fi
 
@@ -131,11 +131,14 @@ if [[ "${1:-}" == get && "${2:-}" == pods ]]; then
 fi
 
 if [[ "${1:-}" == exec ]]; then
-  payload="$(cat)"
+  input_file="${TEST_STATE_DIR}/exec-input"
+  expected_file="${TEST_STATE_DIR}/exec-expected"
+  cat >"${input_file}"
   expected_key="${TEST_RUNTIME_KEY}"
   [[ "$*" == *GFS_JWT_PUBLIC_KEY* ]] && expected_key="${TEST_RUNTIME_KEY_GFS:-${expected_key}}"
   [[ "$*" == *CLERUM_AUTH_JWT_PUBLIC_KEY* ]] && expected_key="${TEST_RUNTIME_KEY_MCP:-${expected_key}}"
-  [[ "${payload}" == "${expected_key}" ]]
+  printf '%s' "${expected_key}" >"${expected_file}"
+  cmp -s "${input_file}" "${expected_file}"
   exit
 fi
 
@@ -145,8 +148,9 @@ SH
 chmod +x "${TMP_DIR}/kubectl"
 
 run_sync() {
+  local source_hash="${TEST_SOURCE_HASH_OVERRIDE:-${SOURCE_HASH}}"
   TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
-    TEST_SOURCE_HASH="${SOURCE_HASH}" PATH="${TMP_DIR}:$PATH" \
+    TEST_SOURCE_HASH="${source_hash}" PATH="${TMP_DIR}:$PATH" \
     "$@"
 }
 
@@ -248,6 +252,28 @@ if grep -q 'rollout restart deployment/gfsc-' "${LOG_FILE}"; then
 fi
 if grep -q 'deployment/gfs-controller' "${LOG_FILE}"; then
   echo "FAIL: GFS auth sync targeted the nonexistent deployment/gfs-controller" >&2
+  exit 1
+fi
+
+# ConfigMap values commonly end in the PEM newline. The source must be
+# compared and attested byte-for-byte; command substitution must not silently
+# remove that newline and trigger a false rollout failure.
+NEWLINE_SOURCE_HASH="$(printf 'public-key\n' | shasum -a 256 | awk '{print $1}')"
+printf 'public-key\n' >"${STATE_DIR}/mcp.key"
+rm -f "${STATE_DIR}/mcp.applied"
+if ! TEST_SOURCE_HASH_OVERRIDE="${NEWLINE_SOURCE_HASH}" run_sync env \
+  TEST_SOURCE_B64='cHVibGljLWtleQo=' TEST_RUNTIME_KEY=$'public-key\n' \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo "FAIL: auth-key sync rejected an exact PEM-style trailing newline" >&2
+  exit 1
+fi
+[[ "$(cat "${STATE_DIR}/mcp.applied")" == "${NEWLINE_SOURCE_HASH}" ]]
+if grep -q 'rollout restart deployment/' "${LOG_FILE}"; then
+  echo "FAIL: exact trailing-newline convergence triggered an unnecessary rollout" >&2
+  cat "${LOG_FILE}" >&2
   exit 1
 fi
 

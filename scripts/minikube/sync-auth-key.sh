@@ -102,11 +102,19 @@ rollout_restart_with_retry() {
 
 # Build a merge patch that sets one ConfigMap data key to a value.
 make_patch() {
-  SOURCE_VALUE="$1" TARGET_KEY="$2" python3 - <<'PY'
+  SOURCE_VALUE_B64="$1" TARGET_KEY="$2" python3 - <<'PY'
+import base64
 import json
 import os
+import sys
 
-print(json.dumps({"data": {os.environ["TARGET_KEY"]: os.environ["SOURCE_VALUE"]}}))
+try:
+    source_value = base64.b64decode(os.environ["SOURCE_VALUE_B64"], validate=True).decode("utf-8")
+except (ValueError, UnicodeDecodeError) as exc:
+    print(f"invalid UTF-8 source auth key: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(json.dumps({"data": {os.environ["TARGET_KEY"]: source_value}}))
 PY
 }
 
@@ -137,6 +145,22 @@ mark_key_applied() {
     -p "$(make_applied_hash_patch "${source_hash}")" >/dev/null
 }
 
+configmap_key_hash() {
+  local namespace="$1" configmap="$2" key="$3"
+  "${KCTL[@]}" get configmap "${configmap}" -n "${namespace}" \
+    -o "jsonpath={.data.${key}}" | shasum -a 256 | awk '{print $1}'
+}
+
+write_source_key() {
+  SOURCE_KEY_B64="${source_key_b64}" python3 - <<'PY'
+import base64
+import os
+import sys
+
+sys.stdout.buffer.write(base64.b64decode(os.environ["SOURCE_KEY_B64"], validate=True))
+PY
+}
+
 consumer_pods_use_key() {
   local namespace="$1" selector="$2" container="$3" env_name="$4" consumer="$5"
   local rows pod ready deleting pod_count=0
@@ -155,7 +179,7 @@ consumer_pods_use_key() {
       return 1
     fi
     pod_count=$((pod_count + 1))
-    if ! printf '%s' "${source_key}" | "${KCTL[@]}" exec -i "${pod}" -n "${namespace}" -c "${container}" -- \
+    if ! write_source_key | "${KCTL[@]}" exec -i "${pod}" -n "${namespace}" -c "${container}" -- \
       node -e 'const fs=require("fs");const expected=fs.readFileSync(0,"utf8");process.exit(process.env[process.argv[1]]===expected?0:42)' \
       "${env_name}" >/dev/null; then
       log "${consumer} pod ${namespace}/${pod} has not consumed the target auth key" >&2
@@ -192,14 +216,35 @@ if ! source_probe="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAM
   fi
   die "cannot inspect auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET}: ${source_probe}"
 fi
-source_key="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" -o "jsonpath={.data.${SOURCE_KEY}}" | base64 -d)"
-if [[ -z "${source_key}" ]]; then
+source_key_b64="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" -o "jsonpath={.data.${SOURCE_KEY}}")"
+if [[ -z "${source_key_b64}" ]]; then
   if [[ "${REQUIRE_GFS}" == "true" ]]; then
     die "required GFS auth source key ${SOURCE_KEY} is empty"
   fi
   die "auth source key ${SOURCE_KEY} is empty; refusing to mutate consumers"
 fi
-source_hash="$(printf '%s' "${source_key}" | shasum -a 256 | awk '{print $1}')"
+if ! source_hash="$(SOURCE_KEY_B64="${source_key_b64}" python3 - <<'PY'
+import base64
+import hashlib
+import os
+import sys
+
+try:
+    source_value = base64.b64decode(os.environ["SOURCE_KEY_B64"], validate=True)
+    source_value.decode("utf-8")
+except (ValueError, UnicodeDecodeError) as exc:
+    print(f"invalid source auth key encoding: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not source_value:
+    print("source auth key decodes empty", file=sys.stderr)
+    raise SystemExit(1)
+
+print(hashlib.sha256(source_value).hexdigest())
+PY
+)"; then
+  die "source auth key ${SOURCE_KEY} is not valid non-empty UTF-8 base64"
+fi
 if [[ "${REQUIRE_GFS}" == "true" ]] && \
    ! gfs_target_probe="$("${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" 2>&1)"; then
   die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} is missing or unreadable: ${gfs_target_probe}"
@@ -222,17 +267,17 @@ sync_mcp_host() {
     fi
     die "cannot inspect auth target ${CONFIG_NAMESPACE}/${CONFIGMAP}: ${target_probe}"
   fi
-  local current_key applied_hash
-  if ! current_key="$("${KCTL[@]}" get configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" -o "jsonpath={.data.${TARGET_KEY}}" 2>&1)"; then
-    die "cannot read auth target ${CONFIG_NAMESPACE}/${CONFIGMAP}: ${current_key}"
+  local current_hash applied_hash
+  if ! current_hash="$(configmap_key_hash "${CONFIG_NAMESPACE}" "${CONFIGMAP}" "${TARGET_KEY}" 2>&1)"; then
+    die "cannot read auth target ${CONFIG_NAMESPACE}/${CONFIGMAP}: ${current_hash}"
   fi
   if ! applied_hash="$(read_applied_hash "${CONFIG_NAMESPACE}" "${CONFIGMAP}" 2>&1)"; then
     die "cannot read auth convergence marker from ${CONFIG_NAMESPACE}/${CONFIGMAP}: ${applied_hash}"
   fi
   local force_rollout=false
-  if [[ "${source_key}" != "${current_key}" ]]; then
+  if [[ "${source_hash}" != "${current_hash}" ]]; then
     log "Patching ${CONFIGMAP}.${TARGET_KEY}"
-    "${KCTL[@]}" patch configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" --type=merge -p "$(make_patch "${source_key}" "${TARGET_KEY}")" >/dev/null
+    "${KCTL[@]}" patch configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" --type=merge -p "$(make_patch "${source_key_b64}" "${TARGET_KEY}")" >/dev/null
     force_rollout=true
   else
     if [[ "${applied_hash}" == "${source_hash}" ]]; then
@@ -292,17 +337,17 @@ sync_gfs() {
     fi
     die "cannot inspect auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP}: ${target_probe}"
   fi
-  local current_key applied_hash
-  if ! current_key="$("${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" -o "jsonpath={.data.${GFS_TARGET_KEY}}" 2>&1)"; then
-    die "cannot read auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP}: ${current_key}"
+  local current_hash applied_hash
+  if ! current_hash="$(configmap_key_hash "${GFS_NAMESPACE}" "${GFS_CONFIGMAP}" "${GFS_TARGET_KEY}" 2>&1)"; then
+    die "cannot read auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP}: ${current_hash}"
   fi
   if ! applied_hash="$(read_applied_hash "${GFS_NAMESPACE}" "${GFS_CONFIGMAP}" 2>&1)"; then
     die "cannot read auth convergence marker from ${GFS_NAMESPACE}/${GFS_CONFIGMAP}: ${applied_hash}"
   fi
   local force_rollout=false
-  if [[ "${source_key}" != "${current_key}" ]]; then
+  if [[ "${source_hash}" != "${current_hash}" ]]; then
     log "Patching ${GFS_CONFIGMAP}.${GFS_TARGET_KEY}"
-    "${KCTL[@]}" patch configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" --type=merge -p "$(make_patch "${source_key}" "${GFS_TARGET_KEY}")" >/dev/null
+    "${KCTL[@]}" patch configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" --type=merge -p "$(make_patch "${source_key_b64}" "${GFS_TARGET_KEY}")" >/dev/null
     force_rollout=true
   else
     if [[ "${applied_hash}" == "${source_hash}" ]]; then
