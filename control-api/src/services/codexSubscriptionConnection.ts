@@ -328,6 +328,38 @@ export async function loadCodexSubscriptionSecrets(
   }
 }
 
+export async function recordCodexCatalogOutcome(
+  db: DbClient,
+  input: {
+    catalogStatus: CodexSubscriptionCatalogStatus
+    connectionStatus?: CodexSubscriptionConnectionStatus
+    expectedCredentialRevision: number
+    expectedCatalogRevision: number
+  }
+): Promise<CodexSubscriptionSafeConnection | null> {
+  const result = await db.query(
+    `UPDATE codex_subscription_connections
+        SET catalog_status = $1,
+            status = COALESCE($2, status),
+            catalog_revision = catalog_revision + 1,
+            catalog_synced_at = now(),
+            updated_at = now()
+      WHERE connection_key = $3
+        AND credential_revision = $4
+        AND catalog_revision = $5
+      RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+    [
+      input.catalogStatus,
+      input.connectionStatus ?? null,
+      CODEX_SUBSCRIPTION_CONNECTION_KEY,
+      input.expectedCredentialRevision,
+      input.expectedCatalogRevision,
+    ]
+  )
+  const row = result.rows[0] as SafeConnectionRow | undefined
+  return row ? toSafeConnection(row) : null
+}
+
 function toSafeConnection(row: SafeConnectionRow): CodexSubscriptionSafeConnection {
   return {
     connectionKey: CODEX_SUBSCRIPTION_CONNECTION_KEY,
