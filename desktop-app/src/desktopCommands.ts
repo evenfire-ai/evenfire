@@ -108,7 +108,6 @@ const definitions = [
     defaultBinding: { key: 'e', modifier: 'mod' },
     sources: ['host', 'sandbox'],
     eligibility: 'app-mounted',
-    editingPolicy: 'allow',
     modalPolicy: 'block',
     actionOwner: 'renderer',
     visibleInPalette: true,
