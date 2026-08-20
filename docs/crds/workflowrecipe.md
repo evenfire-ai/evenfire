@@ -352,7 +352,15 @@ flowchart TB
 
 > **NetworkPolicy ownership**: The HCC's MCPAccessCtrl Sync is the SOLE owner of all NetworkPolicies across all runtime namespaces. The WRC creates ZERO NetworkPolicies. When the WRC reconciles a WorkflowRecipe, it patches the Context CRD with binding information; the MCPAccessCtrl Sync then generates and manages all NetworkPolicies (deny-all defaults, inter-workload binding rules, and cross-namespace access rules). This single-owner model eliminates NetworkPolicy conflicts and TOCTOU race conditions.
 >
-> **TOCTOU requirement**: NetworkPolicies MUST exist before workload pods are scheduled. The MCPAccessCtrl Sync creates NetworkPolicies synchronously during Context CRD reconciliation, before the WRC creates workload resources.
+> **Pod scheduling and NetworkPolicy ordering**: The namespace-wide deny-all policy is applied once per runtime namespace at HCC startup, as a mandatory bootstrap barrier before the controller reconciles anything, so a pod never runs with no policy selecting it. Per-workload ordering after that point depends on the transport, and only one of the three paths blocks:
+>
+> | Workload | Waits for `network-ready`? | If the wait does not resolve |
+> | --- | --- | --- |
+> | External egress bindings | Yes | Throws; no workload resources are created |
+> | Generic `stdio` | Yes, up to 30s | Logs a warning and proceeds |
+> | HTTP transport, no external egress | No | Not applicable |
+>
+> In the two non-blocking cases the pod can start before its per-workload allow rules are confirmed applied. It starts under the pre-existing deny-all, so the failure mode is broken connectivity until those rules land, not unrestricted traffic. Do not read this as a guarantee that every per-workload NetworkPolicy exists before its pod is scheduled.
 
 **Key architectural decisions:**
 
