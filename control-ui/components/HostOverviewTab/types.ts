@@ -1,6 +1,8 @@
 export type HostOverviewAccessSummary = {
   memberCount: number
   teamCount: number
+  memberNames: string[]
+  teamNames: string[]
 }
 
 export type HostOverviewTabProps = {

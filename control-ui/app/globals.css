@@ -7660,6 +7660,40 @@ textarea.cu-input {
   color: var(--cu-text-muted);
 }
 
+.cu-host-overview-access__list {
+  margin-top: var(--cu-space-3);
+  padding-top: var(--cu-space-3);
+  border-top: 1px solid var(--cu-border-subtle);
+}
+
+.cu-host-overview-access__list-label {
+  margin: 0 0 var(--cu-space-1);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-access__names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-host-overview-access__names li {
+  padding: 0.15rem var(--cu-space-2);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-panel-rgb), 0.4);
+  color: var(--cu-text);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
 .cu-host-overview-mcp__head {
   display: flex;
   align-items: center;

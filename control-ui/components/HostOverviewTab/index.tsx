@@ -122,27 +122,6 @@ export function HostOverviewTab({
 
         <div className="cu-host-overview-identity__divider" />
 
-        <SectionLabel>Access</SectionLabel>
-        <div className="cu-host-overview-identity__counts">
-          <div>
-            <div className="cu-host-overview-identity__count-value">
-              {accessSummary.memberCount}
-            </div>
-            <div className="cu-host-overview-identity__count-label">
-              {accessSummary.memberCount === 1 ? 'member' : 'members'}
-            </div>
-          </div>
-          <div className="cu-host-overview-identity__count-sep" aria-hidden="true" />
-          <div>
-            <div className="cu-host-overview-identity__count-value">{accessSummary.teamCount}</div>
-            <div className="cu-host-overview-identity__count-label">
-              {accessSummary.teamCount === 1 ? 'team' : 'teams'}
-            </div>
-          </div>
-        </div>
-
-        <div className="cu-host-overview-identity__divider" />
-
         <SectionLabel>Context</SectionLabel>
         {hasContext ? (
           <a
@@ -242,6 +221,26 @@ export function HostOverviewTab({
                 </div>
               </div>
             </div>
+            {accessSummary.memberNames.length > 0 ? (
+              <div className="cu-host-overview-access__list">
+                <p className="cu-host-overview-access__list-label">Members</p>
+                <ul className="cu-host-overview-access__names">
+                  {accessSummary.memberNames.map(name => (
+                    <li key={name}>{name}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {accessSummary.teamNames.length > 0 ? (
+              <div className="cu-host-overview-access__list">
+                <p className="cu-host-overview-access__list-label">Teams</p>
+                <ul className="cu-host-overview-access__names">
+                  {accessSummary.teamNames.map(name => (
+                    <li key={name}>{name}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         </section>
 

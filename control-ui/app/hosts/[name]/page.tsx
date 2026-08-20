@@ -225,7 +225,9 @@ export default function HostDetailsPage() {
   const [accessSummary, setAccessSummary] = useState<{
     memberCount: number
     teamCount: number
-  }>({ memberCount: 0, teamCount: 0 })
+    memberNames: string[]
+    teamNames: string[]
+  }>({ memberCount: 0, teamCount: 0, memberNames: [], teamNames: [] })
   const [statelessDraft, setStatelessDraft] = useState(false)
   const [savedStateless, setSavedStateless] = useState(false)
   const [lifecycleState, setLifecycleState] = useState('')
@@ -343,6 +345,22 @@ export default function HostDetailsPage() {
         setAccessSummary({
           memberCount: Array.isArray(agentUsers) ? agentUsers.length : 0,
           teamCount: Array.isArray(agentTeams) ? agentTeams.length : 0,
+          memberNames: Array.isArray(agentUsers)
+            ? (
+                agentUsers as Array<{
+                  displayName?: string | null
+                  name?: string | null
+                  email?: string
+                }>
+              )
+                .map(item => String(item.displayName || item.name || item.email || '').trim())
+                .filter(Boolean)
+            : [],
+          teamNames: Array.isArray(agentTeams)
+            ? (agentTeams as Array<{ name?: string }>)
+                .map(item => String(item.name || '').trim())
+                .filter(Boolean)
+            : [],
         })
         // Overview read-only: status, created/updated timestamps, UID.
         // K8s carries lifecycle.state on status. Map active/suspended/etc. to a
