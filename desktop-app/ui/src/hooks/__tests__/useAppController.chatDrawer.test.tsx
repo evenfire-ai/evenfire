@@ -163,6 +163,7 @@ describe('useAppController — chat drawer keepNavItem', () => {
 
     expect(app.result.current.selectedAgent).toBe('agent-x')
     expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(app.result.current.activeChatId).toBe('chat-1')
   })
 
   it('opens a conversation notification in the drawer (keepNavItem) without ejecting to full-screen', async () => {
