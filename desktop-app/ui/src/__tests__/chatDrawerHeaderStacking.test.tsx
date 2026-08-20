@@ -22,6 +22,15 @@ function layer(name: string): number {
   return Number(match[1])
 }
 
+// The `.toast-stack` sits on a raw z-index literal (not a token) in styles.css.
+// Read it from the real rule so a change there is reflected here instead of the
+// assertion passing against a phantom constant (T4).
+function toastStackZIndex(): number {
+  const match = /\.toast-stack\s*\{[^}]*z-index:\s*(\d+)/.exec(stylesCss)
+  if (!match) throw new Error('.toast-stack z-index not found')
+  return Number(match[1])
+}
+
 beforeEach(() => {
   const style = document.createElement('style')
   style.dataset.testStyles = 'header-stacking'
@@ -49,7 +58,7 @@ describe('chat drawer header stacking', () => {
     // Inbox popover surfaces over the drawer instead of behind it.
     expect(layer('layer-dropdown')).toBeGreaterThan(layer('layer-chat-overlay'))
     // Toasts still sit above the raised header (no occlusion of the toast stack).
-    expect(4000).toBeGreaterThan(layer('layer-dropdown'))
+    expect(toastStackZIndex()).toBeGreaterThan(layer('layer-dropdown'))
   })
 
   it('documents the baseline: the header layer is below the drawer when it is not open', () => {
