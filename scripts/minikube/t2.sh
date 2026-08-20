@@ -22,6 +22,7 @@ T2_PLAN_TMP=""
 T2_T0_STATUS=NOT_RUN
 T2_T1_STATUS=NOT_RUN
 T2_T2_STATUS=NOT_RUN
+T2_NP08_HCC_AUTHORIZATION_STATUS=NOT_RUN
 T2_PLAYWRIGHT_STATUS=NOT_RUN
 # A bootstrap or full reconcile must build the current worktree. Reusing a
 # marker's ghcr coordinate would validate a release image rather than HEAD.
@@ -207,6 +208,28 @@ run_final_preflight() {
   t2_evidence_write T2 PASS 'exact marker, image, PostgreSQL, namespace, Service, and deployment readiness passed'
 }
 
+run_np08_hcc_authorization() {
+  local log_file
+  log_file="$T2_EVIDENCE_DIR/logs/np08-hcc-authorization.log"
+  printf '[minikube-t2] NP-08: deployed Host-to-HCC authorization journey\n'
+  if MINIKUBE_PROFILE="$T2_PROFILE" CLERUM_PROFILE_PORTS_ENV="$T2_PORTS_ENV" \
+    bash "$T2_PROJECT_DIR/scripts/e2e/e2e-np08-hcc-authorization.sh" \
+      --context "$T2_CONTEXT" >"$log_file" 2>&1; then
+    cat "$log_file"
+    T2_NP08_HCC_AUTHORIZATION_STATUS=PASS
+    t2_evidence_write NP08_HCC_AUTHORIZATION PASS \
+      'deployed same-Context, cross-Context, caller-token, and credential-disclosure checks passed'
+    return 0
+  fi
+
+  cat "$log_file" >&2 || true
+  T2_NP08_HCC_AUTHORIZATION_STATUS=FAIL
+  t2_evidence_write NP08_HCC_AUTHORIZATION FAIL \
+    'deployed Host-to-HCC authorization journey failed; see the secret-safe local log'
+  T2_NEXT_COMMAND='repair the first NP-08 authorization failure, verify cleanup, then re-run T2 on the same HEAD'
+  t2_fail NP08_HCC_AUTHORIZATION_FAILED 'deployed Host-to-HCC authorization journey failed'
+}
+
 run_healthcheck_if_requested() {
   if [ -z "$T2_HEALTHCHECK_COMMAND" ]; then
     t2_evidence_write Health NOT_RUN 'no profile-owned user-facing health command was supplied'
@@ -263,14 +286,16 @@ main() {
     t2_fail ZERO_TESTS_EXECUTED 'T1 was not executed'
   fi
   run_final_preflight
+  run_np08_hcc_authorization
   run_healthcheck_if_requested
   run_playwright_if_requested
 
-  t2_evidence_write complete PASS "T0=$T2_T0_STATUS T1=$T2_T1_STATUS T2=$T2_T2_STATUS Playwright=$T2_PLAYWRIGHT_STATUS"
+  t2_evidence_write complete PASS "T0=$T2_T0_STATUS T1=$T2_T1_STATUS T2=$T2_T2_STATUS NP08_HCC_AUTHORIZATION=$T2_NP08_HCC_AUTHORIZATION_STATUS Playwright=$T2_PLAYWRIGHT_STATUS"
   printf 'MINIKUBE_T2_PASS\n'
   printf 'T0=%s\n' "$T2_T0_STATUS"
   printf 'T1=%s\n' "$T2_T1_STATUS"
   printf 'T2=%s\n' "$T2_T2_STATUS"
+  printf 'NP08_HCC_AUTHORIZATION=%s\n' "$T2_NP08_HCC_AUTHORIZATION_STATUS"
   printf 'Playwright=%s\n' "$T2_PLAYWRIGHT_STATUS"
   printf 'evidence=%s\n' "$T2_EVIDENCE_FILE"
 }

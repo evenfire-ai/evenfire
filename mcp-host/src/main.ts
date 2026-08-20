@@ -32,12 +32,7 @@ import {
   projectModels,
   resolveSessionModel,
 } from './config/modelResolution'
-import {
-  ContextMapperClient,
-  ContextMapperRequestError,
-  getContextMapperClient,
-  isContextMapperInventoryAuthorityRevocation,
-} from './contextMapperClient'
+import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -83,6 +78,12 @@ import {
   replaceAuthoritativeMcpFleet,
   runAuthoritativeMcpInitialization,
 } from './mcp/authoritativeFleet'
+import {
+  createMcpAuthorityStalenessDeadline,
+  handleMcpAuthorityPollFailure,
+  isMcpAuthorityStale,
+  revokeMcpAuthorityState,
+} from './mcp/authorityLifecycle'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
@@ -809,67 +810,7 @@ function ensureAuthenticatedContextMapperClient(): ContextMapperClient {
   return contextMapperClient
 }
 
-export function isMcpAuthorityStale(
-  lastSuccessAt: number,
-  now: number,
-  maxStalenessMs: number
-): boolean {
-  return (
-    lastSuccessAt > 0 &&
-    Number.isFinite(now) &&
-    Number.isFinite(maxStalenessMs) &&
-    maxStalenessMs > 0 &&
-    now - lastSuccessAt >= maxStalenessMs
-  )
-}
-
-/**
- * Arm an absolute authority deadline from the last successful HCC snapshot.
- * The independent timeout prevents a slow or failed polling cadence from
- * extending retained authority beyond the configured staleness ceiling.
- */
-export function createMcpAuthorityStalenessDeadline(
-  maxStalenessMs: number,
-  onExpired: () => void,
-  now: () => number = Date.now
-): { recordSuccess(successAt?: number): void; clear(): void } {
-  let timer: ReturnType<typeof setTimeout> | null = null
-  let deadlineAt = 0
-
-  const clear = (): void => {
-    if (timer !== null) clearTimeout(timer)
-    timer = null
-    deadlineAt = 0
-  }
-
-  const schedule = (): void => {
-    const remaining = deadlineAt - now()
-    timer = setTimeout(
-      () => {
-        timer = null
-        if (now() < deadlineAt) {
-          schedule()
-          return
-        }
-        deadlineAt = 0
-        onExpired()
-      },
-      Math.max(0, remaining)
-    )
-  }
-
-  return {
-    recordSuccess: (successAt = now()) => {
-      clear()
-      if (!Number.isFinite(successAt) || !Number.isFinite(maxStalenessMs) || maxStalenessMs <= 0) {
-        return
-      }
-      deadlineAt = successAt + maxStalenessMs
-      schedule()
-    },
-    clear,
-  }
-}
+export { createMcpAuthorityStalenessDeadline, isMcpAuthorityStale }
 
 const mcpAuthorityStalenessDeadline = createMcpAuthorityStalenessDeadline(
   config.hccAuthorityMaxStalenessMs,
@@ -891,25 +832,31 @@ function recordMcpAuthoritySuccess(successAt: number = Date.now()): void {
  * Host JWT and live Host -> Context grant snapshot.
  */
 function revokeMcpAuthority(reason: string, restartPolling: boolean): void {
-  mcpInitializationGeneration += 1
-  stopContextMapperPolling()
-  mcpAuthorityStalenessDeadline.clear()
-  const closingManager = mcpManager
-  mcpManager = null
-  lastServerState = new Map()
-  mcpAuthorityLastSuccessAt = 0
-
-  if (closingManager) {
-    mcpFleetCoordinator.closeManager(closingManager)
-    void closingManager
-      .close(cleanup => mcpFleetCoordinator.scheduleCleanup(cleanup))
-      .catch(() => console.error(`[Main] MCP authority cleanup failed (reason=${reason})`))
-  }
-  console.warn(`[Main] MCP authority revoked (reason=${reason})`)
-
-  if (restartPolling && !isShuttingDown && !config.devMode) {
-    startContextMapperPolling()
-  }
+  revokeMcpAuthorityState({
+    reason,
+    restartPolling,
+    invalidateInitialization: () => {
+      mcpInitializationGeneration += 1
+    },
+    stopPolling: stopContextMapperPolling,
+    clearStalenessDeadline: () => mcpAuthorityStalenessDeadline.clear(),
+    withdrawManager: () => {
+      const closingManager = mcpManager
+      mcpManager = null
+      return closingManager
+    },
+    clearServerState: () => {
+      lastServerState = new Map()
+    },
+    clearLastSuccess: () => {
+      mcpAuthorityLastSuccessAt = 0
+    },
+    coordinator: mcpFleetCoordinator,
+    onCleanupFailure: () => console.error(`[Main] MCP authority cleanup failed (reason=${reason})`),
+    onRevoked: () => console.warn(`[Main] MCP authority revoked (reason=${reason})`),
+    shouldRestartPolling: () => !isShuttingDown && !config.devMode,
+    startPolling: startContextMapperPolling,
+  })
 }
 
 async function initializeMcpServers(): Promise<void> {
@@ -1012,23 +959,18 @@ async function pollContextMapper(): Promise<void> {
       recordMcpAuthoritySuccess()
     }
   } catch (error) {
-    if (error instanceof ContextMapperRequestError && error.authorizationFailure) {
-      // ContextMapperClient already revoked synchronously through its callback.
-      console.warn('[Main] HCC poll rejected caller authority')
-      return
-    }
-    if (isContextMapperInventoryAuthorityRevocation(error)) {
-      revokeMcpAuthority('inventory_not_found', true)
-      console.warn('[Main] HCC inventory no longer resolves live Host authority')
-      return
-    }
-    console.error('[Main] HCC authority poll failed (reason=unavailable)')
-    if (
-      mcpManager &&
-      isMcpAuthorityStale(mcpAuthorityLastSuccessAt, Date.now(), config.hccAuthorityMaxStalenessMs)
-    ) {
-      revokeMcpAuthority('authority_stale', true)
-    }
+    handleMcpAuthorityPollFailure(error, {
+      hasPublishedManager: () => mcpManager !== null,
+      lastSuccessAt: () => mcpAuthorityLastSuccessAt,
+      now: Date.now,
+      maxStalenessMs: config.hccAuthorityMaxStalenessMs,
+      revoke: revokeMcpAuthority,
+      onCallerAuthorizationRejected: () =>
+        console.warn('[Main] HCC poll rejected caller authority'),
+      onInventoryAuthorityRevoked: () =>
+        console.warn('[Main] HCC inventory no longer resolves live Host authority'),
+      onUnavailable: () => console.error('[Main] HCC authority poll failed (reason=unavailable)'),
+    })
   }
 }
 

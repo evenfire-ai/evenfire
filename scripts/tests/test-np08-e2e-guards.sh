@@ -3,12 +3,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 E2E_SCRIPT="${ROOT}/scripts/e2e/e2e-np08-hcc-authorization.sh"
+T2_SCRIPT="${ROOT}/scripts/minikube/t2.sh"
+MAKEFILE="${ROOT}/Makefile"
 
 # shellcheck source=scripts/e2e/_lib/np08-cleanup.sh
 source "${ROOT}/scripts/e2e/_lib/np08-cleanup.sh"
 # shellcheck source=scripts/e2e/_lib/np08-provenance.sh
 source "${ROOT}/scripts/e2e/_lib/np08-provenance.sh"
 
+# Consumed dynamically by the sourced cleanup helper.
+# shellcheck disable=SC2034
 MCP_NS='mcp-server'
 KCTL_RESULT='empty'
 
@@ -154,3 +158,28 @@ if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   fail 'the deployed E2E is not wired to every tested guard'
 fi
 pass 'the deployed E2E is wired to cleanup and provenance guards'
+
+if grep -Fq 'clerum-codex-np-08-cross-context-mcp-token-plan-' "${E2E_SCRIPT}"; then
+  fail 'the deployed E2E is still hard-wired to one historical branch profile'
+fi
+if ! grep -Fq '*gke*|*prod*|*staging*|clerum-test|default|minikube)' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'profile_branch=' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'current_branch=' "${E2E_SCRIPT}" ||
+  ! grep -Fq "git -C \"\${PROJECT_DIR}\" status --porcelain" "${E2E_SCRIPT}"; then
+  fail 'the deployed E2E does not enforce generic protected-context, branch, and clean-HEAD guards'
+fi
+pass 'the deployed E2E accepts only a clean branch-owned local profile'
+
+if ! grep -Fq 'run_np08_hcc_authorization' "${T2_SCRIPT}" ||
+  ! grep -Fq "CLERUM_PROFILE_PORTS_ENV=\"\$T2_PORTS_ENV\"" "${T2_SCRIPT}" ||
+  ! grep -Fq 'NP08_HCC_AUTHORIZATION PASS' "${T2_SCRIPT}" ||
+  ! grep -Fq "NP08_HCC_AUTHORIZATION=\$T2_NP08_HCC_AUTHORIZATION_STATUS" "${T2_SCRIPT}" ||
+  ! grep -Fq 'minikube-t2-np08-hcc-authorization: minikube-t2' "${MAKEFILE}"; then
+  fail 'the deployed E2E is not a required evidence-recorded canonical T2 phase'
+fi
+pass 'canonical local T2 records the deployed NP-08 authorization journey'
+
+if grep -R -Fq 'e2e-np08-hcc-authorization.sh' "${ROOT}/.github/workflows"; then
+  fail 'CI directly invokes the cluster-mutating NP-08 deployed journey'
+fi
+pass 'CI validates NP-08 wiring statically without cluster writes'

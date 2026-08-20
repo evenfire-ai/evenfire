@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local Minikube E2E for the PR1 NP-08 caller-binding contract.
+# Local Minikube E2E for the NP-08 caller-binding contract.
 #
 # This is intentionally a service-to-service journey: the request originates
 # inside the mcp-host pod, crosses the real HCC gateway, and is authorized by
@@ -51,12 +51,15 @@ if [[ "${profile}" != "${context}" ]]; then
 fi
 
 case "${context}" in
-  clerum-codex-np-08-cross-context-mcp-token-plan-*) ;;
-  *)
-    echo "FAIL: refusing non branch-owned NP-08 Minikube context" >&2
+  *gke*|*prod*|*staging*|clerum-test|default|minikube)
+    echo "FAIL: refusing shared, protected, or non-local NP-08 context" >&2
     exit 2
     ;;
 esac
+if [[ ! "${context}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+  echo "FAIL: NP-08 context is not a valid local Minikube identifier" >&2
+  exit 2
+fi
 
 for command_name in kubectl jq git shasum awk python3 node; do
   command -v "${command_name}" >/dev/null || {
@@ -86,11 +89,18 @@ verify_profile_ownership() {
     echo "FAIL: branch profile ports.env is missing: ${PORTS_ENV}" >&2
     exit 1
   }
-  local profile_dir profile_name profile_repo profile_dirty
+  local profile_dir profile_env profile_name profile_repo profile_branch profile_dirty current_branch
   profile_dir="${PORTS_ENV%/ports.env}"
-  profile_name="$(awk -F= '$1 == "PROFILE" { print substr($0, index($0, "=") + 1); exit }' "${profile_dir}/profile.env" 2>/dev/null || true)"
-  profile_repo="$(awk -F= '$1 == "REPO_DIR" { print substr($0, index($0, "=") + 1); exit }' "${profile_dir}/profile.env" 2>/dev/null || true)"
-  profile_dirty="$(awk -F= '$1 == "DIRTY" { print substr($0, index($0, "=") + 1); exit }' "${profile_dir}/profile.env" 2>/dev/null || true)"
+  profile_env="${profile_dir}/profile.env"
+  [[ -f "${profile_env}" ]] || {
+    echo "FAIL: branch profile metadata is missing: ${profile_env}" >&2
+    exit 1
+  }
+  profile_name="$(awk -F= '$1 == "PROFILE" { print substr($0, index($0, "=") + 1); exit }' "${profile_env}" 2>/dev/null || true)"
+  profile_repo="$(awk -F= '$1 == "REPO_DIR" { print substr($0, index($0, "=") + 1); exit }' "${profile_env}" 2>/dev/null || true)"
+  profile_branch="$(awk -F= '$1 == "BRANCH" { print substr($0, index($0, "=") + 1); exit }' "${profile_env}" 2>/dev/null || true)"
+  profile_dirty="$(awk -F= '$1 == "DIRTY" { print substr($0, index($0, "=") + 1); exit }' "${profile_env}" 2>/dev/null || true)"
+  current_branch="$(git -C "${PROJECT_DIR}" branch --show-current 2>/dev/null || true)"
   [[ "${profile_name}" == "${profile}" ]] || {
     echo "FAIL: profile marker belongs to '${profile_name:-unknown}', not ${profile}" >&2
     exit 1
@@ -101,6 +111,10 @@ verify_profile_ownership() {
   }
   [[ -n "${profile_repo}" && "$(cd -- "${profile_repo}" 2>/dev/null && pwd -P)" == "${PROJECT_DIR}" ]] || {
     echo "FAIL: profile marker belongs to another worktree: ${profile_repo:-unknown}" >&2
+    exit 1
+  }
+  [[ -n "${current_branch}" && "${profile_branch}" == "${current_branch}" ]] || {
+    echo "FAIL: profile marker belongs to another branch" >&2
     exit 1
   }
 }

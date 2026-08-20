@@ -133,14 +133,18 @@ export async function sendMessage(
     channelId?: string
     userId?: string
     channelType?: string
+    messageId?: string
+    requestId?: string
+    async?: boolean
   }
 ): Promise<{ status: number; data: any }> {
   const sender = opts?.userId ?? 'test-user'
   const hostRef = opts?.hostRef ?? DEFAULT_HOST_REF
   const channelId = opts?.channelId ?? 'test-channel'
   const channelType = opts?.channelType ?? 'telegram'
+  const search = opts?.async ? '?async=true' : ''
   return fetchJson(
-    `${MCP_HOST_URL}/v1/runtime/messages`,
+    `${MCP_HOST_URL}/v1/runtime/messages${search}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -151,7 +155,7 @@ export async function sendMessage(
         sender,
         channelType,
         timestamp: new Date().toISOString(),
-        messageId: `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        messageId: opts?.messageId ?? `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       }),
     },
     {
@@ -160,6 +164,7 @@ export async function sendMessage(
       channelType,
       channelId,
       sender,
+      requestId: opts?.requestId,
     }
   )
 }
@@ -194,12 +199,16 @@ export async function waitForIdle(timeoutMs = 30_000): Promise<any> {
 }
 
 /** Wait for agent to process at least N total tasks. */
-export async function waitForTasksProcessed(minCount: number, timeoutMs = 60_000): Promise<any> {
+export async function waitForTasksProcessed(
+  minCount: number,
+  timeoutMs = 60_000,
+  pollIntervalMs = 1000
+): Promise<any> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     const status = await getStatus()
     if ((status.agent?.tasksProcessed ?? 0) >= minCount) return status
-    await sleep(1000)
+    await sleep(pollIntervalMs)
   }
   throw new Error(`Agent did not process ${minCount} tasks within ${timeoutMs}ms`)
 }

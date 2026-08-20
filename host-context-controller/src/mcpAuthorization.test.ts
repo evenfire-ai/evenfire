@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { VerifiedMcpHostPrincipal } from './mcpApiAuthentication'
 import {
   type AuthorityContext,
   type AuthorityHost,
   type AuthorityMcpServer,
   type AuthoritySecret,
+  type AuthoritySecretMetadata,
   McpAuthorizationService,
   type McpAuthorizationStore,
   toPublicMcpTransport,
@@ -71,7 +72,7 @@ const secret: AuthoritySecret = {
 class FakeStore implements McpAuthorizationStore {
   secretMetadataReads = 0
   secretValueReads = 0
-  secretMetadataSequence: Array<AuthoritySecret | null> = [secret]
+  secretMetadataSequence: Array<AuthoritySecretMetadata | null> = [secret]
   secretSequence: Array<AuthoritySecret | null> = [secret]
   hostSequence: Array<AuthorityHost | null> | null = null
   contextSequence: Array<AuthorityContext | null> | null = null
@@ -113,6 +114,21 @@ class FakeStore implements McpAuthorizationStore {
     this.secretValueReads += 1
     return this.secretSequence[Math.min(this.secretValueReads - 1, this.secretSequence.length - 1)]
   }
+}
+
+async function expectCredentialFailure(
+  service: McpAuthorizationService,
+  code: string
+): Promise<void> {
+  const error = await service.getCredential(principal, 'server-a').then(
+    () => null,
+    reason => reason
+  )
+  expect(error).toMatchObject({ code })
+  expect(error).not.toHaveProperty('token')
+  expect(JSON.stringify(error)).not.toContain(
+    Buffer.from(secret.data.token, 'base64').toString('utf8')
+  )
 }
 
 describe('McpAuthorizationService', () => {
@@ -213,6 +229,63 @@ describe('McpAuthorizationService', () => {
     })
     expect(store.secretMetadataReads).toBe(0)
     expect(store.secretValueReads).toBe(0)
+  })
+
+  it.each(['host', 'context', 'server', 'secret-metadata', 'secret-value'] as const)(
+    'fails closed without disclosing a credential when the %s store read errors',
+    async read => {
+      const store = new FakeStore()
+      if (read === 'host')
+        vi.spyOn(store, 'readHost').mockRejectedValueOnce(new Error('read failed'))
+      if (read === 'context') {
+        vi.spyOn(store, 'readContext').mockRejectedValueOnce(new Error('read failed'))
+      }
+      if (read === 'server') {
+        vi.spyOn(store, 'readMcpServer').mockRejectedValueOnce(new Error('read failed'))
+      }
+      if (read === 'secret-metadata') {
+        vi.spyOn(store, 'readSecretMetadata').mockRejectedValueOnce(new Error('read failed'))
+      }
+      if (read === 'secret-value') {
+        vi.spyOn(store, 'readSecret').mockRejectedValueOnce(new Error('read failed'))
+      }
+      const service = new McpAuthorizationService(store)
+
+      await expectCredentialFailure(service, 'authorization_unavailable')
+      if (read !== 'secret-value') expect(store.secretValueReads).toBe(0)
+      if (read === 'host' || read === 'context' || read === 'server') {
+        expect(store.secretMetadataReads).toBe(0)
+      }
+    }
+  )
+
+  it.each([
+    ['missing secretRef', { auth: { type: 'bearer' as const } }, secret],
+    ['missing Secret metadata', {}, null],
+  ])('rejects %s before any Secret value read', async (_label, serverOverride, metadataValue) => {
+    const store = new FakeStore()
+    store.serverObject = { ...server, ...(serverOverride as Partial<AuthorityMcpServer>) }
+    store.secretMetadataSequence = metadataValue
+      ? [metadataValue as AuthoritySecretMetadata]
+      : [null]
+    const service = new McpAuthorizationService(store)
+
+    await expectCredentialFailure(service, 'credential_unavailable')
+    expect(store.secretValueReads).toBe(0)
+  })
+
+  it.each([
+    ['missing configured key', { other: Buffer.from('other').toString('base64') }],
+    ['empty base64', { token: '' }],
+    ['malformed base64', { token: 'invalid-test-token' }],
+    ['non-UTF8 base64', { token: Buffer.from([0xff]).toString('base64') }],
+  ])('rejects %s without returning Secret data', async (_label, data) => {
+    const store = new FakeStore()
+    store.secretSequence = [{ ...secret, data }]
+    const service = new McpAuthorizationService(store)
+
+    await expectCredentialFailure(service, 'credential_unavailable')
+    expect(store.secretValueReads).toBe(1)
   })
 
   it('uses the same opaque denial for a cross-Context and an unknown target', async () => {
@@ -370,6 +443,26 @@ describe('McpAuthorizationService', () => {
       code: 'authorization_unavailable',
     })
     expect(store.secretMetadataReads).toBe(2)
+    expect(store.secretValueReads).toBe(1)
+  })
+
+  it('rejects a credential when the Host is rebound during the post-read fence', async () => {
+    const store = new FakeStore()
+    store.hostSequence = [host, { ...host, metadata: meta('replacement-host-uid', '1') }]
+    const service = new McpAuthorizationService(store)
+
+    await expectCredentialFailure(service, 'unauthorized')
+    expect(store.secretMetadataReads).toBe(1)
+    expect(store.secretValueReads).toBe(1)
+  })
+
+  it('rejects a credential when the Context allowlist changes during the post-read fence', async () => {
+    const store = new FakeStore()
+    store.contextSequence = [context, { ...context, mcpServers: [] }]
+    const service = new McpAuthorizationService(store)
+
+    await expectCredentialFailure(service, 'not_found')
+    expect(store.secretMetadataReads).toBe(1)
     expect(store.secretValueReads).toBe(1)
   })
 

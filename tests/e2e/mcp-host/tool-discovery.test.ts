@@ -6,7 +6,15 @@
  * does not call an HCC route with a caller-selected Context.
  */
 import { describe, expect, it } from 'vitest'
-import { getPodLogs, getStatus, sendMessage, waitForIdle } from '../helpers.js'
+import { randomUUID } from 'node:crypto'
+import {
+  getPodLogs,
+  getStatus,
+  getTaskResult,
+  sendMessage,
+  waitForIdle,
+  waitForTasksProcessed,
+} from '../helpers.js'
 
 describe('Tool Discovery', () => {
   it('mcp-host publishes only its effective connected mock-server fleet', async () => {
@@ -37,11 +45,35 @@ describe('Tool Discovery', () => {
   })
 
   it('mcp-host processes messages via single pipeline', async () => {
-    await sendMessage('tool discovery test')
-    await waitForIdle(30_000)
+    const correlationId = `tool-discovery-${randomUUID()}`
+    const before = await getStatus()
+    const tasksProcessedBefore = before.agent?.tasksProcessed
+    expect(tasksProcessedBefore).toEqual(expect.any(Number))
 
-    const logs = getPodLogs('mcp-host', 'mcp-host', 200)
-    // Single pipeline — verify the task was processed
-    expect(logs).toContain('[Agent] Processing task')
+    const accepted = await sendMessage(`tool discovery test ${correlationId}`, {
+      async: true,
+      messageId: correlationId,
+      requestId: correlationId,
+    })
+    expect(accepted.status).toBe(200)
+    expect(accepted.data).toMatchObject({ success: true, status: 'pending' })
+    expect(accepted.data.taskId).toEqual(expect.any(String))
+
+    const completedCount = await waitForTasksProcessed(tasksProcessedBefore + 1, 60_000)
+    expect(completedCount.agent.tasksProcessed).toBeGreaterThanOrEqual(tasksProcessedBefore + 1)
+
+    const idle = await waitForIdle(30_000)
+    expect(idle.agent.state).toBe('idle')
+
+    const taskId = accepted.data.taskId as string
+    const result = await getTaskResult(taskId, 10_000)
+    expect(result.status).toBe(200)
+    expect(result.data.success).toBe(true)
+    expect(result.data.status).toBe('completed')
+
+    const logs = getPodLogs('mcp-host', 'mcp-host', 500)
+    expect(logs).toContain(`[Main]   Message ID: ${correlationId}`)
+    expect(logs).toContain(`[Main] Message queued as async task ${taskId}`)
+    expect(logs).toContain(`[Queue] Task ${taskId} dequeued for processing`)
   })
 })

@@ -327,6 +327,42 @@ describe('ContextMapperServer', () => {
     expect(protectedRoute.store.secretValueReads).toBe(1)
   })
 
+  it.each([
+    ['authorization_unavailable' as const, 503],
+    ['credential_unavailable' as const, 503],
+    ['not_found' as const, 404],
+    ['unauthorized' as const, 401],
+  ])('maps credential %s failures to a token-free fail-closed response', async (code, status) => {
+    const authenticator = { authenticate: () => principal } as unknown as McpApiAuthenticator
+    const authorization = {
+      getCredential: async () => {
+        throw new McpAuthorizationError(code)
+      },
+    } as unknown as McpAuthorizationService
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      () => true,
+      () => true,
+      authenticator,
+      authorization
+    )
+    server.setReady(true)
+
+    const response = await invoke(server, '/api/v2/hosts/self/mcpservers/credential', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ serverName: 'server-a' }),
+    })
+
+    expect(response.statusCode).toBe(status)
+    expect(JSON.parse(response.body)).toEqual({ error: code })
+    expect(response.body).not.toContain('token')
+    expect(response.headers['Cache-Control']).toBe('no-store, private')
+  })
+
   it('normalizes protected route method, media-type, and body-limit failures without a Secret read', async () => {
     const protectedRoute = protectedServer()
     server = protectedRoute.server

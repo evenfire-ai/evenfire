@@ -378,6 +378,68 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
       const claims = await verifyMcpHostRefreshJwt(token)
       expect(claims).toBeNull()
     })
+
+    it.each([
+      {
+        label: 'workflow-only audience with injected HCC claims',
+        audience: MCP_HOST_WORKFLOW_AUDIENCE,
+        recipeNamespace: config.hostsNamespace,
+        recipeName: 'standalone',
+        hostRefs: ['chatllm'],
+        hostUid: 'host-uid-chatllm',
+        capabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+      },
+      {
+        label: 'HCC audience without the bound Host UID',
+        audience: [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE],
+        recipeNamespace: config.hostsNamespace,
+        recipeName: 'standalone',
+        hostRefs: ['chatllm'],
+        hostUid: undefined,
+        capabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+      },
+      {
+        label: 'HCC audience with a workflow recipe binding',
+        audience: [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE],
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'recipe-a',
+        hostRefs: ['sandbox-recipes/recipe-a'],
+        hostUid: 'host-uid-chatllm',
+        capabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+      },
+    ])('rejects $label', async candidate => {
+      const token = jwt.sign(
+        {
+          sub: `${candidate.recipeNamespace}/${candidate.recipeName}`,
+          recipeNamespace: candidate.recipeNamespace,
+          recipeName: candidate.recipeName,
+          hostRefs: candidate.hostRefs,
+          scope: 'workflow:approval:refresh',
+          workflowControlScopes: [],
+          ...(candidate.hostUid ? { host_uid: candidate.hostUid } : {}),
+          mcpCapabilities: candidate.capabilities,
+        },
+        config.adminJwtPrivateKey,
+        {
+          algorithm: 'RS256',
+          issuer: config.adminJwtIssuer,
+          audience: candidate.audience,
+          expiresIn: 300,
+          jwtid: `invalid-hcc-refresh-${candidate.label}`,
+        }
+      )
+
+      await expect(verifyMcpHostRefreshJwt(token)).resolves.toBeNull()
+    })
+
+    it('does not treat a control token as an access or refresh credential', async () => {
+      const { token } = issueMcpHostControlJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+        scopes: ['workflow:read'],
+      })
+
+      expect(verifyMcpHostAccessJwt(token)).toBeNull()
+      await expect(verifyMcpHostRefreshJwt(token)).resolves.toBeNull()
+    })
   })
 
   describe('verifyExpiredMcpHostRefreshJwtDetailed', () => {
