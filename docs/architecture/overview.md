@@ -765,7 +765,11 @@ The former caller-selected Context and global `/auth` routes are retired with
 HTTP 410; the remaining global v1 inventory is metadata-only transitional
 surface for the separately reviewed mcp-proxy PR2 and is not used by mcp-host.
 
-Polling interval: 30 seconds (configurable via `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`)
+Polling interval: 30 seconds (configurable via `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`).
+In cluster mode it must remain strictly below the 60-second
+`HCC_AUTHORITY_MAX_STALENESS_MS` ceiling; mcp-host rejects an invalid relation at
+startup rather than allowing the fleet to flap between successful polls and
+authority revocation.
 
 On each poll, mcp-host compares new server list with previous state and:
 
@@ -810,26 +814,27 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Configuration
 
-| Variable                              | Default          | Description                                     |
-| ------------------------------------- | ---------------- | ----------------------------------------------- |
-| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                 |
-| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)            |
-| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                            |
-| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                |
-| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                      |
-| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                              |
-| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"` |
-| `CLERUM_MODEL_NAME`                   | provider default | Specific model name                             |
-| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                           |
-| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                           |
-| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                         |
-| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                |
-| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                     |
-| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                |
-| `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)                        |
-| `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)                          |
-| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task                         |
-| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                          |
+| Variable                              | Default          | Description                                                                                 |
+| ------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------- |
+| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                                                             |
+| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)                                                        |
+| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                                                                        |
+| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                                                            |
+| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                                                                  |
+| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                                                                          |
+| `HCC_AUTHORITY_MAX_STALENESS_MS`      | `60000`          | Maximum retained HCC authority (ms); must be greater than the poll interval in cluster mode |
+| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"`                                             |
+| `CLERUM_MODEL_NAME`                   | provider default | Specific model name                                                                         |
+| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                                                                       |
+| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                                                                       |
+| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                                                                     |
+| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                                                            |
+| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                                                                 |
+| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                                                            |
+| `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)                                                                    |
+| `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)                                                                      |
+| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task                                                                     |
+| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                                                                      |
 
 ### Dependencies
 

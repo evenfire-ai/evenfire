@@ -83,6 +83,7 @@ describe('McpApiAuthenticator', () => {
 
   it.each([
     { mcpCapabilities: [] },
+    { mcpCapabilities: ['mcp:credential:write'] },
     { mcpCapabilities: [MCP_CREDENTIAL_READ_CAPABILITY, 'extra'] },
     { host_uid: undefined },
     { hostRefs: ['host-a', 'host-b'] },

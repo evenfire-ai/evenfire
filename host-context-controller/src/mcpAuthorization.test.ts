@@ -77,6 +77,11 @@ class FakeStore implements McpAuthorizationStore {
   hostSequence: Array<AuthorityHost | null> | null = null
   contextSequence: Array<AuthorityContext | null> | null = null
   serverSequence: Array<AuthorityMcpServer | null> | null = null
+  hostObjects: Map<string, AuthorityHost | null> | null = null
+  contextObjects: Map<string, AuthorityContext | null> | null = null
+  serverObjects: Map<string, AuthorityMcpServer | null> | null = null
+  secretMetadataObjects: Map<string, AuthoritySecretMetadata | null> | null = null
+  secretObjects: Map<string, AuthoritySecret | null> | null = null
   hostReads = 0
   contextReads = 0
   serverReads = 0
@@ -84,34 +89,39 @@ class FakeStore implements McpAuthorizationStore {
   contextObject: AuthorityContext | null = context
   serverObject: AuthorityMcpServer | null = server
 
-  async readHost() {
+  async readHost(name: string) {
     this.hostReads += 1
+    if (this.hostObjects) return this.hostObjects.get(name) ?? null
     return this.hostSequence
       ? this.hostSequence[Math.min(this.hostReads - 1, this.hostSequence.length - 1)]
       : this.hostObject
   }
-  async readContext() {
+  async readContext(name: string) {
     this.contextReads += 1
+    if (this.contextObjects) return this.contextObjects.get(name) ?? null
     return this.contextSequence
       ? this.contextSequence[Math.min(this.contextReads - 1, this.contextSequence.length - 1)]
       : this.contextObject
   }
-  async readMcpServer() {
+  async readMcpServer(name: string) {
     this.serverReads += 1
+    if (this.serverObjects) return this.serverObjects.get(name) ?? null
     return this.serverSequence
       ? this.serverSequence[Math.min(this.serverReads - 1, this.serverSequence.length - 1)]
       : this.serverObject
   }
-  async readSecretMetadata() {
+  async readSecretMetadata(name: string) {
     this.secretMetadataReads += 1
+    if (this.secretMetadataObjects) return this.secretMetadataObjects.get(name) ?? null
     const value =
       this.secretMetadataSequence[
         Math.min(this.secretMetadataReads - 1, this.secretMetadataSequence.length - 1)
       ]
     return value ? { name: value.name, namespace: value.namespace, metadata: value.metadata } : null
   }
-  async readSecret() {
+  async readSecret(name: string) {
     this.secretValueReads += 1
+    if (this.secretObjects) return this.secretObjects.get(name) ?? null
     return this.secretSequence[Math.min(this.secretValueReads - 1, this.secretSequence.length - 1)]
   }
 }
@@ -133,50 +143,62 @@ async function expectCredentialFailure(
 
 describe('McpAuthorizationService', () => {
   it('keeps two Host/Context grant sets disjoint in both directions', async () => {
-    const storeA = new FakeStore()
-    const storeB = new FakeStore()
-    storeB.hostObject = {
+    const hostB: AuthorityHost = {
       name: 'host-b',
       namespace: 'mcp-host',
       metadata: meta('host-uid-b', '11'),
       contextRef: 'context-b',
     }
-    storeB.contextObject = contextB
-    storeB.serverObject = serverB
-    storeB.secretMetadataSequence = [
-      {
-        name: 'server-b-auth',
-        namespace: 'mcp-server',
-        metadata: meta('secret-uid-b', '41'),
-      },
-    ]
-    storeB.secretSequence = [
-      {
-        name: 'server-b-auth',
-        namespace: 'mcp-server',
-        metadata: meta('secret-uid-b', '41'),
-        data: { token: Buffer.from('credential-b').toString('base64') },
-      },
-    ]
+    const secretB: AuthoritySecret = {
+      name: 'server-b-auth',
+      namespace: 'mcp-server',
+      metadata: meta('secret-uid-b', '41'),
+      data: { token: Buffer.from('credential-b').toString('base64') },
+    }
+    const store = new FakeStore()
+    store.hostObjects = new Map([
+      [host.name, host],
+      [hostB.name, hostB],
+    ])
+    store.contextObjects = new Map([
+      [context.name, context],
+      [contextB.name, contextB],
+    ])
+    store.serverObjects = new Map([
+      [server.name, server],
+      [serverB.name, serverB],
+    ])
+    store.secretMetadataObjects = new Map([
+      [secret.name, secret],
+      [secretB.name, secretB],
+    ])
+    store.secretObjects = new Map([
+      [secret.name, secret],
+      [secretB.name, secretB],
+    ])
 
-    const serviceA = new McpAuthorizationService(storeA)
-    const serviceB = new McpAuthorizationService(storeB)
-    await expect(serviceA.listServers(principal)).resolves.toEqual([
+    const service = new McpAuthorizationService(store)
+    await expect(service.listServers(principal)).resolves.toEqual([
       expect.objectContaining({ name: 'server-a' }),
     ])
-    await expect(serviceB.listServers(principalB)).resolves.toEqual([
+    await expect(service.listServers(principalB)).resolves.toEqual([
       expect.objectContaining({ name: 'server-b' }),
     ])
-    await expect(serviceA.getCredential(principal, 'server-b')).rejects.toMatchObject({
+    const readsBeforeForeignRequests = {
+      secretMetadata: store.secretMetadataReads,
+      secretValue: store.secretValueReads,
+    }
+    await expect(service.getCredential(principal, 'server-b')).rejects.toMatchObject({
       code: 'not_found',
     })
-    await expect(serviceB.getCredential(principalB, 'server-a')).rejects.toMatchObject({
+    await expect(service.getCredential(principalB, 'server-a')).rejects.toMatchObject({
       code: 'not_found',
     })
-    expect(storeA.secretMetadataReads).toBe(1)
-    expect(storeA.secretValueReads).toBe(0)
-    expect(storeB.secretMetadataReads).toBe(1)
-    expect(storeB.secretValueReads).toBe(0)
+    expect(store.secretMetadataReads).toBe(readsBeforeForeignRequests.secretMetadata)
+    expect(store.secretValueReads).toBe(readsBeforeForeignRequests.secretValue)
+    await expect(service.getCredential(principalB, 'server-b')).resolves.toMatchObject({
+      token: 'credential-b',
+    })
   })
 
   it('projects only valid TCP ports into the public transport contract', () => {

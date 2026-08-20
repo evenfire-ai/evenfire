@@ -475,6 +475,29 @@ export function resolveDevModelProvider(raw: string | undefined): LlmProvider | 
   return raw
 }
 
+/**
+ * Keep the poll cadence strictly inside the authority-retention window.
+ *
+ * A cadence at or above the staleness ceiling guarantees that a healthy fleet
+ * can be revoked before the next authoritative poll arrives. Failing startup
+ * closed is safer than silently widening the retention window or allowing a
+ * deployment to flap forever after every successful reconnect.
+ */
+export function validateHccAuthorityTiming(
+  contextMapperPollIntervalMs: number,
+  hccAuthorityMaxStalenessMs: number
+): void {
+  if (
+    Number.isFinite(contextMapperPollIntervalMs) &&
+    Number.isFinite(hccAuthorityMaxStalenessMs) &&
+    contextMapperPollIntervalMs >= hccAuthorityMaxStalenessMs
+  ) {
+    throw new Error(
+      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL (${contextMapperPollIntervalMs}ms) must be less than HCC_AUTHORITY_MAX_STALENESS_MS (${hccAuthorityMaxStalenessMs}ms)`
+    )
+  }
+}
+
 // In dev mode, try CLERUM_HOST_CONFIG first, then fall back to building from env vars
 function getDevHostConfig(): HostSpec | undefined {
   if (!devMode) return undefined
@@ -552,6 +575,20 @@ function parseApprovalPromptHistoryMaxBytes(raw: string): number {
   return Number.isSafeInteger(value) && value >= 1_024 && value <= 32_768 ? value : Number.NaN
 }
 
+const contextMapperPollInterval = parseInt(
+  getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!,
+  10
+)
+const hccAuthorityMaxStalenessMs = Math.min(
+  getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 60_000),
+  60_000
+)
+
+// Dev mode does not retain a Kubernetes-authoritative MCP fleet, so the
+// production polling/staleness relationship is intentionally not required for
+// local fixture runs. Every cluster-mode process must satisfy it at startup.
+if (!devMode) validateHccAuthorityTiming(contextMapperPollInterval, hccAuthorityMaxStalenessMs)
+
 export const config: Config = {
   devMode,
   devHostConfig: getDevHostConfig(),
@@ -606,15 +643,12 @@ export const config: Config = {
   )!,
 
   // Context Mapper poll interval (default 30 seconds)
-  contextMapperPollInterval: parseInt(getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!, 10),
+  contextMapperPollInterval,
 
   // Bound transient HCC/Kubernetes authority outages. Identity failures revoke
   // immediately; 5xx/transport failures may preserve the last good fleet only
   // within this finite window.
-  hccAuthorityMaxStalenessMs: Math.min(
-    getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 60_000),
-    60_000
-  ),
+  hccAuthorityMaxStalenessMs,
 
   // MCP status heartbeat. Defaults to 30 seconds so a single missed tick does
   // not trip desktop staleness.
