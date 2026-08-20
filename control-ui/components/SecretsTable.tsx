@@ -21,12 +21,13 @@ import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs
 import { useConfirmDialog } from './ConfirmDialog'
 import { LlmCredentialFields } from './LlmCredentialFields'
 import { LlmProviderIcon } from './LlmProviderIcon'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconKey } from './Sidebar/icons'
 import { TabBar } from './TabBar'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
-import { IconPencil, IconRefresh, IconX } from './icons'
+import { IconRefresh, IconX } from './icons'
 
 type SecretItem = {
   name?: string
@@ -673,25 +674,24 @@ export function SecretsTable({
                       </td>
                       <td style={{ textAlign: 'right' }}>
                         <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--toolbar"
-                            onClick={() => openUpdate(name)}
-                            aria-label={`Update LLM secret ${name}`}
-                          >
-                            <IconPencil width={16} height={16} />
-                          </button>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void deleteSecret(name)}
-                            disabled={deletingName === name}
-                            aria-label={
-                              deletingName === name ? 'Deleting…' : `Delete LLM secret ${name}`
-                            }
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
+                          <RowActionsMenu
+                            ariaLabel={`Actions for LLM secret ${name}`}
+                            horizontalTrigger
+                            actions={[
+                              {
+                                key: 'update',
+                                label: 'Update',
+                                onClick: () => openUpdate(name),
+                              },
+                              {
+                                key: 'delete',
+                                label: deletingName === name ? 'Deleting…' : 'Delete',
+                                danger: true,
+                                disabled: deletingName === name,
+                                onClick: () => void deleteSecret(name),
+                              },
+                            ]}
+                          />
                         </div>
                       </td>
                     </tr>
@@ -920,27 +920,27 @@ export function SecretsTable({
                         </button>
                       ) : (
                         <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--toolbar"
-                            onClick={() => navigateToRecipeEdit(row.name, row.namespace)}
-                            aria-label={`Update recipe secret ${row.name}`}
-                          >
-                            <IconPencil width={16} height={16} />
-                          </button>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void deleteRecipeSecretRow(row.name, row.namespace)}
-                            disabled={recipeDeletingName === `${row.namespace}/${row.name}`}
-                            aria-label={
-                              recipeDeletingName === `${row.namespace}/${row.name}`
-                                ? 'Deleting…'
-                                : `Delete recipe secret ${row.name}`
-                            }
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
+                          <RowActionsMenu
+                            ariaLabel={`Actions for recipe secret ${row.name}`}
+                            horizontalTrigger
+                            actions={[
+                              {
+                                key: 'update',
+                                label: 'Update',
+                                onClick: () => navigateToRecipeEdit(row.name, row.namespace),
+                              },
+                              {
+                                key: 'delete',
+                                label:
+                                  recipeDeletingName === `${row.namespace}/${row.name}`
+                                    ? 'Deleting…'
+                                    : 'Delete',
+                                danger: true,
+                                disabled: recipeDeletingName === `${row.namespace}/${row.name}`,
+                                onClick: () => void deleteRecipeSecretRow(row.name, row.namespace),
+                              },
+                            ]}
+                          />
                         </div>
                       )}
                     </td>

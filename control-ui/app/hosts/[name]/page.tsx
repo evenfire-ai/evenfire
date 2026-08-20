@@ -10,6 +10,7 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
+import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconMoreHorizontal, IconPencil } from '../../../components/icons'
@@ -36,6 +37,7 @@ import {
 import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
+  details: 'Overview',
   model: 'Models & creds',
   advanced: 'Advanced',
   contexts: 'Context',
@@ -44,6 +46,7 @@ const TAB_LABELS: Record<HostTab, string> = {
 }
 
 const TAB_SLUGS: Record<HostTab, string> = {
+  details: 'overview',
   model: 'model',
   advanced: 'advanced',
   contexts: 'contexts',
@@ -135,6 +138,13 @@ export default function HostDetailsPage() {
   const [editingContext, setEditingContext] = useState(false)
 
   const [contextRefDraft, setContextRefDraft] = useState('')
+  // Overview tab — read-only summary. Kept in sync with the host spec by loadData.
+  const [hostDisplayDraft, setHostDisplayDraft] = useState('')
+  const [contextMcpServers, setContextMcpServers] = useState<string[]>([])
+  const [accessSummary, setAccessSummary] = useState<{
+    memberCount: number
+    teamCount: number
+  }>({ memberCount: 0, teamCount: 0 })
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
   // model is always kept selectable even if it fell out of the allowlist
@@ -238,7 +248,7 @@ export default function HostDetailsPage() {
     setError('')
     try {
       const detail = await getHostDetailBundle(routeName)
-      const { host, contexts: contextsList, secrets: secretsList } = detail
+      const { host, contexts: contextsList, secrets: secretsList, agentUsers, agentTeams } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
       // AP-6: remember the version of THIS read — the edit drafts below are
@@ -246,6 +256,28 @@ export default function HostDetailsPage() {
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
       if (resetDrafts === 'all' || resetDrafts === 'context') {
         setContextRefDraft(String(spec.contextRef || ''))
+        // Overview summary — display name + the linked context's MCP servers.
+        // The display name falls back to the slug so the Overview card stays
+        // populated for legacy hosts that never set spec.host.
+        setHostDisplayDraft(String(spec.host || host.metadata?.name || routeName || ''))
+        const ref = String(spec.contextRef || '').trim()
+        const matched = (contextsList || []).find(
+          (item: { spec?: { contextId?: string }; metadata?: { name?: string } }) =>
+            String(item.spec?.contextId || item.metadata?.name || '').trim() === ref
+        )
+        const servers = Array.isArray(
+          (matched as { spec?: { mcpServers?: unknown[] } } | undefined)?.spec?.mcpServers
+        )
+          ? ((matched as { spec?: { mcpServers?: unknown[] } }).spec!.mcpServers as unknown[])
+              .map(String)
+              .map(v => v.trim())
+              .filter(Boolean)
+          : []
+        setContextMcpServers(servers)
+        setAccessSummary({
+          memberCount: Array.isArray(agentUsers) ? agentUsers.length : 0,
+          teamCount: Array.isArray(agentTeams) ? agentTeams.length : 0,
+        })
       }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
@@ -589,6 +621,27 @@ export default function HostDetailsPage() {
       titleActions={<AgentActionsMenu busy={busy} onDelete={() => void handleDeleteAgent()} />}
     >
       <div className="cu-agent-detail-scroll">
+        {activeTab === 'details' && (
+          <HostOverviewTab
+            hostName={routeName}
+            displayName={hostDisplayDraft}
+            contextRef={contextRefDraft}
+            contextMcpServers={contextMcpServers}
+            provider={providerDraft}
+            modelName={modelNameDraft}
+            fallbackLines={(llmPolicyDraft?.fallbacks ?? []).map(entry => {
+              const label = getProviderLabel(entry.provider)
+              const slot = entry.credentialSlot ? ` · ${entry.credentialSlot}` : ''
+              return `${label} · ${entry.model || '—'}${slot}`
+            })}
+            allowedModelLines={allowedModelsDraft.map(entry => {
+              const label = getProviderLabel(entry.provider)
+              return `${label} · ${entry.model}`
+            })}
+            accessSummary={accessSummary}
+          />
+        )}
+
         {activeTab === 'model' && (
           <>
             <div className={editingModel ? 'cu-agent-detail-toolbar' : 'cu-agent-detail-heading'}>
