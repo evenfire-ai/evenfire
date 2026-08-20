@@ -28,12 +28,12 @@ describe('provider registry — auto-detection order (§5.9)', () => {
     ])
   })
 
-  it('registers all 21 static providers plus the Codex broker', () => {
+  it('registers all 22 static providers plus the Codex broker', () => {
     expect(
       ALL_PROVIDERS.filter(p => descriptorFor(p).authMode === 'static-credentials')
-    ).toHaveLength(21)
+    ).toHaveLength(22)
     expect(ALL_PROVIDERS).toContain('codex-subscription')
-    expect(ALL_PROVIDERS).toHaveLength(22)
+    expect(ALL_PROVIDERS).toHaveLength(23)
     for (const p of [
       'openrouter',
       'gemini',
@@ -49,6 +49,7 @@ describe('provider registry — auto-detection order (§5.9)', () => {
       'moonshot',
       'nebius',
       'novita',
+      'minimax',
       'azure',
     ] as const) {
       expect(ALL_PROVIDERS).toContain(p)

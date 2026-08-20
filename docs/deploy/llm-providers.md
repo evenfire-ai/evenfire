@@ -5,7 +5,7 @@ credentials (including the multi-slot providers **Google Vertex AI** and
 **Amazon Bedrock**), how to manage the operator-declared model allowlist, and how
 the per-session model selector behaves in the desktop app.
 
-The canonical provider set — **21 providers**, from `openai`, `claude`
+The canonical provider set — **22 static-credential providers plus the `codex-subscription` oauth broker**, from `openai`, `claude`
 (Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock` to the
 OpenAI-compatible additions and `azure` — and their credential slots live in the
 shared `@clerum/llm-providers` package, which the Control UI, control-api,
@@ -39,7 +39,7 @@ secrets form only shows a hint linking there; it does not duplicate the editor.
 
 Every other provider (the OpenAI-compatible additions — `openrouter`, `gemini`,
 `deepseek`, `groq`, `together`, `fireworks`, `mistral`, `xai`, `cerebras`,
-`deepinfra`, `perplexity`, `moonshot`, `nebius`, `novita`) uses a single
+`deepinfra`, `perplexity`, `moonshot`, `nebius`, `novita`, `minimax`) uses a single
 `<id>-api-key` slot and needs no non-secret env.
 
 The secrets form is **write-only**: existing values are never displayed (the API
@@ -86,7 +86,7 @@ deliberately absent from the recipe CRD's provider enum, so a recipe pinning
 either is rejected at admission. The workflow `configure` transport carries a
 single credential string, which can deliver neither Bedrock's key pair nor
 Azure's required endpoint. Both remain fully supported for interactive Hosts;
-the other 19 providers are admissible in recipes — see the
+the other 20 providers are admissible in recipes — see the
 [providers overview](../llm-providers/README.md) for the per-surface matrix and
 the `clerum-model-secret-mapping` caveat.
 

@@ -26,6 +26,7 @@ export declare const PROVIDER_IDS: readonly [
   'moonshot',
   'nebius',
   'novita',
+  'minimax',
   'azure',
   'codex-subscription',
 ]

@@ -362,7 +362,7 @@ minikube-apply-secrets: ## Apply all secrets to cluster (LLM keys read from .env
 	else \
 	  echo "Channel file not present; per-Host channel values are managed through Control UI/control-api."; \
 	fi
-	@# LLM API keys — all 21 providers from the registry; reads the main checkout
+	@# LLM API keys — all 22 providers from the registry; reads the main checkout
 	@# .env when running from a worktree. Original four keep placeholder fallbacks.
 	@CONTEXT=$(MINIKUBE_PROFILE) bash scripts/minikube/apply-llm-secret.sh
 

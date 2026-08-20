@@ -17,7 +17,7 @@ import {
 // (same convention as @clerum/image-policy → control-api/test/imagePolicy.test.ts).
 
 describe('PROVIDER_IDS', () => {
-  it('is the canonical 21 static providers plus the Codex broker', () => {
+  it('is the canonical 22 static providers plus the Codex broker', () => {
     expect([...PROVIDER_IDS]).toEqual([
       'openai',
       'claude',
@@ -39,6 +39,7 @@ describe('PROVIDER_IDS', () => {
       'moonshot',
       'nebius',
       'novita',
+      'minimax',
       'azure',
       'codex-subscription',
     ])
@@ -140,7 +141,7 @@ describe('non-secret per-Host env', () => {
     expect(PROVIDER_NON_SECRET_ENV.bailian).toEqual([])
   })
 
-  it('declares azure required AZURE_OPENAI_ENDPOINT; the 14 single-key providers have none', () => {
+  it('declares azure required AZURE_OPENAI_ENDPOINT; the 15 single-key providers have none', () => {
     // azure carries a REQUIRED non-secret env — the reason it is admissible on a
     // Host (host-<ref>-env delivers it) but excluded from the mono-credential
     // WRC/workflowrecipe path.
@@ -163,6 +164,7 @@ describe('non-secret per-Host env', () => {
       'moonshot',
       'nebius',
       'novita',
+      'minimax',
     ] as const) {
       expect(PROVIDER_NON_SECRET_ENV[id]).toEqual([])
     }

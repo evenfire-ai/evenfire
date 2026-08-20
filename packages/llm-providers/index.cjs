@@ -48,6 +48,7 @@ const PROVIDER_IDS = Object.freeze([
   'moonshot',
   'nebius',
   'novita',
+  'minimax',
   // Light-driver (OpenAI-compatible shape, non-vanilla auth/host).
   'azure',
   // OAuth-broker subscription provider. Not part of env-key autodetection.
@@ -115,6 +116,7 @@ const PROVIDER_CREDENTIAL_SLOTS = Object.freeze({
   moonshot: apiKeySlot('moonshot-api-key', 'MOONSHOT_API_KEY'),
   nebius: apiKeySlot('nebius-api-key', 'NEBIUS_API_KEY'),
   novita: apiKeySlot('novita-api-key', 'NOVITA_API_KEY'),
+  minimax: apiKeySlot('minimax-api-key', 'MINIMAX_API_KEY'),
   // Azure: one API key, sent via the `api-key` header (driver concern, not here).
   azure: apiKeySlot('azure-openai-api-key', 'AZURE_OPENAI_API_KEY'),
   // Subscription broker: zero Secret slots. Env autodetection must never pick it.
@@ -146,6 +148,7 @@ const PROVIDER_DISPLAY_LABELS = Object.freeze({
   moonshot: 'Moonshot (Kimi)',
   nebius: 'Nebius',
   novita: 'Novita AI',
+  minimax: 'MiniMax',
   azure: 'Azure OpenAI',
   'codex-subscription': 'OpenAI Codex Subscription',
 })
@@ -181,6 +184,7 @@ const PROVIDER_NON_SECRET_ENV = Object.freeze({
   moonshot: Object.freeze([]),
   nebius: Object.freeze([]),
   novita: Object.freeze([]),
+  minimax: Object.freeze([]),
   // Azure has no fixed baseURL: the per-resource endpoint (and optional
   // api-version) are operator-supplied non-secret env. The `model` field is the
   // Azure DEPLOYMENT name, not a catalog id (documented for operators).

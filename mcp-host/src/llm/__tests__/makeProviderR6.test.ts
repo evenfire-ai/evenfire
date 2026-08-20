@@ -36,6 +36,7 @@ const R6_COMPAT = [
   'moonshot',
   'nebius',
   'novita',
+  'minimax',
 ] as const
 
 function createMockOpenAIClient() {

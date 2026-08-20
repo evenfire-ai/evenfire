@@ -245,6 +245,7 @@ default_prompt_credential_slot() {
     moonshot) printf '%s\n' 'moonshot-api-key' ;;
     nebius) printf '%s\n' 'nebius-api-key' ;;
     novita) printf '%s\n' 'novita-api-key' ;;
+    minimax) printf '%s\n' 'minimax-api-key' ;;
     azure) printf '%s\n' 'azure-openai-api-key' ;;
     *) return 1 ;;
   esac

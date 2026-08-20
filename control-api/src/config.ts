@@ -121,7 +121,7 @@ type Config = {
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
   // (a flappy/truncated external catalog must not mass-stale the allowlist);
   // the inert `enabled=false` inserts still proceed. Calibrated off the vendored
-  // snapshot (~1051 mapped models across 21 providers) — a conservative <10%
+  // snapshot (~1058 mapped models across 22 providers) — a conservative <10%
   // floor catches a catastrophic collapse without tripping on normal variation.
   modelsDevMinPlausibleLiveTotal: number
   // §4.5 sanity guard, layer 2: per-provider low/zero-live floor. A provider

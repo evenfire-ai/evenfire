@@ -61,9 +61,9 @@ export type RawModelsDevCatalog = Record<string, RawModelsDevProvider>
 
 /**
  * Our provider id → models.dev provider KEY (spec 09 §11.2: the mapping layer is
- * load-bearing — ~10/21 keys differ from our ids). Every value was verified
+ * load-bearing — ~10/22 keys differ from our ids). Every value was verified
  * against a live `api.json` fetch during implementation. Providers absent from
- * this map (none today — all 21 are mapped) would simply contribute nothing.
+ * this map (none today — all 22 are mapped) would simply contribute nothing.
  *
  * Notable / non-obvious choices:
  *   - `zai` → `zai-coding-plan`: our zai baseURL is the Z.AI *Coding Plan*
@@ -77,7 +77,10 @@ export type RawModelsDevCatalog = Record<string, RawModelsDevProvider>
  *     `fireworks` → `fireworks-ai`, `moonshot` → `moonshotai`,
  *     `novita` → `novita-ai`.
  *   - direct (key == our id): openai, openrouter, deepseek, groq, mistral, xai,
- *     cerebras, deepinfra, perplexity, nebius, azure.
+ *     cerebras, deepinfra, perplexity, nebius, minimax, azure. Our minimax
+ *     baseURL is the international `minimax.io` endpoint, so we map to the
+ *     `minimax` key (the international catalog), not `minimax-cn` / the
+ *     coding-plan keys.
  *
  * NOTE: Azure/Bedrock ids in models.dev are generic model ids, NOT the Azure
  * deployment names / regional inference-profile ids a real deployment uses.
@@ -108,6 +111,7 @@ export const PROVIDER_KEY_MAP: Readonly<Record<ModelsDevMappedProviderId, string
   moonshot: 'moonshotai',
   nebius: 'nebius',
   novita: 'novita-ai',
+  minimax: 'minimax',
   azure: 'azure',
 }
 

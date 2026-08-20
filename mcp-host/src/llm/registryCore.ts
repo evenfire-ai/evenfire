@@ -187,6 +187,13 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
     baseURL: 'https://api.novita.ai/openai',
     tokenizer: 'fallback',
   },
+  minimax: {
+    // International host; `${baseURL}/chat/completions` resolves to the
+    // OpenAI-compatible route. China-region deployments use api.minimaxi.com.
+    defaultModel: 'MiniMax-M2',
+    baseURL: 'https://api.minimax.io/v1',
+    tokenizer: 'fallback',
+  },
   // Azure: light-driver arm (registry.ts). No STATIC baseURL — the per-resource
   // host comes from AZURE_OPENAI_ENDPOINT at construction, so it must NOT hit the
   // data-driven baseURL arm. Tokenizer 'openai' (it serves OpenAI models) and

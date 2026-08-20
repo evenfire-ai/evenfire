@@ -175,7 +175,9 @@ environment variable; setup infers the matching provider).
 | Moonshot (Kimi)  | `moonshot`       | OpenAI-compatible |
 | Nebius           | `nebius`         | OpenAI-compatible |
 | Novita AI        | `novita`         | OpenAI-compatible |
-| Azure OpenAI     | `azure`          | Light driver      |
+| MiniMax          | `minimax`            | OpenAI-compatible |
+| Azure OpenAI     | `azure`              | Light driver      |
+| OpenAI Codex     | `codex-subscription` | OAuth broker      |
 
 Most providers are OpenAI-compatible and plug in as config with no custom code;
 only a few (`claude`, `vertex`, `bedrock`, `azure`) need a dedicated integration.
