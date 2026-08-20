@@ -5,6 +5,7 @@ import * as http from 'http'
 import { config } from './config'
 import { HostReconciler } from './hostReconciler'
 import { McpServerProvider } from './k8sClient'
+import { type McpCaller, type McpCallerResolver } from './mcpCallerAuth'
 import { registry } from './metrics'
 import { ErrorResponse, McpServersResponse } from './types'
 
@@ -20,6 +21,7 @@ export class ContextMapperServer {
   private hasDesktopFn: ((hostRef: string) => boolean) | null
   private providerAuthoritativeFn: () => boolean
   private hostAuthoritativeFn: () => boolean
+  private resolveMcpCaller: McpCallerResolver
   private ready = false
 
   constructor(
@@ -34,7 +36,10 @@ export class ContextMapperServer {
     // Desktop status needs ONLY Host inventory authority, not the full
     // readiness inventory. Fails closed like providerAuthoritativeFn: a caller
     // that omits it gets a 503 on desktop rather than a wrong 200 'inactive'.
-    hostAuthoritativeFn: () => boolean = () => false
+    hostAuthoritativeFn: () => boolean = () => false,
+    // MCP discovery/auth: omit the resolver and every inventory/auth GET 401s.
+    // Path Context and unsigned headers are not authority.
+    options: { resolveMcpCaller?: McpCallerResolver } = {}
   ) {
     this.provider = provider
     this.port = port
@@ -42,6 +47,7 @@ export class ContextMapperServer {
     this.hasDesktopFn = hasDesktopFn ?? null
     this.providerAuthoritativeFn = providerAuthoritativeFn
     this.hostAuthoritativeFn = hostAuthoritativeFn
+    this.resolveMcpCaller = options.resolveMcpCaller ?? (async () => null)
   }
 
   /**
@@ -211,6 +217,31 @@ export class ContextMapperServer {
   }
 
   /**
+   * Bind MCP inventory/auth to the caller's current Host Context.
+   * TokenReview (or a test double) is the only identity source.
+   */
+  private async requireMcpCaller(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<McpCaller | null> {
+    let caller: McpCaller | null
+    try {
+      caller = await this.resolveMcpCaller(req)
+    } catch (err) {
+      console.error('[Server] MCP caller resolution failed:', err)
+      caller = null
+    }
+    if (!caller) {
+      this.sendJson(res, 401, {
+        error: 'Unauthorized',
+        message: 'Invalid or missing Host identity',
+      })
+      return null
+    }
+    return caller
+  }
+
+  /**
    * Start the server.
    */
   start(): Promise<void> {
@@ -294,14 +325,17 @@ export class ContextMapperServer {
   private async handleListAll(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    url: URL
+    _url: URL
   ): Promise<void> {
     console.log(`[Server] GET /api/v1/mcpservers`)
 
-    const servers = this.provider.getAllServerInfos()
+    const caller = await this.requireMcpCaller(req, res)
+    if (!caller) return
+
+    const servers = await this.provider.getServerInfosByContext(caller.contextRef)
     const response: McpServersResponse = {
       servers,
-      contextRef: '*',
+      contextRef: caller.contextRef,
       timestamp: new Date().toISOString(),
     }
 
@@ -323,7 +357,17 @@ export class ContextMapperServer {
       return
     }
 
-    const servers = await this.provider.getServerInfosByContext(contextRef)
+    const caller = await this.requireMcpCaller(req, res)
+    if (!caller) return
+    if (contextRef !== caller.contextRef) {
+      this.sendJson(res, 403, {
+        error: 'Forbidden',
+        message: 'Host is not bound to this Context',
+      })
+      return
+    }
+
+    const servers = await this.provider.getServerInfosByContext(caller.contextRef)
     const response: McpServersResponse = {
       servers,
       contextRef,
@@ -348,16 +392,17 @@ export class ContextMapperServer {
       return
     }
 
-    // Find the server
-    const servers = this.provider.getAllServerInfos()
-    const server = servers.find(s => s.name === serverName)
+    const caller = await this.requireMcpCaller(req, res)
+    if (!caller) return
+
+    const allowed = await this.provider.getServerInfosByContext(caller.contextRef)
+    const server = allowed.find(s => s.name === serverName)
 
     if (!server) {
       this.sendJson(res, 404, { error: 'Not Found', message: `McpServer ${serverName} not found` })
       return
     }
 
-    // Get the auth token via provider
     const token = await this.provider.getAuthToken(serverName)
 
     if (!token) {

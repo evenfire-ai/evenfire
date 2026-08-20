@@ -86,3 +86,19 @@ subjects:
 - kind: ServiceAccount
   name: control-api
   namespace: control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: host-context-controller-tokenreview
+  labels:
+    app.kubernetes.io/part-of: clerum
+    app.kubernetes.io/name: host-context-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: host-context-controller-tokenreview
+subjects:
+- kind: ServiceAccount
+  name: host-context-controller
+  namespace: control-plane

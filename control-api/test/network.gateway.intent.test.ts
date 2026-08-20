@@ -693,10 +693,37 @@ describe('network/gateway intent (manifest-level)', () => {
       'name: host-context-controller-api-gateway'
     )
     expect(hccGatewayConf).toContain('location = /health')
+    expect(hccGatewayConf).toContain('location = /api/v1/mcpservers')
     expect(hccGatewayConf).toContain('location ~ ^/api/v1/mcpservers/context/[^/]+$')
     expect(hccGatewayConf).toContain('location ~ ^/api/v1/mcpservers/[^/]+/auth$')
+    const contextBlock = locationBlock(
+      hccGatewayConf,
+      'location ~ ^/api/v1/mcpservers/context/[^/]+$'
+    )
+    const authBlock = locationBlock(hccGatewayConf, 'location ~ ^/api/v1/mcpservers/[^/]+/auth$')
+    expect(contextBlock).toContain('proxy_set_header Authorization $http_authorization')
+    expect(authBlock).toContain('proxy_set_header Authorization $http_authorization')
     expect(hccGatewayConf).toContain('location / {')
     expect(hccGatewayConf).toContain('return 403;')
+  })
+
+  it('grants host-context-controller TokenReview so MCP discovery can bind Host Context', () => {
+    const clusterRoles = read(`${BASE}/cluster-wide/clusterroles.yaml`)
+    const bindings = read(`${BASE}/cluster-wide/clusterrolebindings.yaml`)
+    const tokenReviewRole = docContaining(
+      yamlDocs(clusterRoles),
+      'name: host-context-controller-tokenreview'
+    )
+    const tokenReviewBinding = docContaining(
+      yamlDocs(bindings),
+      'name: host-context-controller-tokenreview'
+    )
+
+    expect(tokenReviewRole).toContain('authentication.k8s.io')
+    expect(tokenReviewRole).toContain('tokenreviews')
+    expect(tokenReviewRole).toContain('- create')
+    expect(tokenReviewBinding).toContain('name: host-context-controller')
+    expect(tokenReviewBinding).toContain('namespace: control-plane')
   })
 
   it('routes runtime workflow broker traffic through workflow gateway and not admin routes', () => {

@@ -754,15 +754,15 @@ function get(path) {
     throw new Error('unexpected readiness response: ' + ready.status + ' ' + ready.body);
   }
   const discovery = await get('/api/v1/mcpservers');
-  if (discovery.status !== 200) {
+  if (discovery.status !== 401) {
     throw new Error('unexpected discovery response: ' + discovery.status);
   }
   const discoveryBody = JSON.parse(discovery.body);
-  if (!Array.isArray(discoveryBody.servers) || discoveryBody.contextRef !== '*') {
+  if (discoveryBody.error !== 'Unauthorized') {
     throw new Error('discovery response does not match the live API contract');
   }
   console.log(JSON.stringify({readyStatus: ready.status, discoveryStatus: discovery.status,
-    discoveredServers: discoveryBody.servers.length}));
+    discoveryError: discoveryBody.error}));
 })().catch(error => { console.error(error.message); process.exit(1); });
 NODE
 )"
@@ -770,7 +770,7 @@ probe_result="$(kctl exec "pod/${new_hcc_pod}" -n "$HCC_NS" -c host-context-cont
   env "HCC_E2E_PORT=${HCC_PORT}" node -e "$probe_script")" ||
   die "real HCC readiness/discovery HTTP probe failed while the fleet pass was active"
 echo "$probe_result" | jq -e \
-  '.readyStatus == 200 and .discoveryStatus == 200 and (.discoveredServers | type == "number")' \
+  '.readyStatus == 200 and .discoveryStatus == 401 and .discoveryError == "Unauthorized"' \
   >/dev/null ||
   die "HCC HTTP probe returned an invalid result: ${probe_result}"
 hcc_gateway_ready_proxy_recovers ||
@@ -779,7 +779,7 @@ initial_host_pass_is_active "$new_hcc_pod" ||
   die "initial Host reconciliation failed or completed before the HTTP assertions finished"
 ok "/ready returned 200 while the initial Host fleet pass remained active"
 ok "API gateway /ready recovered without changing its local readiness"
-ok "/api/v1/mcpservers returned a valid live discovery response during that same pass"
+ok "/api/v1/mcpservers rejected unauthenticated inventory during that same pass"
 
 header "HCC readiness assertions passed; restoring branch-owned runtime"
 echo "$probe_result"

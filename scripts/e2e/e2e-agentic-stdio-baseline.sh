@@ -61,24 +61,9 @@ wait_for_hcc_server_ready() {
   local server_name=$1 timeout=$2 elapsed=0
   while [ $elapsed -lt "$timeout" ]; do
     local ready
-    ready=$(kctl exec -n "$RECIPE_NS" deploy/mcp-proxy -- node -e "
-const http = require('http');
-const target = process.argv[1];
-http.get('http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081/api/v1/mcpservers', res => {
-  let body = '';
-  res.on('data', chunk => body += chunk);
-  res.on('end', () => {
-    try {
-      const data = JSON.parse(body);
-      const server = (data.servers || []).find(s => s.name === target);
-      process.stdout.write(server?.status?.deployed && server?.status?.ready ? 'ready' : 'not-ready');
-    } catch {
-      process.stdout.write('not-ready');
-    }
-  });
-}).on('error', () => process.stdout.write('not-ready'));
-" "$server_name" 2>/dev/null || echo "not-ready")
-    if [ "$ready" = "ready" ]; then
+    ready=$(kctl get mcpserver "$server_name" -n "$RECIPE_NS" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    if [ "$ready" = "True" ]; then
       return 0
     fi
     sleep "$POLL_INTERVAL"

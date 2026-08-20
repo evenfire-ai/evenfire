@@ -206,7 +206,12 @@ export async function waitForTasksProcessed(minCount: number, timeoutMs = 60_000
 
 /** Query host-context-controller for MCP servers in a context. */
 export async function getMcpServers(contextRef: string): Promise<any> {
-  const { data } = await fetchJson(`${CTX_MAPPER_URL}/api/v1/mcpservers/context/${contextRef}`)
+  const headers: Record<string, string> = {}
+  const token = process.env.HCC_DISCOVERY_TOKEN
+  if (token) headers.Authorization = `Bearer ${token}`
+  const { data } = await fetchJson(`${CTX_MAPPER_URL}/api/v1/mcpservers/context/${contextRef}`, {
+    headers,
+  })
   return data
 }
 

@@ -4,6 +4,7 @@
  * The Context Mapper provides McpServer CRDs via REST API, so mcp-host
  * doesn't need direct K8s access to McpServer resources.
  */
+import { readFile } from 'node:fs/promises'
 import { config } from './config'
 import { McpServerInfo } from './types'
 
@@ -19,6 +20,24 @@ export interface AuthTokenResponse {
 }
 
 const DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 10_000
+export const DEFAULT_HCC_DISCOVERY_TOKEN_FILE =
+  '/var/run/secrets/kubernetes.io/serviceaccount/token'
+
+async function readServiceAccountBearer(tokenFile: string): Promise<string | undefined> {
+  try {
+    const token = (await readFile(tokenFile, 'utf8')).trim()
+    return token ? `Bearer ${token}` : undefined
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') {
+      console.warn(
+        `[ContextMapper] Host ServiceAccount token not readable at ${tokenFile}:`,
+        err instanceof Error ? err.message : err
+      )
+    }
+    return undefined
+  }
+}
 
 /**
  * Context Mapper client.
@@ -26,15 +45,30 @@ const DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 10_000
 export class ContextMapperClient {
   private baseUrl: string
   private requestTimeoutMs: number
+  private getAuthorization: () => Promise<string | undefined>
 
-  constructor(baseUrl: string, requestTimeoutMs = DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS) {
+  constructor(
+    baseUrl: string,
+    requestTimeoutMs = DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS,
+    getAuthorization: () => Promise<string | undefined> = () =>
+      readServiceAccountBearer(
+        process.env.CLERUM_HCC_DISCOVERY_TOKEN_FILE || DEFAULT_HCC_DISCOVERY_TOKEN_FILE
+      )
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, '') // Remove trailing slash
     this.requestTimeoutMs = requestTimeoutMs
+    this.getAuthorization = getAuthorization
   }
 
-  private fetch(input: string): Promise<Response> {
+  private async fetch(input: string, withAuth = true): Promise<Response> {
+    const headers: Record<string, string> = {}
+    if (withAuth) {
+      const authorization = await this.getAuthorization()
+      if (authorization) headers.Authorization = authorization
+    }
     return fetch(input, {
       signal: AbortSignal.timeout(this.requestTimeoutMs),
+      headers,
     })
   }
 
@@ -43,7 +77,7 @@ export class ContextMapperClient {
    */
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await this.fetch(`${this.baseUrl}/ready`)
+      const response = await this.fetch(`${this.baseUrl}/ready`, false)
       return response.ok
     } catch (error) {
       console.error('[ContextMapper] Health check failed:', error)

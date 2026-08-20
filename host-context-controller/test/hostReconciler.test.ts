@@ -1005,6 +1005,7 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
 
     const deployment = appsApi.createNamespacedDeployment.mock.calls[0][0].body
     expect(deployment.spec.template.spec.serviceAccountName).toBe('host-alpha-host-sa')
+    expect(deployment.spec.template.spec.automountServiceAccountToken).toBe(true)
   })
 
   it('injects CLERUM_LLM_SECRET_REF into the Deployment env from spec.secretRef', async () => {

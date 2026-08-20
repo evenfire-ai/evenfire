@@ -52,11 +52,15 @@ class MockResponse {
   }
 }
 
-async function invoke(server: ContextMapperServer, path: string) {
+async function invoke(
+  server: ContextMapperServer,
+  path: string,
+  headers: Record<string, string> = {}
+) {
   const req = {
     method: 'GET',
     url: path,
-    headers: {},
+    headers,
   }
   const res = new MockResponse()
   await (
@@ -119,10 +123,10 @@ describe('ContextMapperServer readiness', () => {
     expect(JSON.parse(response.body)).toEqual({ status: 'ready', ready: true })
 
     response = await invoke(server, '/api/v1/mcpservers')
-    expect(response.statusCode).toBe(200)
-    expect(JSON.parse(response.body)).toMatchObject({
-      servers: [],
-      contextRef: '*',
+    expect(response.statusCode).toBe(401)
+    expect(JSON.parse(response.body)).toEqual({
+      error: 'Unauthorized',
+      message: 'Invalid or missing Host identity',
     })
   })
 
@@ -173,7 +177,7 @@ describe('ContextMapperServer readiness', () => {
     expect(JSON.parse(response.body)).toEqual({ status: 'ready', ready: true })
 
     response = await invoke(server, '/api/v1/mcpservers')
-    expect(response.statusCode).toBe(200)
+    expect(response.statusCode).toBe(401)
   })
 
   it('fails readiness closed when the provider authority check throws', async () => {
@@ -308,5 +312,200 @@ describe('ContextMapperServer desktop status authority', () => {
       error: 'Service Unavailable',
       message: 'Host inventory is not authoritative',
     })
+  })
+})
+
+class InventoryProvider implements McpServerProvider {
+  getAuthTokenCalls: string[] = []
+
+  constructor(
+    private readonly servers: Array<{
+      name: string
+      contextRef: string
+      auth?: { type: 'none' | 'bearer'; secretRef?: string; secretKey?: string }
+      token?: string
+    }>
+  ) {}
+
+  getAllServers() {
+    return []
+  }
+
+  getAllServerInfos() {
+    return this.servers.map(server => ({
+      name: server.name,
+      contextRef: server.contextRef,
+      transport: { type: 'streamableHttp' as const, url: `http://${server.name}` },
+      auth: server.auth,
+      enabled: true,
+      status: { deployed: true, ready: true },
+    }))
+  }
+
+  async getServerInfosByContext(contextRef: string) {
+    return this.getAllServerInfos().filter(server => server.contextRef === contextRef)
+  }
+
+  async getAuthToken(serverName: string) {
+    this.getAuthTokenCalls.push(serverName)
+    return this.servers.find(server => server.name === serverName)?.token
+  }
+
+  onChange() {}
+
+  async start() {}
+
+  async stop() {}
+}
+
+describe('ContextMapperServer MCP Host Context bind', () => {
+  let server: ContextMapperServer | null = null
+
+  const provider = () =>
+    new InventoryProvider([
+      { name: 'airtable-server', contextRef: 'context1' },
+      {
+        name: 'foreign-server',
+        contextRef: 'context2',
+        auth: { type: 'bearer', secretRef: 'foreign-creds', secretKey: 'token' },
+        token: 'foreign-secret',
+      },
+    ])
+
+  const hostA = async (req: { headers: Record<string, string> }) => {
+    const authorization = req.headers.authorization
+    if (authorization === 'Bearer host-a') {
+      return { hostRef: 'chatllm', contextRef: 'context1' }
+    }
+    return null
+  }
+
+  afterEach(async () => {
+    await server?.stop()
+    server = null
+  })
+
+  it('rejects unauthenticated MCP inventory and auth once ready', async () => {
+    const inventory = provider()
+    server = new ContextMapperServer(
+      inventory,
+      0,
+      undefined,
+      undefined,
+      () => true,
+      () => false,
+      { resolveMcpCaller: hostA as never }
+    )
+    server.setReady(true)
+
+    for (const path of [
+      '/api/v1/mcpservers',
+      '/api/v1/mcpservers/context/context1',
+      '/api/v1/mcpservers/foreign-server/auth',
+    ]) {
+      const response = await invoke(server, path)
+      expect(response.statusCode).toBe(401)
+      expect(JSON.parse(response.body)).toEqual({
+        error: 'Unauthorized',
+        message: 'Invalid or missing Host identity',
+      })
+    }
+    expect(inventory.getAuthTokenCalls).toEqual([])
+  })
+
+  it('lists only the caller Host current Context and ignores path Context and forged headers', async () => {
+    server = new ContextMapperServer(
+      provider(),
+      0,
+      undefined,
+      undefined,
+      () => true,
+      () => false,
+      { resolveMcpCaller: hostA as never }
+    )
+    server.setReady(true)
+
+    const list = await invoke(server, '/api/v1/mcpservers', { authorization: 'Bearer host-a' })
+    expect(list.statusCode).toBe(200)
+    expect(JSON.parse(list.body)).toMatchObject({
+      contextRef: 'context1',
+      servers: [{ name: 'airtable-server', contextRef: 'context1' }],
+    })
+    expect(JSON.parse(list.body).servers.map((s: { name: string }) => s.name)).not.toContain(
+      'foreign-server'
+    )
+
+    const ownContext = await invoke(server, '/api/v1/mcpservers/context/context1', {
+      authorization: 'Bearer host-a',
+    })
+    expect(ownContext.statusCode).toBe(200)
+    expect(JSON.parse(ownContext.body).servers.map((s: { name: string }) => s.name)).toEqual([
+      'airtable-server',
+    ])
+
+    const foreignContext = await invoke(server, '/api/v1/mcpservers/context/context2', {
+      authorization: 'Bearer host-a',
+      'x-clerum-context': 'context2',
+      'x-clerum-host-ref': 'other-host',
+    })
+    expect(foreignContext.statusCode).toBe(403)
+    expect(JSON.parse(foreignContext.body)).toEqual({
+      error: 'Forbidden',
+      message: 'Host is not bound to this Context',
+    })
+  })
+
+  it('fails closed with 401 when caller resolution throws', async () => {
+    server = new ContextMapperServer(
+      provider(),
+      0,
+      undefined,
+      undefined,
+      () => true,
+      () => false,
+      {
+        resolveMcpCaller: async () => {
+          throw new Error('resolver exploded')
+        },
+      }
+    )
+    server.setReady(true)
+
+    const response = await invoke(server, '/api/v1/mcpservers', { authorization: 'Bearer host-a' })
+    expect(response.statusCode).toBe(401)
+  })
+
+  it('does not read a Secret for a server outside the caller Host current Context', async () => {
+    const inventory = provider()
+    server = new ContextMapperServer(
+      inventory,
+      0,
+      undefined,
+      undefined,
+      () => true,
+      () => false,
+      { resolveMcpCaller: hostA as never }
+    )
+    server.setReady(true)
+
+    const foreignAuth = await invoke(server, '/api/v1/mcpservers/foreign-server/auth', {
+      authorization: 'Bearer host-a',
+    })
+    expect(foreignAuth.statusCode).toBe(404)
+    expect(JSON.parse(foreignAuth.body)).toEqual({
+      error: 'Not Found',
+      message: 'McpServer foreign-server not found',
+    })
+    expect(inventory.getAuthTokenCalls).toEqual([])
+
+    const ownAuth = await invoke(server, '/api/v1/mcpservers/airtable-server/auth', {
+      authorization: 'Bearer host-a',
+    })
+    expect(ownAuth.statusCode).toBe(200)
+    expect(JSON.parse(ownAuth.body)).toEqual({
+      token: null,
+      message: 'No auth configured for this server',
+    })
+    expect(inventory.getAuthTokenCalls).toEqual(['airtable-server'])
   })
 })

@@ -16,8 +16,18 @@ beforeAll(async () => {
 })
 
 describe('Context Mapper', () => {
-  it('GET /api/v1/mcpservers/context/context1 returns servers', async () => {
+  it('rejects unauthenticated MCP inventory from a laptop port-forward', async () => {
     if (!contextMapperUp) return
+    const res = await fetch(`${CTX_MAPPER_URL}/api/v1/mcpservers/context/context1`)
+    expect(res.status).toBe(401)
+    expect(await res.json()).toEqual({
+      error: 'Unauthorized',
+      message: 'Invalid or missing Host identity',
+    })
+  })
+
+  it('GET /api/v1/mcpservers/context/context1 returns servers', async () => {
+    if (!contextMapperUp || !process.env.HCC_DISCOVERY_TOKEN) return
     const data = await getMcpServers('context1')
     expect(data.servers).toBeDefined()
     expect(Array.isArray(data.servers)).toBe(true)
@@ -25,7 +35,7 @@ describe('Context Mapper', () => {
   })
 
   it('context1 includes at least one ready MCP server with transport metadata', async () => {
-    if (!contextMapperUp) return
+    if (!contextMapperUp || !process.env.HCC_DISCOVERY_TOKEN) return
     const data = await getMcpServers('context1')
     const readyServer = data.servers.find((s: any) => s.status?.ready === true)
     expect(readyServer).toBeDefined()
@@ -33,10 +43,9 @@ describe('Context Mapper', () => {
     expect(readyServer.transport.type).toBeDefined()
   })
 
-  it('non-existent context returns empty server list', async () => {
+  it('non-existent context is not caller-chosen from an unauthenticated laptop', async () => {
     if (!contextMapperUp) return
     const res = await fetch(`${CTX_MAPPER_URL}/api/v1/mcpservers/context/does-not-exist`)
-    const data = await res.json()
-    expect(data.servers).toEqual([])
+    expect(res.status).toBe(401)
   })
 })

@@ -138,3 +138,21 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "list"]
+---
+# host-context-controller-tokenreview — bind MCP discovery/auth to the
+# calling Host's current Context. HCC TokenReviews the per-Host
+# ServiceAccount bearer; path Context and unsigned headers are not authority.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: host-context-controller-tokenreview
+  labels:
+    app.kubernetes.io/part-of: clerum
+    app.kubernetes.io/name: host-context-controller
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create

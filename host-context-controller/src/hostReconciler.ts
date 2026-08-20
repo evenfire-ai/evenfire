@@ -9,6 +9,7 @@ import { HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
 import { mintHostGfsToken } from './gfsHostBinding'
 import { GFS_HOST_SCOPES } from './gfsHostPolicy'
 import { makeExpectedHostGfsSubject } from './gfsHostSubject'
+import { hostServiceAccountName } from './hostServiceAccount'
 import type {
   HccInfrastructureTelemetryPayload,
   InfrastructureTelemetryReporter,
@@ -816,7 +817,7 @@ export class HostReconciler {
 
   /** Per-Host ServiceAccount name. */
   private hostSaName(host: HostCRD): string {
-    return `host-${host.name}-sa`
+    return hostServiceAccountName(host.name)
   }
 
   /** Per-Host RBAC Role + RoleBinding name (shared between the two). */
@@ -2715,6 +2716,9 @@ export class HostReconciler {
             // mcp-host watch only its own Host CRD, env CM/Secret, and LLM
             // Secret.
             serviceAccountName: this.hostSaName(host),
+            // Discovery TokenReview needs the projected SA token in the pod.
+            // Pin true so a later hardening pass cannot silently drop it.
+            automountServiceAccountToken: true,
             // A stateless Host may be recreated after a user interaction.
             // Give only that on-demand workload the interactive class so its
             // wake can preempt explicitly lower-priority batch work. Keep

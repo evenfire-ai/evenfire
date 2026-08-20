@@ -167,6 +167,54 @@ describe('ContextMapperClient.pollServers', () => {
   })
 })
 
+describe('ContextMapperClient Host identity', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('sends the Host ServiceAccount bearer on discovery and auth, not on ready', async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            servers: [],
+            contextRef: 'production',
+            timestamp: '2026-07-29T10:00:00.000Z',
+            token: null,
+          }),
+          { status: 200 }
+        )
+      )
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new ContextMapperClient(
+      'http://context-mapper.test',
+      10_000,
+      async () => 'Bearer sa-token'
+    )
+
+    await expect(client.healthCheck()).resolves.toBe(true)
+    await expect(client.listServersByContext('production')).resolves.toEqual([])
+    await expect(client.getAuthToken('open-server')).resolves.toBeUndefined()
+    await expect(client.pollServers('production')).resolves.toEqual({
+      servers: [],
+      timestamp: '2026-07-29T10:00:00.000Z',
+    })
+
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ headers: {} }))
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({ headers: { Authorization: 'Bearer sa-token' } })
+    )
+    expect(fetchMock.mock.calls[2]?.[1]).toEqual(
+      expect.objectContaining({ headers: { Authorization: 'Bearer sa-token' } })
+    )
+    expect(fetchMock.mock.calls[3]?.[1]).toEqual(
+      expect.objectContaining({ headers: { Authorization: 'Bearer sa-token' } })
+    )
+  })
+})
+
 describe('ContextMapperClient.getAuthToken', () => {
   afterEach(() => {
     vi.restoreAllMocks()

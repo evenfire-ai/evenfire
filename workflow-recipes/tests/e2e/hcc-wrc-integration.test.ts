@@ -17,7 +17,6 @@ import { ChildProcess } from 'node:child_process'
 import {
   MCP_SERVER_NAMESPACE,
   RECIPE_NAMESPACE,
-  fetchJson,
   kubectl,
   kubectlJson,
   sleep,
@@ -122,36 +121,30 @@ describe('HCC-WRC Integration E2E', () => {
   // 2. Patch the Context to add the server to mcpServers[]
   // 3. HCC watches Context change → caches the server → serves via API
   // We wait for Context to be patched first, then poll the Discovery API.
-  it('E6.10 — HCC Discovery API lists delegated McpServer', { timeout: 60_000 }, async () => {
-    // Wait for WRC to patch Context (may take a reconciliation cycle)
-    const ctxStart = Date.now()
-    while (Date.now() - ctxStart < 30_000) {
-      const ctx = kubectlJson<{ spec: { mcpServers?: string[] } }>(
-        `get contexts.clerum.io default -n ${MCP_SERVER_NAMESPACE}`
-      )
-      if (ctx.spec.mcpServers?.includes(MCP_SERVER_NAME)) break
-      await sleep(2_000)
-    }
+  it(
+    'E6.10 — HCC Discovery API rejects unauthenticated laptop inventory',
+    { timeout: 60_000 },
+    async () => {
+      // Wait for WRC to patch Context (may take a reconciliation cycle)
+      const ctxStart = Date.now()
+      while (Date.now() - ctxStart < 30_000) {
+        const ctx = kubectlJson<{ spec: { mcpServers?: string[] } }>(
+          `get contexts.clerum.io default -n ${MCP_SERVER_NAMESPACE}`
+        )
+        if (ctx.spec.mcpServers?.includes(MCP_SERVER_NAME)) break
+        await sleep(2_000)
+      }
 
-    // Now poll the Discovery API (HCC needs to process the Context watch event)
-    const start = Date.now()
-    let found: { name: string; transport?: { type: string } } | undefined
-
-    while (Date.now() - start < 20_000) {
-      const { data } = await fetchJson(
+      const res = await fetch(
         `http://localhost:${HCC_LOCAL_PORT}/api/v1/mcpservers/context/default`
       )
-      const response = data as { servers: Array<{ name: string; transport?: { type: string } }> }
-      if (response.servers) {
-        found = response.servers.find(s => s.name === MCP_SERVER_NAME)
-        if (found) break
-      }
-      await sleep(2_000)
+      expect(res.status).toBe(401)
+      expect(await res.json()).toEqual({
+        error: 'Unauthorized',
+        message: 'Invalid or missing Host identity',
+      })
     }
-
-    expect(found).toBeDefined()
-    expect(found!.transport?.type).toBe('streamableHttp')
-  })
+  )
 
   // E6.11: Context patch triggers L2 context-allow NetworkPolicy from HCC
   // HCC watches Context changes and creates L2 NetworkPolicies.
@@ -229,13 +222,8 @@ describe('HCC-WRC Integration E2E', () => {
   })
 
   // E6.14: HCC Discovery API no longer serves the deleted McpServer
-  it('E6.14 — HCC Discovery API no longer lists deleted McpServer', async () => {
-    const { data } = await fetchJson(
-      `http://localhost:${HCC_LOCAL_PORT}/api/v1/mcpservers/context/default`
-    )
-
-    const response = data as { servers: Array<{ name: string }> }
-    const found = (response.servers ?? []).find(s => s.name === MCP_SERVER_NAME)
-    expect(found).toBeUndefined()
+  it('E6.14 — HCC Discovery API still requires Host identity after delete', async () => {
+    const res = await fetch(`http://localhost:${HCC_LOCAL_PORT}/api/v1/mcpservers/context/default`)
+    expect(res.status).toBe(401)
   })
 })

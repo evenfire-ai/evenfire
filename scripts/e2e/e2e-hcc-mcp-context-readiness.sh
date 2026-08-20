@@ -693,17 +693,26 @@ fixture_converged() {
 }
 
 probe_hcc_final_context() {
-  local probe_script
+  local probe_script host_pod token=""
+  host_pod="$(kctl get pod -n mcp-host -l "clerum.io/context=${CONTEXT_NAME}" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -n "$host_pod" ]; then
+    token="$(kctl exec -n mcp-host "pod/${host_pod}" -- \
+      cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)"
+  fi
   probe_script="$(cat <<'NODE'
 const http = require('http');
 const context = process.argv[1];
 const expected = process.argv[2];
-function get(path) {
+function get(path, token) {
   return new Promise((resolve, reject) => {
+    const headers = token ? {Authorization: 'Bearer ' + token} : {};
     const request = http.get({
       host: '127.0.0.1',
       port: Number(process.env.HCC_E2E_PORT),
-      path
+      path,
+      headers
     }, response => {
       let body = '';
       response.setEncoding('utf8');
@@ -715,18 +724,27 @@ function get(path) {
   });
 }
 (async () => {
+  const token = process.env.HCC_DISCOVERY_TOKEN || '';
   const ready = await get('/ready');
-  const scoped = await get('/api/v1/mcpservers/context/' + encodeURIComponent(context));
-  const body = JSON.parse(scoped.body);
-  const fixture = body.servers?.find(server => server.name === expected);
+  const unauth = await get('/api/v1/mcpservers/context/' + encodeURIComponent(context));
   if (ready.status !== 200 || JSON.parse(ready.body).ready !== true) {
     throw new Error('readiness regressed: ' + ready.status + ' ' + ready.body);
   }
+  if (unauth.status !== 401) {
+    throw new Error('unauthenticated discovery must be 401: ' + unauth.status + ' ' + unauth.body);
+  }
+  if (!token) {
+    throw new Error('no Host ServiceAccount token for context ' + context);
+  }
+  const scoped = await get('/api/v1/mcpservers/context/' + encodeURIComponent(context), token);
+  const body = JSON.parse(scoped.body);
+  const fixture = body.servers?.find(server => server.name === expected);
   if (scoped.status !== 200 || !fixture || fixture.status?.ready !== true) {
     throw new Error('latest Context did not converge in discovery: ' + scoped.status + ' ' + scoped.body);
   }
   console.log(JSON.stringify({
     readyStatus: ready.status,
+    unauthenticatedStatus: unauth.status,
     scopedDiscoveryStatus: scoped.status,
     contextRef: body.contextRef,
     fixture: fixture.name,
@@ -736,7 +754,7 @@ function get(path) {
 NODE
 )"
   kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
-    env "HCC_E2E_PORT=${HCC_PORT}" \
+    env "HCC_E2E_PORT=${HCC_PORT}" "HCC_DISCOVERY_TOKEN=${token}" \
     node -e "$probe_script" "$CONTEXT_NAME" "$MCP_NAME"
 }
 

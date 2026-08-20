@@ -18,6 +18,7 @@ import {
   createMcpServerProvider,
   getKubeConfig,
 } from './k8sClient'
+import { buildMcpCallerResolver, reviewKubernetesToken } from './mcpCallerAuth'
 import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
 import { ContextMapperServer } from './server'
 import { StatelessLifecycleTracker } from './statelessLifecycleTracker'
@@ -126,6 +127,17 @@ async function main(): Promise<void> {
   // server's fail-closed default would pin /api/v1/desktop/* at 503 forever in
   // dev (R2-M1). See resolveHostAuthoritativeFn.
   const hostAuthoritativeFn = resolveHostAuthoritativeFn(watcher)
+  // MCP discovery is TokenReview-bound. Apply TokenReview RBAC and restart
+  // the HCC gateway, roll Hosts onto an mcp-host that sends the SA bearer,
+  // then this HCC image. Recreate HCC first 401s discovery until Hosts roll
+  // (running Hosts keep last fleet; cold start waits on 401 after /ready).
+  const resolveMcpCaller = buildMcpCallerResolver({
+    devMode: config.devMode,
+    hostNamespace: config.hostNamespace,
+    getHost: name => watcher?.getHost(name),
+    reviewToken: reviewKubernetesToken,
+    devContextRef: config.devContexts[0]?.name ?? 'dev-context',
+  })
 
   // Stateless heartbeat consumption — mcp-host pods authenticate their
   // heartbeats toward control-api's /mcp-host facade (control-api is the
@@ -164,7 +176,8 @@ async function main(): Promise<void> {
     hostReconciler,
     hasDesktopFn,
     providerAuthoritativeFn,
-    hostAuthoritativeFn
+    hostAuthoritativeFn,
+    { resolveMcpCaller }
   )
   await server.start()
 
