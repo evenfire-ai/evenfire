@@ -93,7 +93,9 @@ profile-level lock prevents two processes from mutating one profile at the
 same time. The lock record contains only local metadata and is removed by
 success, failure, timeout, and interrupt traps. A live owner produces
 `PROFILE_BUSY`; stale metadata may be reclaimed only after its recorded PID is
-no longer running.
+no longer running. Reclaimers serialize through an atomic `.reclaim` directory
+inside that exact profile lock. A concurrent loser fails closed and never
+removes either the stale directory or the winner's replacement lock.
 
 The pre-gate marker must contain the current worktree identifier, exact `HEAD`,
 cluster fingerprint, and image coordinate. A mismatch stops with a stable
@@ -101,9 +103,12 @@ error code instead of allowing a mixed-commit run.
 
 ### Orphaned lock recovery
 
-If `PROFILE_BUSY` reports that the lock has no valid owner PID, first verify
-that no T2 process owns the profile. After that check, remove only the exact
-profile lock directory and retry the same command:
+If `PROFILE_BUSY` reports that the lock has no valid owner PID, or that a stale
+reclaim is already in progress, first verify that neither the recorded owner
+nor a reclaimer process owns the profile. A `.reclaim` directory can remain
+after a reclaimer is killed and is intentionally not auto-reclaimed. After
+those checks, remove only the exact profile lock directory and retry the same
+command:
 
 ```bash
 rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"
@@ -157,7 +162,12 @@ live non-terminating unready reader pod). A reader pod also fails closed
 when `gfs-config.jwt-public-key` is empty — the overlay re-applies the base
 ConfigMap with an empty value — so `full-setup.sh` and `pre-gate-sync` re-run
 `scripts/minikube/sync-auth-key.sh` before each GFS reconcile; otherwise no
-new reader pod can start and the readiness wait can only time out.
+new reader pod can start and the readiness wait can only time out. Auth sync
+commits a SHA-256 convergence annotation only after every active managed
+mcp-host and the exact `gfsc-writer`/`gfsc-reader` consumers prove—through a
+stdin-only in-process check—that they loaded the target public key. A matching
+ConfigMap without that annotation is an interrupted rollout and is resumed;
+it is never treated as converged.
 `pre-gate-sync` provisions GFS serving with the same opt-ins only in the
 `minikube-t2` transition (including its "no cluster sync required" fast path).
 Other platform security gates refresh MCP auth with `--skip-gfs` and do not

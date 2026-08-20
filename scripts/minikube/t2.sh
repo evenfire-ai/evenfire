@@ -34,11 +34,22 @@ T2_FINAL_PREFLIGHT_OUTPUT="$T2_TMP_ROOT/evenfire-t2-final-preflight.$$.out"
 export T2_PROJECT_DIR T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV T2_CONTEXT T2_LOCK_TOKEN
 
 cleanup_plan() {
-  local status=$?
-  if [ -n "$T2_PLAN_TMP" ] && [ -f "$T2_PLAN_TMP" ]; then rm -f "$T2_PLAN_TMP"; fi
-  if [ -f "$T2_FINAL_PREFLIGHT_OUTPUT" ]; then rm -f "$T2_FINAL_PREFLIGHT_OUTPUT"; fi
-  if [ -f "$T2_T1_OUTPUT" ]; then rm -f "$T2_T1_OUTPUT"; fi
-  t2_lock_release "$status"
+  local status=$? cleanup_status=0
+  trap - EXIT
+  if [ -n "$T2_PLAN_TMP" ] && [ -f "$T2_PLAN_TMP" ]; then
+    rm -f "$T2_PLAN_TMP" || cleanup_status=1
+  fi
+  if [ -f "$T2_FINAL_PREFLIGHT_OUTPUT" ]; then
+    rm -f "$T2_FINAL_PREFLIGHT_OUTPUT" || cleanup_status=1
+  fi
+  if [ -f "$T2_T1_OUTPUT" ]; then
+    rm -f "$T2_T1_OUTPUT" || cleanup_status=1
+  fi
+  t2_lock_release "$status" || cleanup_status=1
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status=1
+  fi
+  exit "$status"
 }
 trap cleanup_plan EXIT
 
@@ -157,37 +168,12 @@ run_bootstrap_or_reconcile() {
 }
 
 run_targeted_sync() {
-  local changed path selected=false
-  changed="$(git -C "$T2_PROJECT_DIR" diff --name-only "$T2_ORIGIN_DEV...$T2_HEAD")"
-  while IFS= read -r path; do
-    [ -z "$path" ] && continue
-    case "$path" in
-      control-api/*)
-        MINIKUBE_PROFILE="$T2_PROFILE" make minikube-deploy-service SVC=control-api NS=control-plane MINIKUBE_DEPLOYMENT=control-api
-        selected=true ;;
-      gfs-controller/*)
-        MINIKUBE_PROFILE="$T2_PROFILE" make minikube-deploy-service SVC=gfs-controller NS=gfs MINIKUBE_DEPLOYMENT=gfs-controller
-        selected=true ;;
-      external-rest-api/*)
-        MINIKUBE_PROFILE="$T2_PROFILE" make minikube-deploy-service SVC=external-rest-api NS=profiles MINIKUBE_DEPLOYMENT=external-rest-api
-        selected=true ;;
-      rpc-proxy/*)
-        MINIKUBE_PROFILE="$T2_PROFILE" make minikube-deploy-service SVC=rpc-proxy NS=rpc-proxy MINIKUBE_DEPLOYMENT=rpc-proxy
-        selected=true ;;
-      mcp-host/*)
-        MINIKUBE_PROFILE="$T2_PROFILE" make minikube-deploy-service SVC=mcp-host NS=mcp-host MINIKUBE_DEPLOYMENT=chatllm
-        selected=true ;;
-      control-ui/*)
-        MINIKUBE_PROFILE="$T2_PROFILE" make minikube-deploy-service SVC=control-ui NS=control-plane MINIKUBE_DEPLOYMENT=control-ui
-        selected=true ;;
-      profile-ui/*)
-        MINIKUBE_PROFILE="$T2_PROFILE" make minikube-deploy-service SVC=profile-ui NS=profiles MINIKUBE_DEPLOYMENT=profile-ui
-        selected=true ;;
-    esac
-  done <<< "$changed"
-  if [ "$selected" != true ]; then
-    printf '[minikube-t2] no service image requires a targeted deployment\n'
-  fi
+  # pre-gate-sync owns the targeted plan and mutation. Keeping a second mapping
+  # here caused the T2 transition to deploy twice and, for GFS, referenced a
+  # deployment that does not exist. The canonical path below classifies the
+  # exact diff, builds each image selector once, and restarts its real consumer
+  # deployment(s) before publishing the exact-head marker.
+  printf '[minikube-t2] targeted mutation delegated to canonical pre-gate-sync\n'
 }
 
 run_pre_gate() {

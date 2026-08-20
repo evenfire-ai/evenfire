@@ -643,6 +643,7 @@ t2_lock_profile_id_check() {
   if [[ ! "$T2_PROFILE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
     T2_NEXT_COMMAND='use the generated profile name without path separators or shell metacharacters'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'profile lock identifier is not a safe local profile name'
+    return 1
   fi
 }
 
@@ -664,7 +665,7 @@ t2_lock_process_matches() {
 
 t2_lock_acquire() {
   local process_start
-  t2_lock_profile_id_check
+  t2_lock_profile_id_check || return 1
   mkdir -p "$T2_LOCK_ROOT"
   T2_LOCK_DIR="$T2_LOCK_ROOT/$T2_PROFILE.lock"
   T2_LOCK_KEY="$(t2_lock_key)"
@@ -672,24 +673,58 @@ t2_lock_acquire() {
     if [ -L "$T2_LOCK_DIR" ] || [ ! -d "$T2_LOCK_DIR" ]; then
       T2_NEXT_COMMAND='remove the unsafe profile-lock path manually after verifying the profile owner'
       t2_fail PROFILE_BUSY "profile lock path is not a directory: $T2_LOCK_DIR"
+      return 1
     fi
-    local existing_pid existing_token existing_start
+    local existing_pid existing_token existing_start reclaim_dir
     existing_pid="$(t2_lock_owner_value PID || true)"
     existing_token="$(t2_lock_owner_value TOKEN || true)"
     existing_start="$(t2_lock_owner_value PROCESS_START || true)"
     if [[ ! "$existing_pid" =~ ^[0-9]+$ ]] || [ -z "$existing_token" ] || [ -z "$existing_start" ]; then
       T2_NEXT_COMMAND='verify no T2 process owns the lock, then follow the orphaned-lock recovery steps in docs/testing/minikube-t2-runbook.md'
       t2_fail PROFILE_BUSY "profile $T2_PROFILE has an orphaned lock without a valid owner identity"
+      return 1
     fi
     if t2_lock_process_matches "$existing_pid"; then
       T2_NEXT_COMMAND="wait for PID $existing_pid to finish, then retry the same profile"
       t2_fail PROFILE_BUSY "profile $T2_PROFILE is locked by PID $existing_pid"
+      return 1
+    fi
+
+    # Reclaim ownership is itself acquired atomically inside the stale lock.
+    # With two concurrent reclaimers, exactly one can create this directory;
+    # every loser fails closed before it can remove either the stale lock or a
+    # replacement lock created by the winner. If a reclaimer is killed while
+    # holding this claim, the marker deliberately remains and requires the
+    # documented orphan-lock recovery rather than permitting an unsafe retry.
+    reclaim_dir="$T2_LOCK_DIR/.reclaim"
+    if ! mkdir "$reclaim_dir" 2>/dev/null; then
+      T2_NEXT_COMMAND='wait for the stale-lock reclaimer to finish; if it died, follow the orphaned-lock recovery steps in docs/testing/minikube-t2-runbook.md'
+      t2_fail PROFILE_BUSY "profile $T2_PROFILE stale lock is already being reclaimed"
+      return 1
+    fi
+
+    # Revalidate after winning the claim. A changed or live owner means the
+    # original stale observation is no longer authoritative.
+    existing_pid="$(t2_lock_owner_value PID || true)"
+    existing_token="$(t2_lock_owner_value TOKEN || true)"
+    existing_start="$(t2_lock_owner_value PROCESS_START || true)"
+    if [[ ! "$existing_pid" =~ ^[0-9]+$ ]] || [ -z "$existing_token" ] || [ -z "$existing_start" ]; then
+      T2_NEXT_COMMAND='verify no T2 process owns the lock, then follow the orphaned-lock recovery steps in docs/testing/minikube-t2-runbook.md'
+      t2_fail PROFILE_BUSY "profile $T2_PROFILE owner changed while its stale lock was being reclaimed"
+      return 1
+    fi
+    if t2_lock_process_matches "$existing_pid"; then
+      rmdir "$reclaim_dir" 2>/dev/null || true
+      T2_NEXT_COMMAND="wait for PID $existing_pid to finish, then retry the same profile"
+      t2_fail PROFILE_BUSY "profile $T2_PROFILE became live while its stale lock was being reclaimed"
+      return 1
     fi
     rm -rf -- "$T2_LOCK_DIR"
   fi
   mkdir "$T2_LOCK_DIR" 2>/dev/null || {
     T2_NEXT_COMMAND='retry after the profile lock is released'
     t2_fail PROFILE_BUSY "unable to acquire the profile lock: $T2_PROFILE"
+    return 1
   }
   umask 077
   T2_LOCK_TOKEN="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -760,7 +795,7 @@ t2_mutation_lock() {
 }
 
 t2_lock_release() {
-  local incoming_status=$? status owner_pid owner_token
+  local incoming_status=$? status owner_pid owner_token cleanup_status=0
   if [ "$#" -gt 0 ]; then status="$1"; else status="$incoming_status"; fi
   if [ "$T2_LOCK_RELEASED" = true ]; then
     return "$status"
@@ -770,12 +805,15 @@ t2_lock_release() {
     owner_pid="$(t2_lock_owner_value PID || true)"
     owner_token="$(t2_lock_owner_value TOKEN || true)"
     if [ "$owner_pid" = "$$" ] && [ -n "$T2_LOCK_TOKEN" ] && [ "$owner_token" = "$T2_LOCK_TOKEN" ]; then
-      rm -rf -- "$T2_LOCK_DIR"
+      rm -rf -- "$T2_LOCK_DIR" || cleanup_status=1
     fi
   fi
   T2_LOCK_HELD=false
   if [ -n "$T2_EVIDENCE_FILE" ] && [ -f "$T2_EVIDENCE_FILE" ] && [ -n "$T2_ERROR_CODE" ]; then
     t2_evidence_write failure FAIL "$T2_ERROR_CODE"
+  fi
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status="$cleanup_status"
   fi
   return "$status"
 }
