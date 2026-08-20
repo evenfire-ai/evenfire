@@ -167,6 +167,151 @@ export async function registerLlmProviderAttemptTicket(
   )
 }
 
+export type LlmProviderAttemptTicketRow = {
+  jti: string
+  providerAttemptId: string
+  status: LlmProviderAttemptTicketStatus
+  expiresAt: Date
+  receiptHash: string | null
+}
+
+export async function loadLlmProviderAttempt(
+  db: DbClient,
+  id: string
+): Promise<LlmProviderAttemptRow | null> {
+  const result = await db.query(
+    `SELECT id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
+            attempt_generation, provider_attempt_index, provider, model, request_hash,
+            policy_revision, policy_hash, budget_reservation_id, connection_revision,
+            status, outcome, created_at
+       FROM llm_provider_attempts
+      WHERE id = $1`,
+    [id]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  if (!row) return null
+  return {
+    id: String(row.id),
+    callerKind: row.caller_kind as 'host' | 'recipe',
+    hostRef: String(row.host_ref),
+    recipeNamespace: (row.recipe_namespace as string | null) ?? null,
+    recipeName: (row.recipe_name as string | null) ?? null,
+    invocationId: String(row.invocation_id),
+    attemptGeneration: Number(row.attempt_generation),
+    providerAttemptIndex: Number(row.provider_attempt_index),
+    provider: LLM_PROVIDER_ATTEMPT_PROVIDER,
+    model: String(row.model),
+    requestHash: String(row.request_hash),
+    policyRevision: Number(row.policy_revision),
+    policyHash: String(row.policy_hash),
+    budgetReservationId: String(row.budget_reservation_id),
+    connectionRevision: Number(row.connection_revision),
+    status: row.status as LlmProviderAttemptStatus,
+    outcome: (row.outcome as LlmProviderAttemptOutcome | null) ?? null,
+    createdAt: row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at)),
+  }
+}
+
+export async function lockLlmProviderAttemptTicket(
+  db: DbClient,
+  jti: string
+): Promise<LlmProviderAttemptTicketRow | null> {
+  const result = await db.query(
+    `SELECT jti::text, provider_attempt_id::text, status, expires_at, receipt_hash
+       FROM llm_provider_attempt_tickets
+      WHERE jti = $1
+      FOR UPDATE`,
+    [jti]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  if (!row) return null
+  return {
+    jti: String(row.jti),
+    providerAttemptId: String(row.provider_attempt_id),
+    status: row.status as LlmProviderAttemptTicketStatus,
+    expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(String(row.expires_at)),
+    receiptHash: (row.receipt_hash as string | null) ?? null,
+  }
+}
+
+export async function markLlmProviderAttemptTicketRedeemed(
+  db: DbClient,
+  jti: string
+): Promise<boolean> {
+  const ticket = await db.query(
+    `UPDATE llm_provider_attempt_tickets
+        SET status = 'redeemed', redeemed_at = now()
+      WHERE jti = $1
+        AND status = 'issued'
+        AND expires_at > now()`,
+    [jti]
+  )
+  if ((ticket.rowCount ?? 0) !== 1) return false
+  await db.query(
+    `UPDATE llm_provider_attempts
+        SET status = 'redeemed'
+      WHERE id = (
+        SELECT provider_attempt_id FROM llm_provider_attempt_tickets WHERE jti = $1
+      )
+        AND status = 'authorized'`,
+    [jti]
+  )
+  return true
+}
+
+export async function markLlmProviderAttemptFinalized(
+  db: DbClient,
+  input: {
+    providerAttemptId: string
+    receiptHash: string
+    outcome: LlmProviderAttemptOutcome
+    usageInputTokens?: number
+    usageOutputTokens?: number
+  }
+): Promise<'applied' | 'duplicate' | 'conflict' | 'missing'> {
+  const current = await db.query(
+    `SELECT status, receipt_hash
+       FROM llm_provider_attempt_tickets
+      WHERE provider_attempt_id = $1
+      FOR UPDATE`,
+    [input.providerAttemptId]
+  )
+  const ticket = current.rows[0] as { status: string; receipt_hash: string | null } | undefined
+  if (!ticket) return 'missing'
+  if (ticket.status === 'finalized') {
+    return ticket.receipt_hash === input.receiptHash ? 'duplicate' : 'conflict'
+  }
+  if (ticket.status !== 'redeemed') return 'conflict'
+
+  const ticketUpdate = await db.query(
+    `UPDATE llm_provider_attempt_tickets
+        SET status = 'finalized', finalized_at = now(), receipt_hash = $2
+      WHERE provider_attempt_id = $1
+        AND status = 'redeemed'`,
+    [input.providerAttemptId, input.receiptHash]
+  )
+  if ((ticketUpdate.rowCount ?? 0) !== 1) return 'conflict'
+
+  const attemptUpdate = await db.query(
+    `UPDATE llm_provider_attempts
+        SET status = 'finalized',
+            outcome = $2,
+            usage_input_tokens = $3,
+            usage_output_tokens = $4,
+            finalized_at = now()
+      WHERE id = $1
+        AND status = 'redeemed'`,
+    [
+      input.providerAttemptId,
+      input.outcome,
+      input.usageInputTokens ?? null,
+      input.usageOutputTokens ?? null,
+    ]
+  )
+  if ((attemptUpdate.rowCount ?? 0) !== 1) return 'conflict'
+  return 'applied'
+}
+
 export async function getMaxLlmProviderAttemptGeneration(
   db: DbClient,
   invocationId: string
