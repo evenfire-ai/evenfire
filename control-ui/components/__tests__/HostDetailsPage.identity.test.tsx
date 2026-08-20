@@ -319,4 +319,61 @@ describe('HostDetailsPage identity integration', () => {
     // reverted saved ctx-a. Pre-collateral-fix this reads 'ctx-a'.
     expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('ctx-b')
   })
+
+  it('saves a Codex-only Host without secretRef and keeps metadata.name as identity', async () => {
+    const { secretRef: _omit, ...specWithoutSecret } = host.spec
+    void _omit
+    const codexHost = {
+      ...host,
+      spec: {
+        ...specWithoutSecret,
+        model: { provider: 'codex-subscription', name: 'gpt-5.1' },
+      },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: codexHost,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [{ name: 'openai-secret' }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(codexHost)
+    ;(api.getLlmModels as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      rows: [
+        {
+          id: 'm-codex',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          vendor: 'OpenAI',
+          display_name: null,
+          context_window_tokens: null,
+          enabled: true,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ],
+    })
+    mockParams = { name: 'foo', tab: 'model' }
+    render(<HostDetailsPage />)
+
+    expect(await screen.findByText('Broker-backed — no LLM secret required')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+    const putCall = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
+      c => c[0] === 'PUT' && c[1] === '/api/v1/admin/hosts/foo'
+    )
+    const payload = putCall![2]
+    expect(payload.spec.model).toEqual({ provider: 'codex-subscription', name: 'gpt-5.1' })
+    expect(payload.spec.secretRef).toBeUndefined()
+    expect(payload.spec.hostRef).toBeUndefined()
+    expect(payload.spec.userId).toBeUndefined()
+    expect(payload.metadata?.name).toBeUndefined()
+  })
 })

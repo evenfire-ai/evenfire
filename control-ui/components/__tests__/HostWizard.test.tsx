@@ -73,6 +73,30 @@ vi.mock('../../lib/api', () => ({
         created_at: '',
         updated_at: '',
       },
+      {
+        id: 'm4',
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        vendor: 'OpenAI',
+        display_name: null,
+        context_window_tokens: null,
+        enabled: true,
+        stale: false,
+        created_at: '',
+        updated_at: '',
+      },
+      {
+        id: 'm5',
+        provider: 'codex-subscription',
+        model: 'old-codex',
+        vendor: 'OpenAI',
+        display_name: null,
+        context_window_tokens: null,
+        enabled: true,
+        stale: true,
+        created_at: '',
+        updated_at: '',
+      },
     ],
   }),
   isSilentApiError: vi.fn().mockReturnValue(false),
@@ -201,6 +225,8 @@ async function build409(bodyObj: Record<string, unknown>): Promise<Error> {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.mocked(api.apiSend).mockReset()
+  vi.mocked(api.apiSend).mockResolvedValue({})
 })
 
 describe('HostWizard — credential draft is projected onto the active provider domain', () => {
@@ -737,5 +763,89 @@ describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)
     // Boundary rule still applies: the secret created before the failing context
     // is compensated (host never created), but nothing beyond that.
     expect(api.apiSend).toHaveBeenCalledWith('DELETE', '/api/v1/admin/secrets/crd-agent-llm')
+  })
+})
+
+async function walkToModelStep(opts?: { agentName?: string }) {
+  const name = opts?.agentName ?? 'codex-agent'
+  await waitFor(() => {
+    expect(api.getAdminUsers).toHaveBeenCalled()
+  })
+  fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: name } })
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+  fireEvent.click(screen.getByLabelText(/Create new context/i))
+  fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+  await waitFor(() => {
+    expect(
+      screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+    ).toBeInTheDocument()
+  })
+}
+
+async function selectCodexSubscription(model = 'gpt-5.1') {
+  fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+  fireEvent.click(screen.getByRole('option', { name: /OpenAI Codex Subscription/i }))
+  await waitFor(() => {
+    expect(screen.queryByText(/Use an existing secret/i)).not.toBeInTheDocument()
+  })
+  fireEvent.click(screen.getByLabelText('Default model', { selector: '#llm-primary-model' }))
+  fireEvent.click(screen.getByRole('option', { name: model }))
+}
+
+describe('HostWizard — broker-backed Codex authoring', () => {
+  it('creates a Codex-only Host without secretRef or a Secret POST', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-only' })
+    await selectCodexSubscription()
+    expect(screen.queryByLabelText(/OpenAI API key/i)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Default model', { selector: '#llm-primary-model' }))
+    expect(screen.queryByRole('option', { name: 'old-codex' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'codex-only' },
+          spec: expect.objectContaining({
+            model: { provider: 'codex-subscription', name: 'gpt-5.1' },
+          }),
+        })
+      )
+    })
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect(hostCall?.[2]).not.toHaveProperty('spec.secretRef')
+    expect((hostCall?.[2] as { spec: Record<string, unknown> }).spec.secretRef).toBeUndefined()
+    expect(
+      vi
+        .mocked(api.apiSend)
+        .mock.calls.some(call => call[0] === 'POST' && call[1] === '/api/v1/admin/secrets')
+    ).toBe(false)
+  })
+
+  it('requires exact credential slots when a static fallback joins a Codex primary', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-mixed' })
+    await selectCodexSubscription()
+    fireEvent.click(screen.getByRole('button', { name: /Fallback providers/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Add fallback provider/i }))
+    fireEvent.change(screen.getByLabelText('Provider', { selector: '#llm-fallback-0-provider' }), {
+      target: { value: 'openai' },
+    })
+    await waitFor(() => {
+      expect(screen.getByText(/Use an existing secret/i)).toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
+    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+    fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+    })
   })
 })

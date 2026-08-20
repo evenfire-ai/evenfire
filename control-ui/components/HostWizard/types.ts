@@ -35,6 +35,10 @@ export type CreatedResource = {
   name: string
 }
 
+// LLM Secret mode for Host create. A broker-only chain hides this entirely
+// and omits spec.secretRef; mixed/static chains still require an exact Secret.
+export type HostLlmSecretMode = 'existing' | 'new'
+
 export type HostWizardProps = {
   existingSecrets: SecretMeta[]
   mcpServers: McpServer[]

@@ -1,5 +1,6 @@
 import {
   type LlmProviderId,
+  PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_IDS,
@@ -55,6 +56,10 @@ export type LlmModelCatalogEntry = {
   provider: string
   model: string
   enabled: boolean
+  // Discovery rows that vanished stay visible on already-saved Hosts but must
+  // not appear as a new pick. The API always normalizes this; optional here so
+  // unit fixtures can omit it (treated as not stale).
+  stale?: boolean
 }
 
 // Wizard pre-select / fallback default per provider. This stays static on
@@ -171,13 +176,17 @@ export const BEDROCK_CREDENTIAL_KEYS: string[] = PROVIDER_CREDENTIAL_SLOTS.bedro
   slot => slot.dataKey
 )
 
-// Group completeness for the "provider usable" chip (spec R4.5.5): a provider is
-// usable once every `required` slot has a value. `present` counts required slots
-// filled; `usable` is true when all required slots are present.
+// Completeness follows `authMode`, not "are there required slots?". A
+// zero-slot oauth-broker provider is usable without a Kubernetes Secret.
+// Static-credentials providers stay usable only when every required slot is
+// present. `present`/`total` count required slots (always 0 for brokers).
 export function getLlmGroupCompleteness(
   group: LlmCredentialGroup,
   isPresent: (dataKey: string) => boolean
 ): { present: number; total: number; usable: boolean } {
+  if (PROVIDER_AUTH_MODE[group.provider] === 'oauth-broker') {
+    return { present: 0, total: 0, usable: true }
+  }
   const required = group.slots.filter(slot => slot.required)
   const present = required.filter(slot => isPresent(slot.dataKey)).length
   return {
@@ -185,6 +194,59 @@ export function getLlmGroupCompleteness(
     total: required.length,
     usable: required.length > 0 && present === required.length,
   }
+}
+
+// True when this provider still needs a Host/recipe LLM Secret. Broker-backed
+// providers (Codex) authenticate via Control API tickets, never via slots.
+export function providerRequiresLlmSecret(provider: string): boolean {
+  return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'static-credentials'
+}
+
+// A Host/recipe LLM chain needs a Secret iff any target (primary or fallback)
+// uses static credentials. Codex-only chains save without `secretRef`.
+export function llmChainRequiresSecret(
+  primary: string,
+  fallbacks?: Array<{ provider: string }>
+): boolean {
+  if (providerRequiresLlmSecret(primary)) return true
+  return (fallbacks ?? []).some(entry => providerRequiresLlmSecret(entry.provider))
+}
+
+// Codex (and any future oauth-broker) cannot be priced in currency — Token
+// Budget `unit=cost` is rejected when the scoped providers include a broker.
+export function providerAllowsCostBudget(provider: string): boolean {
+  return !isLlmProviderId(provider) || PROVIDER_AUTH_MODE[provider] !== 'oauth-broker'
+}
+
+export function budgetUnitAllowedForProviders(
+  unit: 'cost' | 'tokens',
+  providers: readonly string[]
+): boolean {
+  if (unit !== 'cost') return true
+  return providers.every(providerAllowsCostBudget)
+}
+
+// Recipe authoring guard: a broker-backed agent must name an explicit model
+// and must not carry an LLM secretRef or a cost-unit budget.
+export function brokerBackedRecipeAuthoringError(spec: Record<string, unknown>): string | null {
+  const agent = spec.agent
+  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return null
+  const record = agent as Record<string, unknown>
+  const provider = typeof record.provider === 'string' ? record.provider : ''
+  if (!isLlmProviderId(provider) || PROVIDER_AUTH_MODE[provider] !== 'oauth-broker') {
+    return null
+  }
+  const model = typeof record.model === 'string' ? record.model.trim() : ''
+  if (!model) return 'Codex subscription requires an explicit catalog model.'
+  if (record.secretRef != null) {
+    return 'Codex subscription recipes must not declare an LLM secretRef.'
+  }
+  const budget = spec.budget
+  if (budget && typeof budget === 'object' && !Array.isArray(budget)) {
+    const unit = (budget as Record<string, unknown>).unit
+    if (unit === 'cost') return 'Codex subscription budgets must use unit tokens, not cost.'
+  }
+  return null
 }
 
 // UI descriptor for a group's usable/partial/absent chip (spec R4.5.5). Single
@@ -386,10 +448,15 @@ export function formatContextWindow(value: number | null | undefined): string {
 export function getModelOptions(
   catalog: LlmModelCatalogEntry[],
   provider: string,
-  options: { includeDisabled?: boolean } = {}
+  options: { includeDisabled?: boolean; includeStale?: boolean } = {}
 ): string[] {
   return catalog
-    .filter(entry => entry.provider === provider && (options.includeDisabled || entry.enabled))
+    .filter(
+      entry =>
+        entry.provider === provider &&
+        (options.includeDisabled || entry.enabled) &&
+        (options.includeStale || !entry.stale)
+    )
     .map(entry => entry.model)
 }
 
@@ -397,12 +464,13 @@ export function getModelOptions(
 // suggestions). De-duplicated, insertion order preserved.
 export function getAllModelOptions(
   catalog: LlmModelCatalogEntry[],
-  options: { includeDisabled?: boolean } = {}
+  options: { includeDisabled?: boolean; includeStale?: boolean } = {}
 ): string[] {
   const seen = new Set<string>()
   const out: string[] = []
   for (const entry of catalog) {
     if (!options.includeDisabled && !entry.enabled) continue
+    if (!options.includeStale && entry.stale) continue
     if (seen.has(entry.model)) continue
     seen.add(entry.model)
     out.push(entry.model)
@@ -415,6 +483,9 @@ export function getAllModelOptions(
 // the provider has no enabled models (caller shows an empty/error picker; no
 // hardcoded fallback per spec R4.5.1).
 export function resolveDefaultModel(provider: LlmProvider, enabledModels: string[]): string {
+  // Broker-backed providers have no static default and must never silently
+  // pick the first enabled catalog row — the operator names the model.
+  if (PROVIDER_AUTH_MODE[provider] === 'oauth-broker') return ''
   const explicit = LLM_DEFAULT_MODEL_BY_PROVIDER[provider]
   if (explicit && enabledModels.includes(explicit)) return explicit
   return enabledModels[0] ?? ''
