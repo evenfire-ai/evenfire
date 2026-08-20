@@ -245,6 +245,7 @@ function uploadConfig(): GfsUploadConfig {
     GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
     GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
   )
+  requireCanonicalUploadInteger('GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES')
   requireCanonicalUploadInteger('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES')
   requireCanonicalUploadInteger('GFS_UPLOAD_MAX_FILE_BYTES')
   const productMaxFileBytes = uploadIntegerWithAlias(
