@@ -27,6 +27,7 @@ T1_NEXT_COMMAND='repair the first reported Real PostgreSQL precondition, then re
 T1_TOTAL_TESTS=0
 T1_PASSED_TESTS=0
 T1_PENDING_TESTS=0
+T1_GFS_RESTORE_REQUIRED=false
 
 die_t1() {
   local code="$1"
@@ -48,6 +49,12 @@ cleanup_t1() {
       kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
       wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
     fi
+  fi
+  if [ "$T1_GFS_RESTORE_REQUIRED" = true ] && \
+     ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$T2_CONTEXT" \
+       bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    printf '[minikube-t1] ERROR: failed to restore branch-profile GFS credentials\n' >&2
+    status=1
   fi
   if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi
   exit "$status"
@@ -148,26 +155,35 @@ run_suite() {
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package"
   }
-  stats="$(python3 - "$json_file" "$expected_files" <<'PY'
+  # Vitest's suite counters include nested describe blocks, so they are not
+  # comparable to the number of physical *realPostgres*.test.ts files above.
+  # Validate the reporter's own total/passed suite counts instead; the file
+  # discovery count remains a separate zero-selection guard.
+  stats="$(python3 - "$json_file" <<'PY'
 import json
 import sys
 result = json.loads(open(sys.argv[1]).read())
-expected = int(sys.argv[2])
-passed_files = int(result.get("numPassedTestSuites") or 0)
+total_suites = int(result.get("numTotalTestSuites") or 0)
+passed_suites = int(result.get("numPassedTestSuites") or 0)
+failed_suites = int(result.get("numFailedTestSuites") or 0)
 passed_tests = int(result.get("numPassedTests") or 0)
 failed_tests = int(result.get("numFailedTests") or 0)
 pending_files = int(result.get("numPendingTestSuites") or 0)
 pending_tests = int(result.get("numPendingTests") or 0)
 total_tests = int(result.get("numTotalTests") or 0)
 success = bool(result.get("success"))
-print(passed_files, passed_tests, failed_tests, pending_files, pending_tests, total_tests, int(success), expected)
+print(total_suites, passed_suites, failed_suites, passed_tests, failed_tests,
+      pending_files, pending_tests, total_tests, int(success))
 PY
   )"
-  read -r passed_files passed_tests failed_tests pending_files pending_tests total_tests success expected <<< "$stats"
+  read -r total_suites passed_suites failed_suites passed_tests failed_tests \
+    pending_files pending_tests total_tests success <<< "$stats"
   T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))
   T1_PASSED_TESTS=$((T1_PASSED_TESTS + passed_tests))
   T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
-  if [ "$success" -ne 1 ] || [ "$passed_files" -ne "$expected" ] || [ "$failed_tests" -ne 0 ]; then
+  if [ "$success" -ne 1 ] || [ "$total_suites" -le 0 ] || \
+     [ "$passed_suites" -ne "$total_suites" ] || [ "$failed_suites" -ne 0 ] || \
+     [ "$failed_tests" -ne 0 ]; then
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
     die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package"
   fi
@@ -175,7 +191,8 @@ PY
     T1_NEXT_COMMAND='repair the test selection or database route; a T1 run cannot silently skip suites'
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package"
   fi
-  printf '[minikube-t1] PASS %s files=%s tests=%s skipped=0\n' "$package" "$passed_files" "$passed_tests"
+  printf '[minikube-t1] PASS %s files=%s suites=%s tests=%s skipped=0\n' \
+    "$package" "$expected_files" "$passed_suites" "$passed_tests"
 }
 
 main() {
@@ -216,7 +233,14 @@ main() {
   T1_REDACT_PASSWORD="$PG_PASSWORD"
 
   LOCAL_PORT="$(choose_local_port)"
-  t2_kc -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
+  # Background kubectl DIRECTLY, not the t2_kc function. Backgrounding a shell
+  # function forks a subshell, so $! is the subshell's PID and its command line
+  # is this script's name — cleanup_t1's `svc/control-postgres` guard never
+  # matches it, so the kill is skipped and the port-forward (plus the subshell)
+  # orphan (PPID=1) past T1 into the T2 final preflight, tripping a spurious
+  # PORT_FORWARD_CONFLICT. Backgrounding kubectl directly makes PORT_FORWARD_PID
+  # the real forward whose command line the guard (and the wait) can act on.
+  kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
     >"$T1_TMP_DIR/port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
   if ! wait_for_tcp "$LOCAL_PORT"; then
@@ -230,6 +254,12 @@ main() {
     cat "$T1_TMP_DIR/port-forward.log" >&2 || true
     T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward exited before the T1 lane started'
+  fi
+  if t2_kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
+    # Real role-contract suites intentionally leave their cluster-global GFS
+    # roles NOLOGIN during teardown. Restore the branch profile before T1
+    # exits so the following T2 gate observes the production-like runtime.
+    T1_GFS_RESTORE_REQUIRED=true
   fi
 
   ADMIN_DSN="$(printf '%s\0%s\0%s' "$PG_USER" "$PG_PASSWORD" "$LOCAL_PORT" | python3 -c '

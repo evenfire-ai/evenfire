@@ -251,6 +251,10 @@ export class McpClient {
    */
   retire(): () => Promise<void> {
     this.retired = true
+    // The credential is no longer authoritative once this client is detached.
+    // Clear the retained value synchronously before asynchronous transport
+    // cleanup so a retired object cannot keep the old bearer alive in memory.
+    this.authToken = undefined
     this.retirementController.abort(this.lifecycleError('closed'))
     return this.detachConnection()
   }

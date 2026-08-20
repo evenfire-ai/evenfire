@@ -619,7 +619,7 @@ assert_the_migration_job_renders_the_overlay_the_cluster_runs() {
   if [ "$rc" -eq 0 ] \
      && grep -q "renderDir=.*/deploy/overlays/minikube-ghcr" <<< "$out" \
      && grep -Fq 'newTag: latest' "$(grep -o 'renderDir=.*' <<< "$out" | head -1 | cut -d= -f2-)/../../components/ghcr-images/kustomization.yaml" \
-     && ! grep -Fq "$hardcoded" "$REPO_ROOT/scripts/minikube/pre-gate-sync.sh" \
+     && ! grep -Fq -- "$hardcoded" "$REPO_ROOT/scripts/minikube/pre-gate-sync.sh" \
      && grep -Fq -- '--overlay "${PRE_GATE_RENDER_DIR}"' "$REPO_ROOT/scripts/minikube/pre-gate-sync.sh"; then
     pass "the migration Job renders the overlay (and tag) the cluster actually runs"
   else
@@ -937,7 +937,8 @@ assert_a_targeted_build_carries_the_recorded_coordinate_forward() {
 
 assert_the_touched_scripts_parse() {
   local f bad=""
-  for f in scripts/minikube/image-mode.sh scripts/minikube/pre-gate-sync.sh \
+  for f in scripts/minikube/image-mode.sh scripts/minikube/pre-gate-marker.sh \
+           scripts/minikube/pre-gate-sync.sh \
            scripts/minikube/pre-gate-incremental.sh scripts/minikube/build-images.sh \
            scripts/tests/test-minikube-pre-gate-shadow.sh; do
     bash -n "$REPO_ROOT/$f" || bad+="$f "
