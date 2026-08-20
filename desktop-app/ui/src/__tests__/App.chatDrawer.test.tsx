@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
-import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { useAppController } from '@hooks/useAppController'
 import { App } from '@/App'
 
@@ -354,6 +354,53 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       { keepNavItem: true }
     )
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  // #3b — cross-team gesture must EJECT to full-screen, not surface in the drawer.
+  // `handleOpenNotificationInDrawer` only surfaces in-drawer when the notification's
+  // team matches the current one; a cross-team conversation tears the embed down on
+  // the team switch, so opening the drawer would flash it and leave chatDrawerOpen
+  // stuck. With teamId 'team-b' (the harness getCurrentTeamId is 'team-a') the wrap
+  // must fall back to the plain handleOpenNotification WITHOUT keepNavItem.
+  it('ejects a cross-team open-conversation gesture instead of surfacing it in the drawer', async () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: null,
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { rerender } = render(<App />)
+
+    // Launch from the picker (no origin) → app live, apps route, drawer CLOSED.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+
+    // The approval is on a chat in a DIFFERENT team (team-b vs the harness team-a).
+    await act(async () => {
+      await appHeaderHarness.openNotification?.({
+        id: 'n2',
+        kind: 'approval_required',
+        agentName: 'alpha',
+        chatId: 'chat-2',
+        teamId: 'team-b',
+      } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
+    })
+    act(() => rerender(<App />))
+
+    // The drawer never opened, and the gesture ran through the plain path WITHOUT
+    // keepNavItem — the eject the full-screen route needs so a team switch survives.
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 'chat-2' }),
+      undefined
+    )
   })
 
   // Regression for the C wrap opening the drawer for EVERY notification kind: it
