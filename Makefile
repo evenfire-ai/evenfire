@@ -39,6 +39,7 @@ SERVICES := \
 	rpc-proxy \
 	mcp-proxy \
 	webhook-proxy \
+	codex-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -61,6 +62,7 @@ TEST_SERVICES := \
 	rpc-proxy \
 	mcp-proxy \
 	webhook-proxy \
+	codex-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
