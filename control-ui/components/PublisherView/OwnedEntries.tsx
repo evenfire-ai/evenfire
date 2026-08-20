@@ -76,9 +76,16 @@ function groupByName(
 // (mcp-servers always have a serverMode; recipes don't). Prefer an explicit
 // entry_type if the registry ever starts sending it, else infer from serverMode.
 // "Connector" / "Plugin" mirror the labels in PublishToRegistryForm.
+function ownedEntryKind(e: OwnedRegistryEntry): string {
+  // Wire field is `entryType` (camelCase); `entry_type` kept as a fallback.
+  return e.entryType ?? e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
+}
+
 function entryTypeLabel(e: OwnedRegistryEntry): string {
-  const kind = e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
-  return kind === 'mcp-server' ? 'Connector' : 'Plugin'
+  const kind = ownedEntryKind(e)
+  if (kind === 'mcp-server') return 'Connector'
+  if (kind === 'llm-hook') return 'Guardrail hook'
+  return 'Plugin'
 }
 
 /**
@@ -114,6 +121,7 @@ export function OwnedEntries({
   const [installedCatalogKeys, setInstalledCatalogKeys] = useState<Set<string>>(new Set())
   const [installedServerNames, setInstalledServerNames] = useState<Set<string>>(new Set())
   const [installedRecipeKeys, setInstalledRecipeKeys] = useState<Set<string>>(new Set())
+  const [installedHookKeys, setInstalledHookKeys] = useState<Set<string>>(new Set())
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -128,6 +136,7 @@ export function OwnedEntries({
         setInstalledCatalogKeys(new Set(catalog.installed.catalogKeys))
         setInstalledServerNames(new Set(catalog.installed.serverNames))
         setInstalledRecipeKeys(new Set(catalog.installed.recipeKeys))
+        setInstalledHookKeys(new Set(catalog.installed.hookKeys ?? []))
       }
     } catch {
       setError(true)
@@ -170,11 +179,12 @@ export function OwnedEntries({
   }, [])
 
   function isInstalled(e: OwnedRegistryEntry): boolean {
-    const kind = e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
+    const kind = ownedEntryKind(e)
     const key = `${e.name}@${e.version}`
     if (kind === 'mcp-server') {
       return installedCatalogKeys.has(key) || installedServerNames.has(e.name)
     }
+    if (kind === 'llm-hook') return installedHookKeys.has(key)
     return installedRecipeKeys.has(key)
   }
 

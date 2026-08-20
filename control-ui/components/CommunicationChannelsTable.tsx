@@ -256,7 +256,9 @@ export function CommunicationChannelsTable({
                         <td>
                           <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
                         </td>
-                        <td>{providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}</td>
+                        <td>
+                          {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
+                        </td>
                         <td>
                           <div className="cu-table-actions">
                             <CopyChannelMenu

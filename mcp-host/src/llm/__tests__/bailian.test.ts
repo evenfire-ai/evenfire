@@ -16,11 +16,11 @@ function makeBailian(model?: string) {
 }
 
 describe('BailianProvider (OpenAICompatibleProvider)', () => {
-  it('inherits classifyError from OpenAIProvider', () => {
+  it('delegates a plain rate-limit to the shared HTTP classifier', () => {
     const bailian = makeBailian('bailian-model')
     expect(bailian).toBeInstanceOf(OpenAIProvider)
     const result = bailian.classifyError({ status: 429, message: 'rate limited' })
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       code: LlmErrorCode.RateLimited,
       retryable: true,
       message: 'rate limited',

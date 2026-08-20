@@ -14,6 +14,7 @@ import {
   IconRobot,
   IconRunReplay,
   IconSettings,
+  IconShield,
   IconStore,
   IconTokenBudgets,
   IconTraceDashboard,
@@ -32,6 +33,11 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconCable />,
   },
   contexts: { label: 'Contexts', href: CONTROL_ROUTES.contexts.root, icon: <IconGroupWork /> },
+  guardrails: {
+    label: 'Installed Guardrails',
+    href: CONTROL_ROUTES.guardrails.root,
+    icon: <IconShield />,
+  },
   cost: {
     label: 'Cost & Usage',
     href: CONTROL_ROUTES.costAndUsage.root,
@@ -136,6 +142,7 @@ export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
   'registry-catalog',
   'mcp-servers',
   'workflow-recipes',
+  'guardrails',
   'directories',
   'communication-channels',
   'llm-models',

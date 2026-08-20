@@ -990,6 +990,51 @@ describe('HostReconciler.buildDeployment — SharedFileSystem mounts', () => {
     })
   })
 
+  it('omits the guardrails-revision annotation when the host has no guardrails', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const dep = reconciler.buildDeployment(makeHost())
+    expect(dep.spec!.template!.metadata!.annotations ?? {}).not.toHaveProperty(
+      'clerum.io/guardrails-revision'
+    )
+  })
+
+  it('stamps a 64-hex guardrails-revision on the pod template when guardrails are set', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const guardrails: HostCRD['spec']['guardrails'] = {
+      hooks: { preCall: [{ id: 'h1', digest: 'sha256:abc' }] },
+    }
+    const host: HostCRD = { ...makeHost(), spec: { ...makeHost().spec, guardrails } }
+    const dep = reconciler.buildDeployment(host)
+    expect(dep.spec!.template!.metadata!.annotations?.['clerum.io/guardrails-revision']).toMatch(
+      /^[0-9a-f]{64}$/
+    )
+  })
+
+  it('guardrails-revision is nested-key-order-independent and content-sensitive', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const revFor = (guardrails: HostCRD['spec']['guardrails']): string | undefined => {
+      const host: HostCRD = { ...makeHost(), spec: { ...makeHost().spec, guardrails } }
+      return reconciler.buildDeployment(host).spec!.template!.metadata!.annotations?.[
+        'clerum.io/guardrails-revision'
+      ]
+    }
+    // Same content, reordered keys at BOTH the top level (hooks/builtins) and the
+    // hook ref (id/digest). A shallow canonicalization would flip the hash here
+    // and roll the pod for nothing; the deep-stable hash must return the same.
+    const a = revFor({
+      hooks: { preCall: [{ id: 'h1', digest: 'sha256:abc' }] },
+      builtins: [{ type: 'token-trim' }],
+    })
+    const reordered = revFor({
+      builtins: [{ type: 'token-trim' }],
+      hooks: { preCall: [{ digest: 'sha256:abc', id: 'h1' }] },
+    })
+    const changed = revFor({ hooks: { preCall: [{ id: 'h2', digest: 'sha256:def' }] } })
+    expect(a).toBe(reordered) // reorder only → same hash → no spurious roll
+    expect(a).not.toBe(changed) // real change → new hash → rolling restart
+    expect(a).toMatch(/^[0-9a-f]{64}$/)
+  })
+
   it('keeps liveness separate from runtime-auth readiness', () => {
     const reconciler = new HostReconciler(makeStubKc())
     const dep = reconciler.buildDeployment(makeHost())

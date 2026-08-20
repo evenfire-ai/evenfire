@@ -434,4 +434,407 @@ describe('validateHostSpec', () => {
       expect(res!.errors[0].message).toContain('model_not_offered')
     })
   })
+
+  // ── Pieza D: role-scoped no-worsening tolerance (editability trap G3) ────────
+  // Once a Host's default (or a referenced model) falls out of the allowlist, the
+  // global `model_not_allowed` gate rejected EVERY future edit — including the
+  // fix. Tolerance lets a write through iff it does not worsen a pre-existing
+  // incoherence AND the pair keeps its ROLE (primary/fallback/subset). The
+  // validator no longer emits: it appends the granted tolerations to
+  // `context.tolerations`; the route emits them only after the CR persists.
+  describe('no-worsening tolerance (Pieza D, role-scoped)', () => {
+    // isModelAllowed keyed on `${provider}:${model}`; anything not listed is disabled.
+    const allowlist = (...enabled: string[]) => {
+      const set = new Set(enabled)
+      return vi.fn((p: string, m: string) => Promise.resolve(set.has(`${p}:${m}`)))
+    }
+    const hostRef = { namespace: 'mcp-host', name: 'h1' }
+
+    it('re-saving a disabled PRIMARY in the same role, coverage not reduced → 200 + tolerated', async () => {
+      const isModelAllowed = allowlist() // M disabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = { model: { provider: 'claude', name: 'M' } }
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).toBeNull() // → 200
+      expect(tolerations).toEqual([
+        expect.objectContaining({
+          resourceKind: 'host',
+          namespace: 'mcp-host',
+          name: 'h1',
+          provider: 'claude',
+          model: 'M',
+          gate: 'primary',
+          offeredBefore: 'UNIVERSAL',
+          offeredAfter: 'UNIVERSAL',
+        }),
+      ])
+    })
+
+    it('widening coverage while re-saving a disabled primary is still tolerated (G3 not broken)', async () => {
+      const isModelAllowed = allowlist('claude:A') // M disabled, A enabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = {
+        model: { provider: 'claude', name: 'M' },
+        allowedModels: [{ provider: 'claude', model: 'M' }],
+      }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'M' },
+          allowedModels: [
+            { provider: 'claude', model: 'M' },
+            { provider: 'claude', model: 'A' },
+          ],
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).toBeNull()
+      // M tolerated at BOTH the primary gate and the subset gate (same role each).
+      expect(tolerations.map(t => t.gate).sort()).toEqual(['primary', 'subset'])
+    })
+
+    it('keeps a disabled FALLBACK as a fallback → 200 + tolerated (gate=fallback)', async () => {
+      const isModelAllowed = allowlist('claude:A') // F disabled, A enabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = {
+        model: { provider: 'claude', name: 'A' },
+        llmPolicy: { fallbacks: [{ provider: 'claude', model: 'F' }] },
+      }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'A' },
+          llmPolicy: { fallbacks: [{ provider: 'claude', model: 'F' }] },
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).toBeNull()
+      expect(tolerations).toEqual([expect.objectContaining({ gate: 'fallback', model: 'F' })])
+    })
+
+    it('ROLE ELEVATION fallback→primary is NOT tolerated → 422 (mini-spec repro #1)', async () => {
+      // Stored: primary A (enabled), fallback M (disabled). The write promotes the
+      // disabled fallback M to the active primary default without shrinking
+      // coverage. Per-par tolerance let this through (200); role-scoped rejects it.
+      const isModelAllowed = allowlist('claude:A') // M disabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = {
+        model: { provider: 'claude', name: 'A' },
+        llmPolicy: { fallbacks: [{ provider: 'claude', model: 'M' }] },
+      }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'M' },
+          llmPolicy: { fallbacks: [{ provider: 'claude', model: 'M' }] },
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).not.toBeNull() // → 422
+      expect(res!.errors[0].field).toBe('spec.model.name')
+      expect(res!.errors[0].message).toContain('model_not_allowed')
+      expect(tolerations).toEqual([]) // nothing emitted for a rejected write
+    })
+
+    it('ROLE ELEVATION allowedModels→primary is NOT tolerated → 422 (mini-spec repro #2)', async () => {
+      // Stored: primary A (enabled), allowedModels [A, M(disabled)]. The write makes
+      // the disabled subset-only M the primary default.
+      const isModelAllowed = allowlist('claude:A') // M disabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = {
+        model: { provider: 'claude', name: 'A' },
+        allowedModels: [
+          { provider: 'claude', model: 'A' },
+          { provider: 'claude', model: 'M' },
+        ],
+      }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'M' },
+          allowedModels: [
+            { provider: 'claude', model: 'A' },
+            { provider: 'claude', model: 'M' },
+          ],
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).not.toBeNull() // → 422 at the primary gate
+      expect(res!.errors[0].field).toBe('spec.model.name')
+      expect(tolerations).toEqual([])
+    })
+
+    it('a NEW disabled fallback (never stored) is NOT tolerated → 422 (condition c)', async () => {
+      const isModelAllowed = allowlist('claude:A') // X disabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = {
+        model: { provider: 'claude', name: 'A' },
+        llmPolicy: { fallbacks: [{ provider: 'claude', model: 'A' }] },
+      }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'A' },
+          llmPolicy: { fallbacks: [{ provider: 'claude', model: 'X' }] },
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.llmPolicy.fallbacks[0].model')
+      expect(tolerations).toEqual([])
+    })
+
+    it('BYPASS BLOCKED: reducing the subset around a disabled model → 422 (condition b)', async () => {
+      // Same role (subset), but coverage shrinks (drops N) → still rejected.
+      const isModelAllowed = allowlist('claude:A') // M, N disabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = {
+        model: { provider: 'claude', name: 'A' },
+        allowedModels: [
+          { provider: 'claude', model: 'A' },
+          { provider: 'claude', model: 'M' },
+          { provider: 'claude', model: 'N' },
+        ],
+      }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'A' },
+          allowedModels: [
+            { provider: 'claude', model: 'A' },
+            { provider: 'claude', model: 'M' },
+          ],
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.allowedModels[1].model')
+      expect(tolerations).toEqual([])
+    })
+
+    it('narrowing a previously-UNIVERSAL offering around a disabled primary → 422 (condition b)', async () => {
+      const isModelAllowed = allowlist() // M disabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = { model: { provider: 'claude', name: 'M' } } // allowedModels absent → UNIVERSAL
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'M' },
+          allowedModels: [{ provider: 'claude', model: 'M' }],
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).not.toBeNull()
+      expect(tolerations).toEqual([])
+    })
+
+    it('DEMOTION primary→fallback is tolerated → 200 + tolerated (mini-spec v2)', async () => {
+      // Stored: primary M (disabled). The write moves M OUT of the active slot to
+      // a fallback and installs an enabled primary A. M loses activeness — pure
+      // non-worsening — so it is tolerated at the (non-active) fallback gate. v1's
+      // exact-same-role rule wrongly rejected this with 422.
+      const isModelAllowed = allowlist('claude:A') // M disabled, A enabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = { model: { provider: 'claude', name: 'M' } }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'A' },
+          llmPolicy: { fallbacks: [{ provider: 'claude', model: 'M' }] },
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).toBeNull() // → 200
+      expect(tolerations).toEqual([expect.objectContaining({ gate: 'fallback', model: 'M' })])
+    })
+
+    it('DEMOTION away from the primary slot into the subset is tolerated → 200 (mini-spec v2)', async () => {
+      // Stored: primary M (disabled), coverage [M]. The write installs enabled A as
+      // primary and keeps M as a (non-active) subset entry, widening coverage. M is
+      // no longer the active default → non-worsening → tolerated at the subset gate.
+      const isModelAllowed = allowlist('claude:A') // M disabled, A enabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = {
+        model: { provider: 'claude', name: 'M' },
+        allowedModels: [{ provider: 'claude', model: 'M' }],
+      }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'A' },
+          allowedModels: [
+            { provider: 'claude', model: 'A' },
+            { provider: 'claude', model: 'M' },
+          ],
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).toBeNull()
+      expect(tolerations).toEqual([expect.objectContaining({ gate: 'subset', model: 'M' })])
+    })
+
+    it('throws when `stored` is provided without a `tolerations` sink (never-silent contract guard)', async () => {
+      const isModelAllowed = allowlist()
+      await expect(
+        validateHostSpec(
+          { model: { provider: 'claude', name: 'M' } },
+          { isModelAllowed },
+          { stored: { model: { provider: 'claude', name: 'M' } }, hostRef } // no `tolerations`
+        )
+      ).rejects.toThrow(/tolerations sink is required/)
+    })
+
+    it('never tolerates on CREATE (no stored CR) → 422', async () => {
+      const isModelAllowed = allowlist() // M disabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed },
+        { hostRef, tolerations } // no `stored`
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].message).toContain('model_not_allowed')
+      expect(tolerations).toEqual([])
+    })
+
+    it('does NOT record a toleration when a LATER gate hard-rejects the write (persist-safe)', async () => {
+      // Primary M is a tolerable same-role incoherence, but a NEW disabled fallback
+      // X hard-rejects the write. Because validation fails, the queued M toleration
+      // is NOT handed to context.tolerations → the route emits nothing.
+      const isModelAllowed = allowlist() // M and X disabled
+      const tolerations: Array<Record<string, unknown>> = []
+      const stored = { model: { provider: 'claude', name: 'M' } }
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'M' },
+          llmPolicy: { fallbacks: [{ provider: 'claude', model: 'X' }] },
+        },
+        { isModelAllowed },
+        { stored, hostRef, tolerations }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.llmPolicy.fallbacks[0].model')
+      expect(tolerations).toEqual([])
+    })
+  })
+
+  // Fase 6 — soft quarantine of `stale` models on the operator path. An ENABLED
+  // but `stale` model assigned to something NEW passes the gate (never 422) and
+  // yields a NON-BLOCKING warning; a live reference (already in the stored CR) is
+  // never revalidated. Orthogonal to Fase 2 (`enabled=false`).
+  describe('stale soft-quarantine warnings (Fase 6)', () => {
+    // Everything enabled; `stale` keyed on `${provider}:${model}`.
+    const enabledAll = () => vi.fn(() => Promise.resolve(true))
+    const stateFn = (...staleKeys: string[]) => {
+      const stale = new Set(staleKeys)
+      return vi.fn((p: string, m: string) =>
+        Promise.resolve({ enabled: true, stale: stale.has(`${p}:${m}`) })
+      )
+    }
+
+    it('NEW assignment of an enabled+stale primary → null (no error) + warning, never 422', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn('claude:M')
+      const warnings: Array<Record<string, unknown>> = []
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState },
+        { warnings } // no stored → create → assignment is new
+      )
+      // Never a rejection for stale alone.
+      expect(res).toBeNull()
+      expect(warnings).toEqual([
+        { code: 'stale_model_assigned', provider: 'claude', model: 'M', field: 'spec.model.name' },
+      ])
+    })
+
+    it('EXISTING reference to a stale model (already in stored) → no warning (not revalidated)', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn('claude:M')
+      const warnings: Array<Record<string, unknown>> = []
+      const stored = { model: { provider: 'claude', name: 'M' } }
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState },
+        { stored, tolerations: [], warnings }
+      )
+      expect(res).toBeNull()
+      expect(warnings).toEqual([])
+      // A live reference is never revalidated — the state lookup is skipped.
+      expect(getModelAllowlistState).not.toHaveBeenCalled()
+    })
+
+    it('NEW assignment of an enabled but NON-stale model → no warning', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn() // nothing stale
+      const warnings: Array<Record<string, unknown>> = []
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState },
+        { warnings }
+      )
+      expect(res).toBeNull()
+      expect(warnings).toEqual([])
+    })
+
+    it('warns for a NEW stale fallback and a NEW stale subset entry (all 3 gates)', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn('claude:P', 'claude:F', 'claude:S')
+      const warnings: Array<{ field: string; model: string }> = []
+      const res = await validateHostSpec(
+        {
+          model: { provider: 'claude', name: 'P' },
+          llmPolicy: { fallbacks: [{ provider: 'claude', model: 'F' }] },
+          allowedModels: [
+            { provider: 'claude', model: 'P' },
+            { provider: 'claude', model: 'F' },
+            { provider: 'claude', model: 'S' },
+          ],
+        },
+        { isModelAllowed, getModelAllowlistState },
+        { warnings }
+      )
+      expect(res).toBeNull()
+      // One warning per distinct pair (deduped), across primary/fallback/subset.
+      const byModel = Object.fromEntries(warnings.map(w => [w.model, w.field]))
+      expect(byModel).toEqual({
+        P: 'spec.model.name',
+        F: 'spec.llmPolicy.fallbacks[0].model',
+        S: 'spec.allowedModels[2].model',
+      })
+    })
+
+    it('a DISABLED model (Fase 2) is not turned into a Fase 6 warning — it rejects', async () => {
+      // enabled=false → the R3 gate 422s (create, no tolerance). Fase 6 never runs
+      // for a rejected pair, and the state lookup is not even consulted.
+      const isModelAllowed = vi.fn(() => Promise.resolve(false))
+      const getModelAllowlistState = stateFn('claude:M') // would-be stale, but disabled
+      const warnings: Array<Record<string, unknown>> = []
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState },
+        { warnings }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].message).toContain('model_not_allowed')
+      expect(warnings).toEqual([])
+      expect(getModelAllowlistState).not.toHaveBeenCalled()
+    })
+
+    it('does not consult the state lookup at all when no warnings sink is provided', async () => {
+      const isModelAllowed = enabledAll()
+      const getModelAllowlistState = stateFn('claude:M')
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'M' } },
+        { isModelAllowed, getModelAllowlistState }
+        // no context.warnings → opt-out, zero extra queries
+      )
+      expect(res).toBeNull()
+      expect(getModelAllowlistState).not.toHaveBeenCalled()
+    })
+  })
 })
