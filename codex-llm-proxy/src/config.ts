@@ -8,6 +8,9 @@ export type CodexLlmProxyConfig = {
   jwtIssuer: string
   jwtPublicKey: string
   executionEnabled: boolean
+  controlApiBaseUrl: string
+  controlApiServiceName: string
+  controlApiServiceToken: string
 }
 
 function requiredPositiveInt(name: string, raw: string | undefined, fallback?: number): number {
@@ -52,5 +55,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     jwtIssuer: env.CODEX_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('CODEX_LLM_PROXY_JWT_PUBLIC_KEY', env.CODEX_LLM_PROXY_JWT_PUBLIC_KEY),
     executionEnabled: env.CODEX_LLM_PROXY_EXECUTION_ENABLED === 'true',
+    controlApiBaseUrl: env.CODEX_LLM_PROXY_CONTROL_API_URL?.trim() || '',
+    controlApiServiceName: env.CODEX_LLM_PROXY_CONTROL_API_SERVICE?.trim() || 'codex-llm-proxy',
+    controlApiServiceToken: env.CODEX_LLM_PROXY_CONTROL_API_TOKEN?.trim() || '',
   }
 }

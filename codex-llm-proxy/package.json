@@ -15,6 +15,7 @@
   },
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
+    "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "pino": "^10.3.1",

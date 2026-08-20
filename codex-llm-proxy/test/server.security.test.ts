@@ -22,6 +22,9 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
+    controlApiBaseUrl: '',
+    controlApiServiceName: 'codex-llm-proxy',
+    controlApiServiceToken: '',
     ...overrides,
   }
 }
@@ -54,6 +57,7 @@ function ticket(): string {
       hostRef: 'research-host',
       model: 'gpt-5.1',
       requestHash: 'a'.repeat(64),
+      providerAttemptId: 'att-1',
     },
     'codex-llm-proxy'
   )

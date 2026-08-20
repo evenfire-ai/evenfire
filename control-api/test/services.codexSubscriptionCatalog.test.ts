@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  createCodexCatalogTransportFromEnv,
+  createCodexProxyCatalogTransport,
   planCodexCatalogReconcile,
   syncCodexSubscriptionCatalog,
 } from '../src/services/codexSubscriptionCatalog.js'
@@ -136,5 +138,40 @@ describe('syncCodexSubscriptionCatalog fencing', () => {
     expect(result.outcome).toBe('unavailable')
     expect(result.connection).toBeNull()
     expect(result.staled).toBe(0)
+  })
+})
+
+describe('Codex proxy catalog transport', () => {
+  it('stays unavailable when the proxy admin URL is unset', () => {
+    const transport = createCodexCatalogTransportFromEnv({})
+    return expect(transport.listModels({ accessToken: 'tok' })).resolves.toEqual({
+      outcome: 'unavailable',
+    })
+  })
+
+  it('posts a JIT access token to the proxy admin models route and returns normalized models', async () => {
+    const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(
+        'http://codex-llm-proxy.control-plane.svc:8081/internal/admin/v1/codex/models'
+      )
+      expect(
+        String(init?.headers && (init.headers as Record<string, string>).authorization)
+      ).toContain('Bearer ')
+      expect(JSON.parse(String(init?.body))).toEqual({ accessToken: 'tok-live' })
+      return new Response(JSON.stringify({ outcome: 'ready', models: [{ model: 'gpt-5.1' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    const transport = createCodexProxyCatalogTransport({
+      adminBaseUrl: 'http://codex-llm-proxy.control-plane.svc:8081',
+      fetchFn,
+      signPermit: () => 'permit',
+    })
+    await expect(transport.listModels({ accessToken: 'tok-live' })).resolves.toEqual({
+      outcome: 'ready',
+      models: [{ model: 'gpt-5.1' }],
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
   })
 })

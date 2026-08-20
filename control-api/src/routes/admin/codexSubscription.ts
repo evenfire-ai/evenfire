@@ -6,7 +6,7 @@ import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
   type CodexCatalogTransport,
-  createUnavailableCodexCatalogTransport,
+  createCodexCatalogTransportFromEnv,
   syncCodexSubscriptionCatalog,
 } from '../../services/codexSubscriptionCatalog.js'
 import { loadCodexSubscriptionSecrets } from '../../services/codexSubscriptionConnection.js'
@@ -84,7 +84,7 @@ function sendOAuthError(
 }
 
 export function createAdminCodexSubscriptionRouter(
-  catalogTransport: CodexCatalogTransport = createUnavailableCodexCatalogTransport()
+  catalogTransport: CodexCatalogTransport = createCodexCatalogTransportFromEnv()
 ): Router {
   const router = Router()
 
