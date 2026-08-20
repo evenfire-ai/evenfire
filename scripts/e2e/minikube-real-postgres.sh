@@ -377,7 +377,13 @@ main() {
   T1_REDACT_PASSWORD="$PG_PASSWORD"
 
   LOCAL_PORT="$(choose_local_port)"
-  t2_kc -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
+  # Launch kubectl directly, not through the t2_kc function: backgrounding a
+  # function forks a subshell whose argv is this script, so $! would record
+  # the subshell, the cleanup guard (*port-forward*svc/control-postgres*)
+  # would never match, and the orphaned real kubectl port-forward would fail
+  # the final exact-head preflight with PORT_FORWARD_CONFLICT.
+  kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward \
+    --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
     >"$T1_TMP_DIR/port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
   if ! wait_for_tcp "$LOCAL_PORT"; then
