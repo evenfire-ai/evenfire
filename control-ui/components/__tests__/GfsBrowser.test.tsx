@@ -189,6 +189,22 @@ describe('GfsBrowser', () => {
     expect(resourceNamesInOrder).toEqual(['alpha', 'beta', 'apple.md', 'zebra.md'])
   })
 
+  it('renders the solid Font Awesome folder glyph inside the directory row', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('alpha', 'directory', 1)],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    const list = await screen.findByRole('list', { name: 'Current folder resources' })
+    const folderSvg = list.querySelector('.cu-gfs-list__icon svg')
+    expect(folderSvg?.getAttribute('viewBox')).toBe('0 0 512 512')
+    expect(folderSvg?.getAttribute('fill')).toBe('currentColor')
+    expect(folderSvg?.getAttribute('stroke-width')).toBe('0')
+    const path = folderSvg?.querySelector('path')
+    expect(path?.getAttribute('d')).toContain('M464 128H272l-64-64H48C21.49 64')
+  })
+
   it('uses the paperclip header, labels the root as main, and ignores current-crumb clicks', async () => {
     mockApiGet.mockResolvedValueOnce({ items: [], nextCursor: null })
     renderBrowser()

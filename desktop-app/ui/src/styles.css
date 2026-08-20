@@ -13469,8 +13469,8 @@ pre {
 }
 
 .da-gfs-list__icon svg {
-  width: var(--space-4);
-  height: var(--space-4);
+  width: 100%;
+  height: 100%;
 }
 
 .da-gfs-list__identity {
