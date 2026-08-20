@@ -292,10 +292,7 @@ export class ContextMapperClient {
       }
     )
     const data = decodeCredentialResponse(await response.json())
-    if (
-      expectedCredentialRevision !== undefined &&
-      data.credentialRevision !== expectedCredentialRevision
-    ) {
+    if (data.credentialRevision !== expectedCredentialRevision) {
       throw new ContextMapperCredentialRevisionError()
     }
     return data.token ?? undefined

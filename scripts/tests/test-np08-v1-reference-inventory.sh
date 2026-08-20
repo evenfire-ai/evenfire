@@ -6,27 +6,27 @@ cd "${ROOT}"
 
 fail=0
 
-if rg -n -F '/api/v1/mcpservers' mcp-host/src; then
+if grep -RInF -- '/api/v1/mcpservers' mcp-host/src; then
   echo "FAIL: mcp-host must not retain an HCC v1 discovery or credential path" >&2
   fail=1
 fi
 
-if rg -n 'listServersByContext|getAuthTokenForServer|pollServers\([^)]*context' mcp-host/src; then
+if grep -RInE -- 'listServersByContext|getAuthTokenForServer|pollServers\([^)]*context' mcp-host/src; then
   echo "FAIL: mcp-host retains a caller-selected Context or legacy credential API" >&2
   fail=1
 fi
 
-if ! rg -q -F '/api/v1/mcpservers' mcp-proxy/src/hccClient.ts; then
+if ! grep -qF -- '/api/v1/mcpservers' mcp-proxy/src/hccClient.ts; then
   echo "FAIL: the temporary PR 2 global-inventory consumer is no longer explicit" >&2
   fail=1
 fi
 
-if rg -n '/api/v1/mcpservers/(context/|[^/]+/auth)' mcp-proxy/src; then
+if grep -RInE -- '/api/v1/mcpservers/(context/|[^/]+/auth)' mcp-proxy/src; then
   echo "FAIL: mcp-proxy must not consume caller-selected v1 Host routes" >&2
   fail=1
 fi
 
-if rg -n 'getMcpServers\s*\([^)]*context|getMcpAuth|getAuthTokenForServer' tests/e2e; then
+if grep -RInE -- 'getMcpServers[[:space:]]*\([^)]*context|getMcpAuth|getAuthTokenForServer' tests/e2e; then
   echo "FAIL: E2E helpers retain a caller-selected v1 Host contract" >&2
   fail=1
 fi
