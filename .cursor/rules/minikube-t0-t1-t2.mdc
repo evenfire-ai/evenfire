@@ -52,7 +52,11 @@ repository — never mix its PRs or clusters into this lane.
  fail-loud. T1 restores branch-profile GFS credentials on exit, and
  `pre-gate-sync` provisions GFS serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true`
  and `GFS_RECOVER_ABANDONED_STATE=true` in every plan, so no manual repair
- script sits between plan and verdict.
+ script sits between plan and verdict. `settle-gfs-reader-rollout.sh` clears
+ Ready-reader leftovers (claim, stale ReplicaSets, CrashLoopBackOff pods)
+ first, and the `gfs-rollout-shim` PATH prefix replaces the reader
+ `rollout status` wait with a readiness poll because HCC's gfsReconciler
+ strips `restartedAt` and makes generation waits time out.
 - Evidence lives under ignored `.local-notes/infra/runs/`; never commit it.
 
 Full workflow: skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md`.

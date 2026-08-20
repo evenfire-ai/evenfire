@@ -99,7 +99,11 @@ has an unready required deployment, the orchestrator planner selects
 branch-profile GFS credentials on exit and `pre-gate-sync` provisions GFS
 serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` and
 `GFS_RECOVER_ABANDONED_STATE=true` in every plan, so no manual repair
-script belongs between plan and verdict. The standalone preflight and
+script belongs between plan and verdict. Harness GFS reconciles settle
+Ready-reader leftovers first (`settle-gfs-reader-rollout.sh`) and wait on
+reader readiness through the `gfs-rollout-shim` PATH prefix instead of a
+generation-based `rollout status`, because HCC's gfsReconciler strips the
+`restartedAt` annotation and makes that wait time out. The standalone preflight and
 the final exact-head T2 check stay fail-loud on an unready deployment.
 Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is

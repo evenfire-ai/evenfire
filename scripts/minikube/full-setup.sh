@@ -987,9 +987,14 @@ else
     # a manual retry flag between runs.
     # If gfsc-reader is already Ready, settle the leftover claim first so
     # reconcile does not rollout restart and race HCC's gfsReconciler.
+    # The gfs-rollout-shim PATH prefix makes any reader rollout wait inside
+    # reconcile judge readiness instead of the template generation HCC keeps
+    # rewriting (it strips the restartedAt annotation, so a generation wait
+    # loops until timeout).
     CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
-    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+      GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
       CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
   else
@@ -1055,7 +1060,8 @@ else
     CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
     CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
-    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+      GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
       CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
     ok "GFS credentials reconciled and writer bootstrap verified"

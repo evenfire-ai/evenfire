@@ -142,14 +142,23 @@ the same contract as the standalone GFS T1 gate, plus resume of a leftover
 `rollout-running` claim from a timed-out prior setup. The T2 profile lock
 makes that recover safe: the prior process is dead. When `gfsc-reader`
 is already Ready, `scripts/minikube/settle-gfs-reader-rollout.sh` marks
-the leftover reader claim ready before reconcile so a second
-`rollout restart` cannot race HCC's gfsReconciler (that patch loop
-makes `kubectl rollout status` wait for a spec update until timeout).
-`pre-gate-sync`
+the leftover reader claim ready before reconcile, scales to 0 any leftover
+non-current ReplicaSet that contributes no Ready pod (its live unready pod
+would otherwise keep the stale-pod recovery pending forever), and deletes
+CrashLoopBackOff reader pods so they re-read the restored Secret without
+waiting out kubelet backoff. HCC's gfsReconciler owns the reader Deployment
+template and strips the `restartedAt` annotation `kubectl rollout restart`
+adds, so a generation-based `kubectl rollout status` chases flapping
+revisions until timeout; every harness GFS reconcile therefore runs with the
+`scripts/minikube/gfs-rollout-shim` PATH prefix, which intercepts exactly
+the reader `rollout status` wait and judges readiness instead
+(`scripts/minikube/wait-gfs-reader-ready.sh`: desired replicas Ready and no
+live non-terminating unready reader pod). `pre-gate-sync`
 provisions GFS serving with the same opt-ins in every sync plan (including
-"no cluster sync required") and restarts an unready `gfsc-reader` after a
-successful restore. `full-setup.sh` on the REUSE_DB / T2 full-reconcile path
-passes the same opt-ins on both GFS reconcile calls, because setup runs
+"no cluster sync required") and, after a successful restore, restarts an
+unready `gfsc-reader`, deletes its live unready pods once, and waits on the
+same readiness contract. `full-setup.sh` on the REUSE_DB / T2 full-reconcile
+path passes the same opt-ins on both GFS reconcile calls, because setup runs
 before pre-gate-sync and must not abort on a NOLOGIN reader or an abandoned
 reader rollout. The recovery helper restores a
 NOLOGIN role only from the committed Secret DSN and still fails loud when

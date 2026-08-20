@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Development harness PATH shim, prepended only for the GFS credential
+# reconcile subprocess. The shared rollout library finishes a reader rollout
+# with `kubectl rollout status deployment/gfsc-reader`, but HCC's
+# gfsReconciler owns that Deployment template and strips the restartedAt
+# annotation `kubectl rollout restart` adds, so the generation-based wait
+# chases flapping revisions until it times out. Intercept exactly that wait
+# and judge readiness instead (wait-gfs-reader-ready.sh); every other kubectl
+# invocation is passed through to the real binary unchanged.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+REAL_KUBECTL=""
+old_ifs="${IFS}"
+IFS=:
+for dir in $PATH; do
+  IFS="$old_ifs"
+  [ -n "$dir" ] || continue
+  resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || continue
+  [ "$resolved" = "$SELF_DIR" ] && continue
+  if [ -f "${dir}/kubectl" ] && [ -x "${dir}/kubectl" ]; then
+    REAL_KUBECTL="${dir}/kubectl"
+    break
+  fi
+done
+IFS="$old_ifs"
+if [ -z "$REAL_KUBECTL" ]; then
+  printf '[gfs-rollout-shim] no real kubectl found on PATH\n' >&2
+  exit 127
+fi
+
+DEPLOY="${GFS_READER_DEPLOYMENT:-gfsc-reader}"
+joined=" $* "
+intercept=false
+case "$joined" in
+  *' rollout status '*)
+    case "$joined" in
+      *" deployment/${DEPLOY} "*|*" deploy/${DEPLOY} "*|\
+      *" deployment.apps/${DEPLOY} "*|*" deployment ${DEPLOY} "*)
+        intercept=true ;;
+    esac
+    ;;
+esac
+if [ "$intercept" != true ]; then
+  exec "$REAL_KUBECTL" "$@"
+fi
+
+context="${CONTEXT:-}"
+namespace="gfs"
+timeout_raw=""
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  a="${args[$i]}"
+  case "$a" in
+    --context=*) context="${a#--context=}" ;;
+    --context) i=$((i + 1)); context="${args[$i]}" ;;
+    --namespace=*) namespace="${a#--namespace=}" ;;
+    -n|--namespace) i=$((i + 1)); namespace="${args[$i]}" ;;
+    --timeout=*) timeout_raw="${a#--timeout=}" ;;
+    --timeout) i=$((i + 1)); timeout_raw="${args[$i]}" ;;
+  esac
+  i=$((i + 1))
+done
+
+timeout_seconds=600
+case "$timeout_raw" in
+  '') ;;
+  *m) timeout_seconds=$((${timeout_raw%m} * 60)) ;;
+  *s) timeout_seconds="${timeout_raw%s}" ;;
+  *[!0-9]*) ;;
+  *) timeout_seconds="$timeout_raw" ;;
+esac
+# A CrashLoopBackOff retry delay reaches five minutes; a shorter caller
+# timeout cannot observe the credential-restore recovery this wait exists
+# for, so enforce a floor. Overridable only for the stubbed contract test.
+min_timeout="${GFS_ROLLOUT_SHIM_MIN_TIMEOUT_SECONDS:-600}"
+if [ "$timeout_seconds" -lt "$min_timeout" ]; then
+  timeout_seconds="$min_timeout"
+fi
+
+if [ -z "$context" ]; then
+  printf '[gfs-rollout-shim] cannot determine the kube-context for the %s readiness wait\n' "$DEPLOY" >&2
+  exit 1
+fi
+
+printf '[gfs-rollout-shim] waiting on %s/%s readiness instead of a generation-based rollout status (HCC owns the template)\n' \
+  "$namespace" "$DEPLOY" >&2
+CONTEXT="$context" GFS_NS="$namespace" GFS_READER_DEPLOYMENT="$DEPLOY" \
+  GFS_READER_WAIT_TIMEOUT_SECONDS="$timeout_seconds" \
+  exec bash "${SELF_DIR}/../wait-gfs-reader-ready.sh"

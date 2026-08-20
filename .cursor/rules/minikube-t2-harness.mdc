@@ -43,8 +43,15 @@ Invariants that must never regress:
   NOLOGIN reader or a leftover `rollout-running` claim from a dead prior
   setup. The T2 profile lock makes that abandoned-state recover safe.
   When `gfsc-reader` is already Ready, `settle-gfs-reader-rollout.sh`
-  marks that leftover claim ready before reconcile so a second
-  `rollout restart` cannot race HCC's gfsReconciler.
+  marks that leftover claim ready before reconcile, scales leftover
+  non-current unready reader ReplicaSets to 0, and deletes CrashLoopBackOff
+  reader pods so a second `rollout restart` is not triggered and cannot race
+  HCC's gfsReconciler. HCC strips the `restartedAt` annotation, so every
+  harness GFS reconcile runs with the `scripts/minikube/gfs-rollout-shim`
+  PATH prefix: the reader `rollout status` wait becomes the readiness poll
+  in `scripts/minikube/wait-gfs-reader-ready.sh` (desired replicas Ready and
+  no live non-terminating unready reader pod), never a generation wait.
+  `pre-gate-sync` reader convergence uses the same readiness contract.
 - T1 stays fail-loud (no green on unavailable DSN or zero tests); the JSON
   reporter is the suite verdict, not a leftover Vitest process exit after a
   complete green reporter. Role-reset suites keep the throwaway Postgres 16.

@@ -17,9 +17,12 @@ set -u
 for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" \
   "$ROOT/scripts/e2e/e2e-np08-hcc-authorization.sh" \
   "$ROOT/scripts/minikube/settle-gfs-reader-rollout.sh" \
+  "$ROOT/scripts/minikube/wait-gfs-reader-ready.sh" \
+  "$ROOT/scripts/minikube/gfs-rollout-shim/kubectl" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
-  "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"; do
+  "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \
+  "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh"; do
   bash -n "$file"
 done
 
@@ -91,6 +94,8 @@ grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$T1"
 grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$T1"
 grep -Fq 'reconcile-gfs-deploy-credentials.sh' "$T1"
 grep -Fq 'T1_GFS_RESTORE_REQUIRED=true' "$T1"
+grep -Fq 'settle-gfs-reader-rollout.sh' "$T1"
+grep -Fq 'gfs-rollout-shim' "$T1"
 grep -Fq 'T2_UNREADY_DEPLOYMENTS' "$COMMON"
 
 # pre-gate-sync GFS serving provisioning must opt into restoring a NOLOGIN
@@ -108,6 +113,14 @@ if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'settle-gf
   echo 'FAIL: provision_gfs_serving does not settle a Ready gfsc-reader leftover rollout claim before reconcile' >&2
   exit 1
 fi
+if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'gfs-rollout-shim'; then
+  echo 'FAIL: provision_gfs_serving reconcile does not use the HCC-safe reader rollout wait' >&2
+  exit 1
+fi
+if ! sed -n '/^converge_gfs_reader_after_restore()/,/^}/p' "$PRE_GATE" | grep -Fq 'wait-gfs-reader-ready.sh'; then
+  echo 'FAIL: converge_gfs_reader_after_restore still waits on a generation-based rollout status HCC keeps rewriting' >&2
+  exit 1
+fi
 if ! sed -n '/No cluster sync required before/,$p' "$PRE_GATE" | grep -Fq 'provision_gfs_serving'; then
   echo 'FAIL: pre-gate-sync skips GFS serving convergence when no cluster sync is required' >&2
   exit 1
@@ -119,6 +132,10 @@ if [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=tr
 fi
 if [[ "$(grep -c 'scripts/minikube/settle-gfs-reader-rollout.sh' "$ROOT/scripts/minikube/full-setup.sh")" -lt 2 ]]; then
   echo 'FAIL: full-setup REUSE_DB path must settle a Ready gfsc-reader leftover rollout claim before both reconciles' >&2
+  exit 1
+fi
+if [[ "$(grep -c 'gfs-rollout-shim' "$ROOT/scripts/minikube/full-setup.sh")" -lt 2 ]]; then
+  echo 'FAIL: full-setup REUSE_DB reconciles must use the HCC-safe reader rollout wait on both calls' >&2
   exit 1
 fi
 
@@ -267,5 +284,6 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
 fi
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"
+bash "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh"
 
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'

@@ -276,11 +276,16 @@ grep -Fq 'Real PostgreSQL suite failed in $package ($lane)' "$ROOT/scripts/e2e/m
 grep -Fq 'restore_gfs_runtime_credentials' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must restore branch-profile GFS credentials on exit'
 grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must opt into the NOLOGIN recovery contract'
 grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must resume an interrupted gfsc-reader rollout claim'
+grep -Fq 'settle-gfs-reader-rollout.sh' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must settle a Ready gfsc-reader leftover rollout claim first'
+grep -Fq 'gfs-rollout-shim' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must use the HCC-safe reader rollout wait'
 grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync must restore a NOLOGIN GFS role from the committed Secret DSN'
 grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync must resume an interrupted gfsc-reader rollout claim'
 grep -Fq 'settle-gfs-reader-rollout.sh' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync must settle a Ready gfsc-reader leftover rollout claim before reconcile'
+grep -Fq 'gfs-rollout-shim' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync reconcile must use the HCC-safe reader rollout wait'
+grep -Fq 'wait-gfs-reader-ready.sh' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync reader convergence must judge readiness, not the template generation HCC rewrites'
 [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB must restore a NOLOGIN GFS role and resume an abandoned reader rollout on both reconcile calls'
 [[ "$(grep -c 'scripts/minikube/settle-gfs-reader-rollout.sh' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB must settle a Ready gfsc-reader leftover rollout claim before both reconciles'
+[[ "$(grep -c 'gfs-rollout-shim' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB reconciles must use the HCC-safe reader rollout wait on both calls'
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
