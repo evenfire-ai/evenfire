@@ -215,7 +215,9 @@ function RegistryEntryDetailContent() {
       }
       return
     }
-    if (entry.entry_type === 'mcp-server') {
+    // Connectors and guardrail hooks both configure their install on the
+    // dedicated install page, which dispatches on entry_type.
+    if (entry.entry_type === 'mcp-server' || entry.entry_type === 'llm-hook') {
       const params = new URLSearchParams({ entry: entry.name, version: entry.version })
       router.push(CONTROL_ROUTES.marketplace.install(Object.fromEntries(params)))
       return
@@ -443,6 +445,7 @@ function RegistryEntryDetailContent() {
 function labelForType(t: string): string {
   if (t === 'mcp-server') return 'Connector'
   if (t === 'recipe') return 'Recipe'
+  if (t === 'llm-hook') return 'Guardrail hook'
   return t
 }
 

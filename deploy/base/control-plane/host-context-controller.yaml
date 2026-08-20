@@ -13,21 +13,33 @@ metadata:
     app: host-context-controller
 spec:
   replicas: 1
-  # HCC's /ready stays 503 until its initial fleet reconciliation finishes, so time-to-Ready
-  # scales with the McpServer/Context fleet rather than with process start. clerum-dev took
-  # 651s on 2026-08-05 at 108 McpServers / 22 Contexts.
+  # HCC's safety model assumes a single NetworkPolicy writer: replicas:1 with no
+  # leader election (see statelessLifecycleExecutor.ts). RollingUpdate (the
+  # default) starts the new pod before terminating the old one, so every rollout
+  # would overlap two writers — during which the outgoing replica can win a
+  # conflict-retry replace and land its wider spec back over a policy the new
+  # replica just hardened and certified, with no NetworkPolicy resync to heal it
+  # and /ready still 200. Recreate terminates the old pod first, honouring the
+  # single-writer assumption through the rollout too.
+  strategy:
+    type: Recreate
+  # Recreate + replicas:1 means a botched rollout (new pod never Ready) leaves
+  # the control plane down until a manual `kubectl rollout undo` — the single-
+  # writer invariant forbids any overlap-based auto-recovery. This deadline is
+  # DETECTION ONLY: it flips Progressing=False (ProgressDeadlineExceeded) and
+  # fails `kubectl rollout status` for callers without their own --timeout; it
+  # does not roll back.
   #
-  # Unset, this defaults to 600s, and that default is what actually governed the deploy:
-  # `kubectl rollout status` aborts the instant the controller sets ProgressDeadlineExceeded,
-  # so provision-gfs-runtime.sh's --timeout could never exceed the deadline remaining. The
-  # clock also starts several steps earlier, at apply-inter-service-tokens.sh's `rollout
-  # restart` of HCC, so the wait inherits only what is left. On 2026-08-05 that was 600-160
-  # = 440s against a 480s timeout: the timeout raised in #202 never bound, and the deploy
-  # failed 50s before HCC came Ready.
-  #
-  # 1200s covers the 900s wait plus a 300s head-start allowance. This is a mitigation, not
-  # the fix — evenfire-ai/evenfire#205 decouples readiness from fleet convergence, after
-  # which both numbers should come back down.
+  # Value (origin/dev, 2026-08-05): HCC's /ready stays 503 until its initial fleet
+  # reconciliation finishes, so time-to-Ready scales with the McpServer/Context
+  # fleet — clerum-dev took 651s at 108 McpServers / 22 Contexts. The unset default
+  # (600s) governed the deploy because `kubectl rollout status` aborts the instant
+  # the deadline is exceeded, and the clock starts at apply-inter-service-tokens.sh's
+  # `rollout restart`, so the wait inherits only the remaining budget (600-160=440s
+  # vs a 480s timeout on 2026-08-05: #202's timeout never bound, deploy failed 50s
+  # short). 1200s covers the 900s wait plus a 300s head-start. Mitigation, not the
+  # fix — #205 decouples readiness from fleet convergence, after which this should
+  # come back down.
   progressDeadlineSeconds: 1200
   selector:
     matchLabels:
@@ -91,6 +103,8 @@ spec:
         # now fails closed at startup on any interval > overlap/2.
         - name: HCC_EXTERNAL_EGRESS_RESYNC_SEC
           value: "60"
+        - name: HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS
+          value: "5000"
         - name: HCC_HOST_K8S_REQUEST_TIMEOUT_MS
           value: "30000"
         # Bounded cross-Host concurrency for a full/lifecycle Host fleet pass.

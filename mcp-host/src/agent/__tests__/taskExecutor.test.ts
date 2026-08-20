@@ -12,9 +12,9 @@ import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
-import type { Task, TaskError } from '../../queue/types'
+import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
-import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
+import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
 
 vi.mock('../../config', () => ({
   config: {
@@ -1509,5 +1509,27 @@ describe('D3 durability barrier — a turn is never ACKed when the persist fails
     expect(runToolUseLoop).not.toHaveBeenCalled()
     expect(task.responseCallback).not.toHaveBeenCalled()
     expect(deps.onFail).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('executionModeForSource (§6.3)', () => {
+  it('treats channel tasks as interactive — a person sent the message', () => {
+    expect(executionModeForSource('channel')).toBe('interactive')
+  })
+
+  it.each(['cron', 'internal'] as const)(
+    'treats %s tasks as unattended so a guardrail ask fails safe to deny',
+    source => {
+      expect(executionModeForSource(source)).toBe('unattended')
+    }
+  )
+
+  // The regression: `internal` fell through to 'interactive', so an `ask` took the
+  // suspension path and parked in pending_approval with no responder — the task
+  // hung. Not reachable today (createInternalTask has no production caller), which
+  // is exactly why the mapping needs pinning rather than the behaviour.
+  it('never labels an autonomous source interactive', () => {
+    const autonomous: TaskSource[] = ['cron', 'internal']
+    expect(autonomous.map(executionModeForSource)).not.toContain('interactive')
   })
 })

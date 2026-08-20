@@ -228,9 +228,18 @@ export function createMockCustomApi(): MockCustomApi {
 export function createMockNetworkingApi(): MockNetworkingApi {
   return {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
+    // name + uid + resourceVersion because that is what a real apiserver read
+    // returns, and the NetworkPolicy safety mutations (safetyPolicyIdentity)
+    // refuse to act on a partial identity — a delete keyed on name alone could
+    // hit a policy recreated between the read and the write.
     readNamespacedNetworkPolicy: vi.fn(({ name }: { name?: string } = {}) =>
       Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
+        metadata: {
+          name,
+          uid: `uid-${name ?? 'unnamed'}`,
+          resourceVersion: '1',
+          labels: hccOwnedLabels(name),
+        },
       } as MockK8sResource)
     ),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),

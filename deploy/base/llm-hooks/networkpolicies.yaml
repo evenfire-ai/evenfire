@@ -1,0 +1,42 @@
+# Baseline default-deny (INGRESS + EGRESS) for the llm-hooks namespace (§8.2, N3).
+#
+# Every hook pod starts fully isolated — denied all inbound AND all outbound —
+# and reaches (or is reached) only through the narrow allow-policies HCC emits.
+# Without the ingress half, a pod no policy selects is default-ALLOW ingress
+# (the case for `service`-target hooks); without the egress half, a hook could
+# initiate outbound to any pod/namespace/internet (N4/N5).
+#
+# Composes additively with the controller-managed allow-policies:
+#   - image targets:   `llmhook-<podKey>`     admits the referencing mcp-hosts
+#                      (ingress) and permits declared `egressBindings` + scoped
+#                      CoreDNS (egress, only for hooks that declare outbound).
+#   - service targets: `llmhook-svc-<crName>` admits the referencing mcp-hosts.
+# A pure `/v1` responder hook (no egressBindings) gets NO egress — not even DNS
+# (N5, "no implicit DNS"); it still replies to mcp-host on the established
+# inbound connection (connection tracking), which needs no egress rule.
+#
+# Kubelet health/readiness probes originate from the node and are unaffected.
+#
+# OWNERSHIP: this baseline is applied by the DEPLOY, not by HCC, so it carries
+# `managed-by: llm-hooks` and a distinct name — the same convention
+# deploy/base/sandbox-ui/networkpolicies.yaml uses for its static baseline.
+# Labelling it `managed-by: host-context-controller` claimed an owner that has
+# never reconciled it, and the ValidatingAdmissionPolicy
+# `managed-networkpolicy-label-immutability` refuses CREATE of a NetworkPolicy
+# carrying a controller's label from anyone but that controller's ServiceAccount
+# or a system:masters bootstrap — so the restricted deploy identity was denied
+# and the whole apply aborted. A local (cluster-admin) apply is exempt, which is
+# why this only surfaced in CI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-hooks-static-default-deny
+  namespace: llm-hooks
+  labels:
+    clerum.io/managed-by: llm-hooks
+    clerum.io/policy-type: baseline
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

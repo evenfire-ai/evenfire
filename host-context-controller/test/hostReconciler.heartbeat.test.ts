@@ -146,6 +146,20 @@ function createReconciler() {
   return { reconciler, appsApi, coreApi, networkingApi, rbacApi, customApi }
 }
 
+function deferred<T = void>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason?: unknown) => void
+} {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 /** The mcp-host Deployment body sent to the K8s API (excludes channel-reader). */
 function hostDeploymentBody(appsApi: MockAppsApi, name: string): k8s.V1Deployment {
   const calls = [
@@ -217,7 +231,755 @@ function freshHostRead(lifecycle?: {
   }
 }
 
+describe('HostReconciler heartbeat mutation admission', () => {
+  const heartbeatMutations = [
+    {
+      name: 'suspend',
+      core: 'suspendHostFromHeartbeatCore',
+      coreArgs: ['idle', 0] as const,
+      freshLifecycle: { state: 'draining', wakeHandledGeneration: 0 } as const,
+      invoke: (reconciler: HostReconciler, host: HostCRD) =>
+        reconciler.suspendHostFromHeartbeat(host, 'idle', 0),
+    },
+    {
+      name: 'suspend-blocked reason',
+      core: 'publishSuspendBlockedReasonCore',
+      coreArgs: ['suspend-blocked: activeTask'] as const,
+      freshLifecycle: { state: 'active', wakeHandledGeneration: 0 } as const,
+      invoke: (reconciler: HostReconciler, host: HostCRD) =>
+        reconciler.publishSuspendBlockedReason(host, 'suspend-blocked: activeTask'),
+    },
+    {
+      name: 'draining',
+      core: 'markHostDrainingFromHeartbeatCore',
+      coreArgs: [0] as const,
+      freshLifecycle: { state: 'active', wakeHandledGeneration: 0 } as const,
+      invoke: (reconciler: HostReconciler, host: HostCRD) =>
+        reconciler.markHostDrainingFromHeartbeat(host, 0),
+    },
+    {
+      name: 'cancel-drain',
+      core: 'markHostActiveFromHeartbeatCore',
+      coreArgs: [] as const,
+      freshLifecycle: { state: 'draining', wakeHandledGeneration: 0 } as const,
+      invoke: (reconciler: HostReconciler, host: HostCRD) =>
+        reconciler.markHostActiveFromHeartbeat(host),
+    },
+  ] as const
+
+  it.each(heartbeatMutations)(
+    'rejects queued $name work when Host authority changes before serializer admission',
+    async ({ core, invoke }) => {
+      const { reconciler } = createReconciler()
+      const host = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 1 }
+      const authority = { current: { known: true, generation: 7 } }
+      reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+      reconciler.setHostWatchAuthority(() => authority.current)
+      const lifecycle = (reconciler as any).lifecycle
+      const coreSpy = vi.spyOn(lifecycle, core).mockResolvedValue(undefined)
+      const blockerStarted = deferred()
+      const releaseBlocker = deferred()
+      const occupied = lifecycle.serializeByHost(host.name, async () => {
+        blockerStarted.resolve(undefined)
+        await releaseBlocker.promise
+      }) as Promise<void>
+      await blockerStarted.promise
+
+      const pending = invoke(reconciler, host)
+      authority.current = { known: false, generation: 8 }
+      releaseBlocker.resolve(undefined)
+      await occupied
+
+      await expect(pending).rejects.toThrow(/Host inventory authority/)
+      expect(coreSpy).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(heartbeatMutations)(
+    'rejects queued $name work when the Host UID changes before serializer admission',
+    async ({ core, invoke }) => {
+      const { reconciler } = createReconciler()
+      const requested = { ...makeStatelessHost(), uid: 'heartbeat-host-old-uid', generation: 4 }
+      let current = requested
+      const authority = { current: { known: true, generation: 9 } }
+      reconciler.setResolveCurrentHost(name => (name === requested.name ? current : undefined))
+      reconciler.setHostWatchAuthority(() => authority.current)
+      const lifecycle = (reconciler as any).lifecycle
+      const coreSpy = vi.spyOn(lifecycle, core).mockResolvedValue(undefined)
+      const blockerStarted = deferred()
+      const releaseBlocker = deferred()
+      const occupied = lifecycle.serializeByHost(requested.name, async () => {
+        blockerStarted.resolve(undefined)
+        await releaseBlocker.promise
+      }) as Promise<void>
+      await blockerStarted.promise
+
+      const pending = invoke(reconciler, requested)
+      current = { ...requested, uid: 'heartbeat-host-new-uid', generation: 1 }
+      releaseBlocker.resolve(undefined)
+      await occupied
+
+      await expect(pending).rejects.toThrow(/Host identity/)
+      expect(coreSpy).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(heartbeatMutations)(
+    'admits the latest same-UID same-spec Host snapshot for $name inside the heartbeat serializer',
+    async ({ core, coreArgs, invoke }) => {
+      const { reconciler } = createReconciler()
+      const requested = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 4 }
+      const current = {
+        ...requested,
+        resourceVersion: 'cache-rv-latest',
+        status: { lifecycle: { state: 'active' as const, wakeHandledGeneration: 2 } },
+      }
+      reconciler.setResolveCurrentHost(name => (name === requested.name ? current : undefined))
+      reconciler.setHostWatchAuthority(() => ({ known: true, generation: 12 }))
+      const lifecycle = (reconciler as any).lifecycle
+      const coreSpy = vi.spyOn(lifecycle, core).mockResolvedValue(undefined)
+
+      await invoke(reconciler, requested)
+
+      expect(coreSpy).toHaveBeenCalledOnce()
+      expect(coreSpy).toHaveBeenCalledWith(current, ...coreArgs, expect.any(Function))
+    }
+  )
+
+  it.each(heartbeatMutations)(
+    'rejects a $name 409 retry that resolves to a recreated same-name Host',
+    async ({ freshLifecycle, invoke }) => {
+      const { reconciler, customApi } = createReconciler()
+      const host = {
+        ...makeStatelessHost({ status: { lifecycle: freshLifecycle } }),
+        uid: 'heartbeat-host-old-uid',
+        generation: 4,
+      }
+      reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+      reconciler.setHostWatchAuthority(() => ({ known: true, generation: 15 }))
+      customApi.getNamespacedCustomObject
+        .mockResolvedValueOnce({
+          ...freshHostRead(freshLifecycle),
+          metadata: {
+            name: host.name,
+            namespace: host.namespace,
+            uid: host.uid,
+            generation: 4,
+            resourceVersion: 'rv-old',
+          },
+        })
+        .mockResolvedValueOnce({
+          ...freshHostRead(freshLifecycle),
+          metadata: {
+            name: host.name,
+            namespace: host.namespace,
+            uid: 'heartbeat-host-new-uid',
+            generation: 1,
+            resourceVersion: 'rv-new',
+          },
+        })
+      customApi.patchNamespacedCustomObjectStatus
+        .mockRejectedValueOnce({ code: 409 })
+        .mockResolvedValueOnce(undefined)
+
+      await expect(invoke(reconciler, host)).rejects.toThrow(/Host identity/)
+      expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+      expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it.each(heartbeatMutations)(
+    'rejects queued $name work when the same Host advances to a new spec generation',
+    async ({ core, invoke }) => {
+      const { reconciler } = createReconciler()
+      const requested = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 4 }
+      let current = requested
+      reconciler.setResolveCurrentHost(name => (name === requested.name ? current : undefined))
+      reconciler.setHostWatchAuthority(() => ({ known: true, generation: 13 }))
+      const lifecycle = (reconciler as any).lifecycle
+      const coreSpy = vi.spyOn(lifecycle, core).mockResolvedValue(undefined)
+      const blockerStarted = deferred()
+      const releaseBlocker = deferred()
+      const occupied = lifecycle.serializeByHost(requested.name, async () => {
+        blockerStarted.resolve(undefined)
+        await releaseBlocker.promise
+      }) as Promise<void>
+      await blockerStarted.promise
+
+      const pending = invoke(reconciler, requested)
+      current = {
+        ...requested,
+        generation: 5,
+        spec: { ...requested.spec, contextRef: 'new-runtime-context' },
+      }
+      releaseBlocker.resolve(undefined)
+      await occupied
+
+      await expect(pending).rejects.toThrow(/Host spec generation/)
+      expect(coreSpy).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(heartbeatMutations)(
+    'does not apply stale $name evidence to a newer same-UID stateless spec',
+    async ({ freshLifecycle, invoke }) => {
+      const { reconciler, customApi } = createReconciler()
+      const host = {
+        ...makeStatelessHost({ status: { lifecycle: freshLifecycle } }),
+        uid: 'heartbeat-host-uid',
+        generation: 4,
+      }
+      reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+      reconciler.setHostWatchAuthority(() => ({ known: true, generation: 14 }))
+      customApi.getNamespacedCustomObject.mockResolvedValue({
+        ...freshHostRead(freshLifecycle),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 5,
+          resourceVersion: 'rv-new-spec',
+        },
+        spec: { ...host.spec, contextRef: 'new-runtime-context' },
+      })
+      const reconcileCore = vi
+        .spyOn(reconciler as any, 'reconcileCore')
+        .mockResolvedValue(undefined)
+
+      await invoke(reconciler, host)
+
+      expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+      expect(reconcileCore).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(heartbeatMutations)(
+    'does not apply stale $name evidence after the same-UID Host becomes stateful',
+    async ({ invoke }) => {
+      const { reconciler, customApi } = createReconciler()
+      const host = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 4 }
+      reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+      reconciler.setHostWatchAuthority(() => ({ known: true, generation: 16 }))
+      customApi.getNamespacedCustomObject.mockResolvedValue({
+        ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 5,
+          resourceVersion: 'rv-stateful',
+        },
+        spec: {
+          ...host.spec,
+          lifecycle: { stateless: false },
+        },
+      })
+      const reconcileCore = vi
+        .spyOn(reconciler as any, 'reconcileCore')
+        .mockResolvedValue(undefined)
+
+      await invoke(reconciler, host)
+
+      expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+      expect(reconcileCore).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not retry stale heartbeat evidence after a 409 reveals a same-UID stateful spec', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 4 }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 17 }))
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 4,
+          resourceVersion: 'rv-stateless',
+        },
+      })
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 5,
+          resourceVersion: 'rv-stateful',
+        },
+        spec: {
+          ...host.spec,
+          lifecycle: { stateless: false },
+        },
+      })
+    customApi.patchNamespacedCustomObjectStatus.mockRejectedValueOnce({ code: 409 })
+
+    await reconciler.markHostDrainingFromHeartbeat(host, 0)
+
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry stale heartbeat evidence after a 409 reveals a newer stateless spec', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 4 }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 17 }))
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 4,
+          resourceVersion: 'rv-old-spec',
+        },
+      })
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 5,
+          resourceVersion: 'rv-new-spec',
+        },
+        spec: { ...host.spec, contextRef: 'new-runtime-context' },
+      })
+    customApi.patchNamespacedCustomObjectStatus.mockRejectedValueOnce({ code: 409 })
+
+    await reconciler.markHostDrainingFromHeartbeat(host, 0)
+
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('revalidates authority after the fresh read and before the first status patch', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 4 }
+    const authority = { current: { known: true, generation: 18 } }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => authority.current)
+    customApi.getNamespacedCustomObject.mockImplementation(async () => {
+      authority.current = { known: false, generation: 19 }
+      return {
+        ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          resourceVersion: 'rv-authority-lost',
+        },
+      }
+    })
+
+    await expect(reconciler.markHostDrainingFromHeartbeat(host, 0)).rejects.toThrow(
+      /Host inventory authority/
+    )
+    expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+  })
+
+  it('revalidates authority before a 409 retry performs another fresh read', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 4 }
+    const authority = { current: { known: true, generation: 21 } }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => authority.current)
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+      metadata: {
+        name: host.name,
+        namespace: host.namespace,
+        uid: host.uid,
+        generation: 4,
+        resourceVersion: 'rv-before-conflict',
+      },
+    })
+    customApi.patchNamespacedCustomObjectStatus.mockImplementationOnce(async () => {
+      authority.current = { known: false, generation: 22 }
+      throw { code: 409 }
+    })
+
+    await expect(reconciler.markHostDrainingFromHeartbeat(host, 0)).rejects.toThrow(
+      /Host inventory authority/
+    )
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reconcile runtime effects after suspend when the Host UID changes', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'draining', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'heartbeat-host-old-uid',
+      generation: 4,
+    }
+    let current = host
+    reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 24 }))
+    const reconcileCore = vi.spyOn(reconciler as any, 'reconcileCore').mockResolvedValue(undefined)
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...freshHostRead({ state: 'draining', wakeHandledGeneration: 0 }),
+      metadata: {
+        name: host.name,
+        namespace: host.namespace,
+        uid: host.uid,
+        generation: 4,
+        resourceVersion: 'rv-suspend',
+      },
+    })
+    customApi.patchNamespacedCustomObjectStatus.mockImplementationOnce(async () => {
+      current = { ...host, uid: 'heartbeat-host-new-uid', generation: 1 }
+    })
+
+    await expect(reconciler.suspendHostFromHeartbeat(host, 'idle', 0)).rejects.toThrow(
+      /Host identity/
+    )
+    expect(reconcileCore).not.toHaveBeenCalled()
+  })
+
+  it('reconciles suspend follow-on effects from the successful fresh same-UID Host spec', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = {
+      ...makeStatelessHost({
+        spec: { contextRef: 'latest-context' },
+        status: { lifecycle: { state: 'draining', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'heartbeat-host-uid',
+      generation: 5,
+    }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 26 }))
+    const reconcileCore = vi.spyOn(reconciler as any, 'reconcileCore').mockResolvedValue(undefined)
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'draining', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 5,
+          resourceVersion: 'rv-suspend-current',
+        },
+        spec: { ...host.spec, contextRef: 'latest-context' },
+      })
+      .mockResolvedValue({
+        ...freshHostRead({
+          state: 'suspended',
+          wakeHandledGeneration: 0,
+          reason: 'idle',
+        }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 5,
+          resourceVersion: 'rv-suspend-committed',
+        },
+        spec: { ...host.spec, contextRef: 'latest-context' },
+      })
+
+    await reconciler.suspendHostFromHeartbeat(host, 'idle', 0)
+
+    expect(reconcileCore).toHaveBeenCalledOnce()
+    const reconciledHost = reconcileCore.mock.calls[0][0] as HostCRD
+    expect(reconciledHost).toMatchObject({
+      uid: host.uid,
+      generation: 5,
+      spec: expect.objectContaining({ contextRef: 'latest-context' }),
+    })
+    expect(reconciledHost.status?.lifecycle).toEqual({
+      state: 'suspended',
+      wakeHandledGeneration: 0,
+      reason: 'idle',
+    })
+  })
+
+  it('rejects a known-identity status write without a fresh resourceVersion', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = { ...makeStatelessHost(), uid: 'heartbeat-host-uid', generation: 4 }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 28 }))
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+      metadata: { name: host.name, namespace: host.namespace, uid: host.uid },
+    })
+
+    await expect(reconciler.markHostDrainingFromHeartbeat(host, 0)).rejects.toThrow(
+      /no fresh resourceVersion/
+    )
+    expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+  })
+
+  it('retries a 409 on the same UID and uses the latest Host for suspend follow-on effects', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'draining', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'heartbeat-host-uid',
+      generation: 4,
+    }
+    let current = host
+    reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 30 }))
+    const reconcileCore = vi.spyOn(reconciler as any, 'reconcileCore').mockResolvedValue(undefined)
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'draining', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 4,
+          resourceVersion: 'rv-1',
+        },
+      })
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'draining', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 4,
+          resourceVersion: 'rv-2',
+        },
+        spec: host.spec,
+      })
+      .mockResolvedValueOnce({
+        ...freshHostRead({
+          state: 'suspended',
+          wakeHandledGeneration: 0,
+          reason: 'idle',
+        }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 4,
+          resourceVersion: 'rv-3',
+        },
+        spec: host.spec,
+      })
+    customApi.patchNamespacedCustomObjectStatus
+      .mockImplementationOnce(async () => {
+        current = {
+          ...host,
+          resourceVersion: 'cache-rv-after-conflict',
+        }
+        throw { code: 409 }
+      })
+      .mockResolvedValueOnce(undefined)
+
+    await reconciler.suspendHostFromHeartbeat(host, 'idle', 0)
+
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(3)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(2)
+    expect(reconcileCore.mock.calls[0][0]).toMatchObject({
+      uid: host.uid,
+      generation: 4,
+      spec: expect.objectContaining({ contextRef: 'context-a' }),
+    })
+  })
+
+  it('does not apply or record suspension when only the follow-on GET observes a newer spec', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'draining', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'heartbeat-host-uid',
+      generation: 4,
+    }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 33 }))
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'draining', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 4,
+          resourceVersion: 'rv-suspend-write',
+        },
+      })
+      .mockResolvedValueOnce({
+        ...freshHostRead({
+          state: 'suspended',
+          wakeHandledGeneration: 0,
+          reason: 'idle',
+        }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 5,
+          resourceVersion: 'rv-new-spec',
+        },
+        spec: {
+          ...host.spec,
+          contextRef: 'replacement-context',
+          lifecycle: { stateless: false },
+        },
+      })
+    const reconcileCore = vi.spyOn(reconciler as any, 'reconcileCore').mockResolvedValue(undefined)
+    const recordSuspended = vi.spyOn((reconciler as any).lifecycle, 'recordSuspendedApplied')
+
+    await expect(reconciler.suspendHostFromHeartbeat(host, 'idle', 0)).rejects.toThrow(
+      /Host spec generation/
+    )
+
+    expect(reconcileCore).not.toHaveBeenCalled()
+    expect(recordSuspended).not.toHaveBeenCalled()
+  })
+
+  it('rejects stale suspend follow-on work when the Host spec changes during Secret validation', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'draining', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'heartbeat-host-uid',
+      generation: 4,
+    }
+    let current = host
+    reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 34 }))
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce({
+        ...freshHostRead({ state: 'draining', wakeHandledGeneration: 0 }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 4,
+          resourceVersion: 'rv-suspend-write',
+        },
+      })
+      .mockResolvedValueOnce({
+        ...freshHostRead({
+          state: 'suspended',
+          wakeHandledGeneration: 0,
+          reason: 'idle',
+        }),
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: host.uid,
+          generation: 4,
+          resourceVersion: 'rv-suspend-follow-on',
+        },
+      })
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred()
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+      secretReadStarted.resolve(undefined)
+      await releaseSecretRead.promise
+      return { ok: true }
+    })
+    const staleMutation = vi
+      .spyOn(reconciler as any, 'ensureHostServiceAccount')
+      .mockRejectedValue(new Error('stale follow-on mutation was admitted'))
+
+    const pending = reconciler.suspendHostFromHeartbeat(host, 'idle', 0)
+    await secretReadStarted.promise
+    current = {
+      ...host,
+      generation: 5,
+      spec: {
+        ...host.spec,
+        contextRef: 'replacement-context',
+        lifecycle: { stateless: false },
+      },
+    }
+    releaseSecretRead.resolve(undefined)
+
+    await expect(pending).rejects.toThrow(/Host spec generation/)
+    expect(staleMutation).not.toHaveBeenCalled()
+  })
+
+  it('does not record a suspended scale-down when follow-on reconcile handles a wake', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'draining', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'heartbeat-host-uid',
+      generation: 4,
+    }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 32 }))
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...freshHostRead({ state: 'draining', wakeHandledGeneration: 0 }),
+      metadata: {
+        name: host.name,
+        namespace: host.namespace,
+        uid: host.uid,
+        generation: 4,
+        resourceVersion: 'rv-wake-follow-on',
+      },
+    })
+    vi.spyOn(reconciler as any, 'reconcileCore').mockImplementation(async (...args: unknown[]) => {
+      const reconcileHost = args[0] as HostCRD
+      reconcileHost.annotations = { 'clerum.io/wake-requested': '1' }
+      reconcileHost.status = {
+        lifecycle: { state: 'active', wakeHandledGeneration: 1 },
+      }
+    })
+    const recordSuspended = vi.spyOn((reconciler as any).lifecycle, 'recordSuspendedApplied')
+
+    await expect(reconciler.suspendHostFromHeartbeat(host, 'idle', 0)).resolves.toBe('suspended')
+
+    expect(recordSuspended).not.toHaveBeenCalled()
+  })
+})
+
 describe('HostReconciler.suspendHostFromHeartbeat', () => {
+  it('does not mutate the admitted watch-cache snapshot while applying a suspension', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'draining', wakeHandledGeneration: 2 } },
+    })
+    host.uid = 'stateless-host-uid'
+    host.generation = 1
+    host.resourceVersion = 'cache-rv'
+    const snapshot = structuredClone(host)
+    Object.freeze(host)
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostRevision: 1,
+      contextRevision: 1,
+    }))
+    const draining = freshHostRead({ state: 'draining', wakeHandledGeneration: 2 })
+    Object.assign(draining.metadata, {
+      uid: host.uid,
+      generation: host.generation,
+      resourceVersion: 'draining-rv',
+    })
+    const suspended = freshHostRead({
+      state: 'suspended',
+      wakeHandledGeneration: 2,
+      reason: 'idle',
+    })
+    Object.assign(suspended.metadata, {
+      uid: host.uid,
+      generation: host.generation,
+      resourceVersion: 'suspended-rv',
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValueOnce(draining).mockResolvedValue(suspended)
+
+    await expect(reconciler.suspendHostFromHeartbeat(host, 'idle', 2)).resolves.toBe('suspended')
+    expect(host).toEqual(snapshot)
+  })
+
   it("writes state='suspended' + reason 'idle' durably, then reconciles to replicas=0", async () => {
     const { reconciler, appsApi, customApi } = createReconciler()
     const host = makeStatelessHost({
@@ -1321,5 +2083,91 @@ describe('HostReconciler reconcile — stateless replicas derive from FRESH stat
     } finally {
       errorSpy.mockRestore()
     }
+  })
+})
+
+describe('H2: guarded cache reflection', () => {
+  it('reflects a committed lifecycle outcome onto the current cache entry without a watch event', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const entry = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'uid-1',
+      generation: 1,
+      resourceVersion: 'rv-1',
+    }
+    const hosts = new Map<string, HostCRD>([[entry.name, entry]])
+    reconciler.setResolveCurrentHost(name => hosts.get(name))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 17 }))
+    // Exactly the k8sClient.ts wiring shape (uid-guarded apply onto the cache).
+    reconciler.setReflectHostOutcome((name, uid, apply) => {
+      const cached = hosts.get(name)
+      if (!cached || uid === undefined || cached.uid !== uid) return
+      apply(cached)
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+      metadata: {
+        name: entry.name,
+        namespace: entry.namespace,
+        uid: 'uid-1',
+        generation: 1,
+        resourceVersion: 'fresh-rv',
+      },
+    })
+
+    await reconciler.markHostDrainingFromHeartbeat(entry, 0)
+
+    // The status write committed to the API…
+    expect(lifecycleStatusWrites(customApi).at(-1)?.lifecycle?.state).toBe('draining')
+    // …and — the H2 fix — the committed outcome is visible on the CANONICAL cache
+    // entry without waiting for a watch MODIFIED. With the resolver wired, the
+    // heartbeat core mutates the admitted clone (Shape A), so this can ONLY be
+    // true if the guarded reflector routed the outcome onto the cache entry.
+    expect(hosts.get(entry.name)?.status?.lifecycle?.state).toBe('draining')
+  })
+
+  it('never reflects a committed outcome onto a same-name recreation with a different uid', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const entry = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+      }),
+      uid: 'uid-1',
+      generation: 1,
+      resourceVersion: 'rv-1',
+    }
+    const hosts = new Map<string, HostCRD>([[entry.name, entry]])
+    const replacement = { ...makeStatelessHost({ name: entry.name }), uid: 'uid-2' }
+    reconciler.setResolveCurrentHost(name => hosts.get(name))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 17 }))
+    reconciler.setReflectHostOutcome((name, uid, apply) => {
+      const cached = hosts.get(name)
+      if (!cached || uid === undefined || cached.uid !== uid) return
+      apply(cached)
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...freshHostRead({ state: 'active', wakeHandledGeneration: 0 }),
+      metadata: {
+        name: entry.name,
+        namespace: entry.namespace,
+        uid: 'uid-1',
+        generation: 1,
+        resourceVersion: 'fresh-rv',
+      },
+    })
+    // A watch DELETE+ADD recreates the entry (new uid) mid-commit.
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async () => {
+      hosts.set(entry.name, replacement)
+      return {}
+    })
+
+    await reconciler.markHostDrainingFromHeartbeat(entry, 0)
+
+    // The write committed…
+    expect(lifecycleStatusWrites(customApi).at(-1)?.lifecycle?.state).toBe('draining')
+    // …but the recreation (uid-2) was NOT corrupted by the stale reflection.
+    expect(replacement.status?.lifecycle).toBeUndefined()
   })
 })

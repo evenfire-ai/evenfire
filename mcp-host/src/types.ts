@@ -2,6 +2,7 @@
  * Shared types for the MCP Host.
  */
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
+import type { GuardrailsConfig } from './core/guardrails/config'
 import type { LlmProvider } from './llm/registryCore'
 
 /**
@@ -72,6 +73,13 @@ export interface HostSpec {
    * CR like `spec.model`; hot-reloads with the rest of the spec.
    */
   allowedModels?: HostAllowedModel[]
+  /**
+   * Guardrails — the admin-authored `Host.spec.guardrails` block (spec §5).
+   * mcp-host CONSUMES it; the CRD schema is owned by the CRD chart. Absent/empty
+   * = no guardrails = byte-identical to today (no-config compatibility, spec §5).
+   * Phase 1: only `rules` + `limits` are interpreted.
+   */
+  guardrails?: GuardrailsConfig
 }
 
 /**

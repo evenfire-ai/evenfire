@@ -15,6 +15,9 @@
     "test": "vitest run",
     "test:e2e": "vitest run --config test/e2e/vitest.config.ts",
     "test:e2e:playwright": "npm run build && playwright test --config test/e2e-playwright/playwright.config.ts",
+    "test:native:sandbox-find": "npm run build:main --silent && node ./scripts/run-native-sandbox-find.mjs",
+    "test:native:sandbox-shortcut-focus": "npm run build:main --silent && node ./scripts/run-native-sandbox-shortcut-focus.mjs",
+    "test:native:chat-workspace-geometry": "node ./scripts/run-native-chat-workspace-geometry.mjs",
     "test:e2e:gfs-operator": "npm run build && playwright test --config test/e2e-playwright/playwright.gfs-desktop-operator.config.ts",
     "qa:recorder:auth": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-auth.spec.ts",
     "qa:recorder:navigation": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-navigation.spec.ts",
@@ -46,12 +49,16 @@
   "dependencies": {
     "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
     "@tanstack/react-query": "5.100.10",
+    "hast-util-to-jsx-runtime": "^2.3.6",
     "js-yaml": "^4.1.1",
     "keytar": "^7.9.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-rehype": "^11.1.2",
+    "unified": "^11.0.5"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.1",

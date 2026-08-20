@@ -42,6 +42,7 @@ function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
     activeSandboxUiApp: null,
     availableSandboxUiApps: [],
     onCollapsedChange: vi.fn(),
+    onNewChat: vi.fn(),
     onOpenSandboxUiApp: vi.fn(),
     onSelect: vi.fn(),
     ...overrides,
@@ -113,6 +114,42 @@ describe('SidebarNav logo', () => {
     expect(screen.getByTestId('nav-files').textContent).toContain('Global File System')
     expect(screen.queryByRole('menuitem', { name: 'Files' })).toBeNull()
   })
+
+  it('routes a controlled palette request through desktop collapse behavior', () => {
+    const onCollapsedChange = vi.fn()
+    const { rerender } = render(
+      <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
+    )
+
+    rerender(<SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 1 })} />)
+
+    expect(onCollapsedChange).toHaveBeenCalledWith(true)
+  })
+
+  it('routes a controlled palette request through the mobile drawer behavior', () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      query =>
+        ({
+          matches: true,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as MediaQueryList
+    )
+    const onCollapsedChange = vi.fn()
+    const { container, rerender } = render(
+      <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
+    )
+
+    rerender(<SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 1 })} />)
+
+    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(true)
+    expect(onCollapsedChange).not.toHaveBeenCalled()
+  })
 })
 
 describe('SidebarNav new-chat affordance', () => {
@@ -140,16 +177,18 @@ describe('SidebarNav new-chat affordance', () => {
     cleanup()
   })
 
-  it('renders a new-chat button on the chat nav row that selects chat', () => {
+  it('routes the new-chat button through the dedicated new-chat owner', () => {
     const onSelect = vi.fn()
-    render(<SidebarNav {...baseProps({ navItem: 'chat', onSelect })} />)
+    const onNewChat = vi.fn()
+    render(<SidebarNav {...baseProps({ navItem: 'chat', onSelect })} onNewChat={onNewChat} />)
 
     const newChatBtn = screen.getByTestId('nav-new-chat')
     expect(newChatBtn).not.toBeNull()
     expect(newChatBtn.getAttribute('title')).toBe('New chat')
 
     fireEvent.click(newChatBtn)
-    expect(onSelect).toHaveBeenCalledWith('chat')
+    expect(onNewChat).toHaveBeenCalledOnce()
+    expect(onSelect).not.toHaveBeenCalled()
   })
 
   it('renders exactly one new-chat button (on the chat nav row)', () => {

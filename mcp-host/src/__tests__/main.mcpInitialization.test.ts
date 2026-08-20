@@ -24,7 +24,12 @@ function readyServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
     transport: { type: 'streamableHttp', url: 'http://secured-server.test/mcp' },
     auth: { type: 'bearer', secretRef: 'secured-server-auth' },
     enabled: true,
-    status: { deployed: true, ready: true },
+    // Mirror the real producer contract: HCC's reconciler.getStatus() (surfaced
+    // through k8sClient.toServerInfo) always stamps `authoritative` explicitly —
+    // a ready, identity-matched snapshot carries authoritative: true. The legacy
+    // shape that omitted it is never emitted for a live server, so the default
+    // fixture must carry it too.
+    status: { deployed: true, ready: true, authoritative: true },
     ...overrides,
   }
 }
