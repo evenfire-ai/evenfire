@@ -2,6 +2,10 @@
 # Enforces the "sync to minikube before every gate" rule from the platform E2E plan.
 
 set -euo pipefail
+set +u
+PRE_GATE_SYNC_CONFIG_ONLY="$PRE_GATE_SYNC_CONFIG_ONLY"
+set -u
+if [ -z "$PRE_GATE_SYNC_CONFIG_ONLY" ]; then PRE_GATE_SYNC_CONFIG_ONLY=false; fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -42,6 +46,23 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# The pre-gate entrypoint is also a mutating recovery boundary. It must carry
+# the same branch/profile identity as the T2 orchestrator, or acquire that
+# identity itself when invoked standalone.
+T2_PROJECT_DIR="$PROJECT_DIR"
+T2_PROFILE="$PROFILE"
+T2_CONTEXT="$PROFILE"
+T2_GATE_ID="$GATE_NAME"
+# shellcheck source=scripts/minikube/t2-common.sh
+source "$SCRIPT_DIR/t2-common.sh"
+if [ -z "$T2_SKIP_LOCK" ]; then T2_SKIP_LOCK=false; fi
+if [ "$PRE_GATE_SYNC_CONFIG_ONLY" != true ]; then
+  t2_require_commands
+  t2_repo_metadata
+  t2_profile_scope
+  t2_context_check
+fi
 
 log() {
   printf '[pre-gate-sync] %s\n' "$*"
@@ -154,13 +175,19 @@ restore_control_api() {
 }
 
 restore_pre_gate_writers() {
+  local status=$?
   # Restore Control API first so it can serve the final readiness checks; WRC
   # remains last because it is the consumer that must stay stopped until every
   # migration, writer restart, and legacy-policy gate has completed.
-  restore_control_api
-  restore_workflow_reconciler
+  restore_control_api || status=1
+  restore_workflow_reconciler || status=1
+  t2_lock_release "$status" || status=$?
+  return "$status"
 }
 
+if [ "$PRE_GATE_SYNC_CONFIG_ONLY" != true ]; then
+  t2_mutation_lock
+fi
 trap restore_pre_gate_writers EXIT
 
 fingerprint_dir() {
@@ -375,11 +402,19 @@ provision_gfs_serving() {
     # still needs a reader rollout, the gfs-rollout-shim PATH prefix makes
     # that wait judge readiness instead of the template generation HCC keeps
     # rewriting.
-    CONTEXT="${PROFILE}" \
+    T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
+    CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
+    T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
+    CONTEXT="$T2_CONTEXT" \
       bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
     if ! PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
       GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
-      CONTEXT="${PROFILE}" \
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+      T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
+      CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
+      T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
+      CONTEXT="$T2_CONTEXT" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1

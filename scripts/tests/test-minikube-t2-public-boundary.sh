@@ -40,6 +40,11 @@ import sys
 diff = Path(sys.argv[1]).read_text(errors="replace")
 bad = []
 current = ""
+safe_source_paths = {
+    "deploy/scripts/lib/gfs-credential-rollout.sh",
+    "deploy/scripts/lib/gfs-credential-secret.sh",
+    "deploy/scripts/reconcile-gfs-deploy-credentials.sh",
+}
 for line in diff.splitlines():
     if line.startswith("+++ b/"):
         current = line[6:]
@@ -49,7 +54,10 @@ for line in diff.splitlines():
             or path.startswith(".env.")
             or path.endswith((".pem", ".key", ".p12", ".pfx", ".log"))
             or path.endswith(("/kubeconfig", "/config"))
-            or any(token in path for token in ("id_rsa", "id_ed25519", "credential", "wallet", "keystore"))
+            or (
+                any(token in path for token in ("id_rsa", "id_ed25519", "credential", "wallet", "keystore"))
+                and path not in safe_source_paths
+            )
             or "screenshot" in path
             or "e2e-artifacts" in path
         ):

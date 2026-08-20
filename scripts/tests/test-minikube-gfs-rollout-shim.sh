@@ -70,6 +70,20 @@ if PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 FAKE_POD_ROWS='True|\nFalse|\n'
   fail 'shim readiness wait went green with a live unready reader pod'
 fi
 
+# Timeout input is untrusted process input; it must be parsed as data rather
+# than reaching Bash arithmetic evaluation.
+malicious_timeout="1; touch $tmp/timeout-pwned"
+if PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 FAKE_POD_ROWS='True|\n' \
+  GFS_READER_WAIT_POLL_SECONDS=0 \
+  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout="$malicious_timeout" >/dev/null 2>&1; then
+  fail 'shim accepted a malformed rollout timeout'
+fi
+[ ! -e "$tmp/timeout-pwned" ] || fail 'malformed rollout timeout executed shell input'
+if PATH="$shim_path" CONTEXT=fake GFS_READER_WAIT_TIMEOUT_SECONDS="$malicious_timeout" \
+  bash "$WAIT" >/dev/null 2>&1; then
+  fail 'direct readiness helper accepted a malformed timeout'
+fi
+
 # 5. A terminating unready pod does not block the wait.
 : >"$FAKE_KUBECTL_LOG"
 PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 \

@@ -7,8 +7,20 @@ PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC=(kubectl --context="${PROFILE}")
 HOLD=false
 PIDS=()
+PIDFILES=()
+PIDFILE_SERVICES=()
 SAFE_PROFILE="${PROFILE//[^A-Za-z0-9_.-]/_}"
 HAS_PROFILE_OWNED_PORTS=false
+if [[ ! "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+  echo "ERROR: invalid Minikube profile identifier: $PROFILE" >&2
+  exit 1
+fi
+set +u
+PROFILE_PID_ROOT="$CLERUM_PROFILE_CACHE_ROOT"
+set -u
+if [[ -z "$PROFILE_PID_ROOT" ]]; then
+  PROFILE_PID_ROOT="$HOME/.cache/clerum/minikube-profiles"
+fi
 
 load_branch_profile_ports_env() {
   local file="$1"
@@ -110,9 +122,35 @@ cleanup() {
   if [[ "${HOLD}" != "true" ]]; then
     return 0
   fi
-  for pid in "${PIDS[@]}"; do
-    kill "${pid}" 2>/dev/null || true
+  local index
+  for index in "${!PIDFILES[@]}"; do
+    kill_owned_pidfile "${PIDFILES[$index]}" "${PIDFILE_SERVICES[$index]}" || true
   done
+}
+
+kill_owned_pidfile() {
+  local pidfile="$1"
+  local service="$2"
+  local pid command_line
+  [[ -f "$pidfile" ]] || return 0
+  pid="$(sed -n '1p' "$pidfile" 2>/dev/null || true)"
+  if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    rm -f -- "$pidfile"
+    return 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f -- "$pidfile"
+    return 0
+  fi
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  if [[ "$command_line" != *port-forward* ||
+        "$command_line" != *"svc/$service"* ||
+        "$command_line" != *"$PROFILE"* ]]; then
+    echo "ERROR: refusing to kill PID $pid from $pidfile; it is not the $PROFILE $service port-forward" >&2
+    return 1
+  fi
+  kill "$pid" 2>/dev/null || true
+  rm -f -- "$pidfile"
 }
 
 start_pf() {
@@ -123,23 +161,19 @@ start_pf() {
   local health_url="${5:-}"
   local log="/tmp/pf-${SAFE_PROFILE}-${name}.log"
   local pidfile="/tmp/pf-${SAFE_PROFILE}-${name}.pid"
-  local profile_pids_dir="${CLERUM_PROFILE_CACHE_ROOT:-${HOME}/.cache/clerum/minikube-profiles}/${PROFILE}/pids"
+  local profile_pids_dir="$PROFILE_PID_ROOT/$SAFE_PROFILE/pids"
   local profile_pidfile="${profile_pids_dir}/${name}.pid"
 
-  mkdir -p "${profile_pids_dir}"
-  if [[ -f "${pidfile}" ]]; then
-    kill "$(cat "${pidfile}")" 2>/dev/null || true
-    rm -f "${pidfile}"
-  fi
-  if [[ -f "${profile_pidfile}" ]]; then
-    kill "$(cat "${profile_pidfile}")" 2>/dev/null || true
-    rm -f "${profile_pidfile}"
-  fi
+  mkdir -p "$profile_pids_dir"
+  kill_owned_pidfile "$pidfile" "$service"
+  kill_owned_pidfile "$profile_pidfile" "$service"
 
   nohup "${KC[@]}" -n "${namespace}" port-forward --address=127.0.0.1 "svc/${service}" "${ports}" >"${log}" 2>&1 </dev/null &
   echo $! >"${pidfile}"
   echo $! >"${profile_pidfile}"
   PIDS+=("$!")
+  PIDFILES+=("$pidfile" "$profile_pidfile")
+  PIDFILE_SERVICES+=("$service" "$service")
   echo "  ${name}: pid=$(cat "${pidfile}") ns=${namespace} svc=${service} ports=${ports}"
   sleep 0.2
   if ! kill -0 "$!" 2>/dev/null; then

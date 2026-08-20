@@ -43,20 +43,27 @@ runtime_script="$(sed '/^[[:space:]]*#/d' deploy/scripts/provision-gfs-runtime.s
   || fail 'post-overlay runtime path does not wait for exact GFSC rollouts'
 [[ "$runtime_script" != *'rollout restart'* && "$runtime_script" != *'rotate-writer'* ]] \
   || fail 'post-overlay runtime path rotates or unconditionally restarts GFS'
+reconcile_context_err="$(mktemp)"
+if CONTEXT=unverified-context bash deploy/scripts/reconcile-gfs-deploy-credentials.sh 2>"$reconcile_context_err"; then
+  rm -f "$reconcile_context_err"
+  fail 'credential reconciliation accepted an unverified Kubernetes context'
+fi
+grep -Fq 'refusing unverified Kubernetes context' "$reconcile_context_err" \
+  || fail 'credential reconciliation did not explain its unverified-context rejection'
+rm -f "$reconcile_context_err"
 make_block() {
   awk -v target="$1" '$0 ~ "^" target ":" {active=1} active && /^\.PHONY:/ {exit} active {print}' Makefile
 }
-for target in minikube-db-reset; do
-  block="$(make_block "$target")"
-  reset="$(grep -n 'reset-control-db-storage.sh' <<<"$block" | head -1 | cut -d: -f1)"
-  recreate="$(grep -n 'apply -k .* -l app=control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
-  postgres_ready="$(grep -nE 'wait .*control-postgres|wait .*deploy/control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
-  converge="$(grep -n 'converge-control-db-after-reset.sh' <<<"$block" | head -1 | cut -d: -f1)"
-  success="$(grep -n 'DB reset complete' <<<"$block" | tail -1 | cut -d: -f1)"
-  [[ -n "$reset" && -n "$recreate" && -n "$postgres_ready" && -n "$converge" && -n "$success" ]] && \
-    [[ "$reset" -lt "$recreate" && "$recreate" -lt "$postgres_ready" && "$postgres_ready" -lt "$converge" && "$converge" -lt "$success" ]] \
-    || fail "$target bypasses safe GFS reset recovery"
-done
+target=minikube-db-reset
+block="$(make_block "$target")"
+reset="$(grep -n 'reset-control-db-storage.sh' <<<"$block" | head -1 | cut -d: -f1)"
+recreate="$(grep -n 'apply -k .* -l app=control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
+postgres_ready="$(grep -nE 'wait .*control-postgres|wait .*deploy/control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
+converge="$(grep -n 'converge-control-db-after-reset.sh' <<<"$block" | head -1 | cut -d: -f1)"
+success="$(grep -n 'DB reset complete' <<<"$block" | tail -1 | cut -d: -f1)"
+[[ -n "$reset" && -n "$recreate" && -n "$postgres_ready" && -n "$converge" && -n "$success" ]] && \
+  [[ "$reset" -lt "$recreate" && "$recreate" -lt "$postgres_ready" && "$postgres_ready" -lt "$converge" && "$converge" -lt "$success" ]] \
+  || fail "$target bypasses safe GFS reset recovery"
 reset_storage="$(cat deploy/scripts/reset-control-db-storage.sh)"
 for required in preflight-gfs-db-reset.sh 'scale deployment/control-api --replicas=0' 'scale deployment/control-postgres --replicas=0' 'wait_for_pods_gone app=control-api' 'wait_for_pods_gone app=control-postgres' 'preconditions":{"uid":"%s"}' 'persistentvolumeclaims/${PVC}'; do
   [[ "$reset_storage" == *"$required"* ]] || fail "reset storage boundary omits $required"
@@ -113,7 +120,8 @@ assert_minikube_upgrade_classifier() {
     || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
 }
 assert_pre_gate_defers_gfs_reconcile() {
-  local block="$({ awk -v start="$1" -v end="$2" '
+  local block
+  block="$({ awk -v start="$1" -v end="$2" '
     index($0, start) { active=1 }
     active { print }
     active && index($0, end) { exit }

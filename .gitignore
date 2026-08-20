@@ -95,6 +95,7 @@ docs/analysis/
 
 # Local developer notes (untracked)
 .local-notes/
+.ralph/plans/
 
 # Agent session transcripts can contain internal infrastructure details.
 session-ses_*.md

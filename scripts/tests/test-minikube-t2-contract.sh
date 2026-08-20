@@ -25,7 +25,7 @@ for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" \
   bash -n "$file"
 done
 
-required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT"
+required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT"
 for code in $required_codes; do
   grep -Fq "$code" "$COMMON" "$PREFLIGHT" "$T2" "$T1"
 done
@@ -50,12 +50,14 @@ grep -Fq 'CONTROL_API_REAL_PG_CONTEXT' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_ADMIN_URL=' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$T1"
 grep -Fq 'postgres:16-alpine' "$T1"
-grep -Fq 'db.realPostgresMigration.integration.test.ts' "$T1"
-grep -Fq 'gfsReaderRole.realPostgres.integration.test.ts' "$T1"
+grep -Fq 'control-api/test/*realPostgres*.test.ts' "$T1"
 grep -Fq 'start_isolated_postgres' "$T1"
 grep -Fq 'require_isolated_control_api_files' "$T1"
 grep -Fq 'run_suite control-api isolated "$ISOLATED_DSN"' "$T1"
-grep -Fq 'run_suite control-api shared "$ADMIN_DSN"' "$T1"
+if grep -Fq 'run_suite control-api shared "$ADMIN_DSN"' "$T1"; then
+  echo 'FAIL: control-api Real PostgreSQL suites must not use shared control-postgres' >&2
+  exit 1
+fi
 if grep -Fq 'run_suite control-api isolated "$ADMIN_DSN"' "$T1"; then
   echo 'FAIL: migration/role-reset lane points at shared control-postgres' >&2
   exit 1
@@ -67,11 +69,8 @@ fi
 grep -Fq 'T1_REDACT_PASSWORD="${PG_PASSWORD}"' "$T1" || grep -Fq 'T1_REDACT_PASSWORD="$PG_PASSWORD"' "$T1"
 grep -Fq -- '--reporter=json' "$T1"
 grep -Fq '|| suite_status=$?' "$T1"
-grep -Fq 'complete green reporter' "$T1"
-if grep -Fq 'Real PostgreSQL suite failed in $package ($lane)' "$T1"; then
-  echo 'FAIL: T1 still treats npm exit as a suite failure before the JSON reporter' >&2
-  exit 1
-fi
+grep -Fq 'Vitest process exited $suite_status' "$T1"
+grep -Fq 'complete green JSON reporter' "$T1"
 grep -Fq 'pending_tests' "$T1"
 grep -Fq 'numTotalTests' "$T1"
 grep -Fq 'port-forward' "$T1"
@@ -155,8 +154,8 @@ grep -Fq 'run_pre_gate' "$T2"
 grep -Fq 'run_targeted_sync' "$T2"
 grep -Fq 'full-reconcile' "$T2"
 grep -Fq 'already-synced' "$T2" "$COMMON"
-grep -Fq 'T2_SKIP_LOCK=true T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
-grep -Fq 'T2_SKIP_LOCK=true T2_PLAN_MODE=false T2_PLAN_FILE' "$T2"
+grep -Fq 'T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
+grep -Fq 'T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" T2_PLAN_MODE=false T2_PLAN_FILE' "$T2"
 grep -Fq 'T2_PLAN_MODE=false' "$PREFLIGHT"
 grep -Fq -- '--skip-port-forwards' "$T2"
 grep -Fq 't2_lane_completed' "$T2"
@@ -176,7 +175,8 @@ if grep -Eq 'make minikube-pre-gate-sync GATE=minikube-t2$' "$T2"; then
   exit 1
 fi
 
-grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
+grep -Fq 't2_mutation_lock' "$COMMON"
+grep -Fq 't2_lock_validate_inherited' "$COMMON"
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 'REPOSITORY=' "$COMMON"
 grep -Fq 'BRANCH=' "$COMMON"
@@ -184,7 +184,10 @@ grep -Fq 'HEAD=' "$COMMON"
 grep -Fq 'PROFILE=' "$COMMON"
 grep -Fq 'CONTEXT=' "$COMMON"
 grep -Fq 'LOCK_KEY=' "$COMMON"
+grep -Fq 'TOKEN=' "$COMMON"
+grep -Fq 'WORKTREE_ID=' "$COMMON"
 grep -Fq 'PID=' "$COMMON"
+grep -Fq 'PROCESS_START=' "$COMMON"
 
 if grep -Eq 'get secret .* -o (yaml|json)' "$COMMON" "$PREFLIGHT"; then
   echo 'FAIL: preflight reads Secret values' >&2
@@ -212,15 +215,44 @@ bash -c '
   parsed="$(t2_get_name control-plane/control-postgres)"
   test "$parsed" = "control-plane	control-postgres"
   t2_lock_acquire
+  t2_lock_release
 ' bash "$COMMON"
 if [ -e "$tmp/locks/clerum-test-contract.lock" ]; then
   echo 'FAIL: lock was not cleaned after clean exit' >&2
   exit 1
 fi
 
+# A nested mutator must prove the exact opaque lease token and owner identity;
+# T2_SKIP_LOCK=true alone is not an authorization mechanism.
+T2_LOCK_ROOT="$tmp/fenced-locks" T2_PROJECT_DIR="$ROOT" \
+T2_BRANCH=feat/contract-fence T2_HEAD=0123456789abcdef \
+T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
+MINIKUBE_PROFILE=clerum-fence T2_CONTEXT=clerum-fence \
+T2_WORKTREE_ID=contract-worktree \
+bash -c '
+  common="$1"
+  source "$common"
+  t2_lock_acquire
+  token="$T2_LOCK_TOKEN"
+  export T2_PROJECT_DIR T2_BRANCH T2_HEAD T2_ORIGIN_DEV T2_MERGE_BASE
+  export MINIKUBE_PROFILE T2_PROFILE T2_CONTEXT T2_WORKTREE_ID T2_LOCK_ROOT
+  if ! T2_SKIP_LOCK=true T2_LOCK_TOKEN="$token" bash -c '\''source "$1"; t2_lock_validate_inherited'\'' bash "$common"; then
+    exit 1
+  fi
+  if T2_SKIP_LOCK=true T2_LOCK_TOKEN=wrong bash -c '\''source "$1"; t2_lock_validate_inherited'\'' bash "$common"; then
+    exit 1
+  fi
+  t2_lock_release 0
+' bash "$COMMON"
+if [ -e "$tmp/fenced-locks/clerum-fence.lock" ]; then
+  echo 'FAIL: fenced lock survived the owner release' >&2
+  exit 1
+fi
+
 mkdir -p "$tmp/locks/busy-profile.lock"
 cat >"$tmp/locks/busy-profile.lock/owner.env" <<EOF
 PROFILE=busy-profile
+TOKEN=lock
 PID=$$
 EOF
 if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=busy-profile T2_CONTEXT=busy-profile \
@@ -243,6 +275,103 @@ fi
 grep -Fq 'PROFILE_BUSY' "$tmp/empty.err"
 grep -Fq 'orphaned' "$tmp/empty.err"
 
+cert_root="$tmp/certifications"
+mkdir -p "$cert_root/prior" "$cert_root/current"
+CERT_FILE="$cert_root/prior/evidence.json" EXPECTED_REPOSITORY="$ROOT" \
+EXPECTED_BRANCH=feat/certification EXPECTED_HEAD=cert-head EXPECTED_ORIGIN_DEV=cert-dev \
+EXPECTED_WORKTREE_ID=cert-worktree EXPECTED_PROFILE=clerum-cert EXPECTED_CONTEXT=clerum-cert \
+EXPECTED_FINGERPRINT=cert-fingerprint EXPECTED_GATE_ID=cert-gate \
+python3 - <<'PY'
+import json
+import os
+from datetime import datetime, timedelta, timezone
+
+now = datetime.now(timezone.utc)
+payload = {
+    "certificationVersion": 1,
+    "attestationStatus": "PASS",
+    "runId": "prior-certification-run",
+    "attestationStartedAt": now.isoformat().replace("+00:00", "Z"),
+    "attestationExpiresAt": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+    "repository": os.environ["EXPECTED_REPOSITORY"],
+    "branch": os.environ["EXPECTED_BRANCH"],
+    "head": os.environ["EXPECTED_HEAD"],
+    "originDev": os.environ["EXPECTED_ORIGIN_DEV"],
+    "worktreeId": os.environ["EXPECTED_WORKTREE_ID"],
+    "profile": os.environ["EXPECTED_PROFILE"],
+    "context": os.environ["EXPECTED_CONTEXT"],
+    "clusterFingerprintRef": os.environ["EXPECTED_FINGERPRINT"],
+    "gateId": os.environ["EXPECTED_GATE_ID"],
+    "phases": [
+        {"name": "T0", "status": "PASS"},
+        {"name": "T1", "status": "PASS"},
+        {"name": "complete", "status": "PASS"},
+    ],
+}
+with open(os.environ["CERT_FILE"], "w") as handle:
+    json.dump(payload, handle)
+PY
+T2_EVIDENCE_ROOT="$cert_root" T2_PROJECT_DIR="$ROOT" T2_BRANCH=feat/certification \
+T2_HEAD=cert-head T2_ORIGIN_DEV=cert-dev T2_MERGE_BASE=cert-dev \
+T2_WORKTREE_ID=cert-worktree T2_PROFILE=clerum-cert T2_CONTEXT=clerum-cert \
+T2_CLUSTER_FINGERPRINT=cert-fingerprint T2_GATE_ID=cert-gate \
+T2_RUN_ID=current-certification-run \
+bash -c '
+  source "$1"
+  T2_PROJECT_DIR="$3"
+  T2_BRANCH=feat/certification
+  T2_HEAD=cert-head
+  T2_ORIGIN_DEV=cert-dev
+  T2_MERGE_BASE=cert-dev
+  T2_WORKTREE_ID=cert-worktree
+  T2_PROFILE=clerum-cert
+  T2_CONTEXT=clerum-cert
+  T2_CLUSTER_FINGERPRINT=cert-fingerprint
+  T2_GATE_ID=cert-gate
+  T2_RUN_ID=current-certification-run
+  T2_EVIDENCE_DIR="$2/current-run"
+  T2_EVIDENCE_FILE="$T2_EVIDENCE_DIR/evidence.json"
+  mkdir -p "$T2_EVIDENCE_DIR"
+  t2_certification_validate_prior_lanes
+  test "$T2_T0_CERTIFIED" = true
+  test "$T2_T1_CERTIFIED" = true
+  grep -Fq T0_ATTESTED "$T2_EVIDENCE_FILE"
+  grep -Fq T1_ATTESTED "$T2_EVIDENCE_FILE"
+' bash "$COMMON" "$cert_root" "$ROOT"
+
+python3 - "$cert_root/prior/evidence.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    payload = json.load(handle)
+payload["attestationStatus"] = "INVALIDATED"
+with open(sys.argv[1], "w") as handle:
+    json.dump(payload, handle)
+PY
+if T2_EVIDENCE_ROOT="$cert_root" T2_PROJECT_DIR="$ROOT" T2_BRANCH=feat/certification \
+  T2_HEAD=cert-head T2_ORIGIN_DEV=cert-dev T2_MERGE_BASE=cert-dev \
+  T2_WORKTREE_ID=cert-worktree T2_PROFILE=clerum-cert T2_CONTEXT=clerum-cert \
+  T2_CLUSTER_FINGERPRINT=cert-fingerprint T2_GATE_ID=cert-gate \
+  bash -c '
+    source "$1"
+    T2_PROJECT_DIR="$2"
+    T2_BRANCH=feat/certification
+    T2_HEAD=cert-head
+    T2_ORIGIN_DEV=cert-dev
+    T2_MERGE_BASE=cert-dev
+    T2_WORKTREE_ID=cert-worktree
+    T2_PROFILE=clerum-cert
+    T2_CONTEXT=clerum-cert
+    T2_CLUSTER_FINGERPRINT=cert-fingerprint
+    T2_GATE_ID=cert-gate
+    t2_certification_validate_prior_lanes
+  ' bash "$COMMON" "$ROOT" 2>"$tmp/certification.err"; then
+  echo 'FAIL: invalidated certification was accepted' >&2
+  exit 1
+fi
+grep -Fq CERTIFICATION_REQUIRED "$tmp/certification.err"
+
 redaction_file="$tmp/t1-redaction.log"
 redaction_secret='super-secret'
 printf '%s=%s\n' password "$redaction_secret" >"$redaction_file"
@@ -254,6 +383,45 @@ if grep -Fq "$redaction_secret" "$redaction_file"; then
   echo 'FAIL: T1 redaction lost the password after PG_PASSWORD cleanup' >&2
   exit 1
 fi
+
+# A complete green reporter is not sufficient evidence when npm/Vitest exits
+# non-zero during teardown, worker shutdown, OOM handling, or signal cleanup.
+# Exercise the adjudicator with representative failure statuses without Docker
+# or Kubernetes; every one must fail the suite despite the green JSON payload.
+t1_exit_root="$tmp/t1-exit-adjudicator"
+mkdir -p "$t1_exit_root/control-api/test"
+printf 'fixture\n' >"$t1_exit_root/control-api/test/fake.realPostgres.test.ts"
+for exit_code in 1 2 7 126 137; do
+  if EXIT_CODE="$exit_code" T1_EXIT_ROOT="$t1_exit_root" bash -c '
+    set -euo pipefail
+    source "$1"
+    PROJECT_DIR="$T1_EXIT_ROOT"
+    T1_TMP_DIR="$(mktemp -d)"
+    trap '\''rm -rf "$T1_TMP_DIR"'\'' EXIT
+    list_real_pg_files() {
+      printf "%s\\n" "$T1_EXIT_ROOT/control-api/test/fake.realPostgres.test.ts"
+    }
+    is_isolated_control_api_file() { return 0; }
+    npm() {
+      local output_file=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --outputFile=*) output_file="${1#--outputFile=}" ;;
+          --outputFile) shift; output_file="$1" ;;
+        esac
+        shift
+      done
+      printf "%s\\n" '\''{"success":true,"testResults":[{"status":"passed"}],"numPassedTests":1,"numFailedTests":0,"numPendingTestSuites":0,"numPendingTests":0,"numTotalTests":1}'\'' >"$output_file"
+      return "$EXIT_CODE"
+    }
+    if run_suite control-api isolated postgresql://isolated; then
+      exit 1
+    fi
+  ' bash "$T1"; then
+    echo "FAIL: T1 accepted a green reporter after npm exit $exit_code" >&2
+    exit 1
+  fi
+done
 
 bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh"
 if T2_PUBLIC_BASE_REF=nonexistent-ref-for-contract \

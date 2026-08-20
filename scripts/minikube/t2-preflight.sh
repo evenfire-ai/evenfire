@@ -19,14 +19,18 @@ T2_PLAN_FILE="$T2_PLAN_FILE"
 if [ -z "$T2_PLAN_FILE" ]; then T2_PLAN_FILE="$T2_EVIDENCE_ROOT/next-plan.json"; fi
 T2_NEXT_COMMAND='re-run the canonical command with the verified profile'
 
+cleanup_preflight() {
+  local status=$?
+  t2_lock_release "$status"
+}
+trap cleanup_preflight EXIT
+
 main() {
   t2_require_commands
   t2_repo_metadata
   t2_profile_scope
   t2_context_check
-  if [ "$T2_SKIP_LOCK" != true ]; then
-    t2_lock_acquire
-  fi
+  t2_mutation_lock
   t2_evidence_init
 
   # Profile status is read before any resource check. A missing/stopped profile

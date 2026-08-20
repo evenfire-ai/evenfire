@@ -60,6 +60,7 @@ printf 'PORT_BASE=23117\nCONTROL_API_URL=profile-owned-url\n' >"$profile_root/po
 repo_env=(
   T2_PROJECT_DIR="$repo"
   MINIKUBE_PROFILE="$profile"
+  T2_CONTEXT="$profile"
   CONTROL_API_REAL_PG_CONTEXT="$profile"
   T2_PROFILE_ROOT="$tmp/profiles"
   T2_PROFILE_ENV="$profile_root/profile.env"
@@ -88,7 +89,7 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED shared-profile shared-profile \
   bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
 
 expect_code DEVELOPMENT_SCOPE_REQUIRED context-mismatch context-mismatch \
-  env "${repo_env[@]}" CONTROL_API_REAL_PG_CONTEXT=another-context \
+  env "${repo_env[@]}" T2_CONTEXT=another-context CONTROL_API_REAL_PG_CONTEXT=another-context \
   bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
 
 fake_bin="$tmp/fake-bin"
@@ -96,20 +97,27 @@ mkdir -p "$fake_bin"
 cat >"$fake_bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *"config current-context"*) exit 0 ;;
+  *"config get-contexts -o name"*)
+    for arg in "$@"; do
+      case "$arg" in
+        --context=*) printf '%s' "${arg#--context=}"; exit 0 ;;
+      esac
+    done
+    printf '%s' "${FAKE_CONTEXT:-}" ;;
   *"config view"*) printf '%s://%s:6443' https "${FAKE_ENDPOINT:-10.0.0.1}" ;;
   *) exit 0 ;;
 esac
 EOF
 chmod +x "$fake_bin/kubectl"
+context_env=("${repo_env[@]}" FAKE_CONTEXT="$profile")
 expect_code DEVELOPMENT_SCOPE_REQUIRED remote-context remote-context \
-  env "${repo_env[@]}" PATH="$fake_bin:$PATH" \
+  env "${repo_env[@]}" FAKE_CONTEXT=other-context PATH="$fake_bin:$PATH" \
   bash -c 'source "$1"; t2_context_check' bash "$COMMON"
-env "${repo_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=127.0.0.1 \
+env "${context_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=127.0.0.1 \
   bash -c 'source "$1"; t2_context_check' bash "$COMMON"
-env "${repo_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT='[::1]' \
+env "${context_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT='[::1]' \
   bash -c 'source "$1"; t2_context_check' bash "$COMMON"
-env "${repo_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=localhost \
+env "${context_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=localhost \
   bash -c 'source "$1"; t2_context_check' bash "$COMMON"
 
 missing_profile_state="$(env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_profile_status; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
@@ -264,9 +272,9 @@ grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$ROOT/scripts/e2e/minikube-real-postg
 grep -Fq 'ZERO_TESTS_EXECUTED' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'start_isolated_postgres' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'ISOLATED_DSN' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
-grep -Fq '|| suite_status=$?' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must capture vitest exit without aborting before the reporter'
-grep -Fq 'complete green reporter' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must document reporter-authoritative verdict'
-grep -Fq 'Real PostgreSQL suite failed in $package ($lane)' "$ROOT/scripts/e2e/minikube-real-postgres.sh" && fail 'T1 still treats npm exit as a suite failure before the JSON reporter'
+grep -Fq '|| suite_status=$?' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must capture vitest exit before adjudicating the reporter'
+grep -Fq 'complete green JSON reporter' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must require a complete green reporter'
+grep -Fq 'Vitest process exited $suite_status' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must fail on a non-zero Vitest exit'
 grep -Fq 'restore_gfs_runtime_credentials' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must restore branch-profile GFS credentials on exit'
 grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must opt into the NOLOGIN recovery contract'
 grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must resume an interrupted gfsc-reader rollout claim'
@@ -284,7 +292,8 @@ grep -Fq 'wait-gfs-reader-ready.sh' "$ROOT/scripts/minikube/pre-gate-sync.sh" ||
 [[ "$(grep -c 'gfs-rollout-shim' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB reconciles must use the HCC-safe reader rollout wait on both calls'
 [[ "$(grep -c 'sync-auth-key.sh' "$ROOT/scripts/minikube/full-setup.sh")" -ge 3 ]] || fail 'full-setup must re-sync gfs-config.jwt-public-key before both GFS reconciles'
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
-grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
+grep -Fq 't2_mutation_lock' "$COMMON"
+grep -Fq 't2_lock_validate_inherited' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
 grep -Fq 'while read -r uid pid ppid rest' "$COMMON" || fail 't2_process_check must split ps -ef fields'
 grep -Fq 'IFS= read -r uid pid ppid rest' "$COMMON" && fail 'IFS= read disables PID split and silences PORT_FORWARD_CONFLICT'
@@ -314,7 +323,7 @@ grep -Fq 'kubectl -n control-plane port-forward svc/control-api' "$tmp/pf-awk.ou
 grep -Fq -- "--context ${pf_profile} port-forward svc/control-ui" "$tmp/pf-awk.out" || fail 'awk missed run-e2e real launcher'
 grep -Fq 'kubectl port-forward --context=' "$tmp/pf-awk.out" || fail 'awk missed a bare kubectl port-forward'
 grep -Fq '/usr/local/bin/kubectl --context=' "$tmp/pf-awk.out" || fail 'awk missed a path kubectl with flags before port-forward'
-read -r uid pid ppid rest <<<"$pf_all"
+read -r _ pid _ _ <<<"$pf_all"
 [ "$pid" = 4242 ] || fail "ps field split left pid='$pid' instead of 4242"
 
 pf_root="$tmp/pf-check-profiles"

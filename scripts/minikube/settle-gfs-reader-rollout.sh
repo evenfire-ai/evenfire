@@ -13,14 +13,50 @@
 # times out; not restarting a Ready reader is the only safe path.
 set -euo pipefail
 
-CONTEXT="${CONTEXT:?set CONTEXT to the target kube-context}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd -P)"
+set +u
+T2_PROJECT_DIR="$T2_PROJECT_DIR"
+T2_PROFILE="$T2_PROFILE"
+T2_CONTEXT="$T2_CONTEXT"
+MINIKUBE_PROFILE="$MINIKUBE_PROFILE"
+CONTROL_API_REAL_PG_CONTEXT="$CONTROL_API_REAL_PG_CONTEXT"
+CONTEXT="$CONTEXT"
+set -u
+if [ -z "$T2_PROJECT_DIR" ]; then T2_PROJECT_DIR="$ROOT"; fi
+if [ -z "$T2_PROFILE" ]; then T2_PROFILE="$MINIKUBE_PROFILE"; fi
+if [ -z "$T2_PROFILE" ]; then T2_PROFILE="$CONTEXT"; fi
+if [ -z "$T2_CONTEXT" ]; then T2_CONTEXT="$CONTROL_API_REAL_PG_CONTEXT"; fi
+if [ -z "$T2_CONTEXT" ]; then T2_CONTEXT="$CONTEXT"; fi
+# shellcheck source=scripts/minikube/t2-common.sh
+source "$ROOT/scripts/minikube/t2-common.sh"
+if [ -z "$T2_SKIP_LOCK" ]; then T2_SKIP_LOCK=false; fi
+T2_CONTEXT="$T2_CONTEXT"
+CONTEXT="$T2_CONTEXT"
 GFS_NS="${GFS_NS:-gfs}"
 DEPLOY="${GFS_READER_DEPLOYMENT:-gfsc-reader}"
 SECRET="${GFS_READER_DB_SECRET:-gfs-controller-reader-db}"
 SELECTOR="${GFS_READER_SELECTOR:-app=gfs-controller,clerum.io/gfsc-role=reader}"
 
-kc() { kubectl --context="$CONTEXT" "$@"; }
 log() { printf '[settle-gfs-reader-rollout] %s\n' "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+kc() { kubectl --context="$T2_CONTEXT" "$@"; }
+
+cleanup_settle() {
+  local status=$?
+  t2_lock_release "$status"
+}
+trap cleanup_settle EXIT INT TERM
+t2_repo_metadata
+t2_profile_scope
+t2_context_check
+t2_mutation_lock
+
+# The proof library is sourced only after the profile fence is established. It
+# reads the committed DSN in memory and never prints it.
+# shellcheck source=deploy/scripts/lib/gfs-credential-secret.sh
+source "$ROOT/deploy/scripts/lib/gfs-credential-secret.sh"
+# shellcheck source=deploy/scripts/lib/gfs-credential-rollout.sh
+source "$ROOT/deploy/scripts/lib/gfs-credential-rollout.sh"
 
 if ! kc -n "$GFS_NS" get deployment "$DEPLOY" >/dev/null 2>&1; then
   exit 0
@@ -77,11 +113,5 @@ if [ -z "$rotated" ]; then
 fi
 
 log "gfsc-reader is Ready with an interrupted rollout claim; marking the reader Secret ready without restart"
-python3 -c 'import json, sys
-state, stamp = sys.argv[1:]
-print(json.dumps([
-  {"op": "test", "path": "/metadata/annotations/clerum.io~1gfs-dsn-state", "value": state},
-  {"op": "test", "path": "/metadata/annotations/clerum.io~1gfs-dsn-rotated-at", "value": stamp},
-  {"op": "replace", "path": "/metadata/annotations/clerum.io~1gfs-dsn-state", "value": "ready"},
-]))' "$state" "$rotated" \
-  | kc -n "$GFS_NS" patch secret "$SECRET" --type=json --patch-file=/dev/stdin >/dev/null
+credential_rollout_proof "$SECRET" "$DEPLOY" "$rotated"
+mark_secret_rollout_ready "$SECRET" "$rotated" rollout-running

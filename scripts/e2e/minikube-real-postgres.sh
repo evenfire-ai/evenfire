@@ -37,6 +37,7 @@ T1_PENDING_TESTS=0
 # reconcile cluster credentials for a run that never reached the suites
 # (e.g. a failed precondition, or this file being sourced by a harness test).
 T1_GFS_RESTORE_REQUIRED=false
+T1_CLEANUP_DONE=false
 
 die_t1() {
   local code="$1"
@@ -73,11 +74,19 @@ restore_gfs_runtime_credentials() {
   # rollout restart it, and let any wait reconcile still needs judge
   # readiness via the gfs-rollout-shim instead of the template generation
   # HCC's gfsReconciler keeps rewriting.
-  if ! CONTEXT="$T2_CONTEXT" \
+  if ! T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
+    CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
+    T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
+    CONTEXT="$T2_CONTEXT" \
     bash "$PROJECT_DIR/scripts/minikube/settle-gfs-reader-rollout.sh"; then
     printf '[minikube-t1] WARN: could not settle a leftover gfsc-reader rollout claim before restore\n' >&2
   fi
   if ! PATH="$PROJECT_DIR/scripts/minikube/gfs-rollout-shim:$PATH" \
+    T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
+    CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
+    T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
     GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
     CONTEXT="$T2_CONTEXT" \
     bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
@@ -88,6 +97,11 @@ restore_gfs_runtime_credentials() {
 
 cleanup_t1() {
   local status=$?
+  if [ "$T1_CLEANUP_DONE" = true ]; then
+    return 0
+  fi
+  T1_CLEANUP_DONE=true
+  trap - EXIT INT TERM
   if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
     local command_line
     command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
@@ -101,6 +115,7 @@ cleanup_t1() {
     status=1
   fi
   if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi
+  t2_lock_release "$status" || status=$?
   exit "$status"
 }
 trap cleanup_t1 EXIT INT TERM
@@ -183,7 +198,7 @@ list_real_pg_files() {
 is_isolated_control_api_file() {
   local path="$1"
   case "$path" in
-    */db.realPostgresMigration.integration.test.ts|*/gfsReaderRole.realPostgres.integration.test.ts)
+    "$PROJECT_DIR"/control-api/test/*realPostgres*.test.ts)
       return 0
       ;;
     *)
@@ -193,20 +208,19 @@ is_isolated_control_api_file() {
 }
 
 require_isolated_control_api_files() {
-  local relative path
-  for relative in \
-    test/db.realPostgresMigration.integration.test.ts \
-    test/gfsReaderRole.realPostgres.integration.test.ts; do
-    path="$PROJECT_DIR/control-api/$relative"
-    if [ ! -f "$path" ]; then
-      T1_NEXT_COMMAND='restore the isolated Real PostgreSQL suite files, then re-run T1'
-      die_t1 ZERO_TESTS_EXECUTED "isolated suite file missing or renamed: $relative"
-    fi
+  local path count=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    count=$((count + 1))
     is_isolated_control_api_file "$path" || {
-      T1_NEXT_COMMAND='keep the isolated Real PostgreSQL suite filenames in the T1 harness'
-      die_t1 ZERO_TESTS_EXECUTED "isolated suite file is no longer routed away from control-postgres: $relative"
+      T1_NEXT_COMMAND='route every control-api Real PostgreSQL suite through the disposable PostgreSQL instance'
+      die_t1 ZERO_TESTS_EXECUTED "control-api Real PostgreSQL suite is not isolated: $path"
     }
-  done
+  done < <(list_real_pg_files control-api)
+  if [ "$count" -le 0 ]; then
+    T1_NEXT_COMMAND='restore the control-api Real PostgreSQL suite files, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED 'no control-api Real PostgreSQL suites were found'
+  fi
 }
 
 start_isolated_postgres() {
@@ -254,8 +268,12 @@ run_suite() {
 
   while IFS= read -r file; do
     [ -z "$file" ] && continue
-    if [ "$package" = control-api ] && is_isolated_control_api_file "$file"; then
-      [ "$lane" = isolated ] || continue
+    if [ "$package" = control-api ]; then
+      if [ "$lane" = isolated ]; then
+        is_isolated_control_api_file "$file" || continue
+      else
+        is_isolated_control_api_file "$file" && continue
+      fi
     else
       [ "$lane" = shared ] || continue
     fi
@@ -277,9 +295,10 @@ run_suite() {
   json_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).json"
   printf '[minikube-t1] running %s %s Real PostgreSQL suites (%s files)\n' \
     "$package" "$lane" "$expected_files"
-  # T1 verdict is the JSON reporter (expected files, executed/passed, zero
-  # failures, zero pending). Capture npm's exit but do not treat a leftover
-  # process exit after a complete green reporter as a failed suite.
+  # T1 requires both a complete green JSON reporter and a successful process
+  # exit. A reporter can be written before Vitest/npm fails during teardown,
+  # worker shutdown, OOM handling, or signal cleanup; accepting that partial
+  # observation would certify a broken lane.
   suite_status=0
   (
     cd "$PROJECT_DIR/$package"
@@ -332,8 +351,10 @@ PY
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package ($lane)"
   fi
   if [ "$suite_status" -ne 0 ]; then
-    printf '[minikube-t1] vitest process exited %s after a complete green reporter for %s %s; T1 follows the reporter\n' \
-      "$suite_status" "$package" "$lane"
+    cat "$log_file" >&2 || true
+    cat "$json_file" >&2 || true
+    T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
+    die_t1 REAL_PG_SUITE_FAILED "Vitest process exited $suite_status for $package ($lane)"
   fi
   printf '[minikube-t1] PASS %s %s files=%s tests=%s skipped=0\n' \
     "$package" "$lane" "$passed_files" "$passed_tests"
@@ -345,6 +366,7 @@ main() {
   t2_repo_metadata
   t2_profile_scope
   t2_context_check
+  t2_mutation_lock
   if [ -z "$T2_CONTEXT" ]; then
     T1_NEXT_COMMAND='set CONTROL_API_REAL_PG_CONTEXT to the verified Kubernetes context'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'local Real PostgreSQL requires an explicit Minikube context'
@@ -409,7 +431,6 @@ print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.dec
   start_isolated_postgres
   T1_GFS_RESTORE_REQUIRED=true
   run_suite control-api isolated "$ISOLATED_DSN"
-  run_suite control-api shared "$ADMIN_DSN"
   run_suite gfs-controller shared "$ADMIN_DSN"
   unset PG_USER PG_PASSWORD PG_DATABASE T1_REDACT_PASSWORD
   unset ADMIN_DSN ISOLATED_DSN
