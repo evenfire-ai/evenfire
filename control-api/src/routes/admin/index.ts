@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { K8sGateway } from '../../k8s.js'
 import { createAdminAgentsRouter } from './agents.js'
 import { createAdminBudgetsRouter } from './budgets.js'
+import { createAdminCodexSubscriptionRouter } from './codexSubscription.js'
 import { createAdminContextRouter } from './context.js'
 import { createAdminControlAdminsRouter } from './controlAdmins.js'
 import { createAdminHostArtifactsRouter } from './hostArtifacts.js'
@@ -47,6 +48,7 @@ export function createAdminRouter(gateway: K8sGateway): Router {
   router.use(createAdminUsageRouter())
   router.use(createAdminLlmPricesRouter())
   router.use(createAdminLlmModelsRouter(gateway))
+  router.use(createAdminCodexSubscriptionRouter())
   router.use(createAdminBudgetsRouter())
   router.use(createAdminTracingRouter())
   return router

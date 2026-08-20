@@ -131,6 +131,55 @@ export async function insertCodexSubscriptionOAuthState(
   return toSafeOAuthState(result.rows[0] as SafeOAuthStateRow)
 }
 
+export async function peekPendingCodexSubscriptionOAuthState(
+  db: DbClient,
+  encryptionKey: Buffer,
+  state: string
+): Promise<CodexSubscriptionConsumedOAuthState | null> {
+  const result = await db.query(
+    `SELECT ${SAFE_OAUTH_STATE_COLUMNS},
+            pkce_verifier_encrypted,
+            device_code_encrypted
+       FROM codex_subscription_oauth_states
+      WHERE state = $1
+        AND status = 'pending'
+        AND expires_at > now()`,
+    [state]
+  )
+  const row = result.rows[0] as ConsumedOAuthStateRow | undefined
+  if (!row) return null
+  return toConsumedOAuthState(row, encryptionKey)
+}
+
+export async function expireCodexSubscriptionOAuthState(
+  db: DbClient,
+  state: string
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE codex_subscription_oauth_states
+        SET status = 'expired'
+      WHERE state = $1
+        AND status = 'pending'`,
+    [state]
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+function toConsumedOAuthState(
+  row: ConsumedOAuthStateRow,
+  encryptionKey: Buffer
+): CodexSubscriptionConsumedOAuthState {
+  return {
+    safe: toSafeOAuthState(row),
+    pkceVerifier: row.pkce_verifier_encrypted
+      ? decryptOAuthSecret(encryptionKey, row.pkce_verifier_encrypted)
+      : undefined,
+    deviceCode: row.device_code_encrypted
+      ? decryptOAuthSecret(encryptionKey, row.device_code_encrypted)
+      : undefined,
+  }
+}
+
 export async function consumeCodexSubscriptionOAuthState(
   db: DbClient,
   encryptionKey: Buffer,
@@ -150,15 +199,7 @@ export async function consumeCodexSubscriptionOAuthState(
   )
   const row = result.rows[0] as ConsumedOAuthStateRow | undefined
   if (!row) return null
-  return {
-    safe: toSafeOAuthState(row),
-    pkceVerifier: row.pkce_verifier_encrypted
-      ? decryptOAuthSecret(encryptionKey, row.pkce_verifier_encrypted)
-      : undefined,
-    deviceCode: row.device_code_encrypted
-      ? decryptOAuthSecret(encryptionKey, row.device_code_encrypted)
-      : undefined,
-  }
+  return toConsumedOAuthState(row, encryptionKey)
 }
 
 export async function cancelCodexSubscriptionOAuthState(
