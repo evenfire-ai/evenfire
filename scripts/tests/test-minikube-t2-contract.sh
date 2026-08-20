@@ -15,8 +15,10 @@ if [ -z "$TMP_ROOT" ]; then TMP_ROOT=/tmp; fi
 set -u
 
 for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" \
+  "$ROOT/scripts/minikube/settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
-  "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"; do
+  "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
+  "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"; do
   bash -n "$file"
 done
 
@@ -93,6 +95,10 @@ if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'GFS_RECOV
   echo 'FAIL: provision_gfs_serving does not resume an interrupted gfsc-reader rollout claim' >&2
   exit 1
 fi
+if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'settle-gfs-reader-rollout.sh'; then
+  echo 'FAIL: provision_gfs_serving does not settle a Ready gfsc-reader leftover rollout claim before reconcile' >&2
+  exit 1
+fi
 if ! sed -n '/No cluster sync required before/,$p' "$PRE_GATE" | grep -Fq 'provision_gfs_serving'; then
   echo 'FAIL: pre-gate-sync skips GFS serving convergence when no cluster sync is required' >&2
   exit 1
@@ -100,6 +106,10 @@ fi
 grep -Fq 'converge_gfs_reader_after_restore' "$PRE_GATE"
 if [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/minikube/full-setup.sh")" -lt 2 ]]; then
   echo 'FAIL: full-setup REUSE_DB path must restore a NOLOGIN GFS role and resume an abandoned reader rollout before and after overlay' >&2
+  exit 1
+fi
+if [[ "$(grep -c 'scripts/minikube/settle-gfs-reader-rollout.sh' "$ROOT/scripts/minikube/full-setup.sh")" -lt 2 ]]; then
+  echo 'FAIL: full-setup REUSE_DB path must settle a Ready gfsc-reader leftover rollout claim before both reconciles' >&2
   exit 1
 fi
 
@@ -235,5 +245,6 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
   exit 1
 fi
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
+bash "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"
 
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'

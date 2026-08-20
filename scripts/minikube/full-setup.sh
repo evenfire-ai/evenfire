@@ -985,6 +985,10 @@ else
     # reader Secret in rollout-running. This path holds the T2 profile lock,
     # so the prior process is dead; resume that claim instead of asking for
     # a manual retry flag between runs.
+    # If gfsc-reader is already Ready, settle the leftover claim first so
+    # reconcile does not rollout restart and race HCC's gfsReconciler.
+    CONTEXT="${PROFILE}" \
+      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
     GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
       CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
@@ -1049,6 +1053,8 @@ else
     # the split writer/reader templates; reconciling before that lands leaves
     # the staged reader credential rollout-pending and fails the final verify.
     CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
+    CONTEXT="${PROFILE}" \
+      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
     GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
       CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"

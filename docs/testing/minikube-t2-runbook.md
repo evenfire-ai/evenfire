@@ -140,7 +140,12 @@ or interrupt) using the canonical
 `GFS_RESTORE_ACTIVE_NOLOGIN=true` and `GFS_RECOVER_ABANDONED_STATE=true` —
 the same contract as the standalone GFS T1 gate, plus resume of a leftover
 `rollout-running` claim from a timed-out prior setup. The T2 profile lock
-makes that recover safe: the prior process is dead. `pre-gate-sync`
+makes that recover safe: the prior process is dead. When `gfsc-reader`
+is already Ready, `scripts/minikube/settle-gfs-reader-rollout.sh` marks
+the leftover reader claim ready before reconcile so a second
+`rollout restart` cannot race HCC's gfsReconciler (that patch loop
+makes `kubectl rollout status` wait for a spec update until timeout).
+`pre-gate-sync`
 provisions GFS serving with the same opt-ins in every sync plan (including
 "no cluster sync required") and restarts an unready `gfsc-reader` after a
 successful restore. `full-setup.sh` on the REUSE_DB / T2 full-reconcile path

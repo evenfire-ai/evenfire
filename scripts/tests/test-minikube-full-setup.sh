@@ -283,6 +283,7 @@ assert_gfs_provisioning_follows_migrations_and_core_readiness() {
      grep -q 'scale deployment/host-context-controller --replicas="\$RESET_HCC_REPLICAS"' <<<"$reset_block" && \
      ! grep -q 'delete pvc control-postgres-data' scripts/minikube/full-setup.sh && \
      [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true' scripts/minikube/full-setup.sh)" -ge 2 ]] && \
+     [[ "$(grep -c 'scripts/minikube/settle-gfs-reader-rollout.sh' scripts/minikube/full-setup.sh)" -ge 2 ]] && \
      [[ "$core_block" != *"gfs-controller"* ]]; then
     pass "full-setup centralizes explicit UID-bound reset and never auto-deletes on WAL logs"
   else
