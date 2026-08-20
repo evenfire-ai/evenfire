@@ -12,6 +12,24 @@ SOURCE_HASH="$(printf 'public-key' | shasum -a 256 | awk '{print $1}')"
 mkdir -p "${STATE_DIR}"
 printf 'old-mcp-key' >"${STATE_DIR}/mcp.key"
 
+# The production helper requires a live parent T2 lease. Keep the behavior
+# tests isolated with a lease owned by this test shell rather than adding a
+# production-only bypass.
+T2_LOCK_ROOT="${TMP_DIR}/locks"
+T2_LOCK_TOKEN='auth-sync-test-token'
+T2_LOCK_DIR="${T2_LOCK_ROOT}/fake.lock"
+T2_PROCESS_START=unavailable
+mkdir -p "${T2_LOCK_DIR}"
+cat >"${T2_LOCK_DIR}/owner.env" <<EOF
+REPOSITORY=${ROOT}
+PROFILE=fake
+CONTEXT=fake
+TOKEN=${T2_LOCK_TOKEN}
+PID=$$
+PROCESS_START=${T2_PROCESS_START}
+EOF
+export T2_PROJECT_DIR="${ROOT}" T2_PROFILE=fake T2_CONTEXT=fake T2_LOCK_ROOT T2_LOCK_TOKEN
+
 cat >"${TMP_DIR}/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -30,13 +48,44 @@ increment() {
 }
 
 if [[ "${1:-}" == get && "${2:-}" == secret && "${3:-}" == rpc-proxy-secrets ]]; then
-  [[ "$*" == *jsonpath* ]] && printf '%s' "${TEST_SOURCE_B64:-cHVibGljLWtleQ==}"
+  if [[ "$*" == *'.metadata.resourceVersion'* ]]; then
+    printf '42'
+  elif [[ "$*" == *'-o json' ]]; then
+    source_b64="${TEST_SOURCE_B64:-cHVibGljLWtleQ==}"
+    source_rv=42
+    if [[ -n "${TEST_ROTATE_ON_SOURCE_SNAPSHOT:-}" ]]; then
+      snapshot_file="${TEST_STATE_DIR}/source-json-snapshot.count"
+      snapshot_count=0
+      [[ -f "${snapshot_file}" ]] && snapshot_count="$(cat "${snapshot_file}")"
+      snapshot_count=$((snapshot_count + 1))
+      printf '%s' "${snapshot_count}" >"${snapshot_file}"
+      if (( snapshot_count >= TEST_ROTATE_ON_SOURCE_SNAPSHOT )); then
+        source_b64='cm90YXRlZA=='
+        source_rv=43
+      fi
+    fi
+    printf '{"metadata":{"resourceVersion":"%s"},"data":{"RPC_PROXY_JWT_PUBLIC_KEY":"%s"}}' "${source_rv}" "${source_b64}"
+  elif [[ "$*" == *jsonpath* ]]; then
+    printf '%s' "${TEST_SOURCE_B64:-cHVibGljLWtleQ==}"
+  fi
   exit 0
 fi
 
 if [[ "${1:-}" == get && "${2:-}" == configmap && "${3:-}" == mcp-host-config ]]; then
   if [[ "$*" == *auth-key-applied-sha256* ]]; then
     [[ -f "${TEST_STATE_DIR}/mcp.applied" ]] && cat "${TEST_STATE_DIR}/mcp.applied"
+  elif [[ "$*" == *'-o json' ]]; then
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+state = Path(os.environ['TEST_STATE_DIR'])
+annotations = {}
+if (state / 'mcp.applied').exists():
+    annotations['clerum.io/auth-key-applied-sha256'] = (state / 'mcp.applied').read_text()
+print(json.dumps({'metadata': {'resourceVersion': '42', 'annotations': annotations},
+                  'data': {'CLERUM_AUTH_JWT_PUBLIC_KEY': (state / 'mcp.key').read_text()}}))
+PY
   elif [[ "$*" == *jsonpath* ]]; then
     cat "${TEST_STATE_DIR}/mcp.key"
   fi
@@ -50,6 +99,18 @@ if [[ "${1:-}" == get && "${2:-}" == configmap && "${3:-}" == gfs-config ]]; the
   }
   if [[ "$*" == *auth-key-applied-sha256* ]]; then
     [[ -f "${TEST_STATE_DIR}/gfs.applied" ]] && cat "${TEST_STATE_DIR}/gfs.applied"
+  elif [[ "$*" == *'-o json' ]]; then
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+state = Path(os.environ['TEST_STATE_DIR'])
+annotations = {}
+if (state / 'gfs.applied').exists():
+    annotations['clerum.io/auth-key-applied-sha256'] = (state / 'gfs.applied').read_text()
+print(json.dumps({'metadata': {'resourceVersion': '42', 'annotations': annotations},
+                  'data': {'jwt-public-key': (state / 'gfs.key').read_text()}}))
+PY
   elif [[ "$*" == *jsonpath* ]]; then
     cat "${TEST_STATE_DIR}/gfs.key"
   fi
@@ -84,10 +145,15 @@ fi
 
 if [[ "${1:-}" == get && "${2:-}" == deployment/* ]]; then
   case "${2}" in
-    deployment/chatllm|deployment/custom-host) exit 0 ;;
+    deployment/chatllm|deployment/custom-host)
+      [[ "$*" == *'.spec.replicas'* ]] && printf '%s' "${TEST_MCP_REPLICAS:-1}"
+      exit 0 ;;
     deployment/mcp-host) echo 'Error from server (NotFound): deployments.apps "mcp-host" not found' >&2; exit 1 ;;
     deployment/gfsc-writer|deployment/gfsc-reader)
-      if [[ "${TEST_GFS_DEPLOYMENTS:-0}" == 1 ]]; then exit 0; fi
+      if [[ "${TEST_GFS_DEPLOYMENTS:-0}" == 1 ]]; then
+        [[ "$*" == *'.spec.replicas'* ]] && printf '1'
+        exit 0
+      fi
       printf 'Error from server (NotFound): deployments.apps "%s" not found\n' "${2#deployment/}" >&2
       exit 1 ;;
     *) exit 1 ;;
@@ -145,7 +211,15 @@ fi
 echo "unexpected kubectl invocation: $*" >&2
 exit 99
 SH
-chmod +x "${TMP_DIR}/kubectl"
+cat >"${TMP_DIR}/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' -o state='*) printf 'R\n' ;;
+  *' -o lstart='*) printf 'unavailable\n' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "${TMP_DIR}/kubectl" "${TMP_DIR}/ps"
 
 run_sync() {
   local source_hash="${TEST_SOURCE_HASH_OVERRIDE:-${SOURCE_HASH}}"
@@ -206,7 +280,19 @@ if run_sync env TEST_RUNTIME_KEY=old-key TEST_MCP_DEPLOYMENTS=custom \
   exit 1
 fi
 [[ "$(cat "${STATE_DIR}/custom-host-restart.count")" == 1 ]]
-grep -q 'has not consumed the target auth key' "${OUT_FILE}"
+
+# A stateless HCC Host can be intentionally suspended at replicas=0. The
+# ConfigMap still converges, but there is no pod to restart or prove; a future
+# pod must consume the current ConfigMap value.
+printf 'old-mcp-key' >"${STATE_DIR}/mcp.key"
+rm -f "${STATE_DIR}/mcp.applied"
+run_sync env TEST_MCP_REPLICAS=0 TEST_RUNTIME_KEY=old-key \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1
+[[ "$(cat "${STATE_DIR}/mcp.key")" == public-key ]]
+[[ "$(cat "${STATE_DIR}/mcp.applied")" == "${SOURCE_HASH}" ]]
+[[ "$(cat "${STATE_DIR}/chatllm-restart.count")" == 1 ]]
+grep -q 'Skipping suspended mcp-host/chatllm' "${OUT_FILE}"
 
 run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=custom \
   bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
@@ -276,5 +362,25 @@ if grep -q 'rollout restart deployment/' "${LOG_FILE}"; then
   cat "${LOG_FILE}" >&2
   exit 1
 fi
+
+# A source rotation after consumer proof must invalidate the run before the
+# final success message, even when the previous convergence marker was already
+# written. This is the race the resourceVersion+key snapshot closes.
+printf 'old-key' >"${STATE_DIR}/mcp.key"
+rm -f "${STATE_DIR}/mcp.applied" "${STATE_DIR}/source-json-snapshot.count"
+: >"${LOG_FILE}"
+if TEST_ROTATE_ON_SOURCE_SNAPSHOT=3 run_sync env \
+  TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=chatllm \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  echo 'FAIL: auth-key sync certified a source that rotated after consumer proof' >&2
+  exit 1
+fi
+grep -q 'auth source rotated during convergence' "${OUT_FILE}" || {
+  cat "${OUT_FILE}" >&2
+  echo 'FAIL: auth-key sync did not report the final source rotation' >&2
+  exit 1
+}
 
 echo "PASS: auth-key convergence is durable, resumable, consumer-proven, and idempotent"

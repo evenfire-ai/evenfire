@@ -65,6 +65,7 @@ repo_env=(
   T2_PROFILE_ROOT="$tmp/profiles"
   T2_PROFILE_ENV="$profile_root/profile.env"
   T2_PORTS_ENV="$profile_root/ports.env"
+  T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader
   T2_BRANCH=feat/scenario
   T2_HEAD="$feature_sha"
   T2_LOCK_ROOT="$tmp/locks"
@@ -119,6 +120,20 @@ env "${context_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT='[::1]' \
   bash -c 'source "$1"; t2_context_check' bash "$COMMON"
 env "${context_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=localhost \
   bash -c 'source "$1"; t2_context_check' bash "$COMMON"
+expect_code DEVELOPMENT_SCOPE_REQUIRED public-endpoint public-endpoint \
+  env "${context_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=8.8.8.8 \
+  bash -c 'source "$1"; t2_context_check' bash "$COMMON"
+env "${context_env[@]}" PATH="$fake_bin:$PATH" FAKE_ENDPOINT=192.168.1.99 \
+  bash -c 'source "$1"; t2_context_check' bash "$COMMON"
+
+identity_json='{"items":[{"metadata":{"labels":{"minikube.k8s.io/name":"PROFILE"}},"status":{"addresses":[{"type":"InternalIP","address":"172.17.0.3"}]}}]}'
+identity_ok="$(env "${repo_env[@]}" IDENTITY_JSON="$identity_json" \
+  bash -c 'source "$1"; T2_BOOTSTRAP_REQUIRED=false; t2_mk(){ printf 172.17.0.3; }; t2_kc(){ printf "%s" "$IDENTITY_JSON" | sed "s/PROFILE/$T2_PROFILE/g"; }; t2_profile_context_identity_check; printf "%s" "$T2_CONTEXT_IDENTITY_VERIFIED"' bash "$COMMON")"
+[ "$identity_ok" = true ] || fail "exact Minikube profile/node identity did not verify"
+identity_wrong='{"items":[{"metadata":{"labels":{"minikube.k8s.io/name":"other-profile"}},"status":{"addresses":[{"type":"InternalIP","address":"172.17.0.3"}]}}]}'
+expect_code DEVELOPMENT_SCOPE_REQUIRED wrong-profile-identity wrong-profile-identity \
+  env "${repo_env[@]}" IDENTITY_JSON="$identity_wrong" \
+  bash -c 'source "$1"; T2_BOOTSTRAP_REQUIRED=false; t2_mk(){ printf 172.17.0.3; }; t2_kc(){ printf "%s" "$IDENTITY_JSON"; }; t2_profile_context_identity_check' bash "$COMMON"
 
 missing_profile_state="$(env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_profile_status; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
 [ "$missing_profile_state" = full-bootstrap ] || fail "missing profile selected $missing_profile_state instead of full-bootstrap"
@@ -254,6 +269,14 @@ case "$planner_unready" in
   *gfs/gfsc-reader*) ;;
   *) fail 'planner full-reconcile reason does not name the unready deployment' ;;
 esac
+
+ready_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader","generation":7},"spec":{"replicas":1},"status":{"observedGeneration":7,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
+env "${repo_env[@]}" READY_JSON="$ready_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$READY_JSON"; }; t2_deployment_check' bash "$COMMON"
+stale_generation_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader","generation":8},"spec":{"replicas":1},"status":{"observedGeneration":7,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
+expect_code PROFILE_UNHEALTHY stale-generation stale-generation \
+  env "${repo_env[@]}" INVALID_INVENTORY="$stale_generation_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$INVALID_INVENTORY"; }; t2_deployment_check' bash "$COMMON"
 
 # Negative pin: the standalone preflight and the final exact-head check
 # (T2_PLAN_MODE=false) stay fail-loud on an unready deployment.
@@ -404,6 +427,11 @@ if ! run_process_check "$tmp/ps-ef-wrap.out" "$tmp/pf-wrap.err"; then
   fail 't2_process_check failed on a wrapper that only mentions kubectl (comm=bash)'
 fi
 
+printf '%s\n' "$pf_ctl" >"$tmp/ps-ef-contextless.out"
+if ! run_process_check "$tmp/ps-ef-contextless.out" "$tmp/pf-contextless.err"; then
+  fail 't2_process_check rejected an unrelated context-less port-forward'
+fi
+
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
 
@@ -414,7 +442,7 @@ cat >"$forward_tmp/bin/ps" <<'EOF'
 printf '%s\n' 'root 4242 1 0 00:00 ? 00:00:00 kubectl --context=profile-a -n control-plane port-forward svc/control-api 30100:8090'
 EOF
 chmod +x "$forward_tmp/bin/ps"
-printf '4242\n' >"/tmp/pf-profile-a-control-api.pid"
+printf '4242\nPROCESS_START=unavailable\n' >"/tmp/pf-profile-a-control-api.pid"
 forward_check="$(env PATH="$forward_tmp/bin:$PATH" T2_PROFILE=profile-a T2_CONTEXT=profile-a \
   T2_PROFILE_ROOT="$forward_tmp/profile-cache" bash -c 'source "$1"; t2_process_check; printf PASS' bash "$COMMON")"
 rm -f "/tmp/pf-profile-a-control-api.pid"

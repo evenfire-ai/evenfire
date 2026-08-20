@@ -21,16 +21,22 @@ kc() { kubectl --context="$CONTEXT" "$@"; }
 log() { printf '[wait-gfs-reader-ready] %s\n' "$*" >&2; }
 
 if ! TIMEOUT_SECONDS="$(python3 - "$TIMEOUT_SECONDS" <<'PY'
+import math
 import re
 import sys
 
 raw = sys.argv[1]
-if not re.fullmatch(r"[1-9][0-9]{0,4}", raw):
-    raise SystemExit("timeout must be a positive integer")
-value = int(raw)
-if value > 86400:
+if re.fullmatch(r"[1-9][0-9]*", raw):
+    total = float(raw)
+else:
+    tokens = re.findall(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)", raw)
+    if not tokens or "".join(number + unit for number, unit in tokens) != raw:
+        raise SystemExit("timeout must be a positive Go-style duration")
+    factors = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+    total = sum(float(number) * factors[unit] for number, unit in tokens)
+if total <= 0 or total > 86400:
     raise SystemExit("timeout exceeds the one-day limit")
-print(value)
+print(max(1, math.ceil(total)))
 PY
 )"; then
   log 'refusing an invalid readiness timeout'
@@ -67,9 +73,10 @@ while :; do
       log "unable to inspect reader pods for ${GFS_NS}/${DEPLOY}: ${pod_rows}"
       exit 1
     fi
+    live_ready="$(awk -F'|' 'NF && $2 == "" && $1 == "True" { n++ } END { print n+0 }' <<<"$pod_rows")"
     unready="$(awk -F'|' 'NF && $2 == "" && $1 != "True" { n++ } END { print n+0 }' <<<"$pod_rows")"
-    if [ "${unready:-0}" -eq 0 ]; then
-      log "${GFS_NS}/${DEPLOY} is Ready (${ready}/${desired}) with no live unready reader pod"
+    if [ "${live_ready:-0}" -ge "$desired" ] && [ "${unready:-0}" -eq 0 ]; then
+      log "${GFS_NS}/${DEPLOY} is Ready (${ready}/${desired}) with ${live_ready} live Ready reader pod(s)"
       exit 0
     fi
   fi

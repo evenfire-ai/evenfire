@@ -88,7 +88,7 @@ sync_mcp_host_auth_key() {
 }
 
 provision_gfs_serving
-expected=$'sync\nsettle\nreconcile\nconverge'
+expected=$'sync\nsettle\nreconcile\nsync\nconverge'
 actual="$(cat "$order_file")"
 [ "$actual" = "$expected" ] || {
   printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2

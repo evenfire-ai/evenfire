@@ -87,6 +87,7 @@ run_preflight_plan() {
     bash "$SCRIPT_DIR/t2-preflight.sh"; then
     T2_NEXT_COMMAND='re-run make minikube-t2-preflight and repair its first reported precondition'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'preflight failed before a state transition was selected'
+    return 1
   fi
   T2_PLAN_STATE="$(python3 - "$T2_PLAN_TMP" <<'PY'
 import json
@@ -103,6 +104,7 @@ PY
   if [ -z "$T2_PLAN_STATE" ]; then
     T2_NEXT_COMMAND='re-run make minikube-t2-preflight and inspect its evidence'
     t2_fail BOOTSTRAP_REQUIRED 'preflight did not produce a state transition'
+    return 1
   fi
   printf '[minikube-t2] transition=%s reason=%s\n' "$T2_PLAN_STATE" "$T2_PLAN_REASON"
 }
@@ -115,12 +117,14 @@ run_pvc_reset_if_authorized() {
   if [ -z "$T2_EXPECTED_PVC_UID" ]; then
     T2_NEXT_COMMAND='set T2_EXPECTED_PVC_UID to the exact recorded UID and keep T2_RESET_PVC=true only for local development'
     t2_fail POSTGRES_NOT_READY 'destructive PVC reset requires an exact expected UID'
+    return 1
   fi
   local actual_uid
   actual_uid="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get pvc control-postgres-data -o 'jsonpath={.metadata.uid}' 2>/dev/null || true)"
   if [ "$actual_uid" != "$T2_EXPECTED_PVC_UID" ]; then
     T2_NEXT_COMMAND='do not reset this PVC; re-check the profile and recorded UID'
     t2_fail POSTGRES_NOT_READY 'PVC UID does not match the explicit reset expectation'
+    return 1
   fi
   printf '[minikube-t2] authorized development-only PVC reset for the exact expected UID\n'
 }
@@ -162,6 +166,7 @@ run_bootstrap_or_reconcile() {
     *)
       T2_NEXT_COMMAND='re-run make minikube-t2-preflight to select bootstrap, targeted sync, full reconcile, or already-synced'
       t2_fail BOOTSTRAP_REQUIRED "unknown transition: $T2_PLAN_STATE"
+      return 1
       ;;
   esac
   t2_evidence_write transition PASS "$T2_PLAN_STATE"
@@ -210,6 +215,7 @@ run_t1() {
       t2_evidence_write T1 FAIL 'Real PostgreSQL lane exited zero but did not emit a complete green T1 result'
       T2_NEXT_COMMAND='repair the T1 result contract; it must emit PASS, positive total/passed counts, zero pending tests, and an evidence path'
       t2_fail REAL_PG_SUITE_FAILED 'T1 result was incomplete despite a zero process exit'
+      return 1
     fi
     T2_T1_STATUS=PASS
     T2_T1_COUNTS="$(awk -F= '/^T1_TESTS=|^T1_PASSED_TESTS=|^T1_PENDING_TESTS=/{printf "%s%s", (n++ ? "," : ""), $0}' "$T2_T1_OUTPUT")"
@@ -234,6 +240,7 @@ run_final_preflight() {
     cat "$T2_FINAL_PREFLIGHT_OUTPUT" >&2 || true
     T2_NEXT_COMMAND='repair the first reported final preflight condition, then re-run T2 on the same HEAD'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'final exact-head readiness preflight failed'
+    return 1
   fi
   T2_PLAN_STATE="$(python3 - "$T2_PLAN_TMP" <<'PY'
 import json
@@ -244,6 +251,7 @@ PY
   if [ "$T2_PLAN_STATE" != already-synced ]; then
     T2_NEXT_COMMAND='re-run make minikube-t2 so pre-gate-sync updates the marker to this HEAD'
     t2_fail HEAD_MARKER_MISMATCH "final T2 preflight selected $T2_PLAN_STATE instead of already-synced"
+    return 1
   fi
   t2_marker_check
   T2_T2_STATUS=PASS
@@ -283,6 +291,7 @@ run_healthcheck_if_requested() {
     t2_evidence_write Health FAIL 'profile-owned user-facing health command failed'
     T2_NEXT_COMMAND='repair the first failing user-facing health check, then re-run T2 on the same HEAD'
     t2_fail PROFILE_UNHEALTHY 'user-facing health check failed'
+    return 1
   fi
 }
 
@@ -293,6 +302,7 @@ run_playwright_if_requested() {
     if [ "$T2_REQUIRE_PLAYWRIGHT" = true ]; then
       T2_NEXT_COMMAND='set T2_PLAYWRIGHT_COMMAND to the applicable profile-owned Playwright journey and re-run'
       t2_fail ZERO_TESTS_EXECUTED 'Playwright was required but no journey command was supplied'
+      return 1
     fi
     return 0
   fi
@@ -310,7 +320,10 @@ main() {
   t2_require_commands
   t2_repo_metadata
   t2_profile_scope
-  t2_context_check
+  t2_profile_status
+  if [ "$T2_BOOTSTRAP_REQUIRED" != true ]; then
+    t2_context_check
+  fi
   t2_mutation_lock
   t2_evidence_init
 
@@ -318,11 +331,13 @@ main() {
   if [ "$T2_RUN_T0" = true ] && ! t2_lane_completed "$T2_T0_STATUS"; then
     T2_NEXT_COMMAND='re-run make minikube-t2 with T2_RUN_T0=true so the static lane is executed'
     t2_fail ZERO_TESTS_EXECUTED 'T0 was not executed'
+    return 1
   fi
   run_preflight_plan
   if { [ "$T2_RUN_T0" != true ] || [ "$T2_RUN_T1" != true ]; } && [ "$T2_PLAN_STATE" != already-synced ]; then
     T2_NEXT_COMMAND='run make minikube-t2 so bootstrap/reconcile and T0/T1 execute on this HEAD'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'T2-only mode requires an already-synced exact-head profile'
+    return 1
   fi
   if [ "$T2_RUN_T0" != true ] || [ "$T2_RUN_T1" != true ]; then
     t2_marker_check
@@ -334,10 +349,18 @@ main() {
   if [ "$T2_RUN_T1" = true ] && ! t2_lane_completed "$T2_T1_STATUS"; then
     T2_NEXT_COMMAND='re-run make minikube-t2 with T2_RUN_T1=true so the Real PostgreSQL lane is executed'
     t2_fail ZERO_TESTS_EXECUTED 'T1 was not executed'
+    return 1
   fi
   if [ "$T2_RUN_T1" != true ] && [ "$T2_T1_CERTIFIED" != true ]; then
     T2_NEXT_COMMAND='run make minikube-t2 with T2_RUN_T1=true to create an exact-head T1 attestation'
     t2_fail CERTIFICATION_REQUIRED 'T1 was skipped without a validated exact-head attestation'
+    return 1
+  fi
+  if [ "$T2_T0_STATUS" = PASS ] && [ "$T2_T1_STATUS" = PASS ]; then
+    # Publish the reusable static/database lane attestation before runtime T2.
+    # If the later runtime lane fails, a subsequent runtime-only invocation may
+    # reuse these exact-head lanes without pretending that T2 already passed.
+    t2_evidence_write lanes PASS 'T0 and T1 completed before runtime T2'
   fi
   run_final_preflight
   run_np08_hcc_authorization

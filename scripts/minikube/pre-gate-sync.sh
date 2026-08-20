@@ -62,6 +62,8 @@ if [ "$PRE_GATE_SYNC_CONFIG_ONLY" != true ]; then
   t2_repo_metadata
   t2_profile_scope
   t2_context_check
+  t2_profile_status
+  t2_profile_context_identity_check
 fi
 
 log() {
@@ -237,6 +239,8 @@ commit_cluster_sync_state() {
 if [ "$PRE_GATE_SYNC_CONFIG_ONLY" != true ]; then
   t2_mutation_lock
 fi
+export T2_PROJECT_DIR T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV \
+  T2_SKIP_LOCK T2_LOCK_TOKEN
 trap finalize_pre_gate_sync EXIT
 
 fingerprint_dir() {
@@ -384,7 +388,9 @@ sync_mcp_host_auth_key() {
 }
 
 sync_gfs_auth_key() {
-  bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}" --require-gfs
+  local allow_staged="${1:-false}"
+  GFS_AUTH_SYNC_ALLOW_STAGED="${allow_staged}" \
+    bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}" --require-gfs
 }
 
 settle_gfs_reader_rollout() {
@@ -454,14 +460,24 @@ converge_gfs_reader_after_restore() {
   # restored Secret without waiting out CrashLoopBackOff, then judge
   # readiness directly.
   local pod_rows pod_name pod_ready pod_deleting
-  pod_rows="$(${KC} get pods -n gfs -l 'app=gfs-controller,clerum.io/gfsc-role=reader' -o \
+  if ! pod_rows="$(${KC} get pods -n gfs -l 'app=gfs-controller,clerum.io/gfsc-role=reader' -o \
     'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' \
-    2>/dev/null || true)"
+    2>&1)"; then
+    if [[ "$pod_rows" == *NotFound* || "$pod_rows" == *"not found"* ]]; then
+      pod_rows=""
+    else
+      log "ERROR: unable to inspect gfs reader pods before convergence: $pod_rows"
+      return 1
+    fi
+  fi
   while IFS='|' read -r pod_name pod_ready pod_deleting; do
     [ -n "$pod_name" ] || continue
     [ -z "$pod_deleting" ] || continue
     [ "$pod_ready" != True ] || continue
-    ${KC} delete pod "$pod_name" -n gfs --wait=false >/dev/null 2>&1 || true
+    if ! ${KC} delete pod "$pod_name" -n gfs --ignore-not-found --wait=false >/dev/null 2>&1; then
+      log "ERROR: unable to delete unready gfs reader pod $pod_name"
+      return 1
+    fi
   done <<<"$pod_rows"
   CONTEXT="${PROFILE}" \
     bash "${PROJECT_DIR}/scripts/minikube/wait-gfs-reader-ready.sh"
@@ -503,7 +519,7 @@ provision_gfs_serving() {
     # (the overlay re-applies the base ConfigMap with an empty value); a
     # reader pod cannot start without it and any readiness wait would only
     # time out. Re-sync it first; this is a no-op when the key matches.
-    sync_gfs_auth_key
+    sync_gfs_auth_key true
     # Settle a Ready reader first so reconcile does not restart it and
     # race HCC's gfsReconciler during kubectl rollout status. If reconcile
     # still needs a reader rollout, the gfs-rollout-shim PATH prefix makes
@@ -516,6 +532,14 @@ provision_gfs_serving() {
     if ! reconcile_gfs_credentials; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1
+    fi
+    # The first staged sync may have deferred active-pod proof because this
+    # reconcile call is the producer of gfs-controller-db. Re-run strict proof
+    # after it so the durable marker is never published before consumers have
+    # the key and a usable DSN.
+    if ! sync_gfs_auth_key; then
+      log "ERROR: gfs auth-key convergence failed after credential reconciliation"
+      return 1
     fi
     if ! converge_gfs_reader_after_restore; then
       log "ERROR: gfs reader did not converge after credential restoration"
@@ -628,7 +652,9 @@ if [[ "${cluster_changed}" == "true" ]]; then
         "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ]]; then
     (
       cd "${PROJECT_DIR}"
-      make minikube-deploy-crds
+      gfs_crd_mutation=false
+      [[ "${GATE_NAME}" == "minikube-t2" ]] && gfs_crd_mutation=true
+      MINIKUBE_GFS_MUTATION="${gfs_crd_mutation}" make minikube-deploy-crds
     )
     if [[ "${GATE_NAME}" == "minikube-t2" ]]; then
       CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"

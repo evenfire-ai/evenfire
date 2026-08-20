@@ -61,9 +61,12 @@ case " $* " in
     exit 0 ;;
   *' get rs -l '*)
     printf '%b' "${FAKE_RS_ROWS:-}"; exit 0 ;;
+  *' get rs gfsc-reader-stale '*'.spec.replicas'*)
+    [ -s "${FAKE_SCALE_FILE:?}" ] && printf '0' || printf '1'; exit 0 ;;
   *' get rs gfsc-reader-proof-rs '*revision*)
     printf '%s' "${FAKE_REVISION:-19}"; exit 0 ;;
   *' scale rs '*)
+    printf '%s' "${4:-gfsc-reader-stale}" >"${FAKE_SCALE_FILE:?}"
     exit 0 ;;
   *' get pods -l '*gfs-template-hash*)
     printf '%b' "${FAKE_PROOF_POD_ROWS:-gfsc-reader-proof|2026-01-02T00:00:01Z|True||gfsc-reader-proof-rs|}"; exit 0 ;;
@@ -104,7 +107,9 @@ exit 1
 STUB
   chmod +x "$fake_dir/kubectl"
   local status=0
+  : >"$fake_dir/scaled-rs"
   PATH="$fake_dir:$PATH" CONTEXT="$profile" \
+    T2_LOCK_TOKEN=settle-test-token \
     T2_PROJECT_DIR="$repo" T2_PROFILE="$profile" T2_CONTEXT="$profile" \
     MINIKUBE_PROFILE="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" \
     T2_PROFILE_ROOT="$fake_dir/profiles" T2_PROFILE_ENV="$fake_dir/profiles/$profile/profile.env" \
@@ -113,6 +118,7 @@ STUB
     T2_GATE_ID=settle-gfs-reader-test T2_RUN_ID=settle-test-run \
     FAKE_KUBECTL_LOG="$fake_dir/kubectl.log" \
     FAKE_PATCH_LOG="$fake_dir/patch.json" FAKE_DSN=dsn-value \
+    FAKE_SCALE_FILE="$fake_dir/scaled-rs" \
     FAKE_DEPLOY_EXISTS="${1:-1}" \
     FAKE_DESIRED="${2:-1}" \
     FAKE_READY="${3:-1}" \

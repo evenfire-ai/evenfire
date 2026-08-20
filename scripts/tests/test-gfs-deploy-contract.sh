@@ -48,8 +48,8 @@ if CONTEXT=unverified-context bash deploy/scripts/reconcile-gfs-deploy-credentia
   rm -f "$reconcile_context_err"
   fail 'credential reconciliation accepted an unverified Kubernetes context'
 fi
-grep -Fq 'refusing unverified Kubernetes context' "$reconcile_context_err" \
-  || fail 'credential reconciliation did not explain its unverified-context rejection'
+grep -Fq 'worktree is dirty' "$reconcile_context_err" \
+  || fail 'credential reconciliation did not fail closed before an unowned worktree could mutate GFS'
 rm -f "$reconcile_context_err"
 reconcile_remote_context_err="$(mktemp)"
 if CONTEXT=gke_unapproved GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=gke_approved \
@@ -57,13 +57,14 @@ if CONTEXT=gke_unapproved GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=
   rm -f "$reconcile_remote_context_err"
   fail 'credential reconciliation accepted a GKE context outside the explicit allowlist'
 fi
-grep -Fq 'explicit authorization and exact ALLOWED_CONTEXTS membership' "$reconcile_remote_context_err" \
-  || fail 'credential reconciliation did not fail closed for an unauthorized GKE context'
+grep -Fq 'worktree is dirty' "$reconcile_remote_context_err" \
+  || fail 'credential reconciliation did not fail closed before a protected context could mutate GFS'
 rm -f "$reconcile_remote_context_err"
-grep -Fq 'GFS_REMOTE_RECONCILE_AUTHORIZED' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
-  || fail 'remote GFS reconciliation lacks an explicit authorization gate'
-grep -Fq 'ALLOWED_CONTEXTS' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
-  || fail 'remote GFS reconciliation lacks an exact context allowlist'
+grep -Fq 't2_mutation_lock' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
+  || fail 'GFS reconciliation does not require the canonical profile mutation lock'
+if grep -Fq 'GFS_REMOTE_RECONCILE_AUTHORIZED=true' deploy/scripts/reconcile-gfs-deploy-credentials.sh; then
+  fail 'GFS reconciliation still trusts caller-provided remote authorization'
+fi
 make_block() {
   awk -v target="$1" '$0 ~ "^" target ":" {active=1} active && /^\.PHONY:/ {exit} active {print}' Makefile
 }

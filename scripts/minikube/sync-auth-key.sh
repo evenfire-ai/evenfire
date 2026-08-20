@@ -50,6 +50,39 @@ if [[ "${REQUIRE_GFS}" == "true" && "${SYNC_GFS}" != "true" ]]; then
   exit 2
 fi
 
+log() { printf '[sync-auth-key] %s\n' "$*"; }
+die() {
+  log "ERROR: $*" >&2
+  exit 1
+}
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+T2_PROJECT_DIR="${T2_PROJECT_DIR:-${ROOT}}"
+T2_PROFILE="${T2_PROFILE:-${MINIKUBE_PROFILE:-${PROFILE}}}"
+T2_CONTEXT="${T2_CONTEXT:-${CONTROL_API_REAL_PG_CONTEXT:-${PROFILE}}}"
+T2_LOCK_ROOT="${T2_LOCK_ROOT:-${HOME}/.cache/evenfire/minikube-t2-locks}"
+T2_LOCK_TOKEN="${T2_LOCK_TOKEN:-}"
+# Auth-key convergence mutates runtime ConfigMaps and restarts consumers. It is
+# a child of the owning T2/full-setup transition, never an independent writer.
+# Validate the live opaque lease here as well as at the public Make boundary so
+# invoking this helper directly cannot bypass profile ownership.
+source "${ROOT}/scripts/minikube/t2-common.sh"
+[[ -n "${T2_LOCK_TOKEN}" ]] || die "canonical T2 profile lock is required for auth-key convergence"
+T2_LOCK_DIR="${T2_LOCK_ROOT}/${T2_PROFILE}.lock"
+[[ -d "${T2_LOCK_DIR}" && ! -L "${T2_LOCK_DIR}" ]] ||
+  die "canonical T2 profile lock is missing for ${T2_PROFILE}"
+owner_token="$(t2_lock_owner_value TOKEN || true)"
+owner_pid="$(t2_lock_owner_value PID || true)"
+[[ "${owner_token}" == "${T2_LOCK_TOKEN}" ]] ||
+  die "canonical T2 profile lock token does not match"
+[[ "$(t2_lock_owner_value REPOSITORY || true)" == "${T2_PROJECT_DIR}" ]] ||
+  die "canonical T2 profile lock belongs to another worktree"
+[[ "$(t2_lock_owner_value PROFILE || true)" == "${T2_PROFILE}" &&
+   "$(t2_lock_owner_value CONTEXT || true)" == "${T2_CONTEXT}" ]] ||
+  die "canonical T2 profile lock belongs to another profile or context"
+t2_lock_process_matches "${owner_pid}" ||
+  die "canonical T2 profile lock owner is no longer a live process"
+
 KCTL=(kubectl --context="${PROFILE}")
 SOURCE_SECRET="rpc-proxy-secrets"
 SOURCE_NAMESPACE="rpc-proxy"
@@ -70,12 +103,11 @@ MCP_DEPLOY_SELECTOR="clerum.io/managed-by=host-context-controller"
 GFS_CONFIGMAP="gfs-config"
 GFS_NAMESPACE="gfs"
 GFS_TARGET_KEY="jwt-public-key"
-
-log() { printf '[sync-auth-key] %s\n' "$*"; }
-die() {
-  log "ERROR: $*" >&2
-  exit 1
-}
+# During the T2 recovery transition, credential reconciliation is the producer
+# of the GFS DSN. An explicitly staged sync may update gfs-config and defer
+# active-pod proof until that producer has run; ordinary/full-setup callers
+# remain fail-closed by default.
+GFS_AUTH_SYNC_ALLOW_STAGED="${GFS_AUTH_SYNC_ALLOW_STAGED:-false}"
 
 rollout_restart_with_retry() {
   local namespace="$1"
@@ -118,18 +150,42 @@ print(json.dumps({"data": {os.environ["TARGET_KEY"]: source_value}}))
 PY
 }
 
-make_applied_hash_patch() {
-  APPLIED_HASH="$1" APPLIED_HASH_ANNOTATION="${APPLIED_HASH_ANNOTATION}" python3 - <<'PY'
+make_applied_hash_json_patch() {
+  local namespace="$1" configmap="$2" target_key="$3" target_json
+  target_json="$("${KCTL[@]}" get configmap "${configmap}" -n "${namespace}" -o json)" ||
+    die "cannot snapshot auth target ${namespace}/${configmap} before attestation"
+  TARGET_JSON="$target_json" TARGET_KEY="$target_key" SOURCE_KEY_B64="$source_key_b64" \
+    APPLIED_HASH="$source_hash" APPLIED_HASH_ANNOTATION="$APPLIED_HASH_ANNOTATION" \
+    python3 - <<'PY'
+import base64
 import json
 import os
 
-print(json.dumps({
-    "metadata": {
-        "annotations": {
-            os.environ["APPLIED_HASH_ANNOTATION"]: os.environ["APPLIED_HASH"]
-        }
-    }
-}))
+obj = json.loads(os.environ["TARGET_JSON"])
+metadata = obj.get("metadata") or {}
+data = obj.get("data") or {}
+annotations = metadata.get("annotations") or {}
+rv = str(metadata.get("resourceVersion") or "")
+if not rv:
+    raise SystemExit("auth target has no resourceVersion")
+try:
+    expected = base64.b64decode(os.environ["SOURCE_KEY_B64"], validate=True).decode("utf-8")
+except (ValueError, UnicodeDecodeError) as exc:
+    raise SystemExit(f"invalid source auth key: {exc}")
+key = os.environ["TARGET_KEY"]
+if data.get(key) != expected:
+    raise SystemExit("auth target changed before attestation")
+annotation = os.environ["APPLIED_HASH_ANNOTATION"]
+ops = [
+    {"op": "test", "path": "/metadata/resourceVersion", "value": rv},
+    {"op": "test", "path": "/data/" + key.replace("~", "~0").replace("/", "~1"), "value": expected},
+]
+path = "/metadata/annotations/" + annotation.replace("~", "~0").replace("/", "~1")
+if annotations:
+    ops.append({"op": "replace" if annotation in annotations else "add", "path": path, "value": os.environ["APPLIED_HASH"]})
+else:
+    ops.append({"op": "add", "path": "/metadata/annotations", "value": {annotation: os.environ["APPLIED_HASH"]}})
+print(json.dumps(ops))
 PY
 }
 
@@ -140,15 +196,37 @@ read_applied_hash() {
 }
 
 mark_key_applied() {
-  local namespace="$1" configmap="$2"
-  "${KCTL[@]}" patch configmap "${configmap}" -n "${namespace}" --type=merge \
-    -p "$(make_applied_hash_patch "${source_hash}")" >/dev/null
+  local namespace="$1" configmap="$2" target_key="${3:-}"
+  if [ -z "${target_key}" ]; then
+    case "${configmap}" in
+      "${CONFIGMAP}") target_key="${TARGET_KEY}" ;;
+      "${GFS_CONFIGMAP}") target_key="${GFS_TARGET_KEY}" ;;
+      *) die "cannot infer auth target key for ${namespace}/${configmap}" ;;
+    esac
+  fi
+  assert_source_unchanged
+  "${KCTL[@]}" patch configmap "${configmap}" -n "${namespace}" --type=json \
+    -p "$(make_applied_hash_json_patch "${namespace}" "${configmap}" "${target_key}")" >/dev/null
 }
 
 configmap_key_hash() {
   local namespace="$1" configmap="$2" key="$3"
   "${KCTL[@]}" get configmap "${configmap}" -n "${namespace}" \
     -o "jsonpath={.data.${key}}" | shasum -a 256 | awk '{print $1}'
+}
+
+deployment_desired_replicas() {
+  local namespace="$1" deployment="$2" desired
+  desired="$("${KCTL[@]}" get "deployment/${deployment}" -n "${namespace}" \
+    -o 'jsonpath={.spec.replicas}' 2>&1)" || {
+    log "cannot read desired replicas for ${namespace}/deployment/${deployment}: ${desired}" >&2
+    return 1
+  }
+  [[ "${desired}" =~ ^[0-9]+$ ]] || {
+    log "deployment ${namespace}/deployment/${deployment} returned a non-numeric desired replica count" >&2
+    return 1
+  }
+  printf '%s' "${desired}"
 }
 
 write_source_key() {
@@ -158,6 +236,49 @@ import os
 import sys
 
 sys.stdout.buffer.write(base64.b64decode(os.environ["SOURCE_KEY_B64"], validate=True))
+PY
+}
+
+assert_source_unchanged() {
+  local current_snapshot current_rv ignored_b64 current_hash
+  current_snapshot="$(read_source_snapshot)" || die "cannot re-read auth source snapshot"
+  IFS=$'\t' read -r current_rv ignored_b64 current_hash <<<"${current_snapshot}"
+  [[ -n "${current_rv}" && -n "${current_hash}" ]] ||
+    die "auth source snapshot is incomplete during convergence"
+  if [[ "${current_rv}" != "${source_resource_version}" || "${current_hash}" != "${source_hash}" ]]; then
+    die "auth source rotated during convergence; refusing to attest a stale key"
+  fi
+}
+
+read_source_snapshot() {
+  local source_json
+  source_json="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" -o json)" ||
+    return 1
+  SOURCE_JSON="${source_json}" SOURCE_KEY="${SOURCE_KEY}" python3 - <<'PY'
+import base64
+import hashlib
+import json
+import os
+import sys
+
+try:
+    obj = json.loads(os.environ["SOURCE_JSON"])
+    metadata = obj.get("metadata") or {}
+    data = obj.get("data") or {}
+    resource_version = str(metadata.get("resourceVersion") or "")
+    source_key_b64 = data.get(os.environ["SOURCE_KEY"]) or ""
+    source_value = base64.b64decode(source_key_b64, validate=True)
+    source_value.decode("utf-8")
+except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+if not resource_version or not source_value:
+    raise SystemExit(1)
+print("%s\t%s\t%s" % (
+    resource_version,
+    source_key_b64,
+    hashlib.sha256(source_value).hexdigest(),
+))
 PY
 }
 
@@ -216,35 +337,16 @@ if ! source_probe="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAM
   fi
   die "cannot inspect auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET}: ${source_probe}"
 fi
-source_key_b64="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" -o "jsonpath={.data.${SOURCE_KEY}}")"
-if [[ -z "${source_key_b64}" ]]; then
+source_snapshot="$(read_source_snapshot 2>/dev/null || true)"
+if [[ -z "${source_snapshot}" ]]; then
   if [[ "${REQUIRE_GFS}" == "true" ]]; then
     die "required GFS auth source key ${SOURCE_KEY} is empty"
   fi
   die "auth source key ${SOURCE_KEY} is empty; refusing to mutate consumers"
 fi
-if ! source_hash="$(SOURCE_KEY_B64="${source_key_b64}" python3 - <<'PY'
-import base64
-import hashlib
-import os
-import sys
-
-try:
-    source_value = base64.b64decode(os.environ["SOURCE_KEY_B64"], validate=True)
-    source_value.decode("utf-8")
-except (ValueError, UnicodeDecodeError) as exc:
-    print(f"invalid source auth key encoding: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-if not source_value:
-    print("source auth key decodes empty", file=sys.stderr)
-    raise SystemExit(1)
-
-print(hashlib.sha256(source_value).hexdigest())
-PY
-)"; then
-  die "source auth key ${SOURCE_KEY} is not valid non-empty UTF-8 base64"
-fi
+IFS=$'\t' read -r source_resource_version source_key_b64 source_hash <<<"${source_snapshot}"
+[[ -n "${source_resource_version}" && -n "${source_key_b64}" && -n "${source_hash}" ]] ||
+  die "source auth key ${SOURCE_KEY} is not a valid non-empty UTF-8 base64 value with a resourceVersion"
 if [[ "${REQUIRE_GFS}" == "true" ]] && \
    ! gfs_target_probe="$("${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" 2>&1)"; then
   die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} is missing or unreadable: ${gfs_target_probe}"
@@ -286,7 +388,7 @@ sync_mcp_host() {
       log "${CONFIGMAP}.${TARGET_KEY} matches source but consumer attestation is pending; resuming convergence"
     fi
   fi
-  local deployment_resources deployment resource_name
+  local deployment_resources deployment resource_name desired_replicas
   local deployments=()
   if ! deployment_resources="$("${KCTL[@]}" get deployment -l "${MCP_DEPLOY_SELECTOR}" \
     -n "${CONFIG_NAMESPACE}" -o name 2>&1)"; then
@@ -306,6 +408,15 @@ sync_mcp_host() {
     log "No mcp-host deployments exist yet; auth key is synced for future pods"
   else
     for deployment in "${deployments[@]}"; do
+      desired_replicas="$(deployment_desired_replicas "${CONFIG_NAMESPACE}" "${deployment}")" ||
+        die "cannot determine desired replicas for mcp-host deployment/${deployment}"
+      if [[ "${desired_replicas}" == "0" ]]; then
+        # HCC intentionally suspends stateless Hosts by scaling their managed
+        # Deployment to zero. There is no consumer to restart or prove; the
+        # patched ConfigMap is the authoritative input for the next pod.
+        log "Skipping suspended ${CONFIG_NAMESPACE}/${deployment}; desired replicas=0"
+        continue
+      fi
       if [[ "${force_rollout}" != true ]] && \
          consumer_pods_use_key "${CONFIG_NAMESPACE}" "app=${deployment}" mcp-host \
            "${TARGET_KEY}" "mcp-host deployment/${deployment}"; then
@@ -357,7 +468,7 @@ sync_gfs() {
     fi
   fi
 
-  local deployments=() rollout_deployments=() deployment deployment_probe role selector rollout_output dsn_encoded dsn
+  local deployments=() rollout_deployments=() deployment deployment_probe role selector rollout_output dsn_encoded dsn desired_replicas
   for deployment in gfsc-writer gfsc-reader; do
     deployment_probe=""
     if deployment_probe="$("${KCTL[@]}" get "deployment/${deployment}" -n "${GFS_NAMESPACE}" 2>&1)"; then
@@ -378,6 +489,12 @@ sync_gfs() {
   for deployment in "${deployments[@]}"; do
     role="${deployment#gfsc-}"
     selector="app=gfs-controller,clerum.io/gfsc-role=${role}"
+    desired_replicas="$(deployment_desired_replicas "${GFS_NAMESPACE}" "${deployment}")" ||
+      die "cannot determine desired replicas for GFS deployment/${deployment}"
+    if [[ "${desired_replicas}" == "0" ]]; then
+      log "Skipping suspended ${GFS_NAMESPACE}/${deployment}; desired replicas=0"
+      continue
+    fi
     if [[ "${force_rollout}" != true ]] && \
        consumer_pods_use_key "${GFS_NAMESPACE}" "${selector}" gfsc \
          GFS_JWT_PUBLIC_KEY "gfsc deployment/${deployment}"; then
@@ -396,9 +513,17 @@ sync_gfs() {
   fi
 
   if ! dsn_encoded="$("${KCTL[@]}" get secret gfs-controller-db -n "${GFS_NAMESPACE}" -o 'jsonpath={.data.connection-string}' 2>&1)"; then
+    if [[ "${GFS_AUTH_SYNC_ALLOW_STAGED}" == "true" ]]; then
+      log "Deferring active gfsc auth proof until GFS credentials are reconciled"
+      return 0
+    fi
     die "cannot inspect ${GFS_NAMESPACE}/gfs-controller-db before gfsc restart: ${dsn_encoded}"
   fi
   if [[ -z "${dsn_encoded}" ]]; then
+    if [[ "${GFS_AUTH_SYNC_ALLOW_STAGED}" == "true" ]]; then
+      log "Deferring active gfsc auth proof until GFS credentials are reconciled"
+      return 0
+    fi
     die "${GFS_NAMESPACE}/gfs-controller-db.connection-string is empty; refusing to attest gfsc auth convergence"
   fi
   if ! dsn="$(printf '%s' "${dsn_encoded}" | base64 -d 2>&1)"; then
@@ -431,4 +556,5 @@ if [[ "${SYNC_GFS}" == "true" ]]; then
   sync_gfs
 fi
 
+assert_source_unchanged
 log "Auth key synced"

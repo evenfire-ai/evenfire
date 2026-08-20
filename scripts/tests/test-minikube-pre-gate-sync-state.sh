@@ -186,7 +186,7 @@ fi
 
 final_cluster_fingerprint_line="$(grep -n 'cluster_fingerprint=.*pre_gate_marker_cluster_fingerprint' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 final_infra_fingerprint_line="$(grep -n 'infra_fingerprint=.*pre_gate_marker_infra_fingerprint' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-persist_marker_line="$(grep -nF 'persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}"' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+persist_marker_line="$(grep -nF 'commit_cluster_sync_state "${cluster_fingerprint}" "${infra_fingerprint}"' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 if [ -n "$final_cluster_fingerprint_line" ] &&
    [ -n "$final_infra_fingerprint_line" ] &&
    [ -n "$persist_marker_line" ] &&

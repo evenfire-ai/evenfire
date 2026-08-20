@@ -35,7 +35,24 @@ for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T0" \
   "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"; do
   bash -n "$file"
 done
-python3 -m py_compile "$GFS_FILTER"
+python3 - "$GFS_FILTER" "$TMP_ROOT" <<'PY'
+import os
+import py_compile
+import sys
+import tempfile
+
+source = sys.argv[1]
+tmp_root = sys.argv[2]
+fd, compiled = tempfile.mkstemp(prefix="evenfire-filter-gfs-", suffix=".pyc", dir=tmp_root)
+os.close(fd)
+try:
+    py_compile.compile(source, cfile=compiled, doraise=True)
+finally:
+    try:
+        os.unlink(compiled)
+    except FileNotFoundError:
+        pass
+PY
 grep -Fq 't0.sh' "$T2"
 grep -Fq 'T0_SHELLCHECK=PASS' "$T0"
 grep -Fq 'npm run build' "$T0"
@@ -64,15 +81,17 @@ fi
 grep -Fq '([^[:space:]]*\/)?kubectl([[:space:]]|$)' "$COMMON"
 grep -Fq '[[:space:]]port-forward([[:space:]]|$)' "$COMMON"
 grep -Fq 'CONTROL_API_REAL_PG_CONTEXT' "$T1"
+grep -Fq 'T2_REQUIRED_DEPLOYMENTS' "$COMMON"
 grep -Fq 'CONTROL_API_REAL_PG_ADMIN_URL=' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$T1"
 grep -Fq 'postgres:16-alpine' "$T1"
-grep -Fq 'control-api/test/*realPostgres*.test.ts' "$T1"
+grep -Fq '*realPostgres*.test.ts' "$T1"
+grep -Fq 'is_isolated_control_api_file' "$T1"
 grep -Fq 'start_isolated_postgres' "$T1"
 grep -Fq 'require_isolated_control_api_files' "$T1"
 grep -Fq 'run_suite control-api isolated "$ISOLATED_DSN"' "$T1"
 if grep -Fq 'run_suite control-api shared "$ADMIN_DSN"' "$T1"; then
-  echo 'FAIL: control-api Real PostgreSQL suites must not use shared control-postgres' >&2
+  echo 'FAIL: control-api Real PostgreSQL suites still target the shared profile database' >&2
   exit 1
 fi
 if grep -Fq 'run_suite control-api isolated "$ADMIN_DSN"' "$T1"; then
@@ -217,21 +236,23 @@ grep -Fq 'full-bootstrap' "$PREFLIGHT" "$T2"
 grep -Fq 'run_pre_gate' "$T2"
 grep -Fq 'run_targeted_sync' "$T2"
 grep -Fq 'full-reconcile' "$T2"
-grep -Fq 'T2_SKIP_LOCK=true T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
+grep -Fq 'T2_SKIP_LOCK=true' "$T2"
+grep -Fq 'T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
 grep -Fq 'REUSE_DB=true' "$T2"
 grep -Fq 'T2_T0_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_T1_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_NP08_HCC_AUTHORIZATION_STATUS=NOT_RUN' "$T2"
-grep -Fq "T2_T0_STATUS\" != PASS" "$T2"
-grep -Fq "T2_T1_STATUS\" != PASS" "$T2"
+grep -Fq 't2_lane_completed "$T2_T0_STATUS"' "$T2"
+grep -Fq 't2_lane_completed "$T2_T1_STATUS"' "$T2"
 grep -Fq 'T2_HEALTHCHECK_COMMAND' "$T2"
 grep -Fq 'run_np08_hcc_authorization' "$T2"
 grep -Fq "CLERUM_PROFILE_PORTS_ENV=\"\$T2_PORTS_ENV\"" "$T2"
 grep -Fq 'NP08_HCC_AUTHORIZATION PASS' "$T2"
 grep -Fq "NP08_HCC_AUTHORIZATION=\$T2_NP08_HCC_AUTHORIZATION_STATUS" "$T2"
 grep -Fq 'already-synced' "$T2" "$COMMON"
-grep -Fq 'T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
-grep -Fq 'T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" T2_PLAN_MODE=false T2_PLAN_FILE' "$T2"
+grep -Fq 'T2_LOCK_TOKEN="$T2_LOCK_TOKEN"' "$T2"
+grep -Fq 'T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
+grep -Fq 'T2_PLAN_MODE=false T2_PLAN_FILE' "$T2"
 grep -Fq 'T2_PLAN_MODE=false' "$PREFLIGHT"
 grep -Fq -- '--skip-port-forwards' "$T2"
 grep -Fq 't2_lane_completed' "$T2"
@@ -318,6 +339,13 @@ bash -c '
   if T2_SKIP_LOCK=true T2_LOCK_TOKEN=wrong bash -c '\''source "$1"; t2_lock_validate_inherited'\'' bash "$common"; then
     exit 1
   fi
+  saved_token="$T2_LOCK_TOKEN"
+  T2_LOCK_TOKEN=wrong
+  if t2_lock_validate_inherited; then
+    echo "inherited lock validation returned success after a guard fired" >&2
+    exit 1
+  fi
+  T2_LOCK_TOKEN="$saved_token"
   t2_lock_release 0
 ' bash "$COMMON"
 if [ -e "$tmp/fenced-locks/clerum-fence.lock" ]; then

@@ -32,14 +32,37 @@ source "$ROOT/scripts/minikube/t2-common.sh"
 if [ -z "$T2_SKIP_LOCK" ]; then T2_SKIP_LOCK=false; fi
 T2_CONTEXT="$T2_CONTEXT"
 CONTEXT="$T2_CONTEXT"
+SETTLE_T2_MANAGED=false
+[ -n "$T2_LOCK_TOKEN" ] && SETTLE_T2_MANAGED=true
 GFS_NS="${GFS_NS:-gfs}"
 DEPLOY="${GFS_READER_DEPLOYMENT:-gfsc-reader}"
 SECRET="${GFS_READER_DB_SECRET:-gfs-controller-reader-db}"
 SELECTOR="${GFS_READER_SELECTOR:-app=gfs-controller,clerum.io/gfsc-role=reader}"
+SCALE_DOWN_TIMEOUT_SECONDS="${GFS_READER_SCALE_DOWN_TIMEOUT_SECONDS:-60}"
+SCALE_DOWN_POLL_SECONDS="${GFS_READER_SCALE_DOWN_POLL_SECONDS:-1}"
 
 log() { printf '[settle-gfs-reader-rollout] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 kc() { kubectl --context="$T2_CONTEXT" "$@"; }
+
+wait_for_scaled_rs() {
+  local rs_name="$1" deadline desired pod_rows live
+  deadline=$((SECONDS + SCALE_DOWN_TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    desired="$(kc -n "$GFS_NS" get rs "$rs_name" -o jsonpath='{.spec.replicas}' 2>&1)" ||
+      die "unable to verify ReplicaSet ${rs_name} scale-down: ${desired}"
+    [[ "$desired" =~ ^[0-9]+$ ]] || die "ReplicaSet ${rs_name} returned a non-numeric replica count"
+    pod_rows="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
+      'jsonpath={range .items[*]}{.metadata.ownerReferences[0].name}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>&1)" ||
+      die "unable to inspect pods while waiting for ReplicaSet ${rs_name} scale-down: ${pod_rows}"
+    live="$(awk -F'|' -v rs="$rs_name" '$1 == rs && $2 == "" { n++ } END { print n+0 }' <<<"$pod_rows")"
+    if [ "$desired" = 0 ] && [ "${live:-0}" -eq 0 ]; then
+      return 0
+    fi
+    sleep "$SCALE_DOWN_POLL_SECONDS"
+  done
+  die "ReplicaSet ${rs_name} did not settle at zero replicas before credential proof"
+}
 
 SETTLE_CLEANUP_DONE=false
 
@@ -51,7 +74,9 @@ cleanup_settle() {
   SETTLE_CLEANUP_DONE=true
   trap - EXIT
   trap '' INT TERM
-  t2_lock_release "$status" || status=$?
+  if [ "$SETTLE_T2_MANAGED" = true ]; then
+    t2_lock_release "$status" || status=$?
+  fi
   return "$status"
 }
 handle_settle_signal() {
@@ -72,10 +97,22 @@ handle_settle_exit() {
 trap handle_settle_exit EXIT
 trap 'handle_settle_signal INT' INT
 trap 'handle_settle_signal TERM' TERM
-t2_repo_metadata
-t2_profile_scope
-t2_context_check
-t2_mutation_lock
+if [ "$SETTLE_T2_MANAGED" = true ]; then
+  t2_repo_metadata
+  t2_profile_scope
+  t2_context_check
+  t2_mutation_lock
+else
+  [ "${GFS_READER_ROLLOUT_AUTHORIZED:-false}" = true ] ||
+    die 'non-T2 reader settlement requires explicit GFS_READER_ROLLOUT_AUTHORIZED=true'
+  authorized=false
+  IFS=',' read -r -a allowed_contexts <<<"${ALLOWED_CONTEXTS:-}"
+  for allowed_context in "${allowed_contexts[@]}"; do
+    [ "$allowed_context" = "$CONTEXT" ] && authorized=true
+  done
+  [ "$authorized" = true ] ||
+    die "non-T2 reader settlement context is not in the explicit ALLOWED_CONTEXTS list: $CONTEXT"
+fi
 
 # The proof library is sourced only after the profile fence is established. It
 # reads the committed DSN in memory and never prints it.
@@ -115,6 +152,7 @@ fi
 # Desired Ready is met from here on: leftovers below serve nothing.
 current_rev="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
   -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+scaled_rs_names=()
 rs_rows="$(kc -n "$GFS_NS" get rs -l "$SELECTOR" -o \
   'jsonpath={range .items[*]}{.metadata.name}{"|"}{.metadata.ownerReferences[0].name}{"|"}{.spec.replicas}{"|"}{.status.readyReplicas}{"|"}{.metadata.annotations.deployment\.kubernetes\.io/revision}{"\n"}{end}' \
   2>/dev/null)"
@@ -127,7 +165,12 @@ while IFS='|' read -r rs_name rs_owner rs_replicas rs_ready rs_rev; do
   [ -n "$current_rev" ] && [ "$rs_rev" = "$current_rev" ] && continue
   log "scaling leftover unready ReplicaSet ${rs_name} to 0 (revision ${rs_rev:-unknown}, current ${current_rev:-unknown})"
   kc -n "$GFS_NS" scale rs "$rs_name" --replicas=0 >/dev/null
+  scaled_rs_names+=("$rs_name")
 done <<<"$rs_rows"
+
+for rs_name in "${scaled_rs_names[@]}"; do
+  wait_for_scaled_rs "$rs_name"
+done
 
 pod_rows="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
   'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.containerStatuses[0].state.waiting.reason}{"\n"}{end}' \

@@ -62,6 +62,13 @@ grep -q 'gfs-rollout-shim' <<<"$out" || fail 'shim did not announce the readines
 grep -q 'rollout status deployment/gfsc-reader' "$FAKE_KUBECTL_LOG" \
   && fail 'shim leaked the generation-based rollout status to the real kubectl'
 
+for duration in 2m30s 500ms; do
+  PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 FAKE_POD_ROWS='True|\n' \
+    GFS_READER_WAIT_POLL_SECONDS=0 \
+    kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout="$duration" >/dev/null 2>&1 \
+    || fail "shim rejected valid Go duration ${duration}"
+done
+
 # 4. A live unready reader pod blocks the wait until timeout (fail-loud).
 # The explicit 1s caller timeout is honored; the shim must not silently floor
 # it to an unrelated minimum.
@@ -93,5 +100,14 @@ PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 \
   GFS_READER_WAIT_POLL_SECONDS=0 \
   kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=240s >/dev/null 2>&1 \
   || fail 'shim readiness wait blocked on a terminating pod'
+
+# A terminating Ready pod must not satisfy the desired live-reader count. It
+# is already leaving the service and cannot be used as readiness evidence.
+if PATH="$shim_path" FAKE_DESIRED=1 FAKE_READY=1 \
+  FAKE_POD_ROWS='True|2026-01-01T00:00:00Z\n' \
+  GFS_READER_WAIT_POLL_SECONDS=0 \
+  kubectl --context=fake rollout status deployment/gfsc-reader -n gfs --timeout=1s >/dev/null 2>&1; then
+  fail 'shim readiness wait went green with only a terminating Ready reader pod'
+fi
 
 printf 'PASS: gfs-rollout-shim readiness interception contract\n'

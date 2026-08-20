@@ -69,6 +69,7 @@ done
 # explicit short timeout would hide a dead reader and invalidate the caller's
 # fail-fast contract.
 if ! timeout_seconds="$(python3 - "$timeout_raw" <<'PY'
+import math
 import re
 import sys
 
@@ -77,15 +78,17 @@ timeout_raw = sys.argv[1]
 def parse_duration(raw, default, label):
     if raw == "":
         return default
-    match = re.fullmatch(r"[1-9][0-9]{0,4}([sm]?)", raw)
-    if not match:
-        raise SystemExit(f"invalid {label}: expected a positive integer with optional s/m suffix")
-    value = int(raw[:-1] if raw[-1:] in {"s", "m"} else raw)
-    if raw.endswith("m"):
-        value *= 60
-    if value < 1 or value > 86400:
+    if re.fullmatch(r"[1-9][0-9]*", raw):
+        total = float(raw)
+    else:
+        tokens = re.findall(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)", raw)
+        if not tokens or "".join(number + unit for number, unit in tokens) != raw:
+            raise SystemExit(f"invalid {label}: expected a positive Go-style duration")
+        factors = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+        total = sum(float(number) * factors[unit] for number, unit in tokens)
+    if total <= 0 or total > 86400:
         raise SystemExit(f"invalid {label}: value must be between 1 and 86400 seconds")
-    return value
+    return max(1, math.ceil(total))
 
 print(parse_duration(timeout_raw, 600, "rollout timeout"))
 PY

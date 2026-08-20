@@ -47,6 +47,7 @@ T2_PLAN_MODE="$T2_PLAN_MODE"
 if [ -z "$T2_PLAN_MODE" ]; then T2_PLAN_MODE=false; fi
 T2_BOOTSTRAP_REQUIRED=false
 T2_PROFILE_HEALTHY=false
+T2_CONTEXT_IDENTITY_VERIFIED=false
 T2_UNREADY_DEPLOYMENTS=""
 T2_MARKER_MATCHES_HEAD=false
 T2_MARKER_JSON=""
@@ -79,6 +80,8 @@ T2_REQUIRED_NAMESPACES="$T2_REQUIRED_NAMESPACES"
 if [ -z "$T2_REQUIRED_NAMESPACES" ]; then T2_REQUIRED_NAMESPACES="control-plane gfs mcp-host mcp-server profiles rpc-proxy channels sandbox-recipes sandbox-ui webhook-ingress registry"; fi
 T2_REQUIRED_SERVICES="$T2_REQUIRED_SERVICES"
 if [ -z "$T2_REQUIRED_SERVICES" ]; then T2_REQUIRED_SERVICES="control-plane/control-postgres control-plane/control-api control-plane/control-ui control-plane/host-context-controller control-plane/workflow-recipes profiles/external-rest-api profiles/profile-ui rpc-proxy/rpc-proxy mcp-server/mcp-proxy"; fi
+T2_REQUIRED_DEPLOYMENTS="$T2_REQUIRED_DEPLOYMENTS"
+if [ -z "$T2_REQUIRED_DEPLOYMENTS" ]; then T2_REQUIRED_DEPLOYMENTS="control-plane/control-api control-plane/host-context-controller profiles/external-rest-api rpc-proxy/rpc-proxy mcp-host/chatllm"; fi
 T2_REQUIRED_SECRETS="$T2_REQUIRED_SECRETS"
 if [ -z "$T2_REQUIRED_SECRETS" ]; then T2_REQUIRED_SECRETS="control-plane/control-postgres control-plane/control-api-secrets control-plane/control-ui-secrets control-plane/inter-service-tokens profiles/external-rest-api-secrets rpc-proxy/rpc-proxy-secrets mcp-host/chatllm-api-keys gfs/gfs-controller-db gfs/gfs-controller-reader-db"; fi
 T2_REQUIRED_CONFIGMAPS="$T2_REQUIRED_CONFIGMAPS"
@@ -252,13 +255,65 @@ t2_context_check() {
     host="${host%%:*}"
   fi
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-  case "$host" in
-    127.0.0.1|localhost|::1|192.168.*|*.minikube) ;;
-    *)
-      T2_NEXT_COMMAND='select the generated branch-owned Minikube context, not a remote cluster context'
-      t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is not local: $host"
-      ;;
-  esac
+  if [[ "$host" == 127.0.0.1 || "$host" == localhost || "$host" == ::1 || "$host" == *.minikube ]]; then
+    return 0
+  fi
+  if ! python3 - "$host" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if (address.is_private or address.is_loopback or address.is_link_local) else 1)
+PY
+  then
+    T2_NEXT_COMMAND='select the generated branch-owned Minikube context, not a remote cluster context'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is not local: $host"
+    return 1
+  fi
+}
+
+t2_profile_context_identity_check() {
+  # A localhost API endpoint is necessary but not sufficient: kubeconfig can
+  # point at another local Minikube profile, and a broad RFC1918 allowlist can
+  # point at an unrelated LAN cluster. Bind the context to the exact profile
+  # identity and node address reported by the selected Minikube instance.
+  if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
+    return 0
+  fi
+  local expected_ip nodes_json
+  expected_ip="$(t2_mk ip 2>/dev/null || true)"
+  if [ -z "$expected_ip" ]; then
+    T2_NEXT_COMMAND='start the verified branch-owned Minikube profile, then retry the gate'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED "Minikube did not report an IP for profile $T2_PROFILE"
+    return 1
+  fi
+  nodes_json="$(t2_kc get nodes -o json 2>/dev/null || true)"
+  if [ -z "$nodes_json" ] || ! python3 - "$nodes_json" "$T2_PROFILE" "$expected_ip" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+profile = sys.argv[2]
+expected_ip = sys.argv[3]
+for node in payload.get("items", []):
+    metadata = node.get("metadata") or {}
+    labels = metadata.get("labels") or {}
+    if labels.get("minikube.k8s.io/name") != profile:
+        continue
+    for address in (node.get("status") or {}).get("addresses", []):
+        if address.get("type") == "InternalIP" and address.get("address") == expected_ip:
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    T2_NEXT_COMMAND='select the kube-context generated for this exact branch-owned Minikube profile'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context does not identify Minikube profile $T2_PROFILE at $expected_ip"
+    return 1
+  fi
+  T2_CONTEXT_IDENTITY_VERIFIED=true
 }
 
 t2_profile_status() {
@@ -490,22 +545,51 @@ t2_deployment_check() {
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is unavailable'
   fi
-  if ! unready="$(python3 - "$deployment_json" 2>/dev/null <<'PY'
+  if ! unready="$(python3 - "$deployment_json" "$T2_REQUIRED_DEPLOYMENTS" 2>/dev/null <<'PY'
 import json
 import sys
 payload = json.loads(sys.argv[1])
+required_refs = {}
+for ref in sys.argv[2].split():
+    namespace, separator, name = ref.partition("/")
+    if not separator or not namespace or not name:
+        raise ValueError("invalid required deployment reference")
+    required_refs[(namespace, name)] = None
 bad = []
 for item in payload.get("items", []):
     metadata = item.get("metadata") or {}
+    identity = (metadata.get("namespace"), metadata.get("name"))
+    if identity in required_refs:
+        required_refs[identity] = item
+
+for (namespace, name), item in required_refs.items():
+    if item is None:
+        bad.append(f"{namespace}/{name} missing")
+        continue
     spec = item.get("spec") or {}
     status = item.get("status") or {}
-    desired = int(spec.get("replicas") or 0)
+    def integer(value, field):
+        if value in (None, ""):
+            return 0
+        if isinstance(value, bool):
+            raise ValueError(field)
+        return int(value)
+
+    desired = integer(spec.get("replicas"), "spec.replicas")
+    # A present deployment explicitly scaled to zero is an intentional local
+    # suspension; it is not an unready pod.
     if desired == 0:
         continue
-    ready = int(status.get("readyReplicas") or 0)
-    available = int(status.get("availableReplicas") or 0)
-    if ready < desired or available < desired:
-        bad.append("%s/%s %s/%s" % (metadata.get("namespace", "?"), metadata.get("name", "?"), ready, desired))
+    ready = integer(status.get("readyReplicas"), "status.readyReplicas")
+    available = integer(status.get("availableReplicas"), "status.availableReplicas")
+    updated = integer(status.get("updatedReplicas"), "status.updatedReplicas")
+    unavailable = integer(status.get("unavailableReplicas"), "status.unavailableReplicas")
+    generation = integer(metadata.get("generation"), "metadata.generation")
+    observed = integer(status.get("observedGeneration"), "status.observedGeneration")
+    if generation <= 0 or observed != generation or updated < desired or ready < desired or available < desired or unavailable != 0:
+        bad.append("%s/%s ready=%s/%s updated=%s observed=%s/%s unavailable=%s" % (
+            namespace, name, ready, desired,
+            updated, observed, generation, unavailable))
 print("; ".join(bad))
 PY
   )"; then
@@ -538,6 +622,17 @@ PY
   fi
 }
 
+t2_pid_file_matches_process() {
+  local pid_file="$1" pid="$2" recorded_pid recorded_start actual_start
+  recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+  recorded_start="$(sed -n 's/^PROCESS_START=//p' "$pid_file" 2>/dev/null | head -1 || true)"
+  [ "$recorded_pid" = "$pid" ] || return 1
+  [ -n "$recorded_start" ] || return 1
+  [ "$recorded_start" = unavailable ] && return 0
+  actual_start="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//' || true)"
+  [ -n "$actual_start" ] && [ "$actual_start" = "$recorded_start" ]
+}
+
 t2_process_check() {
   local uid pid ppid rest command_line comm allowed pid_file recorded_pid
   local safe_profile
@@ -547,14 +642,9 @@ t2_process_check() {
   # Default IFS so UID/PID/PPID split. `IFS=` left pid empty and skipped every line.
   # awk is a loose pre-filter: kubectl as argv0/path token AND a later
   # standalone port-forward token. Flags may sit between those tokens.
-  # Known limitation: a port-forward whose argv carries no profile/context
-  # token (e.g. pf-control-stack's context-less `kubectl -n NS port-forward`)
-  # cannot be attributed to a cluster from ps output alone and is skipped —
-  # flagging it would also flag unrelated clusters' forwards.
   while read -r uid pid ppid rest; do
     [ -n "$pid" ] || continue
     command_line="$uid $pid $ppid $rest"
-    [[ "$command_line" == *"$T2_PROFILE"* || "$command_line" == *"$T2_CONTEXT"* ]] || continue
     comm="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
     case "$comm" in
       *kubectl*) ;;
@@ -566,19 +656,32 @@ t2_process_check() {
       /tmp/pf-"$safe_profile"-*.pid; do
       [ -f "$pid_file" ] || continue
       recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
-      [ "$recorded_pid" = "$pid" ] && allowed=true
+      if [ "$recorded_pid" = "$pid" ] && t2_pid_file_matches_process "$pid_file" "$pid"; then
+        allowed=true
+      fi
     done
     # pf-all-stack.sh is the canonical gate forwarder and records its child
     # PIDs in /tmp/pf-<profile>-*.pid. Accept those PIDs as profile-owned too;
     # otherwise T1 rejects the forwards that pre-gate-sync just started.
-    for pid_file in "/tmp/pf-${profile_safe}-"*.pid; do
+    for pid_file in "/tmp/pf-${safe_profile}-"*.pid; do
       [ -f "$pid_file" ] || continue
-      pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
-      [[ -n "$pid" && "$command_line" == *" $pid "* ]] && allowed=true
+      recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+      if [[ -n "$recorded_pid" && "$command_line" == *" $recorded_pid "* ]] &&
+         t2_pid_file_matches_process "$pid_file" "$recorded_pid"; then
+        allowed=true
+      fi
     done
+    # Unrelated developer forwards launched without --context are not
+    # attributable to this profile and must not make its gate red. A forward
+    # that names this profile/context, or one recorded in this profile's PID
+    # registry, is attributable and must be owned by this run.
+    if [[ "$command_line" != *"$T2_PROFILE"* && "$command_line" != *"$T2_CONTEXT"* && "$allowed" != true ]]; then
+      continue
+    fi
     if [ "$allowed" != true ]; then
       T2_NEXT_COMMAND='stop the unrelated profile port-forward or select the owner worktree; do not share it'
       t2_fail PORT_FORWARD_CONFLICT 'a port-forward for this profile is owned by another process'
+      return 1
     fi
   done < <(ps -ef 2>/dev/null | awk '/([^[:space:]]*\/)?kubectl([[:space:]]|$)/ && /[[:space:]]port-forward([[:space:]]|$)/ {print}' || true)
 }
@@ -749,18 +852,20 @@ EOF
 
 t2_lock_validate_inherited() {
   local expected_pid expected_token owner_key owner_value
-  t2_lock_profile_id_check
+  t2_lock_profile_id_check || return 1
   T2_LOCK_DIR="$T2_LOCK_ROOT/$T2_PROFILE.lock"
   T2_LOCK_KEY="$(t2_lock_key)"
   if [ -L "$T2_LOCK_DIR" ] || [ ! -d "$T2_LOCK_DIR" ] || [ -L "$T2_LOCK_DIR/owner.env" ]; then
     T2_NEXT_COMMAND='run the parent T2 command with its profile lock token, then retry this child operation'
     t2_fail PROFILE_LOCK_REQUIRED "inherited profile lock is missing for $T2_PROFILE"
+    return 1
   fi
   expected_token="$T2_LOCK_TOKEN"
   owner_value="$(t2_lock_owner_value TOKEN || true)"
   if [ -z "$expected_token" ] || [ "$owner_value" != "$expected_token" ]; then
     T2_NEXT_COMMAND='pass the opaque T2_LOCK_TOKEN from the owning T2 process; do not bypass the profile lock'
     t2_fail PROFILE_LOCK_REQUIRED 'inherited profile lock token is missing or does not match'
+    return 1
   fi
   for owner_key in REPOSITORY BRANCH HEAD PROFILE CONTEXT WORKTREE_ID LOCK_KEY; do
     case "$owner_key" in
@@ -775,12 +880,14 @@ t2_lock_validate_inherited() {
     if [ "$(t2_lock_owner_value "$owner_key" || true)" != "$expected_pid" ]; then
       T2_NEXT_COMMAND='re-run the operation from the worktree/profile that owns the T2 lock'
       t2_fail PROFILE_OWNERSHIP_MISMATCH "profile lock owner does not match $owner_key"
+      return 1
     fi
   done
   expected_pid="$(t2_lock_owner_value PID || true)"
   if ! t2_lock_process_matches "$expected_pid"; then
     T2_NEXT_COMMAND='restart the parent T2 operation so it can acquire a live profile lock'
     t2_fail PROFILE_LOCK_REQUIRED 'inherited profile lock owner is not a live process'
+    return 1
   fi
   T2_LOCK_HELD=false
   T2_LOCK_RELEASED=false
@@ -811,6 +918,12 @@ t2_lock_release() {
   T2_LOCK_HELD=false
   if [ -n "$T2_EVIDENCE_FILE" ] && [ -f "$T2_EVIDENCE_FILE" ] && [ -n "$T2_ERROR_CODE" ]; then
     t2_evidence_write failure FAIL "$T2_ERROR_CODE"
+  fi
+  if [ "$cleanup_status" -ne 0 ] && [ -n "$T2_EVIDENCE_FILE" ] && [ -f "$T2_EVIDENCE_FILE" ]; then
+    # A PASS written before EXIT is not a valid attestation if the profile lock
+    # could not be released. Invalidate it explicitly and keep the detail
+    # secret-free so a later runtime-only lane cannot reuse unsafe evidence.
+    t2_evidence_write lock-cleanup INVALIDATED 'profile lock cleanup failed; prior attestation is invalid' || true
   fi
   if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
     status="$cleanup_status"
@@ -898,6 +1011,12 @@ if status in {"FAIL", "INVALIDATED"}:
 elif phase == "complete" and status == "PASS":
     attestation = "PASS"
 prior["attestationStatus"] = attestation
+lane_attestation = prior.get("laneAttestationStatus", "IN_PROGRESS")
+if phase == "lanes" and status == "PASS":
+    lane_attestation = "PASS"
+elif phase == "lock-cleanup" and status == "INVALIDATED":
+    lane_attestation = "INVALIDATED"
+prior["laneAttestationStatus"] = lane_attestation
 prior.setdefault("phases", []).append({
     "name": os.environ.get("PHASE", ""),
     "status": os.environ.get("STATUS", ""),
@@ -945,7 +1064,7 @@ for candidate in sorted(root.glob("*/evidence.json"), reverse=True):
         continue
     if data.get("certificationVersion") != 1:
         continue
-    if data.get("attestationStatus") != "PASS":
+    if data.get("attestationStatus") != "PASS" and data.get("laneAttestationStatus") != "PASS":
         continue
     if not data.get("runId"):
         continue

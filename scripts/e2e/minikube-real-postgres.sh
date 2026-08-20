@@ -11,8 +11,10 @@ source "$PROJECT_DIR/scripts/minikube/t2-common.sh"
 PG_NAMESPACE="$T2_CONTROL_NAMESPACE"
 PG_SERVICE=control-postgres
 PG_SECRET=control-postgres
-# Suites that DROP/ALTER cluster-global roles cannot share live control-postgres
-# (#412). They run against a throwaway Postgres 16 that matches CI.
+# Only suites that DROP/ALTER cluster-global roles cannot share live
+# control-postgres (#412). They run against a throwaway PostgreSQL 16 that
+# matches CI; the remaining control-api suites must exercise the validated
+# branch profile database.
 T1_ISOLATED_PG_IMAGE="${T1_ISOLATED_PG_IMAGE:-postgres:16-alpine}"
 T1_TIMEOUT="$T2_TIMEOUT_SECONDS"
 T1_TMP_ROOT="$T2_TMP_ROOT"
@@ -52,10 +54,37 @@ die_t1() {
 }
 
 stop_isolated_postgres() {
-  if [ -n "$ISOLATED_CONTAINER" ]; then
-    docker rm -f "$ISOLATED_CONTAINER" >/dev/null 2>&1 || true
+  [ -n "$ISOLATED_CONTAINER" ] || return 0
+  if docker rm -f "$ISOLATED_CONTAINER" >/dev/null 2>&1; then
     ISOLATED_CONTAINER=""
+    return 0
   fi
+  return 1
+}
+
+stop_control_postgres_forward() {
+  [ -n "$PORT_FORWARD_PID" ] || return 0
+  if ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    return 0
+  fi
+  local command_line
+  command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
+  if [[ "$command_line" != *port-forward* || "$command_line" != *svc/control-postgres* ]]; then
+    printf '[minikube-t1] ERROR: T1 port-forward PID is not the expected control-postgres child; refusing to report cleanup success\n' >&2
+    return 1
+  fi
+  if ! kill "$PORT_FORWARD_PID" >/dev/null 2>&1 && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    return 1
+  fi
+  if kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    if wait "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+      :
+    fi
+  fi
+  if kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
 }
 
 restore_gfs_runtime_credentials() {
@@ -82,7 +111,8 @@ restore_gfs_runtime_credentials() {
     T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
     CONTEXT="$T2_CONTEXT" \
     bash "$PROJECT_DIR/scripts/minikube/settle-gfs-reader-rollout.sh"; then
-    printf '[minikube-t1] WARN: could not settle a leftover gfsc-reader rollout claim before restore\n' >&2
+    printf '[minikube-t1] ERROR: could not settle a leftover gfsc-reader rollout claim before restore; refusing to reconcile credentials\n' >&2
+    return 1
   fi
   if ! PATH="$PROJECT_DIR/scripts/minikube/gfs-rollout-shim:$PATH" \
     T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
@@ -118,15 +148,12 @@ cleanup_t1() {
   # interrupt the lock release and leave a half-restored profile behind.
   trap - EXIT
   trap '' INT TERM
-  if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-    local command_line
-    command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
-    if [[ "$command_line" == *port-forward* && "$command_line" == *svc/control-postgres* ]]; then
-      kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
-      wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
-    fi
+  if ! stop_control_postgres_forward; then
+    status=1
   fi
-  stop_isolated_postgres
+  if ! stop_isolated_postgres; then
+    status=1
+  fi
   if ! restore_gfs_runtime_credentials; then
     status=1
   fi
@@ -222,7 +249,11 @@ list_real_pg_files() {
 is_isolated_control_api_file() {
   local path="$1"
   case "$path" in
-    "$PROJECT_DIR"/control-api/test/*realPostgres*.test.ts)
+    "$PROJECT_DIR"/control-api/*realPostgres*.test.ts)
+      # Every control-api real-Postgres suite calls initDb. That migration
+      # path can reconcile cluster-global GFS roles, so keeping any of these
+      # suites on the branch profile database can poison the runtime even when
+      # the fixture database itself is temporary.
       return 0
       ;;
     *)
@@ -232,19 +263,15 @@ is_isolated_control_api_file() {
 }
 
 require_isolated_control_api_files() {
-  local path count=0
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    count=$((count + 1))
-    is_isolated_control_api_file "$path" || {
-      T1_NEXT_COMMAND='route every control-api Real PostgreSQL suite through the disposable PostgreSQL instance'
-      die_t1 ZERO_TESTS_EXECUTED "control-api Real PostgreSQL suite is not isolated: $path"
+  local path
+  for path in \
+    "$PROJECT_DIR/control-api/test/db.realPostgresMigration.integration.test.ts" \
+    "$PROJECT_DIR/control-api/test/gfsReaderRole.realPostgres.integration.test.ts"; do
+    [ -f "$path" ] || {
+      T1_NEXT_COMMAND='restore the role-reset Real PostgreSQL suite files, then re-run T1'
+      die_t1 ZERO_TESTS_EXECUTED "required isolated control-api suite is missing: $path"
     }
-  done < <(list_real_pg_files control-api)
-  if [ "$count" -le 0 ]; then
-    T1_NEXT_COMMAND='restore the control-api Real PostgreSQL suite files, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED 'no control-api Real PostgreSQL suites were found'
-  fi
+  done
 }
 
 start_isolated_postgres() {
@@ -341,13 +368,10 @@ run_suite() {
   # comparable to the number of physical *realPostgres*.test.ts files above.
   # Validate the reporter's own total/passed suite counts instead; the file
   # discovery count remains a separate zero-selection guard.
-  if ! stats="$(python3 - "$json_file" "$expected_files" <<'PY'
+  if ! stats="$(python3 - "$json_file" <<'PY'
 import json
 import sys
 result = json.loads(open(sys.argv[1]).read())
-expected = int(sys.argv[2])
-files = result.get("testResults") or []
-passed_files = sum(1 for item in files if item.get("status") == "passed")
 total_suites = int(result.get("numTotalTestSuites") or 0)
 passed_suites = int(result.get("numPassedTestSuites") or 0)
 failed_suites = int(result.get("numFailedTestSuites") or 0)
@@ -357,9 +381,8 @@ pending_files = int(result.get("numPendingTestSuites") or 0)
 pending_tests = int(result.get("numPendingTests") or 0)
 total_tests = int(result.get("numTotalTests") or 0)
 success = bool(result.get("success"))
-print(total_suites, passed_suites, failed_suites, passed_files, passed_tests,
-      failed_tests, pending_files, pending_tests, total_tests, int(success),
-      expected, len(files))
+print(total_suites, passed_suites, failed_suites, passed_tests, failed_tests,
+      pending_files, pending_tests, total_tests, int(success))
 PY
   )"; then
     cat "$log_file" >&2 || true
@@ -367,15 +390,13 @@ PY
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter was unreadable for $package ($lane)"
   fi
-  read -r total_suites passed_suites failed_suites passed_files passed_tests \
-    failed_tests pending_files pending_tests total_tests success expected \
-    reported_files <<< "$stats"
+  read -r total_suites passed_suites failed_suites passed_tests failed_tests \
+    pending_files pending_tests total_tests success <<< "$stats"
   T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))
   T1_PASSED_TESTS=$((T1_PASSED_TESTS + passed_tests))
   T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
   if [ "$success" -ne 1 ] || [ "$total_suites" -le 0 ] || \
      [ "$passed_suites" -ne "$total_suites" ] || [ "$failed_suites" -ne 0 ] || \
-     [ "$passed_files" -ne "$expected" ] || [ "$reported_files" -ne "$expected" ] || \
      [ "$failed_tests" -ne 0 ]; then
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
     die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package ($lane)"
@@ -393,7 +414,7 @@ PY
     die_t1 REAL_PG_SUITE_FAILED "Vitest process exited $suite_status for $package ($lane)"
   fi
   printf '[minikube-t1] PASS %s %s files=%s tests=%s skipped=0\n' \
-    "$package" "$lane" "$passed_files" "$passed_tests"
+    "$package" "$lane" "$expected_files" "$passed_tests"
 }
 
 main() {
@@ -408,6 +429,7 @@ main() {
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'local Real PostgreSQL requires an explicit Minikube context'
   fi
   t2_profile_status
+  t2_profile_context_identity_check
   if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
     T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'the selected profile is not bootstrapped'
@@ -472,7 +494,6 @@ print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.dec
   require_isolated_control_api_files
   start_isolated_postgres
   T1_GFS_RESTORE_REQUIRED=true
-  run_suite control-api shared "$ADMIN_DSN"
   run_suite control-api isolated "$ISOLATED_DSN"
   run_suite gfs-controller shared "$ADMIN_DSN"
   unset PG_USER PG_PASSWORD PG_DATABASE T1_REDACT_PASSWORD

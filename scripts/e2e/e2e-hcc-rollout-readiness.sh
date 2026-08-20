@@ -244,9 +244,18 @@ assert_botched_outage() {
   else
     fail "could not list HCC pod UIDs — refusing to treat a query failure as old-pod termination"
   fi
+  deployment_revision="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
+    -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)"
   stuck_pod_rows="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\t"}{.status.phase}{"\t"}{.status.containerStatuses[*].state.waiting.reason}{"\n"}{end}' 2>/dev/null || true)"
-  replacement_row="$(awk -F '\t' -v old="$OLD_POD_UID" '$2 != old && $2 != "" { print; exit }' <<<"$stuck_pod_rows")"
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\t"}{.status.phase}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.metadata.ownerReferences[?(@.kind=="ReplicaSet")].name}{"\t"}{.status.containerStatuses[?(@.name=="host-context-controller")].image}{"\t"}{.status.containerStatuses[?(@.name=="host-context-controller")].state.waiting.reason}{"\n"}{end}' 2>/dev/null || true)"
+  replacement_row="$(awk -F '\t' -v old="$OLD_POD_UID" -v image="$BOTCHED_IMAGE" \
+    '$2 != old && $2 != "" && $4 == "" && $3 != "Failed" && $3 != "Succeeded" && $5 != "" && $6 == image && $7 ~ /ErrImagePull|ImagePullBackOff/ { print; exit }' <<<"$stuck_pod_rows")"
+  replacement_owner="$(cut -f5 <<<"$replacement_row")"
+  replacement_owner_revision=""
+  if [ -n "$replacement_owner" ]; then
+    replacement_owner_revision="$(kctl get rs "$replacement_owner" -n "$HCC_NS" \
+      -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)"
+  fi
 
   case "$flavor" in
     recovery)
@@ -278,7 +287,11 @@ assert_botched_outage() {
     fail "$image_fail"
   [ "$old_uid_live" = 0 ] && ok "$old_pod_ok" || fail "$old_pod_fail"
   if [ -n "$replacement_row" ] && grep -Eq 'ErrImagePull|ImagePullBackOff' <<<"$replacement_row"; then
-    ok "replacement pod is pinned by the injected image failure: ${replacement_row}"
+    if [ -n "$deployment_revision" ] && [ "$replacement_owner_revision" = "$deployment_revision" ]; then
+      ok "replacement pod is a live current-revision pod pinned by the injected image failure: ${replacement_row}"
+    else
+      fail "replacement pod owner revision ${replacement_owner_revision:-unset} does not match Deployment revision ${deployment_revision:-unset}"
+    fi
   else
     fail "$replacement_fail"
   fi

@@ -10,9 +10,36 @@ LOG_FILE="${TMP_DIR}/kubectl.log"
 OUT_FILE="${TMP_DIR}/sync-auth-key.out"
 mkdir -p "${STATE_DIR}"
 
+# The production helper requires a live parent T2 lease. Keep the behavior
+# tests isolated with a lease owned by this test shell rather than adding a
+# production-only bypass.
+T2_LOCK_ROOT="${TMP_DIR}/locks"
+T2_LOCK_TOKEN='auth-sync-test-token'
+T2_LOCK_DIR="${T2_LOCK_ROOT}/fake.lock"
+T2_PROCESS_START=unavailable
+mkdir -p "${T2_LOCK_DIR}"
+cat >"${T2_LOCK_DIR}/owner.env" <<EOF
+REPOSITORY=${ROOT}
+PROFILE=fake
+CONTEXT=fake
+TOKEN=${T2_LOCK_TOKEN}
+PID=$$
+PROCESS_START=${T2_PROCESS_START}
+EOF
+export T2_PROJECT_DIR="${ROOT}" T2_PROFILE=fake T2_CONTEXT=fake T2_LOCK_ROOT T2_LOCK_TOKEN
+
 cat >"${TMP_DIR}/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
+SH
+
+cat >"${TMP_DIR}/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' -o state='*) printf 'R\n' ;;
+  *' -o lstart='*) printf 'unavailable\n' ;;
+  *) exit 1 ;;
+esac
 SH
 
 cat >"${TMP_DIR}/kubectl" <<'SH'
@@ -49,7 +76,13 @@ restart_count() {
 
 if [[ "${1:-}" == "get" && "${2:-}" == "secret" && "${3:-}" == "rpc-proxy-secrets" ]]; then
   [[ "${TEST_SOURCE_SECRET_PRESENT:-1}" == "1" ]] || exit 1
-  if has_output_flag "$@"; then
+  if [[ "$*" == *'.metadata.resourceVersion'* ]]; then
+    printf '42'
+  elif [[ "$*" == *'-o json' ]]; then
+    source_b64='cHVibGljLWtleQ=='
+    [[ "${TEST_SOURCE_KEY_EMPTY:-0}" == "1" ]] && source_b64=''
+    printf '{"metadata":{"resourceVersion":"42"},"data":{"RPC_PROXY_JWT_PUBLIC_KEY":"%s"}}' "$source_b64"
+  elif has_output_flag "$@"; then
     [[ "${TEST_SOURCE_KEY_EMPTY:-0}" == "1" ]] || printf 'cHVibGljLWtleQ=='
   fi
   exit 0
@@ -57,7 +90,9 @@ fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "mcp-host-config" ]]; then
   if has_output_flag "$@"; then
-    if [[ "$*" == *auth-key-applied-sha256* ]]; then
+    if [[ "$*" == *'-o json' ]]; then
+      printf '%s' '{"metadata":{"resourceVersion":"42","annotations":{}},"data":{"CLERUM_AUTH_JWT_PUBLIC_KEY":"old-key"}}'
+    elif [[ "$*" == *auth-key-applied-sha256* ]]; then
       printf '%s' "${TEST_MCP_APPLIED_HASH:-old-hash}"
     else
       printf 'old-key'
@@ -72,7 +107,9 @@ if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "gfs-config" ]
     exit 1
   fi
   if has_output_flag "$@"; then
-    if [[ "$*" == *auth-key-applied-sha256* ]]; then
+    if [[ "$*" == *'-o json' ]]; then
+      printf '%s' '{"metadata":{"resourceVersion":"42","annotations":{}},"data":{"jwt-public-key":"old-gfs-key"}}'
+    elif [[ "$*" == *auth-key-applied-sha256* ]]; then
       printf '%s' "${TEST_GFS_APPLIED_HASH:-old-hash}"
     else
       printf 'old-gfs-key'
@@ -112,6 +149,7 @@ if [[ "${1:-}" == "get" && "${2:-}" == deployment/* ]]; then
       exit 1
     fi
   fi
+  [[ "$*" == *'.spec.replicas'* ]] && printf '1'
   exit 0
 fi
 
@@ -176,7 +214,7 @@ echo "unexpected kubectl invocation: $*" >&2
 exit 99
 SH
 
-chmod +x "${TMP_DIR}/kubectl" "${TMP_DIR}/sleep"
+chmod +x "${TMP_DIR}/kubectl" "${TMP_DIR}/sleep" "${TMP_DIR}/ps"
 
 if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" PATH="${TMP_DIR}:$PATH" \
   bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake >"${OUT_FILE}" 2>&1; then
@@ -310,6 +348,34 @@ if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_GFS_CONFI
   exit 1
 fi
 grep -q 'patch configmap gfs-config' "${LOG_FILE}"
+
+: >"${LOG_FILE}"
+if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
+  TEST_GFS_CONFIG_PRESENT=1 TEST_GFS_DEPLOYMENTS=1 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
+  echo "FAIL: strict GFS auth sync accepted an empty DSN before reconciliation" >&2
+  exit 1
+fi
+grep -q 'gfs-controller-db.connection-string is empty' "${OUT_FILE}"
+
+: >"${LOG_FILE}"
+if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
+  TEST_GFS_CONFIG_PRESENT=1 TEST_GFS_DEPLOYMENTS=1 \
+  GFS_AUTH_SYNC_ALLOW_STAGED=true \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo "FAIL: staged GFS auth sync did not defer proof until reconciliation" >&2
+  exit 1
+fi
+grep -q 'Deferring active gfsc auth proof until GFS credentials are reconciled' "${OUT_FILE}"
+if grep -q 'rollout restart deployment/gfsc-' "${LOG_FILE}"; then
+  echo "FAIL: staged GFS auth sync restarted a consumer before DSN provisioning" >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
 
 : >"${LOG_FILE}"
 if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
