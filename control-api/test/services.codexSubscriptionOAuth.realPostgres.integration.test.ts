@@ -72,26 +72,35 @@ describeRealPostgres('Codex subscription OAuth on real PostgreSQL', () => {
   }
 
   it('lets only one concurrent refresh win the single-flight lock', async () => {
-    const fetchFn = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        access_token: 'access-secret',
-        refresh_token: 'winner-refresh',
-        id_token: idTokenFor('acct-seed'),
-      }),
+    let releaseHold!: () => void
+    const hold = new Promise<void>(resolve => {
+      releaseHold = resolve
     })
-    const results = await Promise.allSettled([
-      refreshCodexSubscriptionConnection(deps(fetchFn)),
-      refreshCodexSubscriptionConnection(deps(fetchFn)),
-    ])
-    const fulfilled = results.filter(result => result.status === 'fulfilled')
-    const rejected = results.filter(result => result.status === 'rejected')
-    expect(fulfilled).toHaveLength(1)
-    expect(rejected).toHaveLength(1)
-    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+    const fetchFn = vi.fn().mockImplementation(async () => {
+      await hold
+      return {
+        ok: true,
+        json: async () => ({
+          access_token: 'access-secret',
+          refresh_token: 'winner-refresh',
+          id_token: idTokenFor('acct-seed'),
+        }),
+      }
+    })
+    const winner = refreshCodexSubscriptionConnection(deps(fetchFn))
+    await vi.waitFor(() => {
+      expect(fetchFn).toHaveBeenCalled()
+    })
+    const loser = refreshCodexSubscriptionConnection(deps(fetchFn))
+    const loserSettled = await Promise.allSettled([loser]).then(result => result[0])
+    releaseHold()
+    const winnerSettled = await Promise.allSettled([winner]).then(result => result[0])
+    expect(winnerSettled?.status).toBe('fulfilled')
+    expect(loserSettled?.status).toBe('rejected')
+    expect((loserSettled as PromiseRejectedResult).reason).toBeInstanceOf(
       CodexSubscriptionOAuthError
     )
-    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+    expect((loserSettled as PromiseRejectedResult).reason).toMatchObject({
       code: expect.stringMatching(/refresh_in_flight|stale_revision/),
     })
   })
