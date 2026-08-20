@@ -253,7 +253,8 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
       )
     ).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    fireEvent.change(screen.getByLabelText('Secret reference'), { target: { value: '' } })
+    // Keep the existing static-credentials secret. Emptying it now fails
+    // closed (Codex broker chains omit secretRef; OpenAI still requires one).
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByText('Model & credentials saved.')).toBeInTheDocument()
 
