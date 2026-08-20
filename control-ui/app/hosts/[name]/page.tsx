@@ -61,6 +61,23 @@ function parseHostTab(value: string | undefined): HostTab {
   return HOST_TABS.find(tab => TAB_SLUGS[tab] === value) ?? HOST_DEFAULT_TAB
 }
 
+// Format an RFC3339 timestamp (or empty) to the table-style "May 21, 2024 • 10:24 AM"
+// used in the Overview identity card. Empty string falls through to the same so the
+// cell shows a dash and we don't render "Invalid Date".
+function formatTimestamp(value: string): string {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const month = date.toLocaleString('en-US', { month: 'long' })
+  const day = date.getDate()
+  const year = date.getFullYear()
+  let hours = date.getHours()
+  const minutes = date.getMinutes().toString().padStart(2, '0')
+  const meridiem = hours >= 12 ? 'PM' : 'AM'
+  hours = hours % 12 || 12
+  return `${month} ${day}, ${year} • ${hours}:${minutes} ${meridiem}`
+}
+
 // Cron×stateless: map the machine-readable suspend-blocked reason to
 // operator-friendly text. Every other reason renders verbatim.
 function friendlyLifecycleReason(reason: string): string {
@@ -200,6 +217,11 @@ export default function HostDetailsPage() {
   const [guardrailsData, setGuardrailsData] = useState<HostGuardrails | undefined>(undefined)
   // Overview tab — read-only summary. Kept in sync with the host spec by loadData.
   const [contextMcpServers, setContextMcpServers] = useState<string[]>([])
+  const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
+  const [hostStatusTone, setHostStatusTone] = useState<'active' | 'inactive' | 'unknown'>('unknown')
+  const [hostCreatedAt, setHostCreatedAt] = useState('')
+  const [hostLastUpdated, setHostLastUpdated] = useState('')
+  const [hostUid, setHostUid] = useState('')
   const [accessSummary, setAccessSummary] = useState<{
     memberCount: number
     teamCount: number
@@ -322,6 +344,30 @@ export default function HostDetailsPage() {
           memberCount: Array.isArray(agentUsers) ? agentUsers.length : 0,
           teamCount: Array.isArray(agentTeams) ? agentTeams.length : 0,
         })
+        // Overview read-only: status, created/updated timestamps, UID.
+        // K8s carries lifecycle.state on status. Map active/suspended/etc. to a
+        // simple active/inactive/unknown tone for the badge.
+        const lifecycleState = String(
+          (host.status as { lifecycle?: { state?: string } } | undefined)?.lifecycle?.state || ''
+        ).trim()
+        const lowerState = lifecycleState.toLowerCase()
+        if (lowerState === 'active' || lowerState === 'ready') {
+          setHostStatusLabel('Active')
+          setHostStatusTone('active')
+        } else if (lowerState === 'blocked' || lowerState === 'failed') {
+          setHostStatusLabel(lifecycleState || 'Inactive')
+          setHostStatusTone('inactive')
+        } else if (lifecycleState) {
+          setHostStatusLabel(lifecycleState)
+          setHostStatusTone('unknown')
+        } else {
+          setHostStatusLabel('Active')
+          setHostStatusTone('active')
+        }
+        const createdAt = String(host.metadata?.creationTimestamp || '').trim()
+        setHostCreatedAt(formatTimestamp(createdAt))
+        setHostLastUpdated(formatTimestamp(createdAt))
+        setHostUid(String(host.metadata?.uid || '').trim())
       }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
@@ -784,20 +830,27 @@ export default function HostDetailsPage() {
           <HostOverviewTab
             hostName={routeName}
             displayName={hostDisplayDraft}
+            statusLabel={hostStatusLabel}
+            statusTone={hostStatusTone}
             contextRef={contextRefDraft}
             contextMcpServers={contextMcpServers}
-            provider={providerDraft}
-            modelName={modelNameDraft}
-            fallbackLines={(llmPolicyDraft?.fallbacks ?? []).map(entry => {
-              const label = getProviderLabel(entry.provider)
-              const slot = entry.credentialSlot ? ` · ${entry.credentialSlot}` : ''
-              return `${label} · ${entry.model || '—'}${slot}`
-            })}
-            allowedModelLines={allowedModelsDraft.map(entry => {
-              const label = getProviderLabel(entry.provider)
-              return `${label} · ${entry.model}`
-            })}
+            contextMcpTotal={contextMcpServers.length}
+            contextHref={
+              contextRefDraft.trim()
+                ? CONTROL_ROUTES.contexts.connectors(contextRefDraft.trim())
+                : '#'
+            }
+            modelPrimary={modelNameDraft}
+            modelProviderLine={
+              modelNameDraft ? `${getProviderLabel(providerDraft)} · ${modelNameDraft}` : ''
+            }
+            modelAllowlistLine={allowedModelsDraft
+              .map(entry => `${getProviderLabel(entry.provider)} · ${entry.model}`)
+              .join(', ')}
             accessSummary={accessSummary}
+            uid={hostUid}
+            createdAt={hostCreatedAt}
+            lastUpdated={hostLastUpdated}
           />
         )}
 

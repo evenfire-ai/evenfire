@@ -7430,6 +7430,293 @@ textarea.cu-input {
   box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.18);
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+   HostOverviewTab — 2-column identity + configuration summary on the
+   agent detail Overview tab. Left column holds the identity card; right
+   column stacks Configuration, Access tiles, and MCP servers. */
+.cu-host-overview {
+  display: grid;
+  grid-template-columns: minmax(16rem, 22rem) 1fr;
+  gap: var(--cu-space-4);
+  align-items: start;
+}
+
+.cu-host-overview-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-5) var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius);
+  background: var(--cu-bg-elevated);
+  text-align: center;
+}
+
+.cu-host-overview-identity__avatar {
+  display: grid;
+  place-items: center;
+  width: 5rem;
+  height: 5rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    135deg,
+    rgba(var(--cu-accent-rgb), 0.18),
+    rgba(var(--cu-accent-rgb), 0.04)
+  );
+  color: var(--cu-accent);
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.25);
+}
+
+.cu-host-overview-identity__name {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.2;
+  margin-top: 0.25rem;
+}
+
+.cu-host-overview-identity__slug {
+  font-size: 0.875rem;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-identity__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8125rem;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-status__dot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: var(--cu-text-muted);
+}
+
+.cu-host-overview-status__dot--active {
+  background: var(--cu-success);
+  box-shadow: 0 0 0 3px rgba(var(--cu-success-rgb), 0.18);
+}
+
+.cu-host-overview-status__dot--inactive {
+  background: var(--cu-danger);
+}
+
+.cu-host-overview-status__dot--unknown {
+  background: var(--cu-warning);
+}
+
+.cu-host-overview-identity__divider {
+  width: 100%;
+  height: 1px;
+  background: var(--cu-border-subtle);
+  margin: var(--cu-space-2) 0;
+}
+
+.cu-host-overview-section-label {
+  margin: 0 0 var(--cu-space-2);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-identity__counts {
+  display: flex;
+  align-items: stretch;
+  gap: var(--cu-space-3);
+  width: 100%;
+  justify-content: center;
+}
+
+.cu-host-overview-identity__count-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.cu-host-overview-identity__count-label {
+  font-size: 0.75rem;
+  color: var(--cu-text-muted);
+  text-transform: lowercase;
+}
+
+.cu-host-overview-identity__count-sep {
+  width: 1px;
+  background: var(--cu-border-subtle);
+}
+
+.cu-host-overview-context-chip {
+  font-size: 0.8125rem;
+  text-decoration: none;
+}
+
+.cu-host-overview-identity__uid {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8125rem;
+  color: var(--cu-text);
+}
+
+.cu-host-overview-identity__uid-text {
+  font-family: var(--cu-font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.cu-host-overview-identity__meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem var(--cu-space-2);
+  width: 100%;
+  margin: 0;
+  text-align: left;
+  font-size: 0.75rem;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-identity__meta dt {
+  font-weight: 600;
+  color: var(--cu-text-soft);
+}
+
+.cu-host-overview-identity__meta dd {
+  margin: 0;
+  color: var(--cu-text);
+}
+
+.cu-host-overview-right {
+  display: grid;
+  gap: var(--cu-space-4);
+  min-width: 0;
+}
+
+.cu-host-overview-config {
+  display: grid;
+  gap: 0;
+}
+
+.cu-host-overview-config__row {
+  display: grid;
+  grid-template-columns: minmax(11rem, 16rem) 1fr;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-2) 0;
+  border-top: 1px solid var(--cu-border-subtle);
+  font-size: 0.8125rem;
+}
+
+.cu-host-overview-config__row:first-child {
+  border-top: none;
+}
+
+.cu-host-overview-config__setting {
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-config__value {
+  color: var(--cu-text);
+  word-break: break-word;
+}
+
+.cu-host-overview-access {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--cu-space-3);
+}
+
+.cu-host-overview-access__tile {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius);
+  background: rgba(var(--cu-panel-rgb), 0.4);
+}
+
+.cu-host-overview-access__icon {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 999px;
+  background: rgba(var(--cu-accent-rgb), 0.16);
+  color: var(--cu-accent);
+}
+
+.cu-host-overview-access__value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.cu-host-overview-access__label {
+  font-size: 0.75rem;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-mcp__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  margin-bottom: var(--cu-space-2);
+}
+
+.cu-host-overview-mcp__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-host-overview-mcp__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: 100%;
+  padding: 0.2rem var(--cu-space-2);
+  overflow: hidden;
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-accent-rgb), 0.14);
+  color: var(--cu-text);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-host-overview-mcp__dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--cu-accent);
+  flex-shrink: 0;
+}
+
+.cu-host-overview-mcp__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: var(--cu-space-2);
+  font-size: 0.8125rem;
+  color: var(--cu-link);
+}
+
+@media (max-width: 60rem) {
+  .cu-host-overview {
+    grid-template-columns: 1fr;
+  }
+}
+
 .cu-host-env-form--danger {
   border-color: rgba(var(--cu-danger-rgb), 0.38);
   background: rgba(var(--cu-danger-rgb), 0.06);
