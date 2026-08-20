@@ -9,17 +9,51 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 bash -n "$SCRIPT"
 
 run_settle() {
-  local fake_dir
+  local fake_dir repo profile sha
   fake_dir="$(mktemp -d)"
+  repo="$fake_dir/repo"
+  profile='clerum-settle-gfs-reader'
+  mkdir -p "$repo" "$fake_dir/profiles/$profile" "$fake_dir/locks" "$fake_dir/evidence"
+  repo="$(cd "$repo" && pwd -P)"
+  git init -q -b dev "$repo" >/dev/null
+  git -C "$repo" config user.email test@example.invalid
+  git -C "$repo" config user.name settle-test
+  printf 'settle fixture\n' >"$repo/README"
+  git -C "$repo" add README >/dev/null
+  git -C "$repo" commit -q -m fixture >/dev/null
+  git -C "$repo" remote add origin https://github.com/evenfire-ai/evenfire.git
+  git -C "$repo" switch -c feat/settle-gfs-reader >/dev/null
+  git -C "$repo" update-ref refs/remotes/origin/dev HEAD
+  sha="$(git -C "$repo" rev-parse --short HEAD)"
+  cat >"$fake_dir/profiles/$profile/profile.env" <<EOF
+PROFILE=$profile
+REPO_DIR=$repo
+BRANCH=feat/settle-gfs-reader
+SHA_SHORT=$sha
+DIRTY=false
+EOF
+  printf 'PORT_BASE=23457\n' >"$fake_dir/profiles/$profile/ports.env"
   cat >"$fake_dir/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_KUBECTL_LOG:?}"
 case " $* " in
+  *' config get-contexts -o name'*)
+    printf '%s' "${T2_CONTEXT:?}"; exit 0 ;;
+  *' config view '* )
+    printf 'https://%s:6443' '127.0.0.1'; exit 0 ;;
   *' get deployment gfsc-reader '*'-o jsonpath={.spec.replicas}'*)
     printf '%s' "${FAKE_DESIRED:-1}"; exit 0 ;;
   *' get deployment gfsc-reader '*'-o jsonpath={.status.readyReplicas}'*)
     printf '%s' "${FAKE_READY:-1}"; exit 0 ;;
+  *' get deployment gfsc-reader '*gfs-template-hash*)
+    printf '%s' 'template-42'; exit 0 ;;
+  *' get deployment gfsc-reader '*jsonpath={.metadata.generation}*)
+    printf '%s' '2'; exit 0 ;;
+  *' get deployment gfsc-reader '*jsonpath={.status.observedGeneration}*)
+    printf '%s' '2'; exit 0 ;;
+  *' get deployment gfsc-reader '*jsonpath={range*)
+    printf '%s\n' 'gfs-controller-reader-db'; exit 0 ;;
   *' get deployment gfsc-reader '*revision*)
     printf '%s' "${FAKE_REVISION:-19}"; exit 0 ;;
   *' get deployment gfsc-reader'*)
@@ -27,8 +61,12 @@ case " $* " in
     exit 0 ;;
   *' get rs -l '*)
     printf '%b' "${FAKE_RS_ROWS:-}"; exit 0 ;;
+  *' get rs gfsc-reader-proof-rs '*revision*)
+    printf '%s' "${FAKE_REVISION:-19}"; exit 0 ;;
   *' scale rs '*)
     exit 0 ;;
+  *' get pods -l '*gfs-template-hash*)
+    printf '%b' "${FAKE_PROOF_POD_ROWS:-gfsc-reader-proof|2026-01-02T00:00:01Z|True||gfsc-reader-proof-rs|}"; exit 0 ;;
   *' get pods -l '*)
     printf '%b' "${FAKE_POD_ROWS:-}"; exit 0 ;;
   *' delete pod '*)
@@ -37,19 +75,44 @@ case " $* " in
     printf '%s' "${FAKE_STATE:-rollout-running}"; exit 0 ;;
   *' get secret gfs-controller-reader-db '*gfs-dsn-rotated-at*)
     printf '%s' "${FAKE_ROTATED:-2026-01-01T00:00:00Z}"; exit 0 ;;
+  *' get secret gfs-controller-reader-db '*jsonpath={.metadata.resourceVersion}*)
+    printf '%s' '42'; exit 0 ;;
+  *' get secret gfs-controller-reader-db '*'-o json'*)
+    python3 - <<'PY'
+import base64
+import json
+import os
+print(json.dumps({
+    "metadata": {"resourceVersion": "42"},
+    "data": {"connection-string": base64.b64encode(os.environ["FAKE_DSN"].encode()).decode()},
+}))
+PY
+    exit 0 ;;
   *' get secret gfs-controller-reader-db'*)
     [ "${FAKE_SECRET_EXISTS:-1}" = 1 ] || exit 1
     exit 0 ;;
+  *' exec '*)
+    input="$(cat)"
+    [ "$input" = "${FAKE_DSN:?}" ] || exit 1
+    exit 0 ;;
   *' patch secret gfs-controller-reader-db'*)
-    cat >/dev/null
+    cat >"${FAKE_PATCH_LOG:?}"
     [ "${FAKE_PATCH_OK:-1}" = 1 ] || exit 1
     exit 0 ;;
 esac
 exit 1
 STUB
   chmod +x "$fake_dir/kubectl"
-  PATH="$fake_dir:$PATH" CONTEXT=fake \
+  local status=0
+  PATH="$fake_dir:$PATH" CONTEXT="$profile" \
+    T2_PROJECT_DIR="$repo" T2_PROFILE="$profile" T2_CONTEXT="$profile" \
+    MINIKUBE_PROFILE="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" \
+    T2_PROFILE_ROOT="$fake_dir/profiles" T2_PROFILE_ENV="$fake_dir/profiles/$profile/profile.env" \
+    T2_PORTS_ENV="$fake_dir/profiles/$profile/ports.env" \
+    T2_LOCK_ROOT="$fake_dir/locks" T2_EVIDENCE_ROOT="$fake_dir/evidence" \
+    T2_GATE_ID=settle-gfs-reader-test T2_RUN_ID=settle-test-run \
     FAKE_KUBECTL_LOG="$fake_dir/kubectl.log" \
+    FAKE_PATCH_LOG="$fake_dir/patch.json" FAKE_DSN=dsn-value \
     FAKE_DEPLOY_EXISTS="${1:-1}" \
     FAKE_DESIRED="${2:-1}" \
     FAKE_READY="${3:-1}" \
@@ -60,13 +123,24 @@ STUB
     FAKE_RS_ROWS="${8:-}" \
     FAKE_POD_ROWS="${9:-}" \
     FAKE_REVISION="${10:-19}" \
-    bash "$SCRIPT"
+    FAKE_PROOF_POD_ROWS="${11:-}" \
+    bash "$SCRIPT" || status=$?
   printf '%s' "$fake_dir"
+  return "$status"
 }
 
 dir="$(run_settle 1 1 1 1 rollout-running '2026-01-01T00:00:00Z' 1)"
 grep -q 'patch secret gfs-controller-reader-db' "$dir/kubectl.log" \
   || fail 'Ready leftover claim did not patch the reader Secret to ready'
+grep -q 'gfs-dsn-proof-kind' "$dir/patch.json" \
+  || fail 'Ready leftover claim did not persist credential-consumption proof'
+rm -rf "$dir"
+
+if dir="$(run_settle 1 1 1 1 rollout-running '2026-01-01T00:00:00Z' 1 '' '' 19 'gfsc-reader-old|2025-12-31T23:59:59Z|True||gfsc-reader-old-rs|')"; then
+  fail 'a pre-rotation Ready reader incorrectly certified the rollout'
+fi
+grep -q 'patch secret' "$dir/kubectl.log" \
+  && fail 'a pre-rotation Ready reader must not be marked ready'
 rm -rf "$dir"
 
 dir="$(run_settle 1 1 0 1 rollout-running '2026-01-01T00:00:00Z' 1)"

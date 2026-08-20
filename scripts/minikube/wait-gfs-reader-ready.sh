@@ -20,6 +20,23 @@ POLL_SECONDS="${GFS_READER_WAIT_POLL_SECONDS:-5}"
 kc() { kubectl --context="$CONTEXT" "$@"; }
 log() { printf '[wait-gfs-reader-ready] %s\n' "$*" >&2; }
 
+if ! TIMEOUT_SECONDS="$(python3 - "$TIMEOUT_SECONDS" <<'PY'
+import re
+import sys
+
+raw = sys.argv[1]
+if not re.fullmatch(r"[1-9][0-9]{0,4}", raw):
+    raise SystemExit("timeout must be a positive integer")
+value = int(raw)
+if value > 86400:
+    raise SystemExit("timeout exceeds the one-day limit")
+print(value)
+PY
+)"; then
+  log 'refusing an invalid readiness timeout'
+  exit 2
+fi
+
 deadline=$((SECONDS + TIMEOUT_SECONDS))
 while :; do
   desired="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \

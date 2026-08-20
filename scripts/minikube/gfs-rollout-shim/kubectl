@@ -64,20 +64,32 @@ while [ "$i" -lt "${#args[@]}" ]; do
   i=$((i + 1))
 done
 
-timeout_seconds=600
-case "$timeout_raw" in
-  '') ;;
-  *m) timeout_seconds=$((${timeout_raw%m} * 60)) ;;
-  *s) timeout_seconds="${timeout_raw%s}" ;;
-  *[!0-9]*) ;;
-  *) timeout_seconds="$timeout_raw" ;;
-esac
-# A CrashLoopBackOff retry delay reaches five minutes; a shorter caller
-# timeout cannot observe the credential-restore recovery this wait exists
-# for, so enforce a floor. Overridable only for the stubbed contract test.
-min_timeout="${GFS_ROLLOUT_SHIM_MIN_TIMEOUT_SECONDS:-600}"
-if [ "$timeout_seconds" -lt "$min_timeout" ]; then
-  timeout_seconds="$min_timeout"
+if ! timeout_seconds="$(python3 - "$timeout_raw" "${GFS_ROLLOUT_SHIM_MIN_TIMEOUT_SECONDS:-600}" <<'PY'
+import re
+import sys
+
+timeout_raw, minimum_raw = sys.argv[1:]
+
+def parse_duration(raw, default, label):
+    if raw == "":
+        return default
+    match = re.fullmatch(r"[1-9][0-9]{0,4}([sm]?)", raw)
+    if not match:
+        raise SystemExit(f"invalid {label}: expected a positive integer with optional s/m suffix")
+    value = int(raw[:-1] if raw[-1:] in {"s", "m"} else raw)
+    if raw.endswith("m"):
+        value *= 60
+    if value < 1 or value > 86400:
+        raise SystemExit(f"invalid {label}: value must be between 1 and 86400 seconds")
+    return value
+
+timeout = parse_duration(timeout_raw, 600, "rollout timeout")
+minimum = parse_duration(minimum_raw, 600, "minimum rollout timeout")
+print(max(timeout, minimum))
+PY
+)"; then
+  printf '[gfs-rollout-shim] refusing an invalid rollout timeout\n' >&2
+  exit 2
 fi
 
 if [ -z "$context" ]; then
