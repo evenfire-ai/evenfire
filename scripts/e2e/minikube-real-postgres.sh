@@ -389,14 +389,13 @@ main() {
   T1_REDACT_PASSWORD="$PG_PASSWORD"
 
   LOCAL_PORT="$(choose_local_port)"
-  # Background kubectl DIRECTLY, not the t2_kc function. Backgrounding a shell
-  # function forks a subshell, so $! is the subshell's PID and its command line
-  # is this script's name — cleanup_t1's `svc/control-postgres` guard never
-  # matches it, so the kill is skipped and the port-forward (plus the subshell)
-  # orphan (PPID=1) past T1 into the T2 final preflight, tripping a spurious
-  # PORT_FORWARD_CONFLICT. Backgrounding kubectl directly makes PORT_FORWARD_PID
-  # the real forward whose command line the guard (and the wait) can act on.
-  kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
+  # Launch kubectl directly, not through the t2_kc function: backgrounding a
+  # function forks a subshell whose argv is this script, so $! would record
+  # the subshell, the cleanup guard (*port-forward*svc/control-postgres*)
+  # would never match, and the orphaned real kubectl port-forward would fail
+  # the final exact-head preflight with PORT_FORWARD_CONFLICT.
+  kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward \
+    --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
     >"$T1_TMP_DIR/port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
   if ! wait_for_tcp "$LOCAL_PORT"; then

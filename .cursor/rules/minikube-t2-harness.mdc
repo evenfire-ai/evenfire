@@ -64,6 +64,11 @@ Invariants that must never regress:
   PIDs recorded in the profile cache or legacy `/tmp/pf-<profile>-*.pid`.
   awk is a loose pre-filter: `kubectl` as argv0/path token and a later
   standalone `port-forward` token (flags may sit between them).
+- T1 backgrounds its control-postgres port-forward as a direct `kubectl`
+  child (never through the `t2_kc` function): a backgrounded function forks
+  a subshell whose argv is the script, `$!` records that subshell, cleanup's
+  `*port-forward*` guard never matches, and the orphaned real kubectl fails
+  the final exact-head preflight with `PORT_FORWARD_CONFLICT`.
 - Stable failure codes (`BOOTSTRAP_REQUIRED`, `HEAD_MARKER_MISMATCH`,
   `PORT_FORWARD_CONFLICT`, `PROFILE_BUSY`, ...) keep their meanings.
 

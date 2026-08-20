@@ -84,6 +84,14 @@ if grep -Fq "[ \"\$passed_files\" -ne \"\$expected\" ]" "$T1"; then
   exit 1
 fi
 grep -Fq 'port-forward' "$T1"
+# The pf must be a direct kubectl child: backgrounding the t2_kc function
+# records the subshell PID, cleanup never matches *port-forward*, and the
+# orphaned kubectl fails the final preflight with PORT_FORWARD_CONFLICT.
+if grep -Eq 't2_kc[^|]*port-forward' "$T1"; then
+  echo 'FAIL: T1 backgrounds the control-postgres port-forward through the t2_kc function' >&2
+  exit 1
+fi
+grep -Fq 'kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward' "$T1"
 grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 
 # T1 must restore the branch-profile GFS credentials on the way out with the

@@ -278,6 +278,8 @@ grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$ROOT/scripts/e2e/minikube-real-post
 grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must resume an interrupted gfsc-reader rollout claim'
 grep -Fq 'settle-gfs-reader-rollout.sh' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must settle a Ready gfsc-reader leftover rollout claim first'
 grep -Fq 'gfs-rollout-shim' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must use the HCC-safe reader rollout wait'
+grep -Eq 't2_kc[^|]*port-forward' "$ROOT/scripts/e2e/minikube-real-postgres.sh" && fail 'T1 must background the port-forward as a direct kubectl child, not through the t2_kc function'
+grep -Fq 'kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must launch the control-postgres port-forward with an explicit kubectl context'
 grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync must restore a NOLOGIN GFS role from the committed Secret DSN'
 grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync must resume an interrupted gfsc-reader rollout claim'
 grep -Fq 'settle-gfs-reader-rollout.sh' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync must settle a Ready gfsc-reader leftover rollout claim before reconcile'
