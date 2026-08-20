@@ -155,11 +155,38 @@ describe('GfsBrowser', () => {
     await screen.findAllByText(/readme\.md/)
     expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeTruthy()
     expect(screen.queryByText('Drive map')).toBeNull()
+
+    const orgRow = screen
+      .getByRole('list', { name: 'Current folder resources' })
+      .querySelector('li')
+    expect(orgRow?.querySelector('svg path')?.getAttribute('d')).toContain(
+      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288'
+    )
+
     await openResourceMenu('readme.md')
     expect(screen.getByRole('menuitem', { name: 'Copy GFS link' }).getAttribute('title')).toBe(
       'gfs://main/r2'
     )
     expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/tree', { drive: 'main' })
+  })
+
+  it('orders directories first, then files, both alphabetically', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [
+        child('zebra.md', 'file', 4),
+        child('beta', 'directory', 2),
+        child('apple.md', 'file', 3),
+        child('alpha', 'directory', 1),
+      ],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    const list = await screen.findByRole('list', { name: 'Current folder resources' })
+    const resourceNamesInOrder = Array.from(list.querySelectorAll('.cu-gfs-list__name'))
+      .map(node => node.textContent?.trim() ?? '')
+      .filter(name => /^(alpha|beta|apple|zebra)/.test(name))
+    expect(resourceNamesInOrder).toEqual(['alpha', 'beta', 'apple.md', 'zebra.md'])
   })
 
   it('uses the paperclip header, labels the root as main, and ignores current-crumb clicks', async () => {

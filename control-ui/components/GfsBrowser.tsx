@@ -188,7 +188,8 @@ export function GfsBrowser(): React.JSX.Element {
             : prev
         )
       }
-      setItems(prev => (cursor ? [...prev, ...page.items] : page.items))
+      const sortedItems = sortChildrenWithDirectoriesFirst(page.items)
+      setItems(prev => (cursor ? [...prev, ...sortedItems] : sortedItems))
       setNextCursor(page.nextCursor)
     } catch (err) {
       if (!isSilentApiError(err)) {
@@ -199,6 +200,13 @@ export function GfsBrowser(): React.JSX.Element {
       else setLoading(false)
     }
   }, [])
+
+  function sortChildrenWithDirectoriesFirst(children: GfsChild[]): GfsChild[] {
+    return [...children].sort((a, b) => {
+      if (a.kind === b.kind) return a.name.localeCompare(b.name)
+      return a.kind === 'directory' ? -1 : 1
+    })
+  }
 
   useEffect(() => {
     void load(current)

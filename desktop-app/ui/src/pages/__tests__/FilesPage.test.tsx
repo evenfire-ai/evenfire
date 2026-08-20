@@ -195,6 +195,81 @@ describe('FilesPage', () => {
     expect(screen.queryByRole('tab')).toBeNull()
   })
 
+  it('orders directories before files, both alphabetically by name', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'parent-1',
+        gfsUri: 'gfs://main/parent-1',
+        name: 'Workspace',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-z',
+          rid: 'file-z',
+          gfsUri: 'gfs://main/file-z',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'Zebra.md',
+          kind: 'file',
+          path: '/Zebra.md',
+          version: 1,
+          bytes: 12,
+        },
+        {
+          resourceId: 'dir-b',
+          rid: 'dir-b',
+          gfsUri: 'gfs://main/dir-b',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'beta',
+          kind: 'directory',
+          path: '/beta',
+          version: 1,
+          bytes: 0,
+        },
+        {
+          resourceId: 'file-a',
+          rid: 'file-a',
+          gfsUri: 'gfs://main/file-a',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'apple.md',
+          kind: 'file',
+          path: '/apple.md',
+          version: 1,
+          bytes: 4,
+        },
+        {
+          resourceId: 'dir-a',
+          rid: 'dir-a',
+          gfsUri: 'gfs://main/dir-a',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'alpha',
+          kind: 'directory',
+          path: '/alpha',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    const resourceNamesInOrder = Array.from(document.querySelectorAll('.da-gfs-list__name')).map(
+      node => node.textContent?.trim() ?? ''
+    )
+    expect(resourceNamesInOrder).toEqual(['alpha', 'beta', 'apple.md', 'Zebra.md'])
+
+    const alphaRow = screen.getByRole('button', { name: 'alpha' }).closest('.da-grid__row')
+    expect(alphaRow?.querySelector('.da-gfs-list__icon svg path')?.getAttribute('d')).toContain(
+      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288'
+    )
+  })
+
   it('shows end-user folder CRUD controls only when held permissions allow them', async () => {
     const createFolder = vi.fn(async () => undefined)
     const renameResource = vi.fn(async () => undefined)

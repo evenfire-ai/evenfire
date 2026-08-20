@@ -571,8 +571,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
     const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
     return [...resources].sort((left, right) => {
-      if (left.kind === right.kind) return 0
-      return left.kind === 'directory' ? -1 : 1
+      if (left.kind !== right.kind) {
+        return left.kind === 'directory' ? -1 : 1
+      }
+      return (left.name || left.drive).localeCompare(right.name || right.drive)
     })
   }, [accessibleResources, currentIsFile, currentIsFolder, items])
   const visibleLoading = currentIsFolder ? loading : !current ? loadingAccessible : false
