@@ -64,7 +64,9 @@ The harness owns NOLOGIN recovery and abandoned-rollout resume: T1 restores
 branch-profile GFS credentials on exit, and `pre-gate-sync` provisions
 serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` and
 `GFS_RECOVER_ABANDONED_STATE=true` in every plan and restarts an unready
-`gfsc-reader` after restore. Do not run
+`gfsc-reader` after restore. A Ready leftover `rollout-running` claim is
+settled by `scripts/minikube/settle-gfs-reader-rollout.sh` before
+reconcile so HCC's gfsReconciler cannot race a second restart. Do not run
 `reconcile-gfs-deploy-credentials.sh` or `kubectl rollout restart
 deploy/gfsc-reader` by hand as a T2-repair step — re-run the entry point.
 

@@ -333,6 +333,10 @@ provision_gfs_serving() {
     # credential cannot authenticate; no password is invented here.
     # GFS_RECOVER_ABANDONED_STATE: a dead prior setup can leave
     # rollout-running; this sync holds the T2 lock, so resume that claim.
+    # Settle a Ready reader first so reconcile does not restart it and
+    # race HCC's gfsReconciler during kubectl rollout status.
+    CONTEXT="${PROFILE}" \
+      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
     if ! GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
       CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then

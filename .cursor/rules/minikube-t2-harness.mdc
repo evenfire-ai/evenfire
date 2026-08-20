@@ -42,6 +42,9 @@ Invariants that must never regress:
   reconcile calls — setup runs before pre-gate-sync and must not abort on a
   NOLOGIN reader or a leftover `rollout-running` claim from a dead prior
   setup. The T2 profile lock makes that abandoned-state recover safe.
+  When `gfsc-reader` is already Ready, `settle-gfs-reader-rollout.sh`
+  marks that leftover claim ready before reconcile so a second
+  `rollout restart` cannot race HCC's gfsReconciler.
 - T1 stays fail-loud (no green on unavailable DSN or zero tests); the JSON
   reporter is the suite verdict, not a leftover Vitest process exit after a
   complete green reporter. Role-reset suites keep the throwaway Postgres 16.
