@@ -37,7 +37,7 @@ const FIXTURE: RawModelsDevCatalog = {
 }
 
 describe('modelsDevClient — PROVIDER_KEY_MAP', () => {
-  it('maps every one of our 21 providers to a models.dev key', () => {
+  it('maps every one of our 22 providers to a models.dev key', () => {
     for (const id of PROVIDER_IDS) {
       expect(typeof PROVIDER_KEY_MAP[id]).toBe('string')
       expect(PROVIDER_KEY_MAP[id].length).toBeGreaterThan(0)
