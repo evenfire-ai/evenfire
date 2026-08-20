@@ -9,19 +9,19 @@ BASH_BIN="$(command -v bash)"
 
 if PATH="${tmpdir}/missing-tools" "${BASH_BIN}" "${SCANNER}" \
   --stdin-kind api </dev/null >/dev/null 2>&1; then
-  echo 'FAIL: scanner passed without ripgrep' >&2
+  echo 'FAIL: scanner passed without grep' >&2
   exit 1
 fi
 
 if (
   # Invoked indirectly by the scanner's child Bash process.
   # shellcheck disable=SC2329
-  rg() { return 2; }
-  export -f rg
+  grep() { return 2; }
+  export -f grep
   printf '%s\n' '{"Authorization":"Bearer abc.def.ghi"}' |
     bash "${SCANNER}" --stdin-kind api >/dev/null 2>&1
 ); then
-  echo 'FAIL: scanner passed when ripgrep returned an execution error' >&2
+  echo 'FAIL: scanner passed when grep returned an execution error' >&2
   exit 1
 fi
 
