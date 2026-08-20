@@ -216,7 +216,6 @@ export async function rotateCodexSubscriptionCredentials(
             updated_at = now()
       WHERE connection_key = $6
         AND credential_revision = $7
-        AND revoked_at IS NULL
       RETURNING ${SAFE_CONNECTION_COLUMNS}`,
     [
       refreshTokenEncrypted,
@@ -231,6 +230,30 @@ export async function rotateCodexSubscriptionCredentials(
   const row = result.rows[0] as SafeConnectionRow | undefined
   if (!row) throw new CodexSubscriptionStaleRevisionError()
   return toSafeConnection(row)
+}
+
+export async function revokeCodexSubscriptionConnection(
+  db: DbClient
+): Promise<CodexSubscriptionSafeConnection | null> {
+  const result = await db.query(
+    `UPDATE codex_subscription_connections
+        SET status = 'revoked',
+            refresh_token_encrypted = NULL,
+            access_token_encrypted = NULL,
+            access_token_expires_at = NULL,
+            account_fingerprint = NULL,
+            credential_revision = credential_revision + 1,
+            refresh_lock_token = NULL,
+            refresh_lock_expires_at = NULL,
+            revoked_at = now(),
+            updated_at = now()
+      WHERE connection_key = $1
+        AND revoked_at IS NULL
+      RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+    [CODEX_SUBSCRIPTION_CONNECTION_KEY]
+  )
+  const row = result.rows[0] as SafeConnectionRow | undefined
+  return row ? toSafeConnection(row) : getSafeCodexSubscriptionConnection(db)
 }
 
 export async function acquireCodexSubscriptionRefreshLock(

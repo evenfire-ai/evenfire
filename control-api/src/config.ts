@@ -113,6 +113,9 @@ type Config = {
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
   codexSubscriptionEnabled: boolean
+  // Public Codex CLI OAuth client id. Not a secret; PKCE/device flow protect the
+  // grant. Override only to pin a documented registration.
+  codexOAuthClientId: string
   llmCatalogSyncIntervalMs: number
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
@@ -779,6 +782,10 @@ export const config: Config = {
   // Default OFF. Absent or any value other than the exact token `true` keeps
   // Codex subscription management and admission dark.
   codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
+  // Public native client used by the Codex CLI ChatGPT login. This is not a
+  // confidential client secret.
+  codexOAuthClientId:
+    process.env.CONTROL_API_CODEX_OAUTH_CLIENT_ID || 'app_EMoamEEZ73f0CkXaXp7hrann',
   // Default 24h. Validated (not merely parsed): the value goes straight into
   // setInterval and each tick opens a Postgres transaction + advisory lock. A
   // 60s floor is orders of magnitude below the default and far above a hot loop.

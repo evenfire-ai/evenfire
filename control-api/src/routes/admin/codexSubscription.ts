@@ -1,0 +1,160 @@
+import { Router } from 'express'
+import { config } from '../../config.js'
+import { pool } from '../../db.js'
+import { asyncHandler } from '../../http/asyncHandler.js'
+import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
+import { rootLogger } from '../../observability/logger.js'
+import {
+  type CodexOAuthDeps,
+  CodexSubscriptionOAuthError,
+  getCodexSubscriptionConnection,
+  pollCodexDevice,
+  refreshCodexSubscriptionConnection,
+  revokeCodexSubscription,
+  startCodexBrowserConnect,
+  startCodexDeviceConnect,
+} from '../../services/codexSubscriptionOAuth.js'
+import type { CodexSubscriptionOAuthIntent } from '../../services/codexSubscriptionOAuthState.js'
+
+const log = rootLogger.child({ module: 'admin-codex-subscription' })
+const BASE = '/admin/llm/providers/codex-subscription'
+
+function dbClient() {
+  return { query: (text: string, values?: unknown[]) => pool.query(text, values) }
+}
+
+function buildRedirectUri(req: {
+  protocol: string
+  get: (h: string) => string | undefined
+}): string {
+  const origin =
+    config.oauthCallbackBaseUrl && config.oauthCallbackBaseUrl.length > 0
+      ? config.oauthCallbackBaseUrl.replace(/\/+$/, '')
+      : `${req.protocol}://${req.get('host') ?? 'localhost'}`
+  return `${origin}/api/v1/auth/codex-subscription/callback`
+}
+
+function oauthDeps(req: {
+  protocol: string
+  get: (h: string) => string | undefined
+}): CodexOAuthDeps {
+  return {
+    db: dbClient(),
+    encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
+    fetchFn: fetch,
+    clientId: config.codexOAuthClientId,
+    redirectUri: buildRedirectUri(req),
+    enabled: config.codexSubscriptionEnabled,
+  }
+}
+
+function parseIntent(value: unknown): CodexSubscriptionOAuthIntent {
+  return value === 'reconnect' || value === 'replace' ? value : 'connect'
+}
+
+function sendOAuthError(
+  res: { status: (n: number) => { json: (body: unknown) => void } },
+  err: unknown
+) {
+  if (err instanceof CodexSubscriptionOAuthError) {
+    const status =
+      err.code === 'disabled'
+        ? 404
+        : err.code === 'replacement_required'
+          ? 409
+          : err.code === 'refresh_in_flight' || err.code === 'stale_revision'
+            ? 409
+            : err.code === 'not_connected' || err.code === 'no_grant'
+              ? 404
+              : 400
+    log.warn(
+      { event: 'codex_oauth_admin_denied', code: err.code },
+      'Codex subscription OAuth denied'
+    )
+    res.status(status).json({ error: err.code })
+    return
+  }
+  throw err
+}
+
+export function createAdminCodexSubscriptionRouter(): Router {
+  const router = Router()
+
+  router.get(
+    `${BASE}/connection`,
+    asyncHandler(async (req, res) => {
+      try {
+        const connection = await getCodexSubscriptionConnection(oauthDeps(req))
+        res.status(200).json(connection)
+      } catch (err) {
+        sendOAuthError(res, err)
+      }
+    })
+  )
+
+  router.post(
+    `${BASE}/browser/start`,
+    asyncHandler(async (req, res) => {
+      try {
+        const started = await startCodexBrowserConnect(
+          oauthDeps(req),
+          parseIntent(req.body?.intent)
+        )
+        res.status(200).json(started)
+      } catch (err) {
+        sendOAuthError(res, err)
+      }
+    })
+  )
+
+  router.post(
+    `${BASE}/device/start`,
+    asyncHandler(async (req, res) => {
+      try {
+        const started = await startCodexDeviceConnect(oauthDeps(req), parseIntent(req.body?.intent))
+        res.status(200).json(started)
+      } catch (err) {
+        sendOAuthError(res, err)
+      }
+    })
+  )
+
+  router.get(
+    `${BASE}/device/poll`,
+    asyncHandler(async (req, res) => {
+      try {
+        const state = typeof req.query.state === 'string' ? req.query.state : ''
+        const result = await pollCodexDevice(oauthDeps(req), state)
+        res.status(200).json(result)
+      } catch (err) {
+        sendOAuthError(res, err)
+      }
+    })
+  )
+
+  router.post(
+    `${BASE}/refresh`,
+    asyncHandler(async (req, res) => {
+      try {
+        const connection = await refreshCodexSubscriptionConnection(oauthDeps(req))
+        res.status(200).json(connection)
+      } catch (err) {
+        sendOAuthError(res, err)
+      }
+    })
+  )
+
+  router.post(
+    `${BASE}/revoke`,
+    asyncHandler(async (req, res) => {
+      try {
+        const connection = await revokeCodexSubscription(oauthDeps(req))
+        res.status(200).json(connection)
+      } catch (err) {
+        sendOAuthError(res, err)
+      }
+    })
+  )
+
+  return router
+}
