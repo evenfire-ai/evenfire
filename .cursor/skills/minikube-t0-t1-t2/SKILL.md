@@ -95,6 +95,12 @@ T1 runs inside `make minikube-t2`, or explicitly via
   and poison the T2 preflight. Do not run that restore by hand. T2
   full-reconcile reaches `full-setup.sh` before pre-gate-sync; that REUSE_DB
   path must pass the same opt-in on both GFS reconcile calls.
+- Every harness GFS reconcile first settles Ready-reader leftovers
+  (`settle-gfs-reader-rollout.sh`: leftover claim, stale non-current
+  ReplicaSets, CrashLoopBackOff pods) and runs with the `gfs-rollout-shim`
+  PATH prefix, which replaces the reader `rollout status` wait with the
+  readiness poll in `wait-gfs-reader-ready.sh` — HCC's gfsReconciler strips
+  the `restartedAt` annotation, so a generation-based wait times out.
 
 ## Step 4 — Verdict and evidence reporting
 

@@ -332,7 +332,23 @@ converge_gfs_reader_after_restore() {
   fi
   log "Restarting gfs/${deployment} after credential restore (${ready:-0}/${desired} Ready)"
   rollout_restart_with_retry gfs "${deployment}"
-  ${KC} rollout status "deployment/${deployment}" -n gfs --timeout=180s >/dev/null
+  # HCC's gfsReconciler strips the restartedAt annotation, so the restart may
+  # not replace pods and a generation-based rollout status loops until
+  # timeout. Delete live unready reader pods once so they re-read the
+  # restored Secret without waiting out CrashLoopBackOff, then judge
+  # readiness directly.
+  local pod_rows pod_name pod_ready pod_deleting
+  pod_rows="$(${KC} get pods -n gfs -l 'app=gfs-controller,clerum.io/gfsc-role=reader' -o \
+    'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' \
+    2>/dev/null || true)"
+  while IFS='|' read -r pod_name pod_ready pod_deleting; do
+    [ -n "$pod_name" ] || continue
+    [ -z "$pod_deleting" ] || continue
+    [ "$pod_ready" != True ] || continue
+    ${KC} delete pod "$pod_name" -n gfs --wait=false >/dev/null 2>&1 || true
+  done <<<"$pod_rows"
+  CONTEXT="${PROFILE}" \
+    bash "${PROJECT_DIR}/scripts/minikube/wait-gfs-reader-ready.sh"
 }
 
 provision_gfs_serving() {
@@ -350,10 +366,14 @@ provision_gfs_serving() {
     # GFS_RECOVER_ABANDONED_STATE: a dead prior setup can leave
     # rollout-running; this sync holds the T2 lock, so resume that claim.
     # Settle a Ready reader first so reconcile does not restart it and
-    # race HCC's gfsReconciler during kubectl rollout status.
+    # race HCC's gfsReconciler during kubectl rollout status. If reconcile
+    # still needs a reader rollout, the gfs-rollout-shim PATH prefix makes
+    # that wait judge readiness instead of the template generation HCC keeps
+    # rewriting.
     CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
-    if ! GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    if ! PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+      GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
       CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."

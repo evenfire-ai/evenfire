@@ -69,7 +69,16 @@ restore_gfs_runtime_credentials() {
   if ! t2_kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
     return 0
   fi
-  if ! GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+  # Settle a Ready reader's leftover rollout claim first so restore does not
+  # rollout restart it, and let any wait reconcile still needs judge
+  # readiness via the gfs-rollout-shim instead of the template generation
+  # HCC's gfsReconciler keeps rewriting.
+  if ! CONTEXT="$T2_CONTEXT" \
+    bash "$PROJECT_DIR/scripts/minikube/settle-gfs-reader-rollout.sh"; then
+    printf '[minikube-t1] WARN: could not settle a leftover gfsc-reader rollout claim before restore\n' >&2
+  fi
+  if ! PATH="$PROJECT_DIR/scripts/minikube/gfs-rollout-shim:$PATH" \
+    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
     CONTEXT="$T2_CONTEXT" \
     bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
     printf '[minikube-t1] ERROR: failed to restore branch-profile GFS credentials\n' >&2

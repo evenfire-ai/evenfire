@@ -24,7 +24,11 @@ bootstrapped profile with an unready deployment (never `PROFILE_UNHEALTHY`
 before a transition), T1 restores branch-profile GFS credentials on exit, and
 `pre-gate-sync` provisions GFS serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true`
 and `GFS_RECOVER_ABANDONED_STATE=true` in every plan; do not insert manual
-repair scripts between runs. Follow the rule
+repair scripts between runs. Harness GFS reconciles settle Ready-reader
+leftovers first (`settle-gfs-reader-rollout.sh`) and judge reader rollout
+completion by readiness via the `gfs-rollout-shim` PATH prefix, because
+HCC's gfsReconciler strips the `restartedAt` annotation and a
+generation-based `kubectl rollout status` would time out. Follow the rule
 `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
 `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
 

@@ -20,8 +20,18 @@ case " $* " in
     printf '%s' "${FAKE_DESIRED:-1}"; exit 0 ;;
   *' get deployment gfsc-reader '*'-o jsonpath={.status.readyReplicas}'*)
     printf '%s' "${FAKE_READY:-1}"; exit 0 ;;
+  *' get deployment gfsc-reader '*revision*)
+    printf '%s' "${FAKE_REVISION:-19}"; exit 0 ;;
   *' get deployment gfsc-reader'*)
     [ "${FAKE_DEPLOY_EXISTS:-1}" = 1 ] || exit 1
+    exit 0 ;;
+  *' get rs -l '*)
+    printf '%b' "${FAKE_RS_ROWS:-}"; exit 0 ;;
+  *' scale rs '*)
+    exit 0 ;;
+  *' get pods -l '*)
+    printf '%b' "${FAKE_POD_ROWS:-}"; exit 0 ;;
+  *' delete pod '*)
     exit 0 ;;
   *' get secret gfs-controller-reader-db '*gfs-dsn-state*)
     printf '%s' "${FAKE_STATE:-rollout-running}"; exit 0 ;;
@@ -47,6 +57,9 @@ STUB
     FAKE_STATE="${5:-rollout-running}" \
     FAKE_ROTATED="${6:-2026-01-01T00:00:00Z}" \
     FAKE_PATCH_OK="${7:-1}" \
+    FAKE_RS_ROWS="${8:-}" \
+    FAKE_POD_ROWS="${9:-}" \
+    FAKE_REVISION="${10:-19}" \
     bash "$SCRIPT"
   printf '%s' "$fake_dir"
 }
@@ -59,6 +72,8 @@ rm -rf "$dir"
 dir="$(run_settle 1 1 0 1 rollout-running '2026-01-01T00:00:00Z' 1)"
 grep -q 'patch secret' "$dir/kubectl.log" \
   && fail 'unready reader must not settle the leftover claim'
+grep -Eq 'scale rs|delete pod' "$dir/kubectl.log" \
+  && fail 'unready reader must not scale ReplicaSets or delete pods'
 rm -rf "$dir"
 
 dir="$(run_settle 1 1 1 1 ready '2026-01-01T00:00:00Z' 1)"
@@ -66,4 +81,29 @@ grep -q 'patch secret' "$dir/kubectl.log" \
   && fail 'ready Secret state must not be patched again'
 rm -rf "$dir"
 
-printf 'PASS: settle-gfs-reader-rollout leftover Ready claim\n'
+# A leftover non-current ReplicaSet with live unready pods keeps
+# credential_rollout_pending true forever; it must be scaled to 0 while the
+# current-revision ReplicaSet is never touched.
+rs_rows='gfsc-reader-stale|gfsc-reader|1|0|12\ngfsc-reader-current|gfsc-reader|1|0|19\ngfsc-reader-old-empty|gfsc-reader|0|0|11\n'
+dir="$(run_settle 1 1 1 1 ready '2026-01-01T00:00:00Z' 1 "$rs_rows" '' 19)"
+grep -q 'scale rs gfsc-reader-stale --replicas=0' "$dir/kubectl.log" \
+  || fail 'leftover non-current unready ReplicaSet was not scaled to 0'
+grep -q 'scale rs gfsc-reader-current' "$dir/kubectl.log" \
+  && fail 'the current-revision ReplicaSet must never be scaled by settle'
+grep -q 'scale rs gfsc-reader-old-empty' "$dir/kubectl.log" \
+  && fail 'an already-empty ReplicaSet must not be scaled'
+rm -rf "$dir"
+
+# CrashLoopBackOff pods must be deleted (to reset kubelet backoff and re-read
+# the Secret); Ready and terminating pods must be left alone.
+pod_rows='gfsc-reader-a-crash|False||CrashLoopBackOff\ngfsc-reader-b-ready|True||\ngfsc-reader-c-term|False|2026-01-01T00:00:00Z|CrashLoopBackOff\n'
+dir="$(run_settle 1 1 1 1 ready '2026-01-01T00:00:00Z' 1 '' "$pod_rows" 19)"
+grep -q 'delete pod gfsc-reader-a-crash' "$dir/kubectl.log" \
+  || fail 'CrashLoopBackOff reader pod was not deleted'
+grep -q 'delete pod gfsc-reader-b-ready' "$dir/kubectl.log" \
+  && fail 'a Ready reader pod must never be deleted'
+grep -q 'delete pod gfsc-reader-c-term' "$dir/kubectl.log" \
+  && fail 'a terminating reader pod must not be deleted again'
+rm -rf "$dir"
+
+printf 'PASS: settle-gfs-reader-rollout leftover Ready claim and stale leftovers\n'

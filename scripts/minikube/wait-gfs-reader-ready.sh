@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Development harness only. HCC's gfsReconciler owns the gfsc-reader
+# Deployment template and strips the restartedAt annotation that
+# `kubectl rollout restart` adds, so a generation-based
+# `kubectl rollout status deployment/gfsc-reader` chases flapping revisions
+# ("Waiting for deployment spec update to be observed") until it times out.
+# Judge readiness directly instead: the desired replica count is Ready and no
+# live, non-terminating reader pod is unready. A CrashLoopBackOff pod whose
+# credential was just restored converges through kubelet retries; this wait
+# observes that recovery instead of the template generation HCC keeps moving.
+set -euo pipefail
+
+CONTEXT="${CONTEXT:?set CONTEXT to the target kube-context}"
+GFS_NS="${GFS_NS:-gfs}"
+DEPLOY="${GFS_READER_DEPLOYMENT:-gfsc-reader}"
+SELECTOR="${GFS_READER_SELECTOR:-app=gfs-controller,clerum.io/gfsc-role=reader}"
+TIMEOUT_SECONDS="${GFS_READER_WAIT_TIMEOUT_SECONDS:-600}"
+POLL_SECONDS="${GFS_READER_WAIT_POLL_SECONDS:-5}"
+
+kc() { kubectl --context="$CONTEXT" "$@"; }
+log() { printf '[wait-gfs-reader-ready] %s\n' "$*" >&2; }
+
+deadline=$((SECONDS + TIMEOUT_SECONDS))
+while :; do
+  desired="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
+    -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  ready="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
+    -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+  if [ -n "$desired" ] && [ "$desired" != 0 ] && [ "${ready:-0}" -ge "$desired" ]; then
+    unready="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
+      'jsonpath={range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' \
+      2>/dev/null | awk -F'|' 'NF && $2 == "" && $1 != "True" { n++ } END { print n+0 }')"
+    if [ "${unready:-0}" -eq 0 ]; then
+      log "${GFS_NS}/${DEPLOY} is Ready (${ready}/${desired}) with no live unready reader pod"
+      exit 0
+    fi
+  fi
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    log "timed out after ${TIMEOUT_SECONDS}s waiting for ${GFS_NS}/${DEPLOY} readiness (ready=${ready:-0}/${desired:-unknown})"
+    exit 1
+  fi
+  sleep "$POLL_SECONDS"
+done
