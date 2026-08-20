@@ -42,8 +42,9 @@ repository — never mix its PRs or clusters into this lane.
   current-context.
 - Bootstrap/reconcile must build the worktree: `IMAGE_SOURCE=local`.
 - T1 is fail-loud: unavailable DSN or zero executed tests is FAIL, never green.
-  Role-reset suites use the throwaway `postgres:16-alpine`, never shared
-  `control-postgres`.
+  The JSON reporter is the suite verdict; a leftover Vitest exit after a
+  complete green reporter is not a failed suite. Role-reset suites use the
+  throwaway `postgres:16-alpine`, never shared `control-postgres`.
 - Evidence lives under ignored `.local-notes/infra/runs/`; never commit it.
 
 Full workflow: skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md`.

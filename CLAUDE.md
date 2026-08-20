@@ -16,9 +16,11 @@ evidence rules in `AGENTS.md` and `docs/testing/minikube-t2-runbook.md`.
 produced only by the final exact-head preflight inside `make minikube-t2` (or
 `make minikube-t2-runtime` after T0 and T1 are already green on the same HEAD).
 `make minikube-pre-gate-sync` alone is not T2. Playwright and product E2E
-scripts are separate lanes. Follow the rule `.cursor/rules/minikube-t0-t1-t2.mdc`
-and the skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification
-workflow.
+scripts are separate lanes. T1 judges the JSON reporter (expected files,
+executed/passed, zero failures, zero pending); a leftover Vitest process exit
+after a complete green reporter is not a failed suite. Follow the rule
+`.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
+`.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
 
 ## Logging standard
 
