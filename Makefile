@@ -155,6 +155,7 @@ minikube-stop: ## Stop minikube cluster
 # pulls ~25 published images instead of building 28 from source. Build
 # everything locally with `make minikube-setup-local` (or IMAGE_SOURCE=local).
 IMAGE_SOURCE ?= ghcr
+MINIKUBE_GFS_MUTATION ?= true
 
 .PHONY: minikube-setup
 minikube-setup: ## Clean install from scratch, PULLING published images (IMAGE_SOURCE=local or `make minikube-setup-local` builds instead). Rebuilds the DB; REUSE_DB=true keeps it. SKIP_UIS=true omits Control/Profile UI. Runs 'prereqs' first (SKIP_PREREQS=true to bypass). Needs ADMIN_PASSWORD in .env.
@@ -223,18 +224,21 @@ minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml w
 .PHONY: minikube-deploy-all
 minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
-	@CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-gfs-writer-secret.sh
 	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
-	@writer_dsn="$$(kubectl --context=$(MINIKUBE_PROFILE) -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')" || { \
-		echo "[minikube-deploy-all] failed to classify the existing GFS writer Secret; refusing HCC cutover" >&2; exit 1; \
-	}; \
-	if [ -n "$$writer_dsn" ]; then \
-		kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1 || { \
-			echo "[minikube-deploy-all] existing GFS writer detected but control-api is not Ready; refusing HCC cutover" >&2; exit 1; \
+	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then echo "[minikube-deploy-all] GFS mutation disabled for this non-T2 sync"; fi
+	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-gfs-writer-secret.sh; \
+		writer_dsn="$$(kubectl --context=$(MINIKUBE_PROFILE) -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')" || { \
+			echo "[minikube-deploy-all] failed to classify the existing GFS writer Secret; refusing HCC cutover" >&2; exit 1; \
 		}; \
-		CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
-	else \
-		echo "[minikube-deploy-all] fresh bootstrap: reader staging deferred until post-migration full-setup (GFSC fail-closed)"; \
+		if [[ -n "$$writer_dsn" ]]; then \
+			kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1 || { \
+				echo "[minikube-deploy-all] existing GFS writer detected but control-api is not Ready; refusing HCC cutover" >&2; exit 1; \
+			}; \
+			CONTEXT=$(MINIKUBE_PROFILE) T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
+		else \
+			echo "[minikube-deploy-all] fresh bootstrap: reader staging deferred until post-migration full-setup (GFSC fail-closed)"; \
+		fi; \
 	fi
 	@# THE OVERLAY FOLLOWS THE CLUSTER, NOT THIS SHELL. Hardcoding
 	@# deploy/overlays/minikube applied clerum/*:test image refs to a cluster
@@ -246,14 +250,22 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# above, because an overridden tag renders from a copy of deploy/ that must
 	@# already contain the generated k8s-api-ip.yaml.
 	render_dir="$$(bash scripts/minikube/image-mode.sh --render-dir)" && \
-		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
+	if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | kubectl --context=$(MINIKUBE_PROFILE) apply -f -; \
+	else \
+		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | python3 scripts/minikube/filter-gfs-resources.py | kubectl --context=$(MINIKUBE_PROFILE) apply -f -; \
+	fi
 	CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-inter-service-tokens.sh
-	$(KC) apply -f deploy/overlays/minikube/instances/
+	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		$(KC) apply -f deploy/overlays/minikube/instances/; \
+	else \
+		python3 scripts/minikube/filter-gfs-resources.py deploy/overlays/minikube/instances/*.yaml | $(KC) apply -f -; \
+	fi
 	@# Kustomize reapplies the persisted mcp-host ConfigMap, which can overwrite
 	@# CLERUM_AUTH_JWT_PUBLIC_KEY with an older repo value. Always re-sync from
 	@# rpc-proxy-secrets after each full overlay apply so Desktop/rpc-proxy/mcp-host
 	@# stay on the same JWT validation key.
-	@$(MAKE) --no-print-directory minikube-sync-auth-key
+	@MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" $(MAKE) --no-print-directory minikube-sync-auth-key
 	@# The pre-overlay helper migrates legacy last-applied ownership without
 	@# removing the provisioning-owned connection-string. When the GFS stack is
 	@# deployed AND control-api is Ready (migration 0048 applied), re-provision
@@ -262,13 +274,25 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# control-api is not Ready yet (fresh cluster mid-setup), provisioning is
 	@# deferred LOUDLY to the full-setup/pre-gate-sync flow that already orders
 	@# it after control-api migrations.
-	@if kubectl --context=$(MINIKUBE_PROFILE) get configmap gfs-config -n gfs >/dev/null 2>&1; then \
-		if kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then \
-			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/wait-gfsc-secret-references.sh; \
-			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
-		else \
-			echo "[minikube-deploy-all] control-api not Ready — gfs DSN provisioning DEFERRED to full-setup/pre-gate-sync ordering (gfsc stays fail-closed until then)"; \
+	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		gfs_config_probe="$$(kubectl --context=$(MINIKUBE_PROFILE) get configmap gfs-config -n gfs 2>&1)" || { \
+			if [[ "$$gfs_config_probe" == *NotFound* || "$$gfs_config_probe" == *"not found"* ]]; then \
+				echo "[minikube-deploy-all] GFS is not deployed; skipping post-overlay credential reconciliation"; \
+				gfs_config_probe=""; \
+			else \
+				echo "[minikube-deploy-all] unable to inspect GFS configmap; refusing to continue: $$gfs_config_probe" >&2; exit 1; \
+			fi; \
+		}; \
+		if [ -n "$$gfs_config_probe" ]; then \
+			if kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then \
+				CONTEXT=$(MINIKUBE_PROFILE) T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" bash deploy/scripts/wait-gfsc-secret-references.sh; \
+				CONTEXT=$(MINIKUBE_PROFILE) T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
+			else \
+				echo "[minikube-deploy-all] control-api not Ready — gfs DSN provisioning DEFERRED to full-setup/pre-gate-sync ordering (gfsc stays fail-closed until then)"; \
+			fi; \
 		fi; \
+	else \
+		echo "[minikube-deploy-all] skipping post-overlay GFS credential reconciliation"; \
 	fi
 
 .PHONY: minikube-verify-networkpolicies
@@ -364,7 +388,11 @@ minikube-apply-namespaces: ## Create all namespaces
 
 .PHONY: minikube-sync-auth-key
 minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets into runtime ConfigMaps when drift exists
-	@bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE)
+	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE); \
+	else \
+		bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE) --skip-gfs --require-mcp; \
+	fi
 
 .PHONY: minikube-sync-auth-key-if-present
 minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube auth resources already exist

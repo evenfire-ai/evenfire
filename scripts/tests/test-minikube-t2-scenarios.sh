@@ -268,6 +268,11 @@ expect_code PROFILE_UNHEALTHY unready-final-preflight unready-final-preflight \
 expect_code PROFILE_UNHEALTHY invalid-deployment-inventory invalid-deployment-inventory \
   env "${repo_env[@]}" INVALID_INVENTORY='{not-json' \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$INVALID_INVENTORY"; }; t2_deployment_check' bash "$COMMON"
+if grep -Fq 'Traceback' "$tmp/invalid-deployment-inventory"; then
+  fail 'invalid deployment inventory leaked a Python traceback instead of the stable failure contract'
+fi
+grep -Fq 'next:' "$tmp/invalid-deployment-inventory" ||
+  fail 'invalid deployment inventory omitted the stable next-step guidance'
 expect_code PROFILE_UNHEALTHY malformed-deployment-inventory malformed-deployment-inventory \
   env "${repo_env[@]}" INVALID_INVENTORY='{"items":[{"spec":{"replicas":"not-an-integer"}}]}' \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$INVALID_INVENTORY"; }; t2_deployment_check' bash "$COMMON"

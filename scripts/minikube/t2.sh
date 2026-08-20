@@ -56,13 +56,14 @@ run_t0() {
   printf '[minikube-t2] T0: shell syntax and contract checks\n'
   git -C "$T2_PROJECT_DIR" diff --check "$T2_ORIGIN_DEV...$T2_HEAD"
   bash -n "$SCRIPT_DIR/t2-common.sh" "$SCRIPT_DIR/t2-preflight.sh" "$SCRIPT_DIR/t2.sh"
+  T0_PROJECT_DIR="$T2_PROJECT_DIR" T0_ORIGIN_DEV="$T2_ORIGIN_DEV" T0_HEAD="$T2_HEAD" \
+    bash "$T2_PROJECT_DIR/scripts/minikube/t0.sh"
   if [ -n "$T2_T0_COMMAND" ]; then
     bash -c "$T2_T0_COMMAND"
-  else
-    bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"
   fi
+  bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"
   T2_T0_STATUS=PASS
-  t2_evidence_write T0 PASS 'syntax, contract, and diff checks passed'
+  t2_evidence_write T0 PASS 'syntax, ShellCheck when available, affected package test/build/typecheck, contract, and diff checks passed'
 }
 
 run_preflight_plan() {
@@ -210,6 +211,20 @@ run_t1() {
   if T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" MINIKUBE_PROFILE="$T2_PROFILE" \
     bash "$T2_PROJECT_DIR/scripts/e2e/minikube-real-postgres.sh" >"$T2_T1_OUTPUT" 2>&1; then
     cat "$T2_T1_OUTPUT"
+    local t1_status t1_tests t1_passed t1_pending t1_evidence
+    t1_status="$(awk -F= '$1 == "T1_STATUS" { value=$2 } END { print value }' "$T2_T1_OUTPUT")"
+    t1_tests="$(awk -F= '$1 == "T1_TESTS" { value=$2 } END { print value }' "$T2_T1_OUTPUT")"
+    t1_passed="$(awk -F= '$1 == "T1_PASSED_TESTS" { value=$2 } END { print value }' "$T2_T1_OUTPUT")"
+    t1_pending="$(awk -F= '$1 == "T1_PENDING_TESTS" { value=$2 } END { print value }' "$T2_T1_OUTPUT")"
+    t1_evidence="$(awk -F= '$1 == "T1_EVIDENCE" { value=$2 } END { print value }' "$T2_T1_OUTPUT")"
+    if [ "$t1_status" != PASS ] || ! [[ "$t1_tests" =~ ^[1-9][0-9]*$ ]] || \
+       ! [[ "$t1_passed" =~ ^[1-9][0-9]*$ ]] || [ "$t1_passed" -ne "$t1_tests" ] || \
+       [ "$t1_pending" != 0 ] || [ -z "$t1_evidence" ]; then
+      T2_T1_STATUS=FAIL
+      t2_evidence_write T1 FAIL 'Real PostgreSQL lane exited zero but did not emit a complete green T1 result'
+      T2_NEXT_COMMAND='repair the T1 result contract; it must emit PASS, positive total/passed counts, zero pending tests, and an evidence path'
+      t2_fail REAL_PG_SUITE_FAILED 'T1 result was incomplete despite a zero process exit'
+    fi
     T2_T1_STATUS=PASS
     T2_T1_COUNTS="$(awk -F= '/^T1_TESTS=|^T1_PASSED_TESTS=|^T1_PENDING_TESTS=/{printf "%s%s", (n++ ? "," : ""), $0}' "$T2_T1_OUTPUT")"
     t2_evidence_write T1 PASS "Real PostgreSQL suites executed with no skips; $T2_T1_COUNTS"

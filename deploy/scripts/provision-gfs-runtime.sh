@@ -102,7 +102,7 @@ context_allowed_via_env() {
 }
 
 case "$CONTEXT" in
-  *example-dev*|minikube|clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-pr-*)
+  minikube|clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-pr-*)
     ;;
   *)
     # A non-dev context passes only if explicitly named in ALLOWED_CONTEXTS or
@@ -214,7 +214,7 @@ if [ "$SKIP_SYNC" = "1" ]; then
   log "Skipping runtime auth configuration sync"
 else
   log "Syncing runtime auth configuration"
-  bash scripts/minikube/sync-auth-key.sh --context "$CONTEXT"
+  bash scripts/minikube/sync-auth-key.sh --context "$CONTEXT" --require-gfs
 fi
 
 if [ "$SKIP_INSTANCES" = "1" ]; then

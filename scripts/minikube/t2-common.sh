@@ -63,6 +63,7 @@ T2_LOCK_KEY=""
 T2_EVIDENCE_DIR=""
 T2_EVIDENCE_FILE=""
 T2_LOCK_HELD=false
+T2_LOCK_RELEASED=false
 T2_LOCK_TOKEN="$T2_LOCK_TOKEN"
 T2_RUN_ID="$T2_RUN_ID"
 T2_GATE_ID="$T2_GATE_ID"
@@ -489,7 +490,7 @@ t2_deployment_check() {
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is unavailable'
   fi
-  if ! unready="$(python3 - "$deployment_json" <<'PY'
+  if ! unready="$(python3 - "$deployment_json" 2>/dev/null <<'PY'
 import json
 import sys
 payload = json.loads(sys.argv[1])
@@ -708,6 +709,7 @@ PROCESS_START=$process_start
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   T2_LOCK_HELD=true
+  T2_LOCK_RELEASED=false
 }
 
 t2_lock_validate_inherited() {
@@ -746,6 +748,7 @@ t2_lock_validate_inherited() {
     t2_fail PROFILE_LOCK_REQUIRED 'inherited profile lock owner is not a live process'
   fi
   T2_LOCK_HELD=false
+  T2_LOCK_RELEASED=false
 }
 
 t2_mutation_lock() {
@@ -759,7 +762,10 @@ t2_mutation_lock() {
 t2_lock_release() {
   local incoming_status=$? status owner_pid owner_token
   if [ "$#" -gt 0 ]; then status="$1"; else status="$incoming_status"; fi
-  trap - EXIT INT TERM
+  if [ "$T2_LOCK_RELEASED" = true ]; then
+    return "$status"
+  fi
+  T2_LOCK_RELEASED=true
   if [ "$T2_LOCK_HELD" = true ] && [ -n "$T2_LOCK_DIR" ]; then
     owner_pid="$(t2_lock_owner_value PID || true)"
     owner_token="$(t2_lock_owner_value TOKEN || true)"

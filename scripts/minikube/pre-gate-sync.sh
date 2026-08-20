@@ -115,9 +115,14 @@ CONTROL_API_FENCED=false
 CONTROL_API_REPLICAS=1
 
 fence_workflow_reconciler() {
-  if ! ${KC} get deployment/workflow-recipes -n control-plane >/dev/null 2>&1; then
-    log "Workflow reconciler is not present; no rollout fence is required"
-    return 0
+  local deployment_probe
+  if ! deployment_probe="$(${KC} get deployment/workflow-recipes -n control-plane 2>&1)"; then
+    if [[ "${deployment_probe}" == *NotFound* || "${deployment_probe}" == *"not found"* ]]; then
+      log "Workflow reconciler is not present; no rollout fence is required"
+      return 0
+    fi
+    log "ERROR: unable to inspect workflow-recipes before schema migration; refusing to continue without its writer fence"
+    return 1
   fi
   WRC_REPLICAS="$(${KC} get deployment/workflow-recipes -n control-plane -o jsonpath='{.spec.replicas}')"
   WRC_REPLICAS="${WRC_REPLICAS:-1}"
@@ -147,9 +152,14 @@ restore_workflow_reconciler() {
 }
 
 fence_control_api() {
-  if ! ${KC} get deployment/control-api -n control-plane >/dev/null 2>&1; then
-    log "Control API is not present; no writer fence is required"
-    return 0
+  local deployment_probe
+  if ! deployment_probe="$(${KC} get deployment/control-api -n control-plane 2>&1)"; then
+    if [[ "${deployment_probe}" == *NotFound* || "${deployment_probe}" == *"not found"* ]]; then
+      log "Control API is not present; no writer fence is required"
+      return 0
+    fi
+    log "ERROR: unable to inspect control-api before schema migration; refusing to continue without its writer fence"
+    return 1
   fi
   CONTROL_API_REPLICAS="$(${KC} get deployment/control-api -n control-plane -o jsonpath='{.spec.replicas}')"
   CONTROL_API_REPLICAS="${CONTROL_API_REPLICAS:-1}"
@@ -320,17 +330,26 @@ ensure_artifact() {
 }
 
 sync_mcp_host_auth_key() {
-  if ! ${KC} get secret rpc-proxy-secrets -n rpc-proxy >/dev/null 2>&1; then
-    log "Skipping mcp-host auth key sync (rpc-proxy-secrets not found)"
-    return 0
+  local source_probe target_probe
+  if ! source_probe="$(${KC} get secret rpc-proxy-secrets -n rpc-proxy 2>&1)"; then
+    if [[ "${source_probe}" == *NotFound* || "${source_probe}" == *"not found"* ]]; then
+      log "Skipping mcp-host auth key sync (rpc-proxy-secrets not found)"
+      return 0
+    fi
+    log "ERROR: unable to inspect rpc-proxy/rpc-proxy-secrets before MCP auth sync"
+    return 1
   fi
 
-  if ! ${KC} get configmap mcp-host-config -n mcp-host >/dev/null 2>&1; then
-    log "Skipping mcp-host auth key sync (mcp-host-config not found)"
-    return 0
+  if ! target_probe="$(${KC} get configmap mcp-host-config -n mcp-host 2>&1)"; then
+    if [[ "${target_probe}" == *NotFound* || "${target_probe}" == *"not found"* ]]; then
+      log "Skipping mcp-host auth key sync (mcp-host-config not found)"
+      return 0
+    fi
+    log "ERROR: unable to inspect mcp-host/mcp-host-config before MCP auth sync"
+    return 1
   fi
 
-  bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}" --skip-gfs
+  bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}" --skip-gfs --require-mcp
 }
 
 sync_gfs_auth_key() {
@@ -385,6 +404,10 @@ converge_gfs_reader_after_restore() {
     log "ERROR: unable to read Ready replicas for gfs/${deployment}"
     return 1
   fi
+  # Kubernetes omits status.readyReplicas while a Deployment has zero Ready
+  # pods. An empty successful read is a real 0; an API failure above remains
+  # unknown and fails closed.
+  ready="${ready:-0}"
   if [[ ! "${ready}" =~ ^[0-9]+$ ]]; then
     log "ERROR: Ready replicas for gfs/${deployment} is not numeric"
     return 1
@@ -576,7 +599,11 @@ if [[ "${cluster_changed}" == "true" ]]; then
       cd "${PROJECT_DIR}"
       make minikube-deploy-crds
     )
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+    if [[ "${GATE_NAME}" == "minikube-t2" ]]; then
+      CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+    else
+      log "Skipping GFS writer Secret mutation before ${GATE_NAME}; only minikube-t2 owns GFS recovery"
+    fi
     writer_dsn="$(${KC} -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
     if [[ -n "${writer_dsn}" ]]; then
       # Do not reconcile the GFS roles before the migration window. The
@@ -643,7 +670,10 @@ if [[ "${cluster_changed}" == "true" ]]; then
     (
       cd "${PROJECT_DIR}"
       make minikube-apply-secrets
-      make minikube-deploy-all
+      gfs_mutation=false
+      [[ "${GATE_NAME}" == "minikube-t2" ]] && gfs_mutation=true
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" MINIKUBE_GFS_MUTATION="${gfs_mutation}" \
+        make minikube-deploy-all
       if [[ "${FORCE_RESTART}" == "true" || "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ]]; then
         make minikube-restart-all
       fi

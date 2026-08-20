@@ -63,7 +63,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "mcp-host-conf
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "gfs-config" ]]; then
-  [[ "${TEST_GFS_CONFIG_PRESENT:-}" == "1" ]] || exit 1
+  if [[ "${TEST_GFS_CONFIG_PRESENT:-}" != "1" ]]; then
+    printf 'Error from server (NotFound): configmaps "gfs-config" not found\n' >&2
+    exit 1
+  fi
   if has_output_flag "$@"; then
     printf 'old-gfs-key'
   fi
@@ -79,10 +82,19 @@ if [[ "${1:-}" == "patch" && "${2:-}" == "configmap" && "${3:-}" == "gfs-config"
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "secret" && "${3:-}" == "gfs-controller-db" ]]; then
-  [[ "${TEST_GFS_CONFIG_PRESENT:-}" == "1" ]] || exit 1
-  if has_output_flag "$@"; then
-    printf ''
+  if [[ "${TEST_GFS_CONFIG_PRESENT:-}" != "1" ]]; then
+    printf 'Error from server (NotFound): secrets "gfs-controller-db" not found\n' >&2
+    exit 1
   fi
+  if has_output_flag "$@"; then
+    [[ "${TEST_GFS_DSN_PRESENT:-0}" == "1" ]] && printf 'ZHNuLXZhbHVl'
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "get" && "${2:-}" == "deployment" && "${3:-}" == "-l" ]]; then
+  [[ "${TEST_GFS_DEPLOYMENTS:-0}" == "1" ]] || exit 0
+  printf 'deployment.apps/gfsc-writer\ndeployment.apps/gfsc-reader\n'
   exit 0
 fi
 
@@ -91,8 +103,11 @@ if [[ "${1:-}" == "get" && "${2:-}" == deployment/* ]]; then
 fi
 
 if [[ "${1:-}" == "rollout" && "${2:-}" == "restart" && "${3:-}" == "deployment" && "${4:-}" == "-l" ]]; then
-  echo "unexpected gfsc rollout restart before DSN provisioning" >&2
-  exit 98
+  [[ "${TEST_GFS_DSN_PRESENT:-0}" == "1" ]] || {
+    echo "unexpected gfsc rollout restart before DSN provisioning" >&2
+    exit 98
+  }
+  exit "${TEST_GFS_RESTART_STATUS:-0}"
 fi
 
 if [[ "${1:-}" == "rollout" && "${2:-}" == "restart" && "${3:-}" == "deployment/chatllm" ]]; then
@@ -112,6 +127,10 @@ if [[ "${1:-}" == "rollout" && "${2:-}" == "restart" && "${3:-}" == "deployment/
 fi
 
 if [[ "${1:-}" == "rollout" && "${2:-}" == "status" && "${3:-}" == deployment/* ]]; then
+  if [[ "${3:-}" == *gfsc-writer* && "${TEST_GFS_STATUS_FAILURE:-0}" != "0" ]]; then
+    echo 'simulated gfsc writer rollout failure' >&2
+    exit "${TEST_GFS_STATUS_FAILURE}"
+  fi
   exit 0
 fi
 
@@ -246,5 +265,19 @@ if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" TEST_GFS_CONFI
   exit 1
 fi
 grep -q 'patch configmap gfs-config' "${LOG_FILE}"
+
+: >"${LOG_FILE}"
+if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
+  TEST_GFS_CONFIG_PRESENT=1 TEST_GFS_DSN_PRESENT=1 TEST_GFS_DEPLOYMENTS=1 TEST_GFS_STATUS_FAILURE=42 \
+  PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
+    --context fake --require-gfs >"${OUT_FILE}" 2>&1; then
+  echo "FAIL: GFS auth sync swallowed a failed rollout status" >&2
+  exit 1
+fi
+grep -q 'gfsc deployment deployment.apps/gfsc-writer did not become Ready after auth key drift' "${OUT_FILE}" || {
+  cat "${OUT_FILE}" >&2
+  echo "FAIL: GFS rollout failure did not produce a stable diagnostic" >&2
+  exit 1
+}
 
 echo "PASS: auth-key sync retries transient rollout restart race and skips gfsc restart until DSN provisioning"
