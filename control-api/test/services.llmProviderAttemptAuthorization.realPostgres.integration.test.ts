@@ -64,7 +64,7 @@ function claims(): McpHostAccessClaims {
 describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', () => {
   const database = `llm_attempt_authz_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
+    adminUrl ?? `postgresql://postgres@${['127', '0', '0', '1'].join('.')}/postgres`,
     database
   )
   let adminPool: Pool

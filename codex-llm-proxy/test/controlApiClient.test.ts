@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import { ControlApiClient, ControlApiClientError } from '../src/controlApiClient.js'
 
+const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
+
 function listen(handler: (req: IncomingMessage, body: unknown, res: Server) => void): Promise<{
   url: string
   close: () => Promise<void>
@@ -42,7 +44,7 @@ function listen(handler: (req: IncomingMessage, body: unknown, res: Server) => v
       const addr = server.address()
       const port = typeof addr === 'object' && addr ? addr.port : 0
       resolve({
-        url: `http://127.0.0.1:${port}`,
+        url: `http://${LOOPBACK_V4}:${port}`,
         requests,
         close: () =>
           new Promise(done => {

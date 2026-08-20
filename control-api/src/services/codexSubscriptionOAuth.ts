@@ -421,7 +421,12 @@ async function exchangeDeviceCode(
     device_code: deviceCode,
     client_id: deps.clientId,
   })
-  if (result.ok) return { kind: 'ok', token: parseTokenResponse(result.body) }
+  if (result.ok) {
+    return {
+      kind: 'ok',
+      token: parseTokenResponse(result.body),
+    }
+  }
   const error = typeof result.body.error === 'string' ? result.body.error : ''
   if (error === 'authorization_pending') return { kind: 'pending', intervalSeconds: 5 }
   if (error === 'slow_down') return { kind: 'slow_down', intervalSeconds: 10 }

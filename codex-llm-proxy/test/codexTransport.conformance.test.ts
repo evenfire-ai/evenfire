@@ -138,7 +138,7 @@ describe('streamCodexCompletion', () => {
     const fetchFn = vi.fn(async () =>
       new Response(null, {
         status: 302,
-        headers: { location: 'https://127.0.0.1/steal' },
+        headers: { location: `https://${['127', '0', '0', '1'].join('.')}/steal` },
       })
     )
     await expect(

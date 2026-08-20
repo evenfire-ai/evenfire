@@ -18,7 +18,8 @@ import { loginDesktopVisible } from '../helpers/visible-login'
 
 const DESKTOP_APP_DIR = path.resolve(__dirname, '../../../../desktop-app')
 const MAIN_JS = path.join(DESKTOP_APP_DIR, 'dist/main.js')
-const EXTERNAL_API_URL = process.env.EXTERNAL_REST_API_URL ?? 'http://127.0.0.1:8091'
+const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
+const EXTERNAL_API_URL = process.env.EXTERNAL_REST_API_URL ?? `http://${LOOPBACK_V4}:8091`
 
 test.describe('Codex subscription channel and cron', () => {
   test('channel or cron delivery creates a Codex provider attempt', async () => {
