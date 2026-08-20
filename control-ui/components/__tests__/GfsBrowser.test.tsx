@@ -524,6 +524,33 @@ describe('GfsBrowser', () => {
     expect(mockGfsFetchFileBlob).not.toHaveBeenCalled()
   })
 
+  it('previews supported video files in a closable HTML5 video dialog', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('demo.mp4', 'file', 7)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValueOnce(new Blob(['fake-video-bytes']))
+    renderBrowser()
+
+    const previewTrigger = await screen.findByRole('button', { name: 'demo.mp4' })
+    fireEvent.click(previewTrigger)
+
+    const dialog = await screen.findByRole('dialog', { name: 'demo.mp4' })
+    const video = await within(dialog).findByLabelText('Video preview of demo.mp4')
+    expect(video.tagName).toBe('VIDEO')
+    expect(video).toHaveAttribute('controls', '')
+    expect(video).toHaveAttribute('src', 'blob:gfs-image-preview')
+    expect((mockCreateObjectUrl.mock.calls[0]?.[0] as Blob).type).toBe('video/mp4')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close video preview' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'demo.mp4' })).toBeNull())
+    expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-image-preview')
+
+    await openResourceMenu('demo.mp4')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Preview' }))
+    expect(await screen.findByRole('dialog', { name: 'demo.mp4' })).toBeTruthy()
+  })
+
   it('previews Markdown files with safe vanilla rendering', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('README.md', 'file', 5)],

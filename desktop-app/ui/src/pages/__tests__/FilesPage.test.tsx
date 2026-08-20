@@ -1546,6 +1546,58 @@ describe('FilesPage', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-image-preview')
   })
 
+  it('previews a video file in a closable HTML5 video dialog', async () => {
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const createObjectURL = vi.fn(() => 'blob:gfs-video-preview')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL,
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL,
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'video-1',
+          rid: 'video-1',
+          gfsUri: 'gfs://main/video-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'demo.mp4',
+          kind: 'file',
+          path: '/demo.mp4',
+          version: 1,
+          bytes: 3,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage()
+    fireEvent.click(screen.getByRole('button', { name: 'demo.mp4' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'demo.mp4' })
+    const video = await within(dialog).findByLabelText('Video preview of demo.mp4')
+    expect(video.tagName).toBe('VIDEO')
+    expect(video.getAttribute('controls')).not.toBeNull()
+    expect(video.getAttribute('src')).toBe('blob:gfs-video-preview')
+    expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'video/mp4' }))
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close video preview' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'demo.mp4' })).toBeNull())
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-video-preview')
+  })
+
   it('previews Markdown files with safe vanilla rendering', async () => {
     const markdown =
       '# Project guide\n\nUse **safe rendering**.\n\n1. First\n2. Second\n\n[Unsafe](javascript:alert)\n\n<script>alert("no")</script>'

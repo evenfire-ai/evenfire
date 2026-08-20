@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
+import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
   IconDocumentText,
   IconFolder,
@@ -21,6 +22,7 @@ import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
+import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { GfsGrantPanel } from './GfsGrantPanel'
 import { GfsResourceMenu } from './GfsResourceMenu'
 import { NewFolderModal } from './NewFolderModal'
@@ -94,7 +96,11 @@ function hasDraggedFiles(event: React.DragEvent<HTMLElement>): boolean {
 }
 
 function isGfsPreviewFile(fileName: string): boolean {
-  return gfsImagePreviewMimeType(fileName) !== null || isGfsMarkdownPreviewFile(fileName)
+  return (
+    gfsImagePreviewMimeType(fileName) !== null ||
+    isGfsMarkdownPreviewFile(fileName) ||
+    gfsVideoPreviewMimeType(fileName) !== null
+  )
 }
 
 function isEventFromNestedInteractive(
@@ -140,6 +146,12 @@ export function GfsBrowser(): React.JSX.Element {
   const [markdownPreview, setMarkdownPreview] = useState<{
     byteLength: number
     fileName: string
+    rid: string
+  } | null>(null)
+  const [videoPreview, setVideoPreview] = useState<{
+    byteLength: number
+    fileName: string
+    mimeType: string
     rid: string
   } | null>(null)
   // Resource IDs currently streaming a download (disables that row's button).
@@ -194,13 +206,13 @@ export function GfsBrowser(): React.JSX.Element {
   }, [current, load])
 
   useEffect(() => {
-    if (!selected || imagePreview || markdownPreview) return
+    if (!selected || imagePreview || markdownPreview || videoPreview) return
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') setSelected(null)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [imagePreview, markdownPreview, selected])
+  }, [imagePreview, markdownPreview, videoPreview, selected])
 
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
@@ -222,6 +234,16 @@ export function GfsBrowser(): React.JSX.Element {
     }
     if (isGfsMarkdownPreviewFile(child.name)) {
       setMarkdownPreview({ byteLength: child.bytes, fileName: child.name, rid: child.rid })
+      return true
+    }
+    const videoMimeType = gfsVideoPreviewMimeType(child.name)
+    if (videoMimeType) {
+      setVideoPreview({
+        byteLength: child.bytes,
+        fileName: child.name,
+        mimeType: videoMimeType,
+        rid: child.rid,
+      })
       return true
     }
     return false
@@ -932,6 +954,16 @@ export function GfsBrowser(): React.JSX.Element {
           fileName={markdownPreview.fileName}
           rid={markdownPreview.rid}
           onClose={() => setMarkdownPreview(null)}
+        />
+      ) : null}
+
+      {videoPreview ? (
+        <GfsVideoPreview
+          byteLength={videoPreview.byteLength}
+          fileName={videoPreview.fileName}
+          mimeType={videoPreview.mimeType}
+          rid={videoPreview.rid}
+          onClose={() => setVideoPreview(null)}
         />
       ) : null}
     </section>

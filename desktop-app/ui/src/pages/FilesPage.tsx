@@ -6,6 +6,7 @@ import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
+import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
   IconAttachFile,
   IconChevronRight,
@@ -22,6 +23,7 @@ import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
+import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import {
@@ -69,7 +71,11 @@ function isDroppedPreviewFile(file: File): boolean {
 }
 
 function isGfsPreviewFile(fileName: string): boolean {
-  return gfsImagePreviewMimeType(fileName) !== null || isGfsMarkdownPreviewFile(fileName)
+  return (
+    gfsImagePreviewMimeType(fileName) !== null ||
+    isGfsMarkdownPreviewFile(fileName) ||
+    gfsVideoPreviewMimeType(fileName) !== null
+  )
 }
 
 function delegationSubjectOptions(
@@ -249,6 +255,17 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
         bytes: resource.bytes,
         gfsUri: resource.gfsUri,
         kind: 'markdown',
+        name: resource.name,
+      })
+      return true
+    }
+    const videoMimeType = gfsVideoPreviewMimeType(resource.name)
+    if (videoMimeType) {
+      setFilePreview({
+        bytes: resource.bytes,
+        gfsUri: resource.gfsUri,
+        kind: 'video',
+        mimeType: videoMimeType,
         name: resource.name,
       })
       return true
@@ -1179,6 +1196,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           byteLength={filePreview.bytes}
           fileName={filePreview.name}
           gfsUri={filePreview.gfsUri}
+          onClose={() => setFilePreview(null)}
+        />
+      ) : null}
+
+      {filePreview?.kind === 'video' ? (
+        <GfsVideoPreview
+          byteLength={filePreview.bytes}
+          fileName={filePreview.name}
+          gfsUri={filePreview.gfsUri}
+          mimeType={filePreview.mimeType}
           onClose={() => setFilePreview(null)}
         />
       ) : null}
