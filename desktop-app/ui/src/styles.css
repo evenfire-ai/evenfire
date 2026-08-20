@@ -13954,6 +13954,7 @@ pre {
 
 .da-gfs-drive__grid .da-grid__row {
   width: 100%;
+  font-size: var(--font-size-md);
   border-radius: 0;
   border: 0;
   border-bottom: 1px solid var(--grid-card-border);

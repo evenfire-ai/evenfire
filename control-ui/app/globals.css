@@ -11474,6 +11474,7 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-list__row {
   min-height: 3.7rem;
   width: 100%;
+  font-size: 0.875rem;
   border: 0;
   border-bottom: 1px solid var(--cu-border-subtle);
   border-radius: 0;
