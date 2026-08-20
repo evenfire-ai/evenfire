@@ -58,7 +58,8 @@ transition = full-reconcile (deploy/* or charts/* changed, OR a required
              deployment is unready on a bootstrapped profile)?
   └── make minikube-t2. Never downgrade an infra change to a
       service-only restart. An unready deployment is repaired inside the
-      run (planner full-reconcile + pre-gate GFS restore), not by a manual
+      run (planner full-reconcile + pre-gate GFS restore, including resume
+      of an abandoned `gfsc-reader` rollout claim), not by a manual
       script between runs.
 
 transition = targeted-sync (service-only diff)?

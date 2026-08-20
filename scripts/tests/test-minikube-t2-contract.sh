@@ -77,6 +77,7 @@ grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 # cannot leave gfsc-reader unready and fail the exact-head T2 preflight.
 grep -Fq 'restore_gfs_runtime_credentials' "$T1"
 grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$T1"
+grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$T1"
 grep -Fq 'reconcile-gfs-deploy-credentials.sh' "$T1"
 grep -Fq 'T1_GFS_RESTORE_REQUIRED=true' "$T1"
 grep -Fq 'T2_UNREADY_DEPLOYMENTS' "$COMMON"
@@ -88,13 +89,17 @@ if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'GFS_RESTO
   echo 'FAIL: provision_gfs_serving does not restore a NOLOGIN GFS role from the committed Secret DSN' >&2
   exit 1
 fi
+if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true'; then
+  echo 'FAIL: provision_gfs_serving does not resume an interrupted gfsc-reader rollout claim' >&2
+  exit 1
+fi
 if ! sed -n '/No cluster sync required before/,$p' "$PRE_GATE" | grep -Fq 'provision_gfs_serving'; then
   echo 'FAIL: pre-gate-sync skips GFS serving convergence when no cluster sync is required' >&2
   exit 1
 fi
 grep -Fq 'converge_gfs_reader_after_restore' "$PRE_GATE"
-if [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${PROFILE}"' "$ROOT/scripts/minikube/full-setup.sh")" -lt 2 ]]; then
-  echo 'FAIL: full-setup REUSE_DB path must restore a NOLOGIN GFS role before and after overlay' >&2
+if [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true' "$ROOT/scripts/minikube/full-setup.sh")" -lt 2 ]]; then
+  echo 'FAIL: full-setup REUSE_DB path must restore a NOLOGIN GFS role and resume an abandoned reader rollout before and after overlay' >&2
   exit 1
 fi
 

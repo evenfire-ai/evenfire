@@ -347,7 +347,10 @@ provision_gfs_serving() {
     # may restore the role from it — the same contract the GFS T1 gate already
     # applies on exit. The helper still fails loud when the restored
     # credential cannot authenticate; no password is invented here.
-    if ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${PROFILE}" \
+    # GFS_RECOVER_ABANDONED_STATE: a dead prior setup can leave
+    # rollout-running; this sync holds the T2 lock, so resume that claim.
+    if ! GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+      CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1
