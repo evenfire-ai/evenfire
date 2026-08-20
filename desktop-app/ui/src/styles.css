@@ -14212,6 +14212,36 @@ pre {
   background: rgba(var(--panel-rgb), 0.48);
 }
 
+.da-gfs-image-preview-dialog__header-actions,
+.da-gfs-markdown-preview-dialog__header-actions,
+.da-gfs-video-preview-dialog__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.da-gfs-text-preview__content {
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-5);
+}
+
+.da-gfs-text-preview__body {
+  max-width: 60rem;
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid rgba(var(--edge-rgb), 0.24);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .da-gfs-image-preview-dialog__header h3,
 .da-gfs-markdown-preview-dialog__header h3,
 .da-gfs-video-preview-dialog__header h3 {

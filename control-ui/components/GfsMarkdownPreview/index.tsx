@@ -3,6 +3,8 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { IconCopy } from '@components/Sidebar/icons'
+import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
 import { Button } from '@components/ui'
 import { gfsFetchFileBlob } from '@lib/api'
@@ -59,6 +61,10 @@ function renderBlock(block: MarkdownBlock): ReactNode {
   return block.ordered ? <ol key={block.id}>{items}</ol> : <ul key={block.id}>{items}</ul>
 }
 
+function isPlainTextName(fileName: string): boolean {
+  return fileName.toLowerCase().endsWith('.txt')
+}
+
 export function GfsMarkdownPreview({
   byteLength,
   fileName,
@@ -69,7 +75,17 @@ export function GfsMarkdownPreview({
   const dialogRef = useRef<HTMLElement | null>(null)
   const [source, setSource] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
+  const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const { showToast } = useToast()
   const blocks = useMemo(() => (source === null ? [] : parseVanillaMarkdown(source)), [source])
+  const isPlainText = isPlainTextName(fileName)
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     const previouslyFocused = document.activeElement
@@ -110,6 +126,25 @@ export function GfsMarkdownPreview({
     }
   }, [byteLength, rid])
 
+  async function copySourceToClipboard(): Promise<void> {
+    if (source === null) return
+    if (!navigator.clipboard?.writeText) {
+      showToast('Clipboard is not available in this browser.', { tone: 'error' })
+      setCopyState('error')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(source)
+      setCopyState('copied')
+      showToast(`Copied ${fileName} to the clipboard.`, { tone: 'success' })
+    } catch {
+      setCopyState('error')
+      showToast('Copy failed — check browser clipboard permissions.', { tone: 'error' })
+    }
+    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    copyResetTimeoutRef.current = setTimeout(() => setCopyState('idle'), 2000)
+  }
+
   return createPortal(
     <div
       className="cu-modal-backdrop cu-gfs-markdown-preview-modal"
@@ -127,15 +162,33 @@ export function GfsMarkdownPreview({
       >
         <header className="cu-gfs-markdown-preview-dialog__header">
           <h3 id={titleId}>{fileName}</h3>
-          <Button
-            className="cu-gfs-markdown-preview-dialog__close"
-            data-preview-close
-            variant="ghost"
-            aria-label="Close Markdown preview"
-            onClick={onClose}
-          >
-            <IconX width={18} height={18} />
-          </Button>
+          <div className="cu-gfs-markdown-preview-dialog__header-actions">
+            <Button
+              className="cu-gfs-markdown-preview-dialog__copy"
+              variant="ghost"
+              aria-label={
+                copyState === 'copied'
+                  ? 'Copied preview contents to clipboard'
+                  : 'Copy preview contents to clipboard'
+              }
+              disabled={source === null}
+              onClick={() => void copySourceToClipboard()}
+            >
+              <IconCopy width={18} height={18} />
+              <span className="cu-gfs-preview-button__label">
+                {copyState === 'copied' ? 'Copied' : 'Copy'}
+              </span>
+            </Button>
+            <Button
+              className="cu-gfs-markdown-preview-dialog__close"
+              data-preview-close
+              variant="ghost"
+              aria-label="Close preview"
+              onClick={onClose}
+            >
+              <IconX width={18} height={18} />
+            </Button>
+          </div>
         </header>
         <div className="cu-gfs-markdown-preview-dialog__body">
           {previewError ? (
@@ -145,20 +198,33 @@ export function GfsMarkdownPreview({
           ) : null}
           {!previewError && source === null ? (
             <div className="cu-gfs-markdown-preview-dialog__loading" role="status">
-              Loading Markdown preview…
+              Loading preview…
             </div>
           ) : null}
           {source !== null && !previewError ? (
-            <article
-              aria-label={`Markdown preview of ${fileName}`}
-              className="cu-gfs-markdown-preview__content"
-            >
-              {blocks.length > 0 ? (
-                blocks.map(renderBlock)
-              ) : (
-                <p className="cu-gfs-markdown-preview__empty">This Markdown file is empty.</p>
-              )}
-            </article>
+            isPlainText ? (
+              <article
+                aria-label={`Text preview of ${fileName}`}
+                className="cu-gfs-text-preview__content"
+              >
+                {source.length > 0 ? (
+                  <pre className="cu-gfs-text-preview__body">{source}</pre>
+                ) : (
+                  <p className="cu-gfs-markdown-preview__empty">This text file is empty.</p>
+                )}
+              </article>
+            ) : (
+              <article
+                aria-label={`Markdown preview of ${fileName}`}
+                className="cu-gfs-markdown-preview__content"
+              >
+                {blocks.length > 0 ? (
+                  blocks.map(renderBlock)
+                ) : (
+                  <p className="cu-gfs-markdown-preview__empty">This Markdown file is empty.</p>
+                )}
+              </article>
+            )
           ) : null}
         </div>
       </section>

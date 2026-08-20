@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { IconButton, StatusBanner } from '@components/Common'
-import { IconClose } from '@components/SidebarNav/icons'
+import { IconClose, IconCopy } from '@components/SidebarNav/icons'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewProps } from './types'
 
@@ -16,7 +16,10 @@ export function GfsImagePreview({
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [sourceBlob, setSourceBlob] = useState<Blob | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
+  const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     closeButtonRef.current?.focus()
@@ -37,7 +40,9 @@ export function GfsImagePreview({
         const { bytes } = await window.clerum.gfs.download(gfsUri)
         assertGfsImagePreviewSize(bytes.byteLength)
         if (!active) return
-        objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }))
+        const blob = new Blob([bytes], { type: mimeType })
+        setSourceBlob(blob)
+        objectUrl = URL.createObjectURL(blob)
         setPreviewUrl(objectUrl)
       } catch (error) {
         if (!active) return
@@ -52,6 +57,42 @@ export function GfsImagePreview({
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
   }, [byteLength, gfsUri, mimeType, onDownloadError])
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    }
+  }, [])
+
+  async function copyImageToClipboard(): Promise<void> {
+    if (!sourceBlob) return
+    try {
+      if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+        let clipboardBlob: Blob | null = sourceBlob
+        if (!sourceBlob.type.includes('png')) {
+          clipboardBlob = await convertBlobToPng(sourceBlob)
+        }
+        if (clipboardBlob) {
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': clipboardBlob })])
+          setCopyState('copied')
+        } else if (navigator.clipboard?.writeText && previewUrl) {
+          await navigator.clipboard.writeText(previewUrl)
+          setCopyState('copied')
+        } else {
+          setCopyState('error')
+        }
+      } else if (navigator.clipboard?.writeText && previewUrl) {
+        await navigator.clipboard.writeText(previewUrl)
+        setCopyState('copied')
+      } else {
+        setCopyState('error')
+      }
+    } catch {
+      setCopyState('error')
+    }
+    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    copyResetTimeoutRef.current = setTimeout(() => setCopyState('idle'), 2000)
+  }
 
   return createPortal(
     <div
@@ -69,15 +110,28 @@ export function GfsImagePreview({
       >
         <header className="da-gfs-image-preview-dialog__header">
           <h3 id={titleId}>{fileName}</h3>
-          <IconButton
-            ref={closeButtonRef}
-            label="Close image preview"
-            onClick={onClose}
-            size="sm"
-            variant="ghost"
-          >
-            <IconClose />
-          </IconButton>
+          <div className="da-gfs-image-preview-dialog__header-actions">
+            <IconButton
+              label={
+                copyState === 'copied' ? 'Copied image to clipboard' : 'Copy image to clipboard'
+              }
+              disabled={!sourceBlob}
+              onClick={() => void copyImageToClipboard()}
+              size="sm"
+              variant="ghost"
+            >
+              <IconCopy />
+            </IconButton>
+            <IconButton
+              ref={closeButtonRef}
+              label="Close image preview"
+              onClick={onClose}
+              size="sm"
+              variant="ghost"
+            >
+              <IconClose />
+            </IconButton>
+          </div>
         </header>
         <div className="da-gfs-image-preview-dialog__body">
           {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
@@ -99,6 +153,22 @@ export function GfsImagePreview({
     </div>,
     document.body
   )
+}
+
+async function convertBlobToPng(blob: Blob): Promise<Blob | null> {
+  if (typeof createImageBitmap === 'undefined') return null
+  try {
+    const bitmap = await createImageBitmap(blob)
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width
+    canvas.height = bitmap.height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(bitmap, 0, 0)
+    return await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
+  } catch {
+    return null
+  }
 }
 
 export type { GfsImagePreviewProps } from './types'

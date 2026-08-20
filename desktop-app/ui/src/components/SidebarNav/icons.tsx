@@ -80,11 +80,12 @@ export function IconAttachFile(props: IconProps) {
   )
 }
 
+// Copy to clipboard — two-stacked-documents glyph (Font Awesome fa-copy,
+// solid). Used by the GFS image and text/markdown preview modals.
 export function IconCopy(props: IconProps) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
-      <rect width="14" height="14" x="8" y="8" rx="2" />
-      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+    <svg viewBox="0 0 384 384" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M280 64H112c-8.8 0-16 7.2-16 16v32c0 8.8 7.2 16 16 16h168c8.8 0 16-7.2 16-16V80c0-8.8-7.2-16-16-16zM32 224c0-35.3 28.7-64 64-64h192c35.3 0 64 28.7 64 64v128c0 35.3-28.7 64-64 64H96c-35.3 0-64-28.7-64-64V224zm128 48c-8.8 0-16 7.2-16 16 0 8.8 7.2 16 16 16h128c8.8 0 16-7.2 16-16 0-8.8-7.2-16-16-16H160z" />
     </svg>
   )
 }

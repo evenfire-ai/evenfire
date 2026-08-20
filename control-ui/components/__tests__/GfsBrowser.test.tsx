@@ -492,14 +492,14 @@ describe('GfsBrowser', () => {
 
   it('previews supported image files from the file name and resource menu', async () => {
     mockApiGet.mockResolvedValueOnce({
-      items: [child('avatar.PNG', 'file', 2), child('notes.txt', 'file', 3)],
+      items: [child('avatar.PNG', 'file', 2), child('notes.bin', 'file', 3)],
       nextCursor: null,
     })
     mockGfsFetchFileBlob.mockResolvedValue(new Blob(['image bytes']))
     renderBrowser()
 
     const previewTrigger = await screen.findByRole('button', { name: 'avatar.PNG' })
-    expect(screen.getByText('notes.txt').closest('button')).toBeNull()
+    expect(screen.getByText('notes.bin').closest('button')).toBeNull()
     fireEvent.click(previewTrigger)
 
     const dialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
@@ -509,7 +509,8 @@ describe('GfsBrowser', () => {
     expect(mockGfsFetchFileBlob).toHaveBeenCalledWith('r2')
     expect((mockCreateObjectUrl.mock.calls[0]?.[0] as Blob).type).toBe('image/png')
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close image preview' }))
+    const closeButton = within(dialog).getByRole('button', { name: /close image preview/i })
+    fireEvent.click(closeButton)
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'avatar.PNG' })).toBeNull())
     expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-image-preview')
 
@@ -519,7 +520,7 @@ describe('GfsBrowser', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'avatar.PNG' })).toBeNull())
 
-    await openResourceMenu('notes.txt')
+    await openResourceMenu('notes.bin')
     expect(screen.queryByRole('menuitem', { name: 'Preview' })).toBeNull()
   })
 
@@ -549,6 +550,51 @@ describe('GfsBrowser', () => {
       'Image previews are limited to 10 MB.'
     )
     expect(mockGfsFetchFileBlob).not.toHaveBeenCalled()
+  })
+
+  it('copies markdown source to the clipboard via the preview header button', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { ...navigator.clipboard, writeText },
+    })
+
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('README.md', 'file', 9)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValueOnce(
+      new Blob(['# Hello\n\nGreetings.'], { type: 'text/markdown' })
+    )
+
+    renderBrowser()
+    fireEvent.click(await screen.findByRole('button', { name: 'README.md' }))
+    const dialog = await screen.findByRole('dialog', { name: 'README.md' })
+
+    const copyButton = within(dialog).getByRole('button', {
+      name: /Copy preview contents to clipboard/i,
+    })
+    fireEvent.click(copyButton)
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('# Hello\n\nGreetings.'))
+  })
+
+  it('renders a .txt file as plain text inside the preview dialog', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('notes.txt', 'file', 11)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValueOnce(
+      new Blob(['line one\nline two\twith tab'], { type: 'text/plain' })
+    )
+
+    renderBrowser()
+    fireEvent.click(await screen.findByRole('button', { name: 'notes.txt' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'notes.txt' })
+    const pre = await within(dialog).findByText(/line one/)
+    expect(pre.tagName).toBe('PRE')
+    expect(pre.textContent).toContain('line two\twith tab')
   })
 
   it('previews supported video files in a closable HTML5 video dialog', async () => {
@@ -602,7 +648,7 @@ describe('GfsBrowser', () => {
     expect(dialog.querySelector('script')).toBeNull()
     expect(mockGfsFetchFileBlob).toHaveBeenCalledWith('r5')
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close Markdown preview' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /^close preview$/i }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'README.md' })).toBeNull())
 
     await openResourceMenu('README.md')

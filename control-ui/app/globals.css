@@ -11624,6 +11624,56 @@ button.cu-gfs-tree__button:focus-visible,
   border-radius: 999px;
 }
 
+.cu-gfs-image-preview-dialog__header-actions,
+.cu-gfs-markdown-preview-dialog__header-actions,
+.cu-gfs-video-preview-dialog__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+}
+
+.cu-gfs-image-preview-dialog__copy.cu-btn,
+.cu-gfs-markdown-preview-dialog__copy.cu-btn,
+.cu-gfs-video-preview-dialog__copy.cu-btn {
+  height: 2.25rem;
+  padding-inline: var(--cu-space-3);
+  border-radius: 999px;
+  color: var(--cu-text-soft);
+}
+
+.cu-gfs-image-preview-dialog__copy.cu-btn:hover:not(:disabled),
+.cu-gfs-markdown-preview-dialog__copy.cu-btn:hover:not(:disabled),
+.cu-gfs-video-preview-dialog__copy.cu-btn:hover:not(:disabled) {
+  color: var(--cu-accent);
+}
+
+.cu-gfs-preview-button__label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.cu-gfs-text-preview__content {
+  min-width: 0;
+  min-height: 0;
+  padding: var(--cu-space-5);
+}
+
+.cu-gfs-text-preview__body {
+  max-width: 60rem;
+  margin: 0;
+  padding: var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg);
+  color: var(--cu-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .cu-gfs-image-preview-dialog__body,
 .cu-gfs-video-preview-dialog__body {
   min-width: 0;

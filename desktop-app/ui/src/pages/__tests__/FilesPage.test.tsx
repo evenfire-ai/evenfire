@@ -1621,6 +1621,91 @@ describe('FilesPage', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-image-preview')
   })
 
+  it('copies markdown source to the clipboard via the preview header button', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { ...(navigator.clipboard ?? {}), writeText },
+    })
+
+    const markdown = '# Hello\n\nGreetings.'
+    const download = vi.fn(async () => ({
+      bytes: new TextEncoder().encode(markdown).buffer,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'markdown-2',
+          rid: 'markdown-2',
+          gfsUri: 'gfs://main/markdown-2',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'README.md',
+          kind: 'file',
+          path: '/README.md',
+          version: 1,
+          bytes: markdown.length,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage()
+    fireEvent.click(screen.getByRole('button', { name: 'README.md' }))
+    const dialog = await screen.findByRole('dialog', { name: 'README.md' })
+
+    const copyButton = within(dialog).getByRole('button', {
+      name: /Copy preview contents to clipboard/i,
+    })
+    fireEvent.click(copyButton)
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
+  })
+
+  it('renders a .txt file as plain text inside the preview dialog', async () => {
+    const download = vi.fn(async () => ({
+      bytes: new TextEncoder().encode('line one\nline two\twith tab').buffer,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'text-1',
+          rid: 'text-1',
+          gfsUri: 'gfs://main/text-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/notes.txt',
+          version: 1,
+          bytes: 26,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage()
+    fireEvent.click(screen.getByRole('button', { name: 'notes.txt' }))
+    const dialog = await screen.findByRole('dialog', { name: 'notes.txt' })
+    const pre = await within(dialog).findByText(/line one/)
+    expect(pre.tagName).toBe('PRE')
+    expect(pre.textContent).toContain('line two\twith tab')
+  })
+
   it('previews a video file in a closable HTML5 video dialog', async () => {
     const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
     const createObjectURL = vi.fn(() => 'blob:gfs-video-preview')
@@ -1715,7 +1800,7 @@ describe('FilesPage', () => {
     expect(dialog.querySelector('script')).toBeNull()
     expect(download).toHaveBeenCalledWith('gfs://main/markdown-1')
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close Markdown preview' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close preview' }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'README.md' })).toBeNull())
   })
 
