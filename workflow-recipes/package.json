@@ -1,6 +1,6 @@
 {
   "name": "workload-recipes-controller",
-  "version": "0.1.300",
+  "version": "0.1.301",
   "description": "Workload Recipes Controller (WRC) - WorkloadRecipe lifecycle management and MCP server interface",
   "main": "dist/main.js",
   "engines": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "build:docker": "tsc -p tsconfig.json",
+    "build:docker": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "dev": "ts-node src/main.ts",
     "test": "vitest run",

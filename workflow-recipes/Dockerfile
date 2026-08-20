@@ -21,7 +21,7 @@ COPY workflow-recipes/package.json workflow-recipes/package-lock.json ./workflow
 WORKDIR /app/workflow-recipes
 RUN npm ci
 
-COPY workflow-recipes/tsconfig.json ./
+COPY workflow-recipes/tsconfig.json workflow-recipes/tsconfig.build.json ./
 COPY workflow-recipes/src ./src
 RUN npm run build:docker
 
