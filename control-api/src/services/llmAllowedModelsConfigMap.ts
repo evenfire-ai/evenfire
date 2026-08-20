@@ -19,8 +19,13 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'node:crypto'
+import { config } from '../config.js'
 import type { DbClient } from '../db.js'
 import { pool } from '../db.js'
+import {
+  type CodexSubscriptionSafeConnection,
+  getSafeCodexSubscriptionConnection,
+} from './codexSubscriptionConnection.js'
 import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllowedModels.js'
 
 // CROSS-SERVICE CONTRACT: producer side of the allowlist ConfigMap. Consumers
@@ -29,6 +34,49 @@ import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllow
 // modelConfigHandler.ts, ALLOWLIST_CONFIGMAP_NAME). Keep name + data format in sync.
 export const ALLOWED_MODELS_CONFIGMAP_NAME = 'clerum-llm-allowed-models'
 export const CONTENT_HASH_ANNOTATION = 'clerum.io/content-hash'
+export const CATALOG_REVISION_ANNOTATION = 'clerum.io/catalog-revision'
+export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
+export const CODEX_CONNECTION_STATUS_ANNOTATION = 'clerum.io/codex-connection-status'
+export const CODEX_ENABLED_ANNOTATION = 'clerum.io/codex-enabled'
+
+const KNOWN_CONNECTION_STATUSES = new Set([
+  'disconnected',
+  'connecting',
+  'connected',
+  'reauth_required',
+  'revoked',
+])
+
+export function mapCodexConnectionStatusForSnapshot(
+  connection: CodexSubscriptionSafeConnection | null
+): 'connected' | 'disconnected' | 'reauth-required' | 'unavailable' {
+  if (!connection || !KNOWN_CONNECTION_STATUSES.has(connection.status)) return 'disconnected'
+  if (connection.status === 'reauth_required' || connection.catalogStatus === 'auth-rejected') {
+    return 'reauth-required'
+  }
+  if (connection.catalogStatus === 'unavailable') return 'unavailable'
+  if (connection.status === 'connected' && connection.catalogStatus === 'ready') return 'connected'
+  return 'disconnected'
+}
+
+export function buildCodexReadinessAnnotations(
+  connection: CodexSubscriptionSafeConnection | null
+): Record<string, string> {
+  const annotations: Record<string, string> = {
+    [CODEX_ENABLED_ANNOTATION]: config.codexSubscriptionEnabled ? 'true' : 'false',
+    [CODEX_CONNECTION_STATUS_ANNOTATION]: mapCodexConnectionStatusForSnapshot(connection),
+  }
+  if (
+    connection &&
+    KNOWN_CONNECTION_STATUSES.has(connection.status) &&
+    Number.isInteger(connection.catalogRevision) &&
+    Number.isInteger(connection.credentialRevision)
+  ) {
+    annotations[CATALOG_REVISION_ANNOTATION] = String(connection.catalogRevision)
+    annotations[CONNECTION_REVISION_ANNOTATION] = String(connection.credentialRevision)
+  }
+  return annotations
+}
 
 const MANAGED_BY_LABEL = 'clerum.io/managed-by'
 
@@ -43,6 +91,14 @@ export interface AllowedModelsConfigMapMaterializer {
  * ordered by the query (provider, model), so the serialized form — and thus the
  * hash — is stable for a given allowlist state.
  */
+async function loadCodexConnection(db: DbClient): Promise<CodexSubscriptionSafeConnection | null> {
+  try {
+    return await getSafeCodexSubscriptionConnection(db)
+  } catch {
+    return null
+  }
+}
+
 export function buildConfigMapData(grouped: Record<string, AllowedModelEntry[]>): {
   data: Record<string, string>
   contentHash: string
@@ -78,10 +134,11 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
   async materialize(db: DbClient = pool): Promise<void> {
     const grouped = await listEnabledGroupedByProvider(db)
     const { data, contentHash } = buildConfigMapData(grouped)
+    const readiness = buildCodexReadinessAnnotations(await loadCodexConnection(db))
     let lastError: unknown
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {
-        await this.writeOnce(data, contentHash)
+        await this.writeOnce(data, contentHash, readiness)
         return
       } catch (err) {
         lastError = err
@@ -91,7 +148,11 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
     throw lastError
   }
 
-  private async writeOnce(data: Record<string, string>, contentHash: string): Promise<void> {
+  private async writeOnce(
+    data: Record<string, string>,
+    contentHash: string,
+    readiness: Record<string, string>
+  ): Promise<void> {
     const body: k8s.V1ConfigMap = {
       apiVersion: 'v1',
       kind: 'ConfigMap',
@@ -99,7 +160,10 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
         name: ALLOWED_MODELS_CONFIGMAP_NAME,
         namespace: this.namespace,
         labels: { [MANAGED_BY_LABEL]: 'control-api' },
-        annotations: { [CONTENT_HASH_ANNOTATION]: contentHash },
+        annotations: {
+          [CONTENT_HASH_ANNOTATION]: contentHash,
+          ...readiness,
+        },
       },
       data,
     }
