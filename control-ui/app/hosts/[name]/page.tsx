@@ -1058,13 +1058,13 @@ export default function HostDetailsPage() {
         {activeTab === 'contexts' && (
           <>
             <p className="cu-muted" style={{ fontSize: '0.875rem', marginBottom: '1rem' }}>
-              Associated context for this agent.
+              Connectors available to this agent.
             </p>
             <div className="cu-table-wrap">
               <table className="cu-table cu-table--header-band cu-table--static-rows">
                 <thead>
                   <tr>
-                    <th>Context</th>
+                    <th>Connector</th>
                     <th className="cu-table__col-actions">Actions</th>
                   </tr>
                 </thead>
@@ -1075,73 +1075,39 @@ export default function HostDetailsPage() {
                         Loading…
                       </td>
                     </tr>
-                  ) : (
+                  ) : contextMcpServers.length === 0 ? (
                     <tr>
-                      <td>
-                        {editingContext ? (
-                          <select
-                            className="cu-input cu-host-context-select"
-                            value={contextRefDraft}
-                            onChange={e => setContextRefDraft(e.target.value)}
-                            disabled={busy}
-                            autoFocus
-                            onKeyDown={e => {
-                              if (e.key === 'Escape') {
-                                setEditingContext(false)
-                              }
-                            }}
-                          >
-                            <option value="">Select context</option>
-                            {availableContexts.map(contextId => (
-                              <option key={contextId} value={contextId}>
-                                {contextId}
-                              </option>
-                            ))}
-                          </select>
-                        ) : contextRefDraft.trim() ? (
-                          <button
-                            type="button"
-                            className="cu-link"
-                            onClick={() =>
-                              router.push(CONTROL_ROUTES.contexts.detail(contextRefDraft.trim()))
-                            }
-                          >
-                            {contextRefDraft}
-                          </button>
-                        ) : (
-                          <span className="cu-table__cell-muted">No context selected</span>
-                        )}
-                      </td>
-                      <td className="cu-table__cell-actions">
-                        {editingContext ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--toolbar"
-                            onClick={async () => {
-                              if (await saveHost()) {
-                                setEditingContext(false)
-                              }
-                            }}
-                            disabled={busy}
-                            aria-label="Save context"
-                            title="Save context"
-                          >
-                            <IconCheck width={16} height={16} />
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--toolbar"
-                            onClick={() => setEditingContext(true)}
-                            disabled={busy}
-                            aria-label="Edit context"
-                            title="Edit context"
-                          >
-                            <IconPencil width={16} height={16} />
-                          </button>
-                        )}
+                      <td colSpan={2} className="cu-empty">
+                        {contextRefDraft.trim()
+                          ? 'No connectors attached to this context.'
+                          : 'No context selected.'}
                       </td>
                     </tr>
+                  ) : (
+                    contextMcpServers.map(server => (
+                      <tr key={server}>
+                        <td>
+                          <span className="cu-table__cell-name">{server}</span>
+                        </td>
+                        <td className="cu-table__cell-actions">
+                          {contextRefDraft.trim() ? (
+                            <button
+                              type="button"
+                              className="cu-link"
+                              onClick={() =>
+                                router.push(CONTROL_ROUTES.contexts.detail(contextRefDraft.trim()))
+                              }
+                              aria-label={`Open context ${contextRefDraft.trim()}`}
+                              title={`Open context ${contextRefDraft.trim()}`}
+                            >
+                              {contextRefDraft.trim()}
+                            </button>
+                          ) : (
+                            <span className="cu-table__cell-muted">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
                   )}
                 </tbody>
               </table>
