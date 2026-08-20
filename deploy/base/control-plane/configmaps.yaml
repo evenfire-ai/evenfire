@@ -23,6 +23,8 @@ data:
   CONTROL_API_ADMIN_JWT_ISSUER: control-api
   CONTROL_API_ADMIN_JWT_AUDIENCE: control-ui
   CONTROL_API_ADMIN_JWT_TTL_SECONDS: '3600'
+  CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'false'
+  CODEX_LLM_PROXY_ADMIN_URL: http://codex-llm-proxy.control-plane.svc.cluster.local:8081
   CONTROL_API_ADMIN_BOOTSTRAP_USERNAME: admin
   CONTROL_API_ADMIN_BOOTSTRAP_EMAIL: ''
   CONTROL_API_ADMIN_AUTH_MAX_FAILURES: '5'
@@ -227,6 +229,28 @@ data:
 
         location = /api/v1/internal/sandbox-ui/oauth/grant {
           limit_except DELETE {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location = /api/v1/internal/llm/provider-attempts/redeem {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location = /api/v1/internal/llm/provider-attempts/finalize {
+          limit_except POST {
             deny all;
           }
           proxy_pass http://control_api_upstream;
@@ -646,6 +670,18 @@ data:
         # binds identity to the token's hostRefs[0] claim (never the path) and
         # answers {drain} from Host.status.lifecycle.
         location = /api/v1/mcp-host/hosts/heartbeat {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        location = /api/v1/mcp-host/llm/provider-attempts/authorize {
           limit_except POST {
             deny all;
           }

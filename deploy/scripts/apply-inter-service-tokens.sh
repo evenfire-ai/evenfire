@@ -181,6 +181,8 @@ TOKEN_WEBHOOK_PROXY="$(resolve_token CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY \
   webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN)"
 TOKEN_WA_READER="$(resolve_token CONTROL_API_INTERNAL_TOKEN_WA_READER \
   channels workflow-approval-request-reader-credentials control-api-token)"
+TOKEN_CODEX_LLM_PROXY="$(resolve_token CONTROL_API_INTERNAL_TOKEN_CODEX_LLM_PROXY \
+  control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN)"
 READER_HANDOFF_TOKEN_VALUE="$(resolve_token CHANNEL_READER_HANDOFF_TOKEN \
   channels workflow-approval-request-reader-credentials channel-reader-handoff-token)"
 INTERNAL_CONTROL_WRC_HMAC="$(resolve_token INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET \
@@ -194,6 +196,7 @@ for pair in \
   "RPC:$TOKEN_RPC" \
   "WEBHOOK_PROXY:$TOKEN_WEBHOOK_PROXY" \
   "WA_READER:$TOKEN_WA_READER" \
+  "CODEX_LLM_PROXY:$TOKEN_CODEX_LLM_PROXY" \
   "CHANNEL_READER_HANDOFF:$READER_HANDOFF_TOKEN_VALUE" \
   "INTERNAL_CONTROL_WRC_HMAC:$INTERNAL_CONTROL_WRC_HMAC" \
   "INTERNAL_CONTROL_HCC_HMAC:$INTERNAL_CONTROL_HCC_HMAC" \
@@ -203,8 +206,8 @@ for pair in \
   [ -n "$val" ] || die "token $name resolved to empty — refusing to patch"
 done
 
-SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER}"
-INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER}"
+SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY}"
+INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY}"
 
 # --- 1. control-api-internal-tokens (control-plane) ---
 log "Patching Secret control-api-internal-tokens (control-plane)"
@@ -279,6 +282,15 @@ WEBHOOK_PROXY_PATCH="$(jq -cn --arg t "$TOKEN_WEBHOOK_PROXY" \
   '{stringData: {WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN: $t}}')"
 kctl -n webhook-ingress patch secret webhook-proxy-secrets --type=merge -p "$WEBHOOK_PROXY_PATCH"
 
+# --- 4d. codex-llm-proxy-secrets (control-plane) ---
+# Dedicated service token only. The proxy never receives the full
+# CONTROL_API_INTERNAL_SERVICE_TOKENS map.
+log "Patching Secret codex-llm-proxy-secrets (control-plane)"
+ensure_secret control-plane codex-llm-proxy-secrets
+CODEX_LLM_PROXY_PATCH="$(jq -cn --arg t "$TOKEN_CODEX_LLM_PROXY" \
+  '{stringData: {CODEX_LLM_PROXY_CONTROL_API_TOKEN: $t}}')"
+kctl -n control-plane patch secret codex-llm-proxy-secrets --type=merge -p "$CODEX_LLM_PROXY_PATCH"
+
 # --- 4c. workflow-approval-request-reader-credentials (channels) ---
 # Figure D cross-bot fix (PR1): the reader uses this token to authenticate its
 # consulta call to control-api
@@ -297,7 +309,8 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials --typ
 
 # Roll the consumers so they pick up the fresh tokens on first deploy. Safe
 # no-ops if the Deployments do not yet exist.
-for pair in "control-plane:control-api" \
+for pair in             "control-plane:control-api" \
+            "control-plane:codex-llm-proxy" \
             "control-plane:workflow-recipes" \
             "control-plane:host-context-controller" \
             "profiles:external-rest-api" \

@@ -74,6 +74,7 @@ run_apply() {
 minikube_capture="$TMP/minikube-control-api-internal-tokens.json"
 run_apply clerum-codex-member-registration-test "$minikube_capture" env
 jq -e '.stringData.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET and .stringData.CONTROL_API_INTERNAL_TOKENS and .stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS' "$minikube_capture" >/dev/null
+jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("codex-llm-proxy=")' "$minikube_capture" >/dev/null
 
 branch_profile_capture="$TMP/branch-profile-control-api-internal-tokens.json"
 run_apply clerum-cursor-46f812cd-185fc31b "$branch_profile_capture" env

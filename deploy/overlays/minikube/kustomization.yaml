@@ -65,6 +65,8 @@ images:
     newTag: test
   - name: clerum/webhook-proxy
     newTag: test
+  - name: clerum/codex-llm-proxy
+    newTag: test
   - name: clerum/webhook-gateway
     newTag: test
   - name: clerum/stdio-bridge
