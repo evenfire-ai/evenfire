@@ -34,8 +34,8 @@ Invariants that must never regress:
   `pre-gate-sync` with `--skip-port-forwards`.
 - `t2_process_check` accepts only real `kubectl` (`comm=kubectl`) port-forward
   PIDs recorded in the profile cache or legacy `/tmp/pf-<profile>-*.pid`.
-  The awk argv0 filter anchors on the `ps -ef` TIME token in both macOS
-  (`N:MM[.ss]`) and Linux (`HH:MM:SS`) forms.
+  awk is a loose pre-filter: `kubectl` as argv0/path token and a later
+  standalone `port-forward` token (flags may sit between them).
 - Stable failure codes (`BOOTSTRAP_REQUIRED`, `HEAD_MARKER_MISMATCH`,
   `PORT_FORWARD_CONFLICT`, `PROFILE_BUSY`, ...) keep their meanings.
 

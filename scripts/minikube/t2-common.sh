@@ -512,9 +512,14 @@ t2_process_check() {
   local safe_profile
   safe_profile="$(printf '%s' "$T2_PROFILE" | tr -c 'A-Za-z0-9_.-' '_')"
   # Only real kubectl port-forward processes. A wrapper whose argv merely
-  # mentions those words is not a port-forward.
+  # mentions those words is not a port-forward (rejected by comm=kubectl).
   # Default IFS so UID/PID/PPID split. `IFS=` left pid empty and skipped every line.
-  # awk keys argv0 off the ps -ef TIME column: macOS N:MM[.ss], Linux HH:MM:SS.
+  # awk is a loose pre-filter: kubectl as argv0/path token AND a later
+  # standalone port-forward token. Flags may sit between those tokens.
+  # Known limitation: a port-forward whose argv carries no profile/context
+  # token (e.g. pf-control-stack's context-less `kubectl -n NS port-forward`)
+  # cannot be attributed to a cluster from ps output alone and is skipped —
+  # flagging it would also flag unrelated clusters' forwards.
   while read -r uid pid ppid rest; do
     [ -n "$pid" ] || continue
     command_line="$uid $pid $ppid $rest"
@@ -544,7 +549,7 @@ t2_process_check() {
       T2_NEXT_COMMAND='stop the unrelated profile port-forward or select the owner worktree; do not share it'
       t2_fail PORT_FORWARD_CONFLICT 'a port-forward for this profile is owned by another process'
     fi
-  done < <(ps -ef 2>/dev/null | awk '/[[:space:]][0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?[[:space:]]+([^[:space:]]*\/)?kubectl[[:space:]]+port-forward([[:space:]]|$)/ {print}' || true)
+  done < <(ps -ef 2>/dev/null | awk '/([^[:space:]]*\/)?kubectl([[:space:]]|$)/ && /[[:space:]]port-forward([[:space:]]|$)/ {print}' || true)
 }
 
 t2_classify_transition() {
