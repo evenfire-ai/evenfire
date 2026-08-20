@@ -7539,6 +7539,57 @@ textarea.cu-input {
   color: var(--cu-text-muted);
 }
 
+/* Clickable section header inside an Overview card. Matches the rhythm of
+   `.cu-host-overview-section-label` (uppercase, muted) but reads as a
+   navigation affordance via the chevron + hover color shift. */
+.cu-host-overview-nav-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  margin: 0 0 var(--cu-space-2);
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cu-text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cu-host-overview-nav-header:hover:not(:disabled),
+.cu-host-overview-nav-header:focus-visible {
+  color: var(--cu-text);
+}
+
+.cu-host-overview-nav-header:disabled {
+  cursor: default;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-nav-header__label {
+  flex: 1;
+}
+
+.cu-host-overview-nav-header__chev {
+  display: inline-block;
+  font-size: 0.875rem;
+  line-height: 1;
+  opacity: 0.6;
+  transition:
+    transform var(--cu-control-transition),
+    opacity var(--cu-control-transition);
+}
+
+.cu-host-overview-nav-header:hover:not(:disabled) .cu-host-overview-nav-header__chev,
+.cu-host-overview-nav-header:focus-visible .cu-host-overview-nav-header__chev {
+  transform: translateX(2px);
+  opacity: 1;
+}
+
 .cu-host-overview-identity__counts {
   display: flex;
   align-items: stretch;

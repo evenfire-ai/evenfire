@@ -5,6 +5,8 @@ export type HostOverviewAccessSummary = {
   teamNames: string[]
 }
 
+export type HostTabKey = 'access' | 'model' | 'contexts'
+
 export type HostOverviewTabProps = {
   hostName: string
   displayName: string
@@ -13,12 +15,9 @@ export type HostOverviewTabProps = {
   contextRef: string
   contextMcpServers: string[]
   contextMcpTotal: number
-  contextHref: string
   modelPrimary: string
   modelProviderLine: string
   modelAllowlistLine: string
   accessSummary: HostOverviewAccessSummary
-  uid: string
-  createdAt: string
-  lastUpdated: string
+  onNavigate: (tab: HostTabKey) => void
 }

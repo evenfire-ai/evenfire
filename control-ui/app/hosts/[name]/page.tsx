@@ -853,11 +853,6 @@ export default function HostDetailsPage() {
             contextRef={contextRefDraft}
             contextMcpServers={contextMcpServers}
             contextMcpTotal={contextMcpServers.length}
-            contextHref={
-              contextRefDraft.trim()
-                ? CONTROL_ROUTES.contexts.connectors(contextRefDraft.trim())
-                : '#'
-            }
             modelPrimary={modelNameDraft}
             modelProviderLine={
               modelNameDraft ? `${getProviderLabel(providerDraft)} · ${modelNameDraft}` : ''
@@ -866,9 +861,7 @@ export default function HostDetailsPage() {
               .map(entry => `${getProviderLabel(entry.provider)} · ${entry.model}`)
               .join(', ')}
             accessSummary={accessSummary}
-            uid={hostUid}
-            createdAt={hostCreatedAt}
-            lastUpdated={hostLastUpdated}
+            onNavigate={tab => selectTab(tab)}
           />
         )}
 

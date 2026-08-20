@@ -1,7 +1,6 @@
 import React from 'react'
 import { IconRobot } from '../Sidebar/icons'
-import { IconCopy } from '../icons'
-import type { HostOverviewTabProps } from './types'
+import type { HostOverviewTabProps, HostTabKey } from './types'
 
 function UsersIcon() {
   return (
@@ -57,10 +56,6 @@ function StatusDot({ tone }: { tone: HostOverviewTabProps['statusTone'] }) {
   )
 }
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return <p className="cu-host-overview-section-label">{children}</p>
-}
-
 function initialsFor(name: string): string {
   const parts = String(name || '')
     .trim()
@@ -70,6 +65,34 @@ function initialsFor(name: string): string {
   const first = parts[0]?.[0] || ''
   const last = parts.length > 1 ? parts[parts.length - 1]?.[0] || '' : ''
   return (first + last).toUpperCase() || '?'
+}
+
+// Each section header is a button that jumps the operator to the matching
+// detail tab. The label keeps the visual rhythm (uppercase, muted) and the
+// chevron telegraphs that it's a navigation affordance.
+function NavHeader({
+  label,
+  tab,
+  onNavigate,
+}: {
+  label: string
+  tab?: HostTabKey
+  onNavigate: (tab: HostTabKey) => void
+}) {
+  return (
+    <button
+      type="button"
+      className="cu-host-overview-nav-header"
+      onClick={tab ? () => onNavigate(tab) : undefined}
+      disabled={!tab}
+      aria-label={tab ? `Open ${label}` : undefined}
+    >
+      <span className="cu-host-overview-nav-header__label">{label}</span>
+      <span className="cu-host-overview-nav-header__chev" aria-hidden="true">
+        ›
+      </span>
+    </button>
+  )
 }
 
 function ConfigRow({ setting, value }: { setting: string; value: React.ReactNode }) {
@@ -89,14 +112,11 @@ export function HostOverviewTab({
   contextRef,
   contextMcpServers,
   contextMcpTotal,
-  contextHref,
   modelPrimary,
   modelProviderLine,
   modelAllowlistLine,
   accessSummary,
-  uid,
-  createdAt,
-  lastUpdated,
+  onNavigate,
 }: HostOverviewTabProps) {
   const shownName = displayName.trim() || hostName
   const contextLabel = contextRef.trim() || '—'
@@ -118,7 +138,7 @@ export function HostOverviewTab({
 
         <div className="cu-host-overview-identity__divider" />
 
-        <SectionLabel>Access</SectionLabel>
+        <NavHeader label="Access" tab="access" onNavigate={onNavigate} />
         <div className="cu-host-overview-identity__counts">
           <div>
             <div className="cu-host-overview-identity__count-value">
@@ -139,10 +159,10 @@ export function HostOverviewTab({
 
         <div className="cu-host-overview-identity__divider" />
 
-        <SectionLabel>Context</SectionLabel>
+        <NavHeader label="Context" tab="contexts" onNavigate={onNavigate} />
         {hasContext ? (
           <a
-            href={contextHref}
+            href="#"
             className="cu-chip cu-host-overview-context-chip"
             style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
           >
@@ -168,40 +188,12 @@ export function HostOverviewTab({
             —
           </span>
         )}
-
-        <div className="cu-host-overview-identity__divider" />
-
-        <SectionLabel>Agent ID</SectionLabel>
-        <div className="cu-host-overview-identity__uid">
-          <span className="cu-host-overview-identity__uid-text">{uid || '—'}</span>
-          {uid ? (
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--ghost cu-btn--sm"
-              aria-label="Copy agent ID"
-              title="Copy agent ID"
-              onClick={() => {
-                if (typeof navigator !== 'undefined' && navigator.clipboard) {
-                  void navigator.clipboard.writeText(uid)
-                }
-              }}
-            >
-              <IconCopy width={14} height={14} />
-            </button>
-          ) : null}
-        </div>
-        <dl className="cu-host-overview-identity__meta">
-          <dt>Created</dt>
-          <dd>{createdAt || '—'}</dd>
-          <dt>Last updated</dt>
-          <dd>{lastUpdated || '—'}</dd>
-        </dl>
       </section>
 
       <div className="cu-host-overview-right">
         <section className="cu-card" aria-label="Configuration">
           <div className="cu-card__body">
-            <p className="cu-host-overview-section-label">Configuration</p>
+            <NavHeader label="Configuration" tab="model" onNavigate={onNavigate} />
             <div className="cu-host-overview-config">
               <ConfigRow setting="Primary model" value={modelPrimary} />
               <ConfigRow setting="Provider · Model" value={modelProviderLine} />
@@ -212,7 +204,7 @@ export function HostOverviewTab({
 
         <section className="cu-card" aria-label="Access summary">
           <div className="cu-card__body">
-            <p className="cu-host-overview-section-label">Access</p>
+            <NavHeader label="Access" tab="access" onNavigate={onNavigate} />
 
             <div className="cu-host-overview-access__columns">
               <div className="cu-host-overview-access__group">
@@ -270,12 +262,10 @@ export function HostOverviewTab({
           </div>
         </section>
 
-        <section className="cu-card" aria-label="MCP servers">
+        <section className="cu-card" aria-label="Connectors">
           <div className="cu-card__body">
+            <NavHeader label="Connectors" tab="contexts" onNavigate={onNavigate} />
             <div className="cu-host-overview-mcp__head">
-              <p className="cu-host-overview-section-label" style={{ margin: 0 }}>
-                MCP servers
-              </p>
               <span className="cu-agent-context-mcp-summary__head" style={{ margin: 0 }}>
                 <span>{contextMcpTotal}</span>
               </span>
@@ -291,15 +281,9 @@ export function HostOverviewTab({
               </ul>
             ) : (
               <p className="cu-muted" style={{ margin: '0.5rem 0 0', fontSize: '0.875rem' }}>
-                {hasContext ? 'No MCP servers attached.' : 'No context selected.'}
+                {hasContext ? 'No connectors attached.' : 'No context selected.'}
               </p>
             )}
-            {hasContext ? (
-              <a className="cu-host-overview-mcp__link" href={contextHref}>
-                View all MCP servers
-                <span aria-hidden="true">→</span>
-              </a>
-            ) : null}
           </div>
         </section>
       </div>
