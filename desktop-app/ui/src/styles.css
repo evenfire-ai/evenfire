@@ -2159,6 +2159,11 @@ h3 {
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
   --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
+  /* Chat drawer owns its own width, decoupled from the notification drawer.
+     React sets `--chat-drawer-width` inline (session-only, drag-resizable); this
+     clamp is only the pre-mount / closed-state fallback. Floor 340px == the
+     drawer's min-width (see useChatDrawerResize). */
+  --chat-drawer-width: clamp(340px, 32vw, 420px);
 
   height: 100vh;
   min-height: 0;
@@ -12536,16 +12541,39 @@ pre {
   padding-left: var(--space-4);
 }
 
-/* Chat drawer — Cursor-style chat column beside the live app embed. Reuses the
-   notification drawer's rect-shrink gutter (padding-right on the embed slot's
-   page) so the native WebContentsView shrinks to sit left of the drawer instead
-   of painting over it. */
+/* Chat drawer — Cursor-style chat column beside the live app embed. It shrinks
+   the embed with the same `--app-header-utilities-width` gutter the notification
+   drawer uses, but derives that gutter from its OWN width (`--chat-drawer-width`)
+   so resizing the chat drawer never disturbs the notification drawer. The two
+   drawer-open states are mutually exclusive (see App.tsx notificationTrayUsesDrawer),
+   so this higher-specificity override is unambiguous. */
+.content-panel.content-panel--chat-drawer-open {
+  --app-header-utilities-width: calc(var(--chat-drawer-width) + var(--space-2) + 36px);
+}
+
 .content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-mounted-header) {
   padding-right: var(--app-header-utilities-width);
 }
 
 .content-panel.content-panel--chat-drawer-open .sandbox-ui-mounted-header {
   padding-right: 0;
+}
+
+/* Overlay mode — when the embed column would be squeezed below the readable
+   floor, stop pushing the embed (drop the gutter, embed goes full-width) and let
+   the drawer float over it. `.chat-drawer` is already `position: fixed`, so
+   removing the gutter is all it takes; a stronger elevation reads it as floating.
+   Both `--chat-drawer-open` and `--chat-drawer-overlay` are present here, so this
+   rule must follow the docked rule above to win at equal specificity. */
+.content-panel.content-panel--chat-drawer-overlay > .page:has(.sandbox-ui-mounted-header) {
+  padding-right: 0;
+}
+
+.content-panel.content-panel--chat-drawer-overlay .chat-drawer {
+  border-color: rgba(var(--edge-rgb), 0.5);
+  box-shadow:
+    var(--shadow-hard),
+    0 0 0 3px rgba(var(--edge-rgb), 0.12);
 }
 
 /* The chat drawer occupies the right rail at --layer-chat-overlay, above the
@@ -12564,7 +12592,7 @@ pre {
   top: calc(var(--space-4) + 36px + var(--space-2));
   right: var(--space-4);
   bottom: var(--space-4);
-  width: var(--app-notification-drawer-width);
+  width: var(--chat-drawer-width);
   z-index: var(--layer-chat-overlay);
   display: flex;
   flex-direction: column;
@@ -12583,6 +12611,74 @@ pre {
 .chat-drawer.is-ready {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* Drag handle on the drawer's LEFT edge. A comfortable ~8px grab strip with a
+   slim accent rule that surfaces on hover / during a drag. Sits inside the
+   drawer (which clips overflow), above the header/surface content. */
+.chat-drawer__resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 8px;
+  height: 100%;
+  z-index: 2;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.chat-drawer__resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 100%;
+  background: transparent;
+  transition: background var(--motion-fast);
+}
+
+.chat-drawer__resize-handle:hover::after,
+.chat-drawer.is-resizing .chat-drawer__resize-handle::after {
+  background: rgba(var(--accent-rgb), 0.55);
+}
+
+/* Compact chrome — narrow-column only. Scoped entirely under `.chat-drawer`, so
+   the full-screen chat route (which renders the same <ChatPage> OUTSIDE this
+   ancestor) is untouched. Trims the padding/margins that read as "loose" in the
+   slim column and neutralizes the full-height grid the workspace uses in
+   full-screen (which would overflow this fixed rail and leave odd gaps). */
+.chat-drawer .agent-page {
+  height: 100%;
+}
+
+.chat-drawer .agent-workspace-shell .chat-thread {
+  padding: var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .chat-empty-state {
+  padding: var(--space-4) 0 var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .agent-workspace-top {
+  padding: var(--space-1) var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .agent-workspace-tabs {
+  padding: 0 var(--space-2);
+}
+
+.chat-drawer .composer {
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+}
+
+/* Tighter table cells so the data table breathes in the slim column; the
+   `.da-table__scroll` horizontal overflow still handles anything too wide. */
+.chat-drawer .da-table {
+  --table-cell-padding-x: var(--space-1-5);
+  --table-cell-padding-y: var(--space-1);
 }
 
 .chat-drawer__header {

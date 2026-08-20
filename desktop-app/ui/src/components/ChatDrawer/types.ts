@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from 'react'
+import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from 'react'
 
 export type ChatDrawerProps = {
   /**
@@ -16,5 +16,12 @@ export type ChatDrawerProps = {
    * bounds-ack anti-flash gate.
    */
   ready: boolean
+  /**
+   * mousedown handler for the left-edge drag handle that resizes the drawer.
+   * Wired from `useChatDrawerResize`.
+   */
+  onResizeHandleMouseDown: (event: ReactMouseEvent<HTMLElement>) => void
+  /** True while a resize drag is in progress — highlights the drag handle. */
+  resizing: boolean
   children: ReactNode
 }

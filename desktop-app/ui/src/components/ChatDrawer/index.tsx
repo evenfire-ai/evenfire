@@ -17,14 +17,23 @@ export function ChatDrawer({
   onClose,
   containerRef,
   ready,
+  onResizeHandleMouseDown,
+  resizing,
   children,
 }: ChatDrawerProps) {
   return (
     <aside
-      className={`chat-drawer${ready ? ' is-ready' : ''}`}
+      className={`chat-drawer${ready ? ' is-ready' : ''}${resizing ? ' is-resizing' : ''}`}
       aria-label="Chat"
       data-ready={ready ? 'true' : 'false'}
     >
+      <div
+        className="chat-drawer__resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize chat drawer"
+        onMouseDown={onResizeHandleMouseDown}
+      />
       <header className="chat-drawer__header">
         <div className="chat-drawer__header-main">{header}</div>
         <div className="chat-drawer__header-actions">

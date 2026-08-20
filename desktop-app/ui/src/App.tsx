@@ -26,6 +26,7 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import { useChatDrawerResize } from '@hooks/useChatDrawerResize'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import {
@@ -521,6 +522,9 @@ export function App() {
   const chatDrawerVisible = chatDrawerAvailable && chatDrawerOpen
   chatDrawerVisibleRef.current = chatDrawerVisible
   chatDrawerAvailableRef.current = chatDrawerAvailable
+  // Session-only drawer sizing + docked/overlay policy. Width is not persisted
+  // by design; it resets to the default each launch.
+  const chatDrawerResize = useChatDrawerResize(contentPanelRef, chatDrawerVisible)
   // The notification tray's drawer form occupies the same fixed right-rail rect
   // as the chat drawer, so it only takes drawer form when the chat drawer is NOT
   // visible; while the chat drawer is up it reverts to its popover/overlay form
@@ -1993,7 +1997,16 @@ export function App() {
                                 appNotificationDrawerOpen
                                   ? ' content-panel--app-notification-drawer-open'
                                   : ''
-                              }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
+                              }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}${
+                                chatDrawerVisible && chatDrawerResize.isOverlay
+                                  ? ' content-panel--chat-drawer-overlay'
+                                  : ''
+                              }`}
+                              style={
+                                chatDrawerVisible
+                                  ? { '--chat-drawer-width': `${chatDrawerResize.width}px` }
+                                  : undefined
+                              }
                             >
                               <AppHeader
                                 searchFocusRequestId={globalSearchFocusRequestId}
@@ -2083,6 +2096,10 @@ export function App() {
                                       onClose={closeChatDrawer}
                                       containerRef={chatDrawerRef}
                                       ready={chatDrawerReady}
+                                      onResizeHandleMouseDown={
+                                        chatDrawerResize.onResizeHandleMouseDown
+                                      }
+                                      resizing={chatDrawerResize.isResizing}
                                     >
                                       <ChatPage scrollContainerRef={chatDrawerRef} />
                                     </ChatDrawer>

@@ -6,10 +6,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { ChatDrawer } from '.'
 
-const stylesheet = readFileSync(
-  path.join(process.cwd(), 'ui', 'src', 'styles.css'),
-  'utf8'
-)
+const stylesheet = readFileSync(path.join(process.cwd(), 'ui', 'src', 'styles.css'), 'utf8')
 
 beforeEach(() => {
   const style = document.createElement('style')
@@ -30,6 +27,7 @@ afterEach(() => {
 function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = {}) {
   const onNewChat = props.onNewChat ?? vi.fn()
   const onClose = props.onClose ?? vi.fn()
+  const onResizeHandleMouseDown = props.onResizeHandleMouseDown ?? vi.fn()
   const containerRef = props.containerRef ?? createRef<HTMLElement>()
   const utils = render(
     <ChatDrawer
@@ -38,11 +36,13 @@ function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = 
       onClose={onClose}
       containerRef={containerRef}
       ready={props.ready ?? true}
+      onResizeHandleMouseDown={onResizeHandleMouseDown}
+      resizing={props.resizing ?? false}
     >
       <div data-testid="drawer-chat-page">chat page</div>
     </ChatDrawer>
   )
-  return { ...utils, onNewChat, onClose }
+  return { ...utils, onNewChat, onClose, onResizeHandleMouseDown }
 }
 
 describe('ChatDrawer', () => {
@@ -86,12 +86,20 @@ describe('ChatDrawer', () => {
     // stay anchored rightward (left: 100%+, right: auto) to render over drawer DOM
     // instead of being occluded by the native view. A left flip would cross the
     // embed rect — the confinement guards against that.
-    const rule = stylesheet.match(
-      /\.chat-drawer \.composer-reference-submenu\s*\{([^}]*)\}/
-    )?.[1]
+    const rule = stylesheet.match(/\.chat-drawer \.composer-reference-submenu\s*\{([^}]*)\}/)?.[1]
     expect(rule).toBeTruthy()
     expect(rule).toMatch(/left:\s*calc\(100% \+ var\(--space-1\)\)/)
     expect(rule).toMatch(/right:\s*auto/)
+  })
+
+  it('exposes a left-edge resize handle that fires the drag callback on mousedown', () => {
+    const { container, onResizeHandleMouseDown } = renderDrawer()
+    const handle = container.querySelector('.chat-drawer__resize-handle') as HTMLElement
+    expect(handle).toBeTruthy()
+    expect(handle.getAttribute('aria-orientation')).toBe('vertical')
+    expect(getComputedStyle(handle).cursor).toBe('col-resize')
+    fireEvent.mouseDown(handle)
+    expect(onResizeHandleMouseDown).toHaveBeenCalledTimes(1)
   })
 
   it('reveals once ready', () => {
