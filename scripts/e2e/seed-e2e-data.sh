@@ -186,6 +186,7 @@ if [ -z "$PLUGIN_SDK_DEMO_CREDENTIAL_SLOT" ]; then
     moonshot) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="moonshot-api-key" ;;
     nebius) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="nebius-api-key" ;;
     novita) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="novita-api-key" ;;
+    minimax) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="minimax-api-key" ;;
     azure) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="azure-openai-api-key" ;;
     *) die "Cannot derive a credential slot for provider '$PLUGIN_SDK_DEMO_PROVIDER'; set E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT explicitly" ;;
   esac
