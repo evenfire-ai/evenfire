@@ -27,7 +27,11 @@ spec:
               required:
                 - host
                 - contextRef
-                - secretRef
+              x-kubernetes-validations:
+                - rule: "(has(self.model) && self.model.provider == 'codex-subscription' && (!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, f.provider != 'codex-subscription'))) || (has(self.secretRef) && size(self.secretRef) > 0)"
+                  message: spec.secretRef is required unless every LLM target is the Codex subscription broker
+                - rule: "!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, f.provider == 'codex-subscription' && has(f.credentialSlot))"
+                  message: credentialSlot is not supported for oauth-broker providers
               properties:
                 host:
                   type: string
@@ -41,7 +45,10 @@ spec:
                   description: Reference to the context (e.g. context1) used for MPC servers and secrets.
                 secretRef:
                   type: string
-                  description: Name of the Kubernetes Secret containing API keys (openai-api-key, claude-api-key, zai-api-key).
+                  description: >-
+                    Name of the Kubernetes Secret containing static LLM API keys.
+                    Required when any primary or fallback target uses
+                    static-credentials. Optional for a Codex-subscription-only Host.
                 channels:
                   type: array
                   description: List of CommunicationChannel names this host interacts with.
@@ -76,6 +83,7 @@ spec:
                         - novita
                         - minimax
                         - azure
+                        - codex-subscription
                       description: LLM provider to use.
                     name:
                       type: string
@@ -192,6 +200,7 @@ spec:
                               - novita
                               - minimax
                               - azure
+                              - codex-subscription
                             description: >-
                               Fallback LLM provider. Same enum as spec.model.provider.
                           model:

@@ -933,7 +933,7 @@ export class HostReconciler {
             host.spec.secretRef,
             `host-${host.name}-env-secret`,
             mcpHostRuntimeTokenSecretName(host),
-          ],
+          ].filter((name): name is string => Boolean(name)),
           verbs: ['get', 'watch', 'list'],
         },
       ],
@@ -1953,6 +1953,9 @@ export class HostReconciler {
   }
 
   async validateHostSecret(host: HostCRD): Promise<HostSecretValidationResult> {
+    if (!host.spec.secretRef) {
+      return { ok: true }
+    }
     try {
       await this.coreApi.readNamespacedSecret({
         namespace: host.namespace,
@@ -2541,7 +2544,7 @@ export class HostReconciler {
       },
       { name: 'CLERUM_WORKSPACE_PATH', value: workspacePath },
       // Changing spec.secretRef changes the pod template and rolls the host.
-      { name: 'CLERUM_LLM_SECRET_REF', value: host.spec.secretRef },
+      { name: 'CLERUM_LLM_SECRET_REF', value: host.spec.secretRef ?? '' },
       // mcpHost runtime token env vars. Names match WRC's podFactory.ts so mcp-host
       // sees the same shape regardless of which controller provisioned it.
       {

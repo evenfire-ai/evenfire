@@ -61,7 +61,7 @@ describe('LLM provider CRD enums', () => {
     // spec.model.provider + spec.llmPolicy.fallbacks[].provider
     expect(enums).toHaveLength(2)
     for (const e of enums) {
-      for (const id of [...NEW_SINGLE_KEY, 'azure']) {
+      for (const id of [...NEW_SINGLE_KEY, 'azure', 'codex-subscription']) {
         expect(e).toContain(id)
       }
       // additive: original providers preserved
@@ -75,7 +75,7 @@ describe('LLM provider CRD enums', () => {
     // the two WRC provider enums (model.provider + a second one ~line 543)
     expect(enums).toHaveLength(2)
     for (const e of enums) {
-      for (const id of NEW_SINGLE_KEY) {
+      for (const id of [...NEW_SINGLE_KEY, 'codex-subscription']) {
         expect(e).toContain(id)
       }
       // azure and bedrock must fail at admission (mono-credential WRC transport).

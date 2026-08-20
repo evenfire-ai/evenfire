@@ -221,9 +221,11 @@ describe('codex-subscription zero-slot broker', () => {
   })
 
   it('fails closed when constructing Codex without runtime dependencies', () => {
+    process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
     expect(() => makeProvider('codex-subscription', {})).toThrow(
       /requires an explicit model and runtime authorizer/
     )
     expect(createLLMProvider({}, { provider: 'codex-subscription', name: 'gpt-5.1' })).toBeNull()
+    delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
   })
 })

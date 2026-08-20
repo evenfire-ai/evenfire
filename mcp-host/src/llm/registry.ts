@@ -79,6 +79,9 @@ export function makeProvider(
       // below. Fails closed (throws) if the operator omitted the endpoint.
       return new AzureOpenAIProvider(credentials[primarySlot(d).dataKey], model ?? d.defaultModel)
     case 'codex-subscription':
+      if (process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true') {
+        throw new Error('[LLM] makeProvider: codex-subscription is disabled')
+      }
       throw new Error(
         '[LLM] makeProvider: codex-subscription requires an explicit model and runtime authorizer/proxy dependencies'
       )
