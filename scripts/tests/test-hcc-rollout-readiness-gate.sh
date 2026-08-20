@@ -69,7 +69,7 @@ grep -Eq 'baseline_503.*-eq.*0' "$GATE" &&
 grep -Fq 'EXPECT_STUCK' "$GATE" &&
   grep -Fq 'STUCK_OBSERVE_SEC' "$GATE" &&
   grep -Eq 'stuck_transitions.*-eq.*0' "$GATE" &&
-  grep -Eq 'stuck_maxstreak.*-gt.*ROLLOUT_DOWNTIME_BUDGET_SEC' "$GATE" &&
+  grep -Fq '"$stuck_maxstreak" -gt "$ROLLOUT_DOWNTIME_BUDGET_SEC"' "$GATE" &&
   grep -Fq 'ErrImagePull|ImagePullBackOff' "$GATE" &&
   pass "D1b mode: bounded, pinned to ImagePull, sustained outage with zero recoveries" ||
   fail "the botched-rollout mode lost its outage evidence or can hang unbounded"
@@ -127,6 +127,11 @@ grep -Fq 'create_synthetic_fleet' "$GATE" &&
 #     is the same sustained D1b pin as EXPECT_STUCK, IMAGE_BROKEN is cleared
 #     only AFTER every post-undo proof, and a no-op undo fails.
 recovery_block="$(awk '/FASE D \(recovery, evenfire#391\)/,0' "$GATE")"
+# The sustained-outage comparison lives in the shared assert_botched_outage
+# helper; pin the LITERAL test expression in the helper body (a comment
+# mentioning the variables must never satisfy this check) plus the recovery
+# block's invocation of that helper.
+outage_helper="$(awk '/^assert_botched_outage\(\) \{/,/^\}/' "$GATE")"
 image_clear_line="$(grep -n 'IMAGE_BROKEN=0' <<<"$recovery_block" | head -1 | cut -d: -f1)"
 hold_assert_line="$(grep -n 'post-undo hold' <<<"$recovery_block" | head -1 | cut -d: -f1)"
 grep -Fq 'EXPECT_RECOVERY' "$GATE" &&
@@ -134,7 +139,8 @@ grep -Fq 'EXPECT_RECOVERY' "$GATE" &&
   grep -Fq 'TEST ACTION' "$GATE" &&
   grep -Fq -- '--to-revision' "$GATE" &&
   grep -Fq 'LAST_GOOD_REVISION' "$GATE" &&
-  grep -Eq 'stuck_maxstreak.*-gt.*ROLLOUT_DOWNTIME_BUDGET_SEC' <<<"$recovery_block" &&
+  grep -Fq 'assert_botched_outage recovery' <<<"$recovery_block" &&
+  grep -Fq '"$stuck_maxstreak" -gt "$ROLLOUT_DOWNTIME_BUDGET_SEC"' <<<"$outage_helper" &&
   grep -Fq '[ "$e2e_fail" -eq 0 ] && IMAGE_BROKEN=0' <<<"$recovery_block" &&
   [ -n "$image_clear_line" ] && [ -n "$hold_assert_line" ] &&
   [ "$image_clear_line" -gt "$hold_assert_line" ] &&

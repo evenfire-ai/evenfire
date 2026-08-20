@@ -250,25 +250,91 @@ grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
 grep -Fq 'while read -r uid pid ppid rest' "$COMMON" || fail 't2_process_check must split ps -ef fields'
 grep -Fq 'IFS= read -r uid pid ppid rest' "$COMMON" && fail 'IFS= read disables PID split and silences PORT_FORWARD_CONFLICT'
-grep -Fq '([^[:space:]]*\/)?kubectl[[:space:]]+port-forward' "$COMMON" || fail 't2_process_check awk must match argv0 kubectl, not a wrapper mention'
-grep -Fq '[0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?' "$COMMON" || fail 't2_process_check awk TIME token must accept Linux HH:MM:SS as well as macOS N:MM[.ss]'
-bare_pf='user 12345 1 0 10:00 ttys000 0:00 kubectl port-forward --context=clerum-feat-scenario svc/x 8080:80'
-path_pf='user 124 1 0 10:00 ttys000 0:00 /usr/local/bin/kubectl port-forward --context=clerum-feat-scenario svc/y 9090:80'
-macos_frac_pf='user 12346 1 0 10:00 ttys000 0:00.03 kubectl port-forward --context=clerum-feat-scenario svc/x 8080:80'
-linux_pf='user 126 1 0 10:00 pts/0 00:00:00 kubectl port-forward --context=clerum-feat-scenario svc/z 7070:80'
-linux_path_pf='user 127 1 0 10:00 pts/0 00:00:00 /usr/bin/kubectl port-forward --context=clerum-feat-scenario svc/z 7070:80'
-wrapper_pf='user 125 1 0 10:00 ttys000 0:00 bash -c echo kubectl port-forward'
-linux_wrapper_pf='user 128 1 0 10:00 pts/0 00:00:00 bash -c echo kubectl port-forward'
-awk_pf='/[[:space:]][0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?[[:space:]]+([^[:space:]]*\/)?kubectl[[:space:]]+port-forward([[:space:]]|$)/ {print}'
-printf '%s\n' "$bare_pf" "$path_pf" "$macos_frac_pf" "$linux_pf" "$linux_path_pf" "$wrapper_pf" "$linux_wrapper_pf" | awk "$awk_pf" >"$tmp/pf-awk.out"
-grep -Fq 'kubectl port-forward --context=clerum-feat-scenario svc/x' "$tmp/pf-awk.out" || fail 'awk missed a bare kubectl port-forward'
-grep -Fq '/usr/local/bin/kubectl port-forward' "$tmp/pf-awk.out" || fail 'awk missed a path kubectl port-forward'
-grep -Fq '0:00.03 kubectl port-forward' "$tmp/pf-awk.out" || fail 'awk missed a macOS fractional TIME kubectl port-forward'
-grep -Fq '00:00:00 kubectl port-forward --context=clerum-feat-scenario svc/z' "$tmp/pf-awk.out" || fail 'awk missed a Linux HH:MM:SS kubectl port-forward'
-grep -Fq '/usr/bin/kubectl port-forward' "$tmp/pf-awk.out" || fail 'awk missed a Linux path kubectl port-forward'
-grep -Fq 'bash -c echo kubectl port-forward' "$tmp/pf-awk.out" && fail 'awk matched a wrapper that only mentions kubectl'
-read -r uid pid ppid rest <<<"$bare_pf"
-[ "$pid" = 12345 ] || fail "ps field split left pid='$pid' instead of 12345"
+grep -Fq '([^[:space:]]*\/)?kubectl([[:space:]]|$)' "$COMMON" || fail 't2_process_check awk must match a kubectl argv0/path token'
+grep -Fq '[[:space:]]port-forward([[:space:]]|$)' "$COMMON" || fail 't2_process_check awk must match a standalone port-forward token'
+grep -Fq 'kubectl[[:space:]]+port-forward' "$COMMON" && fail 't2_process_check awk still requires kubectl/port-forward adjacency'
+grep -Fq '[0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?' "$COMMON" && fail 't2_process_check awk still anchors on a TIME-column regex'
+
+# Real launcher argv (flags between kubectl and port-forward). TIME prefixes
+# are only ps -ef wrappers. The dead adjacency regex must miss these lines.
+pf_profile="clerum-t2-pf-fixture"
+pf_all='user 4242 1 0 10:00 ttys000 0:00 kubectl --context='"${pf_profile}"' -n control-plane port-forward --address=127.0.0.1 svc/control-ui 3000:3000'
+pf_ctl='user 4243 1 0 10:00 ttys000 0:00.03 kubectl -n control-plane port-forward svc/control-api 8090:8090'
+pf_e2e='user 4244 1 0 10:00 pts/0 00:00:00 kubectl --context '"${pf_profile}"' port-forward svc/control-ui -n control-plane 3000:3000'
+bare_pf='user 4245 1 0 10:00 ttys000 0:00 kubectl port-forward --context='"${pf_profile}"' svc/x 8080:80'
+path_pf='user 4246 1 0 10:00 pts/0 00:00:00 /usr/local/bin/kubectl --context='"${pf_profile}"' -n control-plane port-forward --address=127.0.0.1 svc/control-api 8090:8090'
+wrapper_pf='user 4247 1 0 10:00 ttys000 0:00 bash -c echo kubectl port-forward --context='"${pf_profile}"
+awk_pf="$(sed -n '/^t2_process_check()/,/^}/p' "$COMMON" | sed -n "s/.*awk '\\(.*\\)' .*/\\1/p")"
+[ -n "$awk_pf" ] || fail 'could not extract t2_process_check awk program'
+printf '%s\n' "$awk_pf" | grep -Fq 'kubectl[[:space:]]+port-forward' && fail 'extracted awk still requires kubectl/port-forward adjacency'
+dead_awk='/[[:space:]][0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?[[:space:]]+([^[:space:]]*\/)?kubectl[[:space:]]+port-forward([[:space:]]|$)/ {print}'
+printf '%s\n' "$pf_all" "$pf_ctl" "$pf_e2e" | awk "$dead_awk" >"$tmp/pf-dead-awk.out"
+[ ! -s "$tmp/pf-dead-awk.out" ] || fail 'real-launcher fixtures still match the dead adjacency regex — fixtures are wrong'
+printf '%s\n' "$pf_all" "$pf_ctl" "$pf_e2e" "$bare_pf" "$path_pf" "$wrapper_pf" | awk "$awk_pf" >"$tmp/pf-awk.out"
+grep -Fq -- "--context=${pf_profile} -n control-plane port-forward --address=127.0.0.1" "$tmp/pf-awk.out" || fail 'awk missed pf-all-stack real launcher'
+grep -Fq 'kubectl -n control-plane port-forward svc/control-api' "$tmp/pf-awk.out" || fail 'awk missed pf-control-stack real launcher'
+grep -Fq -- "--context ${pf_profile} port-forward svc/control-ui" "$tmp/pf-awk.out" || fail 'awk missed run-e2e real launcher'
+grep -Fq 'kubectl port-forward --context=' "$tmp/pf-awk.out" || fail 'awk missed a bare kubectl port-forward'
+grep -Fq '/usr/local/bin/kubectl --context=' "$tmp/pf-awk.out" || fail 'awk missed a path kubectl with flags before port-forward'
+read -r uid pid ppid rest <<<"$pf_all"
+[ "$pid" = 4242 ] || fail "ps field split left pid='$pid' instead of 4242"
+
+pf_root="$tmp/pf-check-profiles"
+mkdir -p "$pf_root/$pf_profile/pids"
+pf_bin="$tmp/pf-ps-bin"
+mkdir -p "$pf_bin"
+cat >"$pf_bin/ps" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-ef" ]; then
+  cat "${T2_PS_EF_FILE:?}"
+  exit 0
+fi
+pid=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p)
+      pid="$2"
+      shift 2
+      ;;
+    -p*)
+      pid="${1#-p}"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+case "$pid" in
+  4242|4243|4244|4245|4246) printf '%s\n' kubectl ;;
+  4247) printf '%s\n' bash ;;
+  *) printf '\n' ;;
+esac
+EOF
+chmod +x "$pf_bin/ps"
+
+run_process_check() {
+  local ef_file="$1" out="$2"
+  T2_PS_EF_FILE="$ef_file" PATH="$pf_bin:$PATH" \
+    T2_PROFILE="$pf_profile" T2_CONTEXT="$pf_profile" \
+    MINIKUBE_PROFILE="$pf_profile" \
+    T2_PROFILE_ROOT="$pf_root" \
+    T2_PROJECT_DIR="$ROOT" \
+    T2_LOCK_ROOT="$tmp/locks" \
+    bash -c 'source "$1"; t2_process_check' bash "$COMMON" >"$out" 2>&1
+}
+
+printf '%s\n' "$pf_all" >"$tmp/ps-ef-real.out"
+if run_process_check "$tmp/ps-ef-real.out" "$tmp/pf-real.err"; then
+  fail 't2_process_check did not fail a foreign real launcher (PORT_FORWARD_CONFLICT)'
+fi
+grep -Fq 'PORT_FORWARD_CONFLICT' "$tmp/pf-real.err" || fail 'foreign real launcher did not report PORT_FORWARD_CONFLICT'
+
+printf '%s\n' "$wrapper_pf" >"$tmp/ps-ef-wrap.out"
+if ! run_process_check "$tmp/ps-ef-wrap.out" "$tmp/pf-wrap.err"; then
+  fail 't2_process_check failed on a wrapper that only mentions kubectl (comm=bash)'
+fi
+
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
 
