@@ -1250,6 +1250,12 @@ describe('FilesPage', () => {
     for (const row of documentRows) {
       const iconSvg = row?.querySelector('.da-gfs-list__icon svg')
       expect(iconSvg?.getAttribute('viewBox')).toBe('0 0 512 512')
+      // The document glyph is outlined — paths carry fill="none" and a
+      // real stroke width; the SVG itself must NOT receive the
+      // data-solid="true" opt-in we use for filled icons.
+      expect(iconSvg?.getAttribute('data-solid')).not.toBe('true')
+      const path = iconSvg?.querySelector('path')
+      expect(path?.getAttribute('fill')).toBe('none')
     }
 
     const clipRow = screen.getByRole('button', { name: 'archive.zip' }).closest('.da-grid__row')

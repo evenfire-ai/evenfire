@@ -201,8 +201,26 @@ describe('GfsBrowser', () => {
     expect(folderSvg?.getAttribute('viewBox')).toBe('0 0 512 512')
     expect(folderSvg?.getAttribute('fill')).toBe('currentColor')
     expect(folderSvg?.getAttribute('stroke-width')).toBe('0')
+    expect(folderSvg?.getAttribute('data-solid')).toBe('true')
     const path = folderSvg?.querySelector('path')
     expect(path?.getAttribute('d')).toContain('M464 128H272l-64-64H48C21.49 64')
+  })
+
+  it('keeps the outlined document glyph visible next to .pdf files', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('report.pdf', 'file', 2)],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    const list = await screen.findByRole('list', { name: 'Current folder resources' })
+    const fileSvg = list.querySelector('.cu-gfs-list__icon svg')
+    // Document glyph is outline-only — should NOT receive the solid opt-in.
+    expect(fileSvg?.getAttribute('data-solid')).not.toBe('true')
+    expect(fileSvg?.getAttribute('viewBox')).toBe('0 0 512 512')
+    const path = fileSvg?.querySelector('path')
+    expect(path?.getAttribute('fill')).toBe('none')
+    expect(path?.getAttribute('stroke-width')).toBe('32')
   })
 
   it('uses the paperclip header, labels the root as main, and ignores current-crumb clicks', async () => {

@@ -10962,13 +10962,14 @@ textarea.cu-input {
   stroke-linejoin: round;
 }
 
-/* Allow the new solid SVG icons (folder, copy, …) to honour their
-   inline fill="currentColor" / stroke-width="0" inside the GFS row
-   + breadcrumb containers. The above rule defaults to outline-only;
-   these selectors bring the solid filled glyphs back. */
-.cu-gfs-breadcrumb__drive-icon svg[fill='currentColor'],
-.cu-gfs-list__icon svg[fill='currentColor'],
-.cu-gfs-list__copy svg[fill='currentColor'] {
+/* Allow the new solid SVG icons (folder, copy, image, video, …) to
+   honour their inline fill="currentColor" / stroke-width="0" inside
+   the GFS row + breadcrumb containers. The above rule defaults to
+   outline-only; `data-solid="true"` opts a glyph into the filled
+   treatment. */
+.cu-gfs-breadcrumb__drive-icon svg[data-solid='true'],
+.cu-gfs-list__icon svg[data-solid='true'],
+.cu-gfs-list__copy svg[data-solid='true'] {
   fill: currentColor;
   stroke: none;
   stroke-width: 0;

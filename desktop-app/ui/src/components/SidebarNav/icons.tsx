@@ -55,6 +55,7 @@ export function IconContexts(props: IconProps) {
       strokeWidth="0"
       viewBox="0 0 512 512"
       aria-hidden="true"
+      data-solid="true"
       {...props}
     >
       <path d="M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288c0 26.51 21.49 48 48 48h416c26.51 0 48-21.49 48-48V176c0-26.51-21.49-48-48-48z" />
@@ -84,7 +85,7 @@ export function IconAttachFile(props: IconProps) {
 // solid). Used by the GFS image and text/markdown preview modals.
 export function IconCopy(props: IconProps) {
   return (
-    <svg viewBox="0 0 384 384" fill="currentColor" aria-hidden="true" {...props}>
+    <svg viewBox="0 0 384 384" fill="currentColor" aria-hidden="true" data-solid="true" {...props}>
       <path d="M280 64H112c-8.8 0-16 7.2-16 16v32c0 8.8 7.2 16 16 16h168c8.8 0 16-7.2 16-16V80c0-8.8-7.2-16-16-16zM32 224c0-35.3 28.7-64 64-64h192c35.3 0 64 28.7 64 64v128c0 35.3-28.7 64-64 64H96c-35.3 0-64-28.7-64-64V224zm128 48c-8.8 0-16 7.2-16 16 0 8.8 7.2 16 16 16h128c8.8 0 16-7.2 16-16 0-8.8-7.2-16-16-16H160z" />
     </svg>
   )
@@ -345,6 +346,7 @@ export function IconImage(props: IconProps) {
       fill="currentColor"
       stroke="currentColor"
       strokeWidth="0"
+      data-solid="true"
       {...props}
     >
       <g>
@@ -363,6 +365,7 @@ export function IconVideo(props: IconProps) {
       fill="currentColor"
       stroke="currentColor"
       strokeWidth="0"
+      data-solid="true"
       {...props}
     >
       <path d="M0 4.75C0 3.784.784 3 1.75 3h20.5c.966 0 1.75.784 1.75 1.75v14.5A1.75 1.75 0 0 1 22.25 21H1.75A1.75 1.75 0 0 1 0 19.25Zm1.75-.25a.25.25 0 0 0-.25.25v14.5c0 .138.112.25.25.25h20.5a.25.25 0 0 0 .25-.25V4.75a.25.25 0 0 0-.25-.25Z" />
