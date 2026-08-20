@@ -116,6 +116,22 @@ describe('mcpHostRuntimeTokenIssuerClient (HCC)', () => {
     expect(claims.jti).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   })
 
+  it('forwards derived llm:codex:execute in the issuance body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => canonicalIssueResponse(),
+    } as Response)
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+
+    const issueMcpHostRuntimeTokens = await loadIssuer()
+    await issueMcpHostRuntimeTokens('chatllm', ['workflow:list', 'llm:codex:execute'])
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect((init as RequestInit).body).toBe(
+      '{"includeMcpHostControlToken":true,"host":"chatllm","workflowControlScopes":["workflow:list","llm:codex:execute"]}'
+    )
+  })
+
   it('uses HCC_TARGET_NAMESPACE when building the issuance URL', async () => {
     vi.resetModules()
     process.env.HCC_TARGET_NAMESPACE = 'first-party-hosts'

@@ -4,6 +4,11 @@ import { createHash, randomUUID } from 'crypto'
 import { isDeepStrictEqual } from 'node:util'
 import * as path from 'path'
 import type { AdministrativeOutcomeReporter } from './administrativeOutcomeReporter'
+import {
+  type CodexCatalogSnapshot,
+  type CodexExecutionProjection,
+  projectCodexExecution,
+} from './codexExecutionProjection'
 import { config } from './config'
 import { HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
 import { mintHostGfsToken } from './gfsHostBinding'
@@ -13,13 +18,22 @@ import type {
   HccInfrastructureTelemetryPayload,
   InfrastructureTelemetryReporter,
 } from './infrastructureTelemetryReporter'
-import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
+import {
+  HOST_K8S_REQUEST_TIMEOUT_CODE,
+  HostK8sRequestTimeoutError,
+  makeHostK8sApiClient,
+} from './k8s/hostK8sApiClient'
 import {
   SFS_LABEL,
   SFS_NAMESPACE_LABEL,
   WFC_APP_LABEL,
   sharedFileSystemHash,
 } from './k8s/sharedFileSystemFactory'
+import {
+  ALLOWED_MODELS_CONFIGMAP_NAME,
+  parseAllowedModelsSnapshot,
+  snapshotFromConfigMapError,
+} from './llmAllowedModelsSnapshot'
 import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
@@ -47,6 +61,7 @@ import { EffectiveHostLifecycle, SuspendFromHeartbeatOutcome } from './stateless
 import { ReflectHostOutcomeFn, StatelessLifecycleExecutor } from './statelessLifecycleExecutor'
 import {
   CommunicationChannelCRD,
+  EffectiveMcpHostControlScope,
   HostCRD,
   HostChannelReaderStatus,
   HostRuntimeStatus,
@@ -449,6 +464,7 @@ export class HostReconciler {
   private readonly now: () => Date
   private readonly newTelemetryOccurrenceId: () => string
   private readonly statusMap: Map<string, HostRuntimeStatus> = new Map()
+  private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
   /**
    * host.name → image whose pull-policy refusal was already error-logged.
@@ -1042,14 +1058,26 @@ export class HostReconciler {
     return HostReconciler.shortHash({ namespace: host.namespace, host: host.name })
   }
 
-  private static runtimeTokenScopeHash(host: HostCRD, hasChannelIngress = false): string {
+  private static runtimeTokenScopeHash(
+    host: HostCRD,
+    hasChannelIngress = false,
+    projection?: CodexExecutionProjection
+  ): string {
     // Hash the EFFECTIVE (resolved) scopes — what actually gets minted into the
     // control token — so change-detection matches the default-fallback applied
     // at issuance (otherwise a null workflowControl hashes as [] while the token
     // carries the first-party defaults, and the two drift).
-    return HostReconciler.shortHash(
-      [...resolveWorkflowControlScopes(host.spec.workflowControl, { hasChannelIngress })].sort()
-    )
+    const workflowScopes = [
+      ...resolveWorkflowControlScopes(host.spec.workflowControl, { hasChannelIngress }),
+    ].sort()
+    const derived = projection?.derivedScopes ?? []
+    if (derived.length === 0) {
+      return HostReconciler.shortHash(workflowScopes)
+    }
+    return HostReconciler.shortHash({
+      scopes: [...workflowScopes, ...derived].sort(),
+      drift: projection?.driftHashInput,
+    })
   }
 
   private static gfsCapabilitySetHash(): string {
@@ -1075,7 +1103,8 @@ export class HostReconciler {
     nowMs: number,
     gfsTokenTtlSec: number,
     hasChannelIngress = false,
-    preservedHostUid?: string
+    preservedHostUid?: string,
+    projection?: CodexExecutionProjection
   ): Record<string, string> {
     const refreshTtlSec = Number.isFinite(tokens.refreshExpiresInSeconds)
       ? Math.max(0, tokens.refreshExpiresInSeconds)
@@ -1092,7 +1121,8 @@ export class HostReconciler {
         HostReconciler.runtimeTokenHostBindingHash(host),
       [RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION]: HostReconciler.runtimeTokenScopeHash(
         host,
-        hasChannelIngress
+        hasChannelIngress,
+        projection
       ),
       [RUNTIME_TOKEN_ISSUER_ANNOTATION]: RUNTIME_TOKEN_ISSUER,
       [RUNTIME_TOKEN_AUDIENCE_ANNOTATION]: RUNTIME_TOKEN_AUDIENCE,
@@ -1122,7 +1152,8 @@ export class HostReconciler {
     host: HostCRD,
     secret: k8s.V1Secret,
     nowMs: number,
-    hasChannelIngress = false
+    hasChannelIngress = false,
+    projection?: CodexExecutionProjection
   ): { refresh: boolean; rolloutRequired: boolean; reason: string; refreshTokenExpMs?: number } {
     const labels = secret.metadata?.labels ?? {}
     if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE || labels[HOST_LABEL] !== host.name) {
@@ -1137,7 +1168,11 @@ export class HostReconciler {
 
     const annotations = secret.metadata?.annotations ?? {}
     const expectedHostBindingHash = HostReconciler.runtimeTokenHostBindingHash(host)
-    const expectedScopeHash = HostReconciler.runtimeTokenScopeHash(host, hasChannelIngress)
+    const expectedScopeHash = HostReconciler.runtimeTokenScopeHash(
+      host,
+      hasChannelIngress,
+      projection
+    )
     const hasContractMetadata =
       RUNTIME_TOKEN_HOST_BINDING_HASH_ANNOTATION in annotations ||
       RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION in annotations ||
@@ -1339,6 +1374,70 @@ export class HostReconciler {
     return scopes
   }
 
+  private projectCodexForHost(host: HostCRD): CodexExecutionProjection {
+    return projectCodexExecution(host.spec, this.codexSnapshot)
+  }
+
+  private resolveEffectiveControlScopesForHost(
+    host: HostCRD,
+    hasChannelIngress = this.hasChannelIngress(host)
+  ): EffectiveMcpHostControlScope[] {
+    const workflow = this.resolveWorkflowControlScopesForHost(host, hasChannelIngress)
+    const derived = this.projectCodexForHost(host).derivedScopes.filter(
+      scope => !workflow.includes(scope as HostWorkflowControlScope)
+    )
+    return [...workflow, ...derived] as EffectiveMcpHostControlScope[]
+  }
+
+  private runtimeScopeHashFor(
+    host: HostCRD,
+    hasChannelIngress = this.hasChannelIngress(host)
+  ): string {
+    return HostReconciler.runtimeTokenScopeHash(
+      host,
+      hasChannelIngress,
+      this.projectCodexForHost(host)
+    )
+  }
+
+  private async refreshCodexSnapshot(): Promise<void> {
+    try {
+      const cm = await this.coreApi.readNamespacedConfigMap({
+        name: ALLOWED_MODELS_CONFIGMAP_NAME,
+        namespace: config.hccTargetNamespace,
+      })
+      this.codexSnapshot = parseAllowedModelsSnapshot(cm)
+    } catch (err) {
+      const timeout =
+        err instanceof HostK8sRequestTimeoutError ||
+        (err as { code?: string }).code === HOST_K8S_REQUEST_TIMEOUT_CODE
+      if (timeout) {
+        this.codexSnapshot = snapshotFromConfigMapError('timeout')
+        log.warn('Codex allowlist ConfigMap read timed out; failing closed', {
+          configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+          namespace: config.hccTargetNamespace,
+        })
+        return
+      }
+      const code = getErrorCode(err)
+      if (code === 401 || code === 403) {
+        this.codexSnapshot = snapshotFromConfigMapError('forbidden')
+        log.warn('Codex allowlist ConfigMap read forbidden; failing closed', {
+          configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+          namespace: config.hccTargetNamespace,
+          statusCode: code,
+        })
+        return
+      }
+      this.codexSnapshot = snapshotFromConfigMapError('missing')
+      log.warn('Codex allowlist ConfigMap unavailable; failing closed', {
+        configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+        namespace: config.hccTargetNamespace,
+        statusCode: code,
+      })
+    }
+  }
+
   private async ensureMcpHostRuntimeTokenSecret(
     host: HostCRD,
     options: BootstrapOptions = {}
@@ -1366,14 +1465,21 @@ export class HostReconciler {
           RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH
         const nowMs = Date.now()
         const hasChannelIngress = this.hasChannelIngress(host)
-        const scopeHash = HostReconciler.runtimeTokenScopeHash(host, hasChannelIngress)
+        const projection = this.projectCodexForHost(host)
+        const scopeHash = this.runtimeScopeHashFor(host, hasChannelIngress)
         let decision: {
           refresh: boolean
           rolloutRequired: boolean
           reason: string
           refreshTokenExpMs?: number
         } = existing
-          ? HostReconciler.runtimeTokenRefreshDecision(host, existing, nowMs, hasChannelIngress)
+          ? HostReconciler.runtimeTokenRefreshDecision(
+              host,
+              existing,
+              nowMs,
+              hasChannelIngress,
+              projection
+            )
           : { refresh: true, rolloutRequired: false, reason: 'missing_secret' }
         if (
           existing &&
@@ -1513,7 +1619,7 @@ export class HostReconciler {
 
         const tokens = await issueMcpHostRuntimeTokens(
           host.name,
-          this.resolveWorkflowControlScopesForHost(host, hasChannelIngress)
+          this.resolveEffectiveControlScopesForHost(host, hasChannelIngress)
         )
         const gfs = await mintHostGfsToken({ name: host.name, namespace: host.namespace })
         const body = buildMcpHostRuntimeTokenSecret(
@@ -1541,7 +1647,8 @@ export class HostReconciler {
               nowMs,
               gfs.expiresInSeconds,
               hasChannelIngress,
-              existing?.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION]
+              existing?.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION],
+              projection
             ),
             [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]: RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH,
             [RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]: rolloutRequired ? 'true' : 'false',
@@ -3764,6 +3871,87 @@ export class HostReconciler {
   }
 
   /**
+   * Per-Host mcp-host egress to the static Codex LLM proxy runtime listener.
+   * Derived from the same Codex projection that mints `llm:codex:execute`.
+   */
+  private async ensureMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const policyName = `mcp-host-${host.name}-egress-codex-proxy`
+    const policy: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: policyName,
+        namespace: host.namespace,
+        labels: {
+          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          [HOST_LABEL]: host.name,
+          'clerum.io/policy-type': 'codex-proxy-egress',
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: {
+            [HOST_LABEL]: host.name,
+            [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          },
+        },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [
+              {
+                namespaceSelector: {
+                  matchLabels: { 'kubernetes.io/metadata.name': config.controlPlaneNamespace },
+                },
+                podSelector: {
+                  matchLabels: { app: 'codex-llm-proxy' },
+                },
+              },
+            ],
+            ports: [{ port: 8080, protocol: 'TCP' }],
+          },
+        ],
+      },
+    }
+
+    await applyNetworkPolicy(
+      this.networkingApi,
+      policyName,
+      host.namespace,
+      policy,
+      '[HostReconciler]'
+    )
+  }
+
+  private async deleteMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const policyName = `mcp-host-${host.name}-egress-codex-proxy`
+    await this.deleteIfHccOwned(
+      'NetworkPolicy',
+      policyName,
+      host.namespace,
+      host.name,
+      () =>
+        this.networkingApi.readNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: host.namespace,
+        }),
+      () =>
+        this.networkingApi.deleteNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: host.namespace,
+        })
+    )
+  }
+
+  private async reconcileMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    if (this.projectCodexForHost(host).requiresCodexProxyEgress) {
+      await this.ensureMcpHostCodexProxyEgressNetworkPolicy(host)
+      return
+    }
+    await this.deleteMcpHostCodexProxyEgressNetworkPolicy(host)
+  }
+
+  /**
    * Delete per-Host NetworkPolicies created by this reconciler.
    * 404-tolerant — safe to call even if NPs were never created or already gone.
    */
@@ -3774,6 +3962,7 @@ export class HostReconciler {
       { name: `mcp-host-${name}-ingress-workflow-approval-reader`, namespace },
       { name: `mcp-host-${name}-ingress-rpc-proxy`, namespace },
       { name: `mcp-host-${name}-egress-gfs`, namespace },
+      { name: `mcp-host-${name}-egress-codex-proxy`, namespace },
       { name: `mcp-host-${name}-egress-llm-hooks`, namespace },
       { name: `channel-reader-${name}-egress`, namespace: config.channelsNamespace },
       {
@@ -3910,6 +4099,8 @@ export class HostReconciler {
     // is recovered here.
     const forceFreshForWake = (await this.lifecycle.handleWakeFastPath(host)) === true
     revalidateHostMutationBoundary()
+    await this.refreshCodexSnapshot()
+    revalidateHostMutationBoundary()
 
     // Track whether this host has desktop enabled
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
@@ -4025,6 +4216,8 @@ export class HostReconciler {
       await this.ensureMcpHostIngressNetworkPolicy(host)
       revalidateHostMutationBoundary()
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
+      await this.reconcileMcpHostCodexProxyEgressNetworkPolicy(host)
       // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
       // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
       // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
@@ -4097,10 +4290,7 @@ export class HostReconciler {
     const ensureCurrentRuntimeTokenScope = async (): Promise<void> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
         revalidateHostMutationBoundary()
-        const currentScopeHash = HostReconciler.runtimeTokenScopeHash(
-          host,
-          this.hasChannelIngress(host)
-        )
+        const currentScopeHash = this.runtimeScopeHashFor(host)
         if (runtimeTokenProvision.scopeHash === currentScopeHash) return
 
         runtimeTokenProvision = await this.provisionRuntimeTokenRevision(host, {
@@ -4109,10 +4299,7 @@ export class HostReconciler {
             lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
         })
         revalidateHostMutationBoundary()
-        const postProvisionScopeHash = HostReconciler.runtimeTokenScopeHash(
-          host,
-          this.hasChannelIngress(host)
-        )
+        const postProvisionScopeHash = this.runtimeScopeHashFor(host)
         if (runtimeTokenProvision.scopeHash === postProvisionScopeHash) return
 
         log.warn('CommunicationChannel scope contract changed during token provisioning', {
@@ -4132,10 +4319,7 @@ export class HostReconciler {
         await resolveDeploymentLifecycle()
         await ensureCurrentRuntimeTokenScope()
         const effective = await resolveDeploymentLifecycle()
-        const currentScopeHash = HostReconciler.runtimeTokenScopeHash(
-          host,
-          this.hasChannelIngress(host)
-        )
+        const currentScopeHash = this.runtimeScopeHashFor(host)
         if (runtimeTokenProvision.scopeHash === currentScopeHash) {
           revalidateHostMutationBoundary()
           return {
