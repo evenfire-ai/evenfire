@@ -331,6 +331,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           'llm_allowed_models',
           'llm_allowed_models_audit',
           'llm_catalog_sync_runs',
+          'codex_subscription_connections',
+          'codex_subscription_oauth_states',
           'notification_deliveries',
           'workflow_approval_requests',
           'workflow_run_steps',
@@ -342,6 +344,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(requiredTables.rows.map(row => row.table_name)).toEqual([
       'administrative_events',
       'agent_run_events',
+      'codex_subscription_connections',
+      'codex_subscription_oauth_states',
       'governed_approval_prompt_history',
       'governed_event_stream',
       'governed_run_attribution_bindings',
@@ -444,6 +448,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'llm_allowed_models',
       'llm_allowed_models_audit',
       'llm_catalog_sync_runs',
+      'codex_subscription_connections',
+      'codex_subscription_oauth_states',
       'gfs_desktop_operator_links',
       'desktop_user_retirement_operations',
     ] as const
@@ -462,6 +468,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       llm_allowed_models: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       llm_allowed_models_audit: ['INSERT', 'SELECT'],
       llm_catalog_sync_runs: ['INSERT', 'SELECT'],
+      codex_subscription_connections: ['INSERT', 'SELECT', 'UPDATE'],
+      codex_subscription_oauth_states: ['INSERT', 'SELECT', 'UPDATE'],
       gfs_desktop_operator_links: ['INSERT', 'SELECT', 'UPDATE'],
       desktop_user_retirement_operations: ['INSERT', 'SELECT', 'UPDATE'],
     }
