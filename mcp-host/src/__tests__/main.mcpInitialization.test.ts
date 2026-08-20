@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import { config } from '../config'
+import { ContextMapperRequestError } from '../contextMapperClient'
 import {
   admitDevelopmentMcpServers,
   createCoalescedPollRunner,
+  createMcpAuthorityPollFailureOptions,
   createMcpAuthorityStalenessDeadline,
   isMcpAuthorityStale,
   startContextMapperPolling,
@@ -14,6 +17,7 @@ import {
   replaceAuthoritativeMcpFleet,
   runAuthoritativeMcpInitialization,
 } from '../mcp/authoritativeFleet'
+import { handleMcpAuthorityPollFailure } from '../mcp/authorityLifecycle'
 import { McpManager } from '../mcp/manager'
 import type { McpServerInfo } from '../types'
 
@@ -525,6 +529,51 @@ describe('authoritative poll publication fence', () => {
 })
 
 describe('context-mapper polling lifecycle', () => {
+  it('wires the live manager and configured staleness ceiling into poll failure handling', () => {
+    const manager = {}
+    const revoke = vi.fn()
+    const onCallerAuthorizationRejected = vi.fn()
+    const onInventoryAuthorityRevoked = vi.fn()
+    const onUnavailable = vi.fn()
+    const options = createMcpAuthorityPollFailureOptions({
+      getManager: () => manager,
+      lastSuccessAt: () => 1_000,
+      now: () => 61_000,
+      revoke,
+      onCallerAuthorizationRejected,
+      onInventoryAuthorityRevoked,
+      onUnavailable,
+    })
+
+    expect(options.maxStalenessMs).toBe(config.hccAuthorityMaxStalenessMs)
+    const disposition = handleMcpAuthorityPollFailure(
+      new ContextMapperRequestError(503, 'inventory', false),
+      options
+    )
+
+    expect(disposition).toBe('authority_stale')
+    expect(revoke).toHaveBeenCalledWith('authority_stale', true)
+    expect(onUnavailable).toHaveBeenCalledTimes(1)
+    expect(onCallerAuthorizationRejected).not.toHaveBeenCalled()
+    expect(onInventoryAuthorityRevoked).not.toHaveBeenCalled()
+
+    const noManagerRevoke = vi.fn()
+    const noManagerDisposition = handleMcpAuthorityPollFailure(
+      new ContextMapperRequestError(503, 'inventory', false),
+      createMcpAuthorityPollFailureOptions({
+        getManager: () => null,
+        lastSuccessAt: () => 1_000,
+        now: () => 61_000,
+        revoke: noManagerRevoke,
+        onCallerAuthorizationRejected: vi.fn(),
+        onInventoryAuthorityRevoked: vi.fn(),
+        onUnavailable: vi.fn(),
+      })
+    )
+    expect(noManagerDisposition).toBe('unavailable')
+    expect(noManagerRevoke).not.toHaveBeenCalled()
+  })
+
   it('keeps exactly one interval producer when polling is started again', () => {
     vi.useFakeTimers()
     try {

@@ -84,6 +84,7 @@ import {
   isMcpAuthorityStale,
   revokeMcpAuthorityState,
 } from './mcp/authorityLifecycle'
+import type { HandleMcpAuthorityPollFailureOptions } from './mcp/authorityLifecycle'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
@@ -812,6 +813,36 @@ function ensureAuthenticatedContextMapperClient(): ContextMapperClient {
 
 export { createMcpAuthorityStalenessDeadline, isMcpAuthorityStale }
 
+type McpAuthorityPollFailureCallbacks = Pick<
+  HandleMcpAuthorityPollFailureOptions,
+  'revoke' | 'onCallerAuthorizationRejected' | 'onInventoryAuthorityRevoked' | 'onUnavailable'
+>
+
+/**
+ * Build the fail-closed polling options from the live main-process state.
+ * Keeping this adapter explicit gives the wiring a small, deterministic test
+ * seam instead of leaving the staleness/revocation callbacks as an untested
+ * inline object inside the timer callback.
+ */
+export function createMcpAuthorityPollFailureOptions(
+  dependencies: McpAuthorityPollFailureCallbacks & {
+    getManager: () => unknown | null
+    lastSuccessAt: () => number
+    now?: () => number
+  }
+): HandleMcpAuthorityPollFailureOptions {
+  return {
+    hasPublishedManager: () => dependencies.getManager() !== null,
+    lastSuccessAt: dependencies.lastSuccessAt,
+    now: dependencies.now ?? Date.now,
+    maxStalenessMs: config.hccAuthorityMaxStalenessMs,
+    revoke: dependencies.revoke,
+    onCallerAuthorizationRejected: dependencies.onCallerAuthorizationRejected,
+    onInventoryAuthorityRevoked: dependencies.onInventoryAuthorityRevoked,
+    onUnavailable: dependencies.onUnavailable,
+  }
+}
+
 const mcpAuthorityStalenessDeadline = createMcpAuthorityStalenessDeadline(
   config.hccAuthorityMaxStalenessMs,
   () => {
@@ -959,18 +990,19 @@ async function pollContextMapper(): Promise<void> {
       recordMcpAuthoritySuccess()
     }
   } catch (error) {
-    handleMcpAuthorityPollFailure(error, {
-      hasPublishedManager: () => mcpManager !== null,
-      lastSuccessAt: () => mcpAuthorityLastSuccessAt,
-      now: Date.now,
-      maxStalenessMs: config.hccAuthorityMaxStalenessMs,
-      revoke: revokeMcpAuthority,
-      onCallerAuthorizationRejected: () =>
-        console.warn('[Main] HCC poll rejected caller authority'),
-      onInventoryAuthorityRevoked: () =>
-        console.warn('[Main] HCC inventory no longer resolves live Host authority'),
-      onUnavailable: () => console.error('[Main] HCC authority poll failed (reason=unavailable)'),
-    })
+    handleMcpAuthorityPollFailure(
+      error,
+      createMcpAuthorityPollFailureOptions({
+        getManager: () => mcpManager,
+        lastSuccessAt: () => mcpAuthorityLastSuccessAt,
+        revoke: revokeMcpAuthority,
+        onCallerAuthorizationRejected: () =>
+          console.warn('[Main] HCC poll rejected caller authority'),
+        onInventoryAuthorityRevoked: () =>
+          console.warn('[Main] HCC inventory no longer resolves live Host authority'),
+        onUnavailable: () => console.error('[Main] HCC authority poll failed (reason=unavailable)'),
+      })
+    )
   }
 }
 

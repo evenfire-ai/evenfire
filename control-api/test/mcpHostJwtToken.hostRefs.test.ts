@@ -95,6 +95,31 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
       }
     })
 
+    it('accepts the HCC access boundary and leaves HCC refresh TTL uncapped', () => {
+      const previousAccessTtl = config.mcpHostJwtAccessTtlSec
+      const previousRefreshTtl = config.mcpHostJwtRefreshTtlSec
+      config.mcpHostJwtAccessTtlSec = MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS
+      config.mcpHostJwtRefreshTtlSec = MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS + 300
+      try {
+        const access = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+          hccCredential: { hostUid: 'host-uid-chatllm' },
+        })
+        const refresh = issueMcpHostRefreshJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+          hccCredential: { hostUid: 'host-uid-chatllm' },
+        })
+        const refreshClaims = jwt.decode(refresh.token) as Record<string, unknown>
+
+        expect(access.expiresInSeconds).toBe(MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS)
+        expect(refresh.expiresInSeconds).toBe(MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS + 300)
+        expect((refreshClaims.exp as number) - (refreshClaims.iat as number)).toBe(
+          MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS + 300
+        )
+      } finally {
+        config.mcpHostJwtAccessTtlSec = previousAccessTtl
+        config.mcpHostJwtRefreshTtlSec = previousRefreshTtl
+      }
+    })
+
     it('rejects workflow-only tokens that inject HCC-only claims', () => {
       const token = jwt.sign(
         {

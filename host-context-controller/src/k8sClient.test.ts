@@ -423,6 +423,79 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
     expect(metadata).not.toHaveProperty('data')
     expect(JSON.stringify(metadata)).not.toContain('credential-bytes-must-not-cross-this-boundary')
   })
+
+  it('projects successful Host, Context, and McpServer authority reads from live Kubernetes objects', async () => {
+    const provider = {
+      getAllServerInfos: () => [
+        {
+          name: 'server-a',
+          status: { deployed: true, ready: true, authoritative: true },
+        },
+      ],
+    } as unknown as Parameters<typeof createMcpAuthorizationStore>[0]
+    const objects: Record<string, unknown> = {
+      'hosts/host-a': {
+        metadata: {
+          name: 'host-a',
+          namespace: 'mcp-host',
+          uid: 'host-uid-a',
+          resourceVersion: '11',
+        },
+        spec: { contextRef: 'context-a' },
+      },
+      'contexts/context-a': {
+        metadata: {
+          name: 'context-a',
+          namespace: 'mcp-server',
+          uid: 'context-uid-a',
+          resourceVersion: '12',
+        },
+        spec: { mcpServers: ['server-a'] },
+      },
+      'mcpservers/server-a': {
+        metadata: {
+          name: 'server-a',
+          namespace: 'mcp-server',
+          uid: 'server-uid-a',
+          resourceVersion: '13',
+        },
+        spec: {
+          description: 'Server A',
+          transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
+          auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
+          enabled: true,
+        },
+      },
+    }
+    mocks.getNamespacedCustomObject.mockImplementation(
+      async ({ plural, name }: { plural: string; name: string }) => objects[`${plural}/${name}`]
+    )
+
+    const store = createMcpAuthorizationStore(provider)
+
+    await expect(store.readHost('host-a')).resolves.toEqual({
+      name: 'host-a',
+      namespace: 'mcp-host',
+      metadata: { uid: 'host-uid-a', resourceVersion: '11' },
+      contextRef: 'context-a',
+    })
+    await expect(store.readContext('context-a')).resolves.toEqual({
+      name: 'context-a',
+      namespace: 'mcp-server',
+      metadata: { uid: 'context-uid-a', resourceVersion: '12' },
+      mcpServers: ['server-a'],
+    })
+    await expect(store.readMcpServer('server-a')).resolves.toEqual({
+      name: 'server-a',
+      namespace: 'mcp-server',
+      metadata: { uid: 'server-uid-a', resourceVersion: '13' },
+      description: 'Server A',
+      transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
+      auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
+      enabled: true,
+      status: { deployed: true, ready: true, authoritative: true },
+    })
+  })
 })
 
 describe('McpServerWatcher startup', () => {
