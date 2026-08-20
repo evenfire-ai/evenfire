@@ -79,6 +79,12 @@ rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"
 
 Never remove a lock with a live owner, and never remove the whole lock root.
 
+After bootstrap or reconcile, `make minikube-t2` calls `pre-gate-sync` with
+`--skip-port-forwards`. T1 opens its own `control-postgres` port-forward and
+does not inherit Control UI stack forwards. `t2_process_check` accepts only
+real `kubectl` port-forward PIDs recorded in the profile cache or legacy
+`/tmp/pf-<profile>-*.pid`.
+
 ## Preconditions and secrets
 
 The runner checks required namespaces, Services, Secret names, ConfigMap names,

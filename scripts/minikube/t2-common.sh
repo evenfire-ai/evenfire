@@ -489,13 +489,14 @@ PY
 
 t2_process_check() {
   local process_lines allowed pid command_line pid_file
+  local safe_profile="${T2_PROFILE//[^A-Za-z0-9_.-]/_}"
   process_lines="$(ps -ef 2>/dev/null | awk '/[p]ort-forward/ && /kubectl/ {print}' || true)"
   [ -z "$process_lines" ] && return 0
   while IFS= read -r command_line; do
     [ -z "$command_line" ] && continue
     [[ "$command_line" == *"$T2_PROFILE"* || "$command_line" == *"$T2_CONTEXT"* ]] || continue
     allowed=false
-    for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid; do
+    for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid /tmp/pf-"$safe_profile"-*.pid; do
       [ -f "$pid_file" ] || continue
       pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
       [[ -n "$pid" && "$command_line" == *" $pid "* ]] && allowed=true

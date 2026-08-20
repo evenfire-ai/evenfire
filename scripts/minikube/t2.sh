@@ -171,7 +171,7 @@ run_targeted_sync() {
 
 run_pre_gate() {
   printf '[minikube-t2] pre-gate-sync after bootstrap/reconcile\n'
-  MINIKUBE_PROFILE="$T2_PROFILE" make minikube-pre-gate-sync GATE=minikube-t2
+  MINIKUBE_PROFILE="$T2_PROFILE" make minikube-pre-gate-sync GATE=minikube-t2 ARGS='--skip-port-forwards'
 }
 
 run_t1() {
