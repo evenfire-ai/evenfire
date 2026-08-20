@@ -1007,6 +1007,16 @@ test-e2e-codex-subscription-network-boundary: ## Codex LLM proxy NetworkPolicy b
 	@echo "Running Codex subscription network-boundary gate..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-network-boundary.sh
 
+.PHONY: test-e2e-codex-subscription-runtime
+test-e2e-codex-subscription-runtime: ## Codex subscription runtime acceptance (RED until HCC/WRC/mcp-host wiring)
+	@echo "Running Codex subscription runtime acceptance..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-runtime.sh
+
+.PHONY: test-e2e-codex-subscription-playwright
+test-e2e-codex-subscription-playwright: ## Codex subscription Playwright guardians (visible login, no storageState)
+	@echo "Running Codex subscription Playwright guardians..."
+	cd tests/e2e/playwright && ./node_modules/.bin/playwright test --config playwright.codex-subscription.config.ts
+
 .PHONY: test-e2e-plugin-workload-sdk
 test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1)
 	@echo "Running Plugin Workload SDK E2E gate..."
