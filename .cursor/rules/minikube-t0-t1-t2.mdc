@@ -1,0 +1,75 @@
+---
+description: Local Minikube T0/T1/T2 contract, profile ownership, and observed failure catalog (host vitest vs GFS, pool leak, leftover restore)
+alwaysApply: true
+---
+
+# Local Minikube T0/T1/T2 contract
+
+Development-only. Clean branch descended from `origin/dev`, branch-owned
+`MINIKUBE_PROFILE`, explicit `--context`. Never production/GKE/Cloudflare/
+staging. Never mix `evenfire-infra` PRs or clusters. HARD DENY:
+`ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+
+## Entry points (only these)
+
+- `make minikube-t2-preflight` — planner, NOT a lane. `T2_PREFLIGHT_PASS` is
+  NOT T2. Default `T2_PLAN_MODE=false` fail-louds `BOOTSTRAP_REQUIRED`.
+- `make minikube-t2` — T0, planner (`T2_PLAN_MODE=true`), bootstrap/reconcile,
+  T1, then the T2 verdict.
+- `make minikube-t2-runtime` — T2-only close when T0+T1 are green on this HEAD
+  and the marker is `already-synced`. If the Makefile **lacks** this target,
+  closing T2 is still `make minikube-t2`. Never hand-set `T2_RUN_T0/T1=false`
+  to skip an uncertified lane.
+
+A T2 verdict is ONLY `MINIKUBE_T2_PASS` from the final exact-head preflight
+(`T2_PLAN_MODE=false`, plan `already-synced`) with `T0=`/`T1=`/`T2=`.
+`pre-gate-sync`, product E2E, CI, unit, and Playwright are other lanes.
+
+Do not pass global `ARGS='--skip-port-forwards'` into `make minikube-t2`
+(kills profile UI PFs). Inner `pre-gate-sync` may use
+`GATE=minikube-t2 ARGS='--skip-port-forwards'`. `PORT_FORWARD_CONFLICT`
+after T1 PASS is usually T1's leftover `control-postgres` forward (must
+be in `/tmp/pf-<profile>-t1-control-postgres.pid`), not a foreign
+worktree — do not kill this lane's `branch-profile-pf`. Reuse the owned profile;
+every `kubectl` uses `--context=<profile>`. `IMAGE_SOURCE=local`. Evidence
+stays under ignored `.local-notes/infra/runs/`.
+
+## T1 / GFS invariants
+
+- Fail-loud: missing DSN or zero tests is FAIL. JSON reporter is the suite
+  verdict; leftover Vitest exit after green JSON (`DROP DATABASE` / `57P01`)
+  is not a failed suite. Role-reset uses throwaway `postgres:16-alpine`,
+  never shared `control-postgres`.
+- One Vitest **process per file** against live `control-postgres`. One process
+  with `fileParallelism: false` still re-instantiates `control-api/src/db.ts`
+  (~max 10) per file and exhausts `max_connections` (`too many clients`
+  → dead PF → GFS probe refuse). Do not skip T1, raise `max_connections`,
+  PVC-reset, or demand `pool.end()` on the singleton. CI empty PG16 does not
+  see this. Codex SQL (`00a0–00a3`) is not the T1 red.
+- Host `npm test` (`"test": "vitest run"`) needs that package's
+  `node_modules/.bin/vitest`. `sh: vitest: command not found` is missing
+  `npm ci` in `gfs-controller/` or a `pre-gate-sync` package (e.g.
+  `external-rest-api`) — **not** the GFS Deployment. Cluster Ready ≠ host
+  runner. `REAL_PG_SUITE_FAILED` names the file that never started.
+- GFS Ready is a T2 precondition: `gfsc-writer` **and** `gfsc-reader`.
+  Restore probe is `kubectl exec` into **control-api**; refuse restore while
+  API is 0/1 (`authentication probe unavailable`). This worktree's
+  `provision_gfs_serving` runs only when a database reconcile is selected;
+  `images=none` can print `Pre-gate cluster sync complete` with GFS down.
+  After postgres+API Ready, same profile:
+  `GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true CONTEXT=<profile> bash deploy/scripts/reconcile-gfs-deploy-credentials.sh`
+  then `rollout status` for **both** deployments. Trust Ready columns, not a
+  previous `rollout status` exit 0. Never a new profile or PVC reset.
+- `full-reconcile` (including `scripts/e2e/*` vs `origin/dev`) rebuilds all
+  images and restarts ~9 deployments. Postgres liveness `pg_isready` is 1s;
+  overload restarts Postgres, CrashLoops control-api, and T1
+  `CREATE DATABASE` hits `hookTimeout` (gfs-controller `renamePublication`).
+  Wait Ready, T1-only, then T2. Do not start T2 while control-api is 0/1.
+
+Orchestrator planner (`T2_PLAN_MODE=true`) self-heals unready required
+deploys via `full-reconcile`. Standalone/final preflight stay fail-loud.
+T1 restores GFS on exit. `settle-gfs-reader-rollout.sh` + `gfs-rollout-shim`
+because HCC strips `restartedAt`.
+
+Full catalog: skill `minikube-t0-t1-t2` `reference.md`.
+Deep contract: `docs/testing/minikube-t2-runbook.md`.

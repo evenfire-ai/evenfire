@@ -16,6 +16,7 @@ T1_TMP_ROOT="$T2_TMP_ROOT"
 if [ -z "$T1_TMP_ROOT" ]; then T1_TMP_ROOT=/tmp; fi
 T1_TMP_DIR=""
 PORT_FORWARD_PID=""
+T1_PF_PID_FILE=""
 LOCAL_PORT=""
 ADMIN_DSN=""
 THROWAY_CONTAINER=""
@@ -199,20 +200,47 @@ print("postgresql://" + quote("postgres", safe="") + "@127.0.0.1:" + sys.argv[1]
   printf '[minikube-t1] throwaway postgres:16-alpine ready for role-reset suites\n'
 }
 
+t1_pf_pid_path() {
+  local safe_profile="${T2_PROFILE//[^A-Za-z0-9_.-]/_}"
+  printf '%s' "/tmp/pf-${safe_profile}-t1-control-postgres.pid"
+}
+
+# Record the T1 forward in the same /tmp/pf-<profile>-*.pid set that
+# t2_process_check allows. A leftover kubectl child after T1 cleanup is
+# otherwise PORT_FORWARD_CONFLICT on the final exact-head preflight.
+record_control_postgres_forward() {
+  T1_PF_PID_FILE="$(t1_pf_pid_path)"
+  printf '%s\n' "$PORT_FORWARD_PID" >"$T1_PF_PID_FILE"
+}
+
+reap_control_postgres_forward_orphans() {
+  local pid command_line
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    [[ "$command_line" == *port-forward* &&
+      "$command_line" == *"--context=$T2_CONTEXT"* &&
+      "$command_line" == *svc/control-postgres* ]] || continue
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  done < <(pgrep -f 'port-forward' 2>/dev/null || true)
+}
+
 stop_control_postgres_forward() {
-  if [ -z "$PORT_FORWARD_PID" ] || ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-    PORT_FORWARD_PID=""
-    return 0
-  fi
-  local command_line
-  command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
-  if [[ "$command_line" == *port-forward* &&
-        "$command_line" == *svc/control-postgres* &&
-        ( -z "$LOCAL_PORT" || "$command_line" == *"${LOCAL_PORT}:5432"* ) ]]; then
-    kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
-    wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+  if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    local command_line
+    command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
+    if [[ "$command_line" == *port-forward* &&
+          "$command_line" == *svc/control-postgres* &&
+          ( -z "$LOCAL_PORT" || "$command_line" == *"${LOCAL_PORT}:5432"* ) ]]; then
+      kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+      wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+    fi
   fi
   PORT_FORWARD_PID=""
+  reap_control_postgres_forward_orphans
+  rm -f "$(t1_pf_pid_path)"
+  T1_PF_PID_FILE=""
 }
 
 start_control_postgres_forward() {
@@ -227,6 +255,7 @@ start_control_postgres_forward() {
       >"$T1_TMP_DIR/port-forward.log" 2>&1 &
     PORT_FORWARD_PID=$!
     if wait_for_tcp "$LOCAL_PORT" && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+      record_control_postgres_forward
       return 0
     fi
     stop_control_postgres_forward

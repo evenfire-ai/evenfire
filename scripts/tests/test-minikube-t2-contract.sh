@@ -44,6 +44,8 @@ grep -Fq 'T1_CLEANUP_ENABLED' "$T1"
 grep -Fq 'pending_tests' "$T1"
 grep -Fq 'numTotalTests' "$T1"
 grep -Fq 'port-forward' "$T1"
+grep -Fq '/tmp/pf-' "$T1"
+grep -Fq 't1-control-postgres.pid' "$T1"
 grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 
 if grep -Eq 'make minikube-pre-gate-sync|pre-gate-sync\.sh' "$PREFLIGHT"; then
