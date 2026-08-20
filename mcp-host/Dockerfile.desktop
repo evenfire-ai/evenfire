@@ -5,6 +5,7 @@
 FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
 WORKDIR /app
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci
@@ -45,6 +46,7 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # ../packages/llm-providers resolves, mirroring the other variants).
 WORKDIR /app
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY --from=builder /app/mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci --omit=dev

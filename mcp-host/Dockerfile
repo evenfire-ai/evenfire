@@ -14,6 +14,7 @@ WORKDIR /app
 
 # Shared prebuilt data-only package (no build step — ships index.cjs + .d.ts).
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 
 # Install dependencies (file: dep resolves to ../packages/llm-providers)
 COPY mcp-host/package*.json ./mcp-host/
@@ -34,6 +35,7 @@ WORKDIR /app
 
 # Copy the shared package + package files, install production dependencies only
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci --only=production
