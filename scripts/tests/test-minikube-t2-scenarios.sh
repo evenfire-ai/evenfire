@@ -261,6 +261,17 @@ expect_code PROFILE_UNHEALTHY unready-final-preflight unready-final-preflight \
   env "${repo_env[@]}" UNREADY_JSON="$unready_json" \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$UNREADY_JSON"; }; t2_deployment_check' bash "$COMMON"
 
+# A kubectl command can return a non-JSON diagnostic (for example during a
+# transient API/proxy failure) or JSON with an invalid replica field. The
+# parser failure must be adjudicated as the stable profile failure, not leak a
+# Python traceback and exit before t2_fail can emit next:.
+expect_code PROFILE_UNHEALTHY invalid-deployment-inventory invalid-deployment-inventory \
+  env "${repo_env[@]}" INVALID_INVENTORY='{not-json' \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$INVALID_INVENTORY"; }; t2_deployment_check' bash "$COMMON"
+expect_code PROFILE_UNHEALTHY malformed-deployment-inventory malformed-deployment-inventory \
+  env "${repo_env[@]}" INVALID_INVENTORY='{"items":[{"spec":{"replicas":"not-an-integer"}}]}' \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$INVALID_INVENTORY"; }; t2_deployment_check' bash "$COMMON"
+
 plan_mode_head="$(env "${marker_env[@]}" T2_PLAN_MODE=true FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"old","worktreeId":"worktree-a","imageSource":"local","imageTag":"test"}}' \
   bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=true; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON")"
 [ "$plan_mode_head" = false ] || fail "planner mode still treated a stale marker as matching HEAD"

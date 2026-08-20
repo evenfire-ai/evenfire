@@ -98,8 +98,9 @@ has an unready required deployment, the orchestrator planner selects
 `PROFILE_UNHEALTHY` before a transition exists; the T1 lane restores
 branch-profile GFS credentials on exit and `pre-gate-sync` provisions GFS
 serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` and
-`GFS_RECOVER_ABANDONED_STATE=true` in every plan, so no manual repair
-script belongs between plan and verdict. Harness GFS reconciles settle
+`GFS_RECOVER_ABANDONED_STATE=true` in the `minikube-t2` transition, so other
+security gates do not mutate GFS and no manual repair script belongs between
+plan and verdict. Harness GFS reconciles settle
 Ready-reader leftovers first (`settle-gfs-reader-rollout.sh`) and wait on
 reader readiness through the `gfs-rollout-shim` PATH prefix instead of a
 generation-based `rollout status`, because HCC's gfsReconciler strips the
@@ -108,8 +109,9 @@ the final exact-head T2 check stay fail-loud on an unready deployment.
 Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by
-silently skipping the suites. The JSON reporter is the suite verdict; a leftover
-Vitest process exit after a complete green reporter is not a failed suite.
+silently skipping the suites. The JSON reporter must be complete and green,
+and the Vitest process must also exit zero; a green reporter cannot hide a
+teardown, worker, OOM, or signal failure.
 Suites that drop or rewrite cluster-global roles must use the harness throwaway
 Postgres 16, never the shared `control-postgres`.
 

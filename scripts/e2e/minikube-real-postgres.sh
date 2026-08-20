@@ -68,7 +68,8 @@ restore_gfs_runtime_credentials() {
     return 0
   fi
   if ! t2_kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
-    return 0
+    printf '[minikube-t1] ERROR: required gfs-controller-db Secret is missing or unreadable; refusing to finish T1 with GFS credentials unreconciled\n' >&2
+    return 1
   fi
   # Settle a Ready reader's leftover rollout claim first so restore does not
   # rollout restart it, and let any wait reconcile still needs judge

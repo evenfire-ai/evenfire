@@ -18,6 +18,21 @@ if [ -z "$T2_PROFILE" ]; then T2_PROFILE="$MINIKUBE_PROFILE"; fi
 if [ -z "$T2_PROFILE" ]; then T2_PROFILE="$CONTEXT"; fi
 if [ -z "$T2_CONTEXT" ]; then T2_CONTEXT="$CONTROL_API_REAL_PG_CONTEXT"; fi
 if [ -z "$T2_CONTEXT" ]; then T2_CONTEXT="$CONTEXT"; fi
+
+remote_context_allowed() {
+  local allowed_context
+  local -a allowed_contexts=()
+  [ "${GFS_REMOTE_RECONCILE_AUTHORIZED:-false}" = true ] || return 1
+  [ -n "${ALLOWED_CONTEXTS:-}" ] || return 1
+  IFS=',' read -r -a allowed_contexts <<<"${ALLOWED_CONTEXTS}"
+  for allowed_context in "${allowed_contexts[@]}"; do
+    if [ "$allowed_context" = "$CONTEXT" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ -n "$T2_LOCK_TOKEN" ] || [ -n "$MINIKUBE_PROFILE" ] || [[ "$CONTEXT" == clerum-* ]]; then
   # shellcheck source=scripts/minikube/t2-common.sh
   source "$ROOT/scripts/minikube/t2-common.sh"
@@ -38,9 +53,13 @@ else
   case "$CONTEXT" in
     gke_*)
       # GKE deploys are owned by the explicitly selected deploy workflow rather
-      # than the local Minikube lease. Keep this exception narrow: an arbitrary
-      # CONTEXT must never turn this credential mutator into a remote-cluster
-      # command without either the local fence or the deploy-context shape.
+      # than the local Minikube lease. The workflow must opt in explicitly and
+      # pass the exact context allowlist; the name prefix alone is not
+      # authorization to mutate a remote cluster.
+      if ! remote_context_allowed; then
+        printf '[reconcile-gfs-deploy] ERROR: refusing remote context without explicit authorization and exact ALLOWED_CONTEXTS membership: %s\n' "$CONTEXT" >&2
+        exit 1
+      fi
       ;;
     *)
       printf '[reconcile-gfs-deploy] ERROR: refusing unverified Kubernetes context: %s\n' "$CONTEXT" >&2

@@ -22,7 +22,10 @@ for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
   "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \
-  "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh"; do
+  "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh" \
+  "$ROOT/scripts/tests/test-minikube-gfs-provision-order.sh" \
+  "$ROOT/scripts/tests/test-minikube-pre-gate-restore.sh" \
+  "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"; do
   bash -n "$file"
 done
 
@@ -104,36 +107,48 @@ grep -Fq 'T1_GFS_RESTORE_REQUIRED=true' "$T1"
 grep -Fq 'settle-gfs-reader-rollout.sh' "$T1"
 grep -Fq 'gfs-rollout-shim' "$T1"
 grep -Fq 'T2_UNREADY_DEPLOYMENTS' "$COMMON"
+grep -Fq 'required gfs-controller-db Secret is missing or unreadable' "$T1"
 
 # pre-gate-sync GFS serving provisioning must opt into restoring a NOLOGIN
-# role from the committed Secret DSN, and must run in every sync plan.
+# role from the committed Secret DSN. Only the T2 transition owns this
+# mutation; security gates refresh MCP auth without touching the GFS plane.
 PRE_GATE="$MINIKUBE_DIR/pre-gate-sync.sh"
-if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true'; then
-  echo 'FAIL: provision_gfs_serving does not restore a NOLOGIN GFS role from the committed Secret DSN' >&2
+grep -Fq 'scale_rc=0 rollout_rc=0' "$PRE_GATE"
+grep -Fq 'leaving the writer fence armed' "$PRE_GATE"
+if ! sed -n '/^reconcile_gfs_credentials()/,/^}/p' "$PRE_GATE" | grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true'; then
+  echo 'FAIL: reconcile_gfs_credentials does not restore a NOLOGIN GFS role from the committed Secret DSN' >&2
   exit 1
 fi
-if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true'; then
-  echo 'FAIL: provision_gfs_serving does not resume an interrupted gfsc-reader rollout claim' >&2
+if ! sed -n '/^reconcile_gfs_credentials()/,/^}/p' "$PRE_GATE" | grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true'; then
+  echo 'FAIL: reconcile_gfs_credentials does not resume an interrupted gfsc-reader rollout claim' >&2
   exit 1
 fi
-if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'settle-gfs-reader-rollout.sh'; then
-  echo 'FAIL: provision_gfs_serving does not settle a Ready gfsc-reader leftover rollout claim before reconcile' >&2
+if ! sed -n '/^settle_gfs_reader_rollout()/,/^}/p' "$PRE_GATE" | grep -Fq 'settle-gfs-reader-rollout.sh'; then
+  echo 'FAIL: settle_gfs_reader_rollout does not settle a Ready gfsc-reader leftover rollout claim before reconcile' >&2
   exit 1
 fi
-if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'gfs-rollout-shim'; then
-  echo 'FAIL: provision_gfs_serving reconcile does not use the HCC-safe reader rollout wait' >&2
+if ! sed -n '/^reconcile_gfs_credentials()/,/^}/p' "$PRE_GATE" | grep -Fq 'gfs-rollout-shim'; then
+  echo 'FAIL: reconcile_gfs_credentials does not use the HCC-safe reader rollout wait' >&2
   exit 1
 fi
-if ! sed -n '/^provision_gfs_serving()/,/settle-gfs-reader-rollout.sh/p' "$PRE_GATE" | grep -Fq 'sync-auth-key.sh'; then
-  echo 'FAIL: provision_gfs_serving does not re-sync gfs-config.jwt-public-key before reconcile (an empty key blocks every new reader pod)' >&2
+if ! sed -n '/^sync_gfs_auth_key()/,/^}/p' "$PRE_GATE" | grep -Fq 'sync-auth-key.sh'; then
+  echo 'FAIL: sync_gfs_auth_key does not re-sync gfs-config.jwt-public-key before reconcile (an empty key blocks every new reader pod)' >&2
   exit 1
 fi
 if ! sed -n '/^converge_gfs_reader_after_restore()/,/^}/p' "$PRE_GATE" | grep -Fq 'wait-gfs-reader-ready.sh'; then
   echo 'FAIL: converge_gfs_reader_after_restore still waits on a generation-based rollout status HCC keeps rewriting' >&2
   exit 1
 fi
-if ! sed -n '/No cluster sync required before/,$p' "$PRE_GATE" | grep -Fq 'provision_gfs_serving'; then
-  echo 'FAIL: pre-gate-sync skips GFS serving convergence when no cluster sync is required' >&2
+if ! sed -n '/^provision_gfs_serving()/,/^}/p' "$PRE_GATE" | grep -Fq 'only minikube-t2 owns GFS recovery'; then
+  echo 'FAIL: pre-gate-sync does not scope GFS recovery mutations to minikube-t2' >&2
+  exit 1
+fi
+if ! sed -n '/^sync_mcp_host_auth_key()/,/^}/p' "$PRE_GATE" | grep -Fq -- '--skip-gfs'; then
+  echo 'FAIL: non-T2 MCP auth refresh can still mutate GFS' >&2
+  exit 1
+fi
+if ! sed -n '/^sync_gfs_auth_key()/,/^}/p' "$PRE_GATE" | grep -Fq -- '--require-gfs'; then
+  echo 'FAIL: T2 GFS auth refresh is not strict about its source key' >&2
   exit 1
 fi
 grep -Fq 'converge_gfs_reader_after_restore' "$PRE_GATE"
@@ -151,6 +166,10 @@ if [[ "$(grep -c 'gfs-rollout-shim' "$ROOT/scripts/minikube/full-setup.sh")" -lt
 fi
 if [[ "$(grep -c 'sync-auth-key.sh' "$ROOT/scripts/minikube/full-setup.sh")" -lt 3 ]]; then
   echo 'FAIL: full-setup must re-sync gfs-config.jwt-public-key before both GFS reconciles (the overlay re-applies it empty)' >&2
+  exit 1
+fi
+if [[ "$(grep -c -- '--require-gfs' "$ROOT/scripts/minikube/full-setup.sh")" -lt 3 ]]; then
+  echo 'FAIL: every GFS-specific full-setup auth sync must require a non-empty source key' >&2
   exit 1
 fi
 
@@ -469,5 +488,8 @@ fi
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"
 bash "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh"
+bash "$ROOT/scripts/tests/test-minikube-gfs-provision-order.sh"
+bash "$ROOT/scripts/tests/test-minikube-pre-gate-restore.sh"
+bash "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"
 
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'

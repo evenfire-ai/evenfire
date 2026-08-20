@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROFILE="clerum-test"
 REQUIRE_GFS=false
+SYNC_GFS=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,8 +22,14 @@ while [[ $# -gt 0 ]]; do
       REQUIRE_GFS=true
       shift
       ;;
+    --skip-gfs)
+      # Pre-gate security lanes need the MCP host key refresh without mutating
+      # the optional GFS plane. The T2 GFS path uses --require-gfs instead.
+      SYNC_GFS=false
+      shift
+      ;;
     -h|--help)
-      echo "Usage: scripts/minikube/sync-auth-key.sh [--context <kubectl-context>] [--require-gfs]" >&2
+      echo "Usage: scripts/minikube/sync-auth-key.sh [--context <kubectl-context>] [--require-gfs|--skip-gfs]" >&2
       exit 0
       ;;
     *)
@@ -31,6 +38,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${REQUIRE_GFS}" == "true" && "${SYNC_GFS}" != "true" ]]; then
+  echo "--require-gfs cannot be combined with --skip-gfs" >&2
+  exit 2
+fi
 
 KCTL=(kubectl --context="${PROFILE}")
 SOURCE_SECRET="rpc-proxy-secrets"
@@ -97,8 +109,11 @@ if ! "${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" >/dev/n
   exit 0
 fi
 source_key="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" -o "jsonpath={.data.${SOURCE_KEY}}" | base64 -d)"
-if [[ "${REQUIRE_GFS}" == "true" && -z "${source_key}" ]]; then
-  die "required GFS auth source key ${SOURCE_KEY} is empty"
+if [[ -z "${source_key}" ]]; then
+  if [[ "${REQUIRE_GFS}" == "true" ]]; then
+    die "required GFS auth source key ${SOURCE_KEY} is empty"
+  fi
+  die "auth source key ${SOURCE_KEY} is empty; refusing to mutate consumers"
 fi
 if [[ "${REQUIRE_GFS}" == "true" ]] && \
    ! "${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" >/dev/null 2>&1; then
@@ -168,6 +183,8 @@ sync_gfs() {
 }
 
 sync_mcp_host
-sync_gfs
+if [[ "${SYNC_GFS}" == "true" ]]; then
+  sync_gfs
+fi
 
 log "Auth key synced"

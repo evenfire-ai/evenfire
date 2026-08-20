@@ -489,7 +489,7 @@ t2_deployment_check() {
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is unavailable'
   fi
-  unready="$(python3 - "$deployment_json" <<'PY'
+  if ! unready="$(python3 - "$deployment_json" <<'PY'
 import json
 import sys
 payload = json.loads(sys.argv[1])
@@ -507,7 +507,15 @@ for item in payload.get("items", []):
         bad.append("%s/%s %s/%s" % (metadata.get("namespace", "?"), metadata.get("name", "?"), ready, desired))
 print("; ".join(bad))
 PY
-  )"
+  )"; then
+    if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
+      T2_PLAN_STATE=full-bootstrap
+      T2_PLAN_REASON='deployment readiness inventory is invalid'
+      return 0
+    fi
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is invalid'
+  fi
   if [ -n "$unready" ]; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
       T2_PLAN_STATE=full-bootstrap

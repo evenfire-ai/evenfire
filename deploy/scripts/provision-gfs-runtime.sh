@@ -189,7 +189,12 @@ finalize_credentials_after_overlay() {
   wait_for_gfsc_secret_references
 
   log "Finalizing staged GFS credentials after the overlay"
-  CONTEXT="$CONTEXT" bash "$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  # This entrypoint has already validated the target context (including the
+  # explicit --allow-prod path). Carry that decision into the credential
+  # mutator as an exact, single-context remote authorization instead of
+  # relying on a gke_* name prefix.
+  GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT" \
+    CONTEXT="$CONTEXT" bash "$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
 
   log "Waiting for the exact GFSC writer and reader rollouts"
   kctl -n gfs rollout status deployment/gfsc-writer --timeout=240s

@@ -64,11 +64,15 @@ while [ "$i" -lt "${#args[@]}" ]; do
   i=$((i + 1))
 done
 
-if ! timeout_seconds="$(python3 - "$timeout_raw" "${GFS_ROLLOUT_SHIM_MIN_TIMEOUT_SECONDS:-600}" <<'PY'
+# Honor the caller's rollout timeout. The harness caller that needs the
+# readiness default omits --timeout and receives 600s; silently flooring an
+# explicit short timeout would hide a dead reader and invalidate the caller's
+# fail-fast contract.
+if ! timeout_seconds="$(python3 - "$timeout_raw" <<'PY'
 import re
 import sys
 
-timeout_raw, minimum_raw = sys.argv[1:]
+timeout_raw = sys.argv[1]
 
 def parse_duration(raw, default, label):
     if raw == "":
@@ -83,9 +87,7 @@ def parse_duration(raw, default, label):
         raise SystemExit(f"invalid {label}: value must be between 1 and 86400 seconds")
     return value
 
-timeout = parse_duration(timeout_raw, 600, "rollout timeout")
-minimum = parse_duration(minimum_raw, 600, "minimum rollout timeout")
-print(max(timeout, minimum))
+print(parse_duration(timeout_raw, 600, "rollout timeout"))
 PY
 )"; then
   printf '[gfs-rollout-shim] refusing an invalid rollout timeout\n' >&2

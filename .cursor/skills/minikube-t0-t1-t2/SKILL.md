@@ -83,8 +83,9 @@ T1 runs inside `make minikube-t2`, or explicitly via
 
 - T1 is fail-loud: an unavailable DSN, an isolated server that did not start,
   or zero executed tests is FAIL. Never report green from skipped suites. The
-  JSON reporter is the suite verdict; a leftover Vitest process exit after a
-  complete green reporter is not a failed suite.
+  JSON reporter must be complete and green, and the Vitest process must also
+  exit zero; a green reporter cannot hide teardown, worker, OOM, or signal
+  failure.
 - Role-reset suites (cluster-global role drop/rewrite) run against a
   throwaway `postgres:16-alpine`, never the shared `control-postgres`.
 - The admin DSN is resolved in-process from the cluster Secret; never print,

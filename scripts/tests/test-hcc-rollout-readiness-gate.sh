@@ -127,6 +127,7 @@ grep -Fq 'create_synthetic_fleet' "$GATE" &&
 #     is the same sustained D1b pin as EXPECT_STUCK, IMAGE_BROKEN is cleared
 #     only AFTER every post-undo proof, and a no-op undo fails.
 recovery_block="$(awk '/FASE D \(recovery, evenfire#391\)/,0' "$GATE")"
+stuck_block="$(awk '/FASE D \(botched, D1b\)/,/^else$/' "$GATE")"
 # The sustained-outage comparison lives in the shared assert_botched_outage
 # helper; pin the LITERAL test expression in the helper body (a comment
 # mentioning the variables must never satisfy this check) plus the recovery
@@ -149,7 +150,88 @@ grep -Fq 'EXPECT_RECOVERY' "$GATE" &&
   pass "EXPECT_RECOVERY undoes to last-good outside cleanup and fails a no-op" ||
   fail "EXPECT_RECOVERY is missing, shares cleanup, skips sustained outage, or clears IMAGE_BROKEN before proofs"
 
-# 13. Makefile entry point: the gate is reachable through the same shaped
+# 13. The stuck and recovery modes share one implementation of every D1b
+#     predicate. Only their explanatory messages differ, so one mode cannot
+#     silently lose a correctness pin while the other keeps it.
+[ "$(grep -Fc '[ "$deployed_image_now" = "$BOTCHED_IMAGE" ]' <<<"$outage_helper")" = 1 ] &&
+  [ "$(grep -Fc '[ "$old_uid_live" = 0 ]' <<<"$outage_helper")" = 1 ] &&
+  [ "$(grep -Fc "grep -Eq 'ErrImagePull|ImagePullBackOff'" <<<"$outage_helper")" = 1 ] &&
+  [ "$(grep -Fc '[ "$stuck_503" -ge 1 ]' <<<"$outage_helper")" = 1 ] &&
+  [ "$(grep -Fc '[ "$stuck_transitions" -eq 0 ]' <<<"$outage_helper")" = 1 ] &&
+  [ "$(grep -Fc '[ "$stuck_maxstreak" -gt "$ROLLOUT_DOWNTIME_BUDGET_SEC" ]' <<<"$outage_helper")" = 1 ] &&
+  grep -Fq 'assert_botched_outage stuck' <<<"$stuck_block" &&
+  grep -Fq 'assert_botched_outage recovery' <<<"$recovery_block" &&
+  pass "stuck and recovery modes share one complete D1b assertion implementation" ||
+  fail "assert_botched_outage duplicates a predicate or one mode bypasses the shared D1b pins"
+
+# 14. Evidence is mode-aware: each mode emits only the samples it collected,
+#     and an unavailable restart count is explicit rather than the ambiguous
+#     `restarts=?` placeholder.
+evidence_helper="$(awk '/^write_evidence_artifact\(\) \{/,/^\}/' "$GATE")"
+render_evidence_mode() (
+  local mode="$1"
+  eval "$evidence_helper"
+  EXPECT_STUCK=0 EXPECT_RECOVERY=0
+  case "$mode" in
+    stuck) EXPECT_STUCK=1 ;;
+    recovery) EXPECT_RECOVERY=1 ;;
+  esac
+  WITH_SYNTHETIC_FLEET=0 FLEET_CONTEXTS=24 FLEET_MCPSERVERS=115 FLEET_HOSTS=8
+  HCC_DEPLOY=host-context-controller HCC_NS=control-plane
+  OLD_POD_NAME=old-pod OLD_POD_UID=uid-old
+  NEW_POD_NAME=new-pod NEW_POD_UID=uid-new NEW_POD_RESTARTS=0
+  LAST_GOOD_REVISION=7 live_revision_before_undo=8 recovered_revision=9
+  replacement_row=$'botched-pod\tuid-botched\tPending\tImagePullBackOff'
+  baseline_total=10 baseline_200=10 baseline_503=0
+  roll_total=3 roll_200=2 roll_503=1 roll_maxstreak=1 roll_transitions=1
+  stuck_total=4 stuck_200=0 stuck_503=4 stuck_maxstreak=4 stuck_transitions=0
+  hold_total=2 hold_503=0
+  ROLLOUT_DOWNTIME_BUDGET_SEC=120 STUCK_OBSERVE_SEC=210
+  rollout_t0=100 rollout_recovered_at=103
+  READY_SERIES=/dev/null
+  LOG_ARTIFACT="$(mktemp "${TMPDIR:-/tmp}/hcc-rollout-evidence-test.XXXXXX")"
+  trap 'rm -f "$LOG_ARTIFACT"' EXIT
+  kctl() { return 0; }
+  write_evidence_artifact
+  cat "$LOG_ARTIFACT"
+)
+healthy_evidence="$(render_evidence_mode healthy)"
+stuck_evidence="$(render_evidence_mode stuck)"
+recovery_evidence="$(render_evidence_mode recovery)"
+grep -Fq 'pre-undo outage: samples=' <<<"$recovery_evidence" &&
+  grep -Fq 'post-undo hold: samples=' <<<"$recovery_evidence" &&
+  grep -Fq 'restarts=0' <<<"$recovery_evidence" &&
+  ! grep -Fq '=== rollout: samples=' <<<"$recovery_evidence" &&
+  grep -Fq 'stuck outage: samples=' <<<"$stuck_evidence" &&
+  ! grep -Fq 'restarts=' <<<"$stuck_evidence" &&
+  ! grep -Fq '=== rollout: samples=' <<<"$stuck_evidence" &&
+  grep -Fq '=== rollout: samples=' <<<"$healthy_evidence" &&
+  grep -Fq 'post-rollout hold: samples=' <<<"$healthy_evidence" &&
+  grep -Fq 'restarts=0' <<<"$healthy_evidence" &&
+  ! grep -Fq 'stuck outage: samples=' <<<"$healthy_evidence" &&
+  ! grep -Fq 'samples=0' <<<"${healthy_evidence}${stuck_evidence}${recovery_evidence}" &&
+  ! grep -Fq 'restarts=?' <<<"${healthy_evidence}${stuck_evidence}${recovery_evidence}" &&
+  ! grep -Fq 'restarts=${NEW_POD_RESTARTS:-?}' <<<"$evidence_helper" &&
+  pass "evidence reports only mode-relevant samples and never emits restarts=?" ||
+  fail "evidence mixes uncollected mode counters or retains an ambiguous restart placeholder"
+
+# 15. Recovery-only state stays in the recovery branch: capture last-good
+#     before injecting the bad image, then record the recovered pod's restart
+#     count after undo and before writing evidence.
+last_good_capture='LAST_GOOD_REVISION="$(kctl get deployment "$HCC_DEPLOY"'
+capture_line="$(grep -nF "$last_good_capture" <<<"$recovery_block" | head -1 | cut -d: -f1)"
+botch_line="$(grep -nF 'kctl set image deployment/"$HCC_DEPLOY"' <<<"$recovery_block" | head -1 | cut -d: -f1)"
+undo_line="$(grep -nF 'kctl rollout undo deployment/"$HCC_DEPLOY"' <<<"$recovery_block" | head -1 | cut -d: -f1)"
+restart_line="$(grep -nF 'NEW_POD_RESTARTS="$(hcc_restart_count "$NEW_POD_NAME" || true)"' <<<"$recovery_block" | head -1 | cut -d: -f1)"
+evidence_line="$(grep -nF 'write_evidence_artifact' <<<"$recovery_block" | head -1 | cut -d: -f1)"
+[ "$(grep -Fc "$last_good_capture" "$GATE")" = 1 ] &&
+  [ -n "$capture_line" ] && [ -n "$botch_line" ] && [ "$capture_line" -lt "$botch_line" ] &&
+  [ -n "$undo_line" ] && [ -n "$restart_line" ] && [ -n "$evidence_line" ] &&
+  [ "$restart_line" -gt "$undo_line" ] && [ "$restart_line" -lt "$evidence_line" ] &&
+  pass "recovery alone captures last-good and records recovered pod restarts after undo" ||
+  fail "last-good/restart evidence escaped recovery scope or occurs on the wrong side of undo"
+
+# 16. Makefile entry point: the gate is reachable through the same shaped
 #     target as the sibling HCC gates — fault-injection ack + pre-gate-sync
 #     expectation + explicit profile=context pin, with the exclusive
 #     EXPECT_STUCK/EXPECT_RECOVERY modes surfaced (and documented as
@@ -168,7 +250,7 @@ grep -Fq '.PHONY: test-e2e-hcc-rollout-readiness' "$MAKEFILE" &&
   pass "Makefile target test-e2e-hcc-rollout-readiness keeps ack + profile=context + modes + gate invocation" ||
   fail "Makefile target test-e2e-hcc-rollout-readiness is missing or lost its ack/profile/mode/gate contract"
 
-# 14. Executable guard suite: CI must RUN the cluster-free guard tests (not
+# 17. Executable guard suite: CI must RUN the cluster-free guard tests (not
 #     only this grep contract), and that suite must actually EXECUTE the gate
 #     — a guards script degraded back to grep would be this file twice.
 GUARDS="${ROOT}/scripts/tests/test-hcc-rollout-readiness-guards.sh"
