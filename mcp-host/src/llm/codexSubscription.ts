@@ -29,6 +29,29 @@ export type CodexAttemptContext = {
   userId?: string
 }
 
+function mapCodexUsage(usage?: { inputTokens: number; outputTokens: number }): {
+  usage: { input_tokens: number; output_tokens: number; total_tokens: number }
+  usage_reported: boolean
+} {
+  const inputTokens = usage?.inputTokens
+  const outputTokens = usage?.outputTokens
+  const usageKnown =
+    typeof inputTokens === 'number' &&
+    typeof outputTokens === 'number' &&
+    Number.isInteger(inputTokens) &&
+    Number.isInteger(outputTokens) &&
+    inputTokens >= 0 &&
+    outputTokens >= 0
+  return {
+    usage: {
+      input_tokens: usageKnown ? inputTokens : 0,
+      output_tokens: usageKnown ? outputTokens : 0,
+      total_tokens: usageKnown ? inputTokens + outputTokens : 0,
+    },
+    usage_reported: usageKnown,
+  }
+}
+
 export type CodexSubscriptionDeps = {
   authorizer: ProviderAttemptAuthorizer
   proxy: CodexLlmProxyClient
@@ -36,6 +59,8 @@ export type CodexSubscriptionDeps = {
 }
 
 export class CodexSubscriptionProvider implements SingleTurnProvider {
+  private nextProviderAttemptIndex = 1
+
   constructor(
     private readonly model: string,
     private readonly deps: CodexSubscriptionDeps
@@ -92,10 +117,11 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
   ): Promise<CompletionResponse> {
     const result = await this.execute(messages, undefined, options)
+    const usage = mapCodexUsage(result.usage)
     return {
       content: result.text,
-      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-      usage_reported: false,
+      usage: usage.usage,
+      usage_reported: usage.usage_reported,
       finish_reason: result.outcome === 'canceled' ? FinishReason.Unknown : FinishReason.Stop,
     }
   }
@@ -111,6 +137,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
   ): Promise<ToolCompletionResponse> {
     const result = await this.execute(messages, tools, options)
+    const usage = mapCodexUsage(result.usage)
     return {
       content: result.text || null,
       tool_calls:
@@ -121,8 +148,8 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
               arguments: call.arguments,
             }))
           : null,
-      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-      usage_reported: false,
+      usage: usage.usage,
+      usage_reported: usage.usage_reported,
       finish_reason: result.toolCalls.length > 0 ? FinishReason.ToolUse : FinishReason.Stop,
     }
   }
@@ -148,7 +175,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       requestHash,
       invocationId: context.invocationId ?? request.requestId,
       attemptGeneration: context.attemptGeneration ?? 1,
-      providerAttemptIndex: context.providerAttemptIndex ?? 1,
+      providerAttemptIndex: context.providerAttemptIndex ?? this.nextProviderAttemptIndex++,
       policyRevision: context.policyRevision,
       policyHash: context.policyHash,
       hostRef: context.hostRef,

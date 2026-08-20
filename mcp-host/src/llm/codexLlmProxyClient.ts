@@ -19,6 +19,8 @@ export type CodexProxyStreamResult = {
   text: string
   toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
   outcome: 'success' | 'canceled' | 'error' | 'unknown'
+  /** Present only when the proxy forwarded real upstream token counts. */
+  usage?: { inputTokens: number; outputTokens: number }
 }
 
 export type CodexLlmProxyClientOptions = {

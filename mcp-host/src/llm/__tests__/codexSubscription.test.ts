@@ -91,6 +91,26 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.stream).not.toHaveBeenCalled()
   })
 
+  it('issues a new authorize attempt index on every physical call', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    await provider.completeSingleTurn([{ role: 'user', content: 'one' }])
+    await provider.completeSingleTurn([{ role: 'user', content: 'two' }])
+    expect(wired.authorize.mock.calls[0][0].providerAttemptIndex).toBe(1)
+    expect(wired.authorize.mock.calls[1][0].providerAttemptIndex).toBe(2)
+    expect(wired.authorize.mock.calls[0][0].request.requestId).not.toBe(
+      wired.authorize.mock.calls[1][0].request.requestId
+    )
+  })
+
+  it('keeps unknown usage unknown when the proxy omits token counts', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const result = await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    expect(result.usage_reported).toBe(false)
+    expect(result.usage).toEqual({ input_tokens: 0, output_tokens: 0, total_tokens: 0 })
+  })
+
   it('keeps insufficient_scope distinguishable', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
     const classified = provider.classifyError(
