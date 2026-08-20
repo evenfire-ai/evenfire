@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROFILE="clerum-test"
 REQUIRE_GFS=false
+REQUIRE_MCP=false
 SYNC_GFS=true
 
 while [[ $# -gt 0 ]]; do
@@ -22,6 +24,10 @@ while [[ $# -gt 0 ]]; do
       REQUIRE_GFS=true
       shift
       ;;
+    --require-mcp)
+      REQUIRE_MCP=true
+      shift
+      ;;
     --skip-gfs)
       # Pre-gate security lanes need the MCP host key refresh without mutating
       # the optional GFS plane. The T2 GFS path uses --require-gfs instead.
@@ -29,7 +35,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h|--help)
-      echo "Usage: scripts/minikube/sync-auth-key.sh [--context <kubectl-context>] [--require-gfs|--skip-gfs]" >&2
+      echo "Usage: scripts/minikube/sync-auth-key.sh [--context <kubectl-context>] [--require-mcp] [--require-gfs|--skip-gfs]" >&2
       exit 0
       ;;
     *)
@@ -101,12 +107,19 @@ PY
 
 # The public key is the SAME for every consumer (one platform keypair), so it is
 # fetched once and synced into each consumer's ConfigMap below.
-if ! "${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" >/dev/null 2>&1; then
-  if [[ "${REQUIRE_GFS}" == "true" ]]; then
-    die "required GFS auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET} is missing or unreadable"
+source_probe=""
+if ! source_probe="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" 2>&1)"; then
+  if [[ "${REQUIRE_GFS}" == "true" || "${REQUIRE_MCP}" == "true" ]]; then
+    if [[ "${REQUIRE_GFS}" == "true" ]]; then
+      die "required GFS auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET} is missing or unreadable"
+    fi
+    die "required MCP auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET} is missing or unreadable"
   fi
-  log "Skipping auth key sync (${SOURCE_SECRET} not found)"
-  exit 0
+  if [ -z "${source_probe}" ] || [[ "${source_probe}" == *NotFound* || "${source_probe}" == *"not found"* ]]; then
+    log "Skipping auth key sync (${SOURCE_SECRET} not found)"
+    exit 0
+  fi
+  die "cannot inspect auth source ${SOURCE_NAMESPACE}/${SOURCE_SECRET}: ${source_probe}"
 fi
 source_key="$("${KCTL[@]}" get secret "${SOURCE_SECRET}" -n "${SOURCE_NAMESPACE}" -o "jsonpath={.data.${SOURCE_KEY}}" | base64 -d)"
 if [[ -z "${source_key}" ]]; then
@@ -116,18 +129,31 @@ if [[ -z "${source_key}" ]]; then
   die "auth source key ${SOURCE_KEY} is empty; refusing to mutate consumers"
 fi
 if [[ "${REQUIRE_GFS}" == "true" ]] && \
-   ! "${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" >/dev/null 2>&1; then
-  die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} is missing or unreadable"
+   ! gfs_target_probe="$("${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" 2>&1)"; then
+  die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} is missing or unreadable: ${gfs_target_probe}"
+fi
+if [[ "${REQUIRE_MCP}" == "true" ]] && \
+   ! mcp_target_probe="$("${KCTL[@]}" get configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" 2>&1)"; then
+  die "required MCP auth target ${CONFIG_NAMESPACE}/${CONFIGMAP} is missing or unreadable: ${mcp_target_probe}"
 fi
 
 # ── Target 1: mcp-host-config (restart named chatllm/mcp-host with retry) ──────
 sync_mcp_host() {
-  if ! "${KCTL[@]}" get configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" >/dev/null 2>&1; then
-    log "Skipping ${CONFIGMAP} sync (not found)"
-    return 0
+  local target_probe=""
+  if ! target_probe="$("${KCTL[@]}" get configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" 2>&1)"; then
+    if [[ "${REQUIRE_MCP}" == "true" ]]; then
+      die "required MCP auth target ${CONFIG_NAMESPACE}/${CONFIGMAP} disappeared or became unreadable during sync"
+    fi
+    if [[ "${target_probe}" == *NotFound* || "${target_probe}" == *"not found"* ]]; then
+      log "Skipping ${CONFIGMAP} sync (not found)"
+      return 0
+    fi
+    die "cannot inspect auth target ${CONFIG_NAMESPACE}/${CONFIGMAP}: ${target_probe}"
   fi
   local current_key
-  current_key="$("${KCTL[@]}" get configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" -o "jsonpath={.data.${TARGET_KEY}}" 2>/dev/null || true)"
+  if ! current_key="$("${KCTL[@]}" get configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" -o "jsonpath={.data.${TARGET_KEY}}" 2>&1)"; then
+    die "cannot read auth target ${CONFIG_NAMESPACE}/${CONFIGMAP}: ${current_key}"
+  fi
   if [[ "${source_key}" == "${current_key}" ]]; then
     log "${CONFIGMAP}.${TARGET_KEY} already matches source; no patch needed"
     return 0
@@ -150,33 +176,62 @@ sync_mcp_host() {
 
 # ── Target 2: gfs-config (gfsc fails closed without the verification key) ──────
 sync_gfs() {
-  if ! "${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" >/dev/null 2>&1; then
+  local target_probe=""
+  if ! target_probe="$("${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" 2>&1)"; then
     if [[ "${REQUIRE_GFS}" == "true" ]]; then
-      die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} disappeared or became unreadable during sync"
+      die "required GFS auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP} disappeared or became unreadable during sync: ${target_probe}"
     fi
-    log "Skipping ${GFS_CONFIGMAP} sync (not found)"
-    return 0
+    if [[ "${target_probe}" == *NotFound* || "${target_probe}" == *"not found"* ]]; then
+      log "Skipping ${GFS_CONFIGMAP} sync (not found)"
+      return 0
+    fi
+    die "cannot inspect auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP}: ${target_probe}"
   fi
   local current_key
-  current_key="$("${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" -o "jsonpath={.data.${GFS_TARGET_KEY}}" 2>/dev/null || true)"
+  if ! current_key="$("${KCTL[@]}" get configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" -o "jsonpath={.data.${GFS_TARGET_KEY}}" 2>&1)"; then
+    die "cannot read auth target ${GFS_NAMESPACE}/${GFS_CONFIGMAP}: ${current_key}"
+  fi
   if [[ "${source_key}" == "${current_key}" ]]; then
     log "${GFS_CONFIGMAP}.${GFS_TARGET_KEY} already matches source; no patch needed"
     return 0
   fi
   log "Patching ${GFS_CONFIGMAP}.${GFS_TARGET_KEY}"
   "${KCTL[@]}" patch configmap "${GFS_CONFIGMAP}" -n "${GFS_NAMESPACE}" --type=merge -p "$(make_patch "${source_key}" "${GFS_TARGET_KEY}")" >/dev/null
-  local dsn
-  dsn="$("${KCTL[@]}" get secret gfs-controller-db -n "${GFS_NAMESPACE}" -o 'jsonpath={.data.connection-string}' 2>/dev/null | base64 -d || true)"
+  local dsn_encoded dsn
+  if ! dsn_encoded="$("${KCTL[@]}" get secret gfs-controller-db -n "${GFS_NAMESPACE}" -o 'jsonpath={.data.connection-string}' 2>&1)"; then
+    if [[ "${dsn_encoded}" == *NotFound* || "${dsn_encoded}" == *"not found"* ]]; then
+      log "Skipping gfsc restart after auth key drift (gfs-controller-db Secret is not populated yet)"
+      return 0
+    fi
+    die "cannot inspect ${GFS_NAMESPACE}/gfs-controller-db before gfsc restart: ${dsn_encoded}"
+  fi
+  if [[ -z "${dsn_encoded}" ]]; then
+    log "Skipping gfsc restart after auth key drift (gfs-controller-db.connection-string not populated yet)"
+    return 0
+  fi
+  if ! dsn="$(printf '%s' "${dsn_encoded}" | base64 -d 2>&1)"; then
+    die "${GFS_NAMESPACE}/gfs-controller-db.connection-string is not valid base64: ${dsn}"
+  fi
   if [[ -z "${dsn}" ]]; then
     log "Skipping gfsc restart after auth key drift (gfs-controller-db.connection-string not populated yet)"
     return 0
   fi
   # gfsc reads the key at boot; restart the writer+reader so the new key takes
   # effect (label-based — the reconciler owns the deployment names).
-  if "${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name 2>/dev/null | grep -q .; then
+  local deployments deployment rollout_output
+  if ! deployments="$("${KCTL[@]}" get deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" -o name 2>&1)"; then
+    die "cannot inspect gfsc deployments after auth key drift: ${deployments}"
+  fi
+  if [[ -n "${deployments}" ]]; then
     log "Restarting gfsc (${GFS_DEPLOY_SELECTOR}) after auth key drift"
     "${KCTL[@]}" rollout restart deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" >/dev/null
-    "${KCTL[@]}" rollout status deployment -l "${GFS_DEPLOY_SELECTOR}" -n "${GFS_NAMESPACE}" --timeout=90s || true
+    while IFS= read -r deployment; do
+      [[ -n "${deployment}" ]] || continue
+      if ! rollout_output="$(PATH="${SCRIPT_DIR}/gfs-rollout-shim:${PATH}" CONTEXT="${PROFILE}" \
+        "${KCTL[@]}" rollout status "${deployment}" -n "${GFS_NAMESPACE}" --timeout=90s 2>&1)"; then
+        die "gfsc deployment ${deployment} did not become Ready after auth key drift: ${rollout_output}"
+      fi
+    done <<<"${deployments}"
   else
     log "No gfsc deployments exist yet; auth key is synced for future pods"
   fi

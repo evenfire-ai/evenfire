@@ -39,14 +39,35 @@ fi
 
 deadline=$((SECONDS + TIMEOUT_SECONDS))
 while :; do
-  desired="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
-    -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  ready="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
-    -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  if [ -n "$desired" ] && [ "$desired" != 0 ] && [ "${ready:-0}" -ge "$desired" ]; then
-    unready="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
+  if ! desired="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
+    -o jsonpath='{.spec.replicas}' 2>&1)"; then
+    log "unable to read desired replicas for ${GFS_NS}/${DEPLOY}: ${desired}"
+    exit 1
+  fi
+  if [ -z "$desired" ] || ! [[ "$desired" =~ ^[0-9]+$ ]]; then
+    log "desired replicas for ${GFS_NS}/${DEPLOY} is not numeric"
+    exit 1
+  fi
+  if ! ready="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
+    -o jsonpath='{.status.readyReplicas}' 2>&1)"; then
+    log "unable to read Ready replicas for ${GFS_NS}/${DEPLOY}: ${ready}"
+    exit 1
+  fi
+  ready="${ready:-0}"
+  if ! [[ "$ready" =~ ^[0-9]+$ ]]; then
+    log "Ready replicas for ${GFS_NS}/${DEPLOY} is not numeric"
+    exit 1
+  fi
+  if [ "$desired" -gt 0 ] && [ "$ready" -ge "$desired" ]; then
+    pod_rows=""
+    unready=""
+    if ! pod_rows="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
       'jsonpath={range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' \
-      2>/dev/null | awk -F'|' 'NF && $2 == "" && $1 != "True" { n++ } END { print n+0 }')"
+      2>&1)"; then
+      log "unable to inspect reader pods for ${GFS_NS}/${DEPLOY}: ${pod_rows}"
+      exit 1
+    fi
+    unready="$(awk -F'|' 'NF && $2 == "" && $1 != "True" { n++ } END { print n+0 }' <<<"$pod_rows")"
     if [ "${unready:-0}" -eq 0 ]; then
       log "${GFS_NS}/${DEPLOY} is Ready (${ready}/${desired}) with no live unready reader pod"
       exit 0

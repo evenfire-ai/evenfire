@@ -33,15 +33,40 @@ remote_context_allowed() {
   return 1
 }
 
-if [ -n "$T2_LOCK_TOKEN" ] || [ -n "$MINIKUBE_PROFILE" ] || [[ "$CONTEXT" == clerum-* ]]; then
+if [ -n "$T2_LOCK_TOKEN" ] || [[ "$CONTEXT" == clerum-* ]]; then
   # shellcheck source=scripts/minikube/t2-common.sh
   source "$ROOT/scripts/minikube/t2-common.sh"
   if [ -z "$T2_SKIP_LOCK" ]; then T2_SKIP_LOCK=false; fi
+  RECONCILE_CLEANUP_DONE=false
   cleanup_reconcile() {
-    local status=$?
-    t2_lock_release "$status"
+    local status="${1:-$?}"
+    if [ "$RECONCILE_CLEANUP_DONE" = true ]; then
+      return "$status"
+    fi
+    RECONCILE_CLEANUP_DONE=true
+    trap - EXIT
+    trap '' INT TERM
+    t2_lock_release "$status" || status=$?
+    return "$status"
   }
-  trap cleanup_reconcile EXIT INT TERM
+  handle_reconcile_signal() {
+    local signal="$1" status
+    case "$signal" in
+      INT) status=130 ;;
+      TERM) status=143 ;;
+      *) status=1 ;;
+    esac
+    cleanup_reconcile "$status" || status=$?
+    exit "$status"
+  }
+  handle_reconcile_exit() {
+    local status=$?
+    cleanup_reconcile "$status" || status=$?
+    exit "$status"
+  }
+  trap handle_reconcile_exit EXIT
+  trap 'handle_reconcile_signal INT' INT
+  trap 'handle_reconcile_signal TERM' TERM
   t2_repo_metadata
   t2_profile_scope
   t2_context_check
@@ -50,22 +75,17 @@ if [ -n "$T2_LOCK_TOKEN" ] || [ -n "$MINIKUBE_PROFILE" ] || [[ "$CONTEXT" == cle
   # a second CONTEXT value after the fence has been acquired.
   CONTEXT="$T2_CONTEXT"
 else
-  case "$CONTEXT" in
-    gke_*)
-      # GKE deploys are owned by the explicitly selected deploy workflow rather
-      # than the local Minikube lease. The workflow must opt in explicitly and
-      # pass the exact context allowlist; the name prefix alone is not
-      # authorization to mutate a remote cluster.
-      if ! remote_context_allowed; then
-        printf '[reconcile-gfs-deploy] ERROR: refusing remote context without explicit authorization and exact ALLOWED_CONTEXTS membership: %s\n' "$CONTEXT" >&2
-        exit 1
-      fi
-      ;;
-    *)
+  # Remote reconciliation is authorized by the explicit workflow decision and
+  # exact context membership, never by a provider/name convention. This also
+  # supports self-hosted dev contexts whose names are not gke_*.
+  if ! remote_context_allowed; then
+    if [ -z "${GFS_REMOTE_RECONCILE_AUTHORIZED:-}" ] && [ -z "${ALLOWED_CONTEXTS:-}" ]; then
       printf '[reconcile-gfs-deploy] ERROR: refusing unverified Kubernetes context: %s\n' "$CONTEXT" >&2
       exit 1
-      ;;
-  esac
+    fi
+    printf '[reconcile-gfs-deploy] ERROR: refusing remote context without explicit authorization and exact ALLOWED_CONTEXTS membership: %s\n' "$CONTEXT" >&2
+    exit 1
+  fi
 fi
 
 CONTEXT="$CONTEXT" bash "$ROOT/deploy/scripts/apply-gfs-writer-secret.sh"

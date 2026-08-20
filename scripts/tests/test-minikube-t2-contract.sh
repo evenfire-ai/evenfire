@@ -9,12 +9,14 @@ MINIKUBE_DIR="$ROOT/scripts/minikube"
 T1="$ROOT/scripts/e2e/minikube-real-postgres.sh"
 PREFLIGHT="$MINIKUBE_DIR/t2-preflight.sh"
 T2="$MINIKUBE_DIR/t2.sh"
+T0="$MINIKUBE_DIR/t0.sh"
+GFS_FILTER="$MINIKUBE_DIR/filter-gfs-resources.py"
 COMMON="$MINIKUBE_DIR/t2-common.sh"
 TMP_ROOT="$TMPDIR"
 if [ -z "$TMP_ROOT" ]; then TMP_ROOT=/tmp; fi
 set -u
 
-for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" \
+for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T0" \
   "$ROOT/scripts/minikube/settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/minikube/wait-gfs-reader-ready.sh" \
   "$ROOT/scripts/minikube/gfs-rollout-shim/kubectl" \
@@ -27,6 +29,12 @@ for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" \
   "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"; do
   bash -n "$file"
 done
+python3 -m py_compile "$GFS_FILTER"
+grep -Fq 't0.sh' "$T2"
+grep -Fq 'T0_SHELLCHECK=PASS' "$T0"
+grep -Fq 'npm run build' "$T0"
+grep -Fq 'npm test' "$T0"
+grep -Fq 'bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"' "$T2"
 
 required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT"
 for code in $required_codes; do
@@ -95,10 +103,33 @@ grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$T1"
 grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$T1"
 grep -Fq 'reconcile-gfs-deploy-credentials.sh' "$T1"
 grep -Fq 'T1_GFS_RESTORE_REQUIRED=true' "$T1"
+grep -Fq "trap 'handle_t1_signal INT' INT" "$T1"
+grep -Fq "trap 'handle_t1_signal TERM' TERM" "$T1"
+grep -Fq 'T1_STATUS=%s' "$T1"
+grep -Fq 'cleanup=PASS' "$T1"
+if grep -Fq 'trap cleanup_t1 EXIT INT TERM' "$T1"; then
+  echo 'FAIL: T1 still treats a signal as an ordinary EXIT cleanup' >&2
+  exit 1
+fi
 grep -Fq 'settle-gfs-reader-rollout.sh' "$T1"
 grep -Fq 'gfs-rollout-shim' "$T1"
 grep -Fq 'T2_UNREADY_DEPLOYMENTS' "$COMMON"
 grep -Fq 'required gfs-controller-db Secret is missing or unreadable' "$T1"
+grep -Fq 'T1_STATUS' "$T2"
+grep -Fq 'T1_PENDING_TESTS' "$T2"
+grep -Fq 'T1 result was incomplete despite a zero process exit' "$T2"
+grep -Fq 'VERIFY_AUTH_RETRIES' "$ROOT/scripts/minikube/verify-gfs.sh"
+grep -Fq 'authentication probe remained unavailable' "$ROOT/scripts/minikube/verify-gfs.sh"
+grep -Fq 'GFS mutation disabled for this non-T2 sync' "$ROOT/Makefile"
+grep -Fq 'filter-gfs-resources.py' "$ROOT/Makefile"
+grep -Fq 'MINIKUBE_GFS_MUTATION' "$ROOT/scripts/minikube/pre-gate-sync.sh"
+grep -Fq 'T2_LOCK_TOKEN="${T2_LOCK_TOKEN}"' "$ROOT/scripts/minikube/pre-gate-sync.sh"
+grep -Fq 'T2_LOCK_RELEASED' "$COMMON"
+grep -Fq 'leaving the writer fence armed' "$ROOT/scripts/minikube/pre-gate-sync.sh"
+if grep -Fq 'gke_*)' "$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+  echo 'FAIL: remote GFS authorization still depends on a gke_* name prefix' >&2
+  exit 1
+fi
 
 # pre-gate-sync GFS serving provisioning must opt into restoring a NOLOGIN
 # role from the committed Secret DSN. Only the T2 transition owns this

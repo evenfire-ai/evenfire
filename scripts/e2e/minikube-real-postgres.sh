@@ -38,6 +38,7 @@ T1_PENDING_TESTS=0
 # (e.g. a failed precondition, or this file being sourced by a harness test).
 T1_GFS_RESTORE_REQUIRED=false
 T1_CLEANUP_DONE=false
+T1_SIGNAL_STATUS=0
 
 die_t1() {
   local code="$1"
@@ -96,13 +97,27 @@ restore_gfs_runtime_credentials() {
   fi
 }
 
+handle_t1_signal() {
+  local signal="$1" status
+  case "$signal" in
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=1 ;;
+  esac
+  T1_SIGNAL_STATUS="$status"
+  cleanup_t1 "$status"
+}
+
 cleanup_t1() {
-  local status=$?
+  local status="${1:-$?}"
   if [ "$T1_CLEANUP_DONE" = true ]; then
     return 0
   fi
   T1_CLEANUP_DONE=true
-  trap - EXIT INT TERM
+  # Finish the safety restore once it has started. A second signal must not
+  # interrupt the lock release and leave a half-restored profile behind.
+  trap - EXIT
+  trap '' INT TERM
   if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
     local command_line
     command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
@@ -116,10 +131,18 @@ cleanup_t1() {
     status=1
   fi
   if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi
+  if [ "$status" -eq 0 ] && [ "$T1_STATUS" = PASS ]; then
+    t2_evidence_write T1 PASS "Real PostgreSQL suites passed; tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS; cleanup=PASS"
+    t2_evidence_write complete PASS "T1=PASS tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS cleanup=PASS"
+  elif [ "$T1_STATUS" = PASS ]; then
+    t2_evidence_write T1 FAIL "Real PostgreSQL suites passed but cleanup failed; cleanup=FAIL"
+  fi
   t2_lock_release "$status" || status=$?
   exit "$status"
 }
-trap cleanup_t1 EXIT INT TERM
+trap cleanup_t1 EXIT
+trap 'handle_t1_signal INT' INT
+trap 'handle_t1_signal TERM' TERM
 
 require_t1_commands() {
   local command_name
@@ -437,8 +460,9 @@ print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.dec
   unset ADMIN_DSN ISOLATED_DSN
   stop_isolated_postgres
   T1_STATUS=PASS
-  t2_evidence_write T1 PASS "Real PostgreSQL suites passed; tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS"
-  t2_evidence_write complete PASS "T1=PASS tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS"
+  # PASS evidence is finalized by cleanup_t1 only after the profile restore and
+  # lock release path has completed successfully.
+  printf 'T1_STATUS=%s\n' "$T1_STATUS"
   printf 'T1_TESTS=%s\n' "$T1_TOTAL_TESTS"
   printf 'T1_PASSED_TESTS=%s\n' "$T1_PASSED_TESTS"
   printf 'T1_PENDING_TESTS=%s\n' "$T1_PENDING_TESTS"
