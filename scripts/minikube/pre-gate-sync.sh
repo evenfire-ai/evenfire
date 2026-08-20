@@ -322,7 +322,8 @@ provision_gfs_serving() {
     # FAIL LOUD: with the GFS stack deployed, a broken gfs_controller credential
     # means every GFS operation 503s (issue #775). Continuing would burn the
     # whole gate run on a cluster that cannot pass.
-    if ! CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    if ! GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+      CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1
     fi
@@ -557,6 +558,13 @@ if [[ "${cluster_changed}" == "true" ]]; then
   if gate_needs_registry; then
     rollout_if_present registry registry-api
   fi
+
+  # minikube-restart-all can recycle gfsc pods and leave reader NOLOGIN after the
+  # post-migration provision. Reconcile serving again only after control-api is
+  # Ready: the DSN probe execs into that Deployment.
+  rollout_if_present control-plane control-postgres
+  rollout_if_present control-plane control-api
+  provision_gfs_serving
 
   incremental_verify_gfs_if_required
 

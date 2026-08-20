@@ -148,7 +148,7 @@ fi
 control_api_migration_line="$(grep -nF 'run-control-api-db-migration.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 runtime_roles_line="$(grep -nF 'provision-control-api-runtime-roles.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 control_api_probe_restore_line="$(grep -nF '    restore_control_api' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-gfs_provision_line="$(grep -nF '    provision_gfs_serving' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+gfs_provision_line="$(grep -nE '^[[:space:]]+provision_gfs_serving$' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 if [[ -n "$control_api_migration_line" &&
       -n "$runtime_roles_line" &&
       -n "$control_api_probe_restore_line" &&
@@ -169,6 +169,16 @@ if [[ -z "$pre_migration_reconcile_line" && -n "$gfs_provision_line" && \
   pass "pre-gate defers GFS credential reconciliation until after schema migration"
 else
   fail "pre-gate can reconcile GFS roles before the migration that grants their projection"
+fi
+
+restart_all_line="$(grep -nF 'make minikube-restart-all' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+verify_gfs_line="$(grep -nF 'incremental_verify_gfs_if_required' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+if [[ -n "$restart_all_line" && -n "$gfs_provision_line" && -n "$verify_gfs_line" &&
+      "$restart_all_line" -lt "$gfs_provision_line" &&
+      "$gfs_provision_line" -lt "$verify_gfs_line" ]]; then
+  pass "pre-gate re-provisions GFS serving after restart-all and before verify-gfs"
+else
+  fail "pre-gate can verify GFS after restart-all without reconciling serving credentials"
 fi
 
 if contains 'fence_control_api()' &&
