@@ -93,6 +93,10 @@ if ! sed -n '/No cluster sync required before/,$p' "$PRE_GATE" | grep -Fq 'provi
   exit 1
 fi
 grep -Fq 'converge_gfs_reader_after_restore' "$PRE_GATE"
+if [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${PROFILE}"' "$ROOT/scripts/minikube/full-setup.sh")" -lt 2 ]]; then
+  echo 'FAIL: full-setup REUSE_DB path must restore a NOLOGIN GFS role before and after overlay' >&2
+  exit 1
+fi
 
 if grep -Eq 'make minikube-pre-gate-sync|pre-gate-sync\.sh' "$PREFLIGHT"; then
   echo 'FAIL: preflight invokes pre-gate-sync' >&2

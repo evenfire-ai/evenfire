@@ -140,7 +140,10 @@ or interrupt) using the canonical
 `GFS_RESTORE_ACTIVE_NOLOGIN=true` — the same contract as the standalone GFS
 T1 gate. `pre-gate-sync` provisions GFS serving with the same opt-in in every
 sync plan (including "no cluster sync required") and restarts an unready
-`gfsc-reader` after a successful restore. The recovery helper restores a
+`gfsc-reader` after a successful restore. `full-setup.sh` on the REUSE_DB /
+T2 full-reconcile path passes the same opt-in on both GFS reconcile calls,
+because setup runs before pre-gate-sync and must not abort on a NOLOGIN
+reader. The recovery helper restores a
 NOLOGIN role only from the committed Secret DSN and still fails loud when
 that credential cannot authenticate; no password is ever invented and no DSN
 is printed.

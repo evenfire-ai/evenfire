@@ -91,7 +91,9 @@ T1 runs inside `make minikube-t2`, or explicitly via
 - T1 restores branch-profile GFS credentials on exit (canonical
   `reconcile-gfs-deploy-credentials.sh` with `GFS_RESTORE_ACTIVE_NOLOGIN=true`,
   same as the GFS T1 gate), so a T1 run cannot leave `gfsc-reader` NOLOGIN
-  and poison the T2 preflight. Do not run that restore by hand.
+  and poison the T2 preflight. Do not run that restore by hand. T2
+  full-reconcile reaches `full-setup.sh` before pre-gate-sync; that REUSE_DB
+  path must pass the same opt-in on both GFS reconcile calls.
 
 ## Step 4 — Verdict and evidence reporting
 
