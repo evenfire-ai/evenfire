@@ -640,7 +640,7 @@ export const config: Config = {
   ),
   internalServiceTokens: parseInternalServiceTokens(
     process.env.CONTROL_API_INTERNAL_SERVICE_TOKENS ||
-      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token'
+      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token'
   ),
   internalControlJwtWrcHmacSecret: requiredOrDevDefault(
     'INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET',
