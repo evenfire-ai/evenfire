@@ -7625,49 +7625,18 @@ textarea.cu-input {
 
 .cu-host-overview-access {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--cu-space-3);
+  gap: var(--cu-space-4);
 }
 
-.cu-host-overview-access__tile {
+.cu-host-overview-access__group {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-overview-access__head {
   display: flex;
   align-items: center;
-  gap: var(--cu-space-3);
-  padding: var(--cu-space-3);
-  border: 1px solid var(--cu-border-subtle);
-  border-radius: var(--cu-radius);
-  background: rgba(var(--cu-panel-rgb), 0.4);
-}
-
-.cu-host-overview-access__icon {
-  display: grid;
-  place-items: center;
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: 999px;
-  background: rgba(var(--cu-accent-rgb), 0.16);
-  color: var(--cu-accent);
-}
-
-.cu-host-overview-access__value {
-  font-size: 1.5rem;
-  font-weight: 600;
-  line-height: 1.1;
-}
-
-.cu-host-overview-access__label {
-  font-size: 0.75rem;
-  color: var(--cu-text-muted);
-}
-
-.cu-host-overview-access__list {
-  margin-top: var(--cu-space-3);
-  padding-top: var(--cu-space-3);
-  border-top: 1px solid var(--cu-border-subtle);
-}
-
-.cu-host-overview-access__list-label {
-  margin: 0 0 var(--cu-space-1);
+  gap: var(--cu-space-2);
   font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -7675,23 +7644,83 @@ textarea.cu-input {
   color: var(--cu-text-muted);
 }
 
-.cu-host-overview-access__names {
-  display: flex;
-  flex-wrap: wrap;
+.cu-host-overview-access__head-icon {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  background: rgba(var(--cu-accent-rgb), 0.18);
+  color: var(--cu-accent);
+}
+
+.cu-host-overview-access__head-icon svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.cu-host-overview-access__head-label {
+  flex: 1;
+}
+
+.cu-host-overview-access__head-count {
+  min-width: 1.5rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-panel-rgb), 0.5);
+  color: var(--cu-text);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.cu-host-overview-access__people {
+  display: grid;
   gap: var(--cu-space-1);
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.cu-host-overview-access__names li {
-  padding: 0.15rem var(--cu-space-2);
+.cu-host-overview-access__person {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  padding: 0.4rem 0.6rem;
   border: 1px solid var(--cu-border-subtle);
-  border-radius: var(--cu-radius-pill);
-  background: rgba(var(--cu-panel-rgb), 0.4);
+  border-radius: var(--cu-radius);
+  background: rgba(var(--cu-panel-rgb), 0.35);
+}
+
+.cu-host-overview-access__avatar {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    135deg,
+    rgba(var(--cu-accent-rgb), 0.32),
+    rgba(var(--cu-accent-rgb), 0.08)
+  );
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.3);
   color: var(--cu-text);
-  font-size: 0.75rem;
-  line-height: 1.4;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.cu-host-overview-access__person-name {
+  font-size: 0.8125rem;
+  color: var(--cu-text);
+  word-break: break-word;
+}
+
+.cu-host-overview-access__empty {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--cu-text-muted);
 }
 
 .cu-host-overview-mcp__head {

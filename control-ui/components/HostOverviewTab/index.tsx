@@ -60,6 +60,17 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <p className="cu-host-overview-section-label">{children}</p>
 }
 
+function initialsFor(name: string): string {
+  const parts = String(name || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  if (parts.length === 0) return '?'
+  const first = parts[0]?.[0] || ''
+  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] || '' : ''
+  return (first + last).toUpperCase() || '?'
+}
+
 function ConfigRow({ setting, value }: { setting: string; value: React.ReactNode }) {
   return (
     <div className="cu-host-overview-config__row">
@@ -118,6 +129,27 @@ export function HostOverviewTab({
         <div className="cu-host-overview-identity__status">
           <StatusDot tone={statusTone} />
           <span>{statusLabel}</span>
+        </div>
+
+        <div className="cu-host-overview-identity__divider" />
+
+        <SectionLabel>Access</SectionLabel>
+        <div className="cu-host-overview-identity__counts">
+          <div>
+            <div className="cu-host-overview-identity__count-value">
+              {accessSummary.memberCount}
+            </div>
+            <div className="cu-host-overview-identity__count-label">
+              {accessSummary.memberCount === 1 ? 'member' : 'members'}
+            </div>
+          </div>
+          <div className="cu-host-overview-identity__count-sep" aria-hidden="true" />
+          <div>
+            <div className="cu-host-overview-identity__count-value">{accessSummary.teamCount}</div>
+            <div className="cu-host-overview-identity__count-label">
+              {accessSummary.teamCount === 1 ? 'team' : 'teams'}
+            </div>
+          </div>
         </div>
 
         <div className="cu-host-overview-identity__divider" />
@@ -197,50 +229,58 @@ export function HostOverviewTab({
         <section className="cu-card" aria-label="Access summary">
           <div className="cu-card__body">
             <p className="cu-host-overview-section-label">Access</p>
-            <div className="cu-host-overview-access">
-              <div className="cu-host-overview-access__tile">
-                <div className="cu-host-overview-access__icon" aria-hidden="true">
+
+            <div className="cu-host-overview-access__group">
+              <div className="cu-host-overview-access__head">
+                <span className="cu-host-overview-access__head-icon" aria-hidden="true">
                   <UsersIcon />
-                </div>
-                <div>
-                  <div className="cu-host-overview-access__value">{accessSummary.memberCount}</div>
-                  <div className="cu-host-overview-access__label">
-                    {accessSummary.memberCount === 1 ? 'Member' : 'Members'}
-                  </div>
-                </div>
+                </span>
+                <span className="cu-host-overview-access__head-label">Members</span>
+                <span className="cu-host-overview-access__head-count">
+                  {accessSummary.memberCount}
+                </span>
               </div>
-              <div className="cu-host-overview-access__tile">
-                <div className="cu-host-overview-access__icon" aria-hidden="true">
-                  <TeamIcon />
-                </div>
-                <div>
-                  <div className="cu-host-overview-access__value">{accessSummary.teamCount}</div>
-                  <div className="cu-host-overview-access__label">
-                    {accessSummary.teamCount === 1 ? 'Team' : 'Teams'}
-                  </div>
-                </div>
-              </div>
-            </div>
-            {accessSummary.memberNames.length > 0 ? (
-              <div className="cu-host-overview-access__list">
-                <p className="cu-host-overview-access__list-label">Members</p>
-                <ul className="cu-host-overview-access__names">
+              {accessSummary.memberNames.length > 0 ? (
+                <ul className="cu-host-overview-access__people">
                   {accessSummary.memberNames.map(name => (
-                    <li key={name}>{name}</li>
+                    <li key={name} className="cu-host-overview-access__person">
+                      <span className="cu-host-overview-access__avatar" aria-hidden="true">
+                        {initialsFor(name)}
+                      </span>
+                      <span className="cu-host-overview-access__person-name">{name}</span>
+                    </li>
                   ))}
                 </ul>
+              ) : (
+                <p className="cu-host-overview-access__empty">No members yet.</p>
+              )}
+            </div>
+
+            <div className="cu-host-overview-access__group">
+              <div className="cu-host-overview-access__head">
+                <span className="cu-host-overview-access__head-icon" aria-hidden="true">
+                  <TeamIcon />
+                </span>
+                <span className="cu-host-overview-access__head-label">Teams</span>
+                <span className="cu-host-overview-access__head-count">
+                  {accessSummary.teamCount}
+                </span>
               </div>
-            ) : null}
-            {accessSummary.teamNames.length > 0 ? (
-              <div className="cu-host-overview-access__list">
-                <p className="cu-host-overview-access__list-label">Teams</p>
-                <ul className="cu-host-overview-access__names">
+              {accessSummary.teamNames.length > 0 ? (
+                <ul className="cu-host-overview-access__people">
                   {accessSummary.teamNames.map(name => (
-                    <li key={name}>{name}</li>
+                    <li key={name} className="cu-host-overview-access__person">
+                      <span className="cu-host-overview-access__avatar" aria-hidden="true">
+                        {initialsFor(name)}
+                      </span>
+                      <span className="cu-host-overview-access__person-name">{name}</span>
+                    </li>
                   ))}
                 </ul>
-              </div>
-            ) : null}
+              ) : (
+                <p className="cu-host-overview-access__empty">No teams yet.</p>
+              )}
+            </div>
           </div>
         </section>
 
