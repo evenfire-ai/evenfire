@@ -34,12 +34,14 @@ Invariants that must never regress:
   naming it. `T2_PLAN_MODE=false` keeps failing `PROFILE_UNHEALTHY`.
 - T1 (`minikube-real-postgres.sh`) restores branch-profile GFS credentials on
   exit via `reconcile-gfs-deploy-credentials.sh` with
-  `GFS_RESTORE_ACTIVE_NOLOGIN=true` (armed only once suites started), and
-  `pre-gate-sync.sh` `provision_gfs_serving` passes the same opt-in and runs
-  in every sync plan, restarting an unready `gfsc-reader` after restore.
-  `full-setup.sh` REUSE_DB / T2 full-reconcile also passes the opt-in on both
-  GFS reconcile calls — setup runs before pre-gate-sync and must not abort
-  on a NOLOGIN reader left by T1.
+  `GFS_RESTORE_ACTIVE_NOLOGIN=true` and `GFS_RECOVER_ABANDONED_STATE=true`
+  (armed only once suites started), and `pre-gate-sync.sh`
+  `provision_gfs_serving` passes the same opt-ins and runs in every sync
+  plan, restarting an unready `gfsc-reader` after restore. `full-setup.sh`
+  REUSE_DB / T2 full-reconcile also passes both opt-ins on both GFS
+  reconcile calls — setup runs before pre-gate-sync and must not abort on a
+  NOLOGIN reader or a leftover `rollout-running` claim from a dead prior
+  setup. The T2 profile lock makes that abandoned-state recover safe.
 - T1 stays fail-loud (no green on unavailable DSN or zero tests); the JSON
   reporter is the suite verdict, not a leftover Vitest process exit after a
   complete green reporter. Role-reset suites keep the throwaway Postgres 16.

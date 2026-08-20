@@ -97,8 +97,9 @@ has an unready required deployment, the orchestrator planner selects
 `full-reconcile` (naming the deployment) instead of failing
 `PROFILE_UNHEALTHY` before a transition exists; the T1 lane restores
 branch-profile GFS credentials on exit and `pre-gate-sync` provisions GFS
-serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` in every plan, so no manual
-repair script belongs between plan and verdict. The standalone preflight and
+serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` and
+`GFS_RECOVER_ABANDONED_STATE=true` in every plan, so no manual repair
+script belongs between plan and verdict. The standalone preflight and
 the final exact-head T2 check stay fail-loud on an unready deployment.
 Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is

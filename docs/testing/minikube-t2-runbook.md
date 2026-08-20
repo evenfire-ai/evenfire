@@ -137,13 +137,16 @@ gfs-controller shared suites exercise cluster-global role names, so the T1
 lane restores the branch-profile GFS credentials on exit (success, failure,
 or interrupt) using the canonical
 `deploy/scripts/reconcile-gfs-deploy-credentials.sh` with
-`GFS_RESTORE_ACTIVE_NOLOGIN=true` — the same contract as the standalone GFS
-T1 gate. `pre-gate-sync` provisions GFS serving with the same opt-in in every
-sync plan (including "no cluster sync required") and restarts an unready
-`gfsc-reader` after a successful restore. `full-setup.sh` on the REUSE_DB /
-T2 full-reconcile path passes the same opt-in on both GFS reconcile calls,
-because setup runs before pre-gate-sync and must not abort on a NOLOGIN
-reader. The recovery helper restores a
+`GFS_RESTORE_ACTIVE_NOLOGIN=true` and `GFS_RECOVER_ABANDONED_STATE=true` —
+the same contract as the standalone GFS T1 gate, plus resume of a leftover
+`rollout-running` claim from a timed-out prior setup. The T2 profile lock
+makes that recover safe: the prior process is dead. `pre-gate-sync`
+provisions GFS serving with the same opt-ins in every sync plan (including
+"no cluster sync required") and restarts an unready `gfsc-reader` after a
+successful restore. `full-setup.sh` on the REUSE_DB / T2 full-reconcile path
+passes the same opt-ins on both GFS reconcile calls, because setup runs
+before pre-gate-sync and must not abort on a NOLOGIN reader or an abandoned
+reader rollout. The recovery helper restores a
 NOLOGIN role only from the committed Secret DSN and still fails loud when
 that credential cannot authenticate; no password is ever invented and no DSN
 is printed.

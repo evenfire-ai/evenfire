@@ -23,7 +23,8 @@ self-healing: the orchestrator planner selects `full-reconcile` for a
 bootstrapped profile with an unready deployment (never `PROFILE_UNHEALTHY`
 before a transition), T1 restores branch-profile GFS credentials on exit, and
 `pre-gate-sync` provisions GFS serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true`
-in every plan; do not insert manual repair scripts between runs. Follow the rule
+and `GFS_RECOVER_ABANDONED_STATE=true` in every plan; do not insert manual
+repair scripts between runs. Follow the rule
 `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
 `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
 

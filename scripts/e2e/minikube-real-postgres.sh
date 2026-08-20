@@ -69,7 +69,8 @@ restore_gfs_runtime_credentials() {
   if ! t2_kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
     return 0
   fi
-  if ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$T2_CONTEXT" \
+  if ! GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    CONTEXT="$T2_CONTEXT" \
     bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
     printf '[minikube-t1] ERROR: failed to restore branch-profile GFS credentials\n' >&2
     return 1
