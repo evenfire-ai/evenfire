@@ -40,6 +40,11 @@ import type {
 } from '../types'
 import { resolveMcpHostAgent } from './agentResolution'
 import {
+  type CodexCatalogSnapshot,
+  projectRecipeCodexExecution,
+  resolveCodexAuthoritativeSpec,
+} from './codexExecutionProjection'
+import {
   type PodReadiness,
   deletePodIfExists,
   evaluateCompletedRuntimePodRecovery,
@@ -52,6 +57,13 @@ import {
 } from './crashRecovery'
 import { JwtTokenFactory } from './jwtTokenFactory'
 import {
+  ALLOWED_MODELS_CONFIGMAP_NAME,
+  ALLOWLIST_CONFIGMAP_NAMESPACE,
+  parseAllowedModelsSnapshot,
+  snapshotFromConfigMapError,
+} from './llmAllowedModelsSnapshot'
+import {
+  type EffectiveWorkflowControlScope,
   type WorkflowControlScope,
   issueMcpHostRuntimeTokens,
   issueMcpHostWorkflowControlToken,
@@ -334,14 +346,26 @@ const WORKFLOW_CONTROL_SCOPE_ORDER: WorkflowControlScope[] = [
   'plugin-workload-sdk',
 ]
 
+const EFFECTIVE_WORKFLOW_CONTROL_SCOPE_ORDER: EffectiveWorkflowControlScope[] = [
+  ...WORKFLOW_CONTROL_SCOPE_ORDER,
+  'llm:codex:execute',
+]
+
+export type CodexReconcileContext = {
+  recipeName: string
+  runtimeScopeRecipeName: string
+  claimedParent: boolean
+  parentSpec: WorkflowRecipeSpec | null
+}
+
 function orderedScopesEqual<T extends string>(actual: T[], expected: T[]): boolean {
   if (actual.length !== expected.length) return false
   return actual.every((scope, index) => scope === expected[index])
 }
 
 function workflowControlScopesEqual(
-  actual: WorkflowControlScope[],
-  expected: WorkflowControlScope[]
+  actual: EffectiveWorkflowControlScope[],
+  expected: EffectiveWorkflowControlScope[]
 ): boolean {
   return orderedScopesEqual(actual, expected)
 }
@@ -355,6 +379,17 @@ function gfsScopesEqual(
 
 function workflowHasGfsPublishTargets(spec: WorkflowRecipeSpec): boolean {
   return (spec.gfs?.publishTargets ?? []).length > 0
+}
+
+function isCodexSnapshotTimeout(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code
+  if (code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'ABORT_ERR') {
+    return true
+  }
+  const name = (error as { name?: string }).name
+  if (name === 'AbortError' || name === 'TimeoutError') return true
+  const message = error instanceof Error ? error.message : String(error)
+  return /timed?\s*out/i.test(message)
 }
 
 function deriveRecipeHostGfsScopes(spec: WorkflowRecipeSpec): WorkflowRecipeGfsScope[] {
@@ -380,6 +415,8 @@ function deriveWorkflowControlScopes(
   spec: WorkflowRecipeSpec,
   opts: { pluginWorkloadSdkEnabled?: boolean } = {}
 ): WorkflowControlScope[] {
+  // Declarative workflow/SDK scopes only. `llm:codex:execute` is derive-only
+  // from the Codex eligibility projection and must never be minted here.
   const scopes = new Set<WorkflowControlScope>()
   // Plugin Workload SDK (plan §3.6): only recipes that declare the
   // capability — and only while the feature flag is on — receive the scope
@@ -840,6 +877,8 @@ export interface WorkflowReconcilerDeps {
 export class WorkflowReconciler {
   private readonly log = createLogger('wrc', 'reconciler')
   private readonly pluginWorkloadSdkProvisioner: PluginWorkloadSdkProvisioner
+  private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
+  private codexContext: CodexReconcileContext | null = null
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
     this.pluginWorkloadSdkProvisioner = new PluginWorkloadSdkProvisioner({
@@ -870,6 +909,92 @@ export class WorkflowReconciler {
       createIfNotExists: (createFn, label) => this.createIfNotExists(createFn, label),
       safeDelete: deleteFn => this.safeDelete(deleteFn),
     })
+  }
+
+  setCodexReconcileContext(context: CodexReconcileContext | null): void {
+    this.codexContext = context
+  }
+
+  private resolveCodexContext(
+    recipeName: string,
+    runtimeScopeRecipeName: string
+  ): CodexReconcileContext {
+    if (this.codexContext?.recipeName === recipeName) {
+      return { ...this.codexContext, runtimeScopeRecipeName }
+    }
+    return {
+      recipeName,
+      runtimeScopeRecipeName,
+      claimedParent: false,
+      parentSpec: null,
+    }
+  }
+
+  private projectCodex(
+    spec: WorkflowRecipeSpec,
+    recipeName: string,
+    runtimeScopeRecipeName: string
+  ) {
+    const context = this.resolveCodexContext(recipeName, runtimeScopeRecipeName)
+    const resolved = resolveCodexAuthoritativeSpec({
+      recipeName: context.recipeName,
+      runtimeScopeRecipeName: context.runtimeScopeRecipeName,
+      claimedParent: context.claimedParent,
+      ownSpec: spec,
+      parentSpec: context.parentSpec,
+    })
+    return projectRecipeCodexExecution(resolved.spec, this.codexSnapshot, resolved.provenance)
+  }
+
+  private resolveEffectiveControlScopes(
+    spec: WorkflowRecipeSpec,
+    recipeName: string,
+    runtimeScopeRecipeName: string
+  ): EffectiveWorkflowControlScope[] {
+    const workflow = deriveWorkflowControlScopes(spec, {
+      pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
+    })
+    const derived = this.projectCodex(
+      spec,
+      recipeName,
+      runtimeScopeRecipeName
+    ).derivedScopes.filter(scope => !workflow.includes(scope as WorkflowControlScope))
+    return [...workflow, ...derived] as EffectiveWorkflowControlScope[]
+  }
+
+  private async refreshCodexSnapshot(): Promise<void> {
+    try {
+      const cm = await this.deps.coreApi.readNamespacedConfigMap({
+        name: ALLOWED_MODELS_CONFIGMAP_NAME,
+        namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
+      })
+      this.codexSnapshot = parseAllowedModelsSnapshot(cm)
+    } catch (err) {
+      if (isCodexSnapshotTimeout(err)) {
+        this.codexSnapshot = snapshotFromConfigMapError('timeout')
+        this.log.warn('Codex allowlist ConfigMap read timed out; failing closed', {
+          configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+          namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
+        })
+        return
+      }
+      const code = getErrorCode(err)
+      if (code === 401 || code === 403) {
+        this.codexSnapshot = snapshotFromConfigMapError('forbidden')
+        this.log.warn('Codex allowlist ConfigMap read forbidden; failing closed', {
+          configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+          namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
+          statusCode: code,
+        })
+        return
+      }
+      this.codexSnapshot = snapshotFromConfigMapError('missing')
+      this.log.warn('Codex allowlist ConfigMap unavailable; failing closed', {
+        configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+        namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
+        statusCode: code,
+      })
+    }
   }
 
   private get runtimeTokenRefreshBeforeSeconds(): number {
@@ -1004,6 +1129,7 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host-to-llm-api`,
       `${recipeName}-mcp-host-to-gfs`,
       `${recipeName}-mcp-host-to-approval-gateway`,
+      `${recipeName}-mcp-host-to-codex-proxy`,
     ]
     const networkPolicyNames = preserveWorkflowRuntime
       ? sdkNetworkPolicyNames
@@ -1230,6 +1356,7 @@ export class WorkflowReconciler {
   ): Promise<WorkflowReconcileResult> {
     const preflightError = this.validateWorkflowSpec(spec)
     if (preflightError) return { phase: 'failed', message: preflightError, workflowPhase: 'failed' }
+    await this.refreshCodexSnapshot()
     const secretPreflightError = await this.validateSnippetSecretRefs(
       recipeName,
       spec,
@@ -2438,6 +2565,7 @@ export class WorkflowReconciler {
       pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
     })
     if (!runtime.mcpHost.required) return
+    await this.refreshCodexSnapshot()
     await this.ensureMcpHostSecrets(recipeNamespace, recipeName, runtimeScopeRecipeName, spec)
   }
 
@@ -2671,6 +2799,11 @@ export class WorkflowReconciler {
       artifactReaderPort: 8080,
       snippetRunnerPort: 8095,
       includeMcpHost: runtime.network.includeMcpHost && mcpHostLaneLive,
+      includeCodexProxyEgress:
+        this.projectCodex(spec, recipeName, this.codexContext?.runtimeScopeRecipeName ?? recipeName)
+          .requiresCodexProxyEgress &&
+        runtime.network.includeMcpHost &&
+        mcpHostLaneLive,
       // A stepless eager SDK host has no coordinator pod. Keep the mcp-host
       // control/egress lanes, but do not manufacture coordinator policies
       // whose selectors can never match a real workload.
@@ -2774,6 +2907,16 @@ export class WorkflowReconciler {
     )
     for (const policy of policies) {
       await this.applyNetworkPolicy(policy)
+    }
+    const policyNames = new Set(policies.map(policy => policy.metadata?.name))
+    const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
+    if (!policyNames.has(codexProxyPolicyName)) {
+      await this.safeDelete(() =>
+        this.deps.networkingApi.deleteNamespacedNetworkPolicy({
+          name: codexProxyPolicyName,
+          namespace: this.deps.config.sandboxNamespace,
+        })
+      )
     }
     await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName)
   }
@@ -3105,6 +3248,7 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host-to-servers`,
       `${recipeName}-mcp-host-to-llm-api`,
       `${recipeName}-mcp-host-to-approval-gateway`,
+      `${recipeName}-mcp-host-to-codex-proxy`,
       `${recipeName}-coord-to-snippet-runner`,
       `${recipeName}-coord-to-snippet-runner-ingress`,
       `${recipeName}-snippet-runner-egress`,
@@ -3480,9 +3624,7 @@ export class WorkflowReconciler {
       namespace,
       recipeName,
       runtimeScopeRecipeName,
-      deriveWorkflowControlScopes(spec, {
-        pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
-      }),
+      this.resolveEffectiveControlScopes(spec, recipeName, runtimeScopeRecipeName),
       deriveRecipeHostGfsScopes(spec)
     )
     if (this.deps.config.pluginWorkloadSdkEnabled && spec.pluginWorkloadSdk) {
@@ -4416,7 +4558,7 @@ export class WorkflowReconciler {
     recipeNamespace: string,
     recipeName: string,
     runtimeScopeRecipeName = recipeName,
-    workflowControlScopes: WorkflowControlScope[] = [],
+    workflowControlScopes: EffectiveWorkflowControlScope[] = [],
     gfsScopes: WorkflowRecipeGfsScope[] = ['gfs.read']
   ): Promise<void> {
     const secretName = `wf-${recipeName}-mcp-host-runtime-tokens`
@@ -4491,7 +4633,7 @@ export class WorkflowReconciler {
     recipeNamespace: string,
     recipeName: string,
     runtimeScopeRecipeName: string,
-    workflowControlScopes: WorkflowControlScope[],
+    workflowControlScopes: EffectiveWorkflowControlScope[],
     expectedGfsScopes: WorkflowRecipeGfsScope[],
     existing: k8s.V1Secret
   ): Promise<void> {
@@ -4665,7 +4807,7 @@ export class WorkflowReconciler {
   private async issueMcpHostControlToken(
     recipeNamespace: string,
     recipeName: string,
-    workflowControlScopes: WorkflowControlScope[]
+    workflowControlScopes: EffectiveWorkflowControlScope[]
   ): Promise<string> {
     try {
       return await issueMcpHostWorkflowControlToken(
@@ -4713,23 +4855,23 @@ export class WorkflowReconciler {
   private static jwtWorkflowControlScopes(
     jwt: string,
     claim: 'scopes' | 'workflowControlScopes' = 'scopes'
-  ): WorkflowControlScope[] {
+  ): EffectiveWorkflowControlScope[] {
     try {
       const payload = decodeJwt(jwt)
       const scopes = Array.isArray(payload[claim]) ? payload[claim] : []
-      const normalized: WorkflowControlScope[] = []
+      const normalized: EffectiveWorkflowControlScope[] = []
       const seen = new Set<string>()
       for (const scope of scopes) {
         if (
           typeof scope === 'string' &&
-          (WORKFLOW_CONTROL_SCOPE_ORDER as string[]).includes(scope) &&
+          (EFFECTIVE_WORKFLOW_CONTROL_SCOPE_ORDER as string[]).includes(scope) &&
           !seen.has(scope)
         ) {
           seen.add(scope)
-          normalized.push(scope as WorkflowControlScope)
+          normalized.push(scope as EffectiveWorkflowControlScope)
         }
       }
-      return WORKFLOW_CONTROL_SCOPE_ORDER.filter(scope => normalized.includes(scope))
+      return EFFECTIVE_WORKFLOW_CONTROL_SCOPE_ORDER.filter(scope => normalized.includes(scope))
     } catch {
       return []
     }
