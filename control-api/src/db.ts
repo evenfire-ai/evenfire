@@ -12,6 +12,10 @@ import {
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
+import {
+  applyLlmProviderAttemptSchema,
+  applyLlmProviderAttemptTicketSchema,
+} from './services/llmProviderAttemptStore.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
@@ -5923,6 +5927,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '00a1_codex_subscription_oauth_states',
     apply: applyCodexSubscriptionOAuthStateSchema,
+  },
+  {
+    version: '00a2_llm_provider_attempts',
+    apply: applyLlmProviderAttemptSchema,
+  },
+  {
+    version: '00a3_llm_provider_attempt_tickets',
+    apply: applyLlmProviderAttemptTicketSchema,
   },
 ]
 

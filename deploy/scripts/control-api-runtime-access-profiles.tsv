@@ -35,6 +35,8 @@ llm_allowed_models	legacy_dml
 llm_allowed_models_audit	append
 llm_catalog_sync_runs	append
 llm_model_prices	legacy_dml
+llm_provider_attempt_tickets	upsert
+llm_provider_attempts	upsert
 member_registration_credentials	upsert
 notification_deliveries	legacy_dml
 oauth_grants	legacy_dml
