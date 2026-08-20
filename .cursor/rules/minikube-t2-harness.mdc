@@ -28,8 +28,9 @@ Invariants that must never regress:
   and plan state `already-synced`; anything else is `HEAD_MARKER_MISMATCH`.
 - Planner mode `T2_PLAN_MODE=true` exists only inside the orchestrator so
   `full-bootstrap` is reachable; standalone preflight stays fail-loud.
-- T1 stays fail-loud (no green on unavailable DSN or zero tests); role-reset
-  suites keep the throwaway Postgres 16.
+- T1 stays fail-loud (no green on unavailable DSN or zero tests); the JSON
+  reporter is the suite verdict, not a leftover Vitest process exit after a
+  complete green reporter. Role-reset suites keep the throwaway Postgres 16.
 - `t2.sh` keeps `IMAGE_SOURCE=local` for bootstrap/reconcile and calls
   `pre-gate-sync` with `--skip-port-forwards`.
 - `t2_process_check` accepts only real `kubectl` (`comm=kubectl`) port-forward

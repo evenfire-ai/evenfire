@@ -131,7 +131,9 @@ never share live `control-postgres` (#412). CI continues to use
   `control-postgres`, except the role-reset suites which use an isolated
   Postgres 16; the lane reports `PASS`, `FAIL`, `SKIPPED`, and `NOT_RUN`
   separately and fails on an unavailable DSN, an isolated server that did not
-  start, or zero executed tests.
+  start, or zero executed tests. The JSON reporter is the suite verdict
+  (expected files, executed/passed, zero failures, zero pending); a leftover
+  Vitest process exit after a complete green reporter is not a failed suite.
 * **T2** — the final exact-head preflight inside `make minikube-t2` (or
   `make minikube-t2-runtime`): the marker matches this worktree/`HEAD`, the
   image manifest is current, PostgreSQL and required namespaces/Services are

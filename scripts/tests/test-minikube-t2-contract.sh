@@ -62,6 +62,12 @@ if grep -Eq 'describe\.skip|pending_tests.*allow|exclude.*realPostgresMigration'
 fi
 grep -Fq 'T1_REDACT_PASSWORD="${PG_PASSWORD}"' "$T1" || grep -Fq 'T1_REDACT_PASSWORD="$PG_PASSWORD"' "$T1"
 grep -Fq -- '--reporter=json' "$T1"
+grep -Fq '|| suite_status=$?' "$T1"
+grep -Fq 'complete green reporter' "$T1"
+if grep -Fq 'Real PostgreSQL suite failed in $package ($lane)' "$T1"; then
+  echo 'FAIL: T1 still treats npm exit as a suite failure before the JSON reporter' >&2
+  exit 1
+fi
 grep -Fq 'pending_tests' "$T1"
 grep -Fq 'numTotalTests' "$T1"
 grep -Fq 'numTotalTestSuites' "$T1"

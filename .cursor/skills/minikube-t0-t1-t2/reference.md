@@ -33,8 +33,10 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   `npm ci`, generated ports/profile metadata, or anything secret-like. Run
   `make minikube-t2-public-boundary` first.
 - **Do not weaken fail-loud T1**: no green on unavailable DSN, zero executed
-  tests, or silently skipped suites; role-reset suites stay on the throwaway
-  `postgres:16-alpine` (#412), never shared `control-postgres`.
+  tests, or silently skipped suites; the JSON reporter is the suite verdict,
+  not a leftover Vitest process exit after a complete green reporter.
+  Role-reset suites stay on the throwaway `postgres:16-alpine` (#412), never
+  shared `control-postgres`.
 
 ## Stable failure codes
 

@@ -251,6 +251,9 @@ grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$ROOT/scripts/e2e/minikube-real-postg
 grep -Fq 'ZERO_TESTS_EXECUTED' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'start_isolated_postgres' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'ISOLATED_DSN' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
+grep -Fq '|| suite_status=$?' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must capture vitest exit without aborting before the reporter'
+grep -Fq 'complete green reporter' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must document reporter-authoritative verdict'
+grep -Fq 'Real PostgreSQL suite failed in $package ($lane)' "$ROOT/scripts/e2e/minikube-real-postgres.sh" && fail 'T1 still treats npm exit as a suite failure before the JSON reporter'
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"

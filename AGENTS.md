@@ -95,8 +95,10 @@ standalone preflight refuses to call `pre-gate-sync` on an incomplete profile;
 `full-bootstrap`. Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by
-silently skipping the suites. Suites that drop or rewrite cluster-global roles
-must use the harness throwaway Postgres 16, never the shared `control-postgres`.
+silently skipping the suites. The JSON reporter is the suite verdict; a leftover
+Vitest process exit after a complete green reporter is not a failed suite.
+Suites that drop or rewrite cluster-global roles must use the harness throwaway
+Postgres 16, never the shared `control-postgres`.
 
 T0 (static/unit/contract checks), T1 (real PostgreSQL), T2 (validated runtime),
 CI, Control UI/Desktop Playwright, and product E2E scripts such as

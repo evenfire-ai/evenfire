@@ -250,22 +250,20 @@ run_suite() {
   json_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).json"
   printf '[minikube-t1] running %s %s Real PostgreSQL suites (%s files)\n' \
     "$package" "$lane" "$expected_files"
-  if ! (
+  # T1 verdict is the JSON reporter (expected files, executed/passed, zero
+  # failures, zero pending). Capture npm's exit but do not treat a leftover
+  # process exit after a complete green reporter as a failed suite.
+  suite_status=0
+  (
     cd "$PROJECT_DIR/$package"
     CONTROL_API_REAL_PG_ADMIN_URL="$admin_url" \
     CONTROL_API_REAL_PG_REQUIRED=1 FORCE_COLOR=0 NO_COLOR=1 \
       npm test -- --run "${vitest_filters[@]}" --reporter=json --outputFile="$json_file"
-  ) >"$log_file" 2>&1; then
-    sanitize_file "$log_file"
-    sanitize_file "$json_file"
-    cat "$log_file" >&2 || true
-    cat "$json_file" >&2 || true
-    T1_NEXT_COMMAND='repair the first failing Real PostgreSQL suite, then re-run T1 on the same HEAD'
-    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL suite failed in $package ($lane)"
-  fi
+  ) >"$log_file" 2>&1 || suite_status=$?
   sanitize_file "$log_file"
   sanitize_file "$json_file"
   [ -s "$json_file" ] || {
+    cat "$log_file" >&2 || true
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package ($lane)"
   }
@@ -273,7 +271,7 @@ run_suite() {
   # comparable to the number of physical *realPostgres*.test.ts files above.
   # Validate the reporter's own total/passed suite counts instead; the file
   # discovery count remains a separate zero-selection guard.
-  stats="$(python3 - "$json_file" "$expected_files" <<'PY'
+  if ! stats="$(python3 - "$json_file" "$expected_files" <<'PY'
 import json
 import sys
 result = json.loads(open(sys.argv[1]).read())
@@ -293,7 +291,12 @@ print(total_suites, passed_suites, failed_suites, passed_files, passed_tests,
       failed_tests, pending_files, pending_tests, total_tests, int(success),
       expected, len(files))
 PY
-  )"
+  )"; then
+    cat "$log_file" >&2 || true
+    cat "$json_file" >&2 || true
+    T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter was unreadable for $package ($lane)"
+  fi
   read -r total_suites passed_suites failed_suites passed_files passed_tests \
     failed_tests pending_files pending_tests total_tests success expected \
     reported_files <<< "$stats"
@@ -308,8 +311,14 @@ PY
     die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package ($lane)"
   fi
   if [ "$total_tests" -le 0 ] || [ "$passed_tests" -le 0 ] || [ "$pending_files" -ne 0 ] || [ "$pending_tests" -ne 0 ]; then
+    cat "$log_file" >&2 || true
+    cat "$json_file" >&2 || true
     T1_NEXT_COMMAND='repair the test selection or database route; a T1 run cannot silently skip suites'
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package ($lane)"
+  fi
+  if [ "$suite_status" -ne 0 ]; then
+    printf '[minikube-t1] vitest process exited %s after a complete green reporter for %s %s; T1 follows the reporter\n' \
+      "$suite_status" "$package" "$lane"
   fi
   printf '[minikube-t1] PASS %s %s files=%s tests=%s skipped=0\n' \
     "$package" "$lane" "$passed_files" "$passed_tests"
