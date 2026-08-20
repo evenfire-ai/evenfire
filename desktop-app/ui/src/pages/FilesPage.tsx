@@ -747,13 +747,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               className="da-grid da-gfs-drive__grid"
               style={{
                 '--da-grid-cols':
-                  'calc(var(--space-5) + var(--space-1)) minmax(12rem, 1fr) minmax(5rem, 0.35fr) 4.5rem',
+                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, 4.5rem) 4.5rem',
               }}
             >
               <div className="da-grid__head">
                 <span className="da-grid__col-header" aria-hidden="true" />
                 <span className="da-grid__col-header">Name</span>
-                <span className="da-grid__col-header da-gfs-drive__type-column">Type</span>
+                <span className="da-grid__col-header da-gfs-drive__type-column da-grid__col-header--right">
+                  Type
+                </span>
                 <span className="da-grid__col-header da-grid__col-header--right">Actions</span>
               </div>
               <div className="da-grid__body">

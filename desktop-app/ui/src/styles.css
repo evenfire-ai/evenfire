@@ -13941,7 +13941,7 @@ pre {
   width: auto;
   align-content: start;
   gap: 0;
-  margin: var(--space-2) var(--space-3) var(--space-3);
+  margin: var(--space-2) 0 var(--space-3);
   overflow: visible;
 }
 
@@ -14037,6 +14037,7 @@ pre {
   overflow: hidden;
   color: var(--text-muted);
   font-size: var(--font-size-sm);
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

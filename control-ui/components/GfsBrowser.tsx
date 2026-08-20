@@ -595,7 +595,7 @@ export function GfsBrowser(): React.JSX.Element {
               <div className="cu-gfs-list__head" aria-hidden="true">
                 <span />
                 <span>Name</span>
-                <span>Size</span>
+                <span className="cu-gfs-list__head-size">Size</span>
                 <span className="cu-gfs-list__head-actions">Actions</span>
               </div>
               <ul className="cu-gfs-list" aria-label="Current folder resources">
