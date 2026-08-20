@@ -53,8 +53,11 @@ export type { LlmProvider }
  * Exported for status/debug callers that key on the primary env name.
  */
 export const PROVIDER_ENV_NAME = Object.fromEntries(
-  ALL_PROVIDERS.map(p => [p, primarySlot(descriptorFor(p)).envName])
-) as Record<LlmProvider, string>
+  ALL_PROVIDERS.filter(p => descriptorFor(p).authMode === 'static-credentials').map(p => [
+    p,
+    primarySlot(descriptorFor(p)).envName,
+  ])
+) as Record<Exclude<LlmProvider, 'codex-subscription'>, string>
 
 /**
  * Every provider credential env var name across ALL providers and ALL their

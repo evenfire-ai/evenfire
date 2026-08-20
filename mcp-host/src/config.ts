@@ -410,7 +410,11 @@ function parseDevHostConfig(): HostSpec | undefined {
  * model per provider comes straight from the registry descriptor.
  */
 function getDefaultModel(provider: LlmProvider): string {
-  return descriptorFor(provider).defaultModel
+  const model = descriptorFor(provider).defaultModel
+  if (!model) {
+    throw new Error(`[Config] provider '${provider}' requires an explicit model`)
+  }
+  return model
 }
 
 function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpec {

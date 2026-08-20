@@ -20,9 +20,15 @@
 import {
   type CredentialSlot,
   type LlmProviderId,
+  PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   PROVIDER_IDS,
+  PROVIDER_MODEL_CATALOG_MODE,
+  PROVIDER_NON_SECRET_ENV,
+  type ProviderAuthMode,
+  type ProviderModelCatalogMode,
   isLlmProviderId,
+  requireStaticCredentialSlot,
 } from '@clerum/llm-providers'
 
 /**
@@ -48,14 +54,18 @@ export type { CredentialSlot }
 export interface CoreProviderDescriptor {
   /** Canonical id, == getProviderType(). */
   id: string
+  authMode: ProviderAuthMode
+  modelCatalogMode: ProviderModelCatalogMode
   /**
    * Credentials this provider loads from the LLM Secret, in priority order
-   * (the first is the "primary" slot — see {@link primarySlot}). Every
-   * provider has at least one slot.
+   * (the first is the "primary" slot — see {@link primarySlot}). Static
+   * providers have at least one slot; oauth-broker providers have none.
    */
   credentialSlots: CredentialSlot[]
-  /** Default model when the Host does not specify one. */
-  defaultModel: string
+  /** Non-secret per-Host env vars. Empty for brokers and single-key providers. */
+  nonSecretEnv: readonly { envName: string; required: boolean }[]
+  /** Default model when the Host does not specify one. Absent for brokers. */
+  defaultModel?: string
   /**
    * Base URL for OpenAI-compatible providers (zai, bailian). Absent for
    * providers that bring their own SDK/client (openai, claude, vertex, bedrock).
@@ -80,7 +90,7 @@ export type LlmProvider = LlmProviderId
  * `@clerum/llm-providers`.
  */
 interface RuntimeProviderFields {
-  defaultModel: string
+  defaultModel?: string
   /** Base URL for OpenAI-compatible providers (zai, bailian). */
   baseURL?: string
   tokenizer: CoreProviderDescriptor['tokenizer']
@@ -182,6 +192,8 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
   // data-driven baseURL arm. Tokenizer 'openai' (it serves OpenAI models) and
   // defaultModel is the Azure DEPLOYMENT name the operator expects by default.
   azure: { defaultModel: 'gpt-4.1', tokenizer: 'openai' },
+  // Broker: explicit model required later; no Secret slot and no default.
+  'codex-subscription': { tokenizer: 'fallback' },
 }
 
 // Order = dev auto-detection priority (first present key wins), inherited from
@@ -191,7 +203,14 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
 export const PROVIDERS: Record<LlmProvider, CoreProviderDescriptor> = Object.fromEntries(
   PROVIDER_IDS.map(id => [
     id,
-    { id, credentialSlots: [...PROVIDER_CREDENTIAL_SLOTS[id]], ...RUNTIME_FIELDS[id] },
+    {
+      id,
+      authMode: PROVIDER_AUTH_MODE[id],
+      modelCatalogMode: PROVIDER_MODEL_CATALOG_MODE[id],
+      credentialSlots: [...PROVIDER_CREDENTIAL_SLOTS[id]],
+      nonSecretEnv: [...PROVIDER_NON_SECRET_ENV[id]],
+      ...RUNTIME_FIELDS[id],
+    },
   ])
 ) as Record<LlmProvider, CoreProviderDescriptor>
 
@@ -209,7 +228,7 @@ export const ALL_PROVIDERS = [...PROVIDER_IDS] as LlmProvider[]
  * fallback slots (R5) are never leaked to a subprocess.
  */
 export function primarySlot(d: CoreProviderDescriptor): CredentialSlot {
-  return d.credentialSlots[0]
+  return requireStaticCredentialSlot(d)
 }
 
 /**

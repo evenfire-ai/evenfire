@@ -60,8 +60,10 @@ describe('resolveDefaultModel', () => {
   it('prefers the static provider default when it is enabled', () => {
     const enabled = getModelOptions(CATALOG, 'claude')
     // Seed the static default into the enabled list to exercise the happy path.
-    const withDefault = [...enabled, LLM_DEFAULT_MODEL_BY_PROVIDER.claude]
-    expect(resolveDefaultModel('claude', withDefault)).toBe(LLM_DEFAULT_MODEL_BY_PROVIDER.claude)
+    const claudeDefault = LLM_DEFAULT_MODEL_BY_PROVIDER.claude
+    expect(claudeDefault).toBeDefined()
+    const withDefault = [...enabled, claudeDefault!]
+    expect(resolveDefaultModel('claude', withDefault)).toBe(claudeDefault)
   })
 
   it('falls back to the first enabled model when the default is not allowed', () => {
@@ -119,6 +121,14 @@ describe('LLM_CREDENTIAL_GROUPS (spec R4.5.1/R4.5.2)', () => {
     expect(vertex.slots.map(s => s.dataKey)).toEqual(['vertex-service-account-json'])
     expect(vertex.slots[0].multiline).toBe(true)
     expect(vertex.nonSecretEnv).toEqual(expect.arrayContaining(['VERTEX_PROJECT_ID']))
+  })
+
+  it('models Codex as a zero-slot broker with no static default model', () => {
+    const codex = LLM_CREDENTIAL_GROUPS.find(g => g.provider === 'codex-subscription')!
+    expect(codex.slots).toEqual([])
+    expect(codex.nonSecretEnv).toEqual([])
+    expect(LLM_DEFAULT_MODEL_BY_PROVIDER['codex-subscription']).toBeUndefined()
+    expect(resolveDefaultModel('codex-subscription', ['gpt-5.1'])).toBe('gpt-5.1')
   })
 })
 

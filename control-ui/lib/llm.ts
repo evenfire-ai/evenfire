@@ -63,7 +63,7 @@ export type LlmModelCatalogEntry = {
 // absorb it into the shared providers package. When this default is not
 // enabled in the allowlist, `resolveDefaultModel()` falls back to the first
 // enabled model of the provider.
-export const LLM_DEFAULT_MODEL_BY_PROVIDER: Record<LlmProvider, string> = {
+export const LLM_DEFAULT_MODEL_BY_PROVIDER: Partial<Record<LlmProvider, string>> = {
   openai: 'gpt-5.4-mini',
   claude: 'claude-sonnet-4-6',
   zai: 'glm-5.1',

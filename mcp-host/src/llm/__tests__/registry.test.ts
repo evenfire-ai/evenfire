@@ -6,8 +6,9 @@
  * guard in `isLlmProvider` (§1), and the factory fail-safe (§5.7).
  */
 import { describe, expect, it } from 'vitest'
-import { createLLMProvider } from '../index'
-import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from '../registryCore'
+import { apiKeysFromEnv, createLLMProvider } from '../index'
+import { makeProvider } from '../registry'
+import { ALL_PROVIDERS, descriptorFor, isLlmProvider, primarySlot } from '../registryCore'
 
 describe('provider registry — auto-detection order (§5.9)', () => {
   it('preserves the dev priority prefix openai > claude > zai > bailian > vertex > bedrock', () => {
@@ -27,8 +28,12 @@ describe('provider registry — auto-detection order (§5.9)', () => {
     ])
   })
 
-  it('registers all 21 canonical providers and every R6 addition', () => {
-    expect(ALL_PROVIDERS).toHaveLength(21)
+  it('registers all 21 static providers plus the Codex broker', () => {
+    expect(
+      ALL_PROVIDERS.filter(p => descriptorFor(p).authMode === 'static-credentials')
+    ).toHaveLength(21)
+    expect(ALL_PROVIDERS).toContain('codex-subscription')
+    expect(ALL_PROVIDERS).toHaveLength(22)
     for (const p of [
       'openrouter',
       'gemini',
@@ -184,5 +189,40 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
     }
     expect(internals.defaultModel).toBe(desc.defaultModel)
     expect(internals.client.baseURL).toBe(desc.baseURL)
+  })
+})
+
+describe('codex-subscription zero-slot broker', () => {
+  it('exposes oauth-broker/dynamic metadata with no slots or defaultModel', () => {
+    expect(descriptorFor('codex-subscription')).toMatchObject({
+      authMode: 'oauth-broker',
+      modelCatalogMode: 'dynamic',
+      credentialSlots: [],
+      nonSecretEnv: [],
+    })
+    expect(descriptorFor('codex-subscription').credentialSlots).toEqual([])
+    expect(descriptorFor('codex-subscription').defaultModel).toBeUndefined()
+  })
+
+  it('rejects the static credential helper for a broker', () => {
+    expect(() => primarySlot(descriptorFor('codex-subscription'))).toThrow(
+      /static credential helper/
+    )
+  })
+
+  it('does not autodetect Codex from env API keys', () => {
+    const keys = apiKeysFromEnv({
+      OPENAI_API_KEY: 'sk-test',
+      CODEX_SUBSCRIPTION_API_KEY: 'should-not-count',
+    })
+    expect(keys.openai).toBeDefined()
+    expect(keys['codex-subscription']).toBeUndefined()
+  })
+
+  it('fails closed when constructing Codex without runtime dependencies', () => {
+    expect(() => makeProvider('codex-subscription', {})).toThrow(
+      /requires an explicit model and runtime authorizer/
+    )
+    expect(createLLMProvider({}, { provider: 'codex-subscription', name: 'gpt-5.1' })).toBeNull()
   })
 })

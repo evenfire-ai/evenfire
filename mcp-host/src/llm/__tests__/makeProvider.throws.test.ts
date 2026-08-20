@@ -36,3 +36,11 @@ describe('makeProvider — divergent provider without a factory', () => {
     )
   })
 })
+
+describe('makeProvider — Codex broker', () => {
+  it('fails closed without runtime authorizer/proxy dependencies', () => {
+    expect(() => makeProvider('codex-subscription', {})).toThrow(
+      /requires an explicit model and runtime authorizer/
+    )
+  })
+})

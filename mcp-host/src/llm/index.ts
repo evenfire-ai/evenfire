@@ -67,6 +67,7 @@ export function createLLMProvider(
 export function apiKeysFromEnv(env: NodeJS.ProcessEnv = process.env): ApiKeys {
   const keys: ApiKeys = {}
   for (const p of ALL_PROVIDERS) {
+    if (descriptorFor(p).authMode !== 'static-credentials') continue
     const slots = descriptorFor(p).credentialSlots
     const bag: Record<string, string> = {}
     for (const slot of slots) {

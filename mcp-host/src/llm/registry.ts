@@ -78,12 +78,19 @@ export function makeProvider(
       // it deliberately has NO static baseURL and must not hit the data arm
       // below. Fails closed (throws) if the operator omitted the endpoint.
       return new AzureOpenAIProvider(credentials[primarySlot(d).dataKey], model ?? d.defaultModel)
+    case 'codex-subscription':
+      throw new Error(
+        '[LLM] makeProvider: codex-subscription requires an explicit model and runtime authorizer/proxy dependencies'
+      )
   }
 
   // Data-driven arm: anything carrying a baseURL is OpenAI-compatible and is
   // built straight from its descriptor — no per-id branch. A new divergent
   // (own-SDK) provider must instead add its own case above.
   if (d.baseURL) {
+    if (!d.defaultModel) {
+      throw new Error(`[LLM] makeProvider: provider '${d.id}' requires a defaultModel`)
+    }
     return new OpenAICompatibleProvider(
       { id: d.id, baseURL: d.baseURL, defaultModel: d.defaultModel },
       credentials[primarySlot(d).dataKey],
