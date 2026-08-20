@@ -2785,9 +2785,13 @@ async function startDevMode(): Promise<void> {
     // Safe `!`: the `ALL_PROVIDERS.every(p => !keys[p])` throw-guard above
     // already proved at least one key is present.
     const provider = ALL_PROVIDERS.find(p => keys[p])!
+    const defaultModel = descriptorFor(provider).defaultModel
+    if (!defaultModel) {
+      throw new Error(`[Main] auto-detected provider '${provider}' requires an explicit model`)
+    }
     hostSpec = {
       ...hostSpec,
-      model: { provider, name: descriptorFor(provider).defaultModel },
+      model: { provider, name: defaultModel },
     }
     console.log(`[Main] Auto-detected provider: ${provider} (based on available API key)`)
   }
