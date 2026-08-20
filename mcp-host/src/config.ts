@@ -579,9 +579,27 @@ const contextMapperPollInterval = parseInt(
   getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!,
   10
 )
+// Fail-closed window for an UNREACHABLE HCC (5xx / transport failures only).
+// It is bounded so a revoked-but-unconfirmable authority cannot linger forever,
+// yet generous enough to survive a normal HCC `Recreate` rollout (measured ~77s
+// in clerum-dev, with a startupProbe budget of up to 120s) without tearing down
+// the whole MCP fleet and aborting in-flight tool calls.
+//
+// Crucially, this window ONLY governs the `unavailable` failure class. Identity /
+// authorization failures (401/403 — Host UID change, revoked grant) revoke
+// immediately on the next reachable call and are NOT gated by this value, and a
+// grant change while HCC is healthy is applied by the next successful poll. So
+// raising this ceiling does not delay any real authority revocation and does not
+// widen the NP-08 credential-disclosure surface (which lives entirely in HCC's
+// per-request authorization). See issue #425.
+//
+// Operators may lower it, or raise it up to HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
+// for slower-starting clusters. The minikube e2e lane pins 60000 explicitly so the
+// revoke-on-staleness scenario stays fast and deterministic.
+const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = 600_000 // 10 min hard upper bound
 const hccAuthorityMaxStalenessMs = Math.min(
-  getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 60_000),
-  60_000
+  getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 180_000),
+  HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
 )
 
 // Dev mode does not retain a Kubernetes-authoritative MCP fleet, so the

@@ -23,20 +23,24 @@ afterEach(() => {
 })
 
 describe('HCC_AUTHORITY_MAX_STALENESS_MS', () => {
-  it('defaults to the 60-second authority ceiling', async () => {
-    await expect(loadAuthorityMaxStaleness(undefined)).resolves.toBe(60_000)
+  it('defaults to the 180-second rollout-tolerant window', async () => {
+    await expect(loadAuthorityMaxStaleness(undefined)).resolves.toBe(180_000)
   })
 
   it('allows an operator to fail closed sooner', async () => {
     await expect(loadAuthorityMaxStaleness('15000', '5000')).resolves.toBe(15_000)
   })
 
-  it('cannot be configured beyond the 60-second authority ceiling', async () => {
-    await expect(loadAuthorityMaxStaleness('120000')).resolves.toBe(60_000)
+  it('allows an operator to raise the window for a slower-starting cluster (issue #425)', async () => {
+    await expect(loadAuthorityMaxStaleness('300000')).resolves.toBe(300_000)
   })
 
-  it('uses the safe ceiling for an invalid value', async () => {
-    await expect(loadAuthorityMaxStaleness('not-a-duration')).resolves.toBe(60_000)
+  it('cannot be configured beyond the 600-second hard ceiling', async () => {
+    await expect(loadAuthorityMaxStaleness('700000')).resolves.toBe(600_000)
+  })
+
+  it('uses the default window for an invalid value', async () => {
+    await expect(loadAuthorityMaxStaleness('not-a-duration')).resolves.toBe(180_000)
   })
 
   it('rejects a poll interval that reaches the authority ceiling', async () => {
@@ -53,8 +57,8 @@ describe('HCC_AUTHORITY_MAX_STALENESS_MS', () => {
     )
   })
 
-  it('accepts the default 30-second poll inside the 60-second ceiling', async () => {
+  it('accepts the default 30-second poll inside the default staleness window', async () => {
     const { validateHccAuthorityTiming } = await import('./config')
-    expect(() => validateHccAuthorityTiming(30_000, 60_000)).not.toThrow()
+    expect(() => validateHccAuthorityTiming(30_000, 180_000)).not.toThrow()
   })
 })

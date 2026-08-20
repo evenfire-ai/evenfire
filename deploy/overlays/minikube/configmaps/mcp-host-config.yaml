@@ -11,6 +11,10 @@ data:
   CLERUM_CONTEXT_MAPPER_URL: 'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
   CLERUM_CONTEXT_MAPPER_POLL_INTERVAL: '30000'
   MCP_PROXY_ENABLED: 'false'
+  # e2e lane pin: 60s keeps the revoke-on-staleness scenario fast and
+  # deterministic. Production defaults to 180s (bounded 600s) in
+  # mcp-host/src/config.ts so a normal HCC rollout (~77s in clerum-dev) does not
+  # tear down the MCP fleet. See issue #425.
   HCC_AUTHORITY_MAX_STALENESS_MS: '60000'
   MCP_PROXY_URL: 'http://mcp-proxy.mcp-server.svc.cluster.local:8083'
   CLERUM_AGENT_TASK_DELAY: '3'

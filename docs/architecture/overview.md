@@ -766,10 +766,13 @@ HTTP 410; the remaining global v1 inventory is metadata-only transitional
 surface for the separately reviewed mcp-proxy PR2 and is not used by mcp-host.
 
 Polling interval: 30 seconds (configurable via `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`).
-In cluster mode it must remain strictly below the 60-second
-`HCC_AUTHORITY_MAX_STALENESS_MS` ceiling; mcp-host rejects an invalid relation at
-startup rather than allowing the fleet to flap between successful polls and
-authority revocation.
+In cluster mode it must remain strictly below `HCC_AUTHORITY_MAX_STALENESS_MS`
+(default 180 s, operator-tunable up to a 600 s hard ceiling); mcp-host rejects an
+invalid relation at startup rather than allowing the fleet to flap between
+successful polls and authority revocation. The staleness window governs only the
+`unavailable` failure class (HCC unreachable / 5xx): it is sized to absorb a
+normal HCC `Recreate` rollout without tearing down the MCP fleet. Identity/401
+revocations are immediate and are not gated by this window (issue #425).
 
 On each poll, mcp-host compares new server list with previous state and:
 
@@ -822,7 +825,7 @@ The HTTP response is held open until the agent finishes processing. The response
 | `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                                                            |
 | `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                                                                  |
 | `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                                                                          |
-| `HCC_AUTHORITY_MAX_STALENESS_MS`      | `60000`          | Maximum retained HCC authority (ms); must be greater than the poll interval in cluster mode |
+| `HCC_AUTHORITY_MAX_STALENESS_MS`      | `180000`         | Max retained HCC authority while HCC is unreachable (ms); operator-tunable, hard-capped at 600000; must be greater than the poll interval in cluster mode (issue #425) |
 | `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"`                                             |
 | `CLERUM_MODEL_NAME`                   | provider default | Specific model name                                                                         |
 | `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                                                                       |
