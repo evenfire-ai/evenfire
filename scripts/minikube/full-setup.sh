@@ -978,7 +978,11 @@ else
       exit 1
     fi
     log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    # REUSE_DB / T2 full-reconcile reaches this before pre-gate-sync. A prior T1
+    # can leave gfs_controller_reader NOLOGIN; restore from the committed
+    # Secret DSN (same opt-in as the GFS T1 gate). Still fail-loud on auth.
+    GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
   else
     log "Fresh bootstrap detected — reader staging deferred until migrations; GFSC remains fail-closed"
   fi
@@ -1040,7 +1044,8 @@ else
     # the split writer/reader templates; reconciling before that lands leaves
     # the staged reader credential rollout-pending and fails the final verify.
     CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
     ok "GFS credentials reconciled and writer bootstrap verified"
 fi
 
