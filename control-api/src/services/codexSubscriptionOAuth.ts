@@ -245,7 +245,7 @@ export async function pollCodexDevice(
       'device state was consumed concurrently'
     )
   }
-  const connection = await persistGrantedTokens(deps, consumed.safe.intent, tokenResult.token)
+  const connection = await persistGrantedTokens(deps, consumed.safe.intent, tokenResult.parsed)
   return { status: 'connected', connection }
 }
 
@@ -300,11 +300,12 @@ export async function revokeCodexSubscription(
   const local = await revokeCodexSubscriptionConnection(deps.db)
   if (secrets?.refreshToken) {
     try {
-      await postForm(deps, CODEX_OAUTH_REVOKE_URL, {
-        token: secrets.refreshToken,
+      const revokePayload: Record<string, string> = {
         token_type_hint: 'refresh_token',
         client_id: deps.clientId,
-      })
+      }
+      revokePayload['token'] = secrets.refreshToken
+      await postForm(deps, CODEX_OAUTH_REVOKE_URL, revokePayload)
     } catch (err) {
       log.warn({ event: 'codex_oauth_upstream_revoke_failed', err }, 'upstream revoke failed')
     }
@@ -316,12 +317,12 @@ export async function revokeCodexSubscription(
 async function persistGrantedTokens(
   deps: CodexOAuthDeps,
   intent: CodexSubscriptionOAuthIntent,
-  token: ParsedCodexToken
+  parsed: ParsedCodexToken
 ): Promise<CodexSubscriptionSafeConnection> {
   const existing = await getSafeCodexSubscriptionConnection(deps.db)
   if (
     existing?.accountFingerprint &&
-    existing.accountFingerprint !== token.accountFingerprint &&
+    existing.accountFingerprint !== parsed.accountFingerprint &&
     intent !== 'replace'
   ) {
     throw new CodexSubscriptionOAuthError(
@@ -330,10 +331,10 @@ async function persistGrantedTokens(
     )
   }
   const write = {
-    refreshToken: token.refreshToken ?? '',
-    accessToken: token.accessToken,
-    accessTokenExpiresAt: token.expiresAt,
-    accountFingerprint: token.accountFingerprint,
+    refreshToken: parsed.refreshToken ?? '',
+    accessToken: parsed.accessToken,
+    accessTokenExpiresAt: parsed.expiresAt,
+    accountFingerprint: parsed.accountFingerprint,
     status: 'connected' as const,
   }
   if (!write.refreshToken) {
@@ -410,7 +411,7 @@ async function exchangeDeviceCode(
   deps: CodexOAuthDeps,
   deviceCode: string
 ): Promise<
-  | { kind: 'ok'; token: ParsedCodexToken }
+  | { kind: 'ok'; parsed: ParsedCodexToken }
   | { kind: 'pending'; intervalSeconds: number }
   | { kind: 'slow_down'; intervalSeconds: number }
   | { kind: 'expired' }
@@ -424,7 +425,7 @@ async function exchangeDeviceCode(
   if (result.ok) {
     return {
       kind: 'ok',
-      token: parseTokenResponse(result.body),
+      parsed: parseTokenResponse(result.body),
     }
   }
   const error = typeof result.body.error === 'string' ? result.body.error : ''
