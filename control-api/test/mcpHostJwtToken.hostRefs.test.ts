@@ -4,6 +4,7 @@ import { config } from '../src/config.js'
 import {
   ALL_MCP_HOST_CONTROL_SCOPES,
   MCP_HOST_CREDENTIAL_CAPABILITY,
+  MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS,
   MCP_HOST_HCC_AUDIENCE,
   MCP_HOST_WORKFLOW_AUDIENCE,
   type McpHostAccessClaims,
@@ -72,6 +73,26 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
         host_uid: 'host-uid-chatllm',
         mcpCapabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
       })
+    })
+
+    it('clamps an HCC access token to the verifier ceiling without changing WRC TTLs', () => {
+      const previousAccessTtl = config.mcpHostJwtAccessTtlSec
+      config.mcpHostJwtAccessTtlSec = MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS + 300
+      try {
+        const hcc = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+          hccCredential: { hostUid: 'host-uid-chatllm' },
+        })
+        const workflow = issueMcpHostAccessJwt('sandbox-recipes', 'recipe')
+        const hccClaims = jwt.decode(hcc.token) as Record<string, unknown>
+
+        expect(hcc.expiresInSeconds).toBe(MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS)
+        expect((hccClaims.exp as number) - (hccClaims.iat as number)).toBe(
+          MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS
+        )
+        expect(workflow.expiresInSeconds).toBe(previousAccessTtl + 300)
+      } finally {
+        config.mcpHostJwtAccessTtlSec = previousAccessTtl
+      }
     })
 
     it('rejects workflow-only tokens that inject HCC-only claims', () => {

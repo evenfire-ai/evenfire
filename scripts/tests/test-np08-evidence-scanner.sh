@@ -5,6 +5,25 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCANNER="${ROOT}/scripts/security/scan-np08-evidence.sh"
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/np08-scan-test.XXXXXX")"
 trap 'rm -rf "${tmpdir}"' EXIT
+BASH_BIN="$(command -v bash)"
+
+if PATH="${tmpdir}/missing-tools" "${BASH_BIN}" "${SCANNER}" \
+  --stdin-kind api </dev/null >/dev/null 2>&1; then
+  echo 'FAIL: scanner passed without ripgrep' >&2
+  exit 1
+fi
+
+if (
+  # Invoked indirectly by the scanner's child Bash process.
+  # shellcheck disable=SC2329
+  rg() { return 2; }
+  export -f rg
+  printf '%s\n' '{"Authorization":"Bearer abc.def.ghi"}' |
+    bash "${SCANNER}" --stdin-kind api >/dev/null 2>&1
+); then
+  echo 'FAIL: scanner passed when ripgrep returned an execution error' >&2
+  exit 1
+fi
 
 if ! printf '%s\n' '{"error":"authorization_unavailable"}' | bash "${SCANNER}" --stdin-kind api >/dev/null; then
   echo 'FAIL: sanitized authorization error was treated as a credential leak' >&2

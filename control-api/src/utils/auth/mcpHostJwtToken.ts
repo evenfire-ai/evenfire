@@ -17,6 +17,12 @@ const EXPIRED_REFRESH_REISSUE_GRACE_SECONDS = 5 * 60
 export const MCP_HOST_WORKFLOW_AUDIENCE = 'workflow-approvals'
 export const MCP_HOST_HCC_AUDIENCE = 'host-context-controller'
 export const MCP_HOST_CREDENTIAL_CAPABILITY = 'mcp:credential:read'
+/**
+ * HCC's access-token verifier accepts at most ten minutes. Keep the issuer
+ * fail-closed if an operator raises the shared workflow access TTL without
+ * first changing the HCC security contract.
+ */
+export const MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS = 600
 const HCC_HOST_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
 
 type McpHostCredentialLineage = {
@@ -214,6 +220,10 @@ function issueToken(
   if (hccCredential) {
     assertHccCredentialLineage(recipeNamespace, recipeName, hostRefs, hccCredential)
   }
+  const effectiveTtlSec =
+    hccCredential && scope === 'workflow:approval:request'
+      ? Math.min(ttlSec, MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS)
+      : ttlSec
   const token = jwt.sign(
     {
       sub: `${recipeNamespace}/${recipeName}`,
@@ -237,10 +247,10 @@ function issueToken(
         ? [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE]
         : MCP_HOST_WORKFLOW_AUDIENCE,
       jwtid: randomUUID(),
-      expiresIn: ttlSec,
+      expiresIn: effectiveTtlSec,
     }
   )
-  return { token, expiresInSeconds: ttlSec }
+  return { token, expiresInSeconds: effectiveTtlSec }
 }
 
 export function issueMcpHostAccessJwt(

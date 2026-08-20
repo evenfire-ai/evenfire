@@ -5,6 +5,11 @@ set -euo pipefail
 # lines. API/log inputs must already be redacted; rendered manifests are a
 # separate scope and may contain Secret references, but never credential values.
 
+command -v rg >/dev/null 2>&1 || {
+  echo 'FAIL: ripgrep (rg) is required for NP-08 evidence scanning' >&2
+  exit 1
+}
+
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/np08-evidence.XXXXXX")"
 trap 'rm -rf "${tmpdir}"' EXIT
 
@@ -61,8 +66,15 @@ scan_scope() {
   local input
   for input in "$@"; do
     local hits="${tmpdir}/${scope}-${count}.hits"
+    local rg_status
     if rg -n -I -i --no-messages -e "${pattern}" "${input}" >"${hits}"; then
       count=$((count + $(wc -l <"${hits}")))
+    else
+      rg_status=$?
+      if [[ "${rg_status}" -ne 1 ]]; then
+        echo "FAIL: rg could not scan ${scope} evidence (exit ${rg_status})" >&2
+        return 2
+      fi
     fi
   done
   echo "${scope}_violations=${count}"

@@ -511,6 +511,9 @@ jobs:
       - name: Test NP-08 Host clients have no v1 fallback
         run: bash scripts/tests/test-np08-v1-reference-inventory.sh
 
+      - name: Test NP-08 evidence scanner fails closed
+        run: bash scripts/tests/test-np08-evidence-scanner.sh
+
       - name: Test NP-08 deployed E2E cleanup and provenance guards
         run: bash scripts/tests/test-np08-e2e-guards.sh
 

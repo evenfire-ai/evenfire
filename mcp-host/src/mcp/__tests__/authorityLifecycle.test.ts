@@ -236,6 +236,7 @@ describe('MCP authority lifecycle', () => {
       authentication: {
         getAccessToken: () => 'host-access-token',
         refreshOnUnauthorized: vi.fn(),
+        onCallerAuthorizationFailure: vi.fn(),
       },
     })
     const error = await captureError(() => client.pollServers())

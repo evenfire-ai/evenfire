@@ -91,17 +91,39 @@ use `CONTROL_API_REAL_PG_ADMIN_URL` unchanged.
 
 ## T0, T1, and T2 boundaries
 
-* **T0** — shell syntax/ShellCheck where available, contract tests, affected
+- **T0** — shell syntax/ShellCheck where available, contract tests, affected
   package builds/typechecks, and `git diff --check`.
-* **T1** — the Real PostgreSQL suites execute against the validated local
+- **T1** — the Real PostgreSQL suites execute against the validated local
   `control-postgres`; the lane reports `PASS`, `FAIL`, `SKIPPED`, and `NOT_RUN`
   separately and fails on an unavailable DSN or zero executed tests.
-* **T2** — the exact worktree/`HEAD` is deployed to the owned profile, the
+- **T2** — the exact worktree/`HEAD` is deployed to the owned profile, the
   cluster is healthy, readiness and health checks pass, and applicable
   Control UI/Desktop journeys are run through their user-visible paths.
 
 CI, static tests, T1, T2, and Playwright are separate evidence lanes. A green
 CI job or unit suite is not proof of T2 runtime behavior.
+
+## NP-08 security evidence gates
+
+The NP-08 runtime conformance helpers are intentionally branch-owned, local
+T2 adjuncts rather than shared CI jobs. They require an explicit Minikube
+context and must never target GKE, Clerum-dev, Clerum-prod, or a shared
+profile:
+
+- `scripts/security/verify-np08-hcc-authz.sh` is the read-only deployment
+  conformance check (Gate F). Invoke it with
+  `--context <profile-context> --read-only --redact-identifiers`.
+- `scripts/security/run-np08-synthetic-gate.sh` runs the repository-owned
+  two-Context authorization matrix without Kubernetes writes (Gate E). Give it
+  the same explicit context and a summary path below the ignored run directory.
+- `scripts/security/scan-np08-evidence.sh` scans already-redacted API/log
+  evidence. Its fixture regression runs in public CI; production-like evidence
+  is scanned only after a local T2 run and must never contain Secret values.
+
+The canonical T2 journey remains
+`scripts/e2e/e2e-np08-hcc-authorization.sh`; these helpers do not replace it.
+Their manual status must be recorded as `PASS`, `FAIL`, or `NOT_RUN` in the
+sanitized run evidence rather than inferred from unit or CI results.
 
 ## Recovery and retry
 
@@ -136,3 +158,22 @@ or private PostgreSQL URLs as well as other sensitive runtime artifacts.
 
 If ownership, scope, or redaction cannot be proved, stop and preserve the
 reported code; do not widen the command to another cluster.
+
+### Deferred NP-08 hardening
+
+The following items are deliberately deferred because they change a security
+contract or require a separate rollout. They remain tracked follow-ups and are
+not evidence that PR1's credential disclosure fix is incomplete.
+
+| Follow-up                                                                                                                                              | Owner / scope                                    | Required completion evidence                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Preserve HCC lineage through refresh/reissue without carrying `aud=host-context-controller` or `mcp:credential:read` on the longer-lived refresh token | Control API + HCC, separate auth-contract change | Issuance, refresh, reissue, expiry, and wrong-route negative tests; explicit rollout/rollback matrix; HCC accepts only the short-lived access credential.                               |
+| Replace the anonymous global metadata inventory with an authenticated system principal for `mcp-proxy`, then retire the v1 route                       | HCC + gateway + mcp-proxy, PR2                   | A dedicated service identity and least-privilege route; no Host access; destination-bound grant/revision; proxy migration and v1 tombstone tests; both rendered and live policy proofs. |
+| Add bounded rate limiting to unauthenticated diagnostic/metadata routes without breaking readiness, metrics, or the retained proxy compatibility lane  | HCC/gateway operations                           | Per-route load/availability tests, probe compatibility evidence, normalized 429 contract, and a rollback-safe gateway rollout.                                                          |
+
+The first item is intentionally not a follow-up patch in PR1: changing refresh
+claims changes token consumers and revocation semantics. The second is the
+accepted PR2 residual: the current global response is metadata-only and must
+not be described as a credential-disclosure path. The third is deferred rather
+than guessed because an overly broad limiter could take down health probes or
+the still-supported inventory consumer.

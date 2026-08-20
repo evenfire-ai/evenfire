@@ -66,7 +66,8 @@ export function isContextMapperInventoryAuthorityRevocation(error: unknown): boo
 export interface ContextMapperAuthentication {
   getAccessToken(): string
   refreshOnUnauthorized(): Promise<void>
-  onCallerAuthorizationFailure?(status: 401 | 403): void
+  /** Required so every authenticated client has a synchronous revocation hook. */
+  onCallerAuthorizationFailure(status: 401 | 403): void
 }
 
 export interface ContextMapperClientOptions {
@@ -203,7 +204,7 @@ export class ContextMapperClient {
       // revoke any already-published fleet before returning to the caller.
     }
     if (!token) {
-      this.authentication?.onCallerAuthorizationFailure?.(401)
+      this.authentication?.onCallerAuthorizationFailure(401)
       throw new ContextMapperRequestError(401, kind, true)
     }
     return token
@@ -230,14 +231,14 @@ export class ContextMapperClient {
         try {
           await this.authentication.refreshOnUnauthorized()
         } catch {
-          this.authentication.onCallerAuthorizationFailure?.(401)
+          this.authentication.onCallerAuthorizationFailure(401)
           throw new ContextMapperRequestError(401, kind, true)
         }
         continue
       }
 
       if (response.status === 401 || response.status === 403) {
-        this.authentication?.onCallerAuthorizationFailure?.(response.status)
+        this.authentication?.onCallerAuthorizationFailure(response.status)
         throw new ContextMapperRequestError(response.status, kind, true)
       }
       if (!response.ok) {
