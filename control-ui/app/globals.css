@@ -7420,6 +7420,20 @@ textarea.cu-input {
   max-width: 100%;
 }
 
+.cu-host-context-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.75rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: var(--cu-radius-pill);
+  border: 1px solid var(--cu-border-subtle);
+  background: rgba(var(--cu-panel-rgb), 0.5);
+  color: var(--cu-text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
 .cu-host-context-hover > .cu-agent-context-mcp-summary {
   position: absolute;
   top: calc(100% + var(--cu-space-1));

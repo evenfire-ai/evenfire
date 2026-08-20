@@ -228,11 +228,12 @@ describe('HostTable display name column (UT-9)', () => {
 })
 
 // Hover card on the Context column — when the page supplies a `contextsByRef`
-// map, hovering (or keyboard-focusing) the context link reveals the same
-// MCP-server list the create wizard shows for the selected context.
+// map, hovering (or keyboard-focusing) the context pill reveals the same
+// MCP-server list the create wizard shows for the selected context. The cell
+// shows the count; the tooltip shows the context name + count + names.
 describe('HostTable context MCP hover card', () => {
-  function contextLink(row: HTMLElement): HTMLElement {
-    return within(row).getByRole('button', { name: 'context1' })
+  function contextPill(row: HTMLElement, count: string): HTMLElement {
+    return within(row).getByRole('button', { name: count })
   }
 
   it('reveals the MCP server list on hover and lists every server', () => {
@@ -241,21 +242,21 @@ describe('HostTable context MCP hover card', () => {
     })
 
     const row = screen.getByLabelText('Open agent chatllm')
-    const link = contextLink(row)
+    const pill = contextPill(row, '3')
 
     // Closed by default — nothing tooltipped.
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
-    expect(link).not.toHaveAttribute('aria-describedby')
+    expect(pill).not.toHaveAttribute('aria-describedby')
 
-    fireEvent.mouseEnter(link)
+    fireEvent.mouseEnter(pill)
     const card = within(row).getByRole('tooltip')
-    expect(card).toHaveTextContent('MCP servers')
+    expect(card).toHaveTextContent('context1')
     expect(card).toHaveTextContent('3')
     expect(within(card).getByText('github')).toBeInTheDocument()
     expect(within(card).getByText('linear')).toBeInTheDocument()
     expect(within(card).getByText('slack')).toBeInTheDocument()
 
-    fireEvent.mouseLeave(link)
+    fireEvent.mouseLeave(pill)
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
   })
 
@@ -265,34 +266,32 @@ describe('HostTable context MCP hover card', () => {
     })
 
     const row = screen.getByLabelText('Open agent chatllm')
-    const link = contextLink(row)
+    const pill = contextPill(row, '1')
 
-    fireEvent.focus(link)
+    fireEvent.focus(pill)
     const card = within(row).getByRole('tooltip')
     expect(within(card).getByText('github')).toBeInTheDocument()
-    expect(link).toHaveAttribute('aria-describedby', card.id)
+    expect(pill).toHaveAttribute('aria-describedby', card.id)
 
-    fireEvent.blur(link)
+    fireEvent.blur(pill)
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
   })
 
-  it('stays a plain link when the context has no MCP servers', () => {
+  it('renders the bare count without a tooltip when the context has no MCP servers', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')], {
       context1: [],
     })
 
     const row = screen.getByLabelText('Open agent chatllm')
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
-    fireEvent.mouseEnter(within(row).getByRole('button', { name: 'context1' }))
-    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+    expect(within(row).getByText('0')).toBeInTheDocument()
   })
 
-  it('does not show a card when the context map is missing', () => {
+  it('renders a plain 0 when the context map is missing', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')])
 
     const row = screen.getByLabelText('Open agent chatllm')
-    const link = within(row).getByRole('button', { name: 'context1' })
-    fireEvent.mouseEnter(link)
+    expect(within(row).getByText('0')).toBeInTheDocument()
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
   })
 })

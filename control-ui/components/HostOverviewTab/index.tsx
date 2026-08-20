@@ -1,4 +1,5 @@
 import React from 'react'
+import { IconRobot } from '../Sidebar/icons'
 import { IconCopy } from '../icons'
 import type { HostOverviewTabProps } from './types'
 
@@ -106,23 +107,7 @@ export function HostOverviewTab({
     <div className="cu-host-overview">
       <section className="cu-host-overview-identity" aria-label="Agent identity">
         <div className="cu-host-overview-identity__avatar" aria-hidden="true">
-          <svg
-            viewBox="0 0 24 24"
-            width="44"
-            height="44"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.7"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <rect x="5" y="7" width="14" height="12" rx="3" />
-            <path d="M9 4h6" />
-            <circle cx="9" cy="13" r="1.2" fill="currentColor" stroke="none" />
-            <circle cx="15" cy="13" r="1.2" fill="currentColor" stroke="none" />
-            <path d="M12 16v3" />
-            <path d="M9 19h6" />
-          </svg>
+          <IconRobot />
         </div>
         <div className="cu-host-overview-identity__name">{shownName}</div>
         <div className="cu-host-overview-identity__slug">{hostName}</div>

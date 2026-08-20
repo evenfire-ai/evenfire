@@ -43,7 +43,7 @@ const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
   model: 'Models & creds',
   advanced: 'Advanced',
-  contexts: 'Context',
+  contexts: 'Connectors',
   access: 'Access',
   identity: 'Identity',
 }
