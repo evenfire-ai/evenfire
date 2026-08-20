@@ -11518,11 +11518,11 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-list__icon {
-  width: 2.25rem;
-  height: 2.25rem;
-  border: 1px solid rgba(var(--cu-accent-rgb), 0.2);
-  background: rgba(var(--cu-accent-rgb), 0.08);
-  color: var(--cu-accent);
+  width: 1.5rem;
+  height: 1.5rem;
+  display: grid;
+  place-items: center;
+  color: var(--cu-text-muted);
 }
 
 .cu-gfs-list__meta {

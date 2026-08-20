@@ -13461,10 +13461,8 @@ pre {
 .da-gfs-list__icon {
   display: grid;
   place-items: center;
-  width: calc(var(--space-5) + var(--space-1));
-  height: calc(var(--space-5) + var(--space-1));
-  border-radius: var(--radius-sm);
-  background: var(--surface-soft);
+  width: var(--space-5);
+  height: var(--space-5);
   color: var(--text-muted);
 }
 
