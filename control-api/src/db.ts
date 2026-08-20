@@ -5,6 +5,8 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { applyCodexSubscriptionConnectionSchema } from './services/codexSubscriptionConnection.js'
+import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
@@ -5913,6 +5915,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0099_gfs_upload_finalizing_recovery',
     apply: applyGfsUploadFinalizingSchema,
+  },
+  {
+    version: '00a0_codex_subscription_connections',
+    apply: applyCodexSubscriptionConnectionSchema,
+  },
+  {
+    version: '00a1_codex_subscription_oauth_states',
+    apply: applyCodexSubscriptionOAuthStateSchema,
   },
 ]
 
