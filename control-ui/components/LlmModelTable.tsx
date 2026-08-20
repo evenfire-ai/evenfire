@@ -231,7 +231,6 @@ export function LlmModelTable({
     },
     { key: 'enabled', label: 'Enabled', width: '6rem' },
     { key: 'source', label: 'Source', width: '7rem' },
-    { key: 'catalogStatus', label: 'Catalog status', width: '8rem' },
     { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
   ]
 
@@ -414,16 +413,6 @@ export function LlmModelTable({
                             >
                               {model.source === 'discovery' ? 'Discovered' : 'Manual'}
                             </span>
-                          </td>
-                          <td>
-                            {model.stale === true ? (
-                              <span
-                                className="cu-px-badge cu-px-badge--warn"
-                                title="Missing from the latest live provider catalog. It remains available when enabled until an operator disables or removes it."
-                              >
-                                Stale
-                              </span>
-                            ) : null}
                           </td>
                           <td className="cu-px-actions">
                             <RowActionsMenu
