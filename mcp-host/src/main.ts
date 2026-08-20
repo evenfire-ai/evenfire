@@ -618,7 +618,7 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
   const store = new ConfigStore({
     namespace: config.namespace,
     hostRef: host.name,
-    llmSecretRef: host.spec.secretRef,
+    llmSecretRef: host.spec.secretRef ?? null,
     provider,
     allowlistConfigMapName: config.llmAllowlistConfigMapName,
     // R5 — load the failover policy's referenced credential slots from the same

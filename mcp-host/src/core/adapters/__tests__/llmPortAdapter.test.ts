@@ -613,4 +613,26 @@ describe('Cross-provider ToolCall normalization', () => {
     expect(typeof openaiResult.tool_calls![0].arguments).toBe('object')
     expect(typeof claudeResult.tool_calls![0].arguments).toBe('object')
   })
+
+  it('preserves Codex insufficient_scope on the LlmError boundary', async () => {
+    const mockProvider: SingleTurnProvider = {
+      completeSingleTurn: vi.fn().mockRejectedValue(new Error('missing scope')),
+      completeSingleTurnWithTools: vi.fn(),
+      getProviderType: () => 'codex-subscription' as const,
+      classifyError: vi.fn(() => ({
+        code: LlmErrorCode.AuthenticationFailed,
+        retryable: false,
+        message: 'missing scope',
+        providerCode: 'insufficient_scope',
+      })),
+    }
+    const adapter = new LlmPortAdapter(mockProvider, 'gpt-5.3-codex', 'codex-subscription')
+    await expect(
+      adapter.complete({ messages: [{ role: 'user', content: 'Hi' }] })
+    ).rejects.toMatchObject({
+      code: LlmErrorCode.AuthenticationFailed,
+      providerCode: 'insufficient_scope',
+      retryable: false,
+    })
+  })
 })

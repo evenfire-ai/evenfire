@@ -225,7 +225,8 @@ describe('codex-subscription zero-slot broker', () => {
     expect(() => makeProvider('codex-subscription', {})).toThrow(
       /requires an explicit model and runtime authorizer/
     )
-    expect(createLLMProvider({}, { provider: 'codex-subscription', name: 'gpt-5.1' })).toBeNull()
+    const provider = createLLMProvider({}, { provider: 'codex-subscription', name: 'gpt-5.1' })
+    expect(provider?.getProviderType()).toBe('codex-subscription')
     delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
   })
 })
