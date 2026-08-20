@@ -1090,21 +1090,7 @@ export default function HostDetailsPage() {
                           <span className="cu-table__cell-name">{server}</span>
                         </td>
                         <td className="cu-table__cell-actions">
-                          {contextRefDraft.trim() ? (
-                            <button
-                              type="button"
-                              className="cu-link"
-                              onClick={() =>
-                                router.push(CONTROL_ROUTES.contexts.detail(contextRefDraft.trim()))
-                              }
-                              aria-label={`Open context ${contextRefDraft.trim()}`}
-                              title={`Open context ${contextRefDraft.trim()}`}
-                            >
-                              {contextRefDraft.trim()}
-                            </button>
-                          ) : (
-                            <span className="cu-table__cell-muted">—</span>
-                          )}
+                          <span className="cu-table__cell-muted">—</span>
                         </td>
                       </tr>
                     ))
