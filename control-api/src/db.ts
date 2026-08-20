@@ -5921,6 +5921,22 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGfsUploadFinalizingSchema,
   },
   {
+    version: '00a0_codex_subscription_connections',
+    apply: applyCodexSubscriptionConnectionSchema,
+  },
+  {
+    version: '00a1_codex_subscription_oauth_states',
+    apply: applyCodexSubscriptionOAuthStateSchema,
+  },
+  {
+    version: '00a2_llm_provider_attempts',
+    apply: applyLlmProviderAttemptSchema,
+  },
+  {
+    version: '00a3_llm_provider_attempt_tickets',
+    apply: applyLlmProviderAttemptTicketSchema,
+  },
+  {
     version: '0100_seed_minimax_allowed_model',
     apply: async db => {
       // Seed one sensible default model for the newly added `minimax` provider
@@ -5937,22 +5953,6 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         ON CONFLICT DO NOTHING;
       `)
     },
-  },
-  {
-    version: '00a0_codex_subscription_connections',
-    apply: applyCodexSubscriptionConnectionSchema,
-  },
-  {
-    version: '00a1_codex_subscription_oauth_states',
-    apply: applyCodexSubscriptionOAuthStateSchema,
-  },
-  {
-    version: '00a2_llm_provider_attempts',
-    apply: applyLlmProviderAttemptSchema,
-  },
-  {
-    version: '00a3_llm_provider_attempt_tickets',
-    apply: applyLlmProviderAttemptTicketSchema,
   },
 ]
 
