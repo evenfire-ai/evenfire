@@ -18,7 +18,12 @@ produced only by the final exact-head preflight inside `make minikube-t2` (or
 `make minikube-pre-gate-sync` alone is not T2. Playwright and product E2E
 scripts are separate lanes. T1 judges the JSON reporter (expected files,
 executed/passed, zero failures, zero pending); a leftover Vitest process exit
-after a complete green reporter is not a failed suite. Follow the rule
+after a complete green reporter is not a failed suite. The single run is
+self-healing: the orchestrator planner selects `full-reconcile` for a
+bootstrapped profile with an unready deployment (never `PROFILE_UNHEALTHY`
+before a transition), T1 restores branch-profile GFS credentials on exit, and
+`pre-gate-sync` provisions GFS serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true`
+in every plan; do not insert manual repair scripts between runs. Follow the rule
 `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
 `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
 

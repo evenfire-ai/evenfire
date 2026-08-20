@@ -28,6 +28,15 @@ Invariants that must never regress:
   and plan state `already-synced`; anything else is `HEAD_MARKER_MISMATCH`.
 - Planner mode `T2_PLAN_MODE=true` exists only inside the orchestrator so
   `full-bootstrap` is reachable; standalone preflight stays fail-loud.
+- Planner mode never dies `PROFILE_UNHEALTHY` on a bootstrapped profile with
+  an unready required deployment: it records the deployment
+  (`T2_UNREADY_DEPLOYMENTS`) and classifies `full-reconcile` with a reason
+  naming it. `T2_PLAN_MODE=false` keeps failing `PROFILE_UNHEALTHY`.
+- T1 (`minikube-real-postgres.sh`) restores branch-profile GFS credentials on
+  exit via `reconcile-gfs-deploy-credentials.sh` with
+  `GFS_RESTORE_ACTIVE_NOLOGIN=true` (armed only once suites started), and
+  `pre-gate-sync.sh` `provision_gfs_serving` passes the same opt-in and runs
+  in every sync plan, restarting an unready `gfsc-reader` after restore.
 - T1 stays fail-loud (no green on unavailable DSN or zero tests); the JSON
   reporter is the suite verdict, not a leftover Vitest process exit after a
   complete green reporter. Role-reset suites keep the throwaway Postgres 16.

@@ -228,6 +228,25 @@ already_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIR
   bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; T2_MARKER_MATCHES_HEAD=true; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$infra_sha")"
 [ "$already_state" = already-synced ] || fail "matching marker selected $already_state instead of already-synced"
 
+# A bootstrapped profile with an unready required deployment must not stop
+# the orchestrator planner before a transition exists (PROFILE_UNHEALTHY was
+# the multi-script loop): planner mode selects full-reconcile and names the
+# deployment, even when the marker already matches HEAD.
+unready_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader"},"spec":{"replicas":1},"status":{"readyReplicas":0,"availableReplicas":0}}]}'
+planner_unready="$(env "${repo_env[@]}" UNREADY_JSON="$unready_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=true; T2_BOOTSTRAP_REQUIRED=false; T2_MARKER_MATCHES_HEAD=true; t2_kc(){ printf "%s" "$UNREADY_JSON"; }; t2_deployment_check; t2_classify_transition; printf "%s|%s" "$T2_PLAN_STATE" "$T2_PLAN_REASON"' bash "$COMMON")"
+[ "${planner_unready%%|*}" = full-reconcile ] || fail "planner mode selected ${planner_unready%%|*} instead of full-reconcile for an unready deployment"
+case "$planner_unready" in
+  *gfs/gfsc-reader*) ;;
+  *) fail 'planner full-reconcile reason does not name the unready deployment' ;;
+esac
+
+# Negative pin: the standalone preflight and the final exact-head check
+# (T2_PLAN_MODE=false) stay fail-loud on an unready deployment.
+expect_code PROFILE_UNHEALTHY unready-final-preflight unready-final-preflight \
+  env "${repo_env[@]}" UNREADY_JSON="$unready_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$UNREADY_JSON"; }; t2_deployment_check' bash "$COMMON"
+
 plan_mode_head="$(env "${marker_env[@]}" T2_PLAN_MODE=true FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"old","worktreeId":"worktree-a","imageSource":"local","imageTag":"test"}}' \
   bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=true; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON")"
 [ "$plan_mode_head" = false ] || fail "planner mode still treated a stale marker as matching HEAD"
@@ -248,6 +267,9 @@ grep -Fq 'ISOLATED_DSN' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq '|| suite_status=$?' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must capture vitest exit without aborting before the reporter'
 grep -Fq 'complete green reporter' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must document reporter-authoritative verdict'
 grep -Fq 'Real PostgreSQL suite failed in $package ($lane)' "$ROOT/scripts/e2e/minikube-real-postgres.sh" && fail 'T1 still treats npm exit as a suite failure before the JSON reporter'
+grep -Fq 'restore_gfs_runtime_credentials' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 must restore branch-profile GFS credentials on exit'
+grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$ROOT/scripts/e2e/minikube-real-postgres.sh" || fail 'T1 GFS restore must opt into the NOLOGIN recovery contract'
+grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$ROOT/scripts/minikube/pre-gate-sync.sh" || fail 'pre-gate-sync must restore a NOLOGIN GFS role from the committed Secret DSN'
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"

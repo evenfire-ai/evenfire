@@ -47,6 +47,7 @@ T2_PLAN_MODE="$T2_PLAN_MODE"
 if [ -z "$T2_PLAN_MODE" ]; then T2_PLAN_MODE=false; fi
 T2_BOOTSTRAP_REQUIRED=false
 T2_PROFILE_HEALTHY=false
+T2_UNREADY_DEPLOYMENTS=""
 T2_MARKER_MATCHES_HEAD=false
 T2_MARKER_JSON=""
 T2_IMAGE_SOURCE=""
@@ -460,7 +461,7 @@ PY
 }
 
 t2_deployment_check() {
-  local deployment_json
+  local deployment_json unready
   deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null || true)"
   if [ -z "$deployment_json" ]; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
@@ -471,7 +472,7 @@ t2_deployment_check() {
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is unavailable'
   fi
-  if ! python3 - "$deployment_json" <<'PY'
+  unready="$(python3 - "$deployment_json" <<'PY'
 import json
 import sys
 payload = json.loads(sys.argv[1])
@@ -487,18 +488,27 @@ for item in payload.get("items", []):
     available = int(status.get("availableReplicas") or 0)
     if ready < desired or available < desired:
         bad.append("%s/%s %s/%s" % (metadata.get("namespace", "?"), metadata.get("name", "?"), ready, desired))
-if bad:
-    print("; ".join(bad), file=sys.stderr)
-    raise SystemExit(1)
+print("; ".join(bad))
 PY
-  then
+  )"
+  if [ -n "$unready" ]; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
       T2_PLAN_STATE=full-bootstrap
-      T2_PLAN_REASON='one or more deployments are not Ready'
+      T2_PLAN_REASON="one or more deployments are not Ready: $unready"
+      return 0
+    fi
+    if [ "$T2_PLAN_MODE" = true ]; then
+      # Orchestrator planner: a bootstrapped profile with an unready required
+      # deployment is repaired by a full reconcile inside the same run.
+      # Failing PROFILE_UNHEALTHY here would abort before any transition is
+      # selected and force manual repair scripts. The standalone preflight and
+      # the final exact-head check run with T2_PLAN_MODE=false and stay
+      # fail-loud below.
+      T2_UNREADY_DEPLOYMENTS="$unready"
       return 0
     fi
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
-    t2_fail PROFILE_UNHEALTHY 'one or more deployments are not Ready'
+    t2_fail PROFILE_UNHEALTHY "one or more deployments are not Ready: $unready"
   fi
 }
 
@@ -543,6 +553,14 @@ t2_classify_transition() {
   if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
     T2_PLAN_STATE=full-bootstrap
     [ -n "$T2_PLAN_REASON" ] || T2_PLAN_REASON='profile is not bootstrapped'
+    return 0
+  fi
+  if [ -n "$T2_UNREADY_DEPLOYMENTS" ]; then
+    # Recorded by t2_deployment_check in planner mode only. Reconcile the
+    # running profile in place; an unready deployment must never certify as
+    # already-synced nor stop the orchestrator before a transition exists.
+    T2_PLAN_STATE=full-reconcile
+    T2_PLAN_REASON="deployment not Ready: $T2_UNREADY_DEPLOYMENTS"
     return 0
   fi
   if [ "$T2_MARKER_MATCHES_HEAD" = true ]; then
