@@ -1,9 +1,12 @@
 /**
  * LLM Provider factory.
  */
+import { config } from '../config'
 import { ApiKeys, ModelConfig } from '../types'
 import { ClaudeProvider } from './claude'
+import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from './codexLlmProxyClient'
 import { OpenAIProvider } from './openai'
+import { ProviderAttemptAuthorizer, resolveCodexAuthorizeUrl } from './providerAttemptAuthorizer'
 import { makeProvider } from './registry'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from './registryCore'
 // Re-export the transport interfaces (moved to ./types to break the registry
@@ -12,6 +15,31 @@ import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export type { ClassifiedError, SingleTurnProvider } from './types'
+
+const DEFAULT_CODEX_AUTHORIZE_GATEWAY =
+  'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092'
+
+function readPlatformJwt(): string {
+  return (process.env.MCP_HOST_RUNTIME_ACCESS_TOKEN || '').trim()
+}
+
+function createCodexRuntimeDeps() {
+  const gateway = (config.mcpHostGatewayUrl ?? '').trim() || DEFAULT_CODEX_AUTHORIZE_GATEWAY
+  return {
+    authorizer: new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl(gateway),
+      readPlatformJwt,
+    }),
+    proxy: new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(config.codexProxyRuntimeBaseUrl),
+      readPlatformJwt,
+    }),
+    attemptContext: () => ({
+      policyRevision: config.codexPolicyRevision,
+      policyHash: config.codexPolicyHash,
+    }),
+  }
+}
 
 /**
  * Create an LLM provider based on configuration.
@@ -47,7 +75,12 @@ export function createLLMProvider(
   // never throw here (their empty-key case is already handled above), so their
   // behaviour is byte-identical.
   try {
-    return makeProvider(provider, credentials, modelName)
+    return makeProvider(
+      provider,
+      credentials,
+      modelName,
+      provider === 'codex-subscription' ? { codex: createCodexRuntimeDeps() } : undefined
+    )
   } catch (err) {
     console.error(
       `[LLM] failed to construct ${provider}:`,

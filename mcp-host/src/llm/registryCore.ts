@@ -212,7 +212,7 @@ export const PROVIDERS: Record<LlmProvider, CoreProviderDescriptor> = Object.fro
       ...RUNTIME_FIELDS[id],
     },
   ])
-) as Record<LlmProvider, CoreProviderDescriptor>
+) as unknown as Record<LlmProvider, CoreProviderDescriptor>
 
 export const ALL_PROVIDERS = [...PROVIDER_IDS] as LlmProvider[]
 

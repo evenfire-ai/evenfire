@@ -62,6 +62,10 @@ export interface Config {
   // Default OFF. Codex provider construction stays dark until the operator
   // sets MCP_HOST_CODEX_SUBSCRIPTION_ENABLED=true.
   codexSubscriptionEnabled: boolean
+  // Server-owned Codex proxy URL. Callers cannot override this per request.
+  codexProxyRuntimeBaseUrl: string
+  codexPolicyRevision: number
+  codexPolicyHash: string
 
   // Dev mode: MCP servers (parsed from CLERUM_MCP_SERVERS JSON)
   devMcpServers?: McpServerInfo[]
@@ -587,6 +591,12 @@ export const config: Config = {
   devModelProvider: devMode ? resolveDevModelProvider(rawDevModelProvider) : undefined,
   devModelName,
   codexSubscriptionEnabled: process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED === 'true',
+  codexProxyRuntimeBaseUrl: getEnv(
+    'CODEX_LLM_PROXY_RUNTIME_URL',
+    'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+  )!,
+  codexPolicyRevision: parseInt(getEnv('CODEX_POLICY_REVISION', '1')!, 10),
+  codexPolicyHash: getEnv('CODEX_POLICY_HASH', '')!,
 
   // Dev mode MCP servers
   devMcpServers: devMode ? parseDevMcpServers() : undefined,
