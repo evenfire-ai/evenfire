@@ -30,6 +30,7 @@ export type AuthorizeAttemptBody = {
 export type ProviderAttemptAuthorizerOptions = {
   authorizeUrl: string
   readPlatformJwt: () => string
+  refreshOnUnauthorized?: () => Promise<void>
   fetchFn?: typeof fetch
 }
 
@@ -51,6 +52,18 @@ export class ProviderAttemptAuthorizer {
     executionTicket: string
     expiresAt: string
   }> {
+    return this.authorizeOnce(body, Boolean(this.options.refreshOnUnauthorized))
+  }
+
+  private async authorizeOnce(
+    body: AuthorizeAttemptBody,
+    retryOnUnauthorized: boolean
+  ): Promise<{
+    providerAttemptId: string
+    requestHash: string
+    executionTicket: string
+    expiresAt: string
+  }> {
     const jwt = this.options.readPlatformJwt()
     if (!jwt) {
       throw new CodexAuthorizeError('no_grant', 'platform JWT is missing')
@@ -66,6 +79,10 @@ export class ProviderAttemptAuthorizer {
     })
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
     if (!response.ok) {
+      if (response.status === 401 && retryOnUnauthorized && this.options.refreshOnUnauthorized) {
+        await this.options.refreshOnUnauthorized()
+        return this.authorizeOnce(body, false)
+      }
       const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
       throw new CodexAuthorizeError(code, `authorize failed with ${response.status}`)
     }

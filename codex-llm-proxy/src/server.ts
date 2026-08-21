@@ -132,7 +132,10 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
     void (async () => {
       let release: (() => void) | undefined
       const abort = new AbortController()
-      req.on('close', () => abort.abort())
+      // After express.json() the incoming request is already complete. Listening
+      // to req 'close' aborts the ChatGPT hop on every call (3–12ms canceled).
+      // Abort only when the client drops the response before we finish writing.
+      abortWhenClientDisconnects(req, res, abort)
       try {
         release = await streamGate.acquire()
         res.status(200)
@@ -298,6 +301,18 @@ function mapError(err: unknown): { status: number; code: string } {
     return { status: statusByCode[err.code] ?? 503, code: err.code }
   }
   return { status: 503, code: 'provider_unavailable' }
+}
+
+export function abortWhenClientDisconnects(
+  req: Request,
+  res: Response,
+  abort: AbortController
+): void {
+  const cancel = () => {
+    if (!res.writableEnded) abort.abort()
+  }
+  res.on('close', cancel)
+  req.on('aborted', cancel)
 }
 
 function closeServer(server: Server): Promise<void> {

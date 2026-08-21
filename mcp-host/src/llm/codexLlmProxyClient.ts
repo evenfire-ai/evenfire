@@ -31,6 +31,7 @@ export type CodexProxyStreamResult = {
 export type CodexLlmProxyClientOptions = {
   runtimeUrl: string
   readPlatformJwt: () => string
+  refreshOnUnauthorized?: () => Promise<void>
   fetchFn?: typeof fetch
 }
 
@@ -51,6 +52,19 @@ export class CodexLlmProxyClient {
     if (input.signal?.aborted) {
       throw new CodexProxyError('canceled', 'aborted before proxy stream')
     }
+    return this.streamOnce(input, Boolean(this.options.refreshOnUnauthorized))
+  }
+
+  private async streamOnce(
+    input: {
+      executionTicket: string
+      requestHash: string
+      request: unknown
+      deadlineMs?: number
+      signal?: AbortSignal
+    },
+    retryOnUnauthorized: boolean
+  ): Promise<CodexProxyStreamResult> {
     const jwt = this.options.readPlatformJwt()
     const fetchFn = this.options.fetchFn ?? fetch
     const response = await fetchFn(this.options.runtimeUrl, {
@@ -68,6 +82,10 @@ export class CodexLlmProxyClient {
       signal: input.signal,
     })
     if (!response.ok) {
+      if (response.status === 401 && retryOnUnauthorized && this.options.refreshOnUnauthorized) {
+        await this.options.refreshOnUnauthorized()
+        return this.streamOnce(input, false)
+      }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
       const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
       throw new CodexProxyError(code, `proxy stream failed with ${response.status} (${code})`)
