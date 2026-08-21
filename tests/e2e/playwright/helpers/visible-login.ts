@@ -19,21 +19,22 @@ export async function loginControlUiVisible(page: Page): Promise<void> {
   expect(response.ok(), `visible Control UI login must succeed, got ${response.status()}`).toBe(
     true
   )
-  await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible({
+  await expect(page.getByLabel('Main navigation')).toBeVisible({
     timeout: 20_000,
   })
 }
 
 export async function loginDesktopVisible(page: Page): Promise<void> {
-  await expect(page.getByLabel('Email')).toBeVisible({ timeout: 20_000 })
-  await page.getByLabel('Email').fill(DESKTOP_EMAIL)
-  await page.getByLabel('Password').fill(DESKTOP_PASSWORD)
-  const login = page.waitForResponse(
-    response =>
-      response.url().includes('/api/v1/auth/password-login') &&
-      response.request().method() === 'POST'
-  )
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  const response = await login
-  expect(response.ok(), `visible Desktop login must succeed, got ${response.status()}`).toBe(true)
+  await expect(page.locator('.boot-overlay')).toBeHidden({ timeout: 20_000 })
+  const backToLogin = page.getByRole('button', { name: 'Go back to login' })
+  if (await backToLogin.isVisible().catch(() => false)) {
+    await backToLogin.click()
+  }
+  const email = page.locator('#email-input')
+  await expect(email).toBeVisible({ timeout: 30_000 })
+  await email.fill(DESKTOP_EMAIL)
+  await page.locator('#password-input').fill(DESKTOP_PASSWORD)
+  await page.getByRole('button', { name: /^Sign in$/ }).click()
+  // Desktop password-login is main-process IPC, not a renderer page response.
+  await expect(page.getByTestId('nav-chat')).toBeVisible({ timeout: 30_000 })
 }
