@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { IconButton, StatusBanner } from '@components/Common'
 import { IconClose, IconCopy } from '@components/SidebarNav/icons'
+import { getCachedGfsBlob, setCachedGfsBlob } from '@lib/gfsBlobCache'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewProps } from './types'
 
@@ -21,6 +22,10 @@ export function GfsImagePreview({
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Translate gfs://<drive>/<rid> to a stable cache key so we can share
+  // the row thumbnail's blob URL with this preview modal.
+  const cacheKey = gfsUriCacheKey(gfsUri)
+
   useEffect(() => {
     closeButtonRef.current?.focus()
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -33,8 +38,28 @@ export function GfsImagePreview({
   useEffect(() => {
     let active = true
     let objectUrl: string | null = null
+    const isFromCacheRef = { current: false }
 
     const loadPreview = async () => {
+      // If the row thumbnail already paid the proxy round-trip for this
+      // resource, reuse its object URL and skip the network entirely.
+      const cached = getCachedGfsBlob(cacheKey)
+      if (cached) {
+        isFromCacheRef.current = true
+        if (!active) return
+        setPreviewUrl(cached.blobUrl)
+        // The cached blob is reachable only through the object URL; for
+        // the "Copy" affordance we still need a Blob. Issue a fetch on
+        // the object URL to materialise it cheaply.
+        try {
+          const cachedBlob = await (await fetch(cached.blobUrl)).blob()
+          if (active) setSourceBlob(cachedBlob)
+        } catch {
+          /* Copy will surface the error in copyImageToClipboard. */
+        }
+        return
+      }
+
       try {
         assertGfsImagePreviewSize(byteLength)
         const { bytes } = await window.clerum.gfs.download(gfsUri)
@@ -43,6 +68,10 @@ export function GfsImagePreview({
         const blob = new Blob([bytes], { type: mimeType })
         setSourceBlob(blob)
         objectUrl = URL.createObjectURL(blob)
+        // Publish to the cache so the next preview open skips the
+        // network. We don't revoke the URL on unmount — the next open
+        // may want it.
+        setCachedGfsBlob(cacheKey, { blobUrl: objectUrl, mimeType: blob.type })
         setPreviewUrl(objectUrl)
       } catch (error) {
         if (!active) return
@@ -54,9 +83,11 @@ export function GfsImagePreview({
     void loadPreview()
     return () => {
       active = false
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
+      // Only revoke object URLs we created ourselves. Cache-served URLs
+      // are owned by the row thumbnail component.
+      if (objectUrl && !isFromCacheRef.current) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, gfsUri, mimeType, onDownloadError])
+  }, [byteLength, cacheKey, gfsUri, mimeType, onDownloadError])
 
   useEffect(() => {
     return () => {
@@ -153,6 +184,13 @@ export function GfsImagePreview({
     </div>,
     document.body
   )
+}
+
+/** Strip the `gfs://<drive>/` prefix to expose just the resource id,
+ *  which is the same key the row thumbnail uses for the blob cache. */
+function gfsUriCacheKey(gfsUri: string): string {
+  const slash = gfsUri.lastIndexOf('/')
+  return slash >= 0 ? gfsUri.slice(slash + 1) : gfsUri
 }
 
 async function convertBlobToPng(blob: Blob): Promise<Blob | null> {

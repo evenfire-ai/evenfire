@@ -247,6 +247,28 @@ describe('GfsBrowser', () => {
     })
   })
 
+  it('reuses the row thumbnail blob when the user opens the image preview', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('logo.png', 'file', 7)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValue(new Blob(['image-bytes']))
+    renderBrowser()
+
+    // Wait for the thumbnail to land so the cache is populated.
+    await screen.findByAltText('Thumbnail of logo.png')
+
+    // Clear the proxy call counter so we can assert the preview does
+    // NOT touch gfsFetchFileBlob a second time.
+    mockGfsFetchFileBlob.mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: 'logo.png' }))
+    const dialog = await screen.findByRole('dialog', { name: 'logo.png' })
+    const img = await within(dialog).findByRole('img', { name: 'Preview of logo.png' })
+    expect(img.getAttribute('src')).toBe('blob:gfs-image-preview')
+    expect(mockGfsFetchFileBlob).not.toHaveBeenCalled()
+  })
+
   it('uses the paperclip header, labels the root as main, and ignores current-crumb clicks', async () => {
     mockApiGet.mockResolvedValueOnce({ items: [], nextCursor: null })
     renderBrowser()
@@ -576,7 +598,10 @@ describe('GfsBrowser', () => {
     const closeButton = within(dialog).getByRole('button', { name: /close image preview/i })
     fireEvent.click(closeButton)
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'avatar.PNG' })).toBeNull())
-    expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-image-preview')
+    // The thumbnail and the preview now share a cached object URL,
+    // so the preview does NOT revoke on close (the row's thumbnail
+    // owns the lifecycle). Verify the thumbnail-owned URL survives.
+    expect(mockRevokeObjectUrl).not.toHaveBeenCalled()
 
     await openResourceMenu('avatar.PNG')
     fireEvent.click(screen.getByRole('menuitem', { name: 'Preview' }))

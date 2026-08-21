@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { IconImage } from '@components/Sidebar/icons'
 import { GFS_FILE_THUMBNAIL_MAX_BYTES } from '@constants/gfsFileThumbnail'
 import { gfsFetchFileBlob } from '@lib/api'
+import { getCachedGfsBlob, setCachedGfsBlob } from '@lib/gfsBlobCache'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import type { GfsFileThumbnailProps } from './types'
 
@@ -12,6 +13,9 @@ import type { GfsFileThumbnailProps } from './types'
  * GFS proxy path, builds an object URL, and renders it inside the
  * row's existing 1.5rem icon slot. Falls back to the inline image
  * glyph when the row is over-budget or the blob fetch/load fails.
+ *
+ * The blob URL is published to the shared GfsBlobCache so the image
+ * preview modal can open instantly if the user clicks the row.
  */
 export function GfsFileThumbnail({
   byteLength,
@@ -26,6 +30,11 @@ export function GfsFileThumbnail({
     if (shouldSkip) {
       setFailed(true)
       setSrc(null)
+      return
+    }
+    const cached = getCachedGfsBlob(rid)
+    if (cached) {
+      setSrc(cached.blobUrl)
       return
     }
     let cancelled = false
@@ -45,9 +54,10 @@ export function GfsFileThumbnail({
         // for SVG bodies, so wrap with the type the image preview
         // modal already computes.
         const mimeType = gfsImagePreviewMimeType(fileName) ?? fetched.type
-        objectUrl = URL.createObjectURL(
+        const wrappedBlob =
           mimeType && mimeType !== fetched.type ? new Blob([fetched], { type: mimeType }) : fetched
-        )
+        objectUrl = URL.createObjectURL(wrappedBlob)
+        setCachedGfsBlob(rid, { blobUrl: objectUrl, mimeType: wrappedBlob.type })
         setSrc(objectUrl)
       } catch {
         if (!cancelled) setFailed(true)
