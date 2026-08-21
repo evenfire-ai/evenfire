@@ -1,4 +1,9 @@
-import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from 'react'
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+  RefObject,
+} from 'react'
 
 export type ChatDrawerProps = {
   /**
@@ -21,6 +26,13 @@ export type ChatDrawerProps = {
    * Wired from `useChatDrawerResize`.
    */
   onResizeHandleMouseDown: (event: ReactMouseEvent<HTMLElement>) => void
+  /**
+   * keydown handler for the focusable drag handle — arrow-key / Home / End
+   * resize (WAI-ARIA window-splitter pattern). Wired from `useChatDrawerResize`.
+   */
+  onResizeHandleKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void
+  /** Current drawer width in px, surfaced as the handle's `aria-valuenow`. */
+  width: number
   /** True while a resize drag is in progress — highlights the drag handle. */
   resizing: boolean
   children: ReactNode

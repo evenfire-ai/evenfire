@@ -1,5 +1,6 @@
 import { IconButton } from '@components/Common'
 import { IconClose, IconNewChat } from '@components/SidebarNav/icons'
+import { CHAT_DRAWER_MAX_ABSOLUTE, CHAT_DRAWER_MIN_WIDTH } from '@hooks/useChatDrawerResize'
 import type { ChatDrawerProps } from './types'
 
 /**
@@ -18,6 +19,8 @@ export function ChatDrawer({
   containerRef,
   ready,
   onResizeHandleMouseDown,
+  onResizeHandleKeyDown,
+  width,
   resizing,
   children,
 }: ChatDrawerProps) {
@@ -30,9 +33,14 @@ export function ChatDrawer({
       <div
         className="chat-drawer__resize-handle"
         role="separator"
+        tabIndex={0}
         aria-orientation="vertical"
         aria-label="Resize chat drawer"
+        aria-valuemin={CHAT_DRAWER_MIN_WIDTH}
+        aria-valuemax={CHAT_DRAWER_MAX_ABSOLUTE}
+        aria-valuenow={Math.round(width)}
         onMouseDown={onResizeHandleMouseDown}
+        onKeyDown={onResizeHandleKeyDown}
       />
       <header className="chat-drawer__header">
         <div className="chat-drawer__header-main">{header}</div>

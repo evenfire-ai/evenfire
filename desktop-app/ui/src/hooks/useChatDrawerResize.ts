@@ -21,7 +21,9 @@ export const CHAT_DRAWER_MIN_WIDTH = 340
 /** Default session width (matches the top of the old CSS clamp). */
 export const CHAT_DRAWER_DEFAULT_WIDTH = 420
 /** Generous absolute ceiling for the drag. */
-const CHAT_DRAWER_MAX_ABSOLUTE = 820
+export const CHAT_DRAWER_MAX_ABSOLUTE = 820
+/** Width step for arrow-key resize (WAI-ARIA window-splitter pattern). */
+const CHAT_DRAWER_KEY_STEP = 24
 /** Always leave at least this much of the content panel for the app embed, so
  *  even at the widest drag the embed never collapses to nothing. */
 const CHAT_DRAWER_VIEWPORT_MARGIN = 80
@@ -77,6 +79,8 @@ export type ChatDrawerResize = {
   isResizing: boolean
   /** mousedown handler for the drag handle on the drawer's left edge. */
   onResizeHandleMouseDown: (event: React.MouseEvent<HTMLElement>) => void
+  /** keydown handler for the (focusable) drag handle — arrow/Home/End resize. */
+  onResizeHandleKeyDown: (event: React.KeyboardEvent<HTMLElement>) => void
 }
 
 export function useChatDrawerResize(
@@ -174,6 +178,38 @@ export function useChatDrawerResize(
     [contentPanelRef, recomputeOverlay]
   )
 
+  // Keyboard resize for the focusable separator handle (WAI-ARIA window-splitter
+  // pattern): with `aria-orientation="vertical"`, Left/Right move the splitter.
+  // The drawer is right-docked, so ArrowLeft widens it (mirroring a leftward
+  // drag) and ArrowRight narrows it; Home/End jump to the drawer's max/min.
+  const onResizeHandleKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLElement>) => {
+      let requested: number
+      switch (event.key) {
+        case 'ArrowLeft':
+          requested = widthRef.current + CHAT_DRAWER_KEY_STEP
+          break
+        case 'ArrowRight':
+          requested = widthRef.current - CHAT_DRAWER_KEY_STEP
+          break
+        case 'Home':
+          requested = CHAT_DRAWER_MAX_ABSOLUTE
+          break
+        case 'End':
+          requested = CHAT_DRAWER_MIN_WIDTH
+          break
+        default:
+          return
+      }
+      event.preventDefault()
+      const panelWidth = readPanelWidth(contentPanelRef)
+      const next = clampWidth(requested, panelWidth)
+      setWidth(next)
+      recomputeOverlay(next)
+    },
+    [contentPanelRef, recomputeOverlay]
+  )
+
   // If the drawer hides or the hook unmounts while a drag is live, tear it down
   // so window listeners and the body cursor/user-select overrides never leak.
   React.useEffect(() => {
@@ -182,5 +218,5 @@ export function useChatDrawerResize(
   }, [active])
   React.useEffect(() => () => endDragRef.current?.(), [])
 
-  return { width, isOverlay, isResizing, onResizeHandleMouseDown }
+  return { width, isOverlay, isResizing, onResizeHandleMouseDown, onResizeHandleKeyDown }
 }

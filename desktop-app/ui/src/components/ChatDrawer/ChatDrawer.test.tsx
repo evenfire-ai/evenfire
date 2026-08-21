@@ -28,6 +28,7 @@ function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = 
   const onNewChat = props.onNewChat ?? vi.fn()
   const onClose = props.onClose ?? vi.fn()
   const onResizeHandleMouseDown = props.onResizeHandleMouseDown ?? vi.fn()
+  const onResizeHandleKeyDown = props.onResizeHandleKeyDown ?? vi.fn()
   const containerRef = props.containerRef ?? createRef<HTMLElement>()
   const utils = render(
     <ChatDrawer
@@ -37,12 +38,14 @@ function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = 
       containerRef={containerRef}
       ready={props.ready ?? true}
       onResizeHandleMouseDown={onResizeHandleMouseDown}
+      onResizeHandleKeyDown={onResizeHandleKeyDown}
+      width={props.width ?? 420}
       resizing={props.resizing ?? false}
     >
       <div data-testid="drawer-chat-page">chat page</div>
     </ChatDrawer>
   )
-  return { ...utils, onNewChat, onClose, onResizeHandleMouseDown }
+  return { ...utils, onNewChat, onClose, onResizeHandleMouseDown, onResizeHandleKeyDown }
 }
 
 describe('ChatDrawer', () => {
@@ -100,6 +103,18 @@ describe('ChatDrawer', () => {
     expect(getComputedStyle(handle).cursor).toBe('col-resize')
     fireEvent.mouseDown(handle)
     expect(onResizeHandleMouseDown).toHaveBeenCalledTimes(1)
+  })
+
+  it('makes the resize handle keyboard-operable per the ARIA separator pattern', () => {
+    const { container, onResizeHandleKeyDown } = renderDrawer({ width: 512 })
+    const handle = container.querySelector('.chat-drawer__resize-handle') as HTMLElement
+    // Focusable, with the value semantics the separator role requires.
+    expect(handle.getAttribute('tabindex')).toBe('0')
+    expect(handle.getAttribute('aria-valuemin')).toBe('340')
+    expect(handle.getAttribute('aria-valuemax')).toBe('820')
+    expect(handle.getAttribute('aria-valuenow')).toBe('512')
+    fireEvent.keyDown(handle, { key: 'ArrowLeft' })
+    expect(onResizeHandleKeyDown).toHaveBeenCalledTimes(1)
   })
 
   it('reveals once ready', () => {

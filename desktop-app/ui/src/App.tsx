@@ -2099,6 +2099,8 @@ export function App() {
                                       onResizeHandleMouseDown={
                                         chatDrawerResize.onResizeHandleMouseDown
                                       }
+                                      onResizeHandleKeyDown={chatDrawerResize.onResizeHandleKeyDown}
+                                      width={chatDrawerResize.width}
                                       resizing={chatDrawerResize.isResizing}
                                     >
                                       <ChatPage scrollContainerRef={chatDrawerRef} />
