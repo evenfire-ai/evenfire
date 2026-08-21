@@ -58,9 +58,13 @@ wait_http() {
 load_branch_profile_ports() {
   local ctx="${KUBECONTEXT:-${MINIKUBE_PROFILE:-}}"
   local ports_env="${CLERUM_PROFILE_PORTS_ENV:-${E2E_PROFILE_PORTS_ENV:-}}"
+  local urls_preconfigured=false
+  if [[ -n "${CONTROL_UI_URL:-${CONTROL_UI_BASE_URL:-}}" && -n "${CONTROL_API_URL:-${CONTROL_API_BASE_URL:-}}" ]]; then
+    urls_preconfigured=true
+  fi
   if [[ "${ctx}" =~ ^clerum-(codex|detached)- ]] || [[ "${ctx}" =~ ^clerum-.+-[0-9a-f]{7,8}$ ]]; then
-    if [[ -z "${ports_env}" ]]; then
-      die "branch-owned context ${ctx} requires ports.env from branch-profile preflight; set CLERUM_PROFILE_PORTS_ENV or E2E_PROFILE_PORTS_ENV"
+    if [[ -z "${ports_env}" && "${urls_preconfigured}" != "true" ]]; then
+      die "branch-owned context ${ctx} requires ports.env from branch-profile preflight, or explicit CONTROL_UI_URL and CONTROL_API_URL"
     fi
   elif [[ -z "${ports_env}" && -n "${ctx}" ]]; then
     ports_env="${HOME}/.cache/clerum/minikube-profiles/${ctx}/ports.env"
