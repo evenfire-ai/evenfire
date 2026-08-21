@@ -2,7 +2,8 @@ import { defineConfig, devices } from '@playwright/test'
 import path from 'path'
 
 const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
-const CONTROL_UI_URL = process.env.CONTROL_UI_URL ?? `http://${LOOPBACK_V4}:3000`
+const CONTROL_UI_URL =
+  process.env.CONTROL_UI_URL ?? process.env.CONTROL_UI_BASE_URL ?? `http://${LOOPBACK_V4}:3000`
 
 export default defineConfig({
   testDir: '.',

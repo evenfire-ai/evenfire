@@ -1017,10 +1017,13 @@ test-e2e-codex-subscription-runtime: ## Codex subscription runtime acceptance (R
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-runtime.sh
 
 .PHONY: test-e2e-codex-subscription-playwright
-test-e2e-codex-subscription-playwright: ## Codex subscription Control UI guardians (Desktop waits for a connected subscription)
+test-e2e-codex-subscription-playwright: ## Codex subscription Control UI guardians (4 specs; Desktop deferred until connected subscription)
 	@echo "Running Codex subscription Control UI Playwright guardians..."
-	@test -x tests/e2e/playwright/node_modules/.bin/playwright || (echo "missing tests/e2e/playwright/node_modules/.bin/playwright; run npm ci in that package" >&2; exit 1)
-	cd tests/e2e/playwright && PLAYWRIGHT_BROWSERS_PATH="$(CURDIR)/tests/e2e/playwright/.playwright-browsers" ./node_modules/.bin/playwright test --config playwright.codex-subscription.config.ts --project=control-ui
+	@if [ -z "$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" ]; then \
+		echo "Refusing Codex subscription Playwright: explicit Kubernetes context is required" >&2; \
+		exit 1; \
+	fi
+	MINIKUBE_PROFILE="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-codex-subscription-playwright.sh
 
 .PHONY: test-e2e-plugin-workload-sdk
 test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1)

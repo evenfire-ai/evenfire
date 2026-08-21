@@ -30,6 +30,8 @@ test.describe('Codex subscription connection', () => {
     await page.getByRole('link', { name: 'Codex subscription' }).click()
     const response = await connection
     expect(response.ok(), `connection read must succeed, got ${response.status()}`).toBe(true)
+    const body = (await response.json()) as { status?: string }
+    expect(body.status).toBe('disconnected')
     await expect(page).toHaveURL(/\/llm-models\/providers\/codex-subscription/)
     await expect(page.getByRole('heading', { name: 'Codex subscription' })).toBeVisible()
     await expect(page.getByTestId('codex-connection-status')).toContainText(/Disconnected/)

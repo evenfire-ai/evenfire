@@ -16,7 +16,7 @@ import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginDesktopVisible } from '../helpers/visible-login'
 
 test.describe('Codex subscription Prompt Bridge', () => {
-  test('Prompt Bridge reauthorizes each Codex physical attempt', async () => {
+  test('apps workspace does not expose Codex broker metadata before a grant', async () => {
     test.skip(process.env.PLAYWRIGHT_DESKTOP_BUILT !== 'true', 'Desktop build is required')
     const app = await launchDesktopApp()
     const page = await app.firstWindow()

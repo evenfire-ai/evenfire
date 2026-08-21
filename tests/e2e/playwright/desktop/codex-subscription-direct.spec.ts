@@ -17,7 +17,7 @@ import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginDesktopVisible } from '../helpers/visible-login'
 
 test.describe('Codex subscription desktop direct chat', () => {
-  test('desktop can start a Codex subscription attempt from the model picker', async () => {
+  test('desktop chat hides Codex models until a connected catalog exists', async () => {
     test.skip(process.env.PLAYWRIGHT_DESKTOP_BUILT !== 'true', 'Desktop build is required')
     const app = await launchDesktopApp()
     const page = await app.firstWindow()
