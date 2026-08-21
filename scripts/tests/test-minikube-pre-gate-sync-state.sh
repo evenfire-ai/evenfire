@@ -64,7 +64,8 @@ else
   fail "evenfire registry deploy helper has invalid bash syntax"
 fi
 
-if contains 'WORKTREE_ID="$(printf '\''%s'\'' "${PROJECT_DIR}" | shasum | awk '\''{print $1}'\'')"' &&
+if contains 'source "$SCRIPT_DIR/t2-worktree-id.sh"' &&
+   contains 'WORKTREE_ID="$(t2_worktree_id "${PROJECT_DIR}")"' &&
    contains 'STATE_DIR="${STATE_ROOT}/${WORKTREE_ID}"' &&
    not_contains 'STATE_DIR="${TMPDIR:-/tmp}/clerum-pre-gate-sync"'; then
   pass "pre-gate sync state is scoped per worktree"
@@ -72,11 +73,12 @@ else
   fail "pre-gate sync state can be shared across worktrees"
 fi
 
-if contains 'cluster_marker_matches()' &&
+if contains 'cluster_marker_value()' &&
+   contains 'cluster_marker_matches()' &&
    contains 'persist_cluster_marker()' &&
    contains '--from-literal=clusterFingerprint=' &&
    contains '--from-literal=worktreeId=' &&
-   contains "-o jsonpath='{.data.gitHead}'" &&
+   contains '-o "jsonpath={.data.${field}}"' &&
    contains 'actual_git_head' &&
    not_contains '--from-literal=worktreePath='; then
   pass "pre-gate sync records and verifies a non-sensitive cluster marker"
