@@ -99,6 +99,10 @@ cat >"$fake_bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
   *"config get-contexts -o name"*)
+    if [ -n "${FAKE_CONTEXT:-}" ]; then
+      printf '%s' "${FAKE_CONTEXT}"
+      exit 0
+    fi
     for arg in "$@"; do
       case "$arg" in
         --context=*) printf '%s' "${arg#--context=}"; exit 0 ;;
@@ -282,6 +286,12 @@ esac
 ready_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader","generation":7},"spec":{"replicas":1},"status":{"observedGeneration":7,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
 env "${repo_env[@]}" READY_JSON="$ready_json" \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$READY_JSON"; }; t2_deployment_check' bash "$COMMON"
+# Each required deployment must use its own metadata generation. Keep an
+# unrelated item last so a stale loop variable cannot make healthy resources
+# appear unready.
+multi_ready_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader","generation":7},"spec":{"replicas":1},"status":{"observedGeneration":7,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"gfs","name":"gfsc-writer","generation":11},"spec":{"replicas":1},"status":{"observedGeneration":11,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"control-plane","name":"unrelated","generation":3},"spec":{"replicas":1},"status":{"observedGeneration":3,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
+env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS='gfs/gfsc-reader gfs/gfsc-writer' MULTI_READY_JSON="$multi_ready_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$MULTI_READY_JSON"; }; t2_deployment_check' bash "$COMMON"
 stale_generation_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader","generation":8},"spec":{"replicas":1},"status":{"observedGeneration":7,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
 expect_code PROFILE_UNHEALTHY stale-generation stale-generation \
   env "${repo_env[@]}" INVALID_INVENTORY="$stale_generation_json" \

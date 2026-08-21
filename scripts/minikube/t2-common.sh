@@ -238,7 +238,7 @@ t2_profile_scope() {
 
 t2_context_check() {
   local context_name
-  context_name="$(kubectl config get-contexts -o name 2>/dev/null | awk -v target="$T2_CONTEXT" '$0 == target {print; exit}')"
+  context_name="$(kubectl --context="$T2_CONTEXT" config get-contexts -o name 2>/dev/null | awk -v target="$T2_CONTEXT" '$0 == target {print; exit}')"
   if [ "$context_name" != "$T2_CONTEXT" ]; then
     T2_NEXT_COMMAND='select the explicit Kubernetes context generated with the profile'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context is unavailable: $T2_CONTEXT"
@@ -573,6 +573,10 @@ for (namespace, name), item in required_refs.items():
     if item is None:
         bad.append(f"{namespace}/{name} missing")
         continue
+    # The first loop leaves `metadata` bound to the last inventory item. Read
+    # metadata from the deployment being evaluated so each resource is
+    # compared with its own observed generation.
+    metadata = item.get("metadata") or {}
     spec = item.get("spec") or {}
     status = item.get("status") or {}
     def integer(value, field):
