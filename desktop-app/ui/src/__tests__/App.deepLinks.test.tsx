@@ -678,6 +678,14 @@ describe('App deep-link orchestration', () => {
       expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
     )
     expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(true)
+
+    await act(async () => {
+      confirmDialogHarness.props?.onCancel()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(false))
   })
 
   it('does not duplicate an authenticated confirmation for the same link id', async () => {
