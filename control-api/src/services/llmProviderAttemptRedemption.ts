@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto'
 import { config } from '../config.js'
-import { withTransaction } from '../db.js'
+import { pool, withTransaction } from '../db.js'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { rootLogger } from '../observability/logger.js'
+import { chatgptAccountIdFromJwt } from './chatgptAccountId.js'
 import {
   getSafeCodexSubscriptionConnection,
   loadCodexSubscriptionSecrets,
 } from './codexSubscriptionConnection.js'
+import {
+  CodexSubscriptionOAuthError,
+  ensureFreshCodexAccessToken,
+} from './codexSubscriptionOAuth.js'
 import {
   loadLlmProviderAttempt,
   lockLlmProviderAttemptTicket,
@@ -17,7 +22,8 @@ import { verifyCodexExecutionTicket } from './llmProviderAttemptTicket.js'
 const log = rootLogger.child({ module: 'llm-provider-attempt-redemption' })
 
 export const CODEX_COMPLETIONS_ORIGIN = 'https://chatgpt.com/backend-api/codex/responses'
-export const CODEX_CATALOG_ORIGIN = 'https://chatgpt.com/backend-api/codex/models'
+export const CODEX_CATALOG_ORIGIN =
+  'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0'
 export const CODEX_TRANSPORT_PROTOCOL = 'codex-subscription-transport.v1'
 export const CODEX_MAX_STREAM_DURATION_MS = 300_000
 
@@ -43,6 +49,7 @@ export class LlmProviderAttemptRedeemError extends Error {
 
 export type RedeemAttemptSuccess = {
   accessToken: string
+  chatgptAccountId?: string
   transport: {
     protocolVersion: typeof CODEX_TRANSPORT_PROTOCOL
     completionsOrigin: typeof CODEX_COMPLETIONS_ORIGIN
@@ -78,6 +85,7 @@ export type RedeemAttemptDeps = {
   withTransaction: typeof withTransaction
   loadSecrets: typeof loadCodexSubscriptionSecrets
   encryptionKey: Buffer
+  ensureFreshAccessToken?: () => Promise<void>
 }
 
 const defaultRedeemDeps = (): RedeemAttemptDeps => ({
@@ -85,6 +93,15 @@ const defaultRedeemDeps = (): RedeemAttemptDeps => ({
   withTransaction,
   loadSecrets: loadCodexSubscriptionSecrets,
   encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
+  ensureFreshAccessToken: () =>
+    ensureFreshCodexAccessToken({
+      db: { query: (text, values) => pool.query(text, values) },
+      encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
+      fetchFn: fetch,
+      clientId: config.codexOAuthClientId,
+      redirectUri: 'http://127.0.0.1/codex/oauth/callback',
+      enabled: config.codexSubscriptionEnabled,
+    }),
 })
 
 export async function redeemLlmProviderAttempt(
@@ -109,6 +126,22 @@ export async function redeemLlmProviderAttempt(
   }
   if (input.hostRef && input.hostRef !== claims.hostRef) {
     throw new LlmProviderAttemptRedeemError('ticket_invalid', 'hostRef does not match the ticket')
+  }
+
+  if (deps.ensureFreshAccessToken) {
+    try {
+      await deps.ensureFreshAccessToken()
+    } catch (err) {
+      if (err instanceof CodexSubscriptionOAuthError) {
+        throw new LlmProviderAttemptRedeemError(
+          err.code === 'no_grant' || err.code === 'not_connected'
+            ? 'no_grant'
+            : 'connection_unavailable',
+          'Codex access token could not be refreshed'
+        )
+      }
+      throw err
+    }
   }
 
   return deps.withTransaction(async tx => {
@@ -175,6 +208,14 @@ export async function redeemLlmProviderAttempt(
         'no usable access token is available'
       )
     }
+    const chatgptAccountId =
+      secrets.chatgptAccountId || chatgptAccountIdFromJwt(secrets.accessToken)
+    if (!chatgptAccountId) {
+      throw new LlmProviderAttemptRedeemError(
+        'connection_unavailable',
+        'Codex access token is missing ChatGPT account id'
+      )
+    }
 
     const expiryClass =
       secrets.accessTokenExpiresAt &&
@@ -188,6 +229,7 @@ export async function redeemLlmProviderAttempt(
     )
     return {
       accessToken: secrets.accessToken,
+      chatgptAccountId,
       transport: {
         protocolVersion: CODEX_TRANSPORT_PROTOCOL,
         completionsOrigin: CODEX_COMPLETIONS_ORIGIN,

@@ -46,6 +46,7 @@ describeRealPostgres('Codex ticket redemption on real PostgreSQL', () => {
     await insertInitialCodexSubscriptionConnection(pool, KEY, {
       refreshToken: 'refresh-secret',
       accessToken: 'access-usable',
+      chatgptAccountId: 'acct_test_1',
       accountFingerprint: 'fp-redeem',
     })
   }, 60_000)
@@ -128,6 +129,7 @@ describeRealPostgres('Codex ticket redemption on real PostgreSQL', () => {
     expect(losses).toHaveLength(19)
     if (wins[0]?.status === 'fulfilled') {
       expect(wins[0].value.accessToken).toBe('access-usable')
+      expect(wins[0].value.chatgptAccountId).toBe('acct_test_1')
       expect(JSON.stringify(wins[0].value)).not.toContain('refresh-secret')
       expect(wins[0].value.attemptReceipt).toBe(
         opaqueAttemptReceipt({

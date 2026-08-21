@@ -188,14 +188,23 @@ export function createCodexProxyCatalogTransport(deps: {
   return {
     async listModels(input: { accessToken: string }): Promise<CodexCatalogTransportResult> {
       const base = deps.adminBaseUrl.replace(/\/+$/, '')
-      const response = await fetchFn(`${base}/internal/admin/v1/codex/models`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${signPermit('catalog_list')}`,
-        },
-        body: JSON.stringify({ accessToken: input.accessToken }),
-      })
+      let response: Response
+      try {
+        response = await fetchFn(`${base}/internal/admin/v1/codex/models`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${signPermit('catalog_list')}`,
+          },
+          body: JSON.stringify({ accessToken: input.accessToken }),
+        })
+      } catch (err) {
+        log.warn(
+          { event: 'codex_catalog_proxy_unreachable', err },
+          'Codex catalog proxy unreachable'
+        )
+        return { outcome: 'unavailable' }
+      }
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) return { outcome: 'auth-rejected' }
         return { outcome: 'unavailable' }

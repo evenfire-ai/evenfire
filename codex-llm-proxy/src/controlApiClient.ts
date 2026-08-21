@@ -9,6 +9,7 @@ export type RedeemOperation = 'completion_stream' | 'completion_cancel' | 'conne
 
 export type RedeemAttemptSuccess = {
   accessToken: string
+  chatgptAccountId?: string
   transport: {
     protocolVersion: typeof CODEX_TRANSPORT_PROTOCOL
     completionsOrigin: typeof CODEX_COMPLETIONS_ORIGIN
@@ -140,6 +141,9 @@ function parseRedeem(body: unknown): RedeemAttemptSuccess {
   }
   return {
     accessToken: body.accessToken,
+    ...(typeof body.chatgptAccountId === 'string' && body.chatgptAccountId.trim()
+      ? { chatgptAccountId: body.chatgptAccountId.trim() }
+      : {}),
     transport: {
       protocolVersion: CODEX_TRANSPORT_PROTOCOL,
       completionsOrigin: CODEX_COMPLETIONS_ORIGIN,

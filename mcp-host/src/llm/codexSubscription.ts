@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   type CodexCompletionRequestV1,
+  LIMITS,
   hashCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../core/errors'
@@ -55,7 +56,42 @@ function mapCodexUsage(usage?: { inputTokens: number; outputTokens: number }): {
 export type CodexSubscriptionDeps = {
   authorizer: ProviderAttemptAuthorizer
   proxy: CodexLlmProxyClient
-  attemptContext: () => CodexAttemptContext
+  attemptContext: (input: { model: string }) => CodexAttemptContext
+}
+
+/**
+ * Codex authorize is capped at `LIMITS.maxTools` (32). MCP tools use
+ * `serverName__toolName`; native tools are unprefixed or `clerum__*`.
+ * Drop MCP tools first so a Host with a large MCP catalog can still
+ * authorize. If natives still exceed the cap, keep the leading native
+ * slice in registry order.
+ */
+export function isCodexNativeToolName(name: string): boolean {
+  const idx = name.indexOf('__')
+  if (idx <= 0) return true
+  return name.startsWith('clerum__')
+}
+
+function assertTerminalCodexOutcome(result: {
+  text: string
+  toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
+  outcome: 'success' | 'canceled' | 'error' | 'unknown'
+}): void {
+  if (result.outcome === 'error') {
+    throw new CodexProxyError('provider_unavailable', 'proxy stream ended with an error outcome')
+  }
+  if (result.outcome === 'unknown' && !result.text && result.toolCalls.length === 0) {
+    throw new CodexProxyError(
+      'provider_unavailable',
+      'proxy stream ended without a terminal outcome'
+    )
+  }
+}
+
+export function selectCodexAdvertisedTools(tools: ToolDefinition[]): ToolDefinition[] {
+  const natives = tools.filter(tool => isCodexNativeToolName(tool.name))
+  if (natives.length <= LIMITS.maxTools) return natives
+  return natives.slice(0, LIMITS.maxTools)
 }
 
 export class CodexSubscriptionProvider implements SingleTurnProvider {
@@ -77,7 +113,12 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
   classifyError(err: unknown): ClassifiedError {
     const code =
       err instanceof CodexAuthorizeError || err instanceof CodexProxyError ? err.code : undefined
-    if (code === 'insufficient_scope' || code === 'no_grant' || code === 'host_binding_mismatch') {
+    if (
+      code === 'insufficient_scope' ||
+      code === 'no_grant' ||
+      code === 'host_binding_mismatch' ||
+      code === 'origin_denied'
+    ) {
       return {
         code: LlmErrorCode.AuthenticationFailed,
         retryable: false,
@@ -117,12 +158,16 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
   ): Promise<CompletionResponse> {
     const result = await this.execute(messages, undefined, options)
+    assertTerminalCodexOutcome(result)
     const usage = mapCodexUsage(result.usage)
     return {
       content: result.text,
       usage: usage.usage,
       usage_reported: usage.usage_reported,
-      finish_reason: result.outcome === 'canceled' ? FinishReason.Unknown : FinishReason.Stop,
+      finish_reason:
+        result.outcome === 'canceled' || result.outcome === 'unknown'
+          ? FinishReason.Unknown
+          : FinishReason.Stop,
     }
   }
 
@@ -137,6 +182,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
   ): Promise<ToolCompletionResponse> {
     const result = await this.execute(messages, tools, options)
+    assertTerminalCodexOutcome(result)
     const usage = mapCodexUsage(result.usage)
     return {
       content: result.text || null,
@@ -150,7 +196,12 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
           : null,
       usage: usage.usage,
       usage_reported: usage.usage_reported,
-      finish_reason: result.toolCalls.length > 0 ? FinishReason.ToolUse : FinishReason.Stop,
+      finish_reason:
+        result.toolCalls.length > 0
+          ? FinishReason.ToolUse
+          : result.outcome === 'canceled' || result.outcome === 'unknown'
+            ? FinishReason.Unknown
+            : FinishReason.Stop,
     }
   }
 
@@ -169,7 +220,14 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
     const request = this.buildRequest(messages, tools, options)
     const requestHash = hashCodexCompletionRequestV1(request)
-    const context = this.deps.attemptContext()
+    const context = this.deps.attemptContext({ model: this.model })
+    if (
+      !Number.isInteger(context.policyRevision) ||
+      context.policyRevision < 1 ||
+      !/^[a-f0-9]{64}$/.test(context.policyHash)
+    ) {
+      throw new CodexAuthorizeError('no_grant', 'Codex catalog policy binding is missing')
+    }
     const authorized = await this.deps.authorizer.authorize({
       request,
       requestHash,
@@ -207,17 +265,34 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       model: this.model,
       messages: messages.map(message => ({
         role: message.role,
-        content: message.content,
+        content: message.content ?? '',
         ...(message.name ? { name: message.name } : {}),
         ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
+        ...(message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0
+          ? {
+              toolCalls: message.tool_calls.map(call => ({
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+              })),
+            }
+          : {}),
       })),
     }
     if (tools && tools.length > 0) {
-      request.tools = tools.map(tool => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-      }))
+      const advertised = selectCodexAdvertisedTools(tools)
+      if (advertised.length !== tools.length) {
+        console.warn(
+          `[Codex] advertised ${advertised.length} native tool(s) of ${tools.length} offered (MCP omitted, cap ${LIMITS.maxTools})`
+        )
+      }
+      if (advertised.length > 0) {
+        request.tools = advertised.map(tool => ({
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        }))
+      }
     }
     if (
       options?.temperature !== undefined ||

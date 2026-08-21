@@ -29,13 +29,21 @@ describe('00a0/00a1 Codex subscription persistence', () => {
     expect(dbSource).toContain("version: '0099_gfs_upload_finalizing_recovery'")
     expect(dbSource).toContain("version: '00a0_codex_subscription_connections'")
     expect(dbSource).toContain("version: '00a1_codex_subscription_oauth_states'")
+    expect(dbSource).toContain("version: '00a4_codex_chatgpt_account_id'")
     expect(dbSource).toContain('apply: applyCodexSubscriptionConnectionSchema')
     expect(dbSource).toContain('apply: applyCodexSubscriptionOAuthStateSchema')
+    expect(dbSource).toContain('apply: applyCodexChatgptAccountIdSchema')
     expect(dbSource.indexOf("version: '0099_gfs_upload_finalizing_recovery'")).toBeLessThan(
       dbSource.indexOf("version: '00a0_codex_subscription_connections'")
     )
     expect(dbSource.indexOf("version: '00a0_codex_subscription_connections'")).toBeLessThan(
       dbSource.indexOf("version: '00a1_codex_subscription_oauth_states'")
+    )
+    expect(dbSource.indexOf("version: '00a3_llm_provider_attempt_tickets'")).toBeLessThan(
+      dbSource.indexOf("version: '00a4_codex_chatgpt_account_id'")
+    )
+    expect(dbSource.indexOf("version: '00a4_codex_chatgpt_account_id'")).toBeLessThan(
+      dbSource.indexOf("version: '0100_seed_minimax_allowed_model'")
     )
   })
 
@@ -48,6 +56,8 @@ describe('00a0/00a1 Codex subscription persistence', () => {
     expect(connectionSource).toContain('credential_revision BIGINT NOT NULL')
     expect(connectionSource).toContain('catalog_revision BIGINT NOT NULL')
     expect(connectionSource).toContain('account_fingerprint TEXT')
+    expect(connectionSource).toContain('chatgpt_account_id_encrypted TEXT')
+    expect(connectionSource).toContain('ADD COLUMN IF NOT EXISTS chatgpt_account_id_encrypted')
     expect(connectionSource).toContain(
       'CREATE UNIQUE INDEX IF NOT EXISTS codex_subscription_connections_active_key'
     )

@@ -23,7 +23,7 @@
     "oauthDeviceCallback": "https://auth.openai.com/deviceauth/callback",
     "oauthDeviceVerification": "https://auth.openai.com/codex/device",
     "oauthRevoke": "https://auth.openai.com/oauth/revoke",
-    "catalog": "https://chatgpt.com/backend-api/codex/models",
+    "catalog": "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
     "completions": "https://chatgpt.com/backend-api/codex/responses"
   },
   "forbiddenOrigins": [

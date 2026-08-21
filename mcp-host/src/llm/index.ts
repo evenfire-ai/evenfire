@@ -5,6 +5,7 @@ import { config } from '../config'
 import { ApiKeys, ModelConfig } from '../types'
 import { ClaudeProvider } from './claude'
 import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from './codexLlmProxyClient'
+import { readLiveCodexPolicyBinding, resolveCodexAttemptPolicy } from './codexPolicyBinding'
 import { OpenAIProvider } from './openai'
 import { ProviderAttemptAuthorizer, resolveCodexAuthorizeUrl } from './providerAttemptAuthorizer'
 import { makeProvider } from './registry'
@@ -34,10 +35,21 @@ function createCodexRuntimeDeps() {
       runtimeUrl: resolveCodexProxyRuntimeUrl(config.codexProxyRuntimeBaseUrl),
       readPlatformJwt,
     }),
-    attemptContext: () => ({
-      policyRevision: config.codexPolicyRevision,
-      policyHash: config.codexPolicyHash,
-    }),
+    attemptContext: ({ model }: { model: string }) => {
+      const resolved = resolveCodexAttemptPolicy({
+        model,
+        envRevision: config.codexPolicyRevision,
+        envHash: config.codexPolicyHash,
+        binding: readLiveCodexPolicyBinding(),
+      })
+      if (!resolved) {
+        return { policyRevision: 0, policyHash: '' }
+      }
+      return {
+        ...resolved,
+        hostRef: config.hostName,
+      }
+    },
   }
 }
 

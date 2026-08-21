@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto'
 import {
   LIMITS,
+  computeCodexPolicyHash,
   hashCodexCompletionRequestV1,
   parseCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
@@ -9,7 +9,6 @@ import { type DbClient, pool, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import type { McpHostAccessClaims } from '../utils/auth/mcpHostJwtToken.js'
 import { isPlainObject } from '../utils/isPlainObject.js'
-import { stableStringify } from '../utils/stableStringify.js'
 import { evaluateBudgetCheck } from './budgets/check.js'
 import { getActiveReservation } from './budgets/reservations.js'
 import { getSafeCodexSubscriptionConnection } from './codexSubscriptionConnection.js'
@@ -96,22 +95,7 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
   issueTicket: issueRegisteredCodexExecutionTicket,
 })
 
-export function computeCodexPolicyHash(input: {
-  model: string
-  catalogRevision: number
-  credentialRevision: number
-}): string {
-  return createHash('sha256')
-    .update(
-      stableStringify({
-        catalogRevision: input.catalogRevision,
-        credentialRevision: input.credentialRevision,
-        model: input.model,
-        provider: PROVIDER,
-      })
-    )
-    .digest('hex')
-}
+export { computeCodexPolicyHash }
 
 function firstUnknownKey(body: Record<string, unknown>): string | null {
   for (const key of Object.keys(body)) {

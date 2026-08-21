@@ -153,6 +153,7 @@ echo "PASS: verify-networkpolicies fails on forbidden CIDR"
 
 grep -q 'name: codex-llm-proxy-ingress' "${ROOT}/deploy/base/control-plane/networkpolicies.yaml"
 grep -q 'name: codex-llm-proxy-egress' "${ROOT}/deploy/base/control-plane/networkpolicies.yaml"
+grep -q 'name: control-api-to-codex-llm-proxy' "${ROOT}/deploy/base/control-plane/networkpolicies.yaml"
 grep -A20 'name: control-api-rpc-gateway' "${ROOT}/deploy/base/control-plane/networkpolicies.yaml" \
   | grep -q 'app: codex-llm-proxy'
 echo "PASS: Codex proxy NetworkPolicies are declared and the RPC gateway admits the proxy"

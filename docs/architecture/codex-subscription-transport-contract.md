@@ -25,7 +25,7 @@ Exact HTTPS origins (no caller-supplied URL or header):
 - OAuth device callback: `https://auth.openai.com/deviceauth/callback`
 - OAuth device verification: `https://auth.openai.com/codex/device`
 - OAuth revoke: `https://auth.openai.com/oauth/revoke`
-- Catalog: `https://chatgpt.com/backend-api/codex/models`
+- Catalog: `https://chatgpt.com/backend-api/codex/models?client_version=1.0.0`
 - Completions: `https://chatgpt.com/backend-api/codex/responses`
 
 Forbidden examples: `https://api.openai.com/v1/chat/completions` (ordinary API

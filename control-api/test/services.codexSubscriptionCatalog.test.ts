@@ -174,4 +174,17 @@ describe('Codex proxy catalog transport', () => {
     })
     expect(fetchFn).toHaveBeenCalledOnce()
   })
+
+  it('maps a proxy transport failure to unavailable without throwing', async () => {
+    const transport = createCodexProxyCatalogTransport({
+      adminBaseUrl: 'http://codex-llm-proxy.control-plane.svc:8081',
+      fetchFn: async () => {
+        throw new TypeError('fetch failed')
+      },
+      signPermit: () => 'permit',
+    })
+    await expect(transport.listModels({ accessToken: 'tok-live' })).resolves.toEqual({
+      outcome: 'unavailable',
+    })
+  })
 })

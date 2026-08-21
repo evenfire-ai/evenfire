@@ -13,7 +13,12 @@ export class CodexProxyError extends Error {
 export type CodexProxyFrame =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown> }
-  | { type: 'done'; outcome: 'success' | 'canceled' | 'error' | 'unknown' }
+  | {
+      type: 'done'
+      outcome: 'success' | 'canceled' | 'error' | 'unknown'
+      usage?: { inputTokens: number; outputTokens: number }
+    }
+  | { type: 'error'; code: string }
 
 export type CodexProxyStreamResult = {
   text: string
@@ -65,7 +70,7 @@ export class CodexLlmProxyClient {
     if (!response.ok) {
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
       const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
-      throw new CodexProxyError(code, `proxy stream failed with ${response.status}`)
+      throw new CodexProxyError(code, `proxy stream failed with ${response.status} (${code})`)
     }
     if (!response.body) {
       throw new CodexProxyError('provider_unavailable', 'proxy stream had no body')
@@ -87,6 +92,7 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<CodexProx
   let text = ''
   const toolCalls: CodexProxyStreamResult['toolCalls'] = []
   let outcome: CodexProxyStreamResult['outcome'] = 'unknown'
+  let usage: CodexProxyStreamResult['usage']
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -97,10 +103,16 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<CodexProx
       const line = part.split('\n').find(entry => entry.startsWith('data: '))
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as CodexProxyFrame
+      if (frame.type === 'error') {
+        throw new CodexProxyError(frame.code, `proxy stream failed with ${frame.code}`)
+      }
       if (frame.type === 'text') text += frame.text
       if (frame.type === 'tool_call') toolCalls.push(frame)
-      if (frame.type === 'done') outcome = frame.outcome
+      if (frame.type === 'done') {
+        outcome = frame.outcome
+        if (frame.usage) usage = frame.usage
+      }
     }
   }
-  return { text, toolCalls, outcome }
+  return { text, toolCalls, outcome, ...(usage ? { usage } : {}) }
 }

@@ -91,12 +91,14 @@ describe('redeemLlmProviderAttempt', () => {
           refreshToken: 'refresh-secret',
           accessToken: 'access-usable',
           accessTokenExpiresAt: new Date(Date.now() + 120_000),
+          chatgptAccountId: 'acct_live_1',
           credentialRevision: 3,
         }),
         encryptionKey: Buffer.alloc(32),
       }
     )
     expect(result.accessToken).toBe('access-usable')
+    expect(result.chatgptAccountId).toBe('acct_live_1')
     expect(result.transport.completionsOrigin).toBe(
       'https://chatgpt.com/backend-api/codex/responses'
     )
@@ -147,5 +149,25 @@ describe('redeemLlmProviderAttempt', () => {
         }
       )
     ).rejects.toMatchObject({ code: 'disabled' })
+  })
+
+  it('refuses to redeem when the ChatGPT account id is missing', async () => {
+    await expect(
+      redeemLlmProviderAttempt(
+        { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
+        {
+          enabled: true,
+          withTransaction: async work => work({ query: vi.fn() } as never),
+          loadSecrets: async () => ({
+            refreshToken: 'refresh-secret',
+            accessToken: 'opaque-token',
+            accessTokenExpiresAt: new Date(Date.now() + 120_000),
+            chatgptAccountId: null,
+            credentialRevision: 3,
+          }),
+          encryptionKey: Buffer.alloc(32),
+        }
+      )
+    ).rejects.toMatchObject({ code: 'connection_unavailable' })
   })
 })

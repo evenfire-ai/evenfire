@@ -61,6 +61,7 @@ import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
 import type { TransitionEvent } from './lifecycle/types'
 import { SingleTurnProvider, apiKeysFromEnv, createLLMProvider } from './llm'
+import { setCodexPolicyBindingReader } from './llm/codexPolicyBinding'
 import { FailoverEngine } from './llm/failover/engine'
 import { llmFallbackTotal } from './llm/failover/metrics'
 import { parseLlmPolicy } from './llm/failover/policy'
@@ -166,6 +167,7 @@ setOutputDirHostAccessor(() => currentHost)
 let currentKeys: ApiKeys = {}
 let currentProvider: SingleTurnProvider | null = null
 let configStore: ConfigStore | null = null
+setCodexPolicyBindingReader(() => configStore?.codexPolicyBinding() ?? null)
 // R5 — provider-fallback. `currentPolicy` is the normalized `spec.llmPolicy`
 // (null = no failover); `failoverEngine` holds the Host-wide sticky state
 // (cooldown + served pair) and is (re)built only when the policy changes.

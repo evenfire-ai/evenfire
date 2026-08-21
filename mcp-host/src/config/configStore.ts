@@ -107,6 +107,20 @@ export interface AllowedModelEntry {
   vendor?: string
 }
 
+/**
+ * Catalog/credential pair projected onto `clerum-llm-allowed-models` by
+ * control-api. Host chat hashes this with the selected model to authorize a
+ * Codex attempt. Annotation names are a cross-service contract with
+ * control-api, HCC, and WRC.
+ */
+export type CodexPolicyBinding = {
+  catalogRevision: number
+  credentialRevision: number
+}
+
+export const CATALOG_REVISION_ANNOTATION = 'clerum.io/catalog-revision'
+export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
+
 export type ConfigStoreChangeHandler = (change: ConfigStoreChange) => void
 
 export interface ConfigStoreOptions {
@@ -228,6 +242,8 @@ export class ConfigStore {
   private allowlistDelivered = false
   /** Dedupe flag for the "CM absent" WARN + metric (fires once per transition). */
   private allowlistMissingWarned = false
+  /** Catalog/credential pair from allowlist CM annotations, or null. */
+  private codexBinding: CodexPolicyBinding | null = null
 
   constructor(opts: ConfigStoreOptions) {
     this.opts = opts
@@ -459,6 +475,16 @@ export class ConfigStore {
     return this.allowlistDelivered
   }
 
+  /**
+   * Live Codex catalog/credential revisions from the allowlist ConfigMap
+   * annotations. Null when the CM is absent, the annotations are missing, or
+   * either value is not an integer. Callers must still require catalogRevision
+   * >= 1 before authorizing.
+   */
+  codexPolicyBinding(): CodexPolicyBinding | null {
+    return this.codexBinding
+  }
+
   // ─── Bootstrap (initial list) ────────────────────────────────────────
 
   private async bootstrapLlmSecret(): Promise<void> {
@@ -506,7 +532,7 @@ export class ConfigStore {
         namespace: this.opts.namespace,
       })
       const wasAvailable = this.allowlistDelivered
-      const contentChanged = this.applyAllowlistData(cm.data ?? {})
+      const contentChanged = this.applyAllowlistConfigMap(cm)
       this.allowlistDelivered = true
       this.allowlistMissingWarned = false
       return contentChanged || !wasAvailable
@@ -517,6 +543,22 @@ export class ConfigStore {
       console.warn(`[ConfigStore] readNamespacedConfigMap ${name} failed:`, err)
       return false
     }
+  }
+
+  /**
+   * Parse models plus Codex catalog/credential annotations from the allowlist
+   * ConfigMap. Returns whether either surface changed so annotation-only
+   * catalog bumps still refresh Host chat's authorize binding.
+   */
+  private applyAllowlistConfigMap(cm: {
+    data?: Record<string, string>
+    metadata?: { annotations?: Record<string, string> }
+  }): boolean {
+    const modelsChanged = this.applyAllowlistData(cm.data ?? {})
+    const nextBinding = parseCodexPolicyBinding(cm.metadata?.annotations)
+    const bindingChanged = !codexBindingsEqual(this.codexBinding, nextBinding)
+    this.codexBinding = nextBinding
+    return modelsChanged || bindingChanged
   }
 
   /**
@@ -592,6 +634,7 @@ export class ConfigStore {
     const wasAvailable = this.allowlistDelivered
     this.allowlistDelivered = false
     this.allowedModelsMap = new Map()
+    this.codexBinding = null
     if (!this.allowlistMissingWarned) {
       this.allowlistMissingWarned = true
       llmAllowlistMissingTotal.inc()
@@ -701,9 +744,7 @@ export class ConfigStore {
       }
       if (type !== 'ADDED' && type !== 'MODIFIED') return
       const wasAvailable = this.allowlistDelivered
-      const contentChanged = this.applyAllowlistData(
-        (obj.data as Record<string, string> | undefined) ?? {}
-      )
+      const contentChanged = this.applyAllowlistConfigMap(obj)
       this.allowlistDelivered = true
       this.allowlistMissingWarned = false
       // Only notify subscribers on a real transition — a re-delivered,
@@ -857,8 +898,43 @@ export class ConfigStore {
 }
 
 interface KubeObject {
-  metadata?: { name?: string }
+  metadata?: { name?: string; annotations?: Record<string, string> }
   data?: Record<string, string>
+}
+
+function parseOptionalIntegerAnnotation(
+  annotations: Record<string, string>,
+  key: string
+): number | null | 'invalid' {
+  if (!(key in annotations)) return null
+  const parsed = Number(annotations[key])
+  return Number.isInteger(parsed) ? parsed : 'invalid'
+}
+
+function parseCodexPolicyBinding(
+  annotations: Record<string, string> | undefined
+): CodexPolicyBinding | null {
+  if (!annotations) return null
+  const catalogRevision = parseOptionalIntegerAnnotation(annotations, CATALOG_REVISION_ANNOTATION)
+  const credentialRevision = parseOptionalIntegerAnnotation(
+    annotations,
+    CONNECTION_REVISION_ANNOTATION
+  )
+  if (
+    catalogRevision === null ||
+    catalogRevision === 'invalid' ||
+    credentialRevision === null ||
+    credentialRevision === 'invalid'
+  ) {
+    return null
+  }
+  return { catalogRevision, credentialRevision }
+}
+
+function codexBindingsEqual(a: CodexPolicyBinding | null, b: CodexPolicyBinding | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.catalogRevision === b.catalogRevision && a.credentialRevision === b.credentialRevision
 }
 
 /**

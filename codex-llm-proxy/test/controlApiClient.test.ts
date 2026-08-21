@@ -27,7 +27,7 @@ function listen(handler: (req: IncomingMessage, body: unknown, res: Server) => v
             transport: {
               protocolVersion: 'codex-subscription-transport.v1',
               completionsOrigin: 'https://chatgpt.com/backend-api/codex/responses',
-              catalogOrigin: 'https://chatgpt.com/backend-api/codex/models',
+              catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
               operation: 'completion_stream',
               servedModel: 'gpt-5.1',
               maxStreamDurationMs: 300000,

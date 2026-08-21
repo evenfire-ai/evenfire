@@ -120,16 +120,21 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       reject(res, 403, 'ticket_invalid')
       return
     }
+    if (!platform.hostRefs.includes('*') && !platform.hostRefs.includes(ticket.hostRef)) {
+      reject(res, 403, 'host_binding_mismatch')
+      return
+    }
     if (!config.executionEnabled) {
       reject(res, 404, 'disabled')
       return
     }
 
     void (async () => {
-      const release = await streamGate.acquire()
+      let release: (() => void) | undefined
       const abort = new AbortController()
       req.on('close', () => abort.abort())
       try {
+        release = await streamGate.acquire()
         res.status(200)
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache')
@@ -139,7 +144,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
           requestHash: parsed.data.requestHash,
           request: parsed.data.request,
           deadlineMs: parsed.data.deadlineMs,
-          maxDeadlineMs: config.maxDeadlineMs,
+          maxDeadlineMs: Math.min(config.maxDeadlineMs, config.maxStreamDurationMs),
           ticket: {
             jti: ticket.jti,
             hostRef: ticket.hostRef,
@@ -155,16 +160,23 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
             res.write(`data: ${JSON.stringify(frame)}\n\n`)
           },
         })
-        res.write(`data: ${JSON.stringify({ type: 'done', outcome: result.outcome })}\n\n`)
+        res.write(
+          `data: ${JSON.stringify({ type: 'done', outcome: result.outcome, ...(result.usage ? { usage: result.usage } : {}) })}\n\n`
+        )
         metrics.observeAttempt(result.outcome, 'completion_stream')
         metrics.observeStream(Date.now() - started)
         res.end()
       } catch (err) {
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
+        if (res.headersSent) {
+          res.write(`data: ${JSON.stringify({ type: 'error', code: mapped.code })}\n\n`)
+          res.end()
+          return
+        }
         reject(res, mapped.status, mapped.code)
       } finally {
-        release()
+        release?.()
       }
     })()
   })
@@ -267,15 +279,23 @@ function mapError(err: unknown): { status: number; code: string } {
   if (err instanceof OriginDeniedError) return { status: 403, code: 'origin_denied' }
   if (err instanceof RequestLimitError) return { status: 503, code: 'provider_unavailable' }
   if (err instanceof CodexTransportError || err instanceof ControlApiClientError) {
-    const status =
-      err.code === 'request_hash_mismatch' || err.code === 'ticket_invalid' || err.code === 'model_not_allowed'
-        ? 403
-        : err.code === 'disabled'
-          ? 404
-          : err.code === 'ticket_replayed'
-            ? 409
-            : 503
-    return { status, code: err.code }
+    const statusByCode: Record<string, number> = {
+      invalid_request: 400,
+      Unauthorized: 401,
+      origin_denied: 403,
+      request_hash_mismatch: 403,
+      ticket_invalid: 403,
+      ticket_expired: 403,
+      no_grant: 403,
+      host_binding_mismatch: 403,
+      model_not_allowed: 403,
+      insufficient_scope: 403,
+      disabled: 404,
+      ticket_replayed: 409,
+      connection_unavailable: 503,
+      provider_unavailable: 503,
+    }
+    return { status: statusByCode[err.code] ?? 503, code: err.code }
   }
   return { status: 503, code: 'provider_unavailable' }
 }

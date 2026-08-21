@@ -64,6 +64,8 @@ export interface Config {
   codexSubscriptionEnabled: boolean
   // Server-owned Codex proxy URL. Callers cannot override this per request.
   codexProxyRuntimeBaseUrl: string
+  // Explicit authorize override for tests/dev. Host chat ignores an empty hash
+  // and binds policyRevision/policyHash from the allowlist ConfigMap instead.
   codexPolicyRevision: number
   codexPolicyHash: string
 
@@ -655,6 +657,9 @@ export const config: Config = {
     'CODEX_LLM_PROXY_RUNTIME_URL',
     'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
   )!,
+  // Empty hash is not a grant: Host chat computes the per-model digest from
+  // clerum.io/catalog-revision + clerum.io/connection-revision on the allowlist
+  // ConfigMap. Set both env vars together only as a test/dev override.
   codexPolicyRevision: parseInt(getEnv('CODEX_POLICY_REVISION', '1')!, 10),
   codexPolicyHash: getEnv('CODEX_POLICY_HASH', '')!,
 
