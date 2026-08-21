@@ -3,6 +3,10 @@ import jwt from 'jsonwebtoken'
 import { config } from '../src/config.js'
 import {
   ALL_MCP_HOST_CONTROL_SCOPES,
+  MCP_HOST_CREDENTIAL_CAPABILITY,
+  MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS,
+  MCP_HOST_HCC_AUDIENCE,
+  MCP_HOST_WORKFLOW_AUDIENCE,
   type McpHostAccessClaims,
   getMcpHostCallerKey,
   getMcpHostExpiredRefreshRateLimitKey,
@@ -51,6 +55,120 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
       const { token } = issueMcpHostRefreshJwt('ns1', 'recipeA', refs)
       const decoded = jwt.decode(token) as Record<string, unknown>
       expect(decoded.hostRefs).toEqual(refs)
+    })
+  })
+
+  describe('HCC-qualified credential lineage', () => {
+    it('issues and verifies the existing access form with exact HCC authority claims', () => {
+      const { token } = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+        hccCredential: { hostUid: 'host-uid-chatllm' },
+      })
+      const decoded = jwt.decode(token) as Record<string, unknown>
+      expect(decoded.aud).toEqual([MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE])
+      expect(decoded.host_uid).toBe('host-uid-chatllm')
+      expect(decoded.mcpCapabilities).toEqual([MCP_HOST_CREDENTIAL_CAPABILITY])
+
+      expect(verifyMcpHostAccessJwt(token)).toMatchObject({
+        hostRefs: ['chatllm'],
+        host_uid: 'host-uid-chatllm',
+        mcpCapabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+      })
+    })
+
+    it('clamps an HCC access token to the verifier ceiling without changing WRC TTLs', () => {
+      const previousAccessTtl = config.mcpHostJwtAccessTtlSec
+      config.mcpHostJwtAccessTtlSec = MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS + 300
+      try {
+        const hcc = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+          hccCredential: { hostUid: 'host-uid-chatllm' },
+        })
+        const workflow = issueMcpHostAccessJwt('sandbox-recipes', 'recipe')
+        const hccClaims = jwt.decode(hcc.token) as Record<string, unknown>
+
+        expect(hcc.expiresInSeconds).toBe(MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS)
+        expect((hccClaims.exp as number) - (hccClaims.iat as number)).toBe(
+          MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS
+        )
+        expect(workflow.expiresInSeconds).toBe(previousAccessTtl + 300)
+      } finally {
+        config.mcpHostJwtAccessTtlSec = previousAccessTtl
+      }
+    })
+
+    it('accepts the HCC access boundary and leaves HCC refresh TTL uncapped', () => {
+      const previousAccessTtl = config.mcpHostJwtAccessTtlSec
+      const previousRefreshTtl = config.mcpHostJwtRefreshTtlSec
+      config.mcpHostJwtAccessTtlSec = MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS
+      config.mcpHostJwtRefreshTtlSec = MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS + 300
+      try {
+        const access = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+          hccCredential: { hostUid: 'host-uid-chatllm' },
+        })
+        const refresh = issueMcpHostRefreshJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+          hccCredential: { hostUid: 'host-uid-chatllm' },
+        })
+        const refreshClaims = jwt.decode(refresh.token) as Record<string, unknown>
+
+        expect(access.expiresInSeconds).toBe(MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS)
+        expect(refresh.expiresInSeconds).toBe(MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS + 300)
+        expect((refreshClaims.exp as number) - (refreshClaims.iat as number)).toBe(
+          MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS + 300
+        )
+      } finally {
+        config.mcpHostJwtAccessTtlSec = previousAccessTtl
+        config.mcpHostJwtRefreshTtlSec = previousRefreshTtl
+      }
+    })
+
+    it('rejects workflow-only tokens that inject HCC-only claims', () => {
+      const token = jwt.sign(
+        {
+          sub: `${config.hostsNamespace}/standalone`,
+          recipeNamespace: config.hostsNamespace,
+          recipeName: 'standalone',
+          hostRefs: ['chatllm'],
+          host_uid: 'forged-host-uid',
+          mcpCapabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+          scope: 'workflow:approval:request',
+          workflowControlScopes: [],
+        },
+        config.adminJwtPrivateKey,
+        {
+          algorithm: 'RS256',
+          issuer: config.adminJwtIssuer,
+          audience: MCP_HOST_WORKFLOW_AUDIENCE,
+          jwtid: 'workflow-only-injected-hcc-claims',
+          expiresIn: 300,
+        }
+      )
+
+      expect(verifyMcpHostAccessJwt(token)).toBeNull()
+    })
+
+    it('rejects duplicate and third-party audience values even with a valid signature', () => {
+      const base = {
+        sub: `${config.hostsNamespace}/standalone`,
+        recipeNamespace: config.hostsNamespace,
+        recipeName: 'standalone',
+        hostRefs: ['chatllm'],
+        host_uid: 'host-uid-chatllm',
+        mcpCapabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+        scope: 'workflow:approval:request',
+        workflowControlScopes: [],
+      }
+      for (const audience of [
+        [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE, MCP_HOST_HCC_AUDIENCE],
+        [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE, 'unrelated-service'],
+      ]) {
+        const token = jwt.sign(base, config.adminJwtPrivateKey, {
+          algorithm: 'RS256',
+          issuer: config.adminJwtIssuer,
+          audience,
+          jwtid: `bad-audience-${audience.length}-${audience.at(-1)}`,
+          expiresIn: 300,
+        })
+        expect(verifyMcpHostAccessJwt(token)).toBeNull()
+      }
     })
   })
 
@@ -306,6 +424,68 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
       const claims = await verifyMcpHostRefreshJwt(token)
       expect(claims).toBeNull()
     })
+
+    it.each([
+      {
+        label: 'workflow-only audience with injected HCC claims',
+        audience: MCP_HOST_WORKFLOW_AUDIENCE,
+        recipeNamespace: config.hostsNamespace,
+        recipeName: 'standalone',
+        hostRefs: ['chatllm'],
+        hostUid: 'host-uid-chatllm',
+        capabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+      },
+      {
+        label: 'HCC audience without the bound Host UID',
+        audience: [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE],
+        recipeNamespace: config.hostsNamespace,
+        recipeName: 'standalone',
+        hostRefs: ['chatllm'],
+        hostUid: undefined,
+        capabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+      },
+      {
+        label: 'HCC audience with a workflow recipe binding',
+        audience: [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE],
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'recipe-a',
+        hostRefs: ['sandbox-recipes/recipe-a'],
+        hostUid: 'host-uid-chatllm',
+        capabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+      },
+    ])('rejects $label', async candidate => {
+      const token = jwt.sign(
+        {
+          sub: `${candidate.recipeNamespace}/${candidate.recipeName}`,
+          recipeNamespace: candidate.recipeNamespace,
+          recipeName: candidate.recipeName,
+          hostRefs: candidate.hostRefs,
+          scope: 'workflow:approval:refresh',
+          workflowControlScopes: [],
+          ...(candidate.hostUid ? { host_uid: candidate.hostUid } : {}),
+          mcpCapabilities: candidate.capabilities,
+        },
+        config.adminJwtPrivateKey,
+        {
+          algorithm: 'RS256',
+          issuer: config.adminJwtIssuer,
+          audience: candidate.audience,
+          expiresIn: 300,
+          jwtid: `invalid-hcc-refresh-${candidate.label}`,
+        }
+      )
+
+      await expect(verifyMcpHostRefreshJwt(token)).resolves.toBeNull()
+    })
+
+    it('does not treat a control token as an access or refresh credential', async () => {
+      const { token } = issueMcpHostControlJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+        scopes: ['workflow:read'],
+      })
+
+      expect(verifyMcpHostAccessJwt(token)).toBeNull()
+      await expect(verifyMcpHostRefreshJwt(token)).resolves.toBeNull()
+    })
   })
 
   describe('verifyExpiredMcpHostRefreshJwtDetailed', () => {
@@ -390,6 +570,8 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
         recipeName: 'recipe1',
         hostRefs: ['ns1/recipe1'],
         scope: 'workflow:approval:request' as const,
+        workflowControlScopes: [],
+        mcpCapabilities: [],
         iss: 'test',
         aud: 'test',
         jti: 'test-jti',
@@ -405,6 +587,8 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
         recipeName: 'recipe1',
         hostRefs: ['ns1/recipe1'],
         scope: 'workflow:approval:request',
+        workflowControlScopes: [],
+        mcpCapabilities: [],
         iss: 'test',
         aud: 'test',
         jti: 'test-jti',
@@ -420,6 +604,8 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
         recipeName: 'recipe1',
         hostRefs: ['ns1/recipe1', 'ns2/recipe2'],
         scope: 'workflow:approval:request',
+        workflowControlScopes: [],
+        mcpCapabilities: [],
         iss: 'test',
         aud: 'test',
         jti: 'test-jti',
@@ -436,6 +622,8 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
         recipeName: 'recipe1',
         hostRefs: ['ns1/*'],
         scope: 'workflow:approval:request',
+        workflowControlScopes: [],
+        mcpCapabilities: [],
         iss: 'test',
         aud: 'test',
         jti: 'test-jti',

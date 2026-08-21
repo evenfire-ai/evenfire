@@ -442,6 +442,9 @@ minikube-t2: ## Run the local development T0, Real PostgreSQL T1, and exact-head
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
 		scripts/minikube/t2.sh
 
+.PHONY: minikube-t2-np08-hcc-authorization
+minikube-t2-np08-hcc-authorization: minikube-t2 ## Run canonical T2 including the required deployed NP-08 Host-to-HCC authorization journey
+
 .PHONY: minikube-t2-real-postgres
 minikube-t2-real-postgres: ## Run the explicit local Real PostgreSQL lane without changing CI's DSN contract
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \

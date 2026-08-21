@@ -57,6 +57,8 @@ log() {
 # environment only for a cluster nothing has built or pulled into yet.
 # shellcheck source=scripts/minikube/image-mode.sh
 source "${SCRIPT_DIR}/image-mode.sh"
+# shellcheck source=scripts/minikube/pre-gate-marker.sh
+source "${SCRIPT_DIR}/pre-gate-marker.sh"
 
 if ! IMAGE_SOURCE="$(image_mode_source "${PROJECT_DIR}")"; then
   exit 1
@@ -164,25 +166,7 @@ restore_pre_gate_writers() {
 trap restore_pre_gate_writers EXIT
 
 fingerprint_dir() {
-  local dir="$1"
-
-  if [[ ! -d "${PROJECT_DIR}/${dir}" ]]; then
-    echo "missing"
-    return
-  fi
-
-  local digest
-  digest="$(find "${PROJECT_DIR}/${dir}" \
-    -type f \
-    ! -path '*/node_modules/*' \
-    ! -path '*/dist/*' \
-    ! -path '*/.next/*' \
-    ! -path '*/playwright-report/*' \
-    ! -path '*/test-results/*' \
-    ! -path '*/coverage/*' \
-    -exec shasum {} + 2>/dev/null | sort | shasum | awk '{print $1}')"
-
-  echo "${digest:-empty}"
+  pre_gate_marker_fingerprint_dir "${PROJECT_DIR}" "$1"
 }
 
 state_file_for() {
@@ -388,34 +372,14 @@ log "Evaluating sync requirements for ${GATE_NAME}"
 log "Cluster images: ${IMAGE_SOURCE}${IMAGE_TAG:+ (${IMAGE_TAG})}; overlay $(basename "${PRE_GATE_RENDER_DIR}")"
 preflight_host_lifecycle_probe
 
-cluster_fingerprint="$(
-  {
-    fingerprint_dir control-api
-    fingerprint_dir external-rest-api
-    fingerprint_dir rpc-proxy
-    fingerprint_dir mcp-host
-    fingerprint_dir host-context-controller
-    fingerprint_dir packages/workflow-runtime-core
-    fingerprint_dir packages/network-policy-core
-	    fingerprint_dir workflow-recipes
-	    fingerprint_dir packages/workflow-sdk
-	    fingerprint_dir tests/e2e/fixtures/custom-workflow-coordinator
-	    fingerprint_dir channel-reader
-    fingerprint_dir workflow-approval-request-reader
-    fingerprint_dir control-ui
-    fingerprint_dir deploy
-    fingerprint_dir charts
-    fingerprint_dir scripts/minikube
-  } | shasum | awk '{print $1}'
-)"
-
-infra_fingerprint="$(
-  {
-    fingerprint_dir deploy
-    fingerprint_dir charts
-    fingerprint_dir scripts/minikube
-  } | shasum | awk '{print $1}'
-)"
+if ! cluster_fingerprint="$(pre_gate_marker_cluster_fingerprint "${PROJECT_DIR}")"; then
+  log "ERROR: unable to compute the cluster fingerprint; refusing to sync or stamp the marker"
+  exit 1
+fi
+if ! infra_fingerprint="$(pre_gate_marker_infra_fingerprint "${PROJECT_DIR}")"; then
+  log "ERROR: unable to compute the infrastructure fingerprint; refusing to sync or stamp the marker"
+  exit 1
+fi
 
 cluster_changed=false
 infra_changed=false
@@ -535,17 +499,19 @@ if [[ "${cluster_changed}" == "true" ]]; then
   ensure_evenfire_registry
   incremental_restart_targets
 
-  # nginx.conf is mounted through a subPath.  Kubernetes updates the
-  # ConfigMap object but does not refresh that file in an already-running pod,
-  # so a full deployment sync must roll the gateway before any SDK probe uses
-  # the new route set.
+  # Both nginx gateway configs are mounted through subPath. Kubernetes updates
+  # the ConfigMaps but not the files in existing pods, so a deployment sync
+  # must roll both before any SDK or NP-08 runtime assertion.
   if [[ "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ||
         "${FORCE_RESTART}" == "true" ]]; then
     rollout_restart_with_retry control-plane nginx-workflow-approval-gateway
     rollout_if_present control-plane nginx-workflow-approval-gateway
+    rollout_restart_with_retry control-plane host-context-controller-api-gateway
+    rollout_if_present control-plane host-context-controller-api-gateway
   fi
 
   assert_workflow_gateway_prompt_bridge_finalization_route
+  assert_hcc_gateway_np08_routes
 
   rollout_if_present control-plane host-context-controller
   rollout_if_present control-plane workflow-recipes
@@ -576,6 +542,18 @@ if [[ "${cluster_changed}" == "true" ]]; then
     "${SCRIPT_DIR}/pf-all-stack.sh"
   fi
 
+  # Full deploy may regenerate ignored, profile-specific inputs such as the
+  # Kubernetes API-IP patch. Recompute after that generation and before
+  # stamping the marker; otherwise a strict consumer can correctly reject a
+  # marker that describes the pre-generation tree.
+  if ! cluster_fingerprint="$(pre_gate_marker_cluster_fingerprint "${PROJECT_DIR}")"; then
+    log "ERROR: unable to recompute the cluster fingerprint after deployment; refusing to stamp the marker"
+    exit 1
+  fi
+  if ! infra_fingerprint="$(pre_gate_marker_infra_fingerprint "${PROJECT_DIR}")"; then
+    log "ERROR: unable to recompute the infrastructure fingerprint after deployment; refusing to stamp the marker"
+    exit 1
+  fi
   persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}"
   persist_state cluster "${cluster_fingerprint}"
   persist_state infra "${infra_fingerprint}"
@@ -586,5 +564,7 @@ else
   ensure_evenfire_registry
   rollout_if_present control-plane nginx-workflow-approval-gateway
   assert_workflow_gateway_prompt_bridge_finalization_route
+  rollout_if_present control-plane host-context-controller-api-gateway
+  assert_hcc_gateway_np08_routes
   ${KC} get deploy -A --no-headers 2>/dev/null | grep -v kube-system || true
 fi

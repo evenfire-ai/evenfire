@@ -16,12 +16,8 @@ T1_TMP_ROOT="$T2_TMP_ROOT"
 if [ -z "$T1_TMP_ROOT" ]; then T1_TMP_ROOT=/tmp; fi
 T1_TMP_DIR=""
 PORT_FORWARD_PID=""
-T1_PF_PID_FILE=""
 LOCAL_PORT=""
 ADMIN_DSN=""
-THROWAY_CONTAINER=""
-THROWAY_PORT=""
-THROWAY_DSN=""
 PG_USER=""
 PG_PASSWORD=""
 PG_DATABASE=""
@@ -31,13 +27,7 @@ T1_NEXT_COMMAND='repair the first reported Real PostgreSQL precondition, then re
 T1_TOTAL_TESTS=0
 T1_PASSED_TESTS=0
 T1_PENDING_TESTS=0
-
-# Cluster-global role mutations must never run against live control-postgres.
-# CI uses an empty postgres:16-alpine for the same reason.
-CONTROL_API_ROLE_RESET_SUITES=(
-  test/db.realPostgresMigration.integration.test.ts
-  test/gfsReaderRole.realPostgres.integration.test.ts
-)
+T1_GFS_RESTORE_REQUIRED=false
 
 die_t1() {
   local code="$1"
@@ -50,58 +40,35 @@ die_t1() {
   return 1
 }
 
-restore_gfs_runtime_credentials() {
-  # Role-reset suites use throwaway Postgres, but a leaked ALTER ROLE against
-  # the shared cluster must not leave GFSC in NOLOGIN for the T2 journey.
-  if [ -z "${T2_CONTEXT:-}" ]; then
-    return 0
-  fi
-  if ! t2_kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
-    return 0
-  fi
-  if ! GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
-    CONTEXT="$T2_CONTEXT" \
-    bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
-    printf '[minikube-t1] ERROR: failed to restore branch-profile GFS credentials\n' >&2
-    return 1
-  fi
-}
-
-stop_throwaway_postgres() {
-  if [ -n "$THROWAY_CONTAINER" ]; then
-    docker rm -f "$THROWAY_CONTAINER" >/dev/null 2>&1 || true
-    THROWAY_CONTAINER=""
-  fi
-}
-
-T1_CLEANUP_ENABLED=0
-
 cleanup_t1() {
   local status=$?
-  if [ "$T1_CLEANUP_ENABLED" != 1 ]; then
-    return 0
+  if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    local command_line
+    command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
+    if [[ "$command_line" == *port-forward* && "$command_line" == *svc/control-postgres* ]]; then
+      kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+      wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+    fi
   fi
-  stop_control_postgres_forward
-  stop_throwaway_postgres
-  if ! restore_gfs_runtime_credentials; then
+  if [ "$T1_GFS_RESTORE_REQUIRED" = true ] && \
+     ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="$T2_CONTEXT" \
+       bash "$PROJECT_DIR/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    printf '[minikube-t1] ERROR: failed to restore branch-profile GFS credentials\n' >&2
     status=1
   fi
   if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi
   exit "$status"
 }
+trap cleanup_t1 EXIT INT TERM
 
 require_t1_commands() {
   local command_name
-  for command_name in npm node docker; do
+  for command_name in npm node; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       T1_NEXT_COMMAND="install or enable $command_name, then re-run the Real PostgreSQL lane"
       die_t1 LOCAL_DEPENDENCY_MISSING "required local dependency is unavailable: $command_name"
     fi
   done
-  if ! docker info >/dev/null 2>&1; then
-    T1_NEXT_COMMAND='start Docker Desktop or the Docker daemon, then re-run the Real PostgreSQL lane'
-    die_t1 LOCAL_DEPENDENCY_MISSING 'docker is not running; T1 needs it for throwaway postgres:16-alpine'
-  fi
 }
 
 secret_field() {
@@ -114,20 +81,17 @@ secret_field() {
   printf '%s' "$encoded" | python3 -c 'import base64,sys; print(base64.b64decode(sys.stdin.buffer.read(), validate=True).decode(), end="")'
 }
 
-tcp_ready() {
-  python3 - "$1" <<'PY' >/dev/null 2>&1
+wait_for_tcp() {
+  local port="$1" deadline
+  deadline=$((SECONDS + T1_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if python3 - "$port" <<'PY' >/dev/null 2>&1
 import socket
 import sys
 with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1):
     pass
 PY
-}
-
-wait_for_tcp() {
-  local port="$1" deadline
-  deadline=$((SECONDS + T1_TIMEOUT))
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if tcp_ready "$port"; then return 0; fi
+    then return 0; fi
     sleep 1
   done
   return 1
@@ -162,210 +126,76 @@ path.write_text(text)
 PY
 }
 
-count_real_postgres_files() {
-  local package="$1"
-  find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
-    ! -name 'realPostgres.requirement.ts' ! -path '*/node_modules/*' -print | wc -l | tr -d ' '
-}
-
-start_throwaway_postgres() {
-  THROWAY_PORT="$(choose_local_port)"
-  THROWAY_CONTAINER="evenfire-t1-pg16-$$"
-  if ! docker image inspect postgres:16-alpine >/dev/null 2>&1; then
-    printf '[minikube-t1] pulling postgres:16-alpine for role-reset suites\n'
-    if ! docker pull postgres:16-alpine >/dev/null; then
-      T1_NEXT_COMMAND='pull postgres:16-alpine, then re-run the Real PostgreSQL lane'
-      die_t1 LOCAL_DEPENDENCY_MISSING 'postgres:16-alpine image is unavailable'
-    fi
+run_suite() {
+  local package="$1" expected_files log_file json_file stats
+  expected_files="$(find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' ! -name 'realPostgres.requirement.ts' -print | wc -l | tr -d ' ')"
+  if ! [[ "$expected_files" =~ ^[1-9][0-9]*$ ]]; then
+    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED "no Real PostgreSQL suites were found under $package"
   fi
-  if ! docker run -d --name "$THROWAY_CONTAINER" \
-    -e POSTGRES_HOST_AUTH_METHOD=trust \
-    -e POSTGRES_USER=postgres \
-    -e POSTGRES_DB=postgres \
-    -p "127.0.0.1:${THROWAY_PORT}:5432" \
-    postgres:16-alpine >/dev/null; then
-    T1_NEXT_COMMAND='repair Docker and re-run the Real PostgreSQL lane'
-    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'failed to start throwaway postgres:16-alpine'
-  fi
-  if ! wait_for_tcp "$THROWAY_PORT"; then
-    docker logs "$THROWAY_CONTAINER" >&2 || true
-    T1_NEXT_COMMAND='repair Docker networking and re-run the Real PostgreSQL lane'
-    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'throwaway postgres:16-alpine did not become reachable'
-  fi
-  THROWAY_DSN="$(python3 -c '
-from urllib.parse import quote
-import sys
-print("postgresql://" + quote("postgres", safe="") + "@127.0.0.1:" + sys.argv[1] + "/postgres", end="")
-' "$THROWAY_PORT")"
-  printf '[minikube-t1] throwaway postgres:16-alpine ready for role-reset suites\n'
-}
-
-t1_pf_pid_path() {
-  local safe_profile="${T2_PROFILE//[^A-Za-z0-9_.-]/_}"
-  printf '%s' "/tmp/pf-${safe_profile}-t1-control-postgres.pid"
-}
-
-# Record the T1 forward in the same /tmp/pf-<profile>-*.pid set that
-# t2_process_check allows. A leftover kubectl child after T1 cleanup is
-# otherwise PORT_FORWARD_CONFLICT on the final exact-head preflight.
-record_control_postgres_forward() {
-  T1_PF_PID_FILE="$(t1_pf_pid_path)"
-  printf '%s\n' "$PORT_FORWARD_PID" >"$T1_PF_PID_FILE"
-}
-
-reap_control_postgres_forward_orphans() {
-  local pid command_line
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    [[ "$command_line" == *port-forward* &&
-      "$command_line" == *"--context=$T2_CONTEXT"* &&
-      "$command_line" == *svc/control-postgres* ]] || continue
-    kill "$pid" >/dev/null 2>&1 || true
-    wait "$pid" >/dev/null 2>&1 || true
-  done < <(pgrep -f 'port-forward' 2>/dev/null || true)
-}
-
-stop_control_postgres_forward() {
-  if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-    local command_line
-    command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
-    if [[ "$command_line" == *port-forward* &&
-          "$command_line" == *svc/control-postgres* &&
-          ( -z "$LOCAL_PORT" || "$command_line" == *"${LOCAL_PORT}:5432"* ) ]]; then
-      kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
-      wait "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
-    fi
-  fi
-  PORT_FORWARD_PID=""
-  reap_control_postgres_forward_orphans
-  rm -f "$(t1_pf_pid_path)"
-  T1_PF_PID_FILE=""
-}
-
-start_control_postgres_forward() {
-  local attempt reuse_port="$LOCAL_PORT"
-  for attempt in 1 2 3 4 5; do
-    if [ -n "$reuse_port" ]; then
-      LOCAL_PORT="$reuse_port"
-    else
-      LOCAL_PORT="$(choose_local_port)"
-    fi
-    t2_kc -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
-      >"$T1_TMP_DIR/port-forward.log" 2>&1 &
-    PORT_FORWARD_PID=$!
-    if wait_for_tcp "$LOCAL_PORT" && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-      record_control_postgres_forward
-      return 0
-    fi
-    stop_control_postgres_forward
-  done
-  sanitize_file "$T1_TMP_DIR/port-forward.log"
-  cat "$T1_TMP_DIR/port-forward.log" >&2 || true
-  T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
-  die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward did not become reachable'
-}
-
-ensure_control_postgres_forward() {
-  if [ -n "$PORT_FORWARD_PID" ] && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1 && tcp_ready "$LOCAL_PORT"; then
-    return 0
-  fi
-  stop_control_postgres_forward
-  start_control_postgres_forward
-}
-
-list_real_postgres_files() {
-  local package="$1"
-  find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
-    ! -name 'realPostgres.requirement.ts' ! -path '*/node_modules/*' -print | sort
-}
-
-run_one_file() {
-  local package="$1" admin_dsn="$2" relative_suite="$3"
-  local log_file json_file stats reported_files passed_tests failed_tests pending_files pending_tests total_tests success expected npm_status
-  log_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _)-$(printf '%s' "$relative_suite" | tr / _).log"
-  json_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _)-$(printf '%s' "$relative_suite" | tr / _).json"
-  printf '[minikube-t1] running %s/%s\n' "$package" "$relative_suite"
-  npm_status=0
-  (
+  log_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _).log"
+  json_file="$T1_TMP_DIR/$(printf '%s' "$package" | tr / _).json"
+  printf '[minikube-t1] running %s Real PostgreSQL suites\n' "$package"
+  if ! (
     cd "$PROJECT_DIR/$package"
-    CONTROL_API_REAL_PG_ADMIN_URL="$admin_dsn" \
+    CONTROL_API_REAL_PG_ADMIN_URL="$ADMIN_DSN" \
     CONTROL_API_REAL_PG_REQUIRED=1 FORCE_COLOR=0 NO_COLOR=1 \
-      npm test -- --reporter=default --reporter=json --outputFile="$json_file" --run "$relative_suite"
-  ) >"$log_file" 2>&1 || npm_status=$?
+      npm test -- --run realPostgres --reporter=json --outputFile="$json_file"
+  ) >"$log_file" 2>&1; then
+    sanitize_file "$log_file"
+    sanitize_file "$json_file"
+    cat "$log_file" >&2 || true
+    cat "$json_file" >&2 || true
+    T1_NEXT_COMMAND='repair the first failing Real PostgreSQL suite, then re-run T1 on the same HEAD'
+    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL suite failed in $package"
+  fi
   sanitize_file "$log_file"
   sanitize_file "$json_file"
   [ -s "$json_file" ] || {
-    cat "$log_file" >&2 || true
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package/$relative_suite"
+    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package"
   }
+  # Vitest's suite counters include nested describe blocks, so they are not
+  # comparable to the number of physical *realPostgres*.test.ts files above.
+  # Validate the reporter's own total/passed suite counts instead; the file
+  # discovery count remains a separate zero-selection guard.
   stats="$(python3 - "$json_file" <<'PY'
 import json
 import sys
 result = json.loads(open(sys.argv[1]).read())
-reported_files = len(result.get("testResults") or [])
+total_suites = int(result.get("numTotalTestSuites") or 0)
+passed_suites = int(result.get("numPassedTestSuites") or 0)
+failed_suites = int(result.get("numFailedTestSuites") or 0)
 passed_tests = int(result.get("numPassedTests") or 0)
 failed_tests = int(result.get("numFailedTests") or 0)
 pending_files = int(result.get("numPendingTestSuites") or 0)
 pending_tests = int(result.get("numPendingTests") or 0)
 total_tests = int(result.get("numTotalTests") or 0)
 success = bool(result.get("success"))
-print(reported_files, passed_tests, failed_tests, pending_files, pending_tests, total_tests, int(success), 1)
+print(total_suites, passed_suites, failed_suites, passed_tests, failed_tests,
+      pending_files, pending_tests, total_tests, int(success))
 PY
   )"
-  read -r reported_files passed_tests failed_tests pending_files pending_tests total_tests success expected <<< "$stats"
-  # The JSON reporter is the suite verdict. A leftover Vitest process exit after
-  # a complete green reporter (DROP DATABASE / 57P01 on an already-closed pool)
-  # is not a failed suite.
-  if [ "$success" -eq 1 ] && [ "$reported_files" -eq 1 ] && [ "$failed_tests" -eq 0 ] &&
-     [ "$total_tests" -gt 0 ] && [ "$passed_tests" -eq "$total_tests" ] &&
-     [ "$pending_files" -eq 0 ] && [ "$pending_tests" -eq 0 ]; then
-    T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))
-    T1_PASSED_TESTS=$((T1_PASSED_TESTS + passed_tests))
-    T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
-    if [ "$npm_status" -ne 0 ]; then
-      printf '[minikube-t1] leftover Vitest exit after green JSON reporter for %s/%s (ignored)\n' \
-        "$package" "$relative_suite"
-    fi
-    printf '[minikube-t1] PASS %s/%s tests=%s skipped=0\n' "$package" "$relative_suite" "$passed_tests"
-    return 0
+  read -r total_suites passed_suites failed_suites passed_tests failed_tests \
+    pending_files pending_tests total_tests success <<< "$stats"
+  T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))
+  T1_PASSED_TESTS=$((T1_PASSED_TESTS + passed_tests))
+  T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
+  if [ "$success" -ne 1 ] || [ "$total_suites" -le 0 ] || \
+     [ "$passed_suites" -ne "$total_suites" ] || [ "$failed_suites" -ne 0 ] || \
+     [ "$failed_tests" -ne 0 ]; then
+    T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
+    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package"
   fi
-  cat "$log_file" >&2 || true
-  cat "$json_file" >&2 || true
-  if [ "$npm_status" -ne 0 ] || [ "$success" -ne 1 ] || [ "$failed_tests" -ne 0 ]; then
-    T1_NEXT_COMMAND='repair the first failing Real PostgreSQL suite, then re-run T1 on the same HEAD'
-    die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL suite failed in $package/$relative_suite"
+  if [ "$total_tests" -le 0 ] || [ "$passed_tests" -le 0 ] || [ "$pending_files" -ne 0 ] || [ "$pending_tests" -ne 0 ]; then
+    T1_NEXT_COMMAND='repair the test selection or database route; a T1 run cannot silently skip suites'
+    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package"
   fi
-  T1_NEXT_COMMAND='repair the test selection or database route; a T1 run cannot silently skip suites'
-  die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL lane reported zero tests or skips in $package/$relative_suite"
-}
-
-# One Vitest process per file. A shared process leaks pg Pools through the
-# control-postgres port-forward until PostgreSQL returns "too many clients already".
-run_isolated_files() {
-  local package="$1" admin_dsn="$2" use_cluster_forward="$3"
-  shift 3
-  local relative_suite expected
-  expected=$#
-  if [ "$expected" -le 0 ]; then
-    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED "no Real PostgreSQL suites were selected under $package"
-  fi
-  printf '[minikube-t1] running %s Real PostgreSQL suites (%s isolated processes)\n' \
-    "$package" "$expected"
-  for relative_suite in "$@"; do
-    if [ "$use_cluster_forward" = 1 ]; then
-      ensure_control_postgres_forward
-    fi
-    run_one_file "$package" "$admin_dsn" "$relative_suite"
-  done
-  printf '[minikube-t1] PASS %s files=%s tests=%s skipped=0\n' "$package" "$expected" "$T1_PASSED_TESTS"
+  printf '[minikube-t1] PASS %s files=%s suites=%s tests=%s skipped=0\n' \
+    "$package" "$expected_files" "$passed_suites" "$passed_tests"
 }
 
 main() {
-  local suite_file abs rel skip role_file
-  local -a shared_files gfs_files
   require_t1_commands
   t2_require_commands
   t2_repo_metadata
@@ -375,8 +205,6 @@ main() {
     T1_NEXT_COMMAND='set CONTROL_API_REAL_PG_CONTEXT to the verified Kubernetes context'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'local Real PostgreSQL requires an explicit Minikube context'
   fi
-  T1_CLEANUP_ENABLED=1
-  trap cleanup_t1 EXIT INT TERM
   t2_profile_status
   if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
     T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
@@ -404,7 +232,35 @@ main() {
   fi
   T1_REDACT_PASSWORD="$PG_PASSWORD"
 
-  start_control_postgres_forward
+  LOCAL_PORT="$(choose_local_port)"
+  # Background kubectl DIRECTLY, not the t2_kc function. Backgrounding a shell
+  # function forks a subshell, so $! is the subshell's PID and its command line
+  # is this script's name — cleanup_t1's `svc/control-postgres` guard never
+  # matches it, so the kill is skipped and the port-forward (plus the subshell)
+  # orphan (PPID=1) past T1 into the T2 final preflight, tripping a spurious
+  # PORT_FORWARD_CONFLICT. Backgrounding kubectl directly makes PORT_FORWARD_PID
+  # the real forward whose command line the guard (and the wait) can act on.
+  kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
+    >"$T1_TMP_DIR/port-forward.log" 2>&1 &
+  PORT_FORWARD_PID=$!
+  if ! wait_for_tcp "$LOCAL_PORT"; then
+    sanitize_file "$T1_TMP_DIR/port-forward.log"
+    cat "$T1_TMP_DIR/port-forward.log" >&2 || true
+    T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward did not become reachable'
+  fi
+  if ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    sanitize_file "$T1_TMP_DIR/port-forward.log"
+    cat "$T1_TMP_DIR/port-forward.log" >&2 || true
+    T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward exited before the T1 lane started'
+  fi
+  if t2_kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
+    # Real role-contract suites intentionally leave their cluster-global GFS
+    # roles NOLOGIN during teardown. Restore the branch profile before T1
+    # exits so the following T2 gate observes the production-like runtime.
+    T1_GFS_RESTORE_REQUIRED=true
+  fi
 
   ADMIN_DSN="$(printf '%s\0%s\0%s' "$PG_USER" "$PG_PASSWORD" "$LOCAL_PORT" | python3 -c '
 from urllib.parse import quote
@@ -412,59 +268,8 @@ import sys
 user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
 print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.decode(), safe="") + "@127.0.0.1:" + port.decode() + "/postgres", end="")
 ')"
-
-  for suite_file in "${CONTROL_API_ROLE_RESET_SUITES[@]}"; do
-    if [ ! -f "$PROJECT_DIR/control-api/$suite_file" ]; then
-      T1_NEXT_COMMAND='restore the role-reset Real PostgreSQL suite files, then re-run T1'
-      die_t1 ZERO_TESTS_EXECUTED "role-reset suite is missing: $suite_file"
-    fi
-  done
-
-  shared_files=()
-  while IFS= read -r abs; do
-    [ -n "$abs" ] || continue
-    rel="${abs#"$PROJECT_DIR/control-api/"}"
-    skip=0
-    for role_file in "${CONTROL_API_ROLE_RESET_SUITES[@]}"; do
-      if [ "$rel" = "$role_file" ]; then
-        skip=1
-        break
-      fi
-    done
-    [ "$skip" -eq 1 ] && continue
-    shared_files+=("$rel")
-  done < <(list_real_postgres_files control-api)
-  if [ "${#shared_files[@]}" -le 0 ]; then
-    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED 'role-reset isolation left no shared control-api Real PostgreSQL suites'
-  fi
-
-  gfs_files=()
-  while IFS= read -r abs; do
-    [ -n "$abs" ] || continue
-    gfs_files+=("${abs#"$PROJECT_DIR/gfs-controller/"}")
-  done < <(list_real_postgres_files gfs-controller)
-  if [ "${#gfs_files[@]}" -le 0 ]; then
-    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED 'no gfs-controller Real PostgreSQL suites were found'
-  fi
-  if [ "$(count_real_postgres_files control-api)" -ne \
-    "$(( ${#CONTROL_API_ROLE_RESET_SUITES[@]} + ${#shared_files[@]} ))" ]; then
-    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED 'control-api Real PostgreSQL file partition does not cover every suite'
-  fi
-  if [ "$(count_real_postgres_files gfs-controller)" -ne "${#gfs_files[@]}" ]; then
-    T1_NEXT_COMMAND='restore the Real PostgreSQL suite files, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED 'gfs-controller Real PostgreSQL file list is incomplete'
-  fi
-
-  start_throwaway_postgres
-  run_isolated_files control-api "$THROWAY_DSN" 0 "${CONTROL_API_ROLE_RESET_SUITES[@]}"
-  stop_throwaway_postgres
-  unset THROWAY_DSN
-
-  run_isolated_files control-api "$ADMIN_DSN" 1 "${shared_files[@]}"
-  run_isolated_files gfs-controller "$ADMIN_DSN" 1 "${gfs_files[@]}"
+  run_suite control-api
+  run_suite gfs-controller
   unset PG_USER PG_PASSWORD PG_DATABASE T1_REDACT_PASSWORD
   unset ADMIN_DSN
   T1_STATUS=PASS

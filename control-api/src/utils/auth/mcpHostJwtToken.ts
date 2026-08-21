@@ -14,12 +14,33 @@ const revokedRefreshJtis = new Set<string>()
 const MAX_CACHED_JTIS = 10_000
 const EXPIRED_REFRESH_REISSUE_GRACE_SECONDS = 5 * 60
 
+export const MCP_HOST_WORKFLOW_AUDIENCE = 'workflow-approvals'
+export const MCP_HOST_HCC_AUDIENCE = 'host-context-controller'
+export const MCP_HOST_CREDENTIAL_CAPABILITY = 'mcp:credential:read'
 /**
- * jsonwebtoken normalizes a single `aud` to a string and multiple to an array.
- * Our claims model carries a single audience string, so unwrap consistently.
+ * HCC's access-token verifier accepts at most ten minutes. Keep the issuer
+ * fail-closed if an operator raises the shared workflow access TTL without
+ * first changing the HCC security contract.
  */
-function firstAudience(aud: jwt.JwtPayload['aud']): string {
-  return Array.isArray(aud) ? aud[0] : (aud as string)
+export const MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS = 600
+const HCC_HOST_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
+
+type McpHostCredentialLineage = {
+  hostUid: string
+}
+
+function normalizeAudienceClaim(aud: jwt.JwtPayload['aud']): string[] | null {
+  const values = typeof aud === 'string' ? [aud] : Array.isArray(aud) ? aud : null
+  if (!values || values.length === 0 || values.some(value => typeof value !== 'string')) {
+    return null
+  }
+  if (new Set(values).size !== values.length) return null
+
+  const actual = new Set(values)
+  const workflowOnly = actual.size === 1 && actual.has(MCP_HOST_WORKFLOW_AUDIENCE)
+  const hccQualified =
+    actual.size === 2 && actual.has(MCP_HOST_WORKFLOW_AUDIENCE) && actual.has(MCP_HOST_HCC_AUDIENCE)
+  return workflowOnly || hccQualified ? values : null
 }
 
 // Eviction is FIFO (Set iterator is insertion-ordered), not LRU. At
@@ -108,8 +129,10 @@ export type McpHostAccessClaims = {
   hostRefs: string[]
   scope: 'workflow:approval:request'
   workflowControlScopes: McpHostControlScope[]
+  mcpCapabilities: string[]
+  host_uid?: string
   iss: string
-  aud: string
+  aud: string | string[]
   jti: string
   exp: number
 }
@@ -121,8 +144,10 @@ export type McpHostRefreshClaims = {
   hostRefs: string[]
   scope: 'workflow:approval:refresh'
   workflowControlScopes: McpHostControlScope[]
+  mcpCapabilities: string[]
+  host_uid?: string
   iss: string
-  aud: string
+  aud: string | string[]
   jti: string
   exp: number
 }
@@ -192,8 +217,16 @@ function issueToken(
   scope: 'workflow:approval:request' | 'workflow:approval:refresh',
   ttlSec: number,
   hostRefs: string[],
-  workflowControlScopes: McpHostControlScope[] = []
+  workflowControlScopes: McpHostControlScope[] = [],
+  hccCredential?: McpHostCredentialLineage
 ): { token: string; expiresInSeconds: number } {
+  if (hccCredential) {
+    assertHccCredentialLineage(recipeNamespace, recipeName, hostRefs, hccCredential)
+  }
+  const effectiveTtlSec =
+    hccCredential && scope === 'workflow:approval:request'
+      ? Math.min(ttlSec, MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS)
+      : ttlSec
   const token = jwt.sign(
     {
       sub: `${recipeNamespace}/${recipeName}`,
@@ -202,24 +235,35 @@ function issueToken(
       hostRefs,
       scope,
       workflowControlScopes,
+      ...(hccCredential
+        ? {
+            host_uid: hccCredential.hostUid,
+            mcpCapabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+          }
+        : {}),
     },
     config.adminJwtPrivateKey,
     {
       algorithm: 'RS256',
       issuer: config.adminJwtIssuer,
-      audience: 'workflow-approvals',
+      audience: hccCredential
+        ? [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE]
+        : MCP_HOST_WORKFLOW_AUDIENCE,
       jwtid: randomUUID(),
-      expiresIn: ttlSec,
+      expiresIn: effectiveTtlSec,
     }
   )
-  return { token, expiresInSeconds: ttlSec }
+  return { token, expiresInSeconds: effectiveTtlSec }
 }
 
 export function issueMcpHostAccessJwt(
   recipeNamespace: string,
   recipeName: string,
   hostRefs?: string[],
-  options: { workflowControlScopes?: McpHostControlScope[] } = {}
+  options: {
+    workflowControlScopes?: McpHostControlScope[]
+    hccCredential?: McpHostCredentialLineage
+  } = {}
 ): { token: string; expiresInSeconds: number } {
   const refs = normalizeIssuedMcpHostHostRefs(recipeNamespace, recipeName, hostRefs)
   const workflowControlScopes = normalizeMcpHostControlScopes(options.workflowControlScopes ?? [])
@@ -230,7 +274,8 @@ export function issueMcpHostAccessJwt(
     'workflow:approval:request',
     config.mcpHostJwtAccessTtlSec,
     refs,
-    workflowControlScopes
+    workflowControlScopes,
+    options.hccCredential
   )
   mcpHostJwtIssueTotal.inc({ kind: 'access' }, 1)
   return out
@@ -240,7 +285,10 @@ export function issueMcpHostRefreshJwt(
   recipeNamespace: string,
   recipeName: string,
   hostRefs?: string[],
-  options: { workflowControlScopes?: McpHostControlScope[] } = {}
+  options: {
+    workflowControlScopes?: McpHostControlScope[]
+    hccCredential?: McpHostCredentialLineage
+  } = {}
 ): { token: string; expiresInSeconds: number } {
   const refs = normalizeIssuedMcpHostHostRefs(recipeNamespace, recipeName, hostRefs)
   const workflowControlScopes = normalizeMcpHostControlScopes(options.workflowControlScopes ?? [])
@@ -251,7 +299,8 @@ export function issueMcpHostRefreshJwt(
     'workflow:approval:refresh',
     config.mcpHostJwtRefreshTtlSec,
     refs,
-    workflowControlScopes
+    workflowControlScopes,
+    options.hccCredential
   )
   mcpHostJwtIssueTotal.inc({ kind: 'refresh' }, 1)
   return out
@@ -318,6 +367,63 @@ function normalizeMcpHostHostRefs(value: unknown): string[] | null {
   return hostRefs
 }
 
+function normalizeHostUid(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  if (!normalized || normalized !== value || normalized.length > 128) return null
+  if (/[^A-Za-z0-9._:-]/.test(normalized)) return null
+  return normalized
+}
+
+function assertHccCredentialLineage(
+  recipeNamespace: string,
+  recipeName: string,
+  hostRefs: string[],
+  lineage: McpHostCredentialLineage
+): void {
+  if (
+    recipeNamespace !== config.hostsNamespace ||
+    recipeName !== 'standalone' ||
+    hostRefs.length !== 1 ||
+    hostRefs[0].length > 63 ||
+    !HCC_HOST_NAME_RE.test(hostRefs[0]) ||
+    !normalizeHostUid(lineage.hostUid)
+  ) {
+    throw new Error('invalid HCC mcp-host credential lineage')
+  }
+}
+
+function validateMcpCredentialLineage(
+  payload: jwt.JwtPayload,
+  audiences: string[],
+  recipeNamespace: string,
+  recipeName: string,
+  hostRefs: string[]
+): { hostUid?: string; capabilities: string[] } | null {
+  const hccQualified = audiences.includes(MCP_HOST_HCC_AUDIENCE)
+  if (!hccQualified) {
+    if (payload.host_uid !== undefined || payload.mcpCapabilities !== undefined) return null
+    return { capabilities: [] }
+  }
+
+  const hostUid = normalizeHostUid(payload.host_uid)
+  const capabilities = payload.mcpCapabilities
+  if (
+    recipeNamespace !== config.hostsNamespace ||
+    recipeName !== 'standalone' ||
+    hostRefs.length !== 1 ||
+    hostRefs[0].length > 63 ||
+    !HCC_HOST_NAME_RE.test(hostRefs[0]) ||
+    !hostUid ||
+    !Array.isArray(capabilities) ||
+    capabilities.length !== 1 ||
+    capabilities[0] !== MCP_HOST_CREDENTIAL_CAPABILITY
+  ) {
+    return null
+  }
+  return { hostUid, capabilities: [MCP_HOST_CREDENTIAL_CAPABILITY] }
+}
+
 function normalizeIssuedMcpHostHostRefs(
   recipeNamespace: string,
   recipeName: string,
@@ -334,18 +440,33 @@ function validateClaims(
 ): McpHostAccessClaims | McpHostRefreshClaims | null {
   const hostRefs = normalizeMcpHostHostRefs(payload?.hostRefs)
   const workflowControlScopes = normalizeMcpHostControlScopes(payload?.workflowControlScopes ?? [])
+  const audiences = normalizeAudienceClaim(payload?.aud)
   if (
     typeof payload?.sub !== 'string' ||
     typeof payload?.recipeNamespace !== 'string' ||
     typeof payload?.recipeName !== 'string' ||
+    payload.recipeNamespace.trim() !== payload.recipeNamespace ||
+    payload.recipeName.trim() !== payload.recipeName ||
+    !payload.recipeNamespace ||
+    !payload.recipeName ||
+    payload.sub !== `${payload.recipeNamespace}/${payload.recipeName}` ||
     !hostRefs ||
     !workflowControlScopes ||
+    !audiences ||
     payload?.scope !== expectedScope ||
     typeof payload?.jti !== 'string' ||
     typeof payload?.exp !== 'number'
   ) {
     return null
   }
+  const lineage = validateMcpCredentialLineage(
+    payload,
+    audiences,
+    payload.recipeNamespace,
+    payload.recipeName,
+    hostRefs
+  )
+  if (!lineage) return null
   return {
     sub: payload.sub,
     recipeNamespace: payload.recipeNamespace,
@@ -353,8 +474,10 @@ function validateClaims(
     hostRefs,
     scope: expectedScope as 'workflow:approval:request' | 'workflow:approval:refresh',
     workflowControlScopes,
+    mcpCapabilities: lineage.capabilities,
+    ...(lineage.hostUid ? { host_uid: lineage.hostUid } : {}),
     iss: payload.iss as string,
-    aud: firstAudience(payload.aud),
+    aud: audiences.length === 1 ? audiences[0] : audiences,
     jti: payload.jti,
     exp: payload.exp,
   }
@@ -365,7 +488,7 @@ export function verifyMcpHostAccessJwt(token: string): McpHostAccessClaims | nul
     const payload = jwt.verify(token, getWorkflowJwtPublicKey(), {
       algorithms: ['RS256'],
       issuer: config.adminJwtIssuer,
-      audience: 'workflow-approvals',
+      audience: MCP_HOST_WORKFLOW_AUDIENCE,
     }) as jwt.JwtPayload
     return validateClaims(payload, 'workflow:approval:request') as McpHostAccessClaims
   } catch {
@@ -411,7 +534,7 @@ export function verifyMcpHostControlJwt(token: string): McpHostControlClaims | n
       typ: 'service',
       scopes,
       iss: payload.iss as string,
-      aud: firstAudience(payload.aud),
+      aud: 'mcp-host',
       jti,
       exp,
     }
@@ -429,7 +552,7 @@ export function getMcpHostRefreshRateLimitKey(
     const payload = jwt.verify(token, getWorkflowJwtPublicKey(), {
       algorithms: ['RS256'],
       issuer: config.adminJwtIssuer,
-      audience: 'workflow-approvals',
+      audience: MCP_HOST_WORKFLOW_AUDIENCE,
       ignoreExpiration: expiredGraceSeconds > 0,
     }) as jwt.JwtPayload
 
@@ -471,7 +594,7 @@ export async function verifyMcpHostRefreshJwt(token: string): Promise<McpHostRef
     const payload = jwt.verify(token, getWorkflowJwtPublicKey(), {
       algorithms: ['RS256'],
       issuer: config.adminJwtIssuer,
-      audience: 'workflow-approvals',
+      audience: MCP_HOST_WORKFLOW_AUDIENCE,
     }) as jwt.JwtPayload
 
     const claims = validateClaims(
@@ -523,7 +646,7 @@ export async function verifyExpiredMcpHostRefreshJwtDetailed(
     payload = jwt.verify(token, getWorkflowJwtPublicKey(), {
       algorithms: ['RS256'],
       issuer: config.adminJwtIssuer,
-      audience: 'workflow-approvals',
+      audience: MCP_HOST_WORKFLOW_AUDIENCE,
       // Critical: do NOT let jsonwebtoken reject expiration here. This route
       // applies its own bounded grace window after normal claim validation.
       ignoreExpiration: true,
@@ -576,7 +699,7 @@ export async function consumeMcpHostRefreshJwt(
     const payload = jwt.verify(token, getWorkflowJwtPublicKey(), {
       algorithms: ['RS256'],
       issuer: config.adminJwtIssuer,
-      audience: 'workflow-approvals',
+      audience: MCP_HOST_WORKFLOW_AUDIENCE,
     }) as jwt.JwtPayload
 
     const claims = validateClaims(

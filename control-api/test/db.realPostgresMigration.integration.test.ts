@@ -129,7 +129,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
-    await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
+    // Roles are cluster-global in PostgreSQL and may own objects in the
+    // shared `profiles` database.  Never drop them while preparing an
+    // isolated migration database; initDb is idempotent and reconciles the
+    // existing role attributes and grants in the database under test.
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
     dbPool = new Pool({ connectionString })
   })
@@ -145,7 +148,6 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         [database]
       )
       await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-      await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
       await adminPool.end()
     }
   })

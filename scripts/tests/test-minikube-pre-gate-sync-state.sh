@@ -3,6 +3,7 @@ set -u
 
 FAIL=0
 SCRIPT="scripts/minikube/pre-gate-sync.sh"
+MARKER_SCRIPT="scripts/minikube/pre-gate-marker.sh"
 RUNTIME_SCRIPT="scripts/minikube/pre-gate-runtime.sh"
 INCREMENTAL_SCRIPT="scripts/minikube/pre-gate-incremental.sh"
 REGISTRY_SCRIPT="scripts/minikube/deploy-evenfire-registry.sh"
@@ -25,6 +26,10 @@ incremental_contains() {
   grep -Fq -- "$1" "$INCREMENTAL_SCRIPT"
 }
 
+marker_contains() {
+  grep -Fq -- "$1" "$MARKER_SCRIPT"
+}
+
 not_contains() {
   ! grep -Fq -- "$1" "$SCRIPT"
 }
@@ -33,6 +38,12 @@ if bash -n "$SCRIPT"; then
   pass "pre-gate sync script has valid bash syntax"
 else
   fail "pre-gate sync script has invalid bash syntax"
+fi
+
+if bash -n "$MARKER_SCRIPT"; then
+  pass "shared pre-gate marker helper has valid bash syntax"
+else
+  fail "shared pre-gate marker helper has invalid bash syntax"
 fi
 
 if bash -n "$INCREMENTAL_SCRIPT"; then
@@ -117,7 +128,7 @@ else
   fail "pre-gate sync does not use the shared idempotent auth-key sync helper"
 fi
 
-if contains 'nginx.conf is mounted through a subPath' &&
+if contains 'Both nginx gateway configs are mounted through subPath' &&
    contains 'INCREMENTAL_FULL_DEPLOYMENT' &&
    contains 'rollout_restart_with_retry control-plane nginx-workflow-approval-gateway' &&
    contains 'rollout_if_present control-plane nginx-workflow-approval-gateway' &&
@@ -127,23 +138,87 @@ else
   fail "pre-gate sync can leave a stale workflow gateway after ConfigMap changes"
 fi
 
+hcc_gateway_restart_line="$(grep -nF 'rollout_restart_with_retry control-plane host-context-controller-api-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+hcc_gateway_wait_line="$(grep -nF 'rollout_if_present control-plane host-context-controller-api-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+hcc_gateway_assert_line="$(grep -nF 'assert_hcc_gateway_np08_routes' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+if [[ -n "$hcc_gateway_restart_line" &&
+      -n "$hcc_gateway_wait_line" &&
+      -n "$hcc_gateway_assert_line" &&
+      "$hcc_gateway_restart_line" -lt "$hcc_gateway_wait_line" &&
+      "$hcc_gateway_wait_line" -lt "$hcc_gateway_assert_line" ]]; then
+  pass "pre-gate restarts and waits for the subPath-mounted HCC gateway before NP-08 inspection"
+else
+  fail "pre-gate can inspect a stale HCC gateway after its ConfigMap changes"
+fi
+
+if runtime_contains 'assert_hcc_gateway_np08_routes()' &&
+   runtime_contains 'location = /api/v2/hosts/self/mcpservers {' &&
+   runtime_contains 'location = /api/v2/hosts/self/mcpservers/credential {' &&
+   runtime_contains 'location ~ ^/api/v1/mcpservers/context/[^/]+$ {' &&
+   runtime_contains 'location ~ ^/api/v1/mcpservers/[^/]+/auth$ {' &&
+   runtime_contains 'proxy_set_header Authorization $http_authorization;' &&
+   runtime_contains 'add_header Pragma "no-cache" always;' &&
+   runtime_contains 'access_log /dev/stdout hcc_gateway_json;' &&
+   runtime_contains 'return 410'; then
+  pass "pre-gate fails closed when the running HCC gateway lacks the NP-08 route contract"
+else
+  fail "pre-gate does not verify the running NP-08 HCC gateway contract"
+fi
+
+nginx_inspection_pipeline_lines="$(grep -F 'nginx -T' "$RUNTIME_SCRIPT" | grep -vE '^[[:space:]]*#' | grep -E '\\|[[:space:]]*(grep|rg|sed|awk|head|tail|cut|sort|tr|wc)([[:space:]]|$)' || true)"
 if runtime_contains 'assert_workflow_gateway_prompt_bridge_finalization_route()' &&
    runtime_contains 'nginx_config="$(${KC} exec' &&
    runtime_contains 'could not inspect the active nginx configuration' &&
    runtime_contains '[[ "${nginx_config}" != *"${expected_route}"* ]]' &&
-   ! grep -F 'nginx -T' "$RUNTIME_SCRIPT" | grep -Fq '|'; then
+   [[ -z "$nginx_inspection_pipeline_lines" ]]; then
   pass "pre-gate runtime guard separates nginx inspection from route validation"
 else
   fail "pre-gate runtime guard can confuse SIGPIPE or exec failure with a missing route"
 fi
 
-if contains 'fingerprint_dir packages/workflow-runtime-core' &&
+if marker_contains 'packages/workflow-runtime-core' &&
    contains 'run_if_changed packages/workflow-runtime-core "npm test && npm run build"' &&
    contains 'ensure_artifact packages/workflow-runtime-core dist/index.js "npm run build"'; then
   pass "pre-gate sync builds workflow-runtime-core before dependent package tests"
 else
   fail "pre-gate sync does not build workflow-runtime-core before dependent package tests"
 fi
+
+final_cluster_fingerprint_line="$(grep -n 'cluster_fingerprint=.*pre_gate_marker_cluster_fingerprint' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+final_infra_fingerprint_line="$(grep -n 'infra_fingerprint=.*pre_gate_marker_infra_fingerprint' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+persist_marker_line="$(grep -nF 'persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}"' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+if [ -n "$final_cluster_fingerprint_line" ] &&
+   [ -n "$final_infra_fingerprint_line" ] &&
+   [ -n "$persist_marker_line" ] &&
+   [ "$final_cluster_fingerprint_line" -lt "$persist_marker_line" ] &&
+   [ "$final_infra_fingerprint_line" -lt "$persist_marker_line" ]; then
+  pass "pre-gate recomputes both fingerprints after generated deploy inputs before stamping the marker"
+else
+  fail "pre-gate can stamp a marker from fingerprints computed before generated deploy inputs"
+fi
+
+marker_failure_dir="$(mktemp -d)"
+mkdir -p "${marker_failure_dir}/bin" "${marker_failure_dir}/repo/control-api"
+printf '#!/usr/bin/env bash\nexit 42\n' >"${marker_failure_dir}/bin/find"
+chmod +x "${marker_failure_dir}/bin/find"
+if (
+  # shellcheck source=/dev/null
+  source "$MARKER_SCRIPT"
+  PATH="${marker_failure_dir}/bin:${PATH}"
+  export PATH
+  pre_gate_marker_fingerprint_dir "${marker_failure_dir}/repo" control-api >/dev/null
+) || (
+  # shellcheck source=/dev/null
+  source "$MARKER_SCRIPT"
+  PATH="${marker_failure_dir}/bin:${PATH}"
+  export PATH
+  pre_gate_marker_cluster_fingerprint "${marker_failure_dir}/repo" >/dev/null
+); then
+  fail "shared pre-gate marker helper can turn a hashing failure into a valid fingerprint"
+else
+  pass "shared pre-gate marker helper propagates hashing failures instead of stamping empty input"
+fi
+rm -rf "${marker_failure_dir}"
 
 control_api_migration_line="$(grep -nF 'run-control-api-db-migration.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 runtime_roles_line="$(grep -nF 'provision-control-api-runtime-roles.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
