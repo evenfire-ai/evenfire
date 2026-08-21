@@ -9,8 +9,8 @@ import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconAlertTriangle, IconCheck, IconX } from '@/components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@/components/ui'
+import { createAgentContextName } from '@/lib/agentContext'
 import {
-  apiGet,
   apiSend,
   getAdminTeams,
   getAdminUsers,
@@ -43,7 +43,12 @@ import {
   STEPS,
   STEP_DETAILS,
 } from './constants'
-import type { ContextOption, CreatedResource, HostWizardProps, WizardSelectProps } from './types'
+import type {
+  CreatedResource,
+  HostWizardProps,
+  HostWizardValidationState,
+  WizardSelectProps,
+} from './types'
 
 // Stateless lifecycle support remains intact in the API and existing-agent UI;
 // only creation through this wizard is temporarily unavailable.
@@ -224,33 +229,10 @@ async function createOrThrow(path: string, body: unknown, collisionMessage: stri
   }
 }
 
-function isStepValid(
-  stepIndex: number,
-  state: {
-    hostName: string
-    contextMode: 'existing' | 'new'
-    contextName: string
-    selectedExistingContext: string
-    selectedMcp: string[]
-    secretMode: 'existing' | 'new'
-    existingSecret: string
-    newSecretName: string
-    llmKeyDraft: Record<string, string>
-    llmPolicy: LlmPolicy | undefined
-    provider: LlmProvider
-    modelName: string
-    selectedUserIds: string[]
-    selectedTeamIds: string[]
-    directoryLoadFailed: boolean
-  }
-): boolean {
+function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
   if (stepIndex === 0)
     return state.hostName.trim().length > 0 && getAgentNameError(state.hostName) === ''
   if (stepIndex === 1) {
-    if (state.contextMode === 'existing') return state.selectedExistingContext.trim().length > 0
-    return state.contextName.trim().length > 0
-  }
-  if (stepIndex === 2) {
     // New secret: the PRIMARY provider must be usable (asymmetric gate — a
     // fallback missing its key only warns). Cross-slot mistakes (half Bedrock
     // pair, malformed Vertex JSON) anywhere still block. Existing secret: the
@@ -270,7 +252,7 @@ function isStepValid(
           validateLlmSecretData(projectedDraft).length === 0
     return hasValidSecret && state.modelName.trim().length > 0
   }
-  if (stepIndex === 3) return true
+  if (stepIndex === 2 || stepIndex === 3) return true
   return false
 }
 
@@ -301,11 +283,7 @@ export function HostWizard({
   const hostNamespace = HOST_NAMESPACE
   const agentNameError = getAgentNameError(hostName)
 
-  const [contextName, setContextName] = useState('')
-  const [contextMode, setContextMode] = useState<'existing' | 'new'>('existing')
-  const [selectedExistingContext, setSelectedExistingContext] = useState('')
   const [selectedMcp, setSelectedMcp] = useState<string[]>([])
-  const [existingContexts, setExistingContexts] = useState<ContextOption[]>([])
 
   // Reuse an existing shared Secret by default. Creating an agent-specific Secret
   // remains available when the operator explicitly chooses New credential.
@@ -375,12 +353,6 @@ export function HostWizard({
         .filter(option => option !== null)
         .sort((left, right) => left.value.localeCompare(right.value)),
     [existingSecrets]
-  )
-  const selectedContextOption = useMemo(
-    () =>
-      existingContexts.find(ctx => `${ctx.namespace}/${ctx.name}` === selectedExistingContext) ||
-      null,
-    [existingContexts, selectedExistingContext]
   )
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, provider),
@@ -457,10 +429,6 @@ export function HostWizard({
   const canNext = useMemo(() => {
     return isStepValid(step, {
       hostName,
-      contextMode,
-      contextName,
-      selectedExistingContext,
-      selectedMcp,
       secretMode,
       existingSecret,
       newSecretName,
@@ -468,17 +436,10 @@ export function HostWizard({
       llmPolicy,
       provider,
       modelName,
-      selectedUserIds,
-      selectedTeamIds,
-      directoryLoadFailed: directoryLoadError.length > 0,
     })
   }, [
     step,
     hostName,
-    contextMode,
-    contextName,
-    selectedExistingContext,
-    selectedMcp,
     secretMode,
     existingSecret,
     newSecretName,
@@ -486,9 +447,6 @@ export function HostWizard({
     llmPolicy,
     provider,
     modelName,
-    selectedUserIds,
-    selectedTeamIds,
-    directoryLoadError,
   ])
 
   const loadDirectory = useCallback(async () => {
@@ -496,40 +454,16 @@ export function HostWizard({
     setDirectoryLoadError('')
     setError('')
     try {
-      const [usersData, teamsData, contextsData] = await Promise.all([
-        getAdminUsers(''),
-        getAdminTeams(),
-        apiGet('/api/v1/admin/contexts') as Promise<{
-          items?: Array<{
-            metadata?: { name?: string; namespace?: string }
-            spec?: { contextId?: string; mcpServers?: unknown[] }
-          }>
-        }>,
-      ])
+      const [usersData, teamsData] = await Promise.all([getAdminUsers(''), getAdminTeams()])
       if (!mountedRef.current) return
       setUsers(Array.isArray(usersData.items) ? usersData.items : [])
       setTeams(Array.isArray(teamsData.items) ? teamsData.items : [])
-      const contextOptions = (contextsData.items || [])
-        .map(ctx => ({
-          name: String(ctx.metadata?.name || '').trim(),
-          namespace: String(ctx.metadata?.namespace || 'default').trim(),
-          contextId: String(ctx.spec?.contextId || ctx.metadata?.name || '').trim(),
-          mcpServers: Array.isArray(ctx.spec?.mcpServers)
-            ? ctx.spec?.mcpServers
-                .map(String)
-                .map(v => v.trim())
-                .filter(Boolean)
-            : [],
-        }))
-        .filter(ctx => ctx.name && ctx.contextId)
-        .sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`))
-      setExistingContexts(contextOptions)
     } catch (e) {
       if (!mountedRef.current) return
       const message =
         e instanceof Error
-          ? `Failed to load users/teams/contexts: ${e.message}. You may not be able to grant access from this wizard — retry or check your session.`
-          : 'Failed to load users/teams/contexts. You may not be able to grant access from this wizard.'
+          ? `Failed to load users/teams: ${e.message}. You may not be able to grant access from this wizard — retry or check your session.`
+          : 'Failed to load users/teams. You may not be able to grant access from this wizard.'
       setDirectoryLoadError(message)
       setError(message)
     } finally {
@@ -548,10 +482,6 @@ export function HostWizard({
         if (
           !isStepValid(i, {
             hostName,
-            contextMode,
-            contextName,
-            selectedExistingContext,
-            selectedMcp,
             secretMode,
             existingSecret,
             newSecretName,
@@ -559,9 +489,6 @@ export function HostWizard({
             llmPolicy,
             provider,
             modelName,
-            selectedUserIds,
-            selectedTeamIds,
-            directoryLoadFailed: directoryLoadError.length > 0,
           })
         ) {
           return false
@@ -572,10 +499,6 @@ export function HostWizard({
     [
       step,
       hostName,
-      contextMode,
-      contextName,
-      selectedExistingContext,
-      selectedMcp,
       secretMode,
       existingSecret,
       newSecretName,
@@ -583,9 +506,6 @@ export function HostWizard({
       llmPolicy,
       provider,
       modelName,
-      selectedUserIds,
-      selectedTeamIds,
-      directoryLoadError,
     ]
   )
 
@@ -594,20 +514,16 @@ export function HostWizard({
       const agentNameError = getAgentNameError(hostName)
       if (agentNameError) return agentNameError
     }
-    if (step === 1 && contextMode === 'existing' && !selectedExistingContext.trim())
-      return 'Select an existing context.'
-    if (step === 1 && contextMode === 'new' && !contextName.trim())
-      return 'Context name is required.'
-    if (step === 2 && !modelName.trim()) return 'Model name is required.'
-    if (step === 2 && secretMode === 'existing' && !existingSecret.trim())
+    if (step === 1 && !modelName.trim()) return 'Model name is required.'
+    if (step === 1 && secretMode === 'existing' && !existingSecret.trim())
       return 'Select an existing secret.'
-    if (step === 2 && secretMode === 'new' && !toKebabCase(newSecretName)) {
+    if (step === 1 && secretMode === 'new' && !toKebabCase(newSecretName)) {
       return 'For a new secret, set a name.'
     }
-    if (step === 2 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
+    if (step === 1 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
       return `Add the ${getProviderLabel(provider)} credential for the primary model.`
     }
-    if (step === 2 && secretMode === 'new') {
+    if (step === 1 && secretMode === 'new') {
       const projected = projectCredentialDraft(
         llmKeyDraft,
         getActiveCredentialKeys(provider, llmPolicy)
@@ -619,10 +535,6 @@ export function HostWizard({
   }, [
     step,
     hostName,
-    contextMode,
-    contextName,
-    selectedExistingContext,
-    selectedMcp,
     secretMode,
     existingSecret,
     newSecretName,
@@ -630,8 +542,6 @@ export function HostWizard({
     llmPolicy,
     provider,
     modelName,
-    selectedUserIds,
-    selectedTeamIds,
   ])
 
   function resetForm() {
@@ -639,9 +549,6 @@ export function HostWizard({
     setError('')
 
     setHostName('')
-    setContextName('')
-    setContextMode('existing')
-    setSelectedExistingContext('')
     setSelectedMcp([])
     setSecretMode('existing')
     setExistingSecret('')
@@ -671,10 +578,6 @@ export function HostWizard({
     })
   }
 
-  function selectExistingContext(context: ContextOption) {
-    setSelectedExistingContext(`${context.namespace}/${context.name}`)
-  }
-
   async function submitAll() {
     setBusy(true)
     setError('')
@@ -687,9 +590,7 @@ export function HostWizard({
     let hostCreated = false
     try {
       const normalizedHostName = toKebabCase(hostName)
-      const normalizedContextName = toKebabCase(contextName)
-      const resolvedContextName =
-        contextMode === 'existing' ? selectedContextOption?.contextId || '' : normalizedContextName
+      const generatedContextName = createAgentContextName(normalizedHostName)
       const normalizedSecretName = toKebabCase(newSecretName)
 
       if (secretMode === 'new') {
@@ -726,23 +627,22 @@ export function HostWizard({
         created.push({ kind: 'secret', name: normalizedSecretName })
       }
 
-      if (contextMode === 'new') {
-        // Create-only POST (R5-C1/R5-B1): a name collision must 409 AlreadyExists
-        // server-side, never silently overwrite a foreign context via a PUT.
-        await createOrThrow(
-          '/api/v1/admin/contexts',
-          {
-            metadata: { name: normalizedContextName },
-            spec: {
-              contextId: normalizedContextName,
-              description: `Context for agent ${normalizedHostName}`,
-              mcpServers: Array.from(new Set(selectedMcp)),
-            },
+      // Every agent gets a private implementation context. The context name is
+      // intentionally generated here instead of being exposed as a wizard
+      // field; the agent still needs a contextRef for its runtime contract.
+      await createOrThrow(
+        '/api/v1/admin/contexts',
+        {
+          metadata: { name: generatedContextName },
+          spec: {
+            contextId: generatedContextName,
+            description: `Connector context for agent ${normalizedHostName}`,
+            mcpServers: Array.from(new Set(selectedMcp)),
           },
-          `A context named "${normalizedContextName}" already exists — choose another name.`
-        )
-        created.push({ kind: 'context', name: normalizedContextName })
-      }
+        },
+        'The agent connector context could not be created — please try again.'
+      )
+      created.push({ kind: 'context', name: generatedContextName })
 
       // Effective per-host model subset (Topic 3a): prune the draft to the
       // providers actually in this host's domain (primary + fallbacks), then
@@ -758,7 +658,7 @@ export function HostWizard({
 
       const hostSpec: Record<string, unknown> = {
         host: normalizedHostName,
-        contextRef: resolvedContextName,
+        contextRef: generatedContextName,
         secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
         channels: [],
         model: {
@@ -939,121 +839,6 @@ export function HostWizard({
 
         {step === 1 && (
           <div className="cu-form-stack cu-agent-form-stack">
-            <div className="cu-agent-radio-group">
-              <label className="cu-agent-radio cu-agent-radio--card">
-                <input
-                  type="radio"
-                  checked={contextMode === 'existing'}
-                  onChange={() => setContextMode('existing')}
-                />
-                <span className="cu-agent-radio__copy">
-                  <span className="cu-agent-radio__title">Use existing context</span>
-                  <span className="cu-agent-radio__description">
-                    Select a saved context and reuse its MCP server attachments.
-                  </span>
-                </span>
-              </label>
-              <label className="cu-agent-radio cu-agent-radio--card">
-                <input
-                  type="radio"
-                  checked={contextMode === 'new'}
-                  onChange={() => setContextMode('new')}
-                />
-                <span className="cu-agent-radio__copy">
-                  <span className="cu-agent-radio__title">Create new context</span>
-                  <span className="cu-agent-radio__description">
-                    Create a context for this agent. MCP servers can be attached now or later.
-                  </span>
-                </span>
-              </label>
-            </div>
-            {contextMode === 'existing' ? (
-              <>
-                <div className="cu-agent-access-section">
-                  <strong>Select Context</strong>
-                  <SelectionDropdown
-                    multiple={false}
-                    value={selectedExistingContext ? [selectedExistingContext] : []}
-                    onChange={values => {
-                      const next = values[0] || ''
-                      const context = existingContexts.find(
-                        ctx => `${ctx.namespace}/${ctx.name}` === next
-                      )
-                      if (context) selectExistingContext(context)
-                      else setSelectedExistingContext('')
-                    }}
-                    options={existingContexts.map(ctx => ({
-                      value: `${ctx.namespace}/${ctx.name}`,
-                      label: ctx.contextId,
-                    }))}
-                    placeholder="Select context..."
-                    searchPlaceholder="Search contexts..."
-                    selectionLabel="Selected context"
-                    emptyLabel="No contexts available."
-                  />
-                </div>
-                {selectedContextOption && (
-                  <section
-                    className="cu-agent-context-mcp-summary"
-                    aria-label="Attached MCP servers"
-                  >
-                    <div className="cu-agent-context-mcp-summary__head">
-                      <span>MCP servers</span>
-                      <span>{selectedContextOption.mcpServers.length}</span>
-                    </div>
-                    {selectedContextOption.mcpServers.length > 0 ? (
-                      <ul className="cu-agent-context-mcp-summary__list">
-                        {selectedContextOption.mcpServers.map(server => (
-                          <li key={server} title={server}>
-                            {server}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="cu-muted">No MCP servers attached.</p>
-                    )}
-                  </section>
-                )}
-              </>
-            ) : (
-              <>
-                <Field
-                  description="Automatically formatted to lowercase with hyphens."
-                  label="Context name"
-                >
-                  <TextInput
-                    value={contextName}
-                    onChange={e => setContextName(toKebabInput(e.target.value))}
-                    placeholder="context-name"
-                  />
-                </Field>
-                <div className="cu-agent-section-label">MCP servers (optional)</div>
-                <div className="cu-agent-mcp-grid">
-                  {availableMcp.map(name => (
-                    <CheckboxField
-                      key={name}
-                      checked={selectedMcp.includes(name)}
-                      className="cu-agent-mcp-option"
-                      label={
-                        <span className="cu-agent-mcp-option__label">
-                          <span className="cu-agent-mcp-option__name">{name}</span>
-                          <span className="cu-agent-mcp-option__meta">MCP server</span>
-                        </span>
-                      }
-                      onChange={() => toggleMcp(name)}
-                    />
-                  ))}
-                  {availableMcp.length === 0 ? (
-                    <span className="cu-agent-empty-note">No MCP servers available.</span>
-                  ) : null}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {step === 2 && (
-          <div className="cu-form-stack cu-agent-form-stack">
             <div className="cu-agent-access-section">
               <strong>Credentials</strong>
               <span className="cu-muted cu-agent-access-hint">
@@ -1158,7 +943,7 @@ export function HostWizard({
           </div>
         )}
 
-        {step === 3 && (
+        {step === 2 && (
           <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
             {directoryLoadError ? (
               <div className="cu-workflow-access__error" role="alert">
@@ -1253,6 +1038,39 @@ export function HostWizard({
                 detail page.
               </p>
             ) : null}
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="cu-form-stack cu-agent-form-stack">
+            <div className="cu-agent-access-section">
+              <strong>Connectors</strong>
+              <span className="cu-muted cu-agent-access-hint">
+                Choose the connectors this agent can use. You can leave this empty and add
+                connectors later.
+              </span>
+            </div>
+            <div className="cu-agent-section-label">Available connectors (optional)</div>
+            <div className="cu-agent-mcp-grid" role="group" aria-label="Available connectors">
+              {availableMcp.map(name => (
+                <CheckboxField
+                  key={name}
+                  checked={selectedMcp.includes(name)}
+                  className="cu-agent-mcp-option"
+                  label={
+                    <span className="cu-agent-mcp-option__label">
+                      <span className="cu-agent-mcp-option__name">{name}</span>
+                      <span className="cu-agent-mcp-option__meta">Connector</span>
+                    </span>
+                  }
+                  disabled={busy}
+                  onChange={() => toggleMcp(name)}
+                />
+              ))}
+              {availableMcp.length === 0 ? (
+                <span className="cu-agent-empty-note">No connectors available.</span>
+              ) : null}
+            </div>
           </div>
         )}
 

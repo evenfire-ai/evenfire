@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { LlmPolicy, LlmProvider } from '@/lib/llm'
 
 export type McpServer = {
   metadata?: { name?: string; namespace?: string }
@@ -10,13 +11,6 @@ export type SecretMeta = {
   // Data-key names only; Secret values are never included in this response.
   keys?: string[]
   type?: string
-}
-
-export type ContextOption = {
-  contextId: string
-  mcpServers: string[]
-  name: string
-  namespace: string
 }
 
 export type ChannelOption = {
@@ -58,4 +52,15 @@ export type WizardSelectProps = {
   options: WizardSelectOption[]
   placeholder: string
   value: string
+}
+
+export type HostWizardValidationState = {
+  hostName: string
+  secretMode: 'existing' | 'new'
+  existingSecret: string
+  newSecretName: string
+  llmKeyDraft: Record<string, string>
+  llmPolicy: LlmPolicy | undefined
+  provider: LlmProvider
+  modelName: string
 }

@@ -140,7 +140,12 @@ export function HostOverviewTab({
 
         <div className="cu-host-overview-identity__divider" />
 
-        <NavHeader label="Context" tab="contexts" onNavigate={onNavigate} />
+        <NavHeader
+          label="Connectors"
+          tab="contexts"
+          count={contextMcpServers.length}
+          onNavigate={onNavigate}
+        />
         {hasContext ? (
           <a
             href="#"
