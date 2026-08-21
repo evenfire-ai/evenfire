@@ -94,4 +94,41 @@ describe('ProviderAttemptAuthorizer', () => {
       })
     ).rejects.toMatchObject({ code: 'insufficient_scope' })
   })
+
+  it('refreshes the platform JWT once and retries authorize after HTTP 401', async () => {
+    let jwt = 'stale-jwt'
+    const refreshOnUnauthorized = vi.fn(async () => {
+      jwt = 'fresh-jwt'
+    })
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: 'Unauthorized' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => validAuthorize,
+      })
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl('http://gateway:8092'),
+      readPlatformJwt: () => jwt,
+      refreshOnUnauthorized,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const result = await authorizer.authorize({
+      request: { schemaVersion: 'codex-completion-request.v1' },
+      invocationId: 'inv-1',
+      attemptGeneration: 1,
+      providerAttemptIndex: 1,
+      policyRevision: 1,
+      policyHash: 'b'.repeat(64),
+    })
+    expect(refreshOnUnauthorized).toHaveBeenCalledTimes(1)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(fetchFn.mock.calls[0][1].headers.authorization).toBe('Bearer stale-jwt')
+    expect(fetchFn.mock.calls[1][1].headers.authorization).toBe('Bearer fresh-jwt')
+    expect(result.executionTicket).toBe('ticket-123456')
+  })
 })

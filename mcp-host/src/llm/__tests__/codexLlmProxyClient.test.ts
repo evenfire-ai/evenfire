@@ -86,6 +86,45 @@ describe('CodexLlmProxyClient', () => {
     })
   })
 
+  it('refreshes the platform JWT once and retries the proxy hop after HTTP 401', async () => {
+    let jwt = 'stale-jwt'
+    const refreshOnUnauthorized = vi.fn(async () => {
+      jwt = 'fresh-jwt'
+    })
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: 'Unauthorized' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'ok' },
+          { type: 'done', outcome: 'success' },
+        ]),
+      })
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => jwt,
+      refreshOnUnauthorized,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const result = await client.stream({
+      executionTicket: 'ticket-123456',
+      requestHash: 'a'.repeat(64),
+      request: {},
+    })
+    expect(refreshOnUnauthorized).toHaveBeenCalledTimes(1)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(fetchFn.mock.calls[0][1].headers.authorization).toBe('Bearer stale-jwt')
+    expect(fetchFn.mock.calls[1][1].headers.authorization).toBe('Bearer fresh-jwt')
+    expect(result.text).toBe('ok')
+  })
+
   it('fails closed when the proxy emits an SSE error frame after headers', async () => {
     const client = new CodexLlmProxyClient({
       runtimeUrl: resolveCodexProxyRuntimeUrl(

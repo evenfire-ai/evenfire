@@ -6140,14 +6140,16 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
 }
 
 export async function assertDbReady(db: DbClient = pool): Promise<void> {
-  const requiredVersion = CONTROL_API_MIGRATIONS.at(-1)?.version
-  if (!requiredVersion) throw new Error('Control API database has no registered migrations')
-  const result = await db.query(
-    'SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1) AS ready',
-    [requiredVersion]
-  )
-  if (!(result.rows[0] as { ready?: boolean } | undefined)?.ready) {
-    throw new Error(`Control API database is not ready: migration ${requiredVersion} is required`)
+  if (!CONTROL_API_MIGRATIONS.length) {
+    throw new Error('Control API database has no registered migrations')
+  }
+  const applied = await loadAppliedMigrationVersions(db)
+  const missing = CONTROL_API_MIGRATIONS.filter(migration => {
+    if (applied.has(migration.version)) return false
+    return !migration.legacyVersions?.some(version => applied.has(version))
+  }).map(migration => migration.version)
+  if (missing.length) {
+    throw new Error(`Control API database is not ready: missing migrations ${missing.join(', ')}`)
   }
 }
 

@@ -61,6 +61,7 @@ import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
 import type { TransitionEvent } from './lifecycle/types'
 import { SingleTurnProvider, apiKeysFromEnv, createLLMProvider } from './llm'
+import { setCodexPlatformJwtReader, setCodexPlatformJwtRefresh } from './llm/codexPlatformJwt'
 import { setCodexPolicyBindingReader } from './llm/codexPolicyBinding'
 import { FailoverEngine } from './llm/failover/engine'
 import { llmFallbackTotal } from './llm/failover/metrics'
@@ -215,6 +216,14 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // consumer (UsageReporter, WorkflowService) so refresh-on-401 propagates.
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
+setCodexPlatformJwtReader(() =>
+  (runtimeAuth?.accessToken || config.mcpHostRuntimeAccessToken || '').trim()
+)
+setCodexPlatformJwtRefresh(async () => {
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) return
+  await refreshWithRecovery(runtimeAuth)
+})
 let pluginWorkloadSdkServer: PluginWorkloadSdkServer | null = null
 let pluginWorkloadSdkBootstrapServer: PluginWorkloadSdkBootstrapServer | null = null
 let usageReporter: UsageReporter | null = null

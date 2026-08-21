@@ -5,6 +5,7 @@ import { config } from '../config'
 import { ApiKeys, ModelConfig } from '../types'
 import { ClaudeProvider } from './claude'
 import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from './codexLlmProxyClient'
+import { readCodexPlatformJwt, refreshCodexPlatformJwt } from './codexPlatformJwt'
 import { readLiveCodexPolicyBinding, resolveCodexAttemptPolicy } from './codexPolicyBinding'
 import { OpenAIProvider } from './openai'
 import { ProviderAttemptAuthorizer, resolveCodexAuthorizeUrl } from './providerAttemptAuthorizer'
@@ -20,20 +21,18 @@ export type { ClassifiedError, SingleTurnProvider } from './types'
 const DEFAULT_CODEX_AUTHORIZE_GATEWAY =
   'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092'
 
-function readPlatformJwt(): string {
-  return (process.env.MCP_HOST_RUNTIME_ACCESS_TOKEN || '').trim()
-}
-
 function createCodexRuntimeDeps() {
   const gateway = (config.mcpHostGatewayUrl ?? '').trim() || DEFAULT_CODEX_AUTHORIZE_GATEWAY
   return {
     authorizer: new ProviderAttemptAuthorizer({
       authorizeUrl: resolveCodexAuthorizeUrl(gateway),
-      readPlatformJwt,
+      readPlatformJwt: readCodexPlatformJwt,
+      refreshOnUnauthorized: refreshCodexPlatformJwt,
     }),
     proxy: new CodexLlmProxyClient({
       runtimeUrl: resolveCodexProxyRuntimeUrl(config.codexProxyRuntimeBaseUrl),
-      readPlatformJwt,
+      readPlatformJwt: readCodexPlatformJwt,
+      refreshOnUnauthorized: refreshCodexPlatformJwt,
     }),
     attemptContext: ({ model }: { model: string }) => {
       const resolved = resolveCodexAttemptPolicy({
