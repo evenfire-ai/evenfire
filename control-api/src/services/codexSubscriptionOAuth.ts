@@ -26,9 +26,15 @@ const log = rootLogger.child({ module: 'codex-subscription-oauth' })
 
 export const CODEX_OAUTH_AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
 export const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token'
+/** Prefix shared by the Codex CLI device-auth routes. */
 export const CODEX_OAUTH_DEVICE_URL = 'https://auth.openai.com/api/accounts/deviceauth'
+export const CODEX_OAUTH_DEVICE_USERCODE_URL = `${CODEX_OAUTH_DEVICE_URL}/usercode`
+export const CODEX_OAUTH_DEVICE_TOKEN_URL = `${CODEX_OAUTH_DEVICE_URL}/token`
+export const CODEX_OAUTH_DEVICE_VERIFICATION_URI = 'https://auth.openai.com/codex/device'
+export const CODEX_OAUTH_DEVICE_CALLBACK_URI = 'https://auth.openai.com/deviceauth/callback'
 export const CODEX_OAUTH_REVOKE_URL = 'https://auth.openai.com/oauth/revoke'
 export const CODEX_OAUTH_SCOPES = ['openid', 'profile', 'email', 'offline_access'] as const
+const DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
 
 const TOKEN_TIMEOUT_MS = 15_000
 const REFRESH_LOCK_TTL_MS = 30_000
@@ -140,37 +146,30 @@ export async function startCodexDeviceConnect(
   intent: CodexSubscriptionOAuthIntent = 'connect'
 ): Promise<CodexDeviceStartResult> {
   requireEnabled(deps)
-  const started = await postJson(deps, CODEX_OAUTH_DEVICE_URL, {
+  const started = await postJson(deps, CODEX_OAUTH_DEVICE_USERCODE_URL, {
     client_id: deps.clientId,
-    scope: CODEX_OAUTH_SCOPES.join(' '),
   })
   if (!started.ok) {
     throw new CodexSubscriptionOAuthError('provider_unavailable', 'device authorization failed')
   }
-  const body = started.body as Record<string, unknown>
-  const deviceCode = requiredString(body.device_code, 'device_code')
-  const userCode = requiredString(body.user_code, 'user_code')
-  const verificationUri = requiredString(
-    body.verification_uri ?? body.verification_uri_complete,
-    'verification_uri'
-  )
-  const intervalSeconds = positiveNumber(body.interval, 5)
-  const expiresIn = positiveNumber(body.expires_in, 600)
-  const expiresAt = new Date(Date.now() + expiresIn * 1000)
+  const body = started.body
+  const deviceAuthId = requiredString(body.device_auth_id, 'device_auth_id')
+  const userCode = requiredString(body.user_code ?? body.usercode, 'user_code')
+  const intervalSeconds = parsePositiveNumber(body.interval, 5)
+  const expiresAt = parseDeviceExpiry(body)
   const state = randomBytes(24).toString('base64url')
   const safe = await insertCodexSubscriptionOAuthState(deps.db, deps.encryptionKey, {
     state,
     flow: 'device',
     intent,
-    deviceCode,
+    deviceCode: encodeDeviceAuthHandle({ deviceAuthId, userCode }),
     expiresAt,
   })
   log.info({ event: 'codex_oauth_device_start', intent: safe.intent }, 'device OAuth start')
   return {
     userCode,
-    verificationUri,
-    verificationUriComplete:
-      typeof body.verification_uri_complete === 'string' ? body.verification_uri_complete : null,
+    verificationUri: CODEX_OAUTH_DEVICE_VERIFICATION_URI,
+    verificationUriComplete: null,
     intervalSeconds,
     expiresAt: safe.expiresAt,
     state,
@@ -214,13 +213,14 @@ export async function pollCodexDevice(
     await expireCodexSubscriptionOAuthState(deps.db, state)
     return { status: 'expired' }
   }
-  if (!pending.deviceCode) {
+  const handle = decodeDeviceAuthHandle(pending.deviceCode)
+  if (!handle) {
     throw new CodexSubscriptionOAuthError(
       'invalid_callback',
-      'device state is missing a device code'
+      'device state is missing a device auth handle'
     )
   }
-  const tokenResult = await exchangeDeviceCode(deps, pending.deviceCode)
+  const tokenResult = await pollDeviceAuthorization(deps, handle)
   if (tokenResult.kind === 'pending') {
     return { status: 'pending', intervalSeconds: tokenResult.intervalSeconds, state: pending.safe }
   }
@@ -375,12 +375,13 @@ type ParsedCodexToken = {
 async function exchangeAuthorizationCode(
   deps: CodexOAuthDeps,
   code: string,
-  pkceVerifier: string
+  pkceVerifier: string,
+  redirectUri = deps.redirectUri
 ): Promise<ParsedCodexToken> {
   const result = await postForm(deps, CODEX_OAUTH_TOKEN_URL, {
     grant_type: 'authorization_code',
     code,
-    redirect_uri: deps.redirectUri,
+    redirect_uri: redirectUri,
     client_id: deps.clientId,
     code_verifier: pkceVerifier,
   })
@@ -408,9 +409,49 @@ async function exchangeRefreshToken(
   return parseTokenResponse(result.body)
 }
 
-async function exchangeDeviceCode(
+type CodexDeviceAuthHandle = {
+  deviceAuthId: string
+  userCode: string
+}
+
+function encodeDeviceAuthHandle(handle: CodexDeviceAuthHandle): string {
+  return JSON.stringify(handle)
+}
+
+function decodeDeviceAuthHandle(value: string | undefined): CodexDeviceAuthHandle | null {
+  if (!value) return null
+  try {
+    const parsed = JSON.parse(value) as { deviceAuthId?: unknown; userCode?: unknown }
+    if (
+      typeof parsed.deviceAuthId === 'string' &&
+      parsed.deviceAuthId.length > 0 &&
+      typeof parsed.userCode === 'string' &&
+      parsed.userCode.length > 0
+    ) {
+      return { deviceAuthId: parsed.deviceAuthId, userCode: parsed.userCode }
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+function readUpstreamErrorCode(body: Record<string, unknown>): string {
+  const error = body.error
+  if (typeof error === 'string') return error
+  if (
+    error &&
+    typeof error === 'object' &&
+    typeof (error as { code?: unknown }).code === 'string'
+  ) {
+    return (error as { code: string }).code
+  }
+  return ''
+}
+
+async function pollDeviceAuthorization(
   deps: CodexOAuthDeps,
-  deviceCode: string
+  handle: CodexDeviceAuthHandle
 ): Promise<
   | { kind: 'ok'; parsed: ParsedCodexToken }
   | { kind: 'pending'; intervalSeconds: number }
@@ -418,22 +459,35 @@ async function exchangeDeviceCode(
   | { kind: 'expired' }
   | { kind: 'denied' }
 > {
-  const result = await postForm(deps, CODEX_OAUTH_TOKEN_URL, {
-    grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-    device_code: deviceCode,
-    client_id: deps.clientId,
+  const result = await postJson(deps, CODEX_OAUTH_DEVICE_TOKEN_URL, {
+    device_auth_id: handle.deviceAuthId,
+    user_code: handle.userCode,
   })
   if (result.ok) {
+    const authorizationCode = requiredString(result.body.authorization_code, 'authorization_code')
+    const codeVerifier = requiredString(result.body.code_verifier, 'code_verifier')
     return {
       kind: 'ok',
-      parsed: parseTokenResponse(result.body),
+      parsed: await exchangeAuthorizationCode(
+        deps,
+        authorizationCode,
+        codeVerifier,
+        CODEX_OAUTH_DEVICE_CALLBACK_URI
+      ),
     }
   }
-  const error = typeof result.body.error === 'string' ? result.body.error : ''
-  if (error === 'authorization_pending') return { kind: 'pending', intervalSeconds: 5 }
-  if (error === 'slow_down') return { kind: 'slow_down', intervalSeconds: 10 }
-  if (error === 'expired_token') return { kind: 'expired' }
-  if (error === 'access_denied') return { kind: 'denied' }
+  if (result.status === 403 || result.status === 404) {
+    return { kind: 'pending', intervalSeconds: parsePositiveNumber(result.body.interval, 5) }
+  }
+  const error = readUpstreamErrorCode(result.body)
+  if (error === 'authorization_pending' || error === 'deviceauth_authorization_pending') {
+    return { kind: 'pending', intervalSeconds: parsePositiveNumber(result.body.interval, 5) }
+  }
+  if (error === 'slow_down') {
+    return { kind: 'slow_down', intervalSeconds: parsePositiveNumber(result.body.interval, 10) }
+  }
+  if (error === 'expired_token' || error === 'deviceauth_expired') return { kind: 'expired' }
+  if (error === 'access_denied' || error === 'deviceauth_denied') return { kind: 'denied' }
   throw new CodexSubscriptionOAuthError('provider_unavailable', 'device token poll failed')
 }
 
@@ -479,7 +533,7 @@ async function postForm(
   deps: CodexOAuthDeps,
   url: string,
   params: Record<string, string>
-): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
   return post(
     deps,
     url,
@@ -492,7 +546,7 @@ async function postJson(
   deps: CodexOAuthDeps,
   url: string,
   payload: Record<string, string>
-): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
   return post(deps, url, 'application/json', JSON.stringify(payload))
 }
 
@@ -501,7 +555,7 @@ async function post(
   url: string,
   contentType: string,
   body: string
-): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
   let response: Response
   try {
     response = await deps.fetchFn(url, {
@@ -518,7 +572,7 @@ async function post(
     )
   }
   const json = (await response.json().catch(() => ({}))) as Record<string, unknown>
-  return { ok: response.ok, body: json }
+  return { ok: response.ok, status: response.status, body: json }
 }
 
 function requiredString(value: unknown, field: string): string {
@@ -528,6 +582,20 @@ function requiredString(value: unknown, field: string): string {
   return value
 }
 
-function positiveNumber(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
+function parsePositiveNumber(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim())
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return fallback
+}
+
+function parseDeviceExpiry(body: Record<string, unknown>): Date {
+  if (typeof body.expires_at === 'string') {
+    const parsed = new Date(body.expires_at)
+    if (!Number.isNaN(parsed.getTime())) return parsed
+  }
+  const expiresIn = parsePositiveNumber(body.expires_in, DEVICE_CODE_TIMEOUT_SECONDS)
+  return new Date(Date.now() + expiresIn * 1000)
 }

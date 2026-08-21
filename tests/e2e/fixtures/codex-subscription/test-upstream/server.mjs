@@ -60,16 +60,27 @@ const server = createServer({ cert, key }, async (request, response) => {
       response.writeHead(302, { location: '/oauth/consent-complete' })
       return response.end()
     }
-    if (request.method === 'POST' && url.pathname === '/api/accounts/deviceauth') {
+    if (request.method === 'POST' && url.pathname === '/api/accounts/deviceauth/usercode') {
       counters.consent += 1
-      const deviceCode = `dev-${randomBytes(6).toString('hex')}`
-      devices.set(deviceCode, { approved: true })
+      const deviceAuthId = `deviceauth_${randomBytes(6).toString('hex')}`
+      devices.set(deviceAuthId, { approved: true, userCode: 'TEST-CODE' })
       return json(response, 200, {
-        device_code: deviceCode,
+        device_auth_id: deviceAuthId,
         user_code: 'TEST-CODE',
-        verification_uri: 'https://codex-test-upstream.local/device',
-        expires_in: 300,
-        interval: 1,
+        interval: '1',
+        expires_at: new Date(Date.now() + 300_000).toISOString(),
+      })
+    }
+    if (request.method === 'POST' && url.pathname === '/api/accounts/deviceauth/token') {
+      const body = JSON.parse((await readBody(request)) || '{}')
+      const pending = devices.get(body.device_auth_id)
+      if (!pending || pending.userCode !== body.user_code) {
+        return json(response, 403, { error: { code: 'deviceauth_authorization_pending' } })
+      }
+      return json(response, 200, {
+        authorization_code: `authz-${randomBytes(6).toString('hex')}`,
+        code_challenge: 'test-challenge',
+        code_verifier: 'test-verifier',
       })
     }
     if (request.method === 'POST' && url.pathname === '/oauth/token') {

@@ -16,7 +16,7 @@ test.describe('Codex subscription admission', () => {
     await page.goto('/llm-models/providers/codex-subscription')
     await expect(page.getByLabel('Username or email')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByTestId('codex-connection-status')).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Connect in browser' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Sign in with ChatGPT' })).toHaveCount(0)
   })
 
   test('catalog surface exposes Codex subscription only after capability is proven', async ({
@@ -42,6 +42,6 @@ test.describe('Codex subscription admission', () => {
     const body = (await capabilityResponse.json()) as { status?: string }
     expect(body.status).toBe('disconnected')
 
-    await expect(page.getByRole('link', { name: 'Codex subscription' })).toBeVisible()
+    await expect(page.getByRole('tab', { name: 'Codex subscription' })).toBeVisible()
   })
 })

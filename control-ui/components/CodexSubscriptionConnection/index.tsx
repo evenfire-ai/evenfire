@@ -5,21 +5,20 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
+import { LlmModelsTabBar } from '@components/LlmModelsSurface/LlmModelsTabBar'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { useToast } from '@components/Toast'
 import { Button, FormSection } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { isSilentApiError } from '@lib/api'
+import { type LlmAllowedModel, getLlmModels, isSilentApiError } from '@lib/api'
 import {
   type CodexOAuthIntent,
   type CodexSubscriptionConnectionView,
   getCodexSubscriptionConnection,
-  isCodexBrowserOAuthUnavailableError,
   pollCodexDevice,
   readCodexOAuthQueryParam,
   refreshCodexSubscriptionConnection,
   revokeCodexSubscription,
-  startCodexBrowserConnect,
   startCodexDeviceConnect,
   syncCodexSubscriptionCatalog,
 } from '@lib/codexSubscription'
@@ -47,12 +46,7 @@ function failureClass(error: unknown): string {
 }
 
 function CodexHeaderIcon() {
-  return (
-    <span className="cu-codex-subscription-header-icon" aria-hidden="true">
-      <LlmProviderIcon provider="openai" label="OpenAI" />
-      <LlmProviderIcon provider="codex-subscription" label="Codex subscription" />
-    </span>
-  )
+  return <LlmProviderIcon provider="codex-subscription" label="Codex subscription" />
 }
 
 function ConnectionDetailRow({
@@ -93,6 +87,14 @@ export function CodexSubscriptionConnection() {
   const [errorClass, setErrorClass] = useState<string | null>(null)
   const [browserOAuthBlocked, setBrowserOAuthBlocked] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [tabModels, setTabModels] = useState<LlmAllowedModel[]>([])
+
+  const discoveryReviewCount = useMemo(
+    () =>
+      tabModels.filter(model => model.source === 'discovery' && !model.enabled && !model.stale)
+        .length,
+    [tabModels]
+  )
 
   function applyConnection(next: CodexSubscriptionConnectionView) {
     setConnection(next)
@@ -109,6 +111,36 @@ export function CodexSubscriptionConnection() {
       setUiStatus('unavailable')
       setErrorClass(failureClass(error))
     }
+  }
+
+  useEffect(() => {
+    if (!enabled) {
+      setTabModels([])
+      return
+    }
+    let cancelled = false
+    void getLlmModels()
+      .then(result => {
+        if (!cancelled) setTabModels(result.rows ?? [])
+      })
+      .catch(error => {
+        if (!cancelled && !isSilentApiError(error)) setTabModels([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [enabled])
+
+  function renderSectionTabs() {
+    if (!enabled) return null
+    return (
+      <LlmModelsTabBar
+        activeTab="codex-subscription"
+        catalogCount={tabModels.length}
+        codexEnabled
+        discoveryReviewCount={discoveryReviewCount}
+      />
+    )
   }
 
   useEffect(() => {
@@ -180,38 +212,6 @@ export function CodexSubscriptionConnection() {
     [connection?.accountFingerprint]
   )
 
-  async function startBrowser(intent: CodexOAuthIntent) {
-    setBusy(true)
-    setErrorClass(null)
-    setBrowserOAuthBlocked(false)
-    setUiStatus('connecting')
-    try {
-      const started = await startCodexBrowserConnect(intent)
-      window.location.assign(started.authorizeUrl)
-    } catch (error) {
-      if (isSilentApiError(error)) return
-      if (isCodexBrowserOAuthUnavailableError(error)) {
-        setBrowserOAuthBlocked(true)
-        setErrorClass('browser_oauth_unregistered')
-        setUiStatus(connection ? mapConnectionStatus(connection.status) : 'disconnected')
-        return
-      }
-      if (
-        error &&
-        typeof error === 'object' &&
-        (error as { code?: string }).code === 'replacement_required'
-      ) {
-        setErrorClass('replacement_required')
-        setUiStatus(connection ? mapConnectionStatus(connection.status) : 'disconnected')
-        return
-      }
-      setUiStatus('unavailable')
-      setErrorClass(failureClass(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-
   async function startDevice(intent: CodexOAuthIntent) {
     setBusy(true)
     setErrorClass(null)
@@ -222,6 +222,9 @@ export function CodexSubscriptionConnection() {
       setDeviceState(started.state)
       setPollMs(started.intervalSeconds * 1000)
       setUiStatus('device-pending')
+      if (started.verificationUri) {
+        window.open(started.verificationUri, '_blank', 'noopener,noreferrer')
+      }
     } catch (error) {
       if (isSilentApiError(error)) return
       setUiStatus('unavailable')
@@ -240,7 +243,7 @@ export function CodexSubscriptionConnection() {
       tone: 'danger',
     })
     if (!approved) return
-    await startBrowser('replace')
+    await startDevice('replace')
   }
 
   async function handleRevoke() {
@@ -297,10 +300,6 @@ export function CodexSubscriptionConnection() {
     }
   }
 
-  function backToModels() {
-    router.push(CONTROL_ROUTES.llmModels.root)
-  }
-
   if (!capabilityReady) {
     return <p className="cu-subtitle">Checking Codex subscription availability.</p>
   }
@@ -314,7 +313,7 @@ export function CodexSubscriptionConnection() {
             title="Codex subscription"
             subtitle="This provider is not enabled on the control plane."
             backLabel="Back to models"
-            onBack={backToModels}
+            onBack={() => router.push(CONTROL_ROUTES.llmModels.root)}
           />
         }
       >
@@ -328,20 +327,20 @@ export function CodexSubscriptionConnection() {
   return (
     <CreateFlowPanel
       header={
-        <CreatePageHeader
-          icon={<CodexHeaderIcon />}
-          title="Codex subscription"
-          subtitle="Connect OpenAI Codex through the OAuth broker without storing tokens in the browser."
-          backLabel="Back to models"
-          onBack={backToModels}
-          backDisabled={busy}
-        />
+        <>
+          <CreatePageHeader
+            icon={<CodexHeaderIcon />}
+            title="Codex subscription"
+            subtitle="Sign in with ChatGPT to use included Codex usage. Tokens stay on the control plane."
+          />
+          {renderSectionTabs()}
+        </>
       }
     >
       <div className="cu-create-content cu-px-form cu-codex-subscription-panel">
         <FormSection
           title="Connection"
-          description="Authorize OpenAI Codex once for this deployment. Tokens stay on the control plane."
+          description="Sign in with ChatGPT once for this deployment. This uses your ChatGPT account, not a platform API key."
         >
           <div className="cu-codex-subscription-panel__status-row">
             <span className="cu-settings-row__label">Status</span>
@@ -372,7 +371,7 @@ export function CodexSubscriptionConnection() {
               role="status"
               data-testid="codex-device-code"
             >
-              Enter device code <strong>{deviceUserCode}</strong>
+              Sign in with ChatGPT using code <strong>{deviceUserCode}</strong>
               {deviceVerificationUri ? (
                 <>
                   {' '}
@@ -403,9 +402,8 @@ export function CodexSubscriptionConnection() {
               role="status"
               data-testid="codex-browser-oauth-blocked"
             >
-              Browser sign-in needs a deployment-registered OpenAI OAuth client for this
-              cluster&apos;s control-ui callback URL. Use device code to connect with the default
-              Codex client.
+              Browser redirect sign-in is not registered for this cluster. Use Sign in with ChatGPT
+              — the same account login path used by Codex, Pi, and OpenCode.
             </div>
           ) : null}
 
@@ -414,23 +412,15 @@ export function CodexSubscriptionConnection() {
               variant="primary"
               size="sm"
               disabled={busy}
-              onClick={() => void startBrowser('connect')}
-            >
-              Connect in browser
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
               onClick={() => void startDevice('connect')}
             >
-              Use device code
+              Sign in with ChatGPT
             </Button>
             <Button
               size="sm"
               variant="ghost"
               disabled={busy || !connection}
-              onClick={() => void startBrowser('reconnect')}
+              onClick={() => void startDevice('reconnect')}
             >
               Reconnect
             </Button>

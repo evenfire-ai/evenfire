@@ -7853,8 +7853,7 @@ textarea.cu-input {
     .cu-filter-select__icon,
     .cu-chip,
     .cu-px-provider,
-    .cu-codex-subscription-entry,
-    .cu-codex-subscription-header-icon
+
   )
   .cu-llm-provider-icon:is([data-provider='openai'], [data-provider='codex-subscription'])
   img {
@@ -10409,77 +10408,9 @@ textarea.cu-input {
   flex: 0 0 auto;
 }
 
-.cu-codex-subscription-entry {
-  display: flex;
-  align-items: center;
-  gap: var(--cu-space-3);
-  padding: var(--cu-space-3) var(--cu-space-4);
-  border: 1px solid var(--cu-border);
-  border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-elevated);
-  color: inherit;
-  text-decoration: none;
-  transition:
-    border-color 0.15s ease,
-    background 0.15s ease;
-}
-
-.cu-codex-subscription-entry:hover {
-  border-color: var(--cu-border-strong);
-  background: var(--cu-bg-panel);
-}
-
-.cu-codex-subscription-entry:focus-visible {
-  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
-  outline-offset: 2px;
-}
-
-.cu-codex-subscription-entry__brand {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--cu-space-2);
-  flex: none;
-}
-
-.cu-codex-subscription-entry__brand .cu-llm-provider-icon {
-  width: 2rem;
-  height: 2rem;
-  flex: 0 0 2rem;
-}
-
-.cu-codex-subscription-entry__copy {
-  display: grid;
-  gap: 0.15rem;
-  flex: 1;
-  min-width: 0;
-}
-
-.cu-codex-subscription-entry__title {
-  color: var(--cu-text);
-  font-weight: 600;
-}
-
-.cu-codex-subscription-entry__subtitle {
-  color: var(--cu-text-soft);
-  font-size: 0.8125rem;
-  line-height: 1.45;
-}
-
-.cu-codex-subscription-entry__chevron {
-  flex: none;
-  color: var(--cu-text-muted);
-}
-
-.cu-codex-subscription-header-icon {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
-}
-
-.cu-codex-subscription-header-icon .cu-llm-provider-icon {
-  width: 1.35rem;
-  height: 1.35rem;
-  flex: 0 0 1.35rem;
+.cu-agent-create-panel__header > .cu-tabs {
+  margin: 0;
+  padding: 0 var(--cu-space-4) var(--cu-space-3);
 }
 
 .cu-codex-subscription-panel {

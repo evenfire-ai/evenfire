@@ -23,7 +23,12 @@ vi.mock('@components/LlmDiscoveryPanel', () => ({
   ),
 }))
 vi.mock('@components/LlmModelTable', () => ({
-  LlmModelTable: () => <div>Model catalog</div>,
+  LlmModelTable: ({ navigation }: { navigation?: ReactNode }) => (
+    <div>
+      {navigation}
+      Model catalog
+    </div>
+  ),
 }))
 vi.mock('@lib/api', async importOriginal => {
   const actual = await importOriginal<typeof import('@lib/api')>()
@@ -75,7 +80,7 @@ describe('LlmModelsSurface', () => {
 
     expect(await screen.findByText('Discovery models: 1')).toBeInTheDocument()
     expect(getUnpricedModels).not.toHaveBeenCalled()
-    expect(screen.queryByRole('link', { name: 'Codex subscription' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Codex subscription' })).not.toBeInTheDocument()
   })
 
   it('hides the Codex subscription deep link when Control API capability is absent', async () => {
@@ -86,10 +91,10 @@ describe('LlmModelsSurface', () => {
     )
 
     expect(await screen.findByText('Model catalog')).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Codex subscription' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Codex subscription' })).not.toBeInTheDocument()
   })
 
-  it('shows the Codex subscription deep link only after Control API proves the flag', async () => {
+  it('shows the Codex subscription tab only after Control API proves the flag', async () => {
     vi.mocked(loadCodexSubscriptionCapability).mockResolvedValue({ enabled: true })
     render(
       <ToastProvider>
@@ -97,8 +102,8 @@ describe('LlmModelsSurface', () => {
       </ToastProvider>
     )
 
-    const link = await screen.findByRole('link', { name: 'Codex subscription' })
-    expect(link).toHaveAttribute('href', '/llm-models/providers/codex-subscription')
-    expect(screen.getByTestId('codex-subscription-catalog-link')).toBeInTheDocument()
+    const tab = await screen.findByRole('tab', { name: 'Codex subscription' })
+    expect(tab).toHaveAttribute('href', '/llm-models/providers/codex-subscription')
+    expect(screen.queryByTestId('codex-subscription-catalog-link')).not.toBeInTheDocument()
   })
 })

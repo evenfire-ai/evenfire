@@ -118,7 +118,7 @@ describe('CodexSubscriptionConnection', () => {
     vi.mocked(loadCodexSubscriptionCapability).mockResolvedValue({ enabled: false })
     renderSurface()
     expect(await screen.findByText('Codex subscription is unavailable.')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Connect in browser' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sign in with ChatGPT' })).not.toBeInTheDocument()
   })
 
   it('renders connected status without tokens or account ids', async () => {
@@ -138,28 +138,35 @@ describe('CodexSubscriptionConnection', () => {
     expect(await screen.findByTestId('codex-connection-status')).toHaveTextContent(label)
   })
 
-  it('starts a browser connect in the same tab without rendering secrets', async () => {
-    vi.mocked(startCodexBrowserConnect).mockResolvedValue({
-      authorizeUrl: 'https://auth.openai.com/oauth/authorize?state=abc',
-      state: 'abc',
+  it('starts Sign in with ChatGPT through the device flow without rendering secrets', async () => {
+    const openMock = vi.fn()
+    vi.stubGlobal('open', openMock)
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-EFGH',
+      verificationUri: 'https://auth.openai.com/codex/device',
+      intervalSeconds: 5,
+      state: 'dev',
       intent: 'connect',
-      expiresAt: '2026-08-20T00:01:00.000Z',
     })
     renderSurface()
-    fireEvent.click(await screen.findByRole('button', { name: 'Connect in browser' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
     await waitFor(() => {
-      expect(startCodexBrowserConnect).toHaveBeenCalledWith('connect')
+      expect(startCodexDeviceConnect).toHaveBeenCalledWith('connect')
     })
-    expect(assignMock).toHaveBeenCalledWith('https://auth.openai.com/oauth/authorize?state=abc')
+    expect(openMock).toHaveBeenCalledWith(
+      'https://auth.openai.com/codex/device',
+      '_blank',
+      'noopener,noreferrer'
+    )
+    expect(assignMock).not.toHaveBeenCalled()
     expect(document.body.textContent).not.toMatch(/sk-|deviceCode|accessToken/i)
   })
 
-  it('shows a device-code fallback banner when browser OAuth is unregistered', async () => {
-    vi.mocked(startCodexBrowserConnect).mockRejectedValue(browserOAuthUnavailableError())
+  it('shows the ChatGPT sign-in banner when a leftover browser callback is unregistered', async () => {
+    searchParams = new URLSearchParams('codex_oauth=browser_oauth_unregistered')
     renderSurface()
-    fireEvent.click(await screen.findByRole('button', { name: 'Connect in browser' }))
     expect(await screen.findByTestId('codex-browser-oauth-blocked')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Use device code' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeVisible()
     expect(assignMock).not.toHaveBeenCalled()
   })
 
@@ -181,7 +188,7 @@ describe('CodexSubscriptionConnection', () => {
       intent: 'connect',
     })
     renderSurface()
-    fireEvent.click(await screen.findByRole('button', { name: 'Use device code' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
     expect(await screen.findByTestId('codex-connection-status')).toHaveTextContent(
       'Device code pending'
     )
@@ -190,11 +197,12 @@ describe('CodexSubscriptionConnection', () => {
   })
 
   it('confirms replacement impact before starting a replace flow', async () => {
-    vi.mocked(startCodexBrowserConnect).mockResolvedValue({
-      authorizeUrl: 'https://auth.openai.com/oauth/authorize?state=rep',
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'REPL-CODE',
+      verificationUri: 'https://auth.openai.com/codex/device',
+      intervalSeconds: 5,
       state: 'rep',
       intent: 'replace',
-      expiresAt: '2026-08-20T00:01:00.000Z',
     })
     renderSurface()
     fireEvent.click(await screen.findByRole('button', { name: 'Replace account' }))
@@ -203,7 +211,7 @@ describe('CodexSubscriptionConnection', () => {
     })
     expect(String(confirmMock.mock.calls[0]?.[0]?.message)).toMatch(/lose the current grant/i)
     await waitFor(() => {
-      expect(startCodexBrowserConnect).toHaveBeenCalledWith('replace')
+      expect(startCodexDeviceConnect).toHaveBeenCalledWith('replace')
     })
   })
 

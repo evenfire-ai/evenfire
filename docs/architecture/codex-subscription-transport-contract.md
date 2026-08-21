@@ -19,7 +19,11 @@ Exact HTTPS origins (no caller-supplied URL or header):
 
 - OAuth authorize: `https://auth.openai.com/oauth/authorize`
 - OAuth token: `https://auth.openai.com/oauth/token`
-- OAuth device: `https://auth.openai.com/api/accounts/deviceauth`
+- OAuth device prefix: `https://auth.openai.com/api/accounts/deviceauth`
+- OAuth device usercode: `https://auth.openai.com/api/accounts/deviceauth/usercode`
+- OAuth device token poll: `https://auth.openai.com/api/accounts/deviceauth/token`
+- OAuth device callback: `https://auth.openai.com/deviceauth/callback`
+- OAuth device verification: `https://auth.openai.com/codex/device`
 - OAuth revoke: `https://auth.openai.com/oauth/revoke`
 - Catalog: `https://chatgpt.com/backend-api/codex/models`
 - Completions: `https://chatgpt.com/backend-api/codex/responses`

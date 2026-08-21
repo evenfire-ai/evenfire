@@ -27,7 +27,7 @@ test.describe('Codex subscription connection', () => {
         response.url().includes('/api/v1/admin/llm/providers/codex-subscription/connection') &&
         response.request().method() === 'GET'
     )
-    await page.getByRole('link', { name: 'Codex subscription' }).click()
+    await page.getByRole('tab', { name: 'Codex subscription' }).click()
     const response = await connection
     expect(response.ok(), `connection read must succeed, got ${response.status()}`).toBe(true)
     const body = (await response.json()) as { status?: string }
@@ -35,32 +35,32 @@ test.describe('Codex subscription connection', () => {
     await expect(page).toHaveURL(/\/llm-models\/providers\/codex-subscription/)
     await expect(page.getByRole('heading', { name: 'Codex subscription' })).toBeVisible()
     await expect(page.getByTestId('codex-connection-status')).toContainText(/Disconnected/)
-    await expect(page.getByRole('button', { name: 'Connect in browser' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Use device code' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeVisible()
     await expect(page.getByText(/sk-|access token|account id/i)).toHaveCount(0)
   })
 
-  test('browser connect fails loud with the default CLI client and keeps device code available', async ({
+  test('Sign in with ChatGPT starts the ChatGPT device login and stays on control-ui', async ({
     page,
   }) => {
     await page.goto('/')
     await loginControlUiVisible(page)
     await page.getByRole('link', { name: 'LLM Models' }).click()
-    await page.getByRole('link', { name: 'Codex subscription' }).click()
+    await page.getByRole('tab', { name: 'Codex subscription' }).click()
     await expect(page).toHaveURL(/\/llm-models\/providers\/codex-subscription/)
 
-    const browserStart = page.waitForResponse(
+    const deviceStart = page.waitForResponse(
       response =>
-        response.url().includes('/api/v1/admin/llm/providers/codex-subscription/browser/start') &&
+        response.url().includes('/api/v1/admin/llm/providers/codex-subscription/device/start') &&
         response.request().method() === 'POST'
     )
-    await page.getByRole('button', { name: 'Connect in browser' }).click()
-    const response = await browserStart
-    expect(response.status(), 'default CLI client must not open browser OAuth').toBe(400)
-    const body = (await response.json()) as { error?: string }
-    expect(body.error).toBe('browser_oauth_unregistered')
-    await expect(page.getByTestId('codex-browser-oauth-blocked')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Use device code' })).toBeVisible()
-    await expect(page).not.toHaveURL(/auth\.openai\.com/)
+    await page.getByRole('button', { name: 'Sign in with ChatGPT' }).click()
+    const response = await deviceStart
+    expect(response.ok(), `device start must succeed, got ${response.status()}`).toBe(true)
+    const body = (await response.json()) as { userCode?: string; verificationUri?: string }
+    expect(body.userCode, 'ChatGPT sign-in must return a user code').toEqual(expect.any(String))
+    expect(body.verificationUri).toMatch(/^https:\/\/auth\.openai\.com\/codex\/device/)
+    await expect(page.getByTestId('codex-device-code')).toContainText(String(body.userCode))
+    await expect(page).toHaveURL(/\/llm-models\/providers\/codex-subscription/)
+    await expect(page).not.toHaveURL(/oauth\/authorize/)
   })
 })
