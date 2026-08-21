@@ -47,6 +47,10 @@ vi.mock('../src/services/codexSubscriptionConnection.js', async () => {
 const {
   CodexSubscriptionOAuthError,
   CODEX_OAUTH_AUTHORIZE_URL,
+  CODEX_OAUTH_DEVICE_CALLBACK_URI,
+  CODEX_OAUTH_DEVICE_TOKEN_URL,
+  CODEX_OAUTH_DEVICE_USERCODE_URL,
+  CODEX_OAUTH_DEVICE_VERIFICATION_URI,
   handleCodexBrowserCallback,
   pollCodexDevice,
   refreshCodexSubscriptionConnection,
@@ -252,6 +256,7 @@ describe('codex subscription OAuth broker', () => {
   })
 
   it('polls device authorization with expiry and backoff', async () => {
+    const handle = JSON.stringify({ deviceAuthId: 'deviceauth_secret', userCode: 'ABCD-EFGH' })
     repos.peekState.mockResolvedValue({
       safe: {
         state: 'dev-1',
@@ -263,22 +268,25 @@ describe('codex subscription OAuth broker', () => {
         cancelledAt: null,
         createdAt: new Date(),
       },
-      deviceCode: 'device-secret',
+      deviceCode: handle,
     })
     const fetchFn = vi
       .fn()
       .mockResolvedValueOnce({
         ok: false,
-        json: async () => ({ error: 'authorization_pending' }),
+        status: 403,
+        json: async () => ({}),
       })
       .mockResolvedValueOnce({
         ok: false,
-        json: async () => ({ error: 'slow_down' }),
+        status: 400,
+        json: async () => ({ error: { code: 'slow_down' }, interval: '10' }),
       })
     await expect(pollCodexDevice(deps(fetchFn), 'dev-1')).resolves.toMatchObject({
       status: 'pending',
       intervalSeconds: 5,
     })
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(CODEX_OAUTH_DEVICE_TOKEN_URL)
     await expect(pollCodexDevice(deps(fetchFn), 'dev-1')).resolves.toMatchObject({
       status: 'slow_down',
       intervalSeconds: 10,
@@ -295,10 +303,76 @@ describe('codex subscription OAuth broker', () => {
         cancelledAt: null,
         createdAt: new Date(),
       },
-      deviceCode: 'device-secret',
+      deviceCode: handle,
     })
     await expect(pollCodexDevice(deps(fetchFn), 'dev-exp')).resolves.toEqual({ status: 'expired' })
     expect(repos.expireState).toHaveBeenCalled()
+  })
+
+  it('exchanges a completed device poll through the Codex device callback', async () => {
+    const handle = JSON.stringify({ deviceAuthId: 'deviceauth_secret', userCode: 'ABCD-EFGH' })
+    repos.peekState.mockResolvedValue({
+      safe: {
+        state: 'dev-ok',
+        flow: 'device',
+        intent: 'connect',
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 60_000),
+        consumedAt: null,
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      deviceCode: handle,
+    })
+    repos.consumeState.mockResolvedValue({
+      safe: {
+        state: 'dev-ok',
+        flow: 'device',
+        intent: 'connect',
+        status: 'consumed',
+        expiresAt: new Date(Date.now() + 60_000),
+        consumedAt: new Date(),
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      deviceCode: handle,
+    })
+    repos.getSafe.mockResolvedValue(null)
+    repos.insertInitial.mockResolvedValue({
+      connectionKey: 'deployment-default',
+      status: 'connected',
+      credentialRevision: 1,
+      accountFingerprint: fingerprint('acct_raw_123'),
+    })
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          authorization_code: 'authz-code',
+          code_verifier: 'pkce-from-poll',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'access-secret',
+          refresh_token: 'refresh-secret',
+          expires_in: 60,
+          id_token: idTokenFor('acct_raw_123'),
+        }),
+      })
+    const connected = await pollCodexDevice(deps(fetchFn), 'dev-ok')
+    expect(connected.status).toBe('connected')
+    expect(fetchFn.mock.calls[1]?.[0]).toContain('/oauth/token')
+    expect(String(fetchFn.mock.calls[1]?.[1]?.body)).toContain(
+      encodeURIComponent(CODEX_OAUTH_DEVICE_CALLBACK_URI)
+    )
+    expect(String(fetchFn.mock.calls[1]?.[1]?.body)).toContain('code_verifier=pkce-from-poll')
+    assertNoLeak(connected)
+    expect(JSON.stringify(connected)).not.toContain('deviceauth_secret')
   })
 
   it('rejects a stale refresh and persists a rotated refresh token', async () => {
@@ -360,19 +434,19 @@ describe('codex subscription OAuth broker', () => {
     assertNoLeak(revoked)
   })
 
-  it('starts device flow without returning the device code', async () => {
+  it('starts device flow without returning the device auth handle', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
+      status: 200,
       json: async () => ({
-        device_code: 'device-secret',
+        device_auth_id: 'deviceauth_secret',
         user_code: 'ABCD-EFGH',
-        verification_uri: 'https://auth.openai.com/codex/device',
-        expires_in: 600,
-        interval: 5,
+        interval: '5',
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
       }),
     })
     repos.insertState.mockImplementation(
-      async (_db: unknown, _key: Buffer, input: { state: string }) => ({
+      async (_db: unknown, _key: Buffer, input: { state: string; deviceCode?: string }) => ({
         state: input.state,
         flow: 'device',
         intent: 'connect',
@@ -384,9 +458,16 @@ describe('codex subscription OAuth broker', () => {
       })
     )
     const started = await startCodexDeviceConnect(deps(fetchFn), 'connect')
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(CODEX_OAUTH_DEVICE_USERCODE_URL)
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual({
+      client_id: 'app_test_client',
+    })
     expect(started.userCode).toBe('ABCD-EFGH')
+    expect(started.verificationUri).toBe(CODEX_OAUTH_DEVICE_VERIFICATION_URI)
+    expect(started.intervalSeconds).toBe(5)
+    expect(repos.insertState.mock.calls[0]?.[2].deviceCode).toContain('deviceauth_secret')
     assertNoLeak(started)
-    expect(JSON.stringify(started)).not.toContain('device-secret')
+    expect(JSON.stringify(started)).not.toContain('deviceauth_secret')
   })
 
   it('exposes only bounded error classes', () => {

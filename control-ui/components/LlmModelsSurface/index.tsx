@@ -9,7 +9,6 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { LlmDiscoveryPanel } from '@components/LlmDiscoveryPanel'
 import { LlmModelTable } from '@components/LlmModelTable'
 import { ModelReferences } from '@components/ModelReferences'
-import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
@@ -29,7 +28,7 @@ import {
 import { getProviderDisplayLabel } from '@lib/llm'
 import { buildUnpricedKeys } from '@lib/llmModelUnpriced'
 import { CatalogAttentionBanner } from './CatalogAttentionBanner'
-import { CodexSubscriptionCatalogLink } from './CodexSubscriptionCatalogLink'
+import { LlmModelsTabBar } from './LlmModelsTabBar'
 import type { LlmModelsSurfaceProps, LlmModelsTab } from './types'
 
 const CONFIGMAP_DEFERRED_WARNING =
@@ -157,23 +156,13 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
     [models]
   )
 
-  const tabs = [
-    {
-      value: 'catalog' as const,
-      href: CONTROL_ROUTES.llmModels.root,
-      label: models.length > 0 ? `Catalog (${models.length})` : 'Catalog',
-    },
-    {
-      value: 'discovery' as const,
-      href: CONTROL_ROUTES.llmModels.discovery,
-      label:
-        discoveryReviewCount > 0
-          ? `Discovery review (${discoveryReviewCount})`
-          : 'Discovery review',
-    },
-  ]
   const navigation = (
-    <TabBar<LlmModelsTab> activeValue={activeTab} ariaLabel="LLM model management" options={tabs} />
+    <LlmModelsTabBar
+      activeTab={activeTab}
+      catalogCount={models.length}
+      codexEnabled={codexEnabled}
+      discoveryReviewCount={discoveryReviewCount}
+    />
   )
 
   return (
@@ -186,7 +175,6 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
       {activeTab === 'catalog' ? (
         <CatalogAttentionBanner refreshSignal={attentionRefreshKey} />
       ) : null}
-      {activeTab === 'catalog' && codexEnabled ? <CodexSubscriptionCatalogLink /> : null}
       {activeTab === 'catalog' ? (
         <LlmModelTable
           items={models}

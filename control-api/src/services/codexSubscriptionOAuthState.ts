@@ -21,6 +21,7 @@ export type CodexSubscriptionOAuthStateWrite = {
   flow: CodexSubscriptionOAuthFlow
   intent: CodexSubscriptionOAuthIntent
   pkceVerifier?: string
+  /** Encrypted Codex device handle JSON: { deviceAuthId, userCode }. */
   deviceCode?: string
   expiresAt: Date
 }

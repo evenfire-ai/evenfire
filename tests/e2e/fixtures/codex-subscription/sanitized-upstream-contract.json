@@ -18,6 +18,10 @@
     "oauthAuthorize": "https://auth.openai.com/oauth/authorize",
     "oauthToken": "https://auth.openai.com/oauth/token",
     "oauthDevice": "https://auth.openai.com/api/accounts/deviceauth",
+    "oauthDeviceUsercode": "https://auth.openai.com/api/accounts/deviceauth/usercode",
+    "oauthDeviceToken": "https://auth.openai.com/api/accounts/deviceauth/token",
+    "oauthDeviceCallback": "https://auth.openai.com/deviceauth/callback",
+    "oauthDeviceVerification": "https://auth.openai.com/codex/device",
     "oauthRevoke": "https://auth.openai.com/oauth/revoke",
     "catalog": "https://chatgpt.com/backend-api/codex/models",
     "completions": "https://chatgpt.com/backend-api/codex/responses"
