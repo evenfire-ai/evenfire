@@ -18,8 +18,8 @@ import {
   requireAdminWorkflowCallerMiddleware,
 } from '../../workflows/shared/auth.js'
 import {
-  WORKFLOW_GRANT_READ_RATE_LIMITS,
-  WORKFLOW_GRANT_WRITE_RATE_LIMITS,
+  workflowGrantReadRateLimits,
+  workflowGrantWriteRateLimits,
 } from '../../workflows/shared/rateLimit.js'
 
 const BASE = '/admin/workflows'
@@ -63,11 +63,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/grants`,
-    ...WORKFLOW_GRANT_READ_RATE_LIMITS,
+    ...workflowGrantReadRateLimits(),
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = requireBoundAdminCaller(req, res)
-      if (!caller) return
+      if (!requireBoundAdminCaller(req, res)) return
 
       try {
         const users = await listWorkflowRecipeGrants(gateway, req.params.ns, req.params.name)
@@ -84,7 +83,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `${BASE}/:ns/:name/grants`,
-    ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
+    ...workflowGrantWriteRateLimits(),
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireBoundAdminCaller(req, res)
@@ -130,11 +129,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/team-grants`,
-    ...WORKFLOW_GRANT_READ_RATE_LIMITS,
+    ...workflowGrantReadRateLimits(),
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = requireBoundAdminCaller(req, res)
-      if (!caller) return
+      if (!requireBoundAdminCaller(req, res)) return
 
       try {
         const teams = await listWorkflowRecipeTeamGrants(gateway, req.params.ns, req.params.name)
@@ -151,7 +149,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `${BASE}/:ns/:name/team-grants`,
-    ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
+    ...workflowGrantWriteRateLimits(),
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireBoundAdminCaller(req, res)
@@ -197,11 +195,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `/admin/workflow-recipes/:ns/:name/allowed-teams`,
-    ...WORKFLOW_GRANT_READ_RATE_LIMITS,
+    ...workflowGrantReadRateLimits(),
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = requireBoundAdminCaller(req, res)
-      if (!caller) return
+      if (!requireBoundAdminCaller(req, res)) return
 
       try {
         const teams = await listWorkflowRecipeApprovalTeams({
@@ -222,7 +219,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `/admin/workflow-recipes/:ns/:name/allowed-teams/:teamId`,
-    ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
+    ...workflowGrantWriteRateLimits(),
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireBoundAdminCaller(req, res)
@@ -262,7 +259,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.delete(
     `/admin/workflow-recipes/:ns/:name/allowed-teams/:teamId`,
-    ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
+    ...workflowGrantWriteRateLimits(),
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireBoundAdminCaller(req, res)

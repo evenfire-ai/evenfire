@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { rateLimit } from 'express-rate-limit'
 import request from 'supertest'
 import {
   adminWorkflowRateLimitCredential,
+  workflowGrantEdgeRateLimitKey,
   workflowGrantReadRateLimit,
 } from '../src/routes/workflows/shared/rateLimit.js'
 
@@ -27,6 +29,43 @@ describe('routes/workflows/shared/rateLimit', () => {
     } as express.Request
 
     expect(adminWorkflowRateLimitCredential(req)).toBe('admin-cookie-token')
+  })
+
+  it('workflowGrantEdgeRateLimitKey buckets by IP regardless of bearer token', () => {
+    const reqA = {
+      ip: '203.0.113.10',
+      header: () => 'Bearer token-a',
+    } as express.Request
+    const reqB = {
+      ip: '203.0.113.10',
+      header: () => 'Bearer token-b',
+    } as express.Request
+
+    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).toBe(
+      workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqB)
+    )
+  })
+
+  it('edge backstop caps distinct bogus bearer tokens from the same IP', async () => {
+    const edgeLimit = rateLimit({
+      windowMs: 60_000,
+      limit: 2,
+      standardHeaders: false,
+      legacyHeaders: false,
+      keyGenerator: req => workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', req),
+      handler: (_req, res) => {
+        res.status(429).json({ error: 'Too Many Requests' })
+      },
+    })
+
+    const app = express()
+    app.get('/grants', edgeLimit, (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app).get('/grants').set('Authorization', 'Bearer bogus-1').expect(200)
+    await request(app).get('/grants').set('Authorization', 'Bearer bogus-2').expect(200)
+    await request(app).get('/grants').set('Authorization', 'Bearer bogus-3').expect(429)
   })
 
   it('workflowGrantReadRateLimit meters cookie-only admin workflow callers', async () => {

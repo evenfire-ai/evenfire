@@ -28,12 +28,16 @@ function hashedAdminWorkflowCredentialBucket(prefix: string) {
   }
 }
 
+/**
+ * Ingress-style edge key: IP-only so unverified bearer rotation cannot evade the
+ * backstop. Per-credential quotas remain on the PG limiter downstream.
+ */
+export function workflowGrantEdgeRateLimitKey(prefix: string, req: Request): string {
+  return `${prefix}:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
 function workflowGrantEdgeRateKey(prefix: string) {
-  return (req: Request): string => {
-    const bucket = hashedAdminWorkflowCredentialBucket(prefix)(req)
-    if (bucket) return bucket
-    return `${prefix}:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
-  }
+  return (req: Request): string => workflowGrantEdgeRateLimitKey(prefix, req)
 }
 
 function workflowGrantEdgeRateLimitHandler(_req: Request, res: Response): void {
@@ -74,15 +78,13 @@ export function workflowGrantWriteEdgeRateLimit() {
   })
 }
 
-export const WORKFLOW_GRANT_READ_RATE_LIMITS = [
-  workflowGrantReadEdgeRateLimit(),
-  workflowGrantReadRateLimit(),
-] as const
+export function workflowGrantReadRateLimits() {
+  return [workflowGrantReadEdgeRateLimit(), workflowGrantReadRateLimit()] as const
+}
 
-export const WORKFLOW_GRANT_WRITE_RATE_LIMITS = [
-  workflowGrantWriteEdgeRateLimit(),
-  workflowGrantWriteRateLimit(),
-] as const
+export function workflowGrantWriteRateLimits() {
+  return [workflowGrantWriteEdgeRateLimit(), workflowGrantWriteRateLimit()] as const
+}
 
 export function workflowTriggerRateLimit() {
   return rateLimitMiddleware({
