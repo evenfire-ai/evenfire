@@ -7,6 +7,8 @@ set +u
 
 T2_SCRIPT_DIR="$T2_SCRIPT_DIR"
 if [ -z "$T2_SCRIPT_DIR" ]; then T2_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"; fi
+# shellcheck source=profile-readiness.sh
+. "$T2_SCRIPT_DIR/profile-readiness.sh"
 T2_PROJECT_DIR="$T2_PROJECT_DIR"
 if [ -z "$T2_PROJECT_DIR" ]; then T2_PROJECT_DIR="$(cd -- "$T2_SCRIPT_DIR/../.." && pwd -P)"; fi
 T2_PROFILE="$T2_PROFILE"
@@ -47,6 +49,7 @@ T2_PLAN_MODE="$T2_PLAN_MODE"
 if [ -z "$T2_PLAN_MODE" ]; then T2_PLAN_MODE=false; fi
 T2_BOOTSTRAP_REQUIRED=false
 T2_PROFILE_HEALTHY=false
+T2_PROFILE_STATUS=unknown
 T2_CONTEXT_IDENTITY_VERIFIED=false
 T2_UNREADY_DEPLOYMENTS=""
 T2_MARKER_MATCHES_HEAD=false
@@ -317,27 +320,31 @@ PY
 }
 
 t2_profile_status() {
-  local status_json status_text
-  status_json="$(t2_mk status --output=json 2>/dev/null || true)"
-  status_text="$(t2_mk status 2>/dev/null || true)"
-  if [ -z "$status_json" ] && [ -z "$status_text" ]; then
+  local status_text status_rc=0
+  status_text="$(t2_mk status 2>/dev/null)" || status_rc=$?
+  if [ -z "$status_text" ]; then
+    T2_PROFILE_STATUS=missing
     T2_BOOTSTRAP_REQUIRED=true
     T2_PROFILE_HEALTHY=false
     T2_PLAN_STATE=full-bootstrap
     T2_PLAN_REASON='profile is missing or uninitialized'
     return 0
   fi
-  if [[ "$status_text" == *Stopped* || "$status_text" == *Nonexistent* || "$status_text" == *'does not exist'* || "$status_text" == *'not found'* || "$status_json" == *'does not exist'* || "$status_json" == *'not found'* ]]; then
+  if minikube_profile_status_is_missing_or_stopped "$status_text"; then
+    T2_PROFILE_STATUS=stopped
     T2_BOOTSTRAP_REQUIRED=true
     T2_PROFILE_HEALTHY=false
     T2_PLAN_STATE=full-bootstrap
     T2_PLAN_REASON='profile is missing or stopped'
     return 0
   fi
-  if [[ "$status_text" != *Running* && "$status_json" != *Running* ]]; then
+  if [ "$status_rc" -ne 0 ] || ! minikube_profile_status_is_healthy "$status_text"; then
+    T2_PROFILE_STATUS=unhealthy
+    T2_PROFILE_HEALTHY=false
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-start"
     t2_fail PROFILE_UNHEALTHY "Minikube profile is not healthy: $T2_PROFILE"
   fi
+  T2_PROFILE_STATUS=healthy
   T2_PROFILE_HEALTHY=true
 }
 
@@ -951,6 +958,7 @@ t2_evidence_write() {
   T2_ORIGIN_DEV="$T2_ORIGIN_DEV" T2_MERGE_BASE="$T2_MERGE_BASE" \
   T2_WORKTREE_ID="$T2_WORKTREE_ID" T2_RUN_ID="$T2_RUN_ID" T2_GATE_ID="$T2_GATE_ID" \
   T2_PROFILE="$T2_PROFILE" T2_CONTEXT="$T2_CONTEXT" T2_CLUSTER_FINGERPRINT="$T2_CLUSTER_FINGERPRINT" \
+  T2_PROFILE_STATUS="$T2_PROFILE_STATUS" T2_PROFILE_HEALTHY="$T2_PROFILE_HEALTHY" \
   T2_EVIDENCE_DIR="$T2_EVIDENCE_DIR" \
   T2_IMAGE_MANIFEST="$T2_IMAGE_MANIFEST" T2_IMAGE_SOURCE="$T2_IMAGE_SOURCE" T2_IMAGE_TAG="$T2_IMAGE_TAG" \
   python3 - "$file" "$T2_EVIDENCE_FILE" <<'PY'
@@ -994,6 +1002,8 @@ prior.update({
     "worktree": os.environ.get("T2_PROJECT_DIR", ""),
     "profile": os.environ.get("T2_PROFILE", ""),
     "context": os.environ.get("T2_CONTEXT", ""),
+    "profileStatus": os.environ.get("T2_PROFILE_STATUS", ""),
+    "profileHealthy": os.environ.get("T2_PROFILE_HEALTHY", "false"),
     "clusterFingerprintRef": os.environ.get("T2_CLUSTER_FINGERPRINT", ""),
     "imageManifestRef": os.environ.get("T2_IMAGE_MANIFEST", ""),
     "localLogDirectory": os.path.join(os.environ.get("T2_EVIDENCE_DIR", ""), "logs"),
@@ -1103,13 +1113,17 @@ t2_write_plan() {
   local plan_file="$1"
   [ -n "$plan_file" ] || return 0
   local tmp_file="$plan_file.tmp.$$"
-  PLAN_STATE="$T2_PLAN_STATE" PLAN_REASON="$T2_PLAN_REASON" python3 - "$tmp_file" <<'PY'
+  PLAN_STATE="$T2_PLAN_STATE" PLAN_REASON="$T2_PLAN_REASON" \
+  PLAN_PROFILE_STATUS="$T2_PROFILE_STATUS" PLAN_PROFILE_HEALTHY="$T2_PROFILE_HEALTHY" \
+  python3 - "$tmp_file" <<'PY'
 import json
 import os
 from pathlib import Path
 Path(os.sys.argv[1]).write_text(json.dumps({
     "state": os.environ.get("PLAN_STATE", ""),
     "reason": os.environ.get("PLAN_REASON", ""),
+    "profileStatus": os.environ.get("PLAN_PROFILE_STATUS", ""),
+    "profileHealthy": os.environ.get("PLAN_PROFILE_HEALTHY", "false"),
 }, sort_keys=True) + "\n")
 PY
   mv -- "$tmp_file" "$plan_file"

@@ -226,12 +226,19 @@ minikube-deploy-instances: ## Apply CRD test instances (context, host, channel)
 minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml with current node IP
 	@CONTEXT=$(MINIKUBE_PROFILE) deploy/scripts/minikube-detect-k8s-api-ip.sh
 
-.PHONY: minikube-deploy-all
+.PHONY: minikube-deploy-all minikube-deploy-all-body
 minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-deploy-all-body
+
+minikube-deploy-all-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
-	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ] && [ -z "$(T2_LOCK_TOKEN)" ]; then \
-		echo "[minikube-deploy-all] refusing GFS mutation without the owning T2 profile lock" >&2; exit 1; \
-	fi
 	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
 	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then echo "[minikube-deploy-all] GFS mutation disabled for this non-T2 sync"; fi
 	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
@@ -321,8 +328,18 @@ minikube-restart-all: ## Restart all Clerum deployments
 	done
 	@echo "All deployments restarted."
 
-.PHONY: minikube-deploy-crds
+.PHONY: minikube-deploy-crds minikube-deploy-crds-body
 minikube-deploy-crds: ## Install/upgrade CRDs via Helm chart + apply CRD YAML (idempotent)
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-deploy-crds-body
+
+minikube-deploy-crds-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
 	kubectl --context=$(MINIKUBE_PROFILE) apply -f deploy/base/namespaces.yaml
 	@if [ "$(MINIKUBE_GFS_MUTATION)" = "false" ]; then \
 		echo "[minikube-deploy-crds] GFS CRD mutation disabled for this non-T2 gate"; \
@@ -364,9 +381,18 @@ minikube-restart-deploy: ## Restart a single deployment without rebuilding (usag
 # Use `make minikube-sync-auth-key` to copy the public key automatically
 # from rpc-proxy-secrets into both runtime ConfigMaps after key regeneration.
 #
-.PHONY: minikube-gen-keys
+.PHONY: minikube-gen-keys minikube-gen-keys-body
 minikube-gen-keys: ## Generate JWT signing keys + auto-sync to mcp-host-config
-	@scripts/minikube/generate-keys.sh
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-gen-keys-body
+
+minikube-gen-keys-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+		@scripts/minikube/generate-keys.sh
 	@if [ -f deploy/minikube/secrets/jwt-signing-keys.yaml ]; then \
 	  $(KC) apply -f deploy/minikube/secrets/jwt-signing-keys.yaml; \
 	else \
@@ -403,11 +429,18 @@ minikube-apply-secrets: ## Apply all secrets to cluster (LLM keys read from .env
 minikube-apply-namespaces: ## Create all namespaces
 	$(KC) apply -f deploy/base/namespaces.yaml
 
-.PHONY: minikube-sync-auth-key
+.PHONY: minikube-sync-auth-key minikube-sync-auth-key-body
 minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets into runtime ConfigMaps when drift exists
-	@if [ -z "$(T2_LOCK_TOKEN)" ]; then \
-		echo "[minikube-sync-auth-key] refusing ConfigMap mutation without the owning T2 profile lock" >&2; exit 1; \
-	fi
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-sync-auth-key-body
+
+minikube-sync-auth-key-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
 	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
 		T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE); \
@@ -801,8 +834,18 @@ minikube-status: ## Show status of all Clerum services in minikube
 minikube-logs: ## Show logs for a service (usage: make minikube-logs SVC=control-api NS=control-plane)
 	$(KC) logs -n $(NS) deploy/$(SVC) --tail=50
 
-.PHONY: minikube-db-reset
+.PHONY: minikube-db-reset minikube-db-reset-body
 minikube-db-reset: ## Reset control-api postgres (re-enables first-time admin setup)
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		CONTROL_DB_RESET_PVC_UID="$(CONTROL_DB_RESET_PVC_UID)" CONTROL_DB_RESET_RESUME="$(CONTROL_DB_RESET_RESUME)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-db-reset-body
+
+minikube-db-reset-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
 	@if [ -z "$(CONTROL_DB_RESET_PVC_UID)" ]; then echo "ERROR: CONTROL_DB_RESET_PVC_UID=<approved UID|none> is required"; exit 1; fi
 	@reset_args="--expected-pvc-uid $(CONTROL_DB_RESET_PVC_UID)"; \
 	 if [ "$(CONTROL_DB_RESET_PVC_UID)" = "none" ]; then reset_args="--expect-no-pvc"; fi; \
@@ -812,8 +855,10 @@ minikube-db-reset: ## Reset control-api postgres (re-enables first-time admin se
 	@echo "Scaling up postgres..."
 	@$(KC) scale deploy/control-postgres --replicas=1 -n control-plane
 	@$(KC) wait --for=condition=Available deploy/control-postgres -n control-plane --timeout=90s
-	@CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/converge-control-db-after-reset.sh \
-	  --overlay deploy/overlays/minikube --job-name control-api-db-migrate-reset
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" CONTEXT=$(MINIKUBE_PROFILE) \
+		bash deploy/scripts/converge-control-db-after-reset.sh \
+		  --overlay deploy/overlays/minikube --job-name control-api-db-migrate-reset
 	@echo "DB reset complete. First-time admin setup is available again."
 
 .PHONY: minikube-seed-test-data

@@ -19,11 +19,19 @@ T2_LOCK_ROOT="${TMP_DIR}/locks"
 T2_LOCK_TOKEN='auth-sync-test-token'
 T2_LOCK_DIR="${T2_LOCK_ROOT}/fake.lock"
 T2_PROCESS_START=unavailable
+T2_TEST_BRANCH="$(git -C "${ROOT}" branch --show-current)"
+T2_TEST_HEAD="$(git -C "${ROOT}" rev-parse --verify HEAD)"
+T2_TEST_WORKTREE_ID="$(printf '%s' "${ROOT}" | shasum | awk '{print $1}')"
+T2_TEST_LOCK_KEY="$(printf '%s\0%s\0%s\0%s\0%s' "${ROOT}" "${T2_TEST_BRANCH}" "${T2_TEST_HEAD}" fake fake | shasum | awk '{print $1}')"
 mkdir -p "${T2_LOCK_DIR}"
 cat >"${T2_LOCK_DIR}/owner.env" <<EOF
 REPOSITORY=${ROOT}
+BRANCH=${T2_TEST_BRANCH}
+HEAD=${T2_TEST_HEAD}
 PROFILE=fake
 CONTEXT=fake
+WORKTREE_ID=${T2_TEST_WORKTREE_ID}
+LOCK_KEY=${T2_TEST_LOCK_KEY}
 TOKEN=${T2_LOCK_TOKEN}
 PID=$$
 PROCESS_START=${T2_PROCESS_START}

@@ -62,28 +62,50 @@ T2_PROFILE="${T2_PROFILE:-${MINIKUBE_PROFILE:-${PROFILE}}}"
 T2_CONTEXT="${T2_CONTEXT:-${CONTROL_API_REAL_PG_CONTEXT:-${PROFILE}}}"
 T2_LOCK_ROOT="${T2_LOCK_ROOT:-${HOME}/.cache/evenfire/minikube-t2-locks}"
 T2_LOCK_TOKEN="${T2_LOCK_TOKEN:-}"
-# Auth-key convergence mutates runtime ConfigMaps and restarts consumers. It is
-# a child of the owning T2/full-setup transition, never an independent writer.
-# Validate the live opaque lease here as well as at the public Make boundary so
-# invoking this helper directly cannot bypass profile ownership.
-source "${ROOT}/scripts/minikube/t2-common.sh"
-[[ -n "${T2_LOCK_TOKEN}" ]] || die "canonical T2 profile lock is required for auth-key convergence"
-T2_LOCK_DIR="${T2_LOCK_ROOT}/${T2_PROFILE}.lock"
-[[ -d "${T2_LOCK_DIR}" && ! -L "${T2_LOCK_DIR}" ]] ||
-  die "canonical T2 profile lock is missing for ${T2_PROFILE}"
-owner_token="$(t2_lock_owner_value TOKEN || true)"
-owner_pid="$(t2_lock_owner_value PID || true)"
-[[ "${owner_token}" == "${T2_LOCK_TOKEN}" ]] ||
-  die "canonical T2 profile lock token does not match"
-[[ "$(t2_lock_owner_value REPOSITORY || true)" == "${T2_PROJECT_DIR}" ]] ||
-  die "canonical T2 profile lock belongs to another worktree"
-[[ "$(t2_lock_owner_value PROFILE || true)" == "${T2_PROFILE}" &&
-   "$(t2_lock_owner_value CONTEXT || true)" == "${T2_CONTEXT}" ]] ||
-  die "canonical T2 profile lock belongs to another profile or context"
-t2_lock_process_matches "${owner_pid}" ||
-  die "canonical T2 profile lock owner is no longer a live process"
 
-KCTL=(kubectl --context="${PROFILE}")
+remote_context_allowed() {
+  local allowed_context
+  local -a allowed_contexts=()
+  [ "${GFS_REMOTE_RECONCILE_AUTHORIZED:-false}" = true ] || return 1
+  [ -n "${ALLOWED_CONTEXTS:-}" ] || return 1
+  IFS=',' read -r -a allowed_contexts <<<"${ALLOWED_CONTEXTS}"
+  for allowed_context in "${allowed_contexts[@]}"; do
+    [ "${allowed_context}" = "${PROFILE}" ] && return 0
+  done
+  return 1
+}
+
+# The non-local infra entrypoint has already made the explicit context
+# authorization decision. A failed/empty Minikube status must never turn a
+# local ambiguity into a remote write path.
+REMOTE_RECONCILE=false
+if [ "${GFS_REMOTE_RECONCILE_AUTHORIZED:-false}" = true ]; then
+  remote_context_allowed || die "remote auth-key convergence requires an explicit allowlisted context"
+  REMOTE_RECONCILE=true
+fi
+
+[[ "${PROFILE}" == "${T2_PROFILE}" && "${PROFILE}" == "${T2_CONTEXT}" ]] ||
+  die "auth-key convergence target profile and Kubernetes context do not match"
+
+if [ "${REMOTE_RECONCILE}" != true ]; then
+  # Auth-key convergence mutates runtime ConfigMaps and restarts consumers. It
+  # is a child of the owning T2/full-setup transition, never an independent
+  # writer. Validate the complete lease identity, including branch/HEAD and
+  # worktree, so an opaque token alone cannot authorize a different target.
+  # shellcheck source=scripts/minikube/t2-common.sh
+  source "${ROOT}/scripts/minikube/t2-common.sh"
+  actual_root="$(git -C "${T2_PROJECT_DIR}" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "${actual_root}" && "$(cd -- "${actual_root}" && pwd -P)" == "${T2_PROJECT_DIR}" ]] ||
+    die "auth-key convergence worktree does not match the lease repository"
+  T2_BRANCH="$(git -C "${T2_PROJECT_DIR}" branch --show-current 2>/dev/null || true)"
+  T2_HEAD="$(git -C "${T2_PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || true)"
+  T2_WORKTREE_ID="$(printf '%s' "${T2_PROJECT_DIR}" | shasum | awk '{print $1}')"
+  [[ -n "${T2_BRANCH}" && -n "${T2_HEAD}" ]] || die "auth-key convergence cannot resolve the current branch and HEAD"
+  t2_lock_validate_inherited
+fi
+
+# Always use the verified effective context, not a stale caller-local alias.
+KCTL=(kubectl --context="${T2_CONTEXT}")
 SOURCE_SECRET="rpc-proxy-secrets"
 SOURCE_NAMESPACE="rpc-proxy"
 CONFIGMAP="mcp-host-config"
@@ -539,7 +561,7 @@ sync_gfs() {
     selector="app=gfs-controller,clerum.io/gfsc-role=${role}"
     log "Restarting ${GFS_NAMESPACE}/${deployment} after auth key drift"
     rollout_restart_with_retry "${GFS_NAMESPACE}" "${deployment}" >/dev/null
-    if ! rollout_output="$(PATH="${SCRIPT_DIR}/gfs-rollout-shim:${PATH}" CONTEXT="${PROFILE}" \
+    if ! rollout_output="$(PATH="${SCRIPT_DIR}/gfs-rollout-shim:${PATH}" CONTEXT="${T2_CONTEXT}" \
       "${KCTL[@]}" rollout status "deployment/${deployment}" -n "${GFS_NAMESPACE}" --timeout=90s 2>&1)"; then
       die "gfsc deployment deployment/${deployment} did not become Ready after auth key drift: ${rollout_output}"
     fi

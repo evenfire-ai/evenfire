@@ -32,18 +32,16 @@ remote_context_allowed() {
   return 1
 }
 
-minikube_profile_exists() {
-  local status
-  status="$(minikube -p "$CONTEXT" status 2>/dev/null || true)"
-  [ -n "$status" ] &&
-    [[ "$status" != *"does not exist"* && "$status" != *"not found"* && "$status" != *Nonexistent* ]]
-}
-
 # The sibling infra deploy path owns its explicit non-local context decision.
-# A local Minikube profile, even if a caller supplies the legacy remote flag,
-# must still use the branch-owned T2 lease below.
+# Remote mode is enabled only by an exact allowlist match. In particular, a
+# failed or empty `minikube status` result is never interpreted as evidence
+# that a target is remote.
 REMOTE_RECONCILE=false
-if remote_context_allowed && ! minikube_profile_exists; then
+if [ "${GFS_REMOTE_RECONCILE_AUTHORIZED:-false}" = true ]; then
+  if ! remote_context_allowed; then
+    printf '[reconcile-gfs-deploy] ERROR: remote context is not explicitly allowlisted: %s\n' "$CONTEXT" >&2
+    exit 1
+  fi
   REMOTE_RECONCILE=true
 fi
 

@@ -43,28 +43,68 @@ runtime_script="$(sed '/^[[:space:]]*#/d' deploy/scripts/provision-gfs-runtime.s
   || fail 'post-overlay runtime path does not wait for exact GFSC rollouts'
 [[ "$runtime_script" != *'rollout restart'* && "$runtime_script" != *'rotate-writer'* ]] \
   || fail 'post-overlay runtime path rotates or unconditionally restarts GFS'
+# Use a clean, minimal Git fixture so this contract tests the profile/cluster
+# boundary rather than whichever unrelated files a developer has open in the
+# main worktree. The fake Minikube command fails closed with no status output;
+# it must never be interpreted as authorization for a remote mutation.
+T2_FIXTURE_ROOT="$(mktemp -d)"
+T2_PROFILE_ROOT="${T2_FIXTURE_ROOT}/profiles"
+T2_PROFILE="contract-profile"
+T2_CONTEXT="${T2_PROFILE}"
+T2_PROFILE_DIR="${T2_PROFILE_ROOT}/${T2_PROFILE}"
+T2_PROFILE_ENV="${T2_PROFILE_DIR}/profile.env"
+T2_PORTS_ENV="${T2_PROFILE_DIR}/ports.env"
+T2_BIN="${T2_FIXTURE_ROOT}/bin"
+T2_MUTATION_LOG="${T2_FIXTURE_ROOT}/mutations.log"
+trap 'rm -rf "${T2_FIXTURE_ROOT}"' EXIT
+mkdir -p "${T2_PROFILE_DIR}" "${T2_BIN}"
+git init -q "${T2_FIXTURE_ROOT}/repo"
+git -C "${T2_FIXTURE_ROOT}/repo" config user.email contract@example.invalid
+git -C "${T2_FIXTURE_ROOT}/repo" config user.name contract-fixture
+git -C "${T2_FIXTURE_ROOT}/repo" checkout -q -b feat/contract-lock
+git -C "${T2_FIXTURE_ROOT}/repo" remote add origin https://github.com/evenfire-ai/evenfire.git
+git -C "${T2_FIXTURE_ROOT}/repo" commit --allow-empty -qm fixture
+git -C "${T2_FIXTURE_ROOT}/repo" update-ref refs/remotes/origin/dev HEAD
+T2_HEAD_SHORT="$(git -C "${T2_FIXTURE_ROOT}/repo" rev-parse --short HEAD)"
+printf 'PROFILE=%s\nREPO_DIR=%s\nBRANCH=feat/contract-lock\nSHA_SHORT=%s\nDIRTY=false\n' \
+  "${T2_PROFILE}" "${T2_FIXTURE_ROOT}/repo" "${T2_HEAD_SHORT}" >"${T2_PROFILE_ENV}"
+: >"${T2_PORTS_ENV}"
+printf '#!/usr/bin/env bash\nexit 42\n' >"${T2_BIN}/minikube"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$T2_MUTATION_LOG"\nexit 99\n' >"${T2_BIN}/kubectl"
+chmod +x "${T2_BIN}/minikube" "${T2_BIN}/kubectl"
+
 reconcile_context_err="$(mktemp)"
-if CONTEXT=unverified-context bash deploy/scripts/reconcile-gfs-deploy-credentials.sh 2>"$reconcile_context_err"; then
+if CONTEXT="${T2_CONTEXT}" T2_PROJECT_DIR="${T2_FIXTURE_ROOT}/repo" \
+  T2_PROFILE="${T2_PROFILE}" T2_CONTEXT="${T2_CONTEXT}" \
+  T2_PROFILE_ROOT="${T2_PROFILE_ROOT}" T2_PROFILE_ENV="${T2_PROFILE_ENV}" \
+  T2_PORTS_ENV="${T2_PORTS_ENV}" PATH="${T2_BIN}:$PATH" \
+  bash deploy/scripts/reconcile-gfs-deploy-credentials.sh 2>"$reconcile_context_err"; then
   rm -f "$reconcile_context_err"
   fail 'credential reconciliation accepted an unverified Kubernetes context'
 fi
-grep -Fq 'worktree is dirty' "$reconcile_context_err" \
-  || fail 'credential reconciliation did not fail closed before an unowned worktree could mutate GFS'
+grep -Fq 'DEVELOPMENT_SCOPE_REQUIRED' "$reconcile_context_err" \
+  || fail 'credential reconciliation did not fail closed when the local profile was not bootstrapped'
+[[ ! -s "$T2_MUTATION_LOG" ]] \
+  || fail 'credential reconciliation mutated Kubernetes after Minikube status failed'
 rm -f "$reconcile_context_err"
 reconcile_remote_context_err="$(mktemp)"
-if CONTEXT=gke_unapproved GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=gke_approved \
+if CONTEXT="${T2_CONTEXT}" GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=other-context \
+  T2_PROJECT_DIR="${T2_FIXTURE_ROOT}/repo" T2_PROFILE="${T2_PROFILE}" T2_CONTEXT="${T2_CONTEXT}" \
+  T2_PROFILE_ROOT="${T2_PROFILE_ROOT}" T2_PROFILE_ENV="${T2_PROFILE_ENV}" \
+  T2_PORTS_ENV="${T2_PORTS_ENV}" PATH="${T2_BIN}:$PATH" \
   bash deploy/scripts/reconcile-gfs-deploy-credentials.sh 2>"$reconcile_remote_context_err"; then
   rm -f "$reconcile_remote_context_err"
   fail 'credential reconciliation accepted a GKE context outside the explicit allowlist'
 fi
-grep -Fq 'worktree is dirty' "$reconcile_remote_context_err" \
+grep -Fq 'remote context is not explicitly allowlisted' "$reconcile_remote_context_err" \
   || fail 'credential reconciliation did not fail closed before a protected context could mutate GFS'
+[[ ! -s "$T2_MUTATION_LOG" ]] \
+  || fail 'credential reconciliation mutated Kubernetes after remote allowlist validation failed'
 rm -f "$reconcile_remote_context_err"
 grep -Fq 't2_mutation_lock' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
   || fail 'GFS reconciliation does not require the canonical profile mutation lock'
-if grep -Fq 'GFS_REMOTE_RECONCILE_AUTHORIZED=true' deploy/scripts/reconcile-gfs-deploy-credentials.sh; then
-  fail 'GFS reconciliation still trusts caller-provided remote authorization'
-fi
+! grep -Fq 'minikube_profile_exists' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
+  || fail 'GFS reconciliation still infers remote ownership from Minikube status'
 make_block() {
   awk -v target="$1" '$0 ~ "^" target ":" {active=1} active && /^\.PHONY:/ {exit} active {print}' Makefile
 }

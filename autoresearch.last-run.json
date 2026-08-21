@@ -1,0 +1,62 @@
+{
+  "asi_template": {
+    "evidence": "candidate_patch=captured (tracked_diff_detected); metrics=evenfire_minikube_healthy_start_calls=0.0, evenfire_minikube_partial_start_calls=1.0; baseline=0.0; delta=0.0; hard_gates=all true.",
+    "family": "autoresearch",
+    "hypothesis": "The captured candidate may improve the configured goal: Reduce Minikube startup overhead while preserving strict branch-profile ownership and readiness gates.",
+    "lane": "local",
+    "next_action_hint": "Review the candidate evidence, metric delta, and hard gates before logging a keep/discard decision.",
+    "risk": "candidate_requires_review",
+    "rollback_reason": "Revert the scoped candidate changes if validation fails or the candidate is discarded."
+  },
+  "baseline": 0.0,
+  "baseline_policy": "initial",
+  "baseline_policy_source": "explicit",
+  "candidate_patch": {
+    "decision_required": true,
+    "reason": "tracked_diff_detected",
+    "status": "captured"
+  },
+  "checks": {
+    "returncode": 0
+  },
+  "command_returncode": 0,
+  "cwd": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire",
+  "delta": 0.0,
+  "freshness_fingerprint": "29e5278281304861c420dafd107ec9356e235561cca873d4810051983cbdc52a",
+  "generation": {
+    "files": {
+      "asi": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/asi.json",
+      "candidate_patch": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/candidate.patch",
+      "checks": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/checks.json",
+      "command": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/command.json",
+      "decision": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/decision.json",
+      "hard_gates": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/hard_gates.json",
+      "improvement": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/improvement.md",
+      "manifest": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/manifest.json",
+      "metrics": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/metrics.json",
+      "scan_report": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/scan_report.json",
+      "stderr_preview": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/benchmark.stderr.preview.txt",
+      "stdout_preview": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/benchmark.stdout.preview.txt",
+      "trace": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001/trace.json"
+    },
+    "generation_id": "gen_001",
+    "path": "/Users/alfredolopez/.codex/worktrees/f3d2/evenfire/autoresearch.runs/reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z/gen_001"
+  },
+  "hard_gates": {
+    "eval_harness_unchanged": true,
+    "finite_primary_metric": true,
+    "fresh_packet": true,
+    "no_eval_gaming": true,
+    "no_scope_violation": true,
+    "no_secret_leak": true,
+    "tests_pass": true
+  },
+  "metric": "evenfire_minikube_healthy_start_calls",
+  "metrics": {
+    "evenfire_minikube_healthy_start_calls": 0.0,
+    "evenfire_minikube_partial_start_calls": 1.0
+  },
+  "ok": true,
+  "primary_metric_present": true,
+  "segment_id": "reduce-minikube-startup-overhead-while-preservin-2026-08-21T084713Z"
+}

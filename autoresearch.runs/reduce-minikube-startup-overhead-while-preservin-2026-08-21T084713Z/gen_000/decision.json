@@ -1,0 +1,9 @@
+{
+  "baseline": 0.0,
+  "baseline_policy": "initial",
+  "candidate_patch_status": "captured",
+  "decision_required": true,
+  "delta": 0.0,
+  "reason": "candidate_review_pending",
+  "status": "pending"
+}

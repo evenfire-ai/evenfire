@@ -51,14 +51,17 @@ assert_make_contains() {
 
 assert_succeeds_dry minikube-start
 assert_succeeds_dry minikube-deploy-all
+assert_succeeds_dry minikube-deploy-all-body
 assert_succeeds_dry minikube-sync-auth-key-if-present
 assert_succeeds_dry minikube-verify-networkpolicies
 
 assert_contains minikube-start "minikube-sync-auth-key-if-present"
 assert_contains minikube-start "--context=clerum-test"
-assert_contains minikube-deploy-all "minikube-sync-auth-key"
-assert_contains minikube-sync-auth-key "--context=clerum-test"
-assert_contains minikube-sync-auth-key "scripts/minikube/sync-auth-key.sh"
+assert_contains minikube-deploy-all "with-t2-mutation-lock.sh"
+assert_contains minikube-deploy-all-body "minikube-sync-auth-key"
+assert_contains minikube-sync-auth-key "with-t2-mutation-lock.sh"
+assert_contains minikube-sync-auth-key-body "--context=clerum-test"
+assert_contains minikube-sync-auth-key-body "scripts/minikube/sync-auth-key.sh"
 assert_contains minikube-verify-networkpolicies "verify-networkpolicies.sh --overlay minikube"
 assert_contains minikube-sync-auth-key-if-present "rpc-proxy-secrets"
 

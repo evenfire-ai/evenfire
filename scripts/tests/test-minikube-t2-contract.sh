@@ -16,7 +16,7 @@ TMP_ROOT="$TMPDIR"
 if [ -z "$TMP_ROOT" ]; then TMP_ROOT=/tmp; fi
 set -u
 
-for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T0" \
+for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minikube-profile-readiness.sh" "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T0" \
   "$ROOT/scripts/e2e/e2e-np08-hcc-authorization.sh" \
   "$ROOT/scripts/minikube/settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/minikube/wait-gfs-reader-ready.sh" \
@@ -30,6 +30,7 @@ for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T0" \
   "$ROOT/scripts/tests/test-minikube-pre-gate-restore.sh" \
   "$ROOT/scripts/tests/test-minikube-sync-auth-key.sh" \
   "$ROOT/scripts/tests/test-minikube-sync-auth-key-durable.sh" \
+  "$ROOT/scripts/tests/test-minikube-mutation-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-targeted-gfs-sync.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"; do
@@ -550,6 +551,7 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
   exit 1
 fi
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
+bash "$ROOT/scripts/tests/test-minikube-profile-readiness.sh"
 bash "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"
 bash "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh"
 bash "$ROOT/scripts/tests/test-minikube-gfs-provision-order.sh"
@@ -557,6 +559,7 @@ bash "$ROOT/scripts/tests/test-minikube-pre-gate-sync-state.sh"
 bash "$ROOT/scripts/tests/test-minikube-pre-gate-restore.sh"
 bash "$ROOT/scripts/tests/test-minikube-sync-auth-key.sh"
 bash "$ROOT/scripts/tests/test-minikube-sync-auth-key-durable.sh"
+bash "$ROOT/scripts/tests/test-minikube-mutation-boundary.sh"
 bash "$ROOT/scripts/tests/test-minikube-targeted-gfs-sync.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh"
 bash "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"

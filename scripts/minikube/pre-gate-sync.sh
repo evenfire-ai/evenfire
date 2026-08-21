@@ -654,7 +654,8 @@ if [[ "${cluster_changed}" == "true" ]]; then
       cd "${PROJECT_DIR}"
       gfs_crd_mutation=false
       [[ "${GATE_NAME}" == "minikube-t2" ]] && gfs_crd_mutation=true
-      MINIKUBE_GFS_MUTATION="${gfs_crd_mutation}" make minikube-deploy-crds
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" \
+        MINIKUBE_GFS_MUTATION="${gfs_crd_mutation}" make minikube-deploy-crds
     )
     if [[ "${GATE_NAME}" == "minikube-t2" ]]; then
       CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
