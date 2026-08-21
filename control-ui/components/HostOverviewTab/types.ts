@@ -10,6 +10,7 @@ export type HostTabKey = 'access' | 'model' | 'connectors'
 export type HostOverviewTabProps = {
   hostName: string
   displayName: string
+  description: string
   statusLabel: string
   statusTone: 'active' | 'inactive' | 'unknown'
   contextRef: string
@@ -20,6 +21,7 @@ export type HostOverviewTabProps = {
   modelAllowlistLine: string
   accessSummary: HostOverviewAccessSummary
   onNavigate: (tab: HostTabKey) => void
+  onSaveDisplayName: (displayName: string) => Promise<boolean>
   createdAt: string
   lastUpdated: string
 }

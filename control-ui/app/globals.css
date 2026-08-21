@@ -7509,10 +7509,49 @@ textarea.cu-input {
 }
 
 .cu-host-overview-identity__name {
+  min-width: 0;
   font-size: 1.5rem;
   font-weight: 600;
   line-height: 1.2;
   margin-top: 0.25rem;
+}
+
+.cu-host-overview-identity__name-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  width: 100%;
+  max-width: 100%;
+}
+
+.cu-host-overview-identity__name-editor {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  width: 100%;
+  max-width: 100%;
+}
+
+.cu-host-overview-identity__name-input {
+  min-width: 0;
+  width: min(100%, 14rem);
+  text-align: center;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.cu-host-overview-identity__edit {
+  flex-shrink: 0;
+}
+
+.cu-host-overview-identity__description {
+  max-width: 100%;
+  color: var(--cu-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .cu-host-overview-identity__slug {

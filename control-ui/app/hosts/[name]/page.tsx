@@ -207,6 +207,7 @@ export default function HostDetailsPage() {
 
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
+  const [hostDescription, setHostDescription] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
   // Last server-backed snapshot of the Overview-owned fields, captured at every
   // (re)load. Cancel (and re-opening Edit) reverts the whole class of Overview
@@ -369,6 +370,7 @@ export default function HostDetailsPage() {
         savedOverviewRef.current = overview
         setHostNameDraft(overview.hostName)
         setHostDisplayDraft(overview.hostDisplay)
+        setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
         setStatelessDraft(overview.stateless)
@@ -638,7 +640,7 @@ export default function HostDetailsPage() {
     setStatelessDraft(saved.stateless)
   }
 
-  async function saveHost(): Promise<boolean> {
+  async function saveHost(nextDisplayName = hostDisplayDraft): Promise<boolean> {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
 
@@ -657,7 +659,7 @@ export default function HostDetailsPage() {
       // semantics — omitting them is what keeps them intact).
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
-        host: hostDisplayDraft.trim() || nextHostName,
+        host: nextDisplayName.trim() || nextHostName,
         contextRef: contextRefDraft.trim(),
         channels: channelsDraft,
         // Echo spec.lifecycle explicitly: the admin facade full-replaces the
@@ -981,6 +983,7 @@ export default function HostDetailsPage() {
           <HostOverviewTab
             hostName={routeName}
             displayName={hostDisplayDraft}
+            description={hostDescription}
             statusLabel={hostStatusLabel}
             statusTone={hostStatusTone}
             contextRef={contextRefDraft}
@@ -995,6 +998,7 @@ export default function HostDetailsPage() {
               .join(', ')}
             accessSummary={accessSummary}
             onNavigate={tab => selectTab(tab)}
+            onSaveDisplayName={nextDisplayName => saveHost(nextDisplayName)}
             createdAt={hostCreatedAt}
             lastUpdated={hostLastUpdated}
           />

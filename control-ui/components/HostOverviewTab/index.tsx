@@ -1,6 +1,9 @@
 import React from 'react'
 import { IconRobot } from '../Sidebar/icons'
+import { IconCheck, IconPencil, IconX } from '../icons'
 import type { HostOverviewTabProps, HostTabKey } from './types'
+
+const DESCRIPTION_MAX_LENGTH = 100
 
 const STATUS_DOT_CLASS: Record<HostOverviewTabProps['statusTone'], string> = {
   active: 'cu-host-overview-status__dot--active',
@@ -81,9 +84,16 @@ function formatTimestamp(value: string): string {
   return `${month} ${day}, ${year} • ${hours}:${minutes} ${meridiem}`
 }
 
+function truncateDescription(value: string): string {
+  const description = value.trim()
+  if (description.length <= DESCRIPTION_MAX_LENGTH) return description
+  return `${description.slice(0, DESCRIPTION_MAX_LENGTH - 1).trimEnd()}…`
+}
+
 export function HostOverviewTab({
   hostName,
   displayName,
+  description,
   statusLabel,
   statusTone,
   contextRef,
@@ -94,23 +104,114 @@ export function HostOverviewTab({
   modelAllowlistLine,
   accessSummary,
   onNavigate,
+  onSaveDisplayName,
   createdAt,
   lastUpdated,
 }: HostOverviewTabProps & { createdAt: string; lastUpdated: string }) {
   const shownName = displayName.trim() || hostName
+  const [editingName, setEditingName] = React.useState(false)
+  const [nameDraft, setNameDraft] = React.useState(shownName)
+  const [savingName, setSavingName] = React.useState(false)
   const hasContext = Boolean(contextRef.trim())
   const allowlist = modelAllowlistLine.trim() || '—'
+  const trimmedDescription = description.trim()
+  const shownDescription = truncateDescription(trimmedDescription) || 'No description provided.'
+
+  React.useEffect(() => {
+    if (!editingName) setNameDraft(shownName)
+  }, [editingName, shownName])
+
+  function startNameEdit() {
+    setNameDraft(shownName)
+    setEditingName(true)
+  }
+
+  function cancelNameEdit() {
+    setNameDraft(shownName)
+    setEditingName(false)
+  }
+
+  async function saveName() {
+    const nextName = nameDraft.trim()
+    if (!nextName || savingName) return
+
+    setSavingName(true)
+    try {
+      if (await onSaveDisplayName(nextName)) setEditingName(false)
+    } finally {
+      setSavingName(false)
+    }
+  }
 
   return (
     <div className="cu-host-overview">
       <section className="cu-host-overview-identity" aria-label="Agent identity">
-        <div className="cu-host-overview-identity__name">
-          <span className="cu-host-overview-identity__icon" aria-hidden="true">
-            <IconRobot />
-          </span>
-          {shownName}
+        <div className="cu-host-overview-identity__name-row">
+          {editingName ? (
+            <div className="cu-host-overview-identity__name-editor">
+              <span className="cu-host-overview-identity__icon" aria-hidden="true">
+                <IconRobot />
+              </span>
+              <input
+                className="cu-input cu-host-overview-identity__name-input"
+                value={nameDraft}
+                onChange={event => setNameDraft(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') void saveName()
+                  if (event.key === 'Escape') cancelNameEdit()
+                }}
+                aria-label="Agent name"
+                disabled={savingName}
+                autoFocus
+              />
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--toolbar"
+                onClick={() => void saveName()}
+                disabled={savingName || !nameDraft.trim()}
+                aria-label="Save agent name"
+                title="Save agent name"
+              >
+                <IconCheck width={16} height={16} />
+              </button>
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--ghost"
+                onClick={cancelNameEdit}
+                disabled={savingName}
+                aria-label="Cancel editing agent name"
+                title="Cancel editing agent name"
+              >
+                <IconX width={16} height={16} />
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="cu-host-overview-identity__name">
+                <span className="cu-host-overview-identity__icon" aria-hidden="true">
+                  <IconRobot />
+                </span>
+                {shownName}
+              </div>
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--ghost cu-host-overview-identity__edit"
+                onClick={startNameEdit}
+                disabled={savingName}
+                aria-label="Edit agent name"
+                title="Edit agent name"
+              >
+                <IconPencil width={16} height={16} />
+              </button>
+            </>
+          )}
         </div>
-        <div className="cu-host-overview-identity__slug">{hostName}</div>
+        <div
+          className="cu-host-overview-identity__description"
+          title={trimmedDescription || undefined}
+        >
+          {shownDescription}
+        </div>
         <div className="cu-host-overview-identity__status">
           <StatusDot tone={statusTone} />
           <span>{statusLabel}</span>
