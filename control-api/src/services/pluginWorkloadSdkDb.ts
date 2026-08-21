@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { type DbClient, pool, withTransaction } from '../db.js'
+import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../db.js'
 import type { AdministrativeEventSubmitterPrincipalV1 } from '../middleware/tracingSubmitterAuth.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import {
@@ -12,10 +12,68 @@ import {
 // Owns the three SDK tables:
 //   - plugin_workload_sdk_grants          per-recipe capability grants
 //   - plugin_workload_sdk_invocations     invocation audit trail
-//   - plugin_workload_sdk_quota_counters  per-recipe+period quota tracking
+//   - plugin_workload_sdk_quota_counters  historical-only counters (issue #348);
+//                                         admin read path only, no writers
 
 export const PLUGIN_WORKLOAD_SDK_FAMILIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkFamily = (typeof PLUGIN_WORKLOAD_SDK_FAMILIES)[number]
+
+// ─── Grant-update NOTIFY (issue #375, P3) ────────────────────────────────
+// CROSS-SERVICE CONTRACT: a transactional `pg_notify` fired inside the
+// grant-mutation transactions (upsert / delete / revoke) so the Workflow
+// Recipes Controller re-reconciles the affected recipe immediately (~1–5s)
+// instead of waiting for its ≤30s level-triggered watchdog. The WRC LISTEN side
+// lives in `workflow-recipes/src/reconciler/grantUpdateListener.ts` — the
+// channel name and payload shape below MUST stay in sync with it.
+//
+// This is an app-level NOTIFY (not a DDL trigger) so the payload stays typed and
+// the change is fully revertible. Being inside the transaction, it is delivered
+// on COMMIT and discarded on ROLLBACK. Semantics are best-effort: a dropped
+// notification degrades to the existing polling backstop, never worse.
+export const PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL = 'plugin_workload_sdk_grant_update'
+
+export interface GrantUpdateNotifyInput {
+  recipeNamespace: string
+  recipeName: string
+  /** Omitted for a whole-recipe revoke that spans multiple families. */
+  capabilityFamily?: string
+}
+
+/**
+ * Build the JSON payload for a grant-update NOTIFY. Pure and exported so the
+ * exact wire shape can be unit-tested without a live Postgres.
+ */
+export function buildGrantUpdateNotifyPayload(input: GrantUpdateNotifyInput): string {
+  return JSON.stringify({
+    recipeNamespace: input.recipeNamespace,
+    recipeName: input.recipeName,
+    ...(input.capabilityFamily ? { capabilityFamily: input.capabilityFamily } : {}),
+  })
+}
+
+/**
+ * Emit the grant-update NOTIFY on the shared channel. MUST be called with the
+ * in-transaction `db` client so the signal is delivered on COMMIT (and dropped
+ * on ROLLBACK), never as a separate connection.
+ *
+ * A `pg_notify` inside the transaction would roll the whole grant mutation back
+ * if it threw — but the only failure mode is a payload over Postgres' 8000-byte
+ * NOTIFY limit, and this payload is just a recipe namespace/name (+ optional
+ * short family), which cannot approach that bound. So the mutation is never at
+ * risk from the notify, and the transactional coupling is intentional.
+ */
+async function notifyGrantUpdate(
+  // issue #375 M3: REQUIRES the branded transaction session — `pool` no longer
+  // structurally satisfies this parameter, so the db→pool refactor that breaks
+  // COMMIT/ROLLBACK coupling fails to COMPILE instead of merely failing a test.
+  db: DbTransactionClient,
+  input: GrantUpdateNotifyInput
+): Promise<void> {
+  await db.query('SELECT pg_notify($1, $2)', [
+    PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL,
+    buildGrantUpdateNotifyPayload(input),
+  ])
+}
 
 export const PLUGIN_WORKLOAD_SDK_INVOCATION_STATUSES = [
   'in_progress',
@@ -324,7 +382,7 @@ function promptTargets(value: unknown): PluginWorkloadSdkPromptTarget[] {
   })
 }
 
-function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
+export function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
   const family = row.capability_family
   if (!PLUGIN_WORKLOAD_SDK_FAMILIES.includes(family as PluginWorkloadSdkFamily)) {
     throw new Error(`unknown capability_family from db: ${String(family)}`)
@@ -466,9 +524,27 @@ export interface UpsertGrantParams {
 
 export async function upsertGrant(
   params: UpsertGrantParams,
-  operatorSub: string
+  operatorSub: string,
+  // When the caller already runs inside a carrier transaction (the grant
+  // write-gate, which holds the per-model advisory locks — R1-H3 fase 2), the
+  // upsert MUST reuse that same transaction so the recipe lock is taken AFTER
+  // the model locks (global order: `llm-model:*` before `plugin_workload_sdk:*`)
+  // and the enabled-ness revalidation + the write commit atomically. Every other
+  // caller passes no `db` and gets its own transaction, exactly as before.
+  // The carrier MUST be a real transaction session (branded, issue #375 M3):
+  // it holds the advisory locks and `notifyGrantUpdate` refuses `pool`.
+  db?: DbTransactionClient
 ): Promise<PluginWorkloadSdkGrant> {
-  return withTransaction(async db => {
+  if (db) return upsertGrantInTransaction(params, operatorSub, db)
+  return withTransaction(inner => upsertGrantInTransaction(params, operatorSub, inner))
+}
+
+async function upsertGrantInTransaction(
+  params: UpsertGrantParams,
+  operatorSub: string,
+  db: DbTransactionClient
+): Promise<PluginWorkloadSdkGrant> {
+  {
     // All capability families for a recipe share one lock. A family-scoped
     // lock permits an SDK-only revoke to race an upsert for the other family.
     const recipeLock = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}`
@@ -613,14 +689,27 @@ export async function upsertGrant(
         })),
     ]
     await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    // issue #375 (P3): nudge the WRC to re-reconcile now that the grant changed.
+    await notifyGrantUpdate(db, {
+      recipeNamespace: params.recipeNamespace,
+      recipeName: params.recipeName,
+      capabilityFamily: params.capabilityFamily,
+    })
     return grant
-  })
+  }
 }
 
-export async function listGrants(filter?: {
-  recipeNamespace?: string
-  recipeName?: string
-}): Promise<PluginWorkloadSdkGrant[]> {
+export async function listGrants(
+  filter?: {
+    recipeNamespace?: string
+    recipeName?: string
+  },
+  // Accepts a transaction client so the grant write-gate can read the stored
+  // grant (Pieza D no-worsening context) on the SAME connection that holds the
+  // model advisory locks — no extra pool checkout under the lock (adenda A3).
+  // Defaults to the global pool for every other (unlocked) caller.
+  db: Pick<DbClient, 'query'> = pool
+): Promise<PluginWorkloadSdkGrant[]> {
   const clauses: string[] = []
   const values: unknown[] = []
   if (filter?.recipeNamespace) {
@@ -632,10 +721,48 @@ export async function listGrants(filter?: {
     clauses.push(`recipe_name = $${values.length}`)
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT * FROM plugin_workload_sdk_grants ${where}
      ORDER BY recipe_namespace, recipe_name, capability_family`,
     values
+  )
+  return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
+}
+
+/**
+ * Grants whose `allowed_models` list names `model` — the 4th source of the
+ * LLM-model impact enumeration (Fase 3, `llmModelImpact.ts`).
+ *
+ * MATCH BY MODEL NAME ONLY, deliberately NOT by `(provider, model)`. The
+ * `allowed_models` column is a provider-LESS flat model-name list and is NOT
+ * enforced to hold only models of the grant's `provider` column: the write-gate
+ * (`routes/admin/pluginWorkloadSdk.ts`) validates `prompt_targets` per-provider,
+ * but `allowed_models` is parsed from the request body free-form and passed
+ * straight through — and since `prompt_targets` can span multiple providers, the
+ * mirrored `allowed_models` set can too. Filtering by `provider` would therefore
+ * UNDER-report references, the unsafe direction for a safety gate that gates a
+ * destructive disable/delete. Matching by model name may over-report a same-named
+ * model under a different provider (extra operator friction, never silent
+ * breakage) — the fail-safe trade-off. This is exercised by the realPostgres
+ * integration test `db.listGrantsReferencingModel.realPostgres.integration`.
+ *
+ * No `policy_state` and no `provider IS NOT NULL` filter: a grant is surfaced
+ * whenever it names the model, including legacy NULL-provider and
+ * `revoking`/`disabled` rows (fail-loud — never hide a dangling reference).
+ *
+ * `allowed_models @> to_jsonb($1::text)` is jsonb array-contains-scalar: for a
+ * text `model`, `to_jsonb('m'::text)` is the JSON string `"m"`, and a jsonb
+ * array `@>` a scalar is true when the array contains that element.
+ */
+export async function listGrantsReferencingModel(
+  model: string,
+  db: DbClient = pool
+): Promise<PluginWorkloadSdkGrant[]> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_grants
+      WHERE allowed_models @> to_jsonb($1::text)
+      ORDER BY recipe_namespace, recipe_name, capability_family`,
+    [model]
   )
   return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
 }
@@ -879,6 +1006,17 @@ export async function revokePluginWorkloadSdkForRecipe(
         changes,
       })
     }
+    // issue #375 (P3): a whole-recipe revoke spans every family, so omit the
+    // capabilityFamily — the WRC only needs the recipe coordinates to re-reconcile.
+    // issue #375 (B2): notify ONLY on an actual transition (rows moved to
+    // 'revoking', or permission changes emitted). A no-op revoke — every grant
+    // already revoking/disabled — must stay silent, otherwise the WRC would
+    // force-reconcile the still-cached recipe, which can re-enter revoke and
+    // NOTIFY again: a reconcile+pg_notify spin. Matches upsert/delete "notify
+    // only on a real mutation" semantics.
+    if ((revoked.rowCount ?? 0) > 0 || changes.length > 0) {
+      await notifyGrantUpdate(db, { recipeNamespace, recipeName })
+    }
     return {
       state:
         hasActivePolicy || hasRevokingPolicy || (revoked.rowCount ?? 0) > 0
@@ -896,6 +1034,11 @@ export async function revokePluginWorkloadSdkForRecipe(
  * that the recipe-bound SDK endpoint and credentials are gone. The state
  * transition is intentionally impossible from `active`, preventing callers
  * from declaring a kill-switch success without the teardown boundary.
+ *
+ * issue #375 (B2 counterpart): finalize (`revoking`→`disabled`) deliberately
+ * emits NO grant-update pg_notify — it is terminal cleanup reachable only after
+ * teardown is proven, its only caller/consumer is the WRC itself, and the
+ * visible `revoke` transition already notified.
  */
 export async function finalizePluginWorkloadSdkRevocation(
   recipeNamespace: string,
@@ -1043,6 +1186,13 @@ export async function deleteGrant(
         })),
     ]
     await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    // issue #375 (P3): nudge the WRC to re-reconcile after the grant is removed
+    // so the capability projection transitions back to awaiting_policy/degraded.
+    await notifyGrantUpdate(db, {
+      recipeNamespace: grant.recipeNamespace,
+      recipeName: grant.recipeName,
+      capabilityFamily: grant.capabilityFamily,
+    })
     return true
   })
 }
@@ -2028,37 +2178,14 @@ export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number
   })
 }
 
-// ─── Quota counters ──────────────────────────────────────────────────────
-
-/** Sentinel period for eager SDK traffic before any workflow run exists. */
-export const PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD = new Date(0)
-
-/**
- * Resolve the quota counter bucket for per-run limits. Uses the active
- * workflow run's start time when one exists; otherwise the eager sentinel.
- *
- * When a run is created concurrently with the first SDK call, the run row may
- * not be visible yet — callers fall back to the eager sentinel until the next
- * attempt sees the committed run.
- */
-export async function resolveQuotaPeriodStart(
-  recipeNamespace: string,
-  recipeName: string
-): Promise<Date> {
-  const result = await pool.query(
-    `SELECT COALESCE(started_at, created_at) AS period_start
-     FROM workflow_runs
-     WHERE recipe_namespace = $1
-       AND recipe_name = $2
-       AND phase NOT IN ('Succeeded', 'Failed', 'Canceled')
-     ORDER BY COALESCE(started_at, created_at) DESC
-     LIMIT 1`,
-    [recipeNamespace, recipeName]
-  )
-  const row = result.rows[0] as { period_start?: Date | string } | undefined
-  if (!row?.period_start) return PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD
-  return new Date(row.period_start)
-}
+// ─── Quota counters (historical-only, issue #348) ────────────────────────
+// Per-run/period quota enforcement was removed (issue #348): nothing writes
+// plugin_workload_sdk_quota_counters anymore (the enforcement writers
+// consumePeriodQuota / resolveQuotaPeriodStart / getPeriodQuotaUsage and the
+// eager epoch sentinel were deleted so a future re-wire cannot resurrect the
+// never-resetting epoch bucket). Existing rows — including stale epoch
+// sentinels — are inert historical data; getQuotaCounters keeps serving them
+// to the admin read path. Hard removal of the table is a separate follow-up.
 
 export interface QuotaCounterRow {
   recipeNamespace: string
@@ -2087,106 +2214,6 @@ export async function getQuotaCounters(
     notificationCount: Number(row.notification_count),
     lastUpdated: new Date(row.last_updated as string).toISOString(),
   }))
-}
-
-export async function getPeriodQuotaUsage(
-  recipeNamespace: string,
-  recipeName: string,
-  family: PluginWorkloadSdkFamily,
-  periodStart: Date
-): Promise<number> {
-  const column = family === 'promptBridge' ? 'prompt_bridge_count' : 'notification_count'
-  const result = await pool.query(
-    `SELECT ${column} AS usage_count
-     FROM plugin_workload_sdk_quota_counters
-     WHERE recipe_namespace = $1 AND recipe_name = $2 AND period_start = $3`,
-    [recipeNamespace, recipeName, periodStart]
-  )
-  const row = result.rows[0] as { usage_count?: number | string } | undefined
-  return Number(row?.usage_count ?? 0)
-}
-
-/**
- * Atomically consume one unit of period quota. The conditional UPDATE only
- * increments while the post-increment count stays within `limit`, so two
- * concurrent calls can never both pass a remaining-1 budget.
- *
- * `foldEagerUsage` (default `false`) folds the eager-sentinel usage into the
- * same atomic conditional — when set, the run-period decision becomes
- * `runCount + 1 + eagerUsage <= limit`, where `eagerUsage` is the count
- * already booked under the eager sentinel period
- * (`PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD`). That eager usage is read with a
- * correlated subquery INSIDE the same conditional-upsert statement, so there
- * is no TOCTOU window: two concurrent run-period consumers can never both pass
- * a budget the eager usage already exhausted.
- *
- * The eager-period `$6` bind is appended to the parameter array ONLY when
- * `foldEagerUsage` is `true`. When it is `false` the eager-usage SQL fragment
- * is the literal `'0'` and never references `$6`, so binding it would raise a
- * parameter-count mismatch; the conditional bind keeps both paths valid.
- *
- * Returns false when the limit is hit (caller maps to quota_exceeded,
- * retryable=false).
- */
-export async function consumePeriodQuota(
-  recipeNamespace: string,
-  recipeName: string,
-  family: PluginWorkloadSdkFamily,
-  limit: number,
-  periodStart: Date = PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD,
-  foldEagerUsage = false
-): Promise<boolean> {
-  const column = family === 'promptBridge' ? 'prompt_bridge_count' : 'notification_count'
-  // When `foldEagerUsage` is set, the run-period decision must account for
-  // usage already booked under the eager sentinel (so the run cap isn't
-  // doubled). We read that eager usage with a correlated subquery INSIDE the
-  // same conditional-upsert statement, eliminating the read-then-consume
-  // TOCTOU: two concurrent run-period consumers evaluate the gate against the
-  // committed counter row under the ON CONFLICT row lock, so they cannot both
-  // pass a budget the eager usage already exhausted.
-  const eagerUsageExpr = foldEagerUsage
-    ? `COALESCE((
-        SELECT eager.${column}
-          FROM plugin_workload_sdk_quota_counters eager
-         WHERE eager.recipe_namespace = $1
-           AND eager.recipe_name = $2
-           AND eager.period_start = $6
-      ), 0)`
-    : '0'
-  // Single conditional upsert. INSERT path (fresh run period → count becomes 1)
-  // is gated by the `SELECT ... WHERE`; UPDATE path (existing row) is gated by
-  // the `ON CONFLICT ... WHERE` on the post-increment count. Both fold in the
-  // live eager usage so the decision is atomic.
-  //
-  // The $6 (eager period) bind is appended ONLY when foldEagerUsage is set —
-  // otherwise eagerUsageExpr is the literal '0' and the SQL never references
-  // $6, so binding it would raise "bind message supplies 6 parameters, but
-  // prepared statement requires 5" and break every quota consumption.
-  const params: Array<string | number | Date> = [
-    recipeNamespace,
-    recipeName,
-    periodStart,
-    family,
-    limit,
-  ]
-  if (foldEagerUsage) {
-    params.push(PLUGIN_WORKLOAD_SDK_EAGER_QUOTA_PERIOD)
-  }
-  const result = await pool.query(
-    `INSERT INTO plugin_workload_sdk_quota_counters
-       (recipe_namespace, recipe_name, period_start, prompt_bridge_count, notification_count)
-     SELECT $1, $2, $3,
-            CASE WHEN $4 = 'promptBridge' THEN 1 ELSE 0 END,
-            CASE WHEN $4 = 'clientNotifications' THEN 1 ELSE 0 END
-      WHERE 1 + ${eagerUsageExpr} <= $5
-     ON CONFLICT (recipe_namespace, recipe_name, period_start)
-     DO UPDATE SET ${column} = plugin_workload_sdk_quota_counters.${column} + 1,
-                   last_updated = now()
-     WHERE plugin_workload_sdk_quota_counters.${column} + 1 + ${eagerUsageExpr} <= $5
-     RETURNING ${column}`,
-    params
-  )
-  return (result.rowCount ?? 0) > 0
 }
 
 /**

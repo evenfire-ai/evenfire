@@ -222,7 +222,7 @@ Workloads with a `transport` field are automatically registered as MCP servers. 
    - Non-MCP workloads (StatefulSets, CronJobs, Jobs, PVCs, Secrets, ConfigMaps) → created directly with `ownerRef → WorkflowRecipe`
    - MCP workloads (those with `transport` field) → creates McpServer CRDs with `ownerRef → WorkflowRecipe`. The `managed` flag is **transport-dependent**: `managed: true` only for `transport.type: stdio`; `streamableHttp` and `sse` workloads get `managed: false` and the WRC creates their Deployment + Service itself.
 2. **MCP Server Sync** (within HCC) watches McpServer CRDs and creates Deployment + Service for each `managed: true` McpServer — i.e. for stdio recipe workloads (where it also injects the stdio-bridge sidecar) and for standalone managed servers. `managed: false` McpServer CRDs are registration/discovery records only; their runtime is owned by whoever created it (the WRC, for HTTP transport workloads).
-3. **Discovery**: mcp-host discovers ALL MCP servers (standalone, recipe-based, and infrastructure) through HCC's Discovery API
+3. **Discovery**: mcp-host discovers only the MCP servers granted to its authenticated Host through HCC's Host-scoped v2 Discovery API; the caller does not select a Context. The global v1 inventory is a metadata-only transitional system surface under separate PR2 review.
 
 See [Architecture Reference §13](../architecture/platform-topology.md#13-deployment-responsibility-matrix) for the complete deployment responsibility matrix.
 
@@ -325,16 +325,16 @@ flowchart TB
 | Red (security)    | Security resources                            | NetworkPolicies                                                        |
 | Gray (storage)    | Supporting resources                          | PVCs, Secrets, ConfigMaps                                              |
 
-| Node                   | Detail                                                                                             |
-| ---------------------- | -------------------------------------------------------------------------------------------------- |
-| **WRC**                | WorkflowRecipe Reconciler — its own `workflow-recipes` Deployment in `control-plane`               |
-| **MCP Server Sync**    | McpServer Reconciler — watches McpServer CRDs, creates Deployments + Services                      |
-| **MCPAccessCtrl Sync** | Context Reconciler — manages access NetworkPolicies                                                |
-| **MCP Host Sync**      | Host CRD lifecycle management                                                                      |
-| **Discovery API**      | REST endpoint: `GET /api/v1/mcpservers/context/{ref}`                                              |
-| **MCP Server Pool**    | All MCP servers: recipe-created, standalone, and infrastructure                                    |
-| **McpServer CRDs**     | Created by the WRC for MCP workloads (`ownerRef → WorkflowRecipe`; `managed: true` only for stdio) |
-| **MCP Server A/B**     | Standalone or recipe-created MCP servers (MongoDB, Airtable, etc.)                                 |
+| Node                   | Detail                                                                                                                                                              |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **WRC**                | WorkflowRecipe Reconciler — its own `workflow-recipes` Deployment in `control-plane`                                                                                |
+| **MCP Server Sync**    | McpServer Reconciler — watches McpServer CRDs, creates Deployments + Services                                                                                       |
+| **MCPAccessCtrl Sync** | Context Reconciler — manages access NetworkPolicies                                                                                                                 |
+| **MCP Host Sync**      | Host CRD lifecycle management                                                                                                                                       |
+| **Discovery API**      | Host-scoped REST endpoints: `GET /api/v2/hosts/self/mcpservers` and `POST /api/v2/hosts/self/mcpservers/credential`; v1 Context/auth routes are HTTP 410 tombstones |
+| **MCP Server Pool**    | All MCP servers: recipe-created, standalone, and infrastructure                                                                                                     |
+| **McpServer CRDs**     | Created by the WRC for MCP workloads (`ownerRef → WorkflowRecipe`; `managed: true` only for stdio)                                                                  |
+| **MCP Server A/B**     | Standalone or recipe-created MCP servers (MongoDB, Airtable, etc.)                                                                                                  |
 
 > **WRC reconciliation model**: Recipes are deployed either by creating WorkflowRecipe CRDs (via control-api or `kubectl apply`) or through the WRC's MCP `deploy_recipe` tool. Either way, the WRC watches the resulting CRDs and reconciles them — it produces declarative intent (McpServer CRDs, workloads, Context patches), and the HCC's other synchronizers materialize them into runtime state.
 
@@ -1036,7 +1036,7 @@ The **default LLM configuration** for every agentic (`instruction`) step. Steps 
 | Field                 | Type   | Required | Description                                                                                                                                                                                                                             |
 | --------------------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `model`               | string | No\*     | LLM model name (e.g. `gpt-4o`, `claude-3-opus`).                                                                                                                                                                                        |
-| `provider`            | string | No\*     | Enum: `openai`, `claude`, `zai`, `bailian`, `vertex`, `bedrock`, `openrouter`, `gemini`, `deepseek`, `groq`, `together`, `fireworks`, `mistral`, `xai`, `cerebras`, `deepinfra`, `perplexity`, `moonshot`, `nebius`, `novita`, `azure`. |
+| `provider`            | string | No\*     | Enum: `openai`, `claude`, `zai`, `bailian`, `vertex`, `bedrock`, `openrouter`, `gemini`, `deepseek`, `groq`, `together`, `fireworks`, `mistral`, `xai`, `cerebras`, `deepinfra`, `perplexity`, `moonshot`, `nebius`, `novita`, `minimax`, `azure`. |
 | `secretRef.name`      | string | No       | Secret holding the API key.                                                                                                                                                                                                             |
 | `secretRef.namespace` | string | No       | Secret namespace.                                                                                                                                                                                                                       |
 | `soulRef.storageRef`  | object | No       | `SOUL.md` in object storage: `bucket`, `key`, `provider` (`s3`\|`gcs`\|`spaces`\|`minio`), `region`, `endpoint`.                                                                                                                        |
@@ -1375,13 +1375,14 @@ Declaring this block forces an always-on `mcp-host`. Runtime enforcement is addi
 | -------------------------------------------- | -------- | --------- | --------------------------------------------------------------------------- |
 | `promptBridge.allowedModels`                 | string[] | No        | Max 32.                                                                     |
 | `promptBridge.maxOutputTokens`               | integer  | No        | Min 1.                                                                      |
-| `promptBridge.maxRequestsPerRun`             | integer  | No        | Min 1.                                                                      |
+| `promptBridge.maxRequestsPerRun`             | integer  | No        | Min 1. **Deprecated:** accepted but ignored; platform per-minute rate limits apply. Removal planned. |
 | `promptBridge.maxConcurrentInvocations`      | integer  | No        | Min 1. Runtime default 5.                                                   |
-| `promptBridge.maxInvocationsPerMinute`       | integer  | No        | Min 1. Runtime default 60.                                                  |
+| `promptBridge.maxInvocationsPerMinute`       | integer  | No        | Min 1. Platform default 120 when unset (ENV `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN`, issue #348). |
 | `clientNotifications.allowedEventTypes`      | string[] | **Yes**\† | 1–64 entries.                                                               |
 | `clientNotifications.allowedTargetRefs`      | string[] | No        | Max 64.                                                                     |
 | `clientNotifications.allowedUserRefs`        | boolean  | No        | Whether `userRef` targets are permitted.                                    |
-| `clientNotifications.maxNotificationsPerRun` | integer  | No        | Min 1.                                                                      |
+| `clientNotifications.maxNotificationsPerRun` | integer  | No        | Min 1. **Deprecated:** accepted but ignored; platform per-minute rate limits apply. Removal planned. |
+| `clientNotifications.maxNotificationsPerMinute` | integer  | No        | Min 1. Platform default 150 when unset (ENV `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN`, issue #348). |
 | `allowedCallers`                             | string[] | No        | Workload ids permitted to call the SDK. **Empty = all declared workloads.** |
 | `idempotencyKeyPattern`                      | string   | No        | Regex; runtime default `^[a-zA-Z0-9_-]{1,128}$`. Must compile.              |
 

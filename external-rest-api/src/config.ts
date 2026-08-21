@@ -14,6 +14,11 @@ type Config = {
   desktopRpcProxyBaseUrl: string
   desktopAppName: string
   desktopReleaseBaseUrl: string
+  gfsUploadRequestPerMinute: number
+  gfsUploadMaxPartBytes: number
+  externalGfsEdgeAggregateRlPerMin: number
+  externalGfsEdgeAuthenticatedIpRlPerMin: number
+  externalGfsEdgeTokenIpRlPerMin: number
 }
 
 function required(name: string): string {
@@ -39,6 +44,18 @@ function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${name} must be a positive integer`)
   }
+  return value
+}
+
+function boundedIntegerFromEnv(name: string, defaultValue: number, maxValue: number): number {
+  const value = positiveIntegerFromEnv(name, defaultValue)
+  if (value > maxValue) throw new Error(`${name} must be an integer between 1 and ${maxValue}`)
+  return value
+}
+
+function boundedPositiveIntegerFromEnv(name: string, defaultValue: number, max: number): number {
+  const value = positiveIntegerFromEnv(name, defaultValue)
+  if (value > max) throw new Error(`${name} must be <= ${max}`)
   return value
 }
 
@@ -79,6 +96,47 @@ EczQ5tIpAaD4e0om3gUNsyOKYc5igojm6ooVqI9T3TUGBVJ0uSZB7ntWxKQ39WyI
 aH+oqnwDGbDcDLQ/wTuBtcn4brWTDgW1xA73HVBSImGFvvHCWBiQBiI1nvovUP0u
 WQIDAQAB
 -----END PUBLIC KEY-----`)
+
+const EXTERNAL_GFS_EDGE_AGGREGATE_ENV = 'EXTERNAL_REST_API_GFS_EDGE_AGGREGATE_RL_PER_MIN'
+const EXTERNAL_GFS_EDGE_CLIENT_IP_ENV = 'EXTERNAL_REST_API_GFS_EDGE_AUTHENTICATED_IP_RL_PER_MIN'
+const EXTERNAL_GFS_EDGE_TOKEN_IP_ENV = 'EXTERNAL_REST_API_GFS_EDGE_TOKEN_IP_RL_PER_MIN'
+const EXTERNAL_GFS_EDGE_RATE_LIMIT_MAX = 1_000_000
+
+function parseExternalGfsEdgeRateLimits() {
+  const externalGfsEdgeAggregateRlPerMin = boundedPositiveIntegerFromEnv(
+    EXTERNAL_GFS_EDGE_AGGREGATE_ENV,
+    1_800,
+    EXTERNAL_GFS_EDGE_RATE_LIMIT_MAX
+  )
+  const externalGfsEdgeAuthenticatedIpRlPerMin = boundedPositiveIntegerFromEnv(
+    EXTERNAL_GFS_EDGE_CLIENT_IP_ENV,
+    1_200,
+    EXTERNAL_GFS_EDGE_RATE_LIMIT_MAX
+  )
+  const externalGfsEdgeTokenIpRlPerMin = boundedPositiveIntegerFromEnv(
+    EXTERNAL_GFS_EDGE_TOKEN_IP_ENV,
+    600,
+    EXTERNAL_GFS_EDGE_RATE_LIMIT_MAX
+  )
+
+  if (
+    externalGfsEdgeTokenIpRlPerMin > externalGfsEdgeAuthenticatedIpRlPerMin ||
+    externalGfsEdgeAuthenticatedIpRlPerMin >= externalGfsEdgeAggregateRlPerMin
+  ) {
+    throw new Error(
+      `External REST GFS edge rate limits must satisfy ${EXTERNAL_GFS_EDGE_TOKEN_IP_ENV} <= ` +
+        `${EXTERNAL_GFS_EDGE_CLIENT_IP_ENV} < ${EXTERNAL_GFS_EDGE_AGGREGATE_ENV}`
+    )
+  }
+
+  return {
+    externalGfsEdgeAggregateRlPerMin,
+    externalGfsEdgeAuthenticatedIpRlPerMin,
+    externalGfsEdgeTokenIpRlPerMin,
+  }
+}
+
+const externalGfsEdgeRateLimits = parseExternalGfsEdgeRateLimits()
 
 export const config: Config = {
   port: Number(process.env.EXTERNAL_REST_API_PORT || 8091),
@@ -126,6 +184,21 @@ export const config: Config = {
     process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL ||
     'https://github.com/evenfire-ai/evenfire/releases'
   ).replace(/\/+$/, ''),
+  // Coarse per-instance edge guard. The replica-safe principal/IP request and
+  // weighted-byte budgets live in control-api's PostgreSQL admission layer.
+  gfsUploadRequestPerMinute: positiveIntegerFromEnv(
+    'EXTERNAL_REST_API_GFS_UPLOAD_REQUESTS_PER_MINUTE',
+    120
+  ),
+  gfsUploadMaxPartBytes: boundedIntegerFromEnv(
+    'EXTERNAL_REST_API_GFS_UPLOAD_MAX_PART_BYTES',
+    16 * 1024 * 1024,
+    16 * 1024 * 1024
+  ),
+  // Coherent GFS-only tiers: token IP <= client IP < process aggregate. The
+  // Control API's distributed 10/min token and 30/min session/actor budgets
+  // remain authoritative.
+  ...externalGfsEdgeRateLimits,
 }
 
 if (process.env.NODE_ENV === 'production' && config.corsOrigin === '*') {

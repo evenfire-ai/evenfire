@@ -343,11 +343,11 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(funnelConf).toContain('client_max_body_size 25165824;')
   })
 
-  it('keeps the whole GFS upload cap chain homologous (client × 4/3 ≤ gfsc write cap)', () => {
-    // The 16 MB upload feature rests on an invariant spread across 5 files and 2
-    // repos, but only the funnel literal was machine-checked. This asserts the rest
-    // of the chain so deleting the HCC env or drifting a client cap fails loud in CI
-    // instead of silently 413-ing a 16 MB file the client said would fit.
+  it('keeps the GFS v2 part cap chain below the gateway request cap', () => {
+    // Upload v2 is indexed binary streaming: the 200 MiB product boundary is
+    // aggregate session metadata, while every request remains <=16 MiB. The
+    // old base64 ×4/3 invariant belongs only to the legacy JSON path and must not
+    // constrain the v2 product limit.
     const GFSC_WRITE_CAP = 25165824 // 24 MiB — the funnel + gfsc authoritative cap
 
     // 1. gfsc's write cap is actually plumbed to the pod. Without this env gfsc
@@ -355,29 +355,35 @@ describe('network/gateway intent (manifest-level)', () => {
     //    hard-413s while the client-side cap says it should have worked.
     const hccDeployment = read(`${BASE}/control-plane/host-context-controller.yaml`)
     const gfscCapMatch = hccDeployment.match(
-      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*"?(\d+)"?/
+      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*(["']?)(\d+)\1/
     )
     expect(
       gfscCapMatch,
       'GFS_MAX_WRITE_BODY_BYTES env must be set on the HCC deployment'
     ).not.toBeNull()
-    expect(Number(gfscCapMatch![1])).toBe(GFSC_WRITE_CAP)
+    expect(Number(gfscCapMatch![2])).toBe(GFSC_WRITE_CAP)
 
-    // 2. Both client caps are equal (web and desktop advertise the same limit).
-    const parseClientCap = (relPath: string): number => {
+    // 2. Both clients advertise the same hard binary part cap and product cap.
+    const parseClientCaps = (relPath: string): { product: number; part: number } => {
       const src = read(relPath)
-      const m = src.match(/GFS_FILE_UPLOAD_MAX_BYTES\s*=\s*([0-9*\s]+)/)
-      expect(m, `GFS_FILE_UPLOAD_MAX_BYTES not found in ${relPath}`).not.toBeNull()
+      const productMatch = src.match(/GFS_FILE_UPLOAD_MAX_BYTES\s*=\s*([0-9*\s]+)/)
+      const partMatch = src.match(/GFS_FILE_UPLOAD_MAX_PART_BYTES\s*=\s*([0-9*\s]+)/)
+      expect(productMatch, `GFS_FILE_UPLOAD_MAX_BYTES not found in ${relPath}`).not.toBeNull()
+      expect(partMatch, `GFS_FILE_UPLOAD_MAX_PART_BYTES not found in ${relPath}`).not.toBeNull()
       // Only digits/`*`/spaces are matched, so evaluating the arithmetic is safe.
-      return Number(m![1].split('*').reduce((acc, n) => acc * Number(n.trim()), 1))
+      const evaluate = (value: string): number =>
+        Number(value.split('*').reduce((acc, n) => acc * Number(n.trim()), 1))
+      return { product: evaluate(productMatch![1]), part: evaluate(partMatch![1]) }
     }
-    const webCap = parseClientCap('../../control-ui/app/constants/gfsFileUpload.ts')
-    const desktopCap = parseClientCap('../../desktop-app/ui/src/constants/gfsFileUpload.ts')
-    expect(webCap).toBe(desktopCap)
+    const webCaps = parseClientCaps('../../control-ui/app/constants/gfsFileUpload.ts')
+    const desktopCaps = parseClientCaps('../../desktop-app/ui/src/constants/gfsFileUpload.ts')
+    expect(webCaps).toEqual(desktopCaps)
+    expect(webCaps.product).toBe(209715200)
+    expect(webCaps.part).toBe(16777216)
 
-    // 3. The base64-inflated client cap (× 4/3) fits under the gfsc write cap, with
-    //    headroom for the JSON envelope.
-    expect(Math.ceil((webCap * 4) / 3)).toBeLessThan(GFSC_WRITE_CAP)
+    // 3. A v2 binary request fits below the internal 24 MiB cap with headroom;
+    // the aggregate 200 MiB value never becomes a single request body.
+    expect(webCaps.part).toBeLessThan(GFSC_WRITE_CAP)
   })
 
   it('keeps control-api memory at >=768Mi in base AND the minikube overlay (RC3 OOM guard)', () => {

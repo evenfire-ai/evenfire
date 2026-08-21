@@ -4,8 +4,25 @@ import {
   PROVIDER_CREDENTIAL_SLOTS,
   isLlmProviderId,
 } from '@clerum/llm-providers'
-import { isModelAllowed as isModelAllowedDefault } from '../../services/llmAllowedModels.js'
+import { rootLogger } from '../../observability/logger.js'
+import {
+  getModelAllowlistState as getModelAllowlistStateDefault,
+  isModelAllowed as isModelAllowedDefault,
+} from '../../services/llmAllowedModels.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
+import { enumerateHostModelReferences } from './hostModelReferences.js'
+import {
+  type HostSpecIncoherenceToleratedEvent,
+  type IncoherenceToleranceGate,
+} from './hostWriteGateAudit.js'
+import {
+  type CoverageSet,
+  isNonWorseningToleration,
+  offeredKey,
+} from './modelAllowlistTolerance.js'
+import { STALE_MODEL_ASSIGNED, type StaleModelWarning } from './staleModelWarning.js'
+
+const logger = rootLogger.child({ module: 'admin-host-spec-validation' })
 
 // A Kubernetes Secret/ConfigMap data key: `[-._a-zA-Z0-9]`, max 253 chars.
 // A fallback `credentialSlot` names a key inside the chatllm-api-keys Secret, so
@@ -44,6 +61,46 @@ const HostApprovalSchema = z
 
 export interface HostSpecValidationDeps {
   isModelAllowed: (provider: string, model: string) => Promise<boolean>
+  /**
+   * Full `{ enabled, stale }` allowlist state for a pair (Fase 6). OPTIONAL and
+   * defaulted so existing callers that inject only `isModelAllowed` keep working;
+   * it is consulted ONLY when `context.warnings` is supplied (the stale-warning
+   * sink), so a caller not requesting warnings never triggers this lookup.
+   */
+  getModelAllowlistState?: (
+    provider: string,
+    model: string
+  ) => Promise<{ enabled: boolean; stale: boolean } | null>
+}
+
+/**
+ * Per-write context for the no-worsening tolerance (Pieza D). ABSENT on create
+ * (there is no stored CR, so tolerance can never apply — a fresh spec may not
+ * introduce a disabled model). Supplied on update by the admin facade, which
+ * reads the stored Host CR before the write.
+ */
+export interface HostSpecValidationContext {
+  /** The stored Host CR spec read before this write; absent on create. */
+  stored?: Record<string, unknown>
+  /** Host identity for the audit event payload. */
+  hostRef?: { namespace: string; name: string }
+  /**
+   * OUTPUT sink. When the write is ACCEPTED, the validator appends here the
+   * audit events for each tolerated gate. It does NOT emit them: the caller
+   * emits only AFTER the write persists (mini-spec 01), so a write that a later
+   * step (secretRef check, K8s conflict) rejects leaves no audit record.
+   */
+  tolerations?: HostSpecIncoherenceToleratedEvent[]
+  /**
+   * OUTPUT sink for Fase 6 soft-quarantine warnings. When present, the validator
+   * appends a warning for every NEW assignment of an `enabled` but `stale` model
+   * (a live reference in `stored` is never revalidated). Same emit-after-persist
+   * discipline as `tolerations`: the validator only fills the sink on ACCEPT; the
+   * caller returns it in the success body only after the write persists — a write
+   * rejected by a later gate carries no warning. Independent of `stored`: warnings
+   * apply on both create (all assignments new) and update.
+   */
+  warnings?: StaleModelWarning[]
 }
 
 // spec.lifecycle follows the facade's contract for optional spec objects,
@@ -94,8 +151,23 @@ const HostLifecycleSchema = z
  */
 export async function validateHostSpec(
   spec: Record<string, unknown>,
-  deps: HostSpecValidationDeps = { isModelAllowed: isModelAllowedDefault }
+  deps: HostSpecValidationDeps = {
+    isModelAllowed: isModelAllowedDefault,
+    getModelAllowlistState: getModelAllowlistStateDefault,
+  },
+  context: HostSpecValidationContext = {}
 ): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
+  // Contract guard (mini-spec 01): passing `stored` enables tolerance, so the
+  // caller MUST also pass the `tolerations` sink — otherwise a tolerated pair
+  // would be accepted while its audit event is silently dropped ("never silent"
+  // violated). Couple them: a caller that supplies `stored` without a sink is a
+  // programming error, not a silent degrade.
+  if (context.stored !== undefined && context.tolerations === undefined) {
+    throw new Error(
+      'validateHostSpec: context.tolerations sink is required when context.stored is provided (a tolerated pair must never be emitted silently)'
+    )
+  }
+
   // Structural (sync, zod) checks first: accumulate approval + lifecycle shape
   // errors so a payload bad in both surfaces both — dev's stateless contract
   // pinned by test/routes.resources.test.ts.
@@ -123,6 +195,21 @@ export async function validateHostSpec(
     }
   }
   if (structuralErrors.length > 0) return { errors: structuralErrors }
+
+  // No-worsening tolerance context (Pieza D), computed once and shared by the 3
+  // global-allowlist gates below. On create `context.stored` is absent, so
+  // `storedPairs` is empty and no gate can tolerate — a fresh spec may never
+  // introduce a disabled model.
+  const tol: HostToleranceBundle = {
+    context,
+    deps,
+    storedRoles: storedRoleSets(context.stored),
+    incomingCov: hostCoverage(spec),
+    storedCov: hostCoverage(context.stored),
+    pending: [],
+    warnings: [],
+    warnedKeys: new Set(),
+  }
 
   // R3 model allowlist. Enforcement is keyed on the PRESENCE of `spec.model.name`
   // (not just a truthy string) so a non-string/garbage name cannot slip past the
@@ -153,7 +240,7 @@ export async function validateHostSpec(
       }
     }
     const allowed = await deps.isModelAllowed(provider, name)
-    if (!allowed) {
+    if (!allowed && !toleratePair(provider, name, 'primary', tol)) {
       return {
         errors: [
           {
@@ -163,6 +250,9 @@ export async function validateHostSpec(
         ],
       }
     }
+    // Fase 6: an ENABLED pair that passed the gate may still be `stale`. Warn (no
+    // block) if this is a NEW assignment.
+    if (allowed) await maybeWarnStale(provider, name, 'spec.model.name', tol)
   }
 
   // R5 provider-fallback policy. Opt-in and additive: a spec with no `llmPolicy`
@@ -171,28 +261,199 @@ export async function validateHostSpec(
   // (same fail-closed gate as spec.model.name), so a broken fallback is caught
   // on write instead of surfacing only during the incident it was meant to
   // absorb (spec V16). `credentialSlot`, when present, is format-checked only.
-  const policyErrors = await validateLlmPolicy(spec.llmPolicy, deps)
+  const policyErrors = await validateLlmPolicy(spec.llmPolicy, deps, tol)
   if (policyErrors) return policyErrors
 
   // Topic 3a per-host allowlist. Runs AFTER the global-allowlist gates above, so
   // by the time coherence is checked the primary + fallbacks are already known
   // to be valid GLOBAL pairs; this narrows them to the host's offered subset.
-  const allowedModelsErrors = await validateAllowedModels(spec, deps)
+  const allowedModelsErrors = await validateAllowedModels(spec, deps, tol)
   if (allowedModelsErrors) return allowedModelsErrors
+
+  // The write PASSED validation: hand the queued tolerations to the caller via
+  // the context sink. The caller emits them only AFTER the write persists — never
+  // here, so a later rejection (secretRef check, K8s conflict) leaves no audit
+  // record (mini-spec 01, persist-ordering fix).
+  if (context.tolerations) context.tolerations.push(...tol.pending)
+
+  // Fase 6: hand the queued soft-quarantine warnings to the caller via the sink,
+  // on ACCEPT only — same persist-ordering as tolerations, so a write a later gate
+  // rejects (secretRef check, K8s conflict) surfaces no warning.
+  if (context.warnings) context.warnings.push(...tol.warnings)
 
   return null
 }
 
-// Separator for the offered-pair set key. A NUL byte can appear in neither a
-// provider id nor a model id (both are validated at the global-allowlist DB
-// layer against space/NUL-free patterns), so distinct `(provider, model)` pairs
-// can never collide onto the same key — even though a model id may itself carry
-// spaces (Azure deployment names).
-const OFFERED_KEY_SEP = '\u0000'
+/**
+ * The stored `(provider, model)` pairs a Host spec references, ranked by ROLE
+ * ACTIVENESS (mini-spec 01 v2 — role-scoped tolerance):
+ *
+ *   - `primary` — the ACTIVE slot (`spec.model`), the default mcp-host routes.
+ *   - `any`     — every referenced pair, across primary + fallbacks + subset.
+ *
+ * Tolerance at the ACTIVE `primary` gate is strict (`P ∈ primary`), so a disabled
+ * pair that was only a fallback/subset entry cannot be PROMOTED to the active
+ * default. The non-active gates (fallback, subset) accept `P ∈ any`, so DEMOTING
+ * a disabled pair from primary to a less-active role — pure non-worsening — is
+ * tolerated. This mirrors the grant seam (`storedDefaultTarget` strict for the
+ * default slot, `storedAnyTarget` for the rest), keeping Host and grants
+ * symmetric (D4). Both sets are empty when there is no stored spec (create), so
+ * tolerance never applies to a fresh Host.
+ */
+interface StoredRoleSets {
+  /** The active slot: `spec.model`. */
+  primary: ReadonlySet<string>
+  /** Union of every referenced pair (primary ∪ fallbacks ∪ allowedModels). */
+  any: ReadonlySet<string>
+}
 
-/** Stable key for an offered `(provider, model)` pair. */
-function offeredKey(provider: string, model: string): string {
-  return `${provider}${OFFERED_KEY_SEP}${model}`
+function storedRoleSets(stored: Record<string, unknown> | undefined): StoredRoleSets {
+  const primary = new Set<string>()
+  const any = new Set<string>()
+  // Location enumeration is shared verbatim with the live impact gate
+  // (`enumerateHostModelReferences`, regla D4). This caller's own concern —
+  // layered on top — is bucketing every referenced key into `any` and only the
+  // `primary`-role keys into `primary`, so the active default slot stays strict
+  // while non-active roles (fallback/subset) tolerate demotion.
+  for (const ref of enumerateHostModelReferences(stored)) {
+    any.add(ref.key)
+    if (ref.role === 'primary') primary.add(ref.key)
+  }
+  return { primary, any }
+}
+
+/**
+ * Coverage a Host spec offers, for condition (b). `spec.allowedModels` absent,
+ * non-array, or EMPTY means "offers the full global allowlist" (Topic 3a
+ * back-compat), represented by the `'UNIVERSAL'` sentinel; a non-empty array is
+ * the finite set of offered `(provider, model)` keys.
+ */
+function hostCoverage(spec: Record<string, unknown> | undefined): CoverageSet {
+  if (!isPlainObject(spec)) return 'UNIVERSAL'
+  const allowedModels = spec.allowedModels
+  if (!Array.isArray(allowedModels) || allowedModels.length === 0) return 'UNIVERSAL'
+  const keys = new Set<string>()
+  for (const entry of allowedModels) {
+    if (!isPlainObject(entry)) continue
+    const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
+    const model = typeof entry.model === 'string' ? entry.model.trim() : ''
+    if (provider && model) keys.add(offeredKey(provider, model))
+  }
+  return keys
+}
+
+/**
+ * Shared no-worsening decision for a Host write gate. Returns `true` (and emits
+ * the audit event) when the disallowed `(provider, model)` pair may be tolerated
+ * because the write does not worsen a pre-existing incoherence.
+ */
+
+/** The precomputed no-worsening tolerance inputs, shared by the 3 Host gates. */
+interface HostToleranceBundle {
+  context: HostSpecValidationContext
+  deps: HostSpecValidationDeps
+  storedRoles: StoredRoleSets
+  incomingCov: CoverageSet
+  storedCov: CoverageSet
+  /**
+   * Audit events for tolerated gates, ACCUMULATED here and copied into
+   * `context.tolerations` only once `validateHostSpec` confirms the write is
+   * ACCEPTED (returns null). Never emitted by the validator — the caller emits
+   * after the write persists. A write that a later gate hard-rejects (422)
+   * leaves no audit record. One event per tolerated gate decision.
+   */
+  pending: HostSpecIncoherenceToleratedEvent[]
+  /**
+   * Fase 6 soft-quarantine warnings, ACCUMULATED here and copied into
+   * `context.warnings` only on ACCEPT (same persist-ordering as `pending`).
+   */
+  warnings: StaleModelWarning[]
+  /** Pair keys already warned, so a model in two roles warns at most once. */
+  warnedKeys: Set<string>
+}
+
+/**
+ * Fase 6 soft quarantine. Queue a NON-BLOCKING warning when an `enabled` but
+ * `stale` model is assigned to something NEW. NO-OP unless `context.warnings` is
+ * provided (opt-in sink), so callers that do not request warnings pay no lookup.
+ * A pair already referenced by the STORED record is a live reference and is never
+ * revalidated (spec §3.3) → no warning. Called ONLY on the `enabled` path (after
+ * the gate accepted the pair), so a disabled/tolerated pair (Fase 2) never routes
+ * here.
+ */
+async function maybeWarnStale(
+  provider: string,
+  model: string,
+  field: string,
+  tol: HostToleranceBundle
+): Promise<void> {
+  if (!tol.context.warnings) return
+  const key = offeredKey(provider, model)
+  if (tol.storedRoles.any.has(key)) return
+  if (tol.warnedKeys.has(key)) return
+  const getState = tol.deps.getModelAllowlistState ?? getModelAllowlistStateDefault
+  // Best-effort: this is an EXTRA lookup (separate from the isModelAllowed gate
+  // query) that ONLY feeds the additive stale warning. The PR invariant is that
+  // the soft quarantine is additive and NEVER blocks a write (never 422/409/500).
+  // A blip on this query (connection reset) must not turn a valid Host
+  // create/update into an HTTP 500 — swallow it, proceed WITHOUT a warning, and
+  // let the write persist. The correctness gate (isModelAllowed) is untouched: it
+  // still propagates its failures and still hard-rejects a disallowed model.
+  let state: { enabled: boolean; stale: boolean } | null
+  try {
+    state = await getState(provider, model)
+  } catch (err) {
+    // Structured (Pino) logging JSON-escapes field values — CR/LF included — so a
+    // request-derived provider/model cannot forge or split a log record. Do NOT
+    // interpolate these into a line-oriented sink (console.*). Best-effort:
+    // swallow and proceed without a warning; behavior is unchanged.
+    logger.warn(
+      { provider, model, err: err instanceof Error ? err.message : String(err) },
+      'stale-model warning lookup failed; proceeding without a warning'
+    )
+    return
+  }
+  if (state?.enabled && state.stale) {
+    tol.warnedKeys.add(key)
+    tol.warnings.push({ code: STALE_MODEL_ASSIGNED, provider, model, field })
+  }
+}
+
+/**
+ * Decide whether a disallowed `(provider, model)` may be tolerated at `gate`
+ * because the write does not worsen a pre-existing incoherence AND the pair does
+ * not GAIN activeness (role-scoped, mini-spec 01 v2). On tolerance, QUEUES the
+ * audit event (not emitted until the whole write persists) and returns true so
+ * the gate skips its rejection.
+ */
+function toleratePair(
+  provider: string,
+  model: string,
+  gate: 'primary' | 'fallback' | 'subset',
+  tol: HostToleranceBundle
+): boolean {
+  // Role-scoped membership. The ACTIVE `primary` slot is strict: the pair must
+  // have been the stored primary (blocks promotion). Non-active gates accept any
+  // stored role (allows demotion — pure non-worsening).
+  const storedRoleSet = gate === 'primary' ? tol.storedRoles.primary : tol.storedRoles.any
+  const tolerated = isNonWorseningToleration({
+    pairKey: offeredKey(provider, model),
+    storedReferencedPairKeys: storedRoleSet,
+    incomingCoverage: tol.incomingCov,
+    storedCoverage: tol.storedCov,
+  })
+  if (!tolerated) return false
+  tol.pending.push({
+    resourceKind: 'host',
+    namespace: tol.context.hostRef?.namespace ?? '',
+    name: tol.context.hostRef?.name ?? '',
+    provider,
+    model,
+    gate,
+    offeredBefore: tol.storedCov,
+    offeredAfter: tol.incomingCov,
+  })
+  return true
 }
 
 /**
@@ -212,7 +473,8 @@ function offeredKey(provider: string, model: string): string {
  */
 async function validateAllowedModels(
   spec: Record<string, unknown>,
-  deps: HostSpecValidationDeps
+  deps: HostSpecValidationDeps,
+  tol: HostToleranceBundle
 ): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
   const allowedModels = spec.allowedModels
   if (allowedModels === undefined) return null
@@ -251,9 +513,11 @@ async function validateAllowedModels(
     }
 
     // Global-allowlist gate LAST (only async/DB check): a pair not in the global
-    // catalog can never be offered by a host.
+    // catalog can never be offered by a host — unless tolerating a pre-existing
+    // incoherence this write does not worsen (Pieza D). A tolerated pair is still
+    // added to `offered` so the coherence gate below sees the host as offering it.
     const allowed = await deps.isModelAllowed(provider, model)
-    if (!allowed) {
+    if (!allowed && !toleratePair(provider, model, 'subset', tol)) {
       return {
         errors: [
           {
@@ -263,6 +527,8 @@ async function validateAllowedModels(
         ],
       }
     }
+    // Fase 6 soft quarantine on the per-host offered subset.
+    if (allowed) await maybeWarnStale(provider, model, `${base}.model`, tol)
 
     offered.add(offeredKey(provider, model))
   }
@@ -328,7 +594,8 @@ async function validateAllowedModels(
  */
 async function validateLlmPolicy(
   llmPolicy: unknown,
-  deps: HostSpecValidationDeps
+  deps: HostSpecValidationDeps,
+  tol: HostToleranceBundle
 ): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
   if (llmPolicy === undefined) return null
   if (!isPlainObject(llmPolicy)) {
@@ -405,9 +672,10 @@ async function validateLlmPolicy(
     }
 
     // Allowlist gate LAST: it is the only async (DB) check, so cheap structural
-    // rejections above avoid a needless query.
+    // rejections above avoid a needless query. Tolerated (Pieza D) when the pair
+    // is a pre-existing incoherence this write does not worsen.
     const allowed = await deps.isModelAllowed(provider, model)
-    if (!allowed) {
+    if (!allowed && !toleratePair(provider, model, 'fallback', tol)) {
       return {
         errors: [
           {
@@ -417,6 +685,8 @@ async function validateLlmPolicy(
         ],
       }
     }
+    // Fase 6 soft quarantine on a fallback assignment.
+    if (allowed) await maybeWarnStale(provider, model, `${base}.model`, tol)
   }
 
   return null

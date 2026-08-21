@@ -3,7 +3,23 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
+
+# The minikube k8s-api-ip patch is a machine-specific, gitignored file rendered
+# at setup time. On a developer box with a live minikube it may already exist;
+# this test shadows it with a dummy render below. Save the real one (if any) and
+# restore it on EXIT so the test leaves the working tree exactly as it found it.
+MINIKUBE_API_IP_PATCH=""
+MINIKUBE_API_IP_PATCH_BACKUP=""
+MINIKUBE_API_IP_PATCH_PREEXISTING=0
+cleanup() {
+  if [[ "${MINIKUBE_API_IP_PATCH_PREEXISTING}" -eq 1 ]]; then
+    cp "${MINIKUBE_API_IP_PATCH_BACKUP}" "${MINIKUBE_API_IP_PATCH}"
+  elif [[ -n "${MINIKUBE_API_IP_PATCH:-}" && -f "${MINIKUBE_API_IP_PATCH}" ]]; then
+    rm -f "${MINIKUBE_API_IP_PATCH}"
+  fi
+  rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
 
 write_policy() {
   local path="$1"
@@ -62,7 +78,7 @@ write_policy "${TMP_DIR}/safe-specific.yaml" '    - ports:
           protocol: TCP
       to:
         - ipBlock:
-            cidr: 203.0.113.10/32'
+            cidr: 198.51.100.10/32'
 run_lint "${TMP_DIR}/safe-specific.yaml" >/dev/null
 echo "PASS: lint-networkpolicies allows explicit port plus specific destination"
 
@@ -135,8 +151,30 @@ ${PUBLIC_EXCEPT_BLOCK}"
 run_lint "${TMP_DIR}/public-with-excepts.yaml" >/dev/null
 echo "PASS: lint-networkpolicies allows public-only exception set with explicit ports"
 
-GCP_DEV_RENDERED="${TMP_DIR}/gcp-dev-rendered.yaml"
-kubectl kustomize "${ROOT}/deploy/overlays/gcp-dev" >"${GCP_DEV_RENDERED}"
+# The minikube overlay references patches/k8s-api-ip.yaml, which is rendered
+# from a gitignored template at setup time (deploy/scripts/minikube-detect-k8s-api-ip.sh)
+# and absent on a fresh checkout — so `kubectl kustomize` would abort with a
+# "no such file" evalsymlink error before ever reaching a lint verdict. Render
+# it inline here from the template with a placeholder CIDR, exactly as the
+# single-writer CI step does (.github/workflows/ci-public.yml), so this test
+# exercises the real rendered overlay instead of failing on a missing env file.
+MINIKUBE_API_IP_TEMPLATE="${ROOT}/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template"
+MINIKUBE_API_IP_PATCH="${ROOT}/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
+if [[ ! -f "${MINIKUBE_API_IP_TEMPLATE}" ]]; then
+  echo "FAIL: missing ${MINIKUBE_API_IP_TEMPLATE}; cannot render the minikube k8s-api-ip patch" >&2
+  exit 1
+fi
+if [[ -f "${MINIKUBE_API_IP_PATCH}" ]]; then
+  # A developer's real rendered patch is present — preserve it so the dummy
+  # render below doesn't clobber it; the EXIT trap restores it verbatim.
+  MINIKUBE_API_IP_PATCH_BACKUP="${TMP_DIR}/k8s-api-ip.yaml.orig"
+  cp "${MINIKUBE_API_IP_PATCH}" "${MINIKUBE_API_IP_PATCH_BACKUP}"
+  MINIKUBE_API_IP_PATCH_PREEXISTING=1
+fi
+sed 's#__K8S_API_IP__#10.96.0.1#g' "${MINIKUBE_API_IP_TEMPLATE}" >"${MINIKUBE_API_IP_PATCH}"
+
+MINIKUBE_RENDERED="${TMP_DIR}/minikube-rendered.yaml"
+kubectl kustomize "${ROOT}/deploy/overlays/minikube" >"${MINIKUBE_RENDERED}"
 RUBYOPT=--disable=gems ruby -ryaml -e '
   forbidden = %w[allow-dns-egress-sandbox-ui deny-all-sandbox-ui]
   required = %w[sandbox-ui-static-deny-all sandbox-ui-static-dns-egress]
@@ -151,7 +189,6 @@ RUBYOPT=--disable=gems ruby -ryaml -e '
     found << name if forbidden.include?(name)
     if name == "sandbox-ui-static-dns-egress"
       saw_dns_peer = false
-      saw_dns_ipblock = false
       Array(doc.dig("spec", "egress")).each_with_index do |rule, rule_idx|
         ports = Array(rule["ports"]).map { |port| [port.fetch("protocol", "TCP"), port["port"]] }.sort
         expected_ports = [["TCP", 53], ["UDP", 53]]
@@ -164,27 +201,20 @@ RUBYOPT=--disable=gems ruby -ryaml -e '
         peers.each_with_index do |peer, peer_idx|
           ns_name = peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name")
           dns_selector = peer.dig("podSelector", "matchLabels", "k8s-app")
-          dns_ipblock = peer.dig("ipBlock", "cidr")
 
           if ns_name == "kube-system" && dns_selector == "kube-dns"
             saw_dns_peer = true
             next
           end
 
-          if dns_ipblock == "203.0.113.10/32"
-            saw_dns_ipblock = true
-            next
-          end
-
-          abort("sandbox-ui static DNS egress peer #{rule_idx}/#{peer_idx} must stay scoped to kube-system kube-dns pods or the example-dev kube-dns ClusterIP")
+          abort("sandbox-ui static DNS egress peer #{rule_idx}/#{peer_idx} must stay scoped to kube-system kube-dns pods")
         end
       end
       abort("sandbox-ui static DNS egress must include a kube-system kube-dns peer") unless saw_dns_peer
-      abort("sandbox-ui static DNS egress must include the example-dev kube-dns ClusterIP") unless saw_dns_ipblock
     end
   end
   abort("sandbox-ui static slice must not render HCC-owned policies: #{found.join(", ")}") unless found.empty?
   missing = required - names
   abort("sandbox-ui static slice must render renamed baseline policies: #{missing.join(", ")}") unless missing.empty?
-' "${GCP_DEV_RENDERED}"
-echo "PASS: gcp-dev sandbox-ui static policies do not take HCC-owned deny-all/DNS ownership and include kube-dns ClusterIP"
+' "${MINIKUBE_RENDERED}"
+echo "PASS: minikube sandbox-ui static policies do not take HCC-owned deny-all/DNS ownership and retain kube-dns-only DNS egress"

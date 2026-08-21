@@ -56,6 +56,33 @@ describe('ContextTable', () => {
     expect(screen.queryByRole('button', { name: 'business' })).not.toBeInTheDocument()
   })
 
+  it('renders the identifier (metadata.name) when displayName is blank/whitespace (R4-M1 / R1-L4)', () => {
+    // A displayName written out-of-band as whitespace ('   ') must fall back to
+    // the identifier, not render a blank label. dev restructured the cell to a
+    // non-link span (cu-expandable-row__name), so assert the observable rendered
+    // name text (T4), not a button role and not the intermediate spec value.
+    render(
+      <ContextTable
+        items={[
+          buildContextResource({
+            metadata: { name: 'business' },
+            spec: { displayName: '   ', description: '', mcpServers: [] },
+          }),
+        ]}
+        onView={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        deletingKey={null}
+        onRefresh={vi.fn()}
+        onCreate={vi.fn()}
+        refreshing={false}
+      />
+    )
+
+    // The visible name span renders the identifier, not a blank/whitespace label.
+    expect(screen.getByText('business')).toHaveClass('cu-expandable-row__name')
+  })
+
   it('does not open a context from row action buttons', () => {
     const onView = vi.fn()
     const onEdit = vi.fn()

@@ -1,6 +1,7 @@
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
 import { createHash, randomUUID } from 'crypto'
+import { isDeepStrictEqual } from 'node:util'
 import * as path from 'path'
 import type { AdministrativeOutcomeReporter } from './administrativeOutcomeReporter'
 import { config } from './config'
@@ -43,7 +44,7 @@ import {
   resolveStatelessImagePullPolicy,
 } from './statelessDeployment'
 import { EffectiveHostLifecycle, SuspendFromHeartbeatOutcome } from './statelessLifecycle.types'
-import { StatelessLifecycleExecutor } from './statelessLifecycleExecutor'
+import { ReflectHostOutcomeFn, StatelessLifecycleExecutor } from './statelessLifecycleExecutor'
 import {
   CommunicationChannelCRD,
   HostCRD,
@@ -77,6 +78,78 @@ export type HostReconcileSource = 'urgent' | 'retry' | 'fleet'
 
 /** Immutable Host watch authority snapshot captured at a full-pass boundary. */
 export type HostWatchAuthoritySnapshot = { known: boolean; generation: number }
+
+/**
+ * Immutable lease for every inventory that contributes to a Host mutation.
+ * Host resources come from the Host watch; mounted SharedFileSystems come from
+ * the Context watch. Both are CONTENT revisions (they move only on a real
+ * desired-state change), not channel generations — a watch reconnect that
+ * re-LISTs the identical inventory must not retire an in-flight Host lease, or
+ * sustained watch-churn starves every queued reconcile. Keeping both revisions
+ * still prevents a false-stable Host-only lease when Context desired state
+ * changes during queued work.
+ */
+export type HostMutationAuthoritySnapshot = {
+  known: boolean
+  hostRevision: number
+  contextRevision: number
+}
+
+class HostInventoryAuthorityUnavailableError extends Error {
+  constructor(
+    action: string,
+    captured: HostMutationAuthoritySnapshot,
+    current: HostMutationAuthoritySnapshot
+  ) {
+    super(
+      `Host inventory authority changed before ${action} admission ` +
+        `(captured known=${captured.known} hostRevision=${captured.hostRevision} ` +
+        `contextRevision=${captured.contextRevision}, current known=${current.known} ` +
+        `hostRevision=${current.hostRevision} contextRevision=${current.contextRevision})`
+    )
+    this.name = 'HostInventoryAuthorityUnavailableError'
+  }
+}
+
+class HostMutationIdentityChangedError extends Error {
+  constructor(action: string, hostName: string) {
+    super(`Host identity changed before ${action} admission for "${hostName}"`)
+    this.name = 'HostMutationIdentityChangedError'
+  }
+}
+
+class HostMutationSpecRevisionChangedError extends Error {
+  constructor(action: string, hostName: string) {
+    super(`Host spec generation changed before ${action} admission for "${hostName}"`)
+    this.name = 'HostMutationSpecRevisionChangedError'
+  }
+}
+
+class HostMutationDependencyChangedError extends Error {
+  constructor(action: string, hostName: string) {
+    super(`Host mutation dependency changed before ${action} admission for "${hostName}"`)
+    this.name = 'HostMutationDependencyChangedError'
+  }
+}
+
+/**
+ * The four benign mid-pass supersession signals. revalidateHostMutationBoundary()
+ * throws these when the watch observes a newer spec/uid/authority-generation while
+ * a reconcile is in flight; a fresh reconcile runs afterwards, so the retired pass
+ * is a WITHDRAWAL, not a hard failure. Matched by `error.name` (string), NOT
+ * `instanceof`: the classes are unexported and statelessLifecycleExecutor.ts
+ * synthesizes name-equivalent plain Errors for the same races.
+ */
+const BENIGN_SUPERSESSION_ERROR_NAMES: ReadonlySet<string> = new Set([
+  'HostInventoryAuthorityUnavailableError',
+  'HostMutationIdentityChangedError',
+  'HostMutationSpecRevisionChangedError',
+  'HostMutationDependencyChangedError',
+])
+
+function isBenignSupersessionError(error: unknown): boolean {
+  return error instanceof Error && BENIGN_SUPERSESSION_ERROR_NAMES.has(error.name)
+}
 
 /**
  * The exact §13.2 destructive-cleanup predicate. Deletion of an orphan Host's
@@ -194,6 +267,39 @@ export type ResolveContextMountsFn = (host: HostCRD) => Promise<ResolvedSfsMount
 const CONTEXT_LABEL = 'clerum.io/context'
 const CONTEXT_MOUNT_PATH_PATTERN = /^\/[a-zA-Z0-9_.][a-zA-Z0-9_.\/-]*$/
 const RUNTIME_TOKEN_REVISION_ANNOTATION = 'clerum.io/runtime-token-revision'
+// Rolls the mcp-host pod when Host.spec.guardrails changes. mcp-host re-resolves
+// the guardrails block (installed-hook refs, built-ins, limits) live off its Host
+// watch, but a watch that has lapsed leaves the running agent on the block it last
+// saw; the roll is the delivery path that does not depend on that watch. Stamping
+// a hash of the guardrails spec onto the pod template makes any change flip the
+// template → rolling restart → mcp-host re-reads guardrails at boot. Removal is
+// handled by preserveHostDeploymentAnnotations, since an omitted key would
+// otherwise survive the annotation merge and produce no diff.
+// Mirrors the runtime-token / credentials revision annotations.
+const GUARDRAILS_REVISION_ANNOTATION = 'clerum.io/guardrails-revision'
+
+/**
+ * Deep, key-sorted JSON for a stable content hash. Object keys are sorted at
+ * EVERY level — unlike `canonicalStringify`, which sorts only the top level —
+ * so a guardrails block that differs only in nested key order (e.g. the API
+ * returning `hooks` phases or a hook ref's fields in a different order) hashes
+ * identically and does not roll mcp-host for nothing. Array order is PRESERVED:
+ * hook precedence within a phase is semantic, so reordering it is a real change.
+ */
+function deepStableStringify(value: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(norm)
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        out[k] = norm((v as Record<string, unknown>)[k])
+      }
+      return out
+    }
+    return v
+  }
+  return JSON.stringify(norm(value))
+}
 const RUNTIME_TOKEN_SECRET_REVISION_ANNOTATION = 'clerum.io/runtime-token-secret-revision'
 const RUNTIME_TOKEN_ISSUED_AT_ANNOTATION = 'clerum.io/runtime-token-issued-at'
 const RUNTIME_TOKEN_REFRESH_EXPIRES_AT_ANNOTATION = 'clerum.io/runtime-token-refresh-expires-at'
@@ -212,11 +318,12 @@ const RUNTIME_TOKEN_SCHEMA_VERSION_ANNOTATION = 'clerum.io/runtime-token-schema-
 const RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION = 'clerum.io/runtime-token-bootstrap-state'
 const RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION = 'clerum.io/runtime-token-rollout-required'
 const RUNTIME_TOKEN_ISSUER = 'control-api'
-const RUNTIME_TOKEN_AUDIENCE = 'workflow-approvals'
-// v2 binds the GFS token to the concrete Host CRD instead of the historical
-// fleet-wide `mcp-host/standalone` sentinel. The version change makes existing
-// Secrets fail the contract check so HCC rotates them and rolls each Host.
-const RUNTIME_TOKEN_SCHEMA_VERSION = '2'
+const RUNTIME_TOKEN_AUDIENCE = 'host-context-controller,workflow-approvals'
+// v3 extends the existing first-party access/refresh token material with the
+// exact HCC audience, immutable MCP credential capability, and live Host UID.
+// Existing Secrets therefore fail the contract check and rotate onto the
+// caller-bound contract instead of remaining workflow-only.
+const RUNTIME_TOKEN_SCHEMA_VERSION = '3'
 const RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH = 'fresh'
 const RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED = 'consumed'
 // Deployments affected by the historical stringData/data hashing bug can carry
@@ -379,6 +486,12 @@ export class HostReconciler {
    */
   private resolveCurrentHost: ((name: string) => HostCRD | undefined) | null = null
   /**
+   * H2: late-bound cache reflector. Wired by McpServerWatcher next to
+   * setResolveCurrentHost; null (standalone) means lifecycle outcomes reflect
+   * only onto the caller's own object (legacy contract).
+   */
+  private reflectHostOutcome: ReflectHostOutcomeFn | null = null
+  /**
    * Snapshot the current Host watch authority + generation. Wired by
    * McpServerWatcher. Default is fail-closed (unknown) so orphan cleanup never
    * runs until the real authority getter is installed.
@@ -387,6 +500,30 @@ export class HostReconciler {
     known: false,
     generation: 0,
   })
+  /**
+   * Positive Host mutations depend on Host plus Context authority. The default
+   * preserves the standalone HostReconciler contract by deriving a Host-only
+   * lease; McpServerWatcher wires the complete composite lease.
+   */
+  private hostMutationAuthority: () => HostMutationAuthoritySnapshot = () => {
+    const host = this.hostWatchAuthority()
+    return {
+      known: host.known,
+      // Standalone contract: no separate desired-revision plumbing here, so the
+      // Host watch generation stands in as the Host-only lease identity. The
+      // McpServerWatcher wires the real composite content revisions in production.
+      hostRevision: host.generation,
+      contextRevision: 0,
+    }
+  }
+  /**
+   * Exact revisions of the cross-resource inputs selected by a Host. Watch
+   * generations fence LIST -> WATCH authority, but normal MODIFIED events stay
+   * in the same generation. The watcher supplies the selected Context,
+   * referenced SharedFileSystems plus mountability, and Host-scoped
+   * CommunicationChannels so unrelated fleet changes do not retire this lease.
+   */
+  private resolveHostMutationDependencies: ((host: HostCRD) => readonly unknown[]) | null = null
 
   constructor(kc: k8s.KubeConfig, deps?: HostReconcilerDeps) {
     this.appsApi =
@@ -420,7 +557,10 @@ export class HostReconciler {
       now: this.now,
       countCommunicationChannels: hostName => this.countCommunicationChannels(hostName),
       isCommunicationChannelCacheSynced: () => this.ccCacheSyncedFn(),
-      reconcileCore: host => this.reconcileCore(host),
+      reconcileCore: (host, revalidate) => this.reconcileCore(host, revalidate),
+      prepareHostMutationAdmission: (action, host) =>
+        this.prepareHostMutationAdmission(action, host),
+      reflectHostOutcome: (name, uid, apply) => this.reflectHostOutcome?.(name, uid, apply),
       onLifecycleStatusCommitted: (host, lifecycle) => {
         const occurredAt = this.now().toISOString()
         this.infrastructureTelemetryReporter?.enqueueHealthTransition({
@@ -487,12 +627,118 @@ export class HostReconciler {
   }
 
   /**
+   * H2: late-bound setter for the guarded cache reflector. Wired by
+   * McpServerWatcher from its `hosts` cache (uid-guarded apply). Pattern
+   * mirrors setResolveCurrentHost.
+   */
+  setReflectHostOutcome(fn: ReflectHostOutcomeFn): void {
+    this.reflectHostOutcome = fn
+  }
+
+  /**
    * Late-bound setter for the Host watch authority/generation snapshot. Wired by
    * McpServerWatcher so orphan cleanup can require known authority and a stable
    * watch generation before deleting anything.
    */
   setHostWatchAuthority(fn: () => HostWatchAuthoritySnapshot): void {
     this.hostWatchAuthority = fn
+  }
+
+  setHostMutationAuthority(fn: () => HostMutationAuthoritySnapshot): void {
+    this.hostMutationAuthority = fn
+  }
+
+  setResolveHostMutationDependencies(fn: (host: HostCRD) => readonly unknown[]): void {
+    this.resolveHostMutationDependencies = fn
+  }
+
+  /**
+   * A standalone HostReconciler receives an explicit Host object and has no
+   * watch-backed cache to fence. Once a live-cache resolver is wired (the
+   * production McpServerWatcher path), every mutation captures and revalidates
+   * Host LIST -> WATCH authority at its actual serializer admission boundary.
+   */
+  private captureHostMutationAuthority(): HostMutationAuthoritySnapshot | null {
+    return this.resolveCurrentHost === null ? null : this.hostMutationAuthority()
+  }
+
+  private requireHostMutationAuthority(
+    action: string,
+    captured: HostMutationAuthoritySnapshot | null
+  ): void {
+    if (captured === null) return
+    const current = this.hostMutationAuthority()
+    if (
+      !captured.known ||
+      !current.known ||
+      captured.hostRevision !== current.hostRevision ||
+      captured.contextRevision !== current.contextRevision
+    ) {
+      throw new HostInventoryAuthorityUnavailableError(action, captured, current)
+    }
+  }
+
+  /**
+   * Heartbeat writers own their serializer inside StatelessLifecycleExecutor.
+   * Capture authority here at dispatch, then let the returned closure re-check
+   * it and resolve the current same-UID Host when that serializer admits the
+   * work. This preserves one queue per Host without a nested-lock deadlock.
+   */
+  private prepareHostMutationAdmission(action: string, requested: HostCRD): () => HostCRD {
+    const capturedAuthority = this.captureHostMutationAuthority()
+    const capturedDependencies = this.resolveHostMutationDependencies?.(requested)
+    return this.makeHostMutationAdmission(
+      action,
+      requested,
+      capturedAuthority,
+      capturedDependencies
+    )
+  }
+
+  private makeHostMutationAdmission(
+    action: string,
+    requested: HostCRD,
+    capturedAuthority: HostMutationAuthoritySnapshot | null,
+    capturedDependencies: readonly unknown[] | undefined
+  ): () => HostCRD {
+    return () => {
+      this.requireHostMutationAuthority(action, capturedAuthority)
+      if (this.resolveCurrentHost === null) return requested
+      const current = this.resolveCurrentHost(requested.name)
+      if (
+        current === undefined ||
+        requested.uid === undefined ||
+        current.uid === undefined ||
+        requested.uid !== current.uid
+      ) {
+        throw new HostMutationIdentityChangedError(action, requested.name)
+      }
+      if (
+        requested.generation === undefined ||
+        current.generation === undefined ||
+        requested.generation !== current.generation
+      ) {
+        throw new HostMutationSpecRevisionChangedError(action, requested.name)
+      }
+      if (this.resolveHostMutationDependencies !== null) {
+        const currentDependencies = this.resolveHostMutationDependencies(current)
+        const sameDependencies =
+          capturedDependencies !== undefined &&
+          capturedDependencies.length === currentDependencies.length &&
+          capturedDependencies.every((value, index) =>
+            isDeepStrictEqual(value, currentDependencies[index])
+          )
+        if (!sameDependencies) {
+          throw new HostMutationDependencyChangedError(action, requested.name)
+        }
+      }
+      // McpServerWatcher owns the canonical LIST/WATCH cache object. Mutation
+      // bodies historically reflect status into their admitted object for
+      // same-pass decisions, so detach the working snapshot whenever a live
+      // cache resolver is wired. Standalone callers without a resolver retain
+      // the legacy caller-visible reflection contract.
+      return structuredClone(current)
+    }
   }
 
   /**
@@ -1268,6 +1514,7 @@ export class HostReconciler {
 
         const tokens = await issueMcpHostRuntimeTokens(
           host.name,
+          host.uid ?? '',
           this.resolveWorkflowControlScopesForHost(host, hasChannelIngress)
         )
         const gfs = await mintHostGfsToken({ name: host.name, namespace: host.namespace })
@@ -2092,29 +2339,52 @@ export class HostReconciler {
    * Host CRD is present).
    */
   async patchChannelReaderRevisionAnnotation(hostName: string): Promise<void> {
+    const capturedAuthority = this.captureHostMutationAuthority()
     const depName = `channel-reader-${hostName}`
     try {
-      const revision = await this.computeChannelReaderRevisionForHost(hostName)
-      const patchBody = {
-        spec: {
-          template: {
-            metadata: {
-              annotations: { 'clerum.io/credentials-revision': revision },
+      await this.lifecycle.serializeByHost(hostName, async () => {
+        const action = `channel-reader "${hostName}" revision patch`
+        this.requireHostMutationAuthority(action, capturedAuthority)
+
+        const resolveCurrentHost = this.resolveCurrentHost
+        const admittedHost = resolveCurrentHost?.(hostName)
+        if (resolveCurrentHost !== null && admittedHost === undefined) return
+        const revalidate = admittedHost
+          ? this.makeHostMutationAdmission(
+              action,
+              admittedHost,
+              capturedAuthority,
+              this.resolveHostMutationDependencies?.(admittedHost)
+            )
+          : () => this.requireHostMutationAuthority(action, capturedAuthority)
+
+        revalidate()
+        const revision = await this.computeChannelReaderRevisionForHost(hostName)
+        // The revision calculation can await multiple Secret reads. Revalidate
+        // Host LIST/WATCH authority plus UID and generation immediately before
+        // entering the Kubernetes mutation, while still holding this Host lane.
+        revalidate()
+        const patchBody = {
+          spec: {
+            template: {
+              metadata: {
+                annotations: { 'clerum.io/credentials-revision': revision },
+              },
             },
           },
-        },
-      }
-      await this.appsApi.patchNamespacedDeployment(
-        { name: depName, namespace: config.channelsNamespace, body: patchBody },
-        {
-          middleware: [
-            k8s.setHeaderMiddleware('Content-Type', 'application/strategic-merge-patch+json'),
-          ],
         }
-      )
-      console.log(
-        `[HostReconciler] Patched ${depName} credentials-revision=${revision || '(empty)'}`
-      )
+        await this.appsApi.patchNamespacedDeployment(
+          { name: depName, namespace: config.channelsNamespace, body: patchBody },
+          {
+            middleware: [
+              k8s.setHeaderMiddleware('Content-Type', 'application/strategic-merge-patch+json'),
+            ],
+          }
+        )
+        console.log(
+          `[HostReconciler] Patched ${depName} credentials-revision=${revision || '(empty)'}`
+        )
+      })
     } catch (err) {
       if (getErrorCode(err) === 404) return
       console.error(`[HostReconciler] Failed to reconcile ${depName} revision:`, err)
@@ -2354,6 +2624,18 @@ export class HostReconciler {
     const podAnnotations: Record<string, string> = {}
     if (runtimeTokenRevision) {
       podAnnotations[RUNTIME_TOKEN_REVISION_ANNOTATION] = runtimeTokenRevision
+    }
+    // Roll the mcp-host pod whenever the guardrails block changes. mcp-host does
+    // re-resolve guardrails live, but only while its Host watch is connected, so
+    // the roll is what delivers the change to an agent whose watch has lapsed.
+    // Stamp a hash of the block: present→changed flips the value, and removal
+    // omits the key — which only reaches the pod because
+    // preserveHostDeploymentAnnotations strips it from the merge instead of
+    // letting the live value survive (an omitted key alone produces no diff).
+    if (host.spec.guardrails) {
+      podAnnotations[GUARDRAILS_REVISION_ANNOTATION] = createHash('sha256')
+        .update(deepStableStringify(host.spec.guardrails))
+        .digest('hex')
     }
 
     // Security context — desktop needs runAsNonRoot: false for s6-overlay init,
@@ -2838,7 +3120,7 @@ export class HostReconciler {
           logPrefix: '[HostReconciler]',
           body: deployment,
           resolveBody: buildDesiredDeployment,
-          mergeExisting: preserveDeploymentAnnotations,
+          mergeExisting: preserveHostDeploymentAnnotations,
           isUpToDate: deploymentMatchesDesired,
           read: () =>
             this.appsApi.readNamespacedDeployment({
@@ -3491,6 +3773,7 @@ export class HostReconciler {
       { name: `mcp-host-${name}-ingress-workflow-approval-reader`, namespace },
       { name: `mcp-host-${name}-ingress-rpc-proxy`, namespace },
       { name: `mcp-host-${name}-egress-gfs`, namespace },
+      { name: `mcp-host-${name}-egress-llm-hooks`, namespace },
       { name: `channel-reader-${name}-egress`, namespace: config.channelsNamespace },
       {
         name: `workflow-approval-reader-${name}-egress-mcp-host`,
@@ -3549,16 +3832,37 @@ export class HostReconciler {
 
   async reconcile(host: HostCRD, source: HostReconcileSource = 'urgent'): Promise<void> {
     const dispatchedAt = Date.now()
+    const capturedAuthority = this.captureHostMutationAuthority()
+    const capturedDependencies = this.resolveHostMutationDependencies?.(host)
     return this.lifecycle.serializeByHost(host.name, async () => {
+      this.requireHostMutationAuthority(`Host "${host.name}" reconcile`, capturedAuthority)
+      const admittedHost = this.resolveCurrentHost ? this.resolveCurrentHost(host.name) : host
+      if (!admittedHost) return
+      const revalidate = this.makeHostMutationAdmission(
+        `Host "${host.name}" reconcile`,
+        admittedHost,
+        capturedAuthority,
+        capturedDependencies
+      )
       const admittedAt = Date.now()
       hostReconcileInFlight.inc({ lane: source })
       try {
-        await this.reconcileCore(host)
-        this.enqueueReconcileOutcome(host)
+        await this.reconcileCore(admittedHost, revalidate)
+        this.enqueueReconcileOutcome(admittedHost)
         this.observeReconcileLatency(source, 'success', dispatchedAt, admittedAt)
       } catch (error) {
-        this.enqueueControllerError(host, 'reconcile_exception', error)
-        this.enqueueReconcileOutcome(host)
+        if (isBenignSupersessionError(error)) {
+          // A newer spec/uid/authority-generation superseded this pass mid-flight;
+          // a fresh reconcile runs after. Model it as a withdrawal (superseded),
+          // NOT a hard failure — do NOT emit controller_error/reconcile_exception
+          // or an administrative 'failed' outcome. Callers already treat the
+          // rethrow as a retire (reconcileDelete → 'superseded', watch callers
+          // only console.error), so the rethrow is preserved.
+          this.observeReconcileLatency(source, 'superseded', dispatchedAt, admittedAt)
+          throw error
+        }
+        this.enqueueControllerError(admittedHost, 'reconcile_exception', error)
+        this.enqueueReconcileOutcome(admittedHost)
         this.observeReconcileLatency(source, 'error', dispatchedAt, admittedAt)
         throw error
       } finally {
@@ -3569,7 +3873,7 @@ export class HostReconciler {
 
   private observeReconcileLatency(
     source: HostReconcileSource,
-    outcome: 'success' | 'error',
+    outcome: 'success' | 'error' | 'superseded',
     dispatchedAt: number,
     admittedAt: number
   ): void {
@@ -3583,7 +3887,19 @@ export class HostReconciler {
     )
   }
 
-  private async reconcileCore(host: HostCRD): Promise<void> {
+  private async reconcileCore(host: HostCRD, revalidate?: () => HostCRD): Promise<void> {
+    // A per-Host serializer orders work, but it does not invalidate an older
+    // reconcile when the watch cache observes a newer spec while this body is
+    // awaiting Kubernetes or issuer I/O. Re-check the captured authority,
+    // identity, and spec generation at every material mutation boundary.
+    // Individual API writes remain atomic at the Kubernetes resource level;
+    // these checks prevent subsequent stale writes from spanning an observed
+    // generation change.
+    const revalidateHostMutationBoundary = (): void => {
+      revalidate?.()
+    }
+
+    revalidateHostMutationBoundary()
     // Wake fast-path (Stage 4.3) BEFORE the heavy reconcile body: reconciles
     // are serialized PER HOST (serializeByHost), so a pending wake for THIS
     // Host must not wait behind token issuance, NetworkPolicies or the
@@ -3592,6 +3908,7 @@ export class HostReconciler {
     // funnels through this same method, so a watch event dropped on disconnect
     // is recovered here.
     const forceFreshForWake = (await this.lifecycle.handleWakeFastPath(host)) === true
+    revalidateHostMutationBoundary()
 
     // Track whether this host has desktop enabled
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
@@ -3602,11 +3919,18 @@ export class HostReconciler {
     }
 
     const secretResult = await this.validateHostSecret(host)
+    revalidateHostMutationBoundary()
     if (!secretResult.ok) {
       if (
         secretResult.reason === 'SecretNotFound' ||
         secretResult.reason === 'SecretAccessDenied'
       ) {
+        // This branch deletes every ephemeral runtime resource. The Secret
+        // decision may have blocked on the API while Host watch authority or
+        // the Host UID/spec generation changed. Revalidate at the destructive
+        // commit boundary so a stale secretRef can never tear down the current
+        // runtime; the recovered/current Host reconcile will decide again.
+        revalidateHostMutationBoundary()
         await this.deleteHostRuntimeResources(host.name, host.namespace, {
           deleteWorkspacePvc: false,
         })
@@ -3627,8 +3951,11 @@ export class HostReconciler {
     // Per-Host SA + Role + RoleBinding must exist BEFORE the Deployment,
     // otherwise the kubelet can't mount the SA token and the pod will
     // crash-loop until RBAC is created.
+    revalidateHostMutationBoundary()
     await this.ensureHostServiceAccount(host)
+    revalidateHostMutationBoundary()
     await this.ensureHostRole(host)
+    revalidateHostMutationBoundary()
     await this.ensureHostRoleBinding(host)
 
     let mounts: ResolvedSfsMount[] = []
@@ -3641,10 +3968,12 @@ export class HostReconciler {
       // will inject them.
       console.error(`[HostReconciler] Failed to resolve context mounts for "${host.name}":`, err)
     }
+    revalidateHostMutationBoundary()
     // Stateless lifecycle (Stage 2): assess enable/reject and persist the
     // durable state to the Host status subresource BEFORE building the
     // Deployment, so replicas derive from the same assessment.
     let lifecycle = await this.lifecycle.assessLifecycle(host, mounts)
+    revalidateHostMutationBoundary()
     // Drained-pre-scale guard (Stage 4.3): a pending wake must abort the
     // suspension IMMEDIATELY before replicas:0 derives from this assessment
     // — see StatelessLifecycleExecutor.resolveWakeBeforeScaleDown. A null
@@ -3652,14 +3981,17 @@ export class HostReconciler {
     // pass (the periodic resync retries) rather than scaling to 0 on stale
     // data.
     const guardedLifecycle = await this.lifecycle.resolveWakeBeforeScaleDown(host, lifecycle)
+    revalidateHostMutationBoundary()
     if (guardedLifecycle === null) {
       return
     }
     lifecycle = guardedLifecycle
+    revalidateHostMutationBoundary()
     const lifecycleStatusCommitted = await this.lifecycle.writeLifecycleStatusToCluster(
       host,
       lifecycle
     )
+    revalidateHostMutationBoundary()
     if (lifecycleStatusCommitted) {
       this.enqueueHostTelemetry(host, 'lifecycle_transition', lifecycle.effective.state, {
         status: 'committed',
@@ -3670,7 +4002,9 @@ export class HostReconciler {
       })
     }
 
+    revalidateHostMutationBoundary()
     await this.ensurePvc(host)
+    revalidateHostMutationBoundary()
     await this.ensureService(host)
 
     // NetworkPolicies before Deployments. Calico/Cilium evaluate egress and
@@ -3686,23 +4020,34 @@ export class HostReconciler {
     // surface it via HostRuntimeStatus instead of swallowing it.
     const npFailures: string[] = []
     try {
+      revalidateHostMutationBoundary()
       await this.ensureMcpHostIngressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
+      // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
+      // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
+      // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
+      revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(host)
     } catch (err) {
       console.error(`[HostReconciler] Failed to ensure mcp-host NP for "${host.name}":`, err)
       npFailures.push(`mcp-host NP: ${(err as Error).message}`)
     }
     try {
+      revalidateHostMutationBoundary()
       await this.ensureRpcProxyMcpHostIngressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
       await this.ensureRpcProxyHostEgressNetworkPolicy(host)
     } catch (err) {
       console.error(`[HostReconciler] Failed to ensure rpc-proxy host NP for "${host.name}":`, err)
       npFailures.push(`rpc-proxy NP: ${(err as Error).message}`)
     }
+    revalidateHostMutationBoundary()
     await this.ensureDesktopNetworkPolicy(host)
     try {
+      revalidateHostMutationBoundary()
       await this.ensureChannelReaderEgressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderHostEgressNetworkPolicy(host)
     } catch (err) {
       console.error(`[HostReconciler] Failed to ensure channels egress NP for "${host.name}":`, err)
@@ -3717,8 +4062,10 @@ export class HostReconciler {
     )
     if (bootstrapLifecycle !== lifecycle) {
       lifecycle = bootstrapLifecycle
+      revalidateHostMutationBoundary()
       await this.lifecycle.writeLifecycleStatusToCluster(host, lifecycle)
     }
+    revalidateHostMutationBoundary()
 
     // Bootstrap captures the scope contract used for issuance. The Deployment
     // guard below compares that contract with the live channel cache after this
@@ -3727,23 +4074,28 @@ export class HostReconciler {
       forceFreshForWake,
       targetSuspended: lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
     })
+    revalidateHostMutationBoundary()
 
     // replaceWithConflictRetry may wait and re-read after a 409, so each body is
     // rebuilt from a stable lifecycle plus token-scope pair before mutation.
     const resolveDeploymentLifecycle = async (): Promise<EffectiveHostLifecycle> => {
+      revalidateHostMutationBoundary()
       const deploymentLifecycle = this.lifecycle.enforceCommunicationChannelPolicyBeforeDeployment(
         host.name,
         lifecycle
       )
       if (deploymentLifecycle !== lifecycle) {
         lifecycle = deploymentLifecycle
+        revalidateHostMutationBoundary()
         await this.lifecycle.writeLifecycleStatusToCluster(host, lifecycle)
       }
+      revalidateHostMutationBoundary()
       return lifecycle.effective
     }
 
     const ensureCurrentRuntimeTokenScope = async (): Promise<void> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
+        revalidateHostMutationBoundary()
         const currentScopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
           this.hasChannelIngress(host)
@@ -3755,6 +4107,7 @@ export class HostReconciler {
           targetSuspended:
             lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
         })
+        revalidateHostMutationBoundary()
         const postProvisionScopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
           this.hasChannelIngress(host)
@@ -3774,6 +4127,7 @@ export class HostReconciler {
 
     const resolveDeploymentState = async (): Promise<DeploymentMutationState> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
+        revalidateHostMutationBoundary()
         await resolveDeploymentLifecycle()
         await ensureCurrentRuntimeTokenScope()
         const effective = await resolveDeploymentLifecycle()
@@ -3782,6 +4136,7 @@ export class HostReconciler {
           this.hasChannelIngress(host)
         )
         if (runtimeTokenProvision.scopeHash === currentScopeHash) {
+          revalidateHostMutationBoundary()
           return {
             lifecycle: effective,
             runtimeTokenRevision: runtimeTokenProvision.revision,
@@ -3798,6 +4153,7 @@ export class HostReconciler {
       )
     }
 
+    revalidateHostMutationBoundary()
     await this.ensureDeployment(
       host,
       mounts,
@@ -3805,6 +4161,7 @@ export class HostReconciler {
       lifecycle.effective,
       resolveDeploymentState
     )
+    revalidateHostMutationBoundary()
 
     const suspended = lifecycle.effective.stateless && lifecycle.effective.state === 'suspended'
     if (suspended) {
@@ -3813,6 +4170,7 @@ export class HostReconciler {
       this.lifecycle.markHostNotSuspended(host.name)
     }
     const ready = suspended ? false : await this.checkDeploymentReady(host.name, host.namespace)
+    revalidateHostMutationBoundary()
     // If any per-Host NP failed to apply, mark the host as degraded:
     // deployed remains true (the pod is in place), but ready=false +
     // a message that names the missing security boundary. Operators see
@@ -3848,6 +4206,7 @@ export class HostReconciler {
       () => this.reconcileChannelReaderDeployment(host),
     ]) {
       try {
+        revalidateHostMutationBoundary()
         await reconcileResource()
       } catch (err) {
         channelReaderFailures.push(err)
@@ -3868,6 +4227,7 @@ export class HostReconciler {
     // Best-effort — checkChannelReaderStatus never throws.
     const ccCount = this.countCommunicationChannels(host.name)
     const channelReaderStatus = await this.checkChannelReaderStatus(host.name, ccCount)
+    revalidateHostMutationBoundary()
     if (channelReaderFailures.length > 0) {
       // Overlay the reconcile error onto the status message so both signals
       // are visible (the deploy error may explain why the Deployment is missing).
@@ -3902,18 +4262,21 @@ export class HostReconciler {
    * that path, so cache presence at admission is the correct fence. This
    * mirrors the F2/#827 in-serializer re-check in collectHostCleanupFailures.
    *
-   * Callers that omit `opts` keep the previous unconditional behavior exactly.
+   * Callers that omit `opts` drop only the extra `skipIf` term; the
+   * resolveCurrentHost supersede fence still gates the delete.
    */
   async reconcileDelete(
     name: string,
     namespace: string,
     opts?: { skipIf?: () => boolean }
   ): Promise<void> {
+    const capturedAuthority = this.captureHostMutationAuthority()
     // A DELETED event must not race an in-flight create/update for the same
     // Host: route it through the same per-Host serializer as reconcile(). The
     // global convergence tail no longer provides this ordering.
     await this.lifecycle.serializeByHost(name, async () => {
-      if (opts?.skipIf?.()) {
+      this.requireHostMutationAuthority(`Host "${name}" delete`, capturedAuthority)
+      if (this.resolveCurrentHost?.(name) !== undefined || opts?.skipIf?.()) {
         // Same vocabulary the watch path already reports for this condition
         // (reconcileHostWatchEvent), so the skip is observable, not silent.
         hostDeleteCleanupTotal.inc({ outcome: 'superseded' })
@@ -4060,6 +4423,15 @@ export class HostReconciler {
         }
         try {
           await this.lifecycle.serializeByHost(hostName, async () => {
+            // The fresh 404 and the cache omission are only destructive
+            // authority while the same LIST -> WATCH generation remains live.
+            // Revalidate inside the serializer: queued Host work can otherwise
+            // outlive that generation and delete a same-name recreation whose
+            // ADDED event has not reached the retired cache.
+            if (!authorityValid()) {
+              hostCleanupDeferredTotal.inc({ reason: 'watch_lost' })
+              return
+            }
             // F2 / #827 TOCTOU: a same-name Host recreated between the fresh read
             // above and admission into this serializer updates the current cache
             // (its ADDED event sets the cache before its reconcile runs, and that
@@ -4291,25 +4663,32 @@ function deploymentMatchesDesired(desired: k8s.V1Deployment, existing: k8s.V1Dep
 }
 
 /**
- * Preserve operational annotations without retaining the channel-reader
- * revision when HCC intentionally omits it from the desired pod template.
- * That annotation is controller-owned and must be cleared when no backing
- * CommunicationChannel Secret is resolvable.
+ * Preserve operational pod-template annotations (kubectl restart markers,
+ * operator edits) while keeping CONTROLLER-OWNED ones authoritative: a key in
+ * `controllerOwned` that the desired template omits is REMOVED from the merge
+ * rather than surviving from the live object.
+ *
+ * Without this, "the field went away" cannot be expressed at all. The merge is
+ * `{...existing, ...desired}`, so an omitted key keeps its old value, the merged
+ * object then compares equal to what is live, and `replaceWithConflictRetry`
+ * skips the write entirely — no template diff, no rolling restart, no write.
  */
-function preserveChannelReaderDeploymentAnnotations(
+export function preserveDeploymentAnnotationsExcept(
   desired: k8s.V1Deployment,
-  existing: k8s.V1Deployment
+  existing: k8s.V1Deployment,
+  controllerOwned: readonly string[]
 ): k8s.V1Deployment {
   const preserved = preserveDeploymentAnnotations(desired, existing)
   const desiredAnnotations = desired.spec?.template?.metadata?.annotations
-  if (desiredAnnotations?.['clerum.io/credentials-revision'] !== undefined) return preserved
+  const dropped = controllerOwned.filter(key => desiredAnnotations?.[key] === undefined)
+  if (dropped.length === 0) return preserved
 
   const spec = preserved.spec
   const template = spec?.template
   if (!spec || !template) return preserved
 
   const annotations = { ...(template.metadata?.annotations ?? {}) }
-  delete annotations['clerum.io/credentials-revision']
+  for (const key of dropped) delete annotations[key]
   return {
     ...preserved,
     spec: {
@@ -4323,6 +4702,34 @@ function preserveChannelReaderDeploymentAnnotations(
       },
     },
   }
+}
+
+/**
+ * Host Deployment merge. `clerum.io/guardrails-revision` is controller-owned:
+ * dropping the whole `spec.guardrails` block omits it from the desired template,
+ * and that removal MUST reach the pod. mcp-host re-resolves guardrails live, but
+ * only while its Host watch is connected — the pod roll is what delivers the
+ * change to an agent whose watch has lapsed, so a removal that silently produced
+ * no diff left the agent enforcing guardrails the operator had uninstalled.
+ */
+function preserveHostDeploymentAnnotations(
+  desired: k8s.V1Deployment,
+  existing: k8s.V1Deployment
+): k8s.V1Deployment {
+  return preserveDeploymentAnnotationsExcept(desired, existing, [GUARDRAILS_REVISION_ANNOTATION])
+}
+
+/**
+ * Preserve operational annotations without retaining the channel-reader
+ * revision when HCC intentionally omits it from the desired pod template.
+ * That annotation is controller-owned and must be cleared when no backing
+ * CommunicationChannel Secret is resolvable.
+ */
+function preserveChannelReaderDeploymentAnnotations(
+  desired: k8s.V1Deployment,
+  existing: k8s.V1Deployment
+): k8s.V1Deployment {
+  return preserveDeploymentAnnotationsExcept(desired, existing, ['clerum.io/credentials-revision'])
 }
 
 function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): unknown {

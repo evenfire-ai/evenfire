@@ -39,6 +39,8 @@ When an `McpServer` CRD is created, modified, or deleted, the host-context-contr
 - **MODIFIED** — Updates the Deployment and Service to match the CRD spec (env vars, image, ports, resources, etc.).
 - **DELETED** — Removes the Deployment and Service.
 
+Remote egress-proxy McpServers keep the author's `spec.image` as desired-state input; HCC no longer rewrites it to the platform proxy image. The former `canonicalizeRemoteEgressProxyImage` step and its `ImageCanonicalized` status condition were removed (PR #205 readiness-safety cleanup): canonicalization mutated the observed CRD cache object and bumped the resource generation, retiring the in-flight reconcile before it could create the runtime resources. The platform-owned proxy image is instead selected at Deployment build time (`buildDeployment`), leaving the CRD spec untouched.
+
 The reconciler builds Deployments with labels used for pod selection and network policy targeting:
 
 | Label                  | Value                     | Purpose                           |
@@ -97,7 +99,21 @@ Servers removed from a Context lose their policies on the next reconcile; deleti
 - **`exact-host`** (default) — a CIDR binding, or a public DNS hostname resolved to `/32` ipBlocks, on one declared port/protocol. CIDRs and resolved IPs are rejected if they overlap `PUBLIC_EGRESS_EXCEPT_CIDRS` (RFC1918, CGNAT, loopback, link-local incl. cloud metadata, documentation, benchmarking, multicast, reserved ranges). Hostnames like `localhost`, `metadata.goog`, `*.internal`, `*.svc`, `*.cluster.local` are rejected outright.
 - **`public-web`** — `0.0.0.0/0` on TCP 80/443 with `PUBLIC_EGRESS_EXCEPT_CIDRS` carved out via `except`.
 
-Results are written to the McpServer's `status.conditions` (`ExternalEgressReady`) and `status.resolvedEgressIPs`. A failed binding blocks runtime reconciliation of that server, so a workload cannot start before its egress converges. DNS answers are re-resolved periodically (`HCC_EXTERNAL_EGRESS_RESYNC_SEC`, default 300s).
+Results are written to the McpServer's `status.conditions` (`ExternalEgressReady`) and `status.resolvedEgressIPs`. A failed binding blocks runtime reconciliation of that server, so a workload cannot start before its egress converges. DNS-derived allows are never retained across a failed refresh: HCC revokes the unprovable policy before certifying global readiness, while only the affected runtime remains blocked until DNS recovers. Each lookup has a bounded deadline.
+
+HCC readiness certifies authoritative inventory and revocation safety, not
+completion of positive policy creation. A renamed or newly requested allow may
+therefore remain unavailable after HCC becomes Ready until its additive
+reconciliation succeeds. HCC never keeps an obsolete allow merely to avoid
+that availability gap: when old and new ownership cannot be proven equivalent,
+revocation wins and only the affected runtime remains fail-closed.
+
+During an in-place release, HCC is also the controller that stamps
+`CONTEXT_MAPPER_HOST_IMAGE` onto managed mcp-host workloads. The new HCC
+producer is consequently running before it replaces those consumers with the
+new mcp-host image. For compatibility, an omitted `status.authoritative` field
+retains the legacy fail-closed meaning; only an explicit `authoritative: false`
+asks a new mcp-host to preserve an unchanged live connection.
 
 ### Recipe binding policies
 
@@ -105,7 +121,8 @@ McpServers carrying a `clerum.io/recipe-bindings` annotation (set for WorkflowRe
 
 ### Reconciliation Lifecycle
 
-- **Startup** — Ensures L0/L1 defaults, reconciles all Contexts and all McpServer egress bindings, then deletes orphaned context-allow policies in the MCP server namespace, plus orphaned rpc-proxy-egress and external-egress policies, whose owning CRD no longer exists (`fullReconcile`).
+- **Startup safety** — Ensures L0/L1 defaults, revokes stale or orphaned context-allow, rpc-proxy-egress, and external-egress policies from authoritative Context/McpServer inventories, then certifies readiness safety.
+- **Startup additive convergence** — Reconciles Context allows after certification. The dedicated external-egress coordinator is the sole owner of McpServer egress creation, per-server startup gating, retry, and periodic DNS refresh; a failed binding blocks only that server's runtime.
 - **Context ADDED/MODIFIED/DELETED** — Creates, updates, or removes the L2 policy set for that context.
 - **McpServer ADDED/MODIFIED/DELETED** — Reconciles L3 external egress (before the workload Deployment is created) and recipe binding policies.
 
@@ -156,7 +173,10 @@ On startup, a full host reconciliation pass runs and deletes orphaned host runti
 
 ## REST API
 
-The host-context-controller returns curated `McpServerInfo` objects that strip deployment-specific fields and include operator-managed status.
+The Host-facing MCP contract is authenticated and Host-scoped. HCC verifies the
+runtime bearer, resolves the live Host and its live Context server-side, and
+checks the Context grant before it reads credential material. Callers do not
+supply a Context reference.
 
 ### Health Check
 
@@ -170,7 +190,7 @@ GET /health
 
 The server also exposes `GET /` (API information), `GET /ready` (readiness; 503 until the controller has started), `GET /metrics` (Prometheus), and `GET /api/v1/desktop/:hostRef` (desktop status; requires the `CONTEXT_MAPPER_DESKTOP_API_TOKEN` bearer token — the check is skipped when that variable is empty).
 
-### List All McpServers
+### Temporary system inventory (PR 2 compatibility)
 
 ```
 GET /api/v1/mcpservers
@@ -181,19 +201,13 @@ GET /api/v1/mcpservers
   "servers": [
     {
       "name": "mongodb-server",
-      "description": "MongoDB MCP Server",
       "contextRef": "context1",
       "transport": {
         "type": "sse",
         "url": "http://mongodb-server.mcp-server.svc.cluster.local:3000/sse"
       },
-      "auth": {
-        "type": "bearer",
-        "secretRef": "mcp-mongodb-credentials",
-        "secretKey": "auth-token"
-      },
       "enabled": true,
-      "status": { "deployed": true, "ready": true, "message": "Running" }
+      "status": { "deployed": true, "ready": true }
     }
   ],
   "contextRef": "*",
@@ -201,36 +215,85 @@ GET /api/v1/mcpservers
 }
 ```
 
-### List McpServers by Context
+This anonymous, metadata-only route is retained temporarily for the existing
+`mcp-proxy` poller. It is not the mcp-host discovery contract and exposes no
+auth selector or Secret metadata. Its removal or authentication belongs to the
+separate PR 2 migration.
+
+### Authenticated Host inventory
 
 ```
-GET /api/v1/mcpservers/context/:contextRef
+GET /api/v2/hosts/self/mcpservers
+Authorization: Bearer <mcp-host-runtime-token>
 ```
 
-Returns only McpServers that are listed in the specified Context CRD's `spec.mcpServers` array and are enabled. If the Context CRD does not exist, returns an empty list.
+The response contains only enabled McpServers granted by the authenticated
+Host's live Context. It omits `contextRef`, auth selectors, and Secret metadata.
+An authenticated server includes an opaque `credentialRevision` so mcp-host can
+retire a credential before admitting a changed revision.
 
-### Get Auth Token
+The verifier accepts only RS256 tokens from the configured Control API issuer
+with an exact HCC audience set (HCC-only, or the bounded HCC + workflow
+migration pair), one `hostRefs` entry, the matching `host_uid`, and the single
+`mcp:credential:read` capability. The historical workflow scope/standalone
+recipe claims identify the reused runtime-token family; they do not grant a
+Context. HCC derives that authorization from the live Host and Context objects.
+
+```json
+{
+  "servers": [
+    {
+      "name": "mongodb-server",
+      "transport": {
+        "type": "sse",
+        "url": "http://mongodb-server.mcp-server.svc.cluster.local:3000/sse"
+      },
+      "enabled": true,
+      "status": { "deployed": true, "ready": true },
+      "authRequired": true,
+      "credentialRevision": "opaque-revision"
+    }
+  ],
+  "timestamp": "2026-02-14T15:11:12.000Z"
+}
+```
+
+### Authenticated Host credential
 
 ```
-GET /api/v1/mcpservers/:name/auth
+POST /api/v2/hosts/self/mcpservers/credential
+Authorization: Bearer <mcp-host-runtime-token>
+Content-Type: application/json
+
+{ "serverName": "mongodb-server" }
 ```
 
 Response (with auth):
 
 ```json
-{ "token": "secret-token-value" }
+{ "token": "credential-value", "credentialRevision": "opaque-revision" }
 ```
 
 Response (no auth configured):
 
 ```json
-{ "token": null, "message": "No auth configured for this server" }
+{ "token": null, "credentialRevision": "opaque-revision" }
 ```
+
+HCC returns the same opaque `404 {"error":"not_found"}` for an ungranted,
+missing, disabled, or cross-Context server name. It performs the grant check
+before any Secret value read and revalidates the live authority snapshot after
+the read. Protected responses are non-cacheable.
+
+The legacy caller-selected routes
+`GET /api/v1/mcpservers/context/:contextRef` and
+`GET /api/v1/mcpservers/:name/auth` are tombstoned with a generic HTTP 410 at
+both the gateway and HCC application layers; there is no v1 fallback.
 
 ## Environment Variables
 
-HCC reads **60** environment variables (`src/config.ts`, `src/gfsConfig.ts`,
-`src/logger.ts`, `src/k8sApiCidrs.ts`). Defaults below are the literal fallbacks
+HCC reads environment variables from `src/config.ts`, `src/gfsConfig.ts`,
+`src/logger.ts`, and `src/k8sApiCidrs.ts`. Defaults below are the literal fallbacks
 in code; where the deploy manifest overrides one, that is noted.
 
 **Parsing semantics.** `getEnv(key, default)` uses `process.env[key] ?? default`,
@@ -254,29 +317,30 @@ a permissive policy — see the NetworkPolicy and GFS tables:
 
 ### Namespaces
 
-| Variable                                 | Default           | Description                                                                                                                                                         |
-| ---------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTEXT_MAPPER_NAMESPACE`               | `mcp-server`      | Where `McpServer` / `Context` CRDs live and managed server workloads are created.                                                                                   |
-| `CONTEXT_MAPPER_CONTROL_PLANE_NAMESPACE` | `control-plane`   | Where control-plane gateway services live.                                                                                                                          |
-| `CONTEXT_MAPPER_HOST_NAMESPACE`          | `mcp-host`        | Where mcp-host pods run (drives NetworkPolicy generation).                                                                                                          |
-| `CONTEXT_MAPPER_GFS_NAMESPACE`           | `gfs`             | Where the GlobalFileSystem controller (gfsc) runs.                                                                                                                  |
-| `CONTEXT_MAPPER_RPC_PROXY_NAMESPACE`     | `rpc-proxy`       | Where rpc-proxy runs (L2 egress policy generation).                                                                                                                 |
-| `CONTEXT_MAPPER_CHANNELS_NAMESPACE`      | `channels`        | Per-Host channel-reader Deployments/Services.                                                                                                                       |
-| `CONTEXT_MAPPER_SANDBOX_NAMESPACE`       | `sandbox-recipes` | Workflow-recipe namespace. Read only by the GFS factory.                                                                                                            |
-| `HCC_TARGET_NAMESPACE`                   | `mcp-host`        | Namespace HCC names when asking control-api for shared 1st-party mcp-host credentials. **Exits 1** if it resolves empty; warns if outside mcp-host/sandbox-recipes. |
+| Variable                                 | Default           | Description                                                                                                                                                                |
+| ---------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_NAMESPACE`               | `mcp-server`      | Where `McpServer` / `Context` CRDs live and managed server workloads are created.                                                                                          |
+| `CONTEXT_MAPPER_CONTROL_PLANE_NAMESPACE` | `control-plane`   | Where control-plane gateway services live.                                                                                                                                 |
+| `CONTEXT_MAPPER_HOST_NAMESPACE`          | `mcp-host`        | Where mcp-host pods run (drives NetworkPolicy generation).                                                                                                                 |
+| `CONTEXT_MAPPER_GFS_NAMESPACE`           | `gfs`             | Where the GlobalFileSystem controller (gfsc) runs.                                                                                                                         |
+| `CONTEXT_MAPPER_RPC_PROXY_NAMESPACE`     | `rpc-proxy`       | Where rpc-proxy runs (L2 egress policy generation).                                                                                                                        |
+| `CONTEXT_MAPPER_CHANNELS_NAMESPACE`      | `channels`        | Per-Host channel-reader Deployments/Services.                                                                                                                              |
+| `CONTEXT_MAPPER_SANDBOX_NAMESPACE`       | `sandbox-recipes` | Workflow-recipe namespace. Read only by the GFS factory.                                                                                                                   |
+| `HCC_TARGET_NAMESPACE`                   | `mcp-host`        | Namespace HCC names when asking control-api for caller-bound 1st-party mcp-host credentials. It must exactly equal `CONTEXT_MAPPER_HOST_NAMESPACE`; HCC exits 1 otherwise. |
 
 ### MCP server provisioning
 
-| Variable                                     | Default                             | Description                                                                                                 |
-| -------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` | `IfNotPresent`                      | Pull policy for reconciled McpServer workloads.                                                             |
-| `CONTEXT_MAPPER_EGRESS_PROXY_IMAGE`          | `clerum/nginx-egress-proxy:0.1.0`   | Per-server nginx egress proxy for **remote** MCP servers (`spec.remote`).                                   |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE`          | (registry-qualified `stdio-bridge`) | stdio-bridge sidecar image for managed stdio MCP servers. Manifest pins `clerum/stdio-bridge:0.9.5`.        |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_MEMORY` | `32Mi`                              | stdio-bridge sidecar memory request.                                                                        |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_CPU`    | `50m`                               | stdio-bridge sidecar CPU request.                                                                           |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_MEMORY`   | `128Mi`                             | stdio-bridge sidecar memory limit.                                                                          |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_CPU`      | `200m`                              | stdio-bridge sidecar CPU limit.                                                                             |
-| `HCC_EXTERNAL_EGRESS_RESYNC_SEC`             | `300`                               | Periodic external-egress DNS resync (seconds), so DNS changes converge without a watch event. `0` disables. |
+| Variable                                     | Default                             | Description                                                                                                          |
+| -------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` | `IfNotPresent`                      | Pull policy for reconciled McpServer workloads.                                                                      |
+| `CONTEXT_MAPPER_EGRESS_PROXY_IMAGE`          | `clerum/nginx-egress-proxy:0.1.0`   | Per-server nginx egress proxy for **remote** MCP servers (`spec.remote`).                                            |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE`          | (registry-qualified `stdio-bridge`) | stdio-bridge sidecar image for managed stdio MCP servers. Manifest pins `clerum/stdio-bridge:0.9.5`.                 |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_MEMORY` | `32Mi`                              | stdio-bridge sidecar memory request.                                                                                 |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_CPU`    | `50m`                               | stdio-bridge sidecar CPU request.                                                                                    |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_MEMORY`   | `128Mi`                             | stdio-bridge sidecar memory limit.                                                                                   |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_CPU`      | `200m`                              | stdio-bridge sidecar CPU limit.                                                                                      |
+| `HCC_EXTERNAL_EGRESS_RESYNC_SEC`             | `300`                               | Periodic external-egress DNS resync interval (seconds). `0` disables periodic refresh; watch events still reconcile. |
+| `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS`         | `5000`                              | Per-hostname DNS lookup deadline in milliseconds.                                                                    |
 
 ### mcp-host provisioning
 
@@ -297,6 +361,15 @@ a permissive policy — see the NetworkPolicy and GFS tables:
 | `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU`           | `500m`                          | Host container CPU limit.                                                                                                      |
 | `CONTEXT_MAPPER_HOST_RESYNC_SEC`                    | `300`                           | Periodic Host `fullReconcile` (seconds); guards against dropped watch events and drives auth-degraded self-heal. `0` disables. |
 | `HCC_MCP_HOST_RUNTIME_BOOTSTRAP_REFRESH_BEFORE_SEC` | `900`                           | How long before expiry HCC refreshes the mcp-host bootstrap credential Secret.                                                 |
+
+### mcp-host API authorization
+
+| Variable                                 | Default       | Description                                                                                                                                |
+| ---------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `HCC_MCP_HOST_JWT_PUBLIC_KEY`            | `` (empty)    | RS256 public key used to verify protected v2 Host MCP requests. HCC fails startup when it is absent, malformed, private, or a placeholder. |
+| `HCC_MCP_HOST_JWT_ISSUER`                | `control-api` | Exact issuer accepted for protected v2 Host MCP requests.                                                                                  |
+| `HCC_MCP_HOST_JWT_MAX_TTL_SECONDS`       | `600`         | Maximum accepted `exp - iat`; the deploy manifest sources this from Control API's access-token TTL contract.                               |
+| `HCC_MCP_HOST_API_RATE_LIMIT_PER_MINUTE` | `120`         | Per verified Host UID and action fixed-window limit for inventory and credential requests.                                                 |
 
 ### Desktop (Host CRD `spec.desktop`)
 
@@ -393,11 +466,11 @@ Read by `src/gfsConfig.ts`. Invalid values **throw at startup** rather than sile
 
 Parsed only when `CLERUM_DEV_MODE` is truthy. A JSON parse failure logs an error and yields an empty result rather than crashing.
 
-| Variable             | Default | Description                                                                                                                                                                                     |
-| -------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLERUM_MCP_SERVERS` | `[]`    | JSON array of McpServer objects.                                                                                                                                                                |
-| `CLERUM_CONTEXTS`    | `[]`    | JSON array of Context objects. When set, `GET /api/v1/mcpservers/context/:contextRef` filters by the Context's `mcpServers` allow-list; when unset it falls back to matching `spec.contextRef`. |
-| `CLERUM_MCP_AUTH`    | `{}`    | JSON object mapping MCP server name → auth token.                                                                                                                                               |
+| Variable             | Default | Description                                                                                                       |
+| -------------------- | ------- | ----------------------------------------------------------------------------------------------------------------- |
+| `CLERUM_MCP_SERVERS` | `[]`    | JSON array of McpServer objects.                                                                                  |
+| `CLERUM_CONTEXTS`    | `[]`    | JSON array of Context objects used by the development provider. Caller-selected Context discovery is not exposed. |
+| `CLERUM_MCP_AUTH`    | `{}`    | JSON object mapping MCP server name → auth token for development-provider fixtures.                               |
 
 ## Kubernetes RBAC
 
@@ -433,9 +506,17 @@ In `mcp-host` (`deploy/base/mcp-host/rbac.yaml`), the controller additionally ma
 
 Run host-context-controller locally without Kubernetes by providing MCP servers via environment variables. In dev mode, no reconciliation occurs (no Deployments, Services, or NetworkPolicies are created).
 
+Startup still requires a real trusted Control API RS256 public key in
+`HCC_MCP_HOST_JWT_PUBLIC_KEY`, including in dev mode. Export it from the
+approved local public-key source before either command below. `.env.example`
+deliberately does not include a placeholder key, and HCC has no insecure
+verifier fallback.
+
 ```bash
 # Install dependencies
 npm install
+
+# Load HCC_MCP_HOST_JWT_PUBLIC_KEY from the trusted Control API public-key source.
 
 # Option 1: Use .env file (recommended)
 cp .env.example .env
@@ -455,18 +536,21 @@ CLERUM_CONTEXTS='[{"name":"dev-context","namespace":"dev","spec":{"contextId":"d
 CLERUM_MCP_AUTH='{"github":"ghp_your_token_here"}'
 ```
 
-In dev mode, `GET /api/v1/mcpservers/context/:contextRef` uses `CLERUM_CONTEXTS` when it is set: it returns the enabled servers named in the matching Context's `mcpServers` list, and returns an empty list if no Context with that name was loaded. When `CLERUM_CONTEXTS` is unset, it falls back to returning the enabled servers whose own `spec.contextRef` matches.
+Dev mode retains the metadata-only global v1 inventory for local `mcp-proxy`
+compatibility. It does not restore either caller-selected v1 Host route. The
+protected v2 contract requires live Kubernetes Host/Context authority and
+therefore fails closed when that authority is unavailable.
 
 ### Production Mode (with Kubernetes)
 
-Run against the cluster in your current kubeconfig (watches K8s for McpServer and Context CRDs) with `CLERUM_DEV_MODE` unset. Outside dev mode the process also requires `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET` — without it, startup aborts with `[HCC] FATAL: INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET env var is required` and exit code 1:
+Run against the cluster in your current kubeconfig (watches K8s for McpServer and Context CRDs) with `CLERUM_DEV_MODE` unset. Production startup requires both the existing `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET` signing material and the real Control API public key in `HCC_MCP_HOST_JWT_PUBLIC_KEY`. Load both from their approved sources before starting; missing or invalid verifier material fails startup closed.
 
 ```bash
 make build
-INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET=<hmac-secret> npm start
+npm start
 ```
 
-`make dev` also works, but only if a `.env` file exists (see above) — it is the same target, so it aborts when `.env` is absent. Leave `CLERUM_DEV_MODE` out of that `.env` and set `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET` in it to run against a real cluster.
+`make dev` also works, but only if a `.env` file exists (see above) — it is the same target, so it aborts when `.env` is absent. Leave `CLERUM_DEV_MODE` out of that `.env` and load both required values through the approved local configuration path to run against a real cluster.
 
 ## Deployment
 

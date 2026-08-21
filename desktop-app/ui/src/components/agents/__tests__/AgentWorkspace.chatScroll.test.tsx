@@ -11,6 +11,7 @@ import { NotificationsContext } from '@contexts/NotificationsContext'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { createRoot } from 'react-dom/client'
 import { useChatScroll } from '@hooks/domain/useChatScroll'
+import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import type { AgentChatMessage } from '../../../uiTypes'
 import { AgentWorkspace } from '../AgentWorkspace'
 
@@ -21,7 +22,14 @@ vi.mock('@hooks/domain/useContextsDataController', () => ({
   useContextsDataController: () => ({ contextIds: [], loading: false, error: null }),
 }))
 vi.mock('@hooks/domain/useMcpServersDataController', () => ({
-  useMcpServersDataController: () => ({ agentContextByName: {}, selectedAgentMcpServers: [] }),
+  useMcpServersDataController: () => ({
+    agentContextByName: {},
+    // AgentWorkspace reads agentDisplayByName for the visible agent name
+    // (R1-M3); the mock must supply it or the display lookup dereferences
+    // undefined.
+    agentDisplayByName: {},
+    selectedAgentMcpServers: [],
+  }),
 }))
 vi.mock('../ComposerPanel', () => ({ ComposerPanel: () => null }))
 vi.mock('../ContextWindowIndicator', () => ({ ContextWindowIndicator: () => null }))
@@ -183,6 +191,11 @@ function WorkspaceHarness({
                 handleLoadOlderMessages: vi.fn(),
                 activityByMessageId: {},
                 progressByMessageId: {},
+                localSearchQuery: '',
+                localSearchCurrentMatch: null,
+                semanticModelsByMessageId: new Map(
+                  buildLoadedChatSemanticModels(messages).map(model => [model.messageId, model])
+                ),
               }}
             >
               <ChatActionsProvider

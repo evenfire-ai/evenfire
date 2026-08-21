@@ -131,10 +131,6 @@ export function GrantsView({
                     )
                   : grant.allowedEventTypes
               const quotaParts: string[] = []
-              if (grant.quotaLimits.maxRequestsPerRun)
-                quotaParts.push(`${grant.quotaLimits.maxRequestsPerRun}/run`)
-              if (grant.quotaLimits.maxNotificationsPerRun)
-                quotaParts.push(`${grant.quotaLimits.maxNotificationsPerRun}/run`)
               if (grant.quotaLimits.maxInvocationsPerMinute)
                 quotaParts.push(`${grant.quotaLimits.maxInvocationsPerMinute}/min`)
               if (grant.quotaLimits.maxNotificationsPerMinute)
@@ -169,7 +165,8 @@ export function GrantsView({
                       <span className="cu-field__hint"> · users: {userRefsDisplay}</span>
                     ) : null}
                   </td>
-                  <td>{quotaParts.length === 0 ? '-' : quotaParts.join(', ')}</td>
+                  {/* Per-run caps removed (issue #348). Shows API-set per-minute grant overrides when present (they take precedence over the platform ENV defaults); 'platform defaults' otherwise. The edit form does not manage these overrides. */}
+                  <td>{quotaParts.length === 0 ? 'platform defaults' : quotaParts.join(', ')}</td>
                   <td className="cu-cell--right">
                     <Button type="button" variant="ghost" size="sm" onClick={() => onEdit(grant)}>
                       Edit

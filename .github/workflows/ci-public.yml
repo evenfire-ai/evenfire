@@ -62,7 +62,6 @@ jobs:
           - external-rest-api
           - profile-ui
           - desktop-app
-          - profile-ui
           - mcp-servers
           - packages/desktop-app-links
           - packages/workflow-runtime-core
@@ -96,6 +95,11 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: npm ci
+
+      - name: Verify Electron runtime
+        if: matrix.service == 'desktop-app'
+        working-directory: desktop-app
+        run: npm run verify:electron
 
       - name: Build
         working-directory: ${{ matrix.service }}
@@ -178,11 +182,33 @@ jobs:
         working-directory: control-api
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
-        # The `realPostgres` filter matches all 8 *.realPostgres.integration
-        # suites: the DB migration plus the 7 GFS suites (reader role, blob
-        # migration, blob reconciler, audit evidence, copy, readiness, structural
-        # integrity). The matrix `npm test` skips them for lack of the admin URL.
-        run: npm test -- --run realPostgres
+          CONTROL_API_REAL_PG_REQUIRED: '1'
+          FORCE_COLOR: '0'
+          NO_COLOR: '1'
+        # The `realPostgres` filter matches every control-api
+        # *.realPostgres.integration suite. The ordinary matrix may omit these
+        # suites when no admin DSN is supplied; this job requires the DSN and
+        # therefore fails before test collection if the lane is misconfigured.
+        run: |
+          set -euo pipefail
+          log_file="$(mktemp)"
+          normalized_log="$(mktemp)"
+          trap 'rm -f "$log_file" "$normalized_log"' EXIT
+          test -n "${CONTROL_API_REAL_PG_ADMIN_URL}"
+          FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres 2>&1 | tee "$log_file"
+          sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
+          grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
+            echo 'real-Postgres control-api lane executed zero passing test files' >&2
+            exit 1
+          }
+          grep -Eq 'Tests[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
+            echo 'real-Postgres control-api lane executed zero passing tests' >&2
+            exit 1
+          }
+          if grep -Eq '(Test Files|Tests).*([1-9][0-9]*) skipped' "$normalized_log"; then
+            echo 'real-Postgres control-api lane reported skipped tests' >&2
+            exit 1
+          fi
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
@@ -192,9 +218,31 @@ jobs:
         working-directory: gfs-controller
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
+          CONTROL_API_REAL_PG_REQUIRED: '1'
+          FORCE_COLOR: '0'
+          NO_COLOR: '1'
         # rename-publication concurrency suite — also admin-URL-gated, so the
         # gfs-controller matrix entry skips it.
-        run: npm test -- --run realPostgres
+        run: |
+          set -euo pipefail
+          log_file="$(mktemp)"
+          normalized_log="$(mktemp)"
+          trap 'rm -f "$log_file" "$normalized_log"' EXIT
+          test -n "${CONTROL_API_REAL_PG_ADMIN_URL}"
+          FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres 2>&1 | tee "$log_file"
+          sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
+          grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
+            echo 'real-Postgres gfs-controller lane executed zero passing test files' >&2
+            exit 1
+          }
+          grep -Eq 'Tests[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
+            echo 'real-Postgres gfs-controller lane executed zero passing tests' >&2
+            exit 1
+          }
+          if grep -Eq '(Test Files|Tests).*([1-9][0-9]*) skipped' "$normalized_log"; then
+            echo 'real-Postgres gfs-controller lane reported skipped tests' >&2
+            exit 1
+          fi
 
   # ─── control-ui build + test check ───────────────────────────────────────
   # control-ui stays out of the SHARED build/test matrix because its tsconfig
@@ -346,6 +394,24 @@ jobs:
       - name: Test HCC watch-recovery gate coordination
         run: bash scripts/tests/test-hcc-watch-recovery-gate.sh
 
+      - name: Test HCC watch-churn readiness gate contract
+        run: bash scripts/tests/test-hcc-watch-churn-readiness-gate.sh
+
+      - name: Test HCC API gateway readiness separation
+        run: bash scripts/tests/test-hcc-api-gateway-readiness.sh
+
+      - name: Test host-storm metric adjudication
+        run: bash scripts/tests/test-host-storm-metric-gate.sh
+
+      - name: Test WRC-to-HCC contracts
+        run: bash scripts/tests/test-wrc-hcc-contracts-gate.sh
+
+      - name: Test WRC internal dependency NetworkPolicy contracts
+        run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
+
+      - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
+        run: bash scripts/tests/test-lint-networkpolicies.sh
+
       - name: Test Plugin Workload SDK auth bootstrap policy
         run: bash scripts/tests/test-plugin-workload-sdk-auth-bootstrap.sh
 
@@ -354,6 +420,24 @@ jobs:
 
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
+
+      - name: Validate single-writer rollout invariant on rendered overlays
+        run: |
+          # The k8s-api-ip patch is rendered from a gitignored template at setup
+          # time; render it with a dummy IP so `kubectl kustomize` can build the
+          # minikube overlay here. The gcp-* overlays live in evenfire-infra, so
+          # this repo validates only the minikube overlay it actually ships.
+          sed 's#__K8S_API_IP__#10.96.0.1#g' \
+            deploy/overlays/minikube/patches/k8s-api-ip.yaml.template \
+            > deploy/overlays/minikube/patches/k8s-api-ip.yaml
+          SINGLE_WRITER_OVERLAYS="deploy/overlays/minikube" \
+            bash deploy/scripts/validate-postgres-single-writer-strategy.sh
+
+      - name: Test single-writer validator fails loud on an absent local deploy
+        run: bash scripts/tests/test-postgres-single-writer-strategy.sh
+
+      - name: Test post-reset convergence isolates DB-dependent controllers
+        run: bash scripts/tests/test-converge-control-db-after-reset.sh
 
       - name: Test release coordinates (writer, checker, floor decoupling)
         run: bash scripts/tests/test-release-coordinates.sh
@@ -376,6 +460,9 @@ jobs:
       - name: Test the ghcr render guard
         run: bash scripts/tests/test-ghcr-render-guard.sh
 
+      - name: Test Docker local-package COPY and materialization contract
+        run: bash scripts/tests/test-dockerfile-local-packages.sh
+
       - name: Test the minikube image puller
         run: bash scripts/tests/test-minikube-pull-images.sh
 
@@ -390,6 +477,15 @@ jobs:
 
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
+
+      - name: Test minikube GFS Upload v2 profile contract
+        run: bash scripts/tests/test-minikube-gfs-upload-v2-profile.sh
+
+      - name: Test GFS Upload v2 cross-client geometry contract
+        run: bash scripts/tests/test-gfs-upload-v2-geometry-contract.sh
+
+      - name: Test GFS real-Postgres Minikube runner contract
+        run: bash scripts/tests/test-gfs-real-pg-minikube-gate.sh
 
       # The NetworkPolicy probe runs on an E2E-only fixture that the default
       # (pulled) setup never acquires. This proves the target says so up front
@@ -408,6 +504,18 @@ jobs:
 
       - name: Test pre-gate sync state contract
         run: bash scripts/tests/test-minikube-pre-gate-sync-state.sh
+
+      - name: Test pre-gate runtime assertions
+        run: bash scripts/tests/test-minikube-pre-gate-runtime.sh
+
+      - name: Test NP-08 Host clients have no v1 fallback
+        run: bash scripts/tests/test-np08-v1-reference-inventory.sh
+
+      - name: Test NP-08 evidence scanner fails closed
+        run: bash scripts/tests/test-np08-evidence-scanner.sh
+
+      - name: Test NP-08 deployed E2E cleanup and provenance guards
+        run: bash scripts/tests/test-np08-e2e-guards.sh
 
       # ADMIN_PASSWORD is a required precondition of full-setup.sh Step 1 on the
       # default (minimal) seed profile. Two cases in this harness execute the
@@ -484,6 +592,20 @@ jobs:
             > deploy/overlays/minikube/patches/k8s-api-ip.yaml
           kubectl kustomize deploy/overlays/minikube > /tmp/clerum-minikube.yaml
           kubectl kustomize deploy/overlays/minikube-no-uis > /tmp/clerum-minikube-no-uis.yaml
+
+      - name: Validate NP-08 caller-bound HCC contract
+        run: |
+          bash scripts/tests/test-np08-render-contract.sh \
+            /tmp/clerum-minikube.yaml \
+            /tmp/clerum-minikube-no-uis.yaml
+
+      - name: Test NP-08 render contract rejection fixtures
+        run: bash scripts/tests/test-np08-render-contract-fixtures.sh /tmp/clerum-minikube.yaml
+
+      - name: Test NP-08 live NetworkPolicy contract parser
+        run: |
+          bash scripts/tests/test-np08-live-networkpolicy-contract.sh \
+            /tmp/clerum-minikube.yaml
 
       - name: cloudflared must not render into the minikube overlays
         run: |

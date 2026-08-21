@@ -12,6 +12,7 @@ import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
+import { startLlmCatalogSyncCron, stopLlmCatalogSyncCron } from './services/llmCatalogSyncCron.js'
 import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
   startPluginWorkloadSdkMaintenanceCron,
@@ -77,6 +78,20 @@ async function main(): Promise<void> {
   startUsageRetentionCron(config.usageRetentionIntervalMs)
   startBudgetReservationSweepCron(config.budgetReservationSweepIntervalMs)
   startWorkflowApprovalTraceProjector()
+
+  // LLM catalog discovery sync cron (Fase 4). DEFAULT OFF — opt in with
+  // LLM_CATALOG_SYNC_CRON_ENABLED=true. Non-destructive: inserts disabled
+  // discovery rows, only stale-flags vanished ones under the §4.5 guards.
+  if (config.llmCatalogSyncCronEnabled) {
+    startLlmCatalogSyncCron({}, config.llmCatalogSyncIntervalMs)
+    console.log(
+      `[ControlAPI] LLM catalog sync cron enabled (interval=${config.llmCatalogSyncIntervalMs}ms)`
+    )
+  } else {
+    console.log(
+      '[ControlAPI] LLM catalog sync cron disabled (LLM_CATALOG_SYNC_CRON_ENABLED not "true")'
+    )
+  }
 
   if (config.userApprovalRequestArchiveCronEnabled) {
     startArchiveCron({
@@ -171,6 +186,7 @@ main().catch(error => {
   stopUsageRollupCron()
   stopUsageRetentionCron()
   stopBudgetReservationSweepCron()
+  stopLlmCatalogSyncCron()
   stopWorkflowApprovalTraceProjector()
   void pool.end()
   process.exit(1)

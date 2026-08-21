@@ -6,8 +6,8 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import { LlmPolicyEditor } from '@/components/LlmPolicyEditor'
 import { LlmProviderIcon } from '@/components/LlmProviderIcon'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
-import { IconChevronRight } from '@/components/icons'
 import type { SelectionDropdownOption } from '@/components/SelectionDropdown/types'
+import { IconChevronRight } from '@/components/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
@@ -67,7 +67,7 @@ function fallbackEffectiveSlots(
  * The single Host LLM configuration surface (spec Topic 1b, jury design C —
  * "model like A, render like C"). Credentials are a PROJECTION of the provider
  * domain: it renders provider blocks ONLY for `{primary} ∪ {each fallback}`, as
- * a progressive flow, instead of a wall of all 21 provider groups.
+ * a progressive flow, instead of a wall of all 22 provider groups.
  *
  *   1. Primary provider block — provider + model + its credential field(s). The
  *      asymmetric save gate (see `isPrimaryUsable`) blocks create/save until the

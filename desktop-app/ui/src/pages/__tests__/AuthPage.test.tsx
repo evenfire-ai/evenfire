@@ -38,6 +38,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   },
   desktopReleaseStatus: null,
   pendingDesktopEnvironmentSetup: null,
+  backendSwitchHint: null,
   runtimeConfigMissing: false,
   showRuntimeConfigSelector: false,
   dependencyHealth: null,
@@ -54,6 +55,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   setStatus: vi.fn(),
   loadSession: vi.fn(),
   handlePasswordLogin: vi.fn(),
+  handleSwitchLoginBackend: vi.fn(),
   handleStartDesktopSetup: vi.fn(),
   handleCompleteDesktopSetup: vi.fn(),
   handleSaveRuntimeConfig: vi.fn(),
@@ -156,5 +158,32 @@ describe('AuthPage', () => {
     await user.click(screen.getByRole('button', { name: 'Localhost' }))
 
     expect(handleSelectRuntimeConfig).toHaveBeenCalledWith(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)
+  })
+
+  it('offers a switch-and-retry action when a backend-mismatch hint is present', async () => {
+    const user = userEvent.setup()
+    const handleSwitchLoginBackend = vi.fn()
+
+    renderAuthPage({
+      backendSwitchHint: {
+        targetOptionId: LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
+        targetLabel: 'Localhost',
+        activeLabel: 'Production',
+      },
+      handleSwitchLoginBackend,
+    })
+
+    const switchButton = screen.getByRole('button', { name: /Switch to Localhost & retry/ })
+    expect(switchButton).toBeTruthy()
+
+    await user.click(switchButton)
+
+    expect(handleSwitchLoginBackend).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows no switch affordance when there is no backend-mismatch hint', () => {
+    renderAuthPage({ backendSwitchHint: null })
+
+    expect(screen.queryByRole('button', { name: /Switch to .* & retry/ })).toBeNull()
   })
 })

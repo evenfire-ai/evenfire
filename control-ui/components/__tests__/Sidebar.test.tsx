@@ -68,6 +68,7 @@ describe('Sidebar publisher gating', () => {
       'Marketplace',
       'Installed connectors',
       'Installed plugins',
+      'Installed Guardrails',
       'Files',
       'External Channels',
       'LLM Models',

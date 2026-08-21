@@ -1,4 +1,6 @@
 export type AppHeaderProps = {
+  searchFocusRequestId?: number
+  notificationOpenRequestId?: number
   notificationTrayMode?: 'overlay' | 'drawer'
   notificationTrayReady?: boolean
   onNotificationTrayOpenChange?: (open: boolean) => void
@@ -20,7 +22,10 @@ export type SearchEntityResult = {
   fromUserScope: boolean
   key: string
   teamNames: string[]
+  /** Stable identifier (agent `metadata.name` / context id) — used for keys, navigation and filtering. */
   value: string
+  /** Human-visible label rendered to the user (agent `spec.host` / context `spec.displayName`). */
+  display: string
 }
 
 export type SearchTeamResult = {
