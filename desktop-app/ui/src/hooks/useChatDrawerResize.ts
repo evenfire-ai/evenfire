@@ -40,7 +40,7 @@ function readPanelWidth(ref: RefObject<HTMLElement | null>): number {
 }
 
 /** Clamp a requested width to [MIN, dynamicMax], rounded to a whole pixel. */
-function clampWidth(requested: number, panelWidth: number): number {
+export function clampWidth(requested: number, panelWidth: number): number {
   const dynamicMax =
     panelWidth > 0
       ? Math.max(
@@ -49,6 +49,23 @@ function clampWidth(requested: number, panelWidth: number): number {
         )
       : CHAT_DRAWER_MAX_ABSOLUTE
   return Math.round(Math.max(CHAT_DRAWER_MIN_WIDTH, Math.min(dynamicMax, requested)))
+}
+
+/** True when the app embed column would fall below the overlay threshold at the
+ *  given content-panel and drawer widths — the drawer then floats over the embed
+ *  instead of pushing it. Pure decision extracted from `recomputeOverlay` so the
+ *  `< OVERLAY_EMBED_MIN` flip is unit-testable at the boundary. */
+export function computeChatDrawerOverlay(panelWidth: number, drawerWidth: number): boolean {
+  const embedWidth = panelWidth - drawerWidth - CHAT_DRAWER_GUTTER_EXTRA
+  return embedWidth < CHAT_DRAWER_OVERLAY_EMBED_MIN
+}
+
+/** Width the drawer should take for a cursor at `pointerX`, given the drawer's
+ *  fixed right edge. Leftward drag (smaller `pointerX`) widens, rightward narrows
+ *  (`rightEdge - pointerX`); result is clamped to the panel. Extracted so the drag
+ *  direction is unit-testable (an inverted mapping would otherwise pass every test). */
+export function widthForCursor(rightEdge: number, pointerX: number, panelWidth: number): number {
+  return clampWidth(rightEdge - pointerX, panelWidth)
 }
 
 export type ChatDrawerResize = {
@@ -83,8 +100,7 @@ export function useChatDrawerResize(
       const panelWidth = readPanelWidth(contentPanelRef)
       if (panelWidth <= 0) return
       const nextWidth = overrideWidth ?? widthRef.current
-      const embedWidth = panelWidth - nextWidth - CHAT_DRAWER_GUTTER_EXTRA
-      setIsOverlay(embedWidth < CHAT_DRAWER_OVERLAY_EMBED_MIN)
+      setIsOverlay(computeChatDrawerOverlay(panelWidth, nextWidth))
     },
     [contentPanelRef]
   )
@@ -126,7 +142,7 @@ export function useChatDrawerResize(
       const apply = () => {
         frame = 0
         const panelWidth = readPanelWidth(contentPanelRef)
-        const next = clampWidth(rightEdge - pointerX, panelWidth)
+        const next = widthForCursor(rightEdge, pointerX, panelWidth)
         setWidth(next)
         recomputeOverlay(next)
       }
