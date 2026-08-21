@@ -156,6 +156,7 @@ export function SandboxUiPage({
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
   toastShellOverlayOpen = false,
+  deepLinkOverlayOpen = false,
   shortcutApp = null,
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
@@ -184,8 +185,14 @@ export function SandboxUiPage({
   const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
   const lastActionRequestIdRef = useRef(0)
+  // The deep-link confirm/error dialogs render as renderer DOM at the App
+  // shell level; like the other shell overlays they must hide the native
+  // WebContentsView, which always paints above the DOM, to be visible at all.
   const shellOverlayOpen =
-    headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
+    headerShellOverlayOpen ||
+    sidebarShellOverlayOpen ||
+    toastShellOverlayOpen ||
+    deepLinkOverlayOpen
 
   const reload = useCallback(async () => {
     setError(null)

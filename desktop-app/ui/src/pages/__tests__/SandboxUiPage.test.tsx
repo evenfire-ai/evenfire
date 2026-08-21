@@ -851,6 +851,45 @@ describe('SandboxUiPage', () => {
     })
   })
 
+  it('hides the native view while a deep-link dialog overlay is open and restores it on close', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.capturePreview.mockResolvedValueOnce('data:image/png;base64,deeplink')
+
+    const { rerender } = render(<SandboxUiPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    sandboxUi.setVisible.mockClear()
+
+    // The "Open app link?" / "App link could not be opened" dialogs live in the
+    // renderer DOM; without hiding the WebContentsView they render behind the
+    // embedded app and the user can never reach the confirm/dismiss buttons.
+    rerender(<SandboxUiPage deepLinkOverlayOpen />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy()
+      expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false)
+    })
+
+    sandboxUi.setVisible.mockClear()
+    rerender(<SandboxUiPage />)
+
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+  })
+
   it('hides an active native view even before local launch state is available', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
     sandboxUi.capturePreview.mockResolvedValueOnce(null)

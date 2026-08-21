@@ -37,6 +37,7 @@ const sidebarHarness = vi.hoisted(() => ({
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
     headerShellOverlayOpen?: boolean
+    deepLinkOverlayOpen?: boolean
     shortcutOpenRequestId?: number
     localSearchRequestId?: number
     actionRequest?: {
@@ -610,6 +611,73 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
     expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeUndefined()
+  })
+
+  it('signals a deep-link overlay to the sandbox page while the confirm dialog is open', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
+    // The native WebContentsView paints above renderer DOM, so the overlay
+    // signal must stay off until a deep-link dialog actually needs to show.
+    expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBeFalsy()
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(true)
+
+    await confirmPendingAppLink()
+    await reportShortcutOpenResult()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(false))
+  })
+
+  it('keeps the deep-link overlay signal raised while the failure dialog is open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const ensureTeamContext = vi.fn(async () => {
+      throw Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' })
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 15_000]) {
+      await act(async () => {
+        vi.advanceTimersByTime(delay)
+        await Promise.resolve()
+      })
+    }
+
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(true)
   })
 
   it('does not duplicate an authenticated confirmation for the same link id', async () => {

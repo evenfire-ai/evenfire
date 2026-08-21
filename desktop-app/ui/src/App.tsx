@@ -1878,6 +1878,9 @@ export function App() {
                                   }
                                   sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
                                   toastShellOverlayOpen={vm.toasts.length > 0}
+                                  deepLinkOverlayOpen={Boolean(
+                                    pendingSandboxUiConfirmation || failedSandboxUiDeepLink
+                                  )}
                                   shortcutApp={activeSandboxUiApp}
                                   shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
                                   localSearchRequestId={sandboxLocalSearchRequestId}
