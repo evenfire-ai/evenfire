@@ -7589,7 +7589,7 @@ textarea.cu-input {
 }
 
 .cu-host-overview-nav-header__label {
-  flex: 1;
+  margin-right: var(--cu-space-2);
 }
 
 .cu-host-overview-nav-header__count {
@@ -7770,7 +7770,7 @@ textarea.cu-input {
 }
 
 .cu-host-overview-access__head-label {
-  flex: 1;
+  margin-right: var(--cu-space-2);
 }
 
 .cu-host-overview-access__head-count {
