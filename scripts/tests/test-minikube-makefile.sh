@@ -35,7 +35,7 @@ assert_contains() {
 
 assert_file_contains() {
   local path="$1" needle="$2"
-  if grep -Fq "$needle" "$REPO_ROOT/$path"; then
+  if grep -Fq -- "$needle" "$REPO_ROOT/$path"; then
     echo "PASS: $path contains '$needle'"
   else
     echo "FAIL: $path missing '$needle'"
