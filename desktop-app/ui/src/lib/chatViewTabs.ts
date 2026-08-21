@@ -1,5 +1,24 @@
 import type { ChatViewTab, ChatViewTabsState, PersistedChatView } from './chatViewTabs.types'
 
+/**
+ * Module invariant: the tab list is never empty — `createChatViewTabsState`
+ * seeds one tab and `closeChatViewTab` re-seeds when closing the last one. These
+ * accessors turn a would-be silent `undefined` (or a cryptic `.id of undefined`)
+ * into a named error if a future refactor ever breaks that invariant, instead of
+ * the non-null assertions they replace.
+ */
+function firstTab(tabs: ChatViewTab[]): ChatViewTab {
+  const tab = tabs[0]
+  if (!tab) throw new Error('chatViewTabs invariant violated: tab list must never be empty')
+  return tab
+}
+
+function lastTab(tabs: ChatViewTab[]): ChatViewTab {
+  const tab = tabs.at(-1)
+  if (!tab) throw new Error('chatViewTabs invariant violated: tab list must never be empty')
+  return tab
+}
+
 export function createChatViewTabsState(
   id: string,
   agentRef: string | null = null
@@ -11,7 +30,7 @@ export function createChatViewTabsState(
 }
 
 export function activeChatViewTab(state: ChatViewTabsState): ChatViewTab {
-  return state.tabs.find(tab => tab.id === state.activeTabId) ?? state.tabs[0]!
+  return state.tabs.find(tab => tab.id === state.activeTabId) ?? firstTab(state.tabs)
 }
 
 export function addBlankChatViewTab(
@@ -145,7 +164,7 @@ export function selectChatViewTabAt(state: ChatViewTabsState, index: number): Ch
 }
 
 export function selectLastChatViewTab(state: ChatViewTabsState): ChatViewTabsState {
-  return { ...state, activeTabId: state.tabs.at(-1)!.id }
+  return { ...state, activeTabId: lastTab(state.tabs).id }
 }
 
 export function cycleChatViewTab(

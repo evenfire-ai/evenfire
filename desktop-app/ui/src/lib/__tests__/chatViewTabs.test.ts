@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import {
+  activeChatViewTab,
   addBlankChatViewTab,
   closeChatViewTab,
   createChatViewTabsState,
   cycleChatViewTab,
-  activeChatViewTab,
   focusBlankChatViewTab,
   openPersistedChatViewTab,
   reconcileChatViewTabs,
@@ -180,5 +180,21 @@ describe('reconcileChatViewTabs (minispec 04 §4 invariant — property-based)',
         }
       })
     )
+  })
+
+  // R2-L3: the non-empty-tabs invariant is enforced across the module, but the
+  // accessors that leaned on it used non-null assertions — a silent `undefined`
+  // (activeChatViewTab) or a cryptic `.id of undefined` (selectLastChatViewTab)
+  // if a future refactor ever produced an empty list. The named guard makes that
+  // a diagnosable failure. (The empty state is unreachable by construction, so
+  // it is built directly here to exercise the guard.)
+  describe('empty-tabs invariant guard', () => {
+    it('activeChatViewTab throws a named invariant error instead of returning undefined', () => {
+      expect(() => activeChatViewTab({ tabs: [], activeTabId: 'x' })).toThrow(/invariant/)
+    })
+
+    it('selectLastChatViewTab throws a named invariant error instead of a cryptic TypeError', () => {
+      expect(() => selectLastChatViewTab({ tabs: [], activeTabId: 'x' })).toThrow(/invariant/)
+    })
   })
 })
