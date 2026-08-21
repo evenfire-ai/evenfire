@@ -97,6 +97,8 @@ spec:
   agent:
     model: gpt-5.3-codex
     provider: codex-subscription
+  triggers:
+    onDemand: {}
   steps:
     - id: ping
       instruction: Say hello through Codex subscription

@@ -1,12 +1,14 @@
 /**
- * Codex subscription — Host and WorkflowRecipe authoring journey.
+ * Codex subscription — Host authoring journey.
  *
  * Contract:
  * - Entry point: application root `/` (E2E_GUARDIAN_ENTRY_POINT).
- * - Actions: visible login, open Agents, create an agent with Codex provider.
- * - Route/state: Agents create form after sidebar navigation.
- * - UI: Codex Subscription is selectable and does not require a Secret.
- * - Business signal: waitForResponse on the Host create mutation.
+ * - Actions: visible login, open Agents, start Create agent, choose Codex.
+ * - Route/state: `/agents/new` Model & credentials step.
+ * - UI: OpenAI Codex Subscription is selectable and requires no LLM secret.
+ * - Business signal: waitForResponse on the allowlist catalog used to populate models.
+ *
+ * A live catalog model is not asserted: Sync/enable is the connection lane.
  */
 import { expect, test } from '@playwright/test'
 import { loginControlUiVisible } from '../helpers/visible-login'
@@ -17,20 +19,31 @@ test.describe('Codex subscription host and workflow authoring', () => {
     await page.goto('/')
     await loginControlUiVisible(page)
 
-    await page.getByRole('link', { name: 'Agents' }).click()
-    await expect(page).toHaveURL(/\/agents/)
-    await page.getByRole('button', { name: 'Create agent' }).click()
+    await page.getByRole('link', { name: 'Agents', exact: true }).click()
+    await expect(page).toHaveURL(/\/(?:hosts|agents)$/)
 
-    await page.getByLabel('Model provider').selectOption('codex-subscription')
-    await expect(page.getByLabel('Secret reference')).toHaveCount(0)
-
-    const created = page.waitForResponse(
+    const catalog = page.waitForResponse(
       response =>
-        response.url().includes('/api/v1/admin/hosts') &&
-        response.request().method() === 'POST' &&
-        response.ok()
+        response.url().includes('/api/v1/admin/llm-models') && response.request().method() === 'GET'
     )
-    await page.getByRole('button', { name: 'Create agent' }).click()
-    await created
+    await page.getByRole('button', { name: 'Create agent', exact: true }).click()
+    await expect(page).toHaveURL(/\/(?:hosts|agents)\/new$/)
+    const catalogResponse = await catalog
+    expect(catalogResponse.ok()).toBe(true)
+
+    await page.getByPlaceholder('agent-name').fill('e2e-codex-authoring')
+    await page.getByRole('button', { name: 'Next' }).click()
+    await page.getByText('Create new context', { exact: true }).click()
+    await page.getByPlaceholder('context-name').fill('e2e-codex-ctx')
+    await page.getByRole('button', { name: 'Next' }).click()
+    await expect(page.getByText('Model & credentials', { exact: true })).toBeVisible()
+
+    await page.getByLabel('Provider').click()
+    await page.getByRole('option', { name: 'OpenAI Codex Subscription' }).click()
+    await expect(
+      page.getByText(/This provider authenticates through the Codex subscription/)
+    ).toBeVisible()
+    await expect(page.getByLabel('Secret name')).toHaveCount(0)
+    await expect(page.getByLabel(/OpenAI API key/i)).toHaveCount(0)
   })
 })

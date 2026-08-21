@@ -858,9 +858,10 @@ test-e2e-codex-subscription-runtime: ## Codex subscription runtime acceptance (R
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-runtime.sh
 
 .PHONY: test-e2e-codex-subscription-playwright
-test-e2e-codex-subscription-playwright: ## Codex subscription Playwright guardians (visible login, no storageState)
-	@echo "Running Codex subscription Playwright guardians..."
-	cd tests/e2e/playwright && ./node_modules/.bin/playwright test --config playwright.codex-subscription.config.ts
+test-e2e-codex-subscription-playwright: ## Codex subscription Control UI guardians (Desktop waits for a connected subscription)
+	@echo "Running Codex subscription Control UI Playwright guardians..."
+	@test -x tests/e2e/playwright/node_modules/.bin/playwright || (echo "missing tests/e2e/playwright/node_modules/.bin/playwright; run npm ci in that package" >&2; exit 1)
+	cd tests/e2e/playwright && PLAYWRIGHT_BROWSERS_PATH="$(CURDIR)/tests/e2e/playwright/.playwright-browsers" ./node_modules/.bin/playwright test --config playwright.codex-subscription.config.ts --project=control-ui
 
 .PHONY: test-e2e-plugin-workload-sdk
 test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1)
