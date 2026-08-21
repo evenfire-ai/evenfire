@@ -34,6 +34,12 @@ metadata:
   name: gfs
 """
 
+source += """---
+apiVersion: v1
+"kind": Namespace
+"metadata":
+  "name": gfs
+"""
 result = subprocess.run(
     [sys.executable, filter_path],
     input=source,
@@ -50,6 +56,7 @@ assert "    ---\n    kind: Namespace" in output
 assert "kind: Example" in output
 assert "spec:\n  name: gfs" in output
 assert "kind: Namespace\nmetadata:\n  name: gfs" not in output
+assert '"kind": Namespace\n"metadata":\n  "name": gfs' not in output
 
 empty = subprocess.run(
     [sys.executable, filter_path],

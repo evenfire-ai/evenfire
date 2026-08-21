@@ -58,12 +58,14 @@ else
   printf 'T0_SHELLCHECK=NOT_APPLICABLE\n'
 fi
 
-for package in "${package_dirs[@]}"; do
-  printf '[minikube-t0] affected package: %s test\n' "$package"
-  (cd "$PROJECT_DIR/$package" && npm test)
-  printf '[minikube-t0] affected package: %s build/typecheck\n' "$package"
-  (cd "$PROJECT_DIR/$package" && npm run build)
-done
+if [ "${#package_dirs[@]}" -gt 0 ]; then
+  for package in "${package_dirs[@]}"; do
+    printf '[minikube-t0] affected package: %s test\n' "$package"
+    (cd "$PROJECT_DIR/$package" && npm test)
+    printf '[minikube-t0] affected package: %s build/typecheck\n' "$package"
+    (cd "$PROJECT_DIR/$package" && npm run build)
+  done
+fi
 
 printf 'T0_AFFECTED_PACKAGES=%s\n' "${package_dirs[*]:-none}"
 printf 'T0_AFFECTED_CHECKS=PASS\n'

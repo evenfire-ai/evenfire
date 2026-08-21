@@ -11,6 +11,10 @@ grep -Fq 'if [ "${#scaled_rs_names[@]}" -gt 0 ]; then' "$SCRIPT" ||
   fail 'settle must guard empty ReplicaSet arrays under Bash 3.2 set -u'
 grep -Fq 'if [ -n "${ALLOWED_CONTEXTS:-}" ]; then' "$SCRIPT" ||
   fail 'settle must guard empty authorization-context arrays under Bash 3.2 set -u'
+grep -Fq 'unable to inspect ${GFS_NS} ReplicaSets before reader settlement' "$SCRIPT" ||
+  fail 'settle must report ReplicaSet inspection failures instead of swallowing kubectl stderr'
+grep -Fq 'unable to inspect ${GFS_NS} reader pods before crash-loop cleanup' "$SCRIPT" ||
+  fail 'settle must report reader-pod inspection failures instead of swallowing kubectl stderr'
 
 run_settle() {
   local fake_dir repo profile sha

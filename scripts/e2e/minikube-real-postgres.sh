@@ -11,10 +11,10 @@ source "$PROJECT_DIR/scripts/minikube/t2-common.sh"
 PG_NAMESPACE="$T2_CONTROL_NAMESPACE"
 PG_SERVICE=control-postgres
 PG_SECRET=control-postgres
-# Only suites that DROP/ALTER cluster-global roles cannot share live
-# control-postgres (#412). They run against a throwaway PostgreSQL 16 that
-# matches CI; the remaining control-api suites must exercise the validated
-# branch profile database.
+# Every control-api real-Postgres suite is isolated because any migration
+# path may DROP/ALTER cluster-global roles (#412). They run against a
+# throwaway PostgreSQL 16 that matches CI; the shared branch-profile database
+# is reserved for the non-control-api lane.
 T1_ISOLATED_PG_IMAGE="${T1_ISOLATED_PG_IMAGE:-postgres:16-alpine}"
 T1_TIMEOUT="$T2_TIMEOUT_SECONDS"
 T1_TMP_ROOT="$T2_TMP_ROOT"

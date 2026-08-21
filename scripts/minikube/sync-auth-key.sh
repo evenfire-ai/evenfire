@@ -6,6 +6,7 @@ PROFILE="clerum-test"
 REQUIRE_GFS=false
 REQUIRE_MCP=false
 SYNC_GFS=true
+SHARED_PROFILE_BOOTSTRAP=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,8 +35,15 @@ while [[ $# -gt 0 ]]; do
       SYNC_GFS=false
       shift
       ;;
+    --shared-profile-bootstrap)
+      # The documented shared local profile may be started before a
+      # branch-owned T2 lease exists. This mode is intentionally limited to
+      # MCP-only convergence; GFS and remote authorization stay forbidden.
+      SHARED_PROFILE_BOOTSTRAP=true
+      shift
+      ;;
     -h|--help)
-      echo "Usage: scripts/minikube/sync-auth-key.sh [--context <kubectl-context>] [--require-mcp] [--require-gfs|--skip-gfs]" >&2
+      echo "Usage: scripts/minikube/sync-auth-key.sh [--context <kubectl-context>] [--require-mcp] [--require-gfs|--skip-gfs] [--shared-profile-bootstrap]" >&2
       exit 0
       ;;
     *)
@@ -48,6 +56,17 @@ done
 if [[ "${REQUIRE_GFS}" == "true" && "${SYNC_GFS}" != "true" ]]; then
   echo "--require-gfs cannot be combined with --skip-gfs" >&2
   exit 2
+fi
+
+if [[ "${SHARED_PROFILE_BOOTSTRAP}" == "true" ]]; then
+  if [[ "${REQUIRE_MCP}" != "true" || "${SYNC_GFS}" != "false" || "${REQUIRE_GFS}" == "true" ]]; then
+    echo "--shared-profile-bootstrap requires --require-mcp --skip-gfs and forbids --require-gfs" >&2
+    exit 2
+  fi
+  if [[ "${GFS_REMOTE_RECONCILE_AUTHORIZED:-false}" == "true" ]]; then
+    echo "--shared-profile-bootstrap cannot carry remote reconciliation authorization" >&2
+    exit 2
+  fi
 fi
 
 log() { printf '[sync-auth-key] %s\n' "$*"; }
@@ -87,7 +106,7 @@ fi
 [[ "${PROFILE}" == "${T2_PROFILE}" && "${PROFILE}" == "${T2_CONTEXT}" ]] ||
   die "auth-key convergence target profile and Kubernetes context do not match"
 
-if [ "${REMOTE_RECONCILE}" != true ]; then
+if [ "${REMOTE_RECONCILE}" != true ] && [ "${SHARED_PROFILE_BOOTSTRAP}" != true ]; then
   # Auth-key convergence mutates runtime ConfigMaps and restarts consumers. It
   # is a child of the owning T2/full-setup transition, never an independent
   # writer. Validate the complete lease identity, including branch/HEAD and
@@ -99,7 +118,7 @@ if [ "${REMOTE_RECONCILE}" != true ]; then
     die "auth-key convergence worktree does not match the lease repository"
   T2_BRANCH="$(git -C "${T2_PROJECT_DIR}" branch --show-current 2>/dev/null || true)"
   T2_HEAD="$(git -C "${T2_PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || true)"
-  T2_WORKTREE_ID="$(printf '%s' "${T2_PROJECT_DIR}" | shasum | awk '{print $1}')"
+  T2_WORKTREE_ID="$(t2_worktree_id "${T2_PROJECT_DIR}")"
   [[ -n "${T2_BRANCH}" && -n "${T2_HEAD}" ]] || die "auth-key convergence cannot resolve the current branch and HEAD"
   t2_lock_validate_inherited
 fi
@@ -539,7 +558,7 @@ sync_gfs() {
       log "Deferring active gfsc auth proof until GFS credentials are reconciled"
       return 0
     fi
-    die "cannot inspect ${GFS_NAMESPACE}/gfs-controller-db before gfsc restart: ${dsn_encoded}"
+    die "cannot inspect ${GFS_NAMESPACE}/gfs-controller-db before gfsc restart"
   fi
   if [[ -z "${dsn_encoded}" ]]; then
     if [[ "${GFS_AUTH_SYNC_ALLOW_STAGED}" == "true" ]]; then

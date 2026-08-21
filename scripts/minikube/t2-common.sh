@@ -7,6 +7,8 @@ set +u
 
 T2_SCRIPT_DIR="$T2_SCRIPT_DIR"
 if [ -z "$T2_SCRIPT_DIR" ]; then T2_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"; fi
+# shellcheck source=t2-worktree-id.sh
+. "$T2_SCRIPT_DIR/t2-worktree-id.sh"
 # shellcheck source=profile-readiness.sh
 . "$T2_SCRIPT_DIR/profile-readiness.sh"
 T2_PROJECT_DIR="$T2_PROJECT_DIR"
@@ -191,7 +193,7 @@ t2_repo_metadata() {
     T2_NEXT_COMMAND='commit or restore the worktree before invoking Minikube validation'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'worktree is dirty'
   fi
-  T2_WORKTREE_ID="$(printf '%s' "$T2_PROJECT_DIR" | shasum | awk '{print $1}')"
+  T2_WORKTREE_ID="$(t2_worktree_id "$T2_PROJECT_DIR")"
 }
 
 t2_profile_scope() {
@@ -609,9 +611,12 @@ for (namespace, name), item in selected:
         return int(value)
 
     desired = integer(spec.get("replicas"), "spec.replicas")
-    # A present deployment explicitly scaled to zero is an intentional local
-    # suspension; it is not an unready pod.
+    # Additional deployments may be intentionally suspended locally, but a
+    # deployment in the required scope is part of the certification contract
+    # and must not pass readiness at replicas=0.
     if desired == 0:
+        if (namespace, name) in scope_refs:
+            bad.append(f"{namespace}/{name} scaled to zero")
         continue
     ready = integer(status.get("readyReplicas"), "status.readyReplicas")
     available = integer(status.get("availableReplicas"), "status.availableReplicas")

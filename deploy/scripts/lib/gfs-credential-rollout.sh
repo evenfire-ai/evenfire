@@ -97,8 +97,8 @@ rollout_exact() {
 credential_rollout_proof() {
   local secret="$1" deployment="$2" rotated_at="$3"
   local secret_json secret_rv active_dsn template_revision generation observed_revision
-  local selector rows pod_name pod_created pod_ready pod_deleting pod_owner pod_revision
-  local owner_revision
+  local selector rows pod_name pod_created pod_ready pod_deleting pod_owner
+  local owner_revision owner_revision_status
   local pod_count=0 current_rv
   if ! deployment_uses_secret "$deployment" "$secret"; then
     die "$GFS_NS/$deployment does not reference $GFS_NS/$secret; refusing to certify credential consumption"
@@ -142,10 +142,10 @@ print(str(metadata.get("resourceVersion", "")) + "\t" + dsn)'); then
     *) die "unsupported GFSC deployment for credential proof: $deployment" ;;
   esac
   if ! rows="$(kc -n "$GFS_NS" get pods -l "$selector" -o \
-    'jsonpath={range .items[*]}{.metadata.name}{"|"}{.metadata.creationTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"|"}{.metadata.ownerReferences[0].name}{"|"}{.metadata.annotations.clerum\.io/gfs-template-hash}{"\n"}{end}')"; then
+    'jsonpath={range .items[*]}{.metadata.name}{"|"}{.metadata.creationTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"|"}{.metadata.ownerReferences[0].name}{"\n"}{end}')"; then
     die "cannot list $GFS_NS/$deployment pods for credential proof"
   fi
-  while IFS='|' read -r pod_name pod_created pod_ready pod_deleting pod_owner pod_revision; do
+  while IFS='|' read -r pod_name pod_created pod_ready pod_deleting pod_owner; do
     [ -n "$pod_name" ] || continue
     [ -z "$pod_deleting" ] || continue
     if ! python3 - "$pod_created" "$rotated_at" <<'PY'
@@ -164,9 +164,13 @@ PY
       die "$GFS_NS/$deployment Ready pod predates the committed credential rotation"
     fi
     [ "$pod_ready" = True ] || die "$GFS_NS/$deployment has a live pod that is not Ready"
+    [ -n "$pod_owner" ] || die "$GFS_NS/$deployment Ready pod has no owning ReplicaSet"
+    owner_revision_status=0
     owner_revision="$(kc -n "$GFS_NS" get rs "$pod_owner" \
-      -o 'jsonpath={.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)"
-    [ -n "$owner_revision" ] || owner_revision="$pod_revision"
+      -o 'jsonpath={.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null)" || owner_revision_status=$?
+    if [ "$owner_revision_status" -ne 0 ] || [ -z "$owner_revision" ]; then
+      die "$GFS_NS/$deployment Ready pod owner ReplicaSet could not be verified"
+    fi
     [ "$owner_revision" = "$template_revision" ] ||
       die "$GFS_NS/$deployment Ready pod is not on the observed template revision"
     if ! printf '%s' "$active_dsn" |

@@ -311,6 +311,13 @@ default_core_ready_json='{"items":[{"metadata":{"namespace":"control-plane","nam
 env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS= DEFAULT_CORE_READY_JSON="$default_core_ready_json" \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$DEFAULT_CORE_READY_JSON"; }; t2_deployment_check' bash "$COMMON"
 
+# A required core Deployment scaled to zero is not a valid certification
+# result, even though additional non-core Deployments may remain suspended.
+zero_core_json='{"items":[{"metadata":{"namespace":"control-plane","name":"control-api","generation":1},"spec":{"replicas":0},"status":{"observedGeneration":1,"updatedReplicas":0,"readyReplicas":0,"availableReplicas":0,"unavailableReplicas":0}},{"metadata":{"namespace":"control-plane","name":"host-context-controller","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"profiles","name":"external-rest-api","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"rpc-proxy","name":"rpc-proxy","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"mcp-host","name":"chatllm","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
+expect_code PROFILE_UNHEALTHY required-core-scaled-zero required-core-scaled-zero \
+  env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS= ZERO_CORE_JSON="$zero_core_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$ZERO_CORE_JSON"; }; t2_deployment_check' bash "$COMMON"
+
 # Production scope also evaluates every additional Deployment. Keep the five
 # core Deployments healthy while an otherwise out-of-scope UI is unready; the
 # old allowlist passed this fixture and certified a broken profile.

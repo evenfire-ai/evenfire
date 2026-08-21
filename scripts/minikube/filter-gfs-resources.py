@@ -27,7 +27,7 @@ class MappingLine(NamedTuple):
 
 
 MAPPING_LINE = re.compile(
-    r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*):"
+    r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*|\"[^\"\r\n]+\"|'[^'\r\n]+'):"
     r"(?:[ \t]*(?P<value>.*?))?[ \t]*$"
 )
 DOCUMENT_START = re.compile(r"^---[ \t]*(?:#.*)?(?:\r?\n)?$")
@@ -57,7 +57,7 @@ def mapping_line(line: str) -> MappingLine | None:
         return None
     return MappingLine(
         indentation(line),
-        match.group("key"),
+        scalar_value(match.group("key")),
         match.group("value") or "",
     )
 

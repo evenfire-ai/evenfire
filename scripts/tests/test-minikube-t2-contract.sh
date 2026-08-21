@@ -59,6 +59,12 @@ grep -Fq 't0.sh' "$T2"
 grep -Fq 'T0_SHELLCHECK=PASS' "$T0"
 grep -Fq 'npm run build' "$T0"
 grep -Fq 'npm test' "$T0"
+grep -Fq 'if [ "${#package_dirs[@]}" -gt 0 ]' "$T0"
+grep -Fq 'Ready pod owner ReplicaSet could not be verified' "$ROOT/deploy/scripts/lib/gfs-credential-rollout.sh"
+grep -Fq 'treating marker as stale' "$ROOT/scripts/minikube/pre-gate-sync.sh"
+for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/scripts/minikube/require-t2-mutation-lock.sh" "$ROOT/scripts/minikube/pre-gate-sync.sh"; do
+  grep -Fq 't2_worktree_id' "$identity_file"
+done
 grep -Fq 'bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"' "$T2"
 
 required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED"

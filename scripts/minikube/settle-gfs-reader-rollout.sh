@@ -155,12 +155,16 @@ if [ "$ready" != "$desired" ]; then
 fi
 
 # Desired Ready is met from here on: leftovers below serve nothing.
-current_rev="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
-  -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+if ! current_rev="$(kc -n "$GFS_NS" get deployment "$DEPLOY" \
+  -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>&1)"; then
+  die "unable to read current revision for ${GFS_NS}/${DEPLOY}: ${current_rev}"
+fi
 scaled_rs_names=()
-rs_rows="$(kc -n "$GFS_NS" get rs -l "$SELECTOR" -o \
+if ! rs_rows="$(kc -n "$GFS_NS" get rs -l "$SELECTOR" -o \
   'jsonpath={range .items[*]}{.metadata.name}{"|"}{.metadata.ownerReferences[0].name}{"|"}{.spec.replicas}{"|"}{.status.readyReplicas}{"|"}{.metadata.annotations.deployment\.kubernetes\.io/revision}{"\n"}{end}' \
-  2>/dev/null)"
+  2>&1)"; then
+  die "unable to inspect ${GFS_NS} ReplicaSets before reader settlement: ${rs_rows}"
+fi
 while IFS='|' read -r rs_name rs_owner rs_replicas rs_ready rs_rev; do
   [ -n "$rs_name" ] || continue
   [ "$rs_owner" = "$DEPLOY" ] || continue
@@ -180,9 +184,11 @@ if [ "${#scaled_rs_names[@]}" -gt 0 ]; then
   done
 fi
 
-pod_rows="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
+if ! pod_rows="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
   'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.containerStatuses[0].state.waiting.reason}{"\n"}{end}' \
-  2>/dev/null)"
+  2>&1)"; then
+  die "unable to inspect ${GFS_NS} reader pods before crash-loop cleanup: ${pod_rows}"
+fi
 while IFS='|' read -r pod_name pod_ready pod_deleting pod_reason; do
   [ -n "$pod_name" ] || continue
   [ -z "$pod_deleting" ] || continue

@@ -123,6 +123,10 @@ build-preflight: ## Run local build preflight across deployable packages
 
 # ── Minikube Cluster ─────────────────────────────────────────────────
 MINIKUBE_PROFILE ?= clerum-test
+# Startup supports the documented shared local profile before a branch-owned
+# T2 lease exists. The mode is passed only by minikube-start; standalone auth
+# sync remains lease-protected.
+MINIKUBE_STARTUP_AUTH_SYNC_MODE ?= locked
 MINIKUBE_MULTI_NODE ?= false
 MINIKUBE_NODES ?=
 MINIKUBE_MEMORY ?= 10240
@@ -145,7 +149,7 @@ minikube-start: ## Start minikube cluster (starts Docker Desktop if needed)
 		echo "Docker ready."; \
 	fi
 	MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_MULTI_NODE="$(MINIKUBE_MULTI_NODE)" MINIKUBE_NODES="$(MINIKUBE_NODES)" MINIKUBE_MEMORY="$(MINIKUBE_MEMORY)" MINIKUBE_CPUS="$(MINIKUBE_CPUS)" scripts/minikube/start.sh
-	@$(MAKE) --no-print-directory minikube-sync-auth-key-if-present
+	@$(MAKE) --no-print-directory MINIKUBE_STARTUP_AUTH_SYNC_MODE=shared-profile-mcp minikube-sync-auth-key-if-present
 
 .PHONY: minikube-stop
 minikube-stop: ## Stop minikube cluster
@@ -448,7 +452,7 @@ minikube-apply-secrets: ## Apply all secrets to cluster (LLM keys read from .env
 minikube-apply-namespaces: ## Create all namespaces
 	$(KC) apply -f deploy/base/namespaces.yaml
 
-.PHONY: minikube-sync-auth-key minikube-sync-auth-key-body
+.PHONY: minikube-sync-auth-key minikube-sync-auth-key-body minikube-sync-auth-key-shared-profile
 minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets into runtime ConfigMaps when drift exists
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
@@ -467,6 +471,10 @@ minikube-sync-auth-key-body:
 		T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE) --skip-gfs --require-mcp; \
 	fi
+
+minikube-sync-auth-key-shared-profile: ## Sync only MCP auth on the documented shared profile during startup
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE) --shared-profile-bootstrap --skip-gfs --require-mcp
 
 .PHONY: minikube-sync-auth-key-if-present
 minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube auth resources already exist
@@ -499,8 +507,10 @@ minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube aut
 	  fi; \
 	  printf '%s\n' "$$mcp_probe_output" >&2; exit "$$mcp_probe_status"; \
 	fi; \
-	if [ "$(T2_MUTATION_LOCK_WRAPPED)" = "true" ]; then \
-	  $(MAKE) --no-print-directory minikube-sync-auth-key-body; \
+	if [ "$(MINIKUBE_STARTUP_AUTH_SYNC_MODE)" = "shared-profile-mcp" ]; then \
+		$(MAKE) --no-print-directory minikube-sync-auth-key-shared-profile; \
+	elif [ "$(T2_MUTATION_LOCK_WRAPPED)" = "true" ]; then \
+		$(MAKE) --no-print-directory minikube-sync-auth-key-body; \
 	else \
 	  $(MAKE) --no-print-directory minikube-sync-auth-key; \
 	fi

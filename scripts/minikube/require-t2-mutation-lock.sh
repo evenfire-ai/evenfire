@@ -33,7 +33,7 @@ actual_root="$(git -C "${T2_PROJECT_DIR}" rev-parse --show-toplevel 2>/dev/null 
 }
 T2_BRANCH="$(git -C "${T2_PROJECT_DIR}" branch --show-current 2>/dev/null || true)"
 T2_HEAD="$(git -C "${T2_PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || true)"
-T2_WORKTREE_ID="$(printf '%s' "${T2_PROJECT_DIR}" | shasum | awk '{print $1}')"
+T2_WORKTREE_ID="$(t2_worktree_id "${T2_PROJECT_DIR}")"
 [[ -n "${T2_BRANCH}" && -n "${T2_HEAD}" ]] || {
   printf 'DEVELOPMENT_SCOPE_REQUIRED: mutation child cannot resolve branch and HEAD\n' >&2
   exit 1

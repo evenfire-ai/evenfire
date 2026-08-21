@@ -218,7 +218,7 @@ else
   # context authorization into the auth-key mutator; it must not infer remote
   # ownership from a failed local Minikube probe.
   GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT" \
-    bash scripts/minikube/sync-auth-key.sh --context "$CONTEXT" --require-gfs
+    bash "$ROOT/scripts/minikube/sync-auth-key.sh" --context "$CONTEXT" --require-gfs
 fi
 
 if [ "$SKIP_INSTANCES" = "1" ]; then

@@ -11,7 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
-WORKTREE_ID="$(printf '%s' "${PROJECT_DIR}" | shasum | awk '{print $1}')"
+# shellcheck source=t2-worktree-id.sh
+source "$SCRIPT_DIR/t2-worktree-id.sh"
+WORKTREE_ID="$(t2_worktree_id "${PROJECT_DIR}")"
 STATE_ROOT="${TMPDIR:-/tmp}/clerum-pre-gate-sync"
 STATE_DIR="${STATE_ROOT}/${WORKTREE_ID}"
 CLUSTER_SYNC_STATE_CONFIGMAP="${CLERUM_PRE_GATE_SYNC_CONFIGMAP:-clerum-pre-gate-sync-state}"
@@ -273,6 +275,21 @@ persist_state() {
   printf '%s' "${value}" >"$(state_file_for "${key}")"
 }
 
+cluster_marker_value() {
+  local field="$1" output
+  if output="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
+    -o "jsonpath={.data.${field}}" 2>&1)"; then
+    printf '%s' "${output}"
+    return 0
+  fi
+  if [[ "${output}" == *NotFound* || "${output}" == *"not found"* ]]; then
+    printf ''
+    return 0
+  fi
+  log "WARNING: unable to inspect ${CLUSTER_SYNC_STATE_CONFIGMAP}.${field}; treating marker as stale: ${output}" >&2
+  printf ''
+}
+
 cluster_marker_matches() {
   local expected_cluster_fingerprint="$1"
   local expected_worktree_id="$2"
@@ -281,18 +298,18 @@ cluster_marker_matches() {
 
   expected_git_head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || true)"
 
-  actual_cluster_fingerprint="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.clusterFingerprint}' 2>/dev/null || true)"
-  actual_worktree_id="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.worktreeId}' 2>/dev/null || true)"
-  actual_git_head="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.gitHead}' 2>/dev/null || true)"
+  actual_cluster_fingerprint="$(cluster_marker_value clusterFingerprint)"
+  actual_worktree_id="$(cluster_marker_value worktreeId)"
+  actual_git_head="$(cluster_marker_value gitHead)"
   # The image coordinate is part of "in sync". gitHead cannot tell a ghcr
   # cluster from a local one, nor v0.6.0 from latest, and the acquisition stamp
   # is what catches a `make minikube-setup` between two pre-gates: that re-pulls
   # every release image and discards any shadow build while leaving this marker
   # untouched, so without it no sync would run and the gate would silently test
   # release code.
-  actual_image_source="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imageSource}' 2>/dev/null || true)"
-  actual_image_tag="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imageTag}' 2>/dev/null || true)"
-  actual_images_generated_at="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
+  actual_image_source="$(cluster_marker_value imageSource)"
+  actual_image_tag="$(cluster_marker_value imageTag)"
+  actual_images_generated_at="$(cluster_marker_value imagesGeneratedAt)"
 
   [[ "${actual_cluster_fingerprint}" == "${expected_cluster_fingerprint}" ]] &&
     [[ "${actual_worktree_id}" == "${expected_worktree_id}" ]] &&
