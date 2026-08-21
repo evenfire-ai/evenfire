@@ -124,6 +124,10 @@ describe('HostDetailsPage identity integration', () => {
       'Access',
       'Advanced',
     ])
+    expect(tabs.find(tab => tab.textContent === 'Connectors')).toHaveAttribute(
+      'href',
+      '/agents/foo/connectors'
+    )
   })
 
   it('puts Allowed models in place of Model name and spells out Secret reference', async () => {
@@ -270,5 +274,4 @@ describe('HostDetailsPage identity integration', () => {
     )
     expect(putCall![2].spec.host).toBe('foo-display')
   })
-
 })

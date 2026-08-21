@@ -9,8 +9,8 @@ const replaceMock = vi.fn()
 const pushMock = vi.fn()
 
 vi.mock('next/navigation', () => ({
-  useParams: () => ({ name: 'foo', tab: 'contexts' }),
-  usePathname: () => '/agents/foo/contexts',
+  useParams: () => ({ name: 'foo', tab: 'connectors' }),
+  usePathname: () => '/agents/foo/connectors',
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
   useSearchParams: () => new URLSearchParams(),
 }))
@@ -134,11 +134,12 @@ describe('HostDetailsPage connectors', () => {
   it('confirms connector removal and updates the private context membership', async () => {
     renderPage()
 
-    const removeButton = await screen.findByRole('button', {
-      name: 'Remove connector mcp-existing',
+    const actionsButton = await screen.findByRole('button', {
+      name: 'Actions for connector mcp-existing',
     })
-    fireEvent.click(removeButton)
-    fireEvent.click(screen.getByRole('button', { name: 'Remove connector', exact: true }))
+    fireEvent.click(actionsButton)
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove connector', exact: true }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove connector', exact: true }))
 
     await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
     expect(api.updateContext).toHaveBeenCalledWith(
@@ -149,7 +150,9 @@ describe('HostDetailsPage connectors', () => {
       })
     )
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Remove connector mcp-existing' })).toBeNull()
+      expect(
+        screen.queryByRole('button', { name: 'Actions for connector mcp-existing' })
+      ).toBeNull()
     )
   })
 })

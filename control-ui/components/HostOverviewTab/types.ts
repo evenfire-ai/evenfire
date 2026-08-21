@@ -5,7 +5,7 @@ export type HostOverviewAccessSummary = {
   teamNames: string[]
 }
 
-export type HostTabKey = 'access' | 'model' | 'contexts'
+export type HostTabKey = 'access' | 'model' | 'connectors'
 
 export type HostOverviewTabProps = {
   hostName: string

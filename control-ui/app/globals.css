@@ -5083,6 +5083,14 @@ textarea.cu-input {
   margin-left: auto;
 }
 
+.cu-agent-connectors-table .cu-table__col-actions,
+.cu-agent-connectors-table .cu-table__cell-actions {
+  width: 6rem;
+  min-width: 6rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .cu-agent-detail-toolbar {
   position: sticky;
   top: 0;
@@ -8311,10 +8319,6 @@ textarea.cu-input {
   )
   img {
   filter: brightness(0) invert(1);
-}
-
-:root[data-theme='light'] .cu-llm-provider-icon[data-provider='zai'] img {
-  filter: brightness(0);
 }
 
 /* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be

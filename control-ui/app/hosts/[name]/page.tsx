@@ -15,6 +15,7 @@ import type { HostGuardrails } from '../../../components/HostGuardrailsSection/t
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
+import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
 import {
@@ -52,7 +53,7 @@ const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
   model: 'Models & creds',
   advanced: 'Advanced',
-  contexts: 'Connectors',
+  connectors: 'Connectors',
   access: 'Access',
   identity: 'Identity',
 }
@@ -61,7 +62,7 @@ const TAB_SLUGS: Record<HostTab, string> = {
   details: 'overview',
   model: 'model',
   advanced: 'advanced',
-  contexts: 'contexts',
+  connectors: 'connectors',
   access: 'access',
   identity: 'identity',
 }
@@ -1182,7 +1183,7 @@ export default function HostDetailsPage() {
           </>
         )}
 
-        {activeTab === 'contexts' && (
+        {activeTab === 'connectors' && (
           <>
             <div className="cu-agent-detail-heading">
               <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
@@ -1200,7 +1201,7 @@ export default function HostDetailsPage() {
               </div>
             </div>
             <div className="cu-table-wrap">
-              <table className="cu-table cu-table--header-band cu-table--static-rows">
+              <table className="cu-table cu-table--header-band cu-table--static-rows cu-agent-connectors-table">
                 <thead>
                   <tr>
                     <th>Connector</th>
@@ -1227,16 +1228,21 @@ export default function HostDetailsPage() {
                           <span className="cu-table__cell-name">{server}</span>
                         </td>
                         <td className="cu-table__cell-actions">
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void removeAgentConnector(server)}
-                            disabled={busy}
-                            aria-label={`Remove connector ${server}`}
-                            title="Remove connector"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
+                          <div className="cu-table-actions">
+                            <RowActionsMenu
+                              ariaLabel={`Actions for connector ${server}`}
+                              horizontalTrigger
+                              actions={[
+                                {
+                                  key: 'remove',
+                                  label: 'Remove connector',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () => void removeAgentConnector(server),
+                                },
+                              ]}
+                            />
+                          </div>
                         </td>
                       </tr>
                     ))
