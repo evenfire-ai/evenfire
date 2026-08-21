@@ -104,6 +104,7 @@ function makeCodexHost(overrides?: Partial<HostCRD['spec']>): HostCRD {
   return {
     name: 'codex-host',
     namespace: 'mcp-host',
+    uid: 'codex-host-uid',
     spec: {
       host: 'codex-host',
       contextRef: 'context-a',
