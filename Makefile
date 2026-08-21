@@ -1017,7 +1017,7 @@ test-e2e-codex-subscription-runtime: ## Codex subscription runtime acceptance (R
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-runtime.sh
 
 .PHONY: test-e2e-codex-subscription-playwright
-test-e2e-codex-subscription-playwright: ## Codex subscription Control UI guardians (4 specs; Desktop deferred until connected subscription)
+test-e2e-codex-subscription-playwright: ## Codex subscription Control UI guardians (5 tests; Desktop deferred until connected subscription)
 	@echo "Running Codex subscription Control UI Playwright guardians..."
 	@if [ -z "$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" ]; then \
 		echo "Refusing Codex subscription Playwright: explicit Kubernetes context is required" >&2; \

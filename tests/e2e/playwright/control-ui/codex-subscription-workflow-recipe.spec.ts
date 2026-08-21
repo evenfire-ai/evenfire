@@ -11,11 +11,10 @@
  * API calls are limited to fixture setup/cleanup; the Codex template swap is UI-driven.
  */
 import { expect, test } from '@playwright/test'
+import { adminSessionCookieHeader } from '../helpers/session-cookie'
 import { loginControlUiVisible } from '../helpers/visible-login'
 
 const BASE_API = process.env.CONTROL_API_URL ?? process.env.CONTROL_API_BASE_URL ?? ''
-const ADMIN_USERNAME = process.env.TEST_ADMIN_USERNAME ?? 'admin'
-const ADMIN_PASSWORD = process.env.TEST_ADMIN_PASSWORD ?? 'changeme123!'
 const RECIPE_NS = 'sandbox-recipes'
 const CODEX_TEMPLATE = 'Agentic Workflow (Codex Subscription)'
 
@@ -25,18 +24,13 @@ function uniqueRecipeName(): string {
   return `e2e-codex-wr-${Date.now().toString(36)}`.slice(0, 63).replace(/-$/, '')
 }
 
-async function api<T>(
-  token: string,
-  method: string,
-  path: string,
-  body?: unknown
-): Promise<ApiResult<T>> {
+async function api<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
   if (!BASE_API) throw new Error('CONTROL_API_URL is required for workflow-recipe fixture setup')
   const response = await fetch(`${BASE_API}${path}`, {
     method,
     headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
+      ...adminSessionCookieHeader(),
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
@@ -52,38 +46,22 @@ async function api<T>(
   return { status: response.status, data, text }
 }
 
-async function loginApiToken(): Promise<string> {
-  const result = await api<{ token?: string }>('', 'POST', '/api/v1/admin/auth/login', {
-    username: ADMIN_USERNAME,
-    password: ADMIN_PASSWORD,
+async function createPlaceholderRecipe(name: string): Promise<void> {
+  const result = await api<{ metadata?: { name?: string } }>('POST', '/api/v1/admin/recipes', {
+    metadata: { name, namespace: RECIPE_NS },
+    spec: {
+      agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+      triggers: { onDemand: { requiresApproval: false, allowedActors: ['user'] } },
+      steps: [{ id: 'noop', instruction: 'Return ok.', timeoutSeconds: 60 }],
+      workloads: [],
+    },
   })
-  expect(result.status, result.text).toBe(200)
-  expect(result.data.token, 'admin login must return a bearer token').toBeTruthy()
-  return result.data.token!
-}
-
-async function createPlaceholderRecipe(token: string, name: string): Promise<void> {
-  const result = await api<{ metadata?: { name?: string } }>(
-    token,
-    'POST',
-    '/api/v1/admin/recipes',
-    {
-      metadata: { name, namespace: RECIPE_NS },
-      spec: {
-        agent: { provider: 'zai', model: 'glm-4.7' },
-        triggers: { onDemand: { requiresApproval: false, allowedActors: ['user'] } },
-        steps: [{ id: 'noop', instruction: 'Return ok.', timeoutSeconds: 60 }],
-        workloads: [],
-      },
-    }
-  )
   expect([200, 201], result.text).toContain(result.status)
   expect(result.data.metadata?.name).toBe(name)
 }
 
-async function deleteRecipe(token: string, name: string): Promise<void> {
+async function deleteRecipe(name: string): Promise<void> {
   const result = await api<Record<string, unknown>>(
-    token,
     'DELETE',
     `/api/v1/admin/recipes/${encodeURIComponent(name)}`
   )
@@ -93,11 +71,14 @@ async function deleteRecipe(token: string, name: string): Promise<void> {
 test.describe('Codex subscription workflow recipe authoring', () => {
   test('operator can load a Codex subscription template without LLM secrets', async ({ page }) => {
     test.skip(!BASE_API, 'CONTROL_API_URL is required for recipe fixture setup')
+    test.skip(
+      !process.env.PLAYWRIGHT_ADMIN_TOKEN,
+      'admin session cookie missing; globalSetup must run first'
+    )
 
-    const token = await loginApiToken()
     const recipeName = uniqueRecipeName()
-    await deleteRecipe(token, recipeName)
-    await createPlaceholderRecipe(token, recipeName)
+    await deleteRecipe(recipeName)
+    await createPlaceholderRecipe(recipeName)
 
     try {
       // E2E_GUARDIAN_ENTRY_POINT
@@ -129,23 +110,12 @@ test.describe('Codex subscription workflow recipe authoring', () => {
       await expect(manifest).toContainText('"provider": "codex-subscription"')
       await expect(manifest).not.toContainText('secretRef')
 
-      const validate = page.waitForResponse(
-        response =>
-          response.url().includes('/api/v1/admin/recipes/validate') &&
-          response.request().method() === 'POST',
-        { timeout: 30_000 }
-      )
+      // L1 validation is client-side on "Review manifest"; server L2 runs only on deploy.
       await page.getByRole('button', { name: 'Review manifest' }).click()
-      const validateResponse = await validate
-      expect(
-        validateResponse.ok(),
-        `server manifest validation must succeed, got ${validateResponse.status()}`
-      ).toBe(true)
-
       await expect(page.getByText(/Manifest review passed/)).toBeVisible({ timeout: 20_000 })
       await expect(page.getByText(/must not declare an LLM secretRef/i)).toHaveCount(0)
     } finally {
-      await deleteRecipe(token, recipeName)
+      await deleteRecipe(recipeName)
     }
   })
 })

@@ -7,6 +7,7 @@ const CONTROL_UI_URL =
 
 export default defineConfig({
   testDir: '.',
+  globalSetup: path.join(__dirname, 'global-setup.ts'),
   timeout: 45_000,
   expect: { timeout: 15_000 },
   retries: 0,
