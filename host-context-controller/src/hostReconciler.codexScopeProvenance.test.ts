@@ -104,6 +104,7 @@ function makeCodexHost(overrides?: Partial<HostCRD['spec']>): HostCRD {
   return {
     name: 'codex-host',
     namespace: 'mcp-host',
+    uid: 'codex-host-uid',
     spec: {
       host: 'codex-host',
       contextRef: 'context-a',
@@ -146,7 +147,7 @@ function wireAllowlist(
 
 function issuedScopes(): string[] {
   const last = vi.mocked(issueMcpHostRuntimeTokens).mock.calls.at(-1)
-  return (last?.[1] ?? []) as string[]
+  return (last?.[2] ?? []) as string[]
 }
 
 function scopeHashFromSecretWrites(coreApi: ReturnType<typeof createMockCoreApi>): string[] {
