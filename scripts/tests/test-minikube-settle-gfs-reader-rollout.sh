@@ -76,7 +76,7 @@ case " $* " in
   *' scale rs '*)
     printf '%s' "${4:-gfsc-reader-stale}" >"${FAKE_SCALE_FILE:?}"
     exit 0 ;;
-  *' get pods -l '*gfs-template-hash*)
+  *' get pods -l '*creationTimestamp*)
     printf '%b' "${FAKE_PROOF_POD_ROWS:-gfsc-reader-proof|2026-01-02T00:00:01Z|True||gfsc-reader-proof-rs|}"; exit 0 ;;
   *' get pods -l '*)
     printf '%b' "${FAKE_POD_ROWS:-}"; exit 0 ;;
