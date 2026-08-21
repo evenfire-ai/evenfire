@@ -15,8 +15,8 @@ import {
 } from '../../../services/workflows/workflowGrantManagementService.js'
 import { requireAdminWorkflowCaller } from '../../workflows/shared/auth.js'
 import {
-  workflowGrantReadRateLimit,
-  workflowGrantWriteRateLimit,
+  WORKFLOW_GRANT_READ_RATE_LIMITS,
+  WORKFLOW_GRANT_WRITE_RATE_LIMITS,
 } from '../../workflows/shared/rateLimit.js'
 
 const BASE = '/admin/workflows'
@@ -39,7 +39,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/grants`,
-    workflowGrantReadRateLimit(),
+    ...WORKFLOW_GRANT_READ_RATE_LIMITS,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = await requireAdminWorkflowCaller(req, res)
       if (!caller) return
@@ -59,7 +59,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `${BASE}/:ns/:name/grants`,
-    workflowGrantWriteRateLimit(),
+    ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = await requireAdminWorkflowCaller(req, res)
       if (!caller) return
@@ -104,7 +104,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/team-grants`,
-    workflowGrantReadRateLimit(),
+    ...WORKFLOW_GRANT_READ_RATE_LIMITS,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = await requireAdminWorkflowCaller(req, res)
       if (!caller) return
@@ -124,7 +124,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `${BASE}/:ns/:name/team-grants`,
-    workflowGrantWriteRateLimit(),
+    ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = await requireAdminWorkflowCaller(req, res)
       if (!caller) return
@@ -169,7 +169,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `/admin/workflow-recipes/:ns/:name/allowed-teams`,
-    workflowGrantReadRateLimit(),
+    ...WORKFLOW_GRANT_READ_RATE_LIMITS,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = await requireAdminWorkflowCaller(req, res)
       if (!caller) return
@@ -193,7 +193,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `/admin/workflow-recipes/:ns/:name/allowed-teams/:teamId`,
-    workflowGrantWriteRateLimit(),
+    ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = await requireAdminWorkflowCaller(req, res)
       if (!caller) return
@@ -232,7 +232,7 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.delete(
     `/admin/workflow-recipes/:ns/:name/allowed-teams/:teamId`,
-    workflowGrantWriteRateLimit(),
+    ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = await requireAdminWorkflowCaller(req, res)
       if (!caller) return
