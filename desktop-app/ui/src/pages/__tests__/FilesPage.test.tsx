@@ -1614,27 +1614,18 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage()
-    // Wait for the row thumbnail to land so the blob cache is warm
-    // before the user opens the preview modal.
-    await screen.findByAltText('Thumbnail of diagram.PNG')
-
-    // Capture download calls made by the thumbnail so we can assert
-    // that opening the preview doesn't trigger another fetch.
-    const downloadCallsAfterThumbnail = download.mock.calls.length
+    expect(download).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
 
     const dialog = await screen.findByRole('dialog', { name: 'diagram.PNG' })
     await waitFor(() => expect(within(dialog).getByAltText('Preview of diagram.PNG')).toBeTruthy())
-    // The preview reuses the cached object URL — the proxy download
-    // is NOT triggered a second time.
-    expect(download.mock.calls.length).toBe(downloadCallsAfterThumbnail)
+    expect(download).toHaveBeenCalledWith('gfs://main/image-1')
+    expect(download).toHaveBeenCalledTimes(1)
     expect(anchorClick).not.toHaveBeenCalled()
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close image preview' }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'diagram.PNG' })).toBeNull())
-    // The thumbnail owns the cached URL lifecycle, so closing the
-    // preview must NOT revoke the object URL.
-    expect(revokeObjectURL).not.toHaveBeenCalled()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-image-preview')
   })
 
   it('copies markdown source to the clipboard via the preview header button', async () => {

@@ -739,11 +739,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           ) : currentIsFile ? (
             <div className="da-gfs-current-file">
               <span className="da-gfs-current-file__icon" aria-hidden="true">
-                {currentIsFile ? (
-                  <GfsFileIcon name={current.name} bytes={current.bytes} rid={current.rid} />
-                ) : (
-                  <IconAttachFile />
-                )}
+                {currentIsFile ? <GfsFileIcon name={current.name} /> : <IconAttachFile />}
               </span>
               <div className="da-gfs-current-file__copy">
                 <div className="da-gfs-current-file__title-row">
@@ -821,11 +817,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                       {resource.kind === 'directory' ? (
                         <IconContexts />
                       ) : (
-                        <GfsFileIcon
-                          name={resource.name}
-                          bytes={resource.bytes}
-                          rid={resource.rid}
-                        />
+                        <GfsFileIcon name={resource.name} />
                       )}
                     </span>
                     <span className="da-gfs-list__identity da-grid__cell">
@@ -976,11 +968,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 className={`da-gfs-manage-dialog__icon${currentIsFolder ? ' da-gfs-manage-dialog__icon--folder' : ''}`}
                 aria-hidden="true"
               >
-                {currentIsFolder ? (
-                  <IconContexts />
-                ) : (
-                  <GfsFileIcon name={current.name} bytes={current.bytes} rid={current.rid} />
-                )}
+                {currentIsFolder ? <IconContexts /> : <GfsFileIcon name={current.name} />}
               </span>
               <span className="da-gfs-manage-dialog__heading">
                 {renameOpen ? (

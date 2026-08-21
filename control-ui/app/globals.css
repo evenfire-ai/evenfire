@@ -11528,14 +11528,6 @@ button.cu-gfs-tree__button:focus-visible,
   border-radius: var(--cu-radius-sm);
 }
 
-.cu-gfs-file-thumbnail {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: cover;
-  border-radius: var(--cu-radius-sm);
-}
-
 .cu-gfs-list__meta {
   color: var(--cu-text-muted);
   font-size: 0.72rem;

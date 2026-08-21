@@ -2,7 +2,6 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { FileUploadModal } from '@components/FileUploadModal'
-import { GfsFileThumbnail } from '@components/GfsFileThumbnail'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
 import { GfsVideoPreview } from '@components/GfsVideoPreview'
@@ -702,11 +701,7 @@ export function GfsBrowser(): React.JSX.Element {
                         {child.kind === 'directory' ? (
                           <IconFolder />
                         ) : gfsImagePreviewMimeType(child.name) ? (
-                          <GfsFileThumbnail
-                            byteLength={child.bytes}
-                            fileName={child.name}
-                            rid={child.rid}
-                          />
+                          <IconImage />
                         ) : isGfsVideoFile(child.name) ? (
                           <IconVideo />
                         ) : isGfsDocumentFile(child.name) ? (

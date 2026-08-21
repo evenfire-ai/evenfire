@@ -7,12 +7,6 @@ import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
 import { Button } from '@components/ui'
 import { gfsFetchFileBlob } from '@lib/api'
-import {
-  getCachedGfsBlob,
-  releaseCachedGfsBlob,
-  retainCachedGfsBlob,
-  setCachedGfsBlob,
-} from '@lib/gfsBlobCache'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewProps } from './types'
 
@@ -52,30 +46,6 @@ export function GfsImagePreview({
     let objectUrl: string | null = null
 
     async function loadPreview(): Promise<void> {
-      // If the row thumbnail already paid the proxy round-trip for this
-      // resource, reuse its object URL and skip the network entirely.
-      const cached = getCachedGfsBlob(rid)
-      if (cached && retainCachedGfsBlob(rid, cached.blobUrl)) {
-        objectUrl = cached.blobUrl
-        if (!active) return
-        // Reconstruct the Blob from the same bytes the thumbnail cached
-        // would require keeping the Blob alive; instead we copy the
-        // cached object URL and let the modal revoke its own reference
-        // when it unmounts (sharing the URL is fine — the browser keeps
-        // the blob alive until every reference revokes).
-        setPreviewUrl(cached.blobUrl)
-        // The cached blob is reachable only through the object URL; for
-        // the "Copy" affordance we still need a Blob. Issue a fetch on
-        // the object URL to materialise it cheaply.
-        try {
-          const cachedBlob = await (await fetch(cached.blobUrl)).blob()
-          if (active) setSourceBlob(cachedBlob)
-        } catch {
-          /* Copy will surface the error in copyImageToClipboard. */
-        }
-        return
-      }
-
       try {
         assertGfsImagePreviewSize(byteLength)
         const fetched = await gfsFetchFileBlob(rid)
@@ -83,14 +53,8 @@ export function GfsImagePreview({
         if (!active) return
         const blob = new Blob([fetched], { type: mimeType })
         setSourceBlob(blob)
-        const cachedEntry = setCachedGfsBlob(rid, {
-          blobUrl: URL.createObjectURL(blob),
-          mimeType: blob.type,
-        })
-        objectUrl = cachedEntry.blobUrl
-        // Publish to the cache so the next preview open skips the network.
-        // This preview holds one reference until its cleanup runs.
-        setPreviewUrl(cachedEntry.blobUrl)
+        objectUrl = URL.createObjectURL(blob)
+        setPreviewUrl(objectUrl)
       } catch (error) {
         if (!active) return
         setPreviewError(error instanceof Error ? error.message : 'Could not load the image preview')
@@ -100,9 +64,7 @@ export function GfsImagePreview({
     void loadPreview()
     return () => {
       active = false
-      // Release this preview's reference. The cache revokes the URL only
-      // after the last thumbnail or preview consumer leaves.
-      if (objectUrl) releaseCachedGfsBlob(rid, objectUrl)
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
   }, [byteLength, mimeType, rid])
 

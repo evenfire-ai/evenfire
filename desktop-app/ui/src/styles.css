@@ -13467,16 +13467,9 @@ pre {
   overflow: hidden;
 }
 
-.da-gfs-list__icon svg,
-.da-gfs-list__icon .da-gfs-file-thumbnail {
+.da-gfs-list__icon svg {
   width: 100%;
   height: 100%;
-}
-
-.da-gfs-file-thumbnail {
-  display: block;
-  object-fit: cover;
-  border-radius: var(--radius-sm);
 }
 
 .da-gfs-list__identity {
