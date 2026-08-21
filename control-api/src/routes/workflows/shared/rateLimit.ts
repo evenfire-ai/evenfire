@@ -2,6 +2,7 @@ import type { Request, Response } from 'express'
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
+import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
@@ -22,12 +23,23 @@ export function adminWorkflowRateLimitCredential(req: Request): string | null {
   return cookie || null
 }
 
+/** Persist PG buckets only for cryptographically verified admin subjects. */
+export function verifiedAdminRateLimitSubject(credential: string | null): string | null {
+  if (!credential) return null
+  const claims = verifyAdminToken(credential)
+  return claims?.sub || null
+}
+
 function hashedAdminWorkflowCredentialBucket(prefix: string) {
   return (req: Request): string | null => {
     const credential = adminWorkflowRateLimitCredential(req)
+    const subject = verifiedAdminRateLimitSubject(credential)
+    if (subject) {
+      const hash = createHash('sha256').update(subject).digest('hex').slice(0, 32)
+      return `${prefix}:${hash}`
+    }
     if (!credential) return null
-    const hash = createHash('sha256').update(credential).digest('hex').slice(0, 32)
-    return `${prefix}:${hash}`
+    return `${prefix}:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
   }
 }
 
@@ -43,14 +55,14 @@ export function shouldSkipWorkflowGrantEdgeRateLimit(req: Request): boolean {
 
 /**
  * Edge backstop key:
- * - HttpOnly admin cookie → per-session bucket (isolates Control UI admins)
- * - Bearer only → IP bucket (unverified bearer rotation cannot mint fresh buckets)
+ * - Verified admin cookie/bearer → per-subject bucket (isolates Control UI admins)
+ * - Unverified credential → IP bucket (rotation cannot mint fresh identities)
  */
 export function workflowGrantEdgeRateLimitKey(prefix: string, req: Request): string {
-  const cookie = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
-  if (cookie) {
-    const hash = createHash('sha256').update(cookie).digest('hex').slice(0, 32)
-    return `${prefix}:cred:${hash}`
+  const subject = verifiedAdminRateLimitSubject(adminWorkflowRateLimitCredential(req))
+  if (subject) {
+    const hash = createHash('sha256').update(subject).digest('hex').slice(0, 32)
+    return `${prefix}:sub:${hash}`
   }
   return `${prefix}:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
@@ -120,11 +132,19 @@ export function adminOutputsReadRateLimits() {
 
 function workflowTriggerRateLimitCredential(req: Request): string | null {
   const bearer = extractBearerToken(req)
-  if (bearer) return bearer
+  if (bearer) {
+    return verifiedAdminRateLimitSubject(bearer) || bearer
+  }
   const userSessionToken = String(req.header('x-user-session-token') || '').trim()
   if (userSessionToken) return userSessionToken
-  const cookie = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
-  return cookie || null
+  const cookieSubject = verifiedAdminRateLimitSubject(
+    readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+  )
+  if (cookieSubject) return cookieSubject
+  if (readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)) {
+    return `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+  }
+  return null
 }
 
 export function workflowTriggerRateLimit() {

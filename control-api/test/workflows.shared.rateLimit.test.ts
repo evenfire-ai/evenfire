@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import {
   adminOutputsReadRateLimits,
   adminWorkflowRateLimitCredential,
   shouldSkipWorkflowGrantEdgeRateLimit,
+  verifiedAdminRateLimitSubject,
   workflowAdminReadRateLimits,
   workflowGrantEdgeRateLimitKey,
   workflowGrantReadRateLimit,
@@ -13,6 +14,7 @@ import {
 } from '../src/routes/workflows/shared/rateLimit.js'
 
 const mockCheckAndIncrement = vi.hoisted(() => vi.fn())
+const mockVerifyAdminToken = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: (...args: unknown[]) => mockCheckAndIncrement(...args),
@@ -20,6 +22,20 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
 vi.mock('../src/observability/metrics.js', () => ({
   rateLimitHitsTotal: { inc: vi.fn() },
 }))
+vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
+  verifyAdminToken: (token: string) => mockVerifyAdminToken(token),
+}))
+
+function signedClaims(sub: string) {
+  return {
+    sub,
+    typ: 'user' as const,
+    role: 'admin' as const,
+    jti: 'jti',
+    exp: 1,
+    sessionVersion: 0,
+  }
+}
 
 function pgAllows() {
   mockCheckAndIncrement.mockResolvedValue({
@@ -32,6 +48,12 @@ function pgAllows() {
 }
 
 describe('routes/workflows/shared/rateLimit', () => {
+  beforeEach(() => {
+    mockVerifyAdminToken.mockImplementation((token: string) =>
+      token.startsWith('signed-') ? signedClaims(token.slice('signed-'.length)) : null
+    )
+  })
+
   it('adminWorkflowRateLimitCredential accepts HttpOnly admin session cookies', () => {
     const req = {
       header(name: string) {
@@ -57,7 +79,29 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(shouldSkipWorkflowGrantEdgeRateLimit(req)).toBe(true)
   })
 
-  it('workflowGrantEdgeRateLimitKey isolates distinct admin cookies on the same IP', () => {
+  it('verifiedAdminRateLimitSubject ignores unverified cookies and bearers', () => {
+    expect(verifiedAdminRateLimitSubject('forged-cookie')).toBeNull()
+    expect(verifiedAdminRateLimitSubject('signed-admin-a')).toBe('admin-a')
+  })
+
+  it('workflowGrantEdgeRateLimitKey isolates verified admin subjects on the same IP', () => {
+    const reqA = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=signed-admin-a' : undefined,
+    } as express.Request
+    const reqB = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=signed-admin-b' : undefined,
+    } as express.Request
+
+    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).not.toBe(
+      workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqB)
+    )
+  })
+
+  it('workflowGrantEdgeRateLimitKey aggregates unverified cookies on the same IP', () => {
     const reqA = {
       ip: '203.0.113.10',
       header: (name: string) =>
@@ -69,7 +113,7 @@ describe('routes/workflows/shared/rateLimit', () => {
         name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=cookie-b' : undefined,
     } as express.Request
 
-    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).not.toBe(
+    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).toBe(
       workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqB)
     )
   })
@@ -177,6 +221,93 @@ describe('routes/workflows/shared/rateLimit', () => {
     }
   })
 
+  it('workflowGrantWriteRateLimits aggregates unverified cookie rotation on the same IP', async () => {
+    mockCheckAndIncrement.mockReset()
+
+    const app = express()
+    app.put('/grants', ...workflowGrantWriteRateLimits(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    for (let i = 0; i < 20; i++) {
+      pgAllows()
+      await request(app)
+        .put('/grants')
+        .set('Cookie', `control_ui_admin_session=forged-${i}`)
+        .expect(200)
+    }
+
+    pgAllows()
+    const res = await request(app)
+      .put('/grants')
+      .set('Cookie', 'control_ui_admin_session=forged-final')
+      .expect(429)
+
+    expect(res.body).toMatchObject({
+      error: 'Too Many Requests',
+      retryAfterSeconds: expect.any(Number),
+    })
+  })
+
+  it('workflowGrantReadRateLimit reuses one IP PG bucket for rotated unverified cookies', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 59,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.get('/grants', workflowGrantReadRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .get('/grants')
+      .set('Cookie', 'control_ui_admin_session=forged-cookie-a')
+      .expect(200)
+    await request(app)
+      .get('/grants')
+      .set('Cookie', 'control_ui_admin_session=forged-cookie-b')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_grants_read:ip:/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+
+  it('workflowTriggerRateLimit reuses one IP PG bucket for rotated unverified cookies', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const { workflowTriggerRateLimit } = await import('../src/routes/workflows/shared/rateLimit.js')
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=forged-cookie-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=forged-cookie-b')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+
   it('workflowTriggerRateLimit meters cookie-only admin workflow triggers', async () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
@@ -195,7 +326,7 @@ describe('routes/workflows/shared/rateLimit', () => {
 
     await request(app)
       .post('/trigger')
-      .set('Cookie', 'control_ui_admin_session=admin-cookie-token')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-cookie')
       .expect(200)
 
     expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
@@ -219,7 +350,7 @@ describe('routes/workflows/shared/rateLimit', () => {
 
     await request(app)
       .get('/grants')
-      .set('Cookie', 'control_ui_admin_session=admin-cookie-token')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-cookie')
       .expect(200)
 
     expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
