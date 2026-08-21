@@ -63,6 +63,27 @@ describe('GfsFileThumbnail', () => {
     expect(mockCreateObjectUrl).toHaveBeenCalledTimes(1)
   })
 
+  it('releases the cached URL when the row unmounts so a remount fetches again', async () => {
+    mockGfsFetchFileBlob.mockResolvedValue(new Blob(['fake-image-bytes']))
+    const firstRender = renderThumb({
+      byteLength: 64 * 1024,
+      fileName: 'logo.png',
+      rid: 'r-remount',
+    })
+
+    await screen.findByAltText('Thumbnail of logo.png')
+    firstRender.unmount()
+
+    renderThumb({
+      byteLength: 64 * 1024,
+      fileName: 'logo.png',
+      rid: 'r-remount',
+    })
+
+    await waitFor(() => expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(2))
+    expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-thumbnail')
+  })
+
   it('rewraps the blob with image/svg+xml when the proxy returns SVG bytes', async () => {
     const svgBytes = new Blob(['<svg></svg>'], { type: 'application/octet-stream' })
     mockGfsFetchFileBlob.mockResolvedValueOnce(svgBytes)

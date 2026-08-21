@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react'
 import { IconImage } from '@components/SidebarNav/icons'
 import { GFS_FILE_THUMBNAIL_MAX_BYTES } from '@constants/gfsFileThumbnail'
-import { getCachedGfsBlob, setCachedGfsBlob } from '@lib/gfsBlobCache'
+import {
+  getCachedGfsBlob,
+  releaseCachedGfsBlob,
+  retainCachedGfsBlob,
+  setCachedGfsBlob,
+} from '@lib/gfsBlobCache'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import type { GfsFileThumbnailProps } from './types'
 
@@ -26,9 +31,9 @@ export function GfsFileThumbnail({ byteLength, fileName, rid }: GfsFileThumbnail
       return
     }
     const cached = getCachedGfsBlob(rid)
-    if (cached) {
+    if (cached && retainCachedGfsBlob(rid, cached.blobUrl)) {
       setSrc(cached.blobUrl)
-      return
+      return () => releaseCachedGfsBlob(rid, cached.blobUrl)
     }
     let cancelled = false
     let objectUrl: string | null = null
@@ -47,9 +52,12 @@ export function GfsFileThumbnail({ byteLength, fileName, rid }: GfsFileThumbnail
         // <img> can actually paint the SVG.
         const mimeType = gfsImagePreviewMimeType(fileName)
         const blob = mimeType !== null ? new Blob([bytes], { type: mimeType }) : new Blob([bytes])
-        objectUrl = URL.createObjectURL(blob)
-        setCachedGfsBlob(rid, { blobUrl: objectUrl, mimeType: blob.type })
-        setSrc(objectUrl)
+        const cachedEntry = setCachedGfsBlob(rid, {
+          blobUrl: URL.createObjectURL(blob),
+          mimeType: blob.type,
+        })
+        objectUrl = cachedEntry.blobUrl
+        setSrc(cachedEntry.blobUrl)
       } catch {
         if (!cancelled) setFailed(true)
       }
@@ -58,7 +66,7 @@ export function GfsFileThumbnail({ byteLength, fileName, rid }: GfsFileThumbnail
     void load()
     return () => {
       cancelled = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
+      if (objectUrl) releaseCachedGfsBlob(rid, objectUrl)
     }
   }, [fileName, rid, shouldSkip])
 

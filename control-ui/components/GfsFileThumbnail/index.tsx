@@ -4,7 +4,12 @@ import { useEffect, useState } from 'react'
 import { IconImage } from '@components/Sidebar/icons'
 import { GFS_FILE_THUMBNAIL_MAX_BYTES } from '@constants/gfsFileThumbnail'
 import { gfsFetchFileBlob } from '@lib/api'
-import { getCachedGfsBlob, setCachedGfsBlob } from '@lib/gfsBlobCache'
+import {
+  getCachedGfsBlob,
+  releaseCachedGfsBlob,
+  retainCachedGfsBlob,
+  setCachedGfsBlob,
+} from '@lib/gfsBlobCache'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import type { GfsFileThumbnailProps } from './types'
 
@@ -33,9 +38,9 @@ export function GfsFileThumbnail({
       return
     }
     const cached = getCachedGfsBlob(rid)
-    if (cached) {
+    if (cached && retainCachedGfsBlob(rid, cached.blobUrl)) {
       setSrc(cached.blobUrl)
-      return
+      return () => releaseCachedGfsBlob(rid, cached.blobUrl)
     }
     let cancelled = false
     let objectUrl: string | null = null
@@ -56,9 +61,12 @@ export function GfsFileThumbnail({
         const mimeType = gfsImagePreviewMimeType(fileName) ?? fetched.type
         const wrappedBlob =
           mimeType && mimeType !== fetched.type ? new Blob([fetched], { type: mimeType }) : fetched
-        objectUrl = URL.createObjectURL(wrappedBlob)
-        setCachedGfsBlob(rid, { blobUrl: objectUrl, mimeType: wrappedBlob.type })
-        setSrc(objectUrl)
+        const cachedEntry = setCachedGfsBlob(rid, {
+          blobUrl: URL.createObjectURL(wrappedBlob),
+          mimeType: wrappedBlob.type,
+        })
+        objectUrl = cachedEntry.blobUrl
+        setSrc(cachedEntry.blobUrl)
       } catch {
         if (!cancelled) setFailed(true)
       }
@@ -67,7 +75,7 @@ export function GfsFileThumbnail({
     void load()
     return () => {
       cancelled = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
+      if (objectUrl) releaseCachedGfsBlob(rid, objectUrl)
     }
   }, [fileName, rid, shouldSkip])
 

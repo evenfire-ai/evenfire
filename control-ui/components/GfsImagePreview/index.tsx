@@ -7,7 +7,12 @@ import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
 import { Button } from '@components/ui'
 import { gfsFetchFileBlob } from '@lib/api'
-import { getCachedGfsBlob, setCachedGfsBlob } from '@lib/gfsBlobCache'
+import {
+  getCachedGfsBlob,
+  releaseCachedGfsBlob,
+  retainCachedGfsBlob,
+  setCachedGfsBlob,
+} from '@lib/gfsBlobCache'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewProps } from './types'
 
@@ -45,14 +50,13 @@ export function GfsImagePreview({
   useEffect(() => {
     let active = true
     let objectUrl: string | null = null
-    const isFromCacheRef = { current: false }
 
     async function loadPreview(): Promise<void> {
       // If the row thumbnail already paid the proxy round-trip for this
       // resource, reuse its object URL and skip the network entirely.
       const cached = getCachedGfsBlob(rid)
-      if (cached) {
-        isFromCacheRef.current = true
+      if (cached && retainCachedGfsBlob(rid, cached.blobUrl)) {
+        objectUrl = cached.blobUrl
         if (!active) return
         // Reconstruct the Blob from the same bytes the thumbnail cached
         // would require keeping the Blob alive; instead we copy the
@@ -79,12 +83,14 @@ export function GfsImagePreview({
         if (!active) return
         const blob = new Blob([fetched], { type: mimeType })
         setSourceBlob(blob)
-        objectUrl = URL.createObjectURL(blob)
-        // Publish to the cache so the next preview open skips the
-        // network. We don't revoke the URL on unmount — the next open
-        // may want it.
-        setCachedGfsBlob(rid, { blobUrl: objectUrl, mimeType: blob.type })
-        setPreviewUrl(objectUrl)
+        const cachedEntry = setCachedGfsBlob(rid, {
+          blobUrl: URL.createObjectURL(blob),
+          mimeType: blob.type,
+        })
+        objectUrl = cachedEntry.blobUrl
+        // Publish to the cache so the next preview open skips the network.
+        // This preview holds one reference until its cleanup runs.
+        setPreviewUrl(cachedEntry.blobUrl)
       } catch (error) {
         if (!active) return
         setPreviewError(error instanceof Error ? error.message : 'Could not load the image preview')
@@ -94,9 +100,9 @@ export function GfsImagePreview({
     void loadPreview()
     return () => {
       active = false
-      // Only revoke object URLs we created ourselves. Cache-served URLs
-      // are owned by the row thumbnail component.
-      if (objectUrl && !isFromCacheRef.current) URL.revokeObjectURL(objectUrl)
+      // Release this preview's reference. The cache revokes the URL only
+      // after the last thumbnail or preview consumer leaves.
+      if (objectUrl) releaseCachedGfsBlob(rid, objectUrl)
     }
   }, [byteLength, mimeType, rid])
 
