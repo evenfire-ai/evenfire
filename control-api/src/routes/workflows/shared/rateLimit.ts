@@ -70,33 +70,28 @@ function workflowGrantEdgeRateLimitHandler(_req: Request, res: Response): void {
   res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
 }
 
-/**
- * CodeQL-visible edge backstop for admin workflow grant reads. The PG-backed
- * workflowGrantReadRateLimit() remains the cross-replica source of truth.
- */
-export function workflowGrantReadEdgeRateLimit() {
+function createWorkflowEdgeRateLimit(prefix: string, limit: number) {
   return rateLimit({
     windowMs: 60_000,
-    limit: WORKFLOW_GRANT_READ_PER_MINUTE,
+    limit,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     skip: shouldSkipWorkflowGrantEdgeRateLimit,
-    keyGenerator: workflowGrantEdgeRateKey('workflow_grants_read_edge'),
+    keyGenerator: workflowGrantEdgeRateKey(prefix),
     handler: workflowGrantEdgeRateLimitHandler,
   })
 }
 
-/** CodeQL-visible edge backstop paired with workflowGrantWriteRateLimit(). */
+/**
+ * Fresh stack per call so route tests stay isolated. Shared MemoryStore
+ * across grant-write registrations is a follow-up (Low 1), not this PR.
+ */
+export function workflowGrantReadEdgeRateLimit() {
+  return createWorkflowEdgeRateLimit('workflow_grants_read_edge', WORKFLOW_GRANT_READ_PER_MINUTE)
+}
+
 export function workflowGrantWriteEdgeRateLimit() {
-  return rateLimit({
-    windowMs: 60_000,
-    limit: WORKFLOW_GRANT_WRITE_PER_MINUTE,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    skip: shouldSkipWorkflowGrantEdgeRateLimit,
-    keyGenerator: workflowGrantEdgeRateKey('workflow_grants_write_edge'),
-    handler: workflowGrantEdgeRateLimitHandler,
-  })
+  return createWorkflowEdgeRateLimit('workflow_grants_write_edge', WORKFLOW_GRANT_WRITE_PER_MINUTE)
 }
 
 export function workflowGrantReadRateLimits() {
@@ -108,27 +103,11 @@ export function workflowGrantWriteRateLimits() {
 }
 
 function workflowAdminReadEdgeRateLimit() {
-  return rateLimit({
-    windowMs: 60_000,
-    limit: WORKFLOW_ADMIN_READ_PER_MINUTE,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    skip: shouldSkipWorkflowGrantEdgeRateLimit,
-    keyGenerator: workflowGrantEdgeRateKey('workflow_admin_read_edge'),
-    handler: workflowGrantEdgeRateLimitHandler,
-  })
+  return createWorkflowEdgeRateLimit('workflow_admin_read_edge', WORKFLOW_ADMIN_READ_PER_MINUTE)
 }
 
 function adminOutputsReadEdgeRateLimit() {
-  return rateLimit({
-    windowMs: 60_000,
-    limit: ADMIN_OUTPUTS_READ_PER_MINUTE,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    skip: shouldSkipWorkflowGrantEdgeRateLimit,
-    keyGenerator: workflowGrantEdgeRateKey('admin_outputs_read_edge'),
-    handler: workflowGrantEdgeRateLimitHandler,
-  })
+  return createWorkflowEdgeRateLimit('admin_outputs_read_edge', ADMIN_OUTPUTS_READ_PER_MINUTE)
 }
 
 export function workflowAdminReadRateLimits() {

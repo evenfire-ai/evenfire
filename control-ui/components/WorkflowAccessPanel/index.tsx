@@ -296,12 +296,28 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
     const added = nextTeamIds.filter(id => !current.includes(id))
     const removed = current.filter(id => !nextTeamIds.includes(id))
     setSectionPatch('approval-target-teams', { mutating: true, mutateError: null })
+    const errors: string[] = []
     try {
-      await Promise.all([
-        ...added.map(teamId => allowWorkflowApprovalTeam(namespace, recipeName, teamId)),
-        ...removed.map(teamId => revokeWorkflowApprovalTeam(namespace, recipeName, teamId)),
-      ])
+      // Serialize allow/revoke so a shared 20/min grant-write bucket cannot
+      // leave a partial write behind a Promise.all rejection.
+      for (const teamId of added) {
+        try {
+          await allowWorkflowApprovalTeam(namespace, recipeName, teamId)
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error))
+        }
+      }
+      for (const teamId of removed) {
+        try {
+          await revokeWorkflowApprovalTeam(namespace, recipeName, teamId)
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error))
+        }
+      }
       await loadApprovalTeams()
+      if (errors.length > 0) {
+        throw new Error(errors.join('; '))
+      }
       if (added.length > 0) {
         showToast('Approval target team allowed.', { tone: 'success' })
       } else if (removed.length > 0) {

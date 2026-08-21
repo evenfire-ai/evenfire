@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import {
+  adminOutputsReadRateLimits,
   adminWorkflowRateLimitCredential,
   shouldSkipWorkflowGrantEdgeRateLimit,
+  workflowAdminReadRateLimits,
   workflowGrantEdgeRateLimitKey,
   workflowGrantReadRateLimit,
+  workflowGrantReadRateLimits,
   workflowGrantWriteRateLimits,
 } from '../src/routes/workflows/shared/rateLimit.js'
 
@@ -40,6 +43,13 @@ describe('routes/workflows/shared/rateLimit', () => {
     } as express.Request
 
     expect(adminWorkflowRateLimitCredential(req)).toBe('admin-cookie-token')
+  })
+
+  it('rate-limit factories pair an edge backstop with the PG limiter', () => {
+    expect(workflowGrantReadRateLimits()).toHaveLength(2)
+    expect(workflowGrantWriteRateLimits()).toHaveLength(2)
+    expect(workflowAdminReadRateLimits()).toHaveLength(2)
+    expect(adminOutputsReadRateLimits()).toHaveLength(2)
   })
 
   it('shouldSkipWorkflowGrantEdgeRateLimit skips anonymous callers', () => {
@@ -79,35 +89,80 @@ describe('routes/workflows/shared/rateLimit', () => {
     )
   })
 
-  it('workflowGrantWriteRateLimits returns 429 from the real edge factory on the 21st cookie request', async () => {
-    mockCheckAndIncrement.mockReset()
-    pgAllows()
+  it.each([
+    {
+      label: 'workflowGrantWriteRateLimits',
+      method: 'put' as const,
+      limit: 20,
+      cookie: 'write-edge-cookie',
+      mount: (app: express.Express) => {
+        app.put('/probe', ...workflowGrantWriteRateLimits(), (_req, res) => {
+          res.status(200).json({ ok: true })
+        })
+      },
+    },
+    {
+      label: 'workflowGrantReadRateLimits',
+      method: 'get' as const,
+      limit: 60,
+      cookie: 'grant-read-edge-cookie',
+      mount: (app: express.Express) => {
+        app.get('/probe', ...workflowGrantReadRateLimits(), (_req, res) => {
+          res.status(200).json({ ok: true })
+        })
+      },
+    },
+    {
+      label: 'workflowAdminReadRateLimits',
+      method: 'get' as const,
+      limit: 60,
+      cookie: 'admin-read-edge-cookie',
+      mount: (app: express.Express) => {
+        app.get('/probe', ...workflowAdminReadRateLimits(), (_req, res) => {
+          res.status(200).json({ ok: true })
+        })
+      },
+    },
+    {
+      label: 'adminOutputsReadRateLimits',
+      method: 'get' as const,
+      limit: 30,
+      cookie: 'outputs-read-edge-cookie',
+      mount: (app: express.Express) => {
+        app.get('/probe', ...adminOutputsReadRateLimits(), (_req, res) => {
+          res.status(200).json({ ok: true })
+        })
+      },
+    },
+  ])(
+    '$label returns 429 from the real edge factory after the quota',
+    async ({ method, limit, cookie, mount }) => {
+      mockCheckAndIncrement.mockReset()
 
-    const app = express()
-    app.put('/grants', ...workflowGrantWriteRateLimits(), (_req, res) => {
-      res.status(200).json({ ok: true })
-    })
+      const app = express()
+      mount(app)
 
-    for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < limit; i++) {
+        pgAllows()
+        await request(app)
+          [method]('/probe')
+          .set('Cookie', `control_ui_admin_session=${cookie}`)
+          .expect(200)
+      }
+
       pgAllows()
-      await request(app)
-        .put('/grants')
-        .set('Cookie', 'control_ui_admin_session=admin-cookie-token')
-        .expect(200)
+      const res = await request(app)
+        [method]('/probe')
+        .set('Cookie', `control_ui_admin_session=${cookie}`)
+        .expect(429)
+
+      expect(res.body).toMatchObject({
+        error: 'Too Many Requests',
+        retryAfterSeconds: expect.any(Number),
+      })
+      expect(res.headers['retry-after']).toBeDefined()
     }
-
-    pgAllows()
-    const res = await request(app)
-      .put('/grants')
-      .set('Cookie', 'control_ui_admin_session=admin-cookie-token')
-      .expect(429)
-
-    expect(res.body).toMatchObject({
-      error: 'Too Many Requests',
-      retryAfterSeconds: expect.any(Number),
-    })
-    expect(res.headers['retry-after']).toBeDefined()
-  })
+  )
 
   it('workflowGrantWriteRateLimits does not edge-limit anonymous callers', async () => {
     mockCheckAndIncrement.mockReset()
