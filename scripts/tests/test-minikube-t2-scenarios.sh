@@ -142,6 +142,12 @@ expect_code IMAGE_MANIFEST_MISMATCH stale-image stale-image \
   env "${repo_env[@]}" T2_IMAGE_MANIFEST="$manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG=old \
   bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=old; t2_image_check' bash "$COMMON"
 
+invalid_manifest="$tmp/invalid-image-manifest.json"
+printf '{"imageSource":"ghcr","imageTag":""}\n' >"$invalid_manifest"
+bootstrap_manifest_state="$(env "${repo_env[@]}" T2_IMAGE_MANIFEST="$invalid_manifest" T2_BOOTSTRAP_REQUIRED=true \
+  bash -c 'source "$1"; T2_BOOTSTRAP_REQUIRED=true; t2_image_check; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
+[ "$bootstrap_manifest_state" = full-bootstrap ] || fail "invalid bootstrap manifest selected $bootstrap_manifest_state instead of full-bootstrap"
+
 local_manifest="$tmp/local-image-manifest.json"
 printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$local_manifest"
 env "${repo_env[@]}" T2_IMAGE_MANIFEST="$local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
@@ -228,5 +234,18 @@ grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
+
+forward_tmp="$tmp/port-forward-check"
+mkdir -p "$forward_tmp/bin" "$forward_tmp/profile-cache/profile-a/pids"
+cat >"$forward_tmp/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'root 4242 1 0 00:00 ? 00:00:00 kubectl --context=profile-a -n control-plane port-forward svc/control-api 30100:8090'
+EOF
+chmod +x "$forward_tmp/bin/ps"
+printf '4242\n' >"/tmp/pf-profile-a-control-api.pid"
+forward_check="$(env PATH="$forward_tmp/bin:$PATH" T2_PROFILE=profile-a T2_CONTEXT=profile-a \
+  T2_PROFILE_ROOT="$forward_tmp/profile-cache" bash -c 'source "$1"; t2_process_check; printf PASS' bash "$COMMON")"
+rm -f "/tmp/pf-profile-a-control-api.pid"
+[ "$forward_check" = PASS ] || fail "canonical /tmp port-forward ownership was rejected: $forward_check"
 
 printf 'PASS: local Minikube T0/T1/T2 scenario checks\n'

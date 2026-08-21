@@ -78,6 +78,10 @@ export interface Config {
   // Context Mapper poll interval in ms (for production mode)
   contextMapperPollInterval: number
 
+  // Maximum time an already-published MCP fleet may survive without a fresh,
+  // authenticated HCC inventory snapshot.
+  hccAuthorityMaxStalenessMs: number
+
   // MCP server health heartbeat interval in ms. mcp-host periodically
   // tools/list's each connected server to keep observedAt fresh and detect
   // silent failures. Must stay well under the desktop's 120s stale threshold.
@@ -471,6 +475,29 @@ export function resolveDevModelProvider(raw: string | undefined): LlmProvider | 
   return raw
 }
 
+/**
+ * Keep the poll cadence strictly inside the authority-retention window.
+ *
+ * A cadence at or above the staleness ceiling guarantees that a healthy fleet
+ * can be revoked before the next authoritative poll arrives. Failing startup
+ * closed is safer than silently widening the retention window or allowing a
+ * deployment to flap forever after every successful reconnect.
+ */
+export function validateHccAuthorityTiming(
+  contextMapperPollIntervalMs: number,
+  hccAuthorityMaxStalenessMs: number
+): void {
+  if (
+    Number.isFinite(contextMapperPollIntervalMs) &&
+    Number.isFinite(hccAuthorityMaxStalenessMs) &&
+    contextMapperPollIntervalMs >= hccAuthorityMaxStalenessMs
+  ) {
+    throw new Error(
+      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL (${contextMapperPollIntervalMs}ms) must be less than HCC_AUTHORITY_MAX_STALENESS_MS (${hccAuthorityMaxStalenessMs}ms)`
+    )
+  }
+}
+
 // In dev mode, try CLERUM_HOST_CONFIG first, then fall back to building from env vars
 function getDevHostConfig(): HostSpec | undefined {
   if (!devMode) return undefined
@@ -548,6 +575,39 @@ function parseApprovalPromptHistoryMaxBytes(raw: string): number {
   return Number.isSafeInteger(value) && value >= 1_024 && value <= 32_768 ? value : Number.NaN
 }
 
+const contextMapperPollInterval = parseInt(
+  getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!,
+  10
+)
+// Fail-closed window for an UNREACHABLE HCC (5xx / transport failures only).
+// It is bounded so a revoked-but-unconfirmable authority cannot linger forever,
+// yet generous enough to survive a normal HCC `Recreate` rollout (measured ~77s
+// in clerum-dev, with a startupProbe budget of up to 120s) without tearing down
+// the whole MCP fleet and aborting in-flight tool calls.
+//
+// Crucially, this window ONLY governs the `unavailable` failure class. Identity /
+// authorization failures (401/403 — Host UID change, revoked grant) revoke
+// immediately on the next reachable call, and a grant change while HCC is healthy
+// is applied by the next successful poll. Raising this ceiling intentionally trades
+// bounded revocation latency during an HCC outage for fleet availability; it does
+// not widen the NP-08 credential-disclosure surface because HCC cannot serve a new
+// credential while unavailable and rechecks live authorization when reachable.
+// See issue #425.
+//
+// Operators may lower it, or raise it up to HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
+// for slower-starting clusters. The minikube e2e lane pins 60000 explicitly so the
+// revoke-on-staleness scenario stays fast and deterministic.
+const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = 600_000 // 10 min hard upper bound
+const hccAuthorityMaxStalenessMs = Math.min(
+  getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 180_000),
+  HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
+)
+
+// Dev mode does not retain a Kubernetes-authoritative MCP fleet, so the
+// production polling/staleness relationship is intentionally not required for
+// local fixture runs. Every cluster-mode process must satisfy it at startup.
+if (!devMode) validateHccAuthorityTiming(contextMapperPollInterval, hccAuthorityMaxStalenessMs)
+
 export const config: Config = {
   devMode,
   devHostConfig: getDevHostConfig(),
@@ -602,7 +662,12 @@ export const config: Config = {
   )!,
 
   // Context Mapper poll interval (default 30 seconds)
-  contextMapperPollInterval: parseInt(getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!, 10),
+  contextMapperPollInterval,
+
+  // Bound transient HCC/Kubernetes authority outages. Identity failures revoke
+  // immediately; 5xx/transport failures may preserve the last good fleet only
+  // within this finite window.
+  hccAuthorityMaxStalenessMs,
 
   // MCP status heartbeat. Defaults to 30 seconds so a single missed tick does
   // not trip desktop staleness.

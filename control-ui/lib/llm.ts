@@ -85,6 +85,7 @@ export const LLM_DEFAULT_MODEL_BY_PROVIDER: Record<LlmProvider, string> = {
   moonshot: 'kimi-k2.6',
   nebius: 'Qwen/Qwen3-235B-A22B-Instruct-2507',
   novita: 'deepseek/deepseek-v3.2',
+  minimax: 'MiniMax-M2',
   // Azure: the "model" is a per-deployment name the operator chooses; this is
   // only a placeholder pre-select (operator overrides in the allowlist).
   azure: 'gpt-4.1',
@@ -102,6 +103,7 @@ const SECRET_FIELD_HINTS: Record<string, { label: string; placeholder: string }>
   'claude-api-key': { label: 'Claude API key', placeholder: 'sk-ant-...' },
   'zai-api-key': { label: 'Z.AI API key', placeholder: 'zai-...' },
   'bailian-api-key': { label: 'Bailian API key', placeholder: 'bailian-...' },
+  'minimax-api-key': { label: 'MiniMax API key', placeholder: 'eyJ...' },
   'vertex-service-account-json': {
     label: 'Google Vertex AI service account JSON',
     placeholder: '{ "type": "service_account", ... }',

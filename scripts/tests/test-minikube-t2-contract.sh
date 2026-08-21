@@ -15,12 +15,13 @@ if [ -z "$TMP_ROOT" ]; then TMP_ROOT=/tmp; fi
 set -u
 
 for file in "$COMMON" "$PREFLIGHT" "$T2" "$T1" \
+  "$ROOT/scripts/e2e/e2e-np08-hcc-authorization.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"; do
   bash -n "$file"
 done
 
-required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT"
+required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED"
 for code in $required_codes; do
   grep -Fq "$code" "$COMMON" "$PREFLIGHT" "$T2" "$T1"
 done
@@ -33,6 +34,14 @@ grep -Fq 'T1_REDACT_PASSWORD="${PG_PASSWORD}"' "$T1" || grep -Fq 'T1_REDACT_PASS
 grep -Fq -- '--reporter=json' "$T1"
 grep -Fq 'pending_tests' "$T1"
 grep -Fq 'numTotalTests' "$T1"
+grep -Fq 'numTotalTestSuites' "$T1"
+grep -Fq 'passed_suites' "$T1"
+grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$T1"
+grep -Fq 'reconcile-gfs-deploy-credentials.sh' "$T1"
+if grep -Fq "[ \"\$passed_files\" -ne \"\$expected\" ]" "$T1"; then
+  echo 'FAIL: T1 compares Vitest nested suite counts to physical file counts' >&2
+  exit 1
+fi
 grep -Fq 'port-forward' "$T1"
 grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 
@@ -44,13 +53,18 @@ grep -Fq 'full-bootstrap' "$PREFLIGHT" "$T2"
 grep -Fq 'run_pre_gate' "$T2"
 grep -Fq 'run_targeted_sync' "$T2"
 grep -Fq 'full-reconcile' "$T2"
-grep -Fq 'T2_SKIP_LOCK=true T2_PLAN_MODE=false T2_PLAN_FILE' "$T2"
+grep -Fq 'T2_SKIP_LOCK=true T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
 grep -Fq 'REUSE_DB=true' "$T2"
 grep -Fq 'T2_T0_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_T1_STATUS=NOT_RUN' "$T2"
+grep -Fq 'T2_NP08_HCC_AUTHORIZATION_STATUS=NOT_RUN' "$T2"
 grep -Fq "T2_T0_STATUS\" != PASS" "$T2"
 grep -Fq "T2_T1_STATUS\" != PASS" "$T2"
 grep -Fq 'T2_HEALTHCHECK_COMMAND' "$T2"
+grep -Fq 'run_np08_hcc_authorization' "$T2"
+grep -Fq "CLERUM_PROFILE_PORTS_ENV=\"\$T2_PORTS_ENV\"" "$T2"
+grep -Fq 'NP08_HCC_AUTHORIZATION PASS' "$T2"
+grep -Fq "NP08_HCC_AUTHORIZATION=\$T2_NP08_HCC_AUTHORIZATION_STATUS" "$T2"
 
 grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"

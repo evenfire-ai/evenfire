@@ -354,7 +354,7 @@ minikube-apply-secrets: ## Apply all secrets to cluster (LLM keys read from .env
 	else \
 	  echo "Channel file not present; per-Host channel values are managed through Control UI/control-api."; \
 	fi
-	@# LLM API keys — all 21 providers from the registry; reads the main checkout
+	@# LLM API keys — all 22 providers from the registry; reads the main checkout
 	@# .env when running from a worktree. Original four keep placeholder fallbacks.
 	@CONTEXT=$(MINIKUBE_PROFILE) bash scripts/minikube/apply-llm-secret.sh
 
@@ -433,6 +433,9 @@ minikube-t2-preflight: ## Read-only, fail-loud T0/T1/T2 preflight for the explic
 minikube-t2: ## Run the local development T0, Real PostgreSQL T1, and exact-head T2 contract
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
 		scripts/minikube/t2.sh
+
+.PHONY: minikube-t2-np08-hcc-authorization
+minikube-t2-np08-hcc-authorization: minikube-t2 ## Run canonical T2 including the required deployed NP-08 Host-to-HCC authorization journey
 
 .PHONY: minikube-t2-real-postgres
 minikube-t2-real-postgres: ## Run the explicit local Real PostgreSQL lane without changing CI's DSN contract
