@@ -83,8 +83,16 @@ T2_REQUIRED_NAMESPACES="$T2_REQUIRED_NAMESPACES"
 if [ -z "$T2_REQUIRED_NAMESPACES" ]; then T2_REQUIRED_NAMESPACES="control-plane gfs mcp-host mcp-server profiles rpc-proxy channels sandbox-recipes sandbox-ui webhook-ingress registry"; fi
 T2_REQUIRED_SERVICES="$T2_REQUIRED_SERVICES"
 if [ -z "$T2_REQUIRED_SERVICES" ]; then T2_REQUIRED_SERVICES="control-plane/control-postgres control-plane/control-api control-plane/control-ui control-plane/host-context-controller control-plane/workflow-recipes profiles/external-rest-api profiles/profile-ui rpc-proxy/rpc-proxy mcp-server/mcp-proxy"; fi
+# An empty or unset scope uses the production contract: every core Deployment
+# is mandatory and every additional Deployment in the inventory is evaluated.
+# Tests may provide a non-empty scope for isolated fixtures; that explicit
+# scope remains narrowed to the listed deployments.
 T2_REQUIRED_DEPLOYMENTS="$T2_REQUIRED_DEPLOYMENTS"
-if [ -z "$T2_REQUIRED_DEPLOYMENTS" ]; then T2_REQUIRED_DEPLOYMENTS="control-plane/control-api control-plane/host-context-controller profiles/external-rest-api rpc-proxy/rpc-proxy mcp-host/chatllm"; fi
+T2_REQUIRED_DEPLOYMENTS_INCLUDE_ADDITIONAL=false
+if [ -z "${T2_REQUIRED_DEPLOYMENTS//[[:space:]]/}" ]; then
+  T2_REQUIRED_DEPLOYMENTS="control-plane/control-api control-plane/host-context-controller profiles/external-rest-api rpc-proxy/rpc-proxy mcp-host/chatllm"
+  T2_REQUIRED_DEPLOYMENTS_INCLUDE_ADDITIONAL=true
+fi
 T2_REQUIRED_SECRETS="$T2_REQUIRED_SECRETS"
 if [ -z "$T2_REQUIRED_SECRETS" ]; then T2_REQUIRED_SECRETS="control-plane/control-postgres control-plane/control-api-secrets control-plane/control-ui-secrets control-plane/inter-service-tokens profiles/external-rest-api-secrets rpc-proxy/rpc-proxy-secrets mcp-host/chatllm-api-keys gfs/gfs-controller-db gfs/gfs-controller-reader-db"; fi
 T2_REQUIRED_CONFIGMAPS="$T2_REQUIRED_CONFIGMAPS"
@@ -552,24 +560,38 @@ t2_deployment_check() {
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is unavailable'
   fi
-  if ! unready="$(python3 - "$deployment_json" "$T2_REQUIRED_DEPLOYMENTS" 2>/dev/null <<'PY'
+  if ! unready="$(python3 - "$deployment_json" "$T2_REQUIRED_DEPLOYMENTS" "$T2_REQUIRED_DEPLOYMENTS_INCLUDE_ADDITIONAL" 2>/dev/null <<'PY'
 import json
 import sys
 payload = json.loads(sys.argv[1])
-required_refs = {}
+scope_refs = {}
 for ref in sys.argv[2].split():
     namespace, separator, name = ref.partition("/")
     if not separator or not namespace or not name:
         raise ValueError("invalid required deployment reference")
-    required_refs[(namespace, name)] = None
-bad = []
+    scope_refs[(namespace, name)] = None
+include_additional = sys.argv[3] == "true"
+
+inventory = {}
+inventory_order = []
 for item in payload.get("items", []):
     metadata = item.get("metadata") or {}
     identity = (metadata.get("namespace"), metadata.get("name"))
-    if identity in required_refs:
-        required_refs[identity] = item
+    if identity not in inventory:
+        inventory_order.append(identity)
+    inventory[identity] = item
 
-for (namespace, name), item in required_refs.items():
+selected = []
+if scope_refs:
+    for identity in scope_refs:
+        selected.append((identity, inventory.get(identity)))
+    if include_additional:
+        selected.extend((identity, inventory[identity]) for identity in inventory_order if identity not in scope_refs)
+else:
+    selected = [(identity, inventory[identity]) for identity in inventory_order]
+
+bad = []
+for (namespace, name), item in selected:
     if item is None:
         bad.append(f"{namespace}/{name} missing")
         continue

@@ -7,6 +7,10 @@ SCRIPT="$ROOT/scripts/minikube/settle-gfs-reader-rollout.sh"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 bash -n "$SCRIPT"
+grep -Fq 'if [ "${#scaled_rs_names[@]}" -gt 0 ]; then' "$SCRIPT" ||
+  fail 'settle must guard empty ReplicaSet arrays under Bash 3.2 set -u'
+grep -Fq 'if [ -n "${ALLOWED_CONTEXTS:-}" ]; then' "$SCRIPT" ||
+  fail 'settle must guard empty authorization-context arrays under Bash 3.2 set -u'
 
 run_settle() {
   local fake_dir repo profile sha

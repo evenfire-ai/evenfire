@@ -1052,9 +1052,11 @@ else
     # rewriting (it strips the restartedAt annotation, so a generation wait
     # loops until timeout).
     GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
+      T2_SKIP_LOCK=true \
       bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
     PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
       GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+      T2_SKIP_LOCK=true \
       CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
     # A staged sync may have deferred active-pod proof until the reconciler
@@ -1127,9 +1129,11 @@ else
     GFS_AUTH_SYNC_ALLOW_STAGED=true \
       bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
     GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
+      T2_SKIP_LOCK=true \
       bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
     PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
       GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+      T2_SKIP_LOCK=true \
       CONTEXT="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
     # The preceding staged sync is allowed to wait for this DSN-producing

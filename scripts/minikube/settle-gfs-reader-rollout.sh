@@ -106,10 +106,15 @@ else
   [ "${GFS_READER_ROLLOUT_AUTHORIZED:-false}" = true ] ||
     die 'non-T2 reader settlement requires explicit GFS_READER_ROLLOUT_AUTHORIZED=true'
   authorized=false
-  IFS=',' read -r -a allowed_contexts <<<"${ALLOWED_CONTEXTS:-}"
-  for allowed_context in "${allowed_contexts[@]}"; do
-    [ "$allowed_context" = "$CONTEXT" ] && authorized=true
-  done
+  # Bash 3.2 expands an empty array as an unset variable under `set -u`.
+  # Leave the explicit authorization failure below in charge when the caller
+  # omits ALLOWED_CONTEXTS instead of masking it with an array expansion error.
+  if [ -n "${ALLOWED_CONTEXTS:-}" ]; then
+    IFS=',' read -r -a allowed_contexts <<<"${ALLOWED_CONTEXTS}"
+    for allowed_context in "${allowed_contexts[@]}"; do
+      [ "$allowed_context" = "$CONTEXT" ] && authorized=true
+    done
+  fi
   [ "$authorized" = true ] ||
     die "non-T2 reader settlement context is not in the explicit ALLOWED_CONTEXTS list: $CONTEXT"
 fi
@@ -168,9 +173,12 @@ while IFS='|' read -r rs_name rs_owner rs_replicas rs_ready rs_rev; do
   scaled_rs_names+=("$rs_name")
 done <<<"$rs_rows"
 
-for rs_name in "${scaled_rs_names[@]}"; do
-  wait_for_scaled_rs "$rs_name"
-done
+# Bash 3.2 treats an empty array expansion as unbound with `set -u`.
+if [ "${#scaled_rs_names[@]}" -gt 0 ]; then
+  for rs_name in "${scaled_rs_names[@]}"; do
+    wait_for_scaled_rs "$rs_name"
+  done
+fi
 
 pod_rows="$(kc -n "$GFS_NS" get pods -l "$SELECTOR" -o \
   'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.containerStatuses[0].state.waiting.reason}{"\n"}{end}' \

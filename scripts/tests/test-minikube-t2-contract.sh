@@ -229,6 +229,10 @@ if [[ "$(grep -c -- '--require-gfs' "$ROOT/scripts/minikube/full-setup.sh")" -lt
   echo 'FAIL: every GFS-specific full-setup auth sync must require a non-empty source key' >&2
   exit 1
 fi
+if [[ "$(grep -c 'T2_SKIP_LOCK=true' "$ROOT/scripts/minikube/full-setup.sh")" -lt 4 ]]; then
+  echo 'FAIL: full-setup GFS child mutators must validate the parent lease instead of acquiring a second lock' >&2
+  exit 1
+fi
 
 if grep -Eq 'make minikube-pre-gate-sync|pre-gate-sync\.sh' "$PREFLIGHT"; then
   echo 'FAIL: preflight invokes pre-gate-sync' >&2

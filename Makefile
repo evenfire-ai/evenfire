@@ -470,11 +470,36 @@ minikube-sync-auth-key-body:
 
 .PHONY: minikube-sync-auth-key-if-present
 minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube auth resources already exist
-	@if ! $(KC) get secret rpc-proxy-secrets -n rpc-proxy >/dev/null 2>&1; then \
-	  echo "Skipping auth key sync (rpc-proxy-secrets not found yet)."; \
-	elif ! $(KC) get configmap mcp-host-config -n mcp-host >/dev/null 2>&1; then \
-	  echo "Skipping auth key sync (mcp-host-config not found yet)."; \
-	elif [ "$(T2_MUTATION_LOCK_WRAPPED)" = "true" ]; then \
+	@kubectl_probe_is_not_found() { \
+	  probe_output="$$1"; \
+	  probe_kind="$$2"; \
+	  probe_name="$$3"; \
+	  [[ "$$probe_output" =~ ^Error[[:space:]]+from[[:space:]]+server[[:space:]]+\(NotFound\):[[:space:]] ]] || return 1; \
+	  probe_detail="$${probe_output#*): }"; \
+	  case "$$probe_kind" in \
+	    secret) case "$$probe_detail" in secret\ *|secrets\ *) ;; *) return 1 ;; esac ;; \
+	    configmap) case "$$probe_detail" in configmap\ *|configmaps\ *) ;; *) return 1 ;; esac ;; \
+	    *) return 1 ;; \
+	  esac; \
+	  [[ "$$probe_detail" == *"\"$$probe_name\""* ]] || return 1; \
+	}; \
+	rpc_probe_status=0; \
+	rpc_probe_output="$$( $(KC) get secret rpc-proxy-secrets -n rpc-proxy 2>&1 )" || rpc_probe_status=$$?; \
+	if [ "$$rpc_probe_status" -ne 0 ]; then \
+	  if kubectl_probe_is_not_found "$$rpc_probe_output" secret rpc-proxy-secrets; then \
+	    echo "Skipping auth key sync (rpc-proxy-secrets not found yet)."; exit 0; \
+	  fi; \
+	  printf '%s\n' "$$rpc_probe_output" >&2; exit "$$rpc_probe_status"; \
+	fi; \
+	mcp_probe_status=0; \
+	mcp_probe_output="$$( $(KC) get configmap mcp-host-config -n mcp-host 2>&1 )" || mcp_probe_status=$$?; \
+	if [ "$$mcp_probe_status" -ne 0 ]; then \
+	  if kubectl_probe_is_not_found "$$mcp_probe_output" configmap mcp-host-config; then \
+	    echo "Skipping auth key sync (mcp-host-config not found yet)."; exit 0; \
+	  fi; \
+	  printf '%s\n' "$$mcp_probe_output" >&2; exit "$$mcp_probe_status"; \
+	fi; \
+	if [ "$(T2_MUTATION_LOCK_WRAPPED)" = "true" ]; then \
 	  $(MAKE) --no-print-directory minikube-sync-auth-key-body; \
 	else \
 	  $(MAKE) --no-print-directory minikube-sync-auth-key; \

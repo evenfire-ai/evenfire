@@ -292,6 +292,33 @@ env "${repo_env[@]}" READY_JSON="$ready_json" \
 multi_ready_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader","generation":7},"spec":{"replicas":1},"status":{"observedGeneration":7,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"gfs","name":"gfsc-writer","generation":11},"spec":{"replicas":1},"status":{"observedGeneration":11,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"control-plane","name":"unrelated","generation":3},"spec":{"replicas":1},"status":{"observedGeneration":3,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
 env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS='gfs/gfsc-reader gfs/gfsc-writer' MULTI_READY_JSON="$multi_ready_json" \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$MULTI_READY_JSON"; }; t2_deployment_check' bash "$COMMON"
+
+# The default scope is fail-closed even when the API returns an empty inventory.
+empty_inventory_json='{"items":[]}'
+expect_code PROFILE_UNHEALTHY default-empty-inventory default-empty-inventory \
+  env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS= EMPTY_INVENTORY_JSON="$empty_inventory_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$EMPTY_INVENTORY_JSON"; }; t2_deployment_check' bash "$COMMON"
+
+# A missing core Deployment is reported even when the other core Deployments
+# are healthy; the inventory cannot silently shrink the required contract.
+missing_core_json='{"items":[{"metadata":{"namespace":"control-plane","name":"control-api","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"control-plane","name":"host-context-controller","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"profiles","name":"external-rest-api","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"rpc-proxy","name":"rpc-proxy","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
+expect_code PROFILE_UNHEALTHY missing-core-deployment missing-core-deployment \
+  env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS= MISSING_CORE_JSON="$missing_core_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$MISSING_CORE_JSON"; }; t2_deployment_check' bash "$COMMON"
+
+# All five core Deployments ready is a valid default-scope pass.
+default_core_ready_json='{"items":[{"metadata":{"namespace":"control-plane","name":"control-api","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"control-plane","name":"host-context-controller","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"profiles","name":"external-rest-api","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"rpc-proxy","name":"rpc-proxy","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"mcp-host","name":"chatllm","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
+env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS= DEFAULT_CORE_READY_JSON="$default_core_ready_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$DEFAULT_CORE_READY_JSON"; }; t2_deployment_check' bash "$COMMON"
+
+# Production scope also evaluates every additional Deployment. Keep the five
+# core Deployments healthy while an otherwise out-of-scope UI is unready; the
+# old allowlist passed this fixture and certified a broken profile.
+out_of_scope_unready_json='{"items":[{"metadata":{"namespace":"control-plane","name":"control-api","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"control-plane","name":"host-context-controller","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"profiles","name":"external-rest-api","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"rpc-proxy","name":"rpc-proxy","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"mcp-host","name":"chatllm","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}},{"metadata":{"namespace":"control-plane","name":"control-ui","generation":1},"spec":{"replicas":1},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":0,"availableReplicas":0,"unavailableReplicas":1}}]}'
+expect_code PROFILE_UNHEALTHY out-of-scope-unready out-of-scope-unready \
+  env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS= OUT_OF_SCOPE_JSON="$out_of_scope_unready_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$OUT_OF_SCOPE_JSON"; }; t2_deployment_check' bash "$COMMON"
+
 stale_generation_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader","generation":8},"spec":{"replicas":1},"status":{"observedGeneration":7,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
 expect_code PROFILE_UNHEALTHY stale-generation stale-generation \
   env "${repo_env[@]}" INVALID_INVENTORY="$stale_generation_json" \
@@ -355,6 +382,7 @@ grep -Fq 'wait-gfs-reader-ready.sh' "$ROOT/scripts/minikube/pre-gate-sync.sh" ||
 [[ "$(grep -c 'scripts/minikube/settle-gfs-reader-rollout.sh' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB must settle a Ready gfsc-reader leftover rollout claim before both reconciles'
 [[ "$(grep -c 'gfs-rollout-shim' "$ROOT/scripts/minikube/full-setup.sh")" -ge 2 ]] || fail 'full-setup REUSE_DB reconciles must use the HCC-safe reader rollout wait on both calls'
 [[ "$(grep -c 'sync-auth-key.sh' "$ROOT/scripts/minikube/full-setup.sh")" -ge 3 ]] || fail 'full-setup must re-sync gfs-config.jwt-public-key before both GFS reconciles'
+[[ "$(grep -c 'T2_SKIP_LOCK=true' "$ROOT/scripts/minikube/full-setup.sh")" -ge 4 ]] || fail 'full-setup GFS child mutators must validate the parent lease instead of acquiring a second lock'
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 't2_mutation_lock' "$COMMON"
 grep -Fq 't2_lock_validate_inherited' "$COMMON"
