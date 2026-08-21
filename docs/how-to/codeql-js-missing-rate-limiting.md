@@ -42,6 +42,17 @@ Tier defaults (requests/minute, per admin credential hash unless noted):
 | [#81](https://github.com/evenfire-ai/evenfire/security/code-scanning/81) | `grants.routes.ts:173` | Fixed: cookie bucket + dual limiter + auth middleware |
 | [#82](https://github.com/evenfire-ai/evenfire/security/code-scanning/82) | `grants.routes.ts:197` | Fixed: same |
 | [#83](https://github.com/evenfire-ai/evenfire/security/code-scanning/83) | `grants.routes.ts:236` | Fixed: same |
+| [#63](https://github.com/evenfire-ai/evenfire/security/code-scanning/63) | `outputs.ts:35` | Fixed: `adminOutputsReadRateLimits()` PG + edge backstop (30/min) |
+
+Edge backstop keys: **cookie hash** for Control UI sessions, **source IP** for bearer-only automation, **skipped** when no credential (anonymous). PG tiers remain per admin credential hash.
+
+Additional tiers shipped in PR #428:
+
+| Tier | Limit | Config anchor |
+| ---- | ----- | ------------- |
+| Admin workflow read | 60 | `workflowAdminReadRateLimits` |
+| Admin outputs read | 30 | `adminOutputsReadRateLimits` |
+| Admin workflow trigger | 10 | `workflowTriggerRateLimit` |
 
 ## Out-of-scope dispositions (Layer 3)
 
@@ -65,7 +76,6 @@ SAST-visible backstop (and in some cases PG limiter — see Notes).
 
 | Alert | Location | Planned tier | Notes |
 | ----- | -------- | ------------ | ----- |
-| [#63](https://github.com/evenfire-ai/evenfire/security/code-scanning/63) | `outputs.ts:34` | 30/min heavy read | Uses `requireAdminWorkflowCaller` (F4 live auth) |
 | [#61](https://github.com/evenfire-ai/evenfire/security/code-scanning/61) | `auth.ts:607` | 60/min session read | `/admin/auth/me` SPA hydration |
 | [#62](https://github.com/evenfire-ai/evenfire/security/code-scanning/62) | `controlAdmins.ts:327` | 10/min write | Admin invitation POST |
 | [#70](https://github.com/evenfire-ai/evenfire/security/code-scanning/70) | `registryConnect.ts:520` | 10/min write | Claim redemption |

@@ -32,10 +32,26 @@ function hashedAdminWorkflowCredentialBucket(prefix: string) {
 }
 
 /**
- * Ingress-style edge key: IP-only so unverified bearer rotation cannot evade the
- * backstop. Per-credential quotas remain on the PG limiter downstream.
+ * Skip the edge backstop when no admin credential is present. Anonymous traffic
+ * must not share a single IP bucket (Control UI proxy often omits XFF).
+ */
+export function shouldSkipWorkflowGrantEdgeRateLimit(req: Request): boolean {
+  if (readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)) return false
+  if (extractBearerToken(req)) return false
+  return true
+}
+
+/**
+ * Edge backstop key:
+ * - HttpOnly admin cookie → per-session bucket (isolates Control UI admins)
+ * - Bearer only → IP bucket (unverified bearer rotation cannot mint fresh buckets)
  */
 export function workflowGrantEdgeRateLimitKey(prefix: string, req: Request): string {
+  const cookie = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+  if (cookie) {
+    const hash = createHash('sha256').update(cookie).digest('hex').slice(0, 32)
+    return `${prefix}:cred:${hash}`
+  }
   return `${prefix}:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
 
@@ -64,6 +80,7 @@ export function workflowGrantReadEdgeRateLimit() {
     limit: WORKFLOW_GRANT_READ_PER_MINUTE,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    skip: shouldSkipWorkflowGrantEdgeRateLimit,
     keyGenerator: workflowGrantEdgeRateKey('workflow_grants_read_edge'),
     handler: workflowGrantEdgeRateLimitHandler,
   })
@@ -76,6 +93,7 @@ export function workflowGrantWriteEdgeRateLimit() {
     limit: WORKFLOW_GRANT_WRITE_PER_MINUTE,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    skip: shouldSkipWorkflowGrantEdgeRateLimit,
     keyGenerator: workflowGrantEdgeRateKey('workflow_grants_write_edge'),
     handler: workflowGrantEdgeRateLimitHandler,
   })
@@ -95,6 +113,7 @@ function workflowAdminReadEdgeRateLimit() {
     limit: WORKFLOW_ADMIN_READ_PER_MINUTE,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    skip: shouldSkipWorkflowGrantEdgeRateLimit,
     keyGenerator: workflowGrantEdgeRateKey('workflow_admin_read_edge'),
     handler: workflowGrantEdgeRateLimitHandler,
   })
@@ -106,6 +125,7 @@ function adminOutputsReadEdgeRateLimit() {
     limit: ADMIN_OUTPUTS_READ_PER_MINUTE,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    skip: shouldSkipWorkflowGrantEdgeRateLimit,
     keyGenerator: workflowGrantEdgeRateKey('admin_outputs_read_edge'),
     handler: workflowGrantEdgeRateLimitHandler,
   })

@@ -542,6 +542,26 @@ describe('routes/admin/workflows', () => {
         .get('/admin/workflows')
         .set('Authorization', 'Bearer mcp-host-workflow-control-token')
         .expect(401)
+
+      expect(mockPoolQuery).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('GET /admin/outputs', () => {
+    it('returns empty output aggregates for live admin cookie sessions', async () => {
+      mockLiveAdminSession()
+      mockRateLimiterAllowed()
+
+      const app = makeOutputsApp(gateway)
+      const res = await request(app)
+        .get('/admin/outputs')
+        .set('Cookie', 'control_ui_admin_session=admin-token')
+        .expect(200)
+
+      expect(res.body).toEqual({
+        workflowOutputs: [],
+        chatArtifacts: [],
+      })
     })
   })
 
