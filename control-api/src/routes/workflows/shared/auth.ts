@@ -1,4 +1,4 @@
-import { Request, Response } from 'express'
+import { NextFunction, Request, Response } from 'express'
 import { isCurrentExternalSession } from '../../../middleware/externalSessionAuth.js'
 import { authenticateAdminSession } from '../../../services/adminSessionAuth.js'
 import type { WorkflowCaller } from '../../../services/workflows/types.js'
@@ -28,6 +28,10 @@ function unauthorized(res: Response): null {
   return null
 }
 
+export type AdminWorkflowAuthedRequest = Request & {
+  adminWorkflowCaller?: Extract<WorkflowCaller, { kind: 'admin-ui' }>
+}
+
 export async function requireAdminWorkflowCaller(
   req: Request,
   res: Response
@@ -36,6 +40,18 @@ export async function requireAdminWorkflowCaller(
   const adminClaims = await authenticateAdminSession(adminToken)
   if (!adminClaims) return unauthorized(res)
   return { kind: 'admin-ui', userId: adminClaims.sub }
+}
+
+/** Express middleware — keeps authorization out of business handlers for SAST. */
+export async function requireAdminWorkflowCallerMiddleware(
+  req: AdminWorkflowAuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const caller = await requireAdminWorkflowCaller(req, res)
+  if (!caller) return
+  req.adminWorkflowCaller = caller
+  next()
 }
 
 export async function requireExternalWorkflowCaller(
