@@ -26,11 +26,24 @@ const BASE = '/admin/workflows'
 const logger = rootLogger.child({ module: 'admin-workflow-grants' })
 
 function bindAdminWorkflowAuth(req: Request, res: Response, next: NextFunction): void {
-  void requireAdminWorkflowCallerMiddleware(req as AdminWorkflowAuthedRequest, res, next)
+  void requireAdminWorkflowCallerMiddleware(req as AdminWorkflowAuthedRequest, res, next).catch(
+    next
+  )
 }
 
 function adminCaller(req: Request): AdminWorkflowAuthedRequest['adminWorkflowCaller'] {
   return (req as AdminWorkflowAuthedRequest).adminWorkflowCaller
+}
+
+function requireBoundAdminCaller(req: Request, res: Response) {
+  const caller = adminCaller(req)
+  if (!caller) {
+    if (!res.headersSent) {
+      res.status(401).json({ error: 'Unauthorized' })
+    }
+    return null
+  }
+  return caller
 }
 
 function withAdministrativeTraceContext<T>(req: Request, operatorSub: string, work: () => T): T {
@@ -53,7 +66,8 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
     ...WORKFLOW_GRANT_READ_RATE_LIMITS,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = adminCaller(req)!
+      const caller = requireBoundAdminCaller(req, res)
+      if (!caller) return
 
       try {
         const users = await listWorkflowRecipeGrants(gateway, req.params.ns, req.params.name)
@@ -73,7 +87,8 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
     ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = adminCaller(req)!
+      const caller = requireBoundAdminCaller(req, res)
+      if (!caller) return
 
       try {
         const result = await withAdministrativeTraceContext(req, caller.userId, () =>
@@ -118,7 +133,8 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
     ...WORKFLOW_GRANT_READ_RATE_LIMITS,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = adminCaller(req)!
+      const caller = requireBoundAdminCaller(req, res)
+      if (!caller) return
 
       try {
         const teams = await listWorkflowRecipeTeamGrants(gateway, req.params.ns, req.params.name)
@@ -138,7 +154,8 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
     ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = adminCaller(req)!
+      const caller = requireBoundAdminCaller(req, res)
+      if (!caller) return
 
       try {
         const result = await withAdministrativeTraceContext(req, caller.userId, () =>
@@ -183,7 +200,8 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
     ...WORKFLOW_GRANT_READ_RATE_LIMITS,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = adminCaller(req)!
+      const caller = requireBoundAdminCaller(req, res)
+      if (!caller) return
 
       try {
         const teams = await listWorkflowRecipeApprovalTeams({
@@ -207,7 +225,8 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
     ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = adminCaller(req)!
+      const caller = requireBoundAdminCaller(req, res)
+      if (!caller) return
 
       try {
         const result = await withAdministrativeTraceContext(req, caller.userId, () =>
@@ -246,7 +265,8 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
     ...WORKFLOW_GRANT_WRITE_RATE_LIMITS,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = adminCaller(req)!
+      const caller = requireBoundAdminCaller(req, res)
+      if (!caller) return
 
       try {
         const result = await withAdministrativeTraceContext(req, caller.userId, () =>

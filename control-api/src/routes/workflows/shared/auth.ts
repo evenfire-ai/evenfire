@@ -48,10 +48,14 @@ export async function requireAdminWorkflowCallerMiddleware(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const caller = await requireAdminWorkflowCaller(req, res)
-  if (!caller) return
-  req.adminWorkflowCaller = caller
-  next()
+  try {
+    const caller = await requireAdminWorkflowCaller(req, res)
+    if (!caller) return
+    req.adminWorkflowCaller = caller
+    next()
+  } catch (error) {
+    next(error)
+  }
 }
 
 export async function requireExternalWorkflowCaller(

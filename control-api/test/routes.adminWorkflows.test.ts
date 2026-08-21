@@ -1934,6 +1934,22 @@ describe('routes/admin/workflows', () => {
       await request(app).get(`/admin/workflows/${RECIPE_NS}/test-recipe/grants`).expect(401)
     })
 
+    it('forwards admin session lookup failures to the error handler', async () => {
+      mockGetGrantsRateLimiterAllowed()
+      mockLiveAdminSession()
+      mockFindAdminById.mockRejectedValueOnce(new Error('db unavailable'))
+      const app = express()
+      app.use(express.json())
+      app.use(createWorkflowsAdminRouter(gateway as never))
+      app.use((_err, _req, res, _next) => {
+        res.status(500).json({ error: 'internal_error' })
+      })
+      await request(app)
+        .get(`/admin/workflows/${RECIPE_NS}/test-recipe/grants`)
+        .set('Authorization', 'Bearer admin-token')
+        .expect(500)
+    })
+
     it('returns opaque 401 for a user-session caller', async () => {
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
       const app = makeApp(gateway)
