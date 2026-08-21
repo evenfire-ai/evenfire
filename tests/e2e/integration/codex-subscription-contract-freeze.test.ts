@@ -48,7 +48,7 @@ const REQUIRED_LIMIT_KEYS = [
 ] as const
 
 const SENSITIVE_VALUE_PATTERN =
-  /^(?:sk-[A-Za-z0-9]+|Bearer\s+\S+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[^;\s]+=[^;\s]+(?:;|$))/
+  /^(?:sk-[A-Za-z0-9]+|Bearer\s+\S+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|(?!https?:\/\/)[^;\s]+=[^;\s]+(?:;|$))/
 
 type FiniteLimit = number
 

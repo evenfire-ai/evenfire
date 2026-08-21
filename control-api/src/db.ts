@@ -5,7 +5,10 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
-import { applyCodexSubscriptionConnectionSchema } from './services/codexSubscriptionConnection.js'
+import {
+  applyCodexChatgptAccountIdSchema,
+  applyCodexSubscriptionConnectionSchema,
+} from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import {
   applyGfsUploadCleanupSchema,
@@ -5935,6 +5938,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '00a3_llm_provider_attempt_tickets',
     apply: applyLlmProviderAttemptTicketSchema,
+  },
+  {
+    version: '00a4_codex_chatgpt_account_id',
+    apply: applyCodexChatgptAccountIdSchema,
   },
   {
     version: '0100_seed_minimax_allowed_model',

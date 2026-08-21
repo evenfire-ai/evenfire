@@ -1,5 +1,7 @@
 export const CODEX_COMPLETIONS_ORIGIN = 'https://chatgpt.com/backend-api/codex/responses'
-export const CODEX_CATALOG_ORIGIN = 'https://chatgpt.com/backend-api/codex/models'
+export const CODEX_CATALOG_CLIENT_VERSION = '1.0.0'
+export const CODEX_CATALOG_ORIGIN =
+  `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`
 export const CODEX_TRANSPORT_PROTOCOL = 'codex-subscription-transport.v1' as const
 
 export type UpstreamKind = 'completions' | 'catalog'
@@ -34,7 +36,7 @@ export function assertAllowedUpstreamUrl(raw: string, kind: UpstreamKind): URL {
   if (parsed.protocol !== 'https:') throw new OriginDeniedError('origin_denied')
   if (parsed.username || parsed.password) throw new OriginDeniedError('origin_denied')
   if (parsed.hash) throw new OriginDeniedError('origin_denied')
-  if (parsed.search) throw new OriginDeniedError('origin_denied')
+  if (parsed.search !== frozen.search) throw new OriginDeniedError('origin_denied')
   if (parsed.origin !== frozen.origin || parsed.pathname !== frozen.pathname) {
     throw new OriginDeniedError('origin_denied')
   }
@@ -56,6 +58,28 @@ export async function assertResolvedUpstream(
   }
 }
 
+/**
+ * POST/GET the frozen origin with redirects disabled. Follow at most one
+ * same-origin/same-path/same-search HTTPS redirect; anything else is denied.
+ */
+export async function fetchFrozenOrigin(input: {
+  url: URL
+  init: RequestInit
+  fetchFn: typeof fetch
+  lookup?: OriginPolicyOptions['lookup']
+}): Promise<Response> {
+  await assertResolvedUpstream(input.url, input.lookup)
+  const init: RequestInit = { ...input.init, redirect: 'manual' }
+  const first = await input.fetchFn(input.url.href, init)
+  if (first.status < 300 || first.status >= 400) return first
+  const next = assertRedirectLocation(first.headers.get('location') || '', input.url)
+  const second = await input.fetchFn(next.href, init)
+  if (second.status >= 300 && second.status < 400) {
+    throw new OriginDeniedError('origin_denied')
+  }
+  return second
+}
+
 export function assertRedirectLocation(location: string, from: URL): URL {
   let next: URL
   try {
@@ -69,6 +93,7 @@ export function assertRedirectLocation(location: string, from: URL): URL {
     throw new OriginDeniedError('origin_denied')
   }
   if (next.pathname !== from.pathname) throw new OriginDeniedError('origin_denied')
+  if (next.search !== from.search) throw new OriginDeniedError('origin_denied')
   return next
 }
 

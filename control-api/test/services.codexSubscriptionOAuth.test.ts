@@ -16,6 +16,8 @@ const repos = vi.hoisted(() => ({
   releaseLock: vi.fn(),
   loadSecrets: vi.fn(),
   revokeConnection: vi.fn(),
+  updateInPlace: vi.fn(),
+  persistAccountId: vi.fn(),
 }))
 
 vi.mock('../src/services/codexSubscriptionOAuthState.js', async () => {
@@ -41,6 +43,8 @@ vi.mock('../src/services/codexSubscriptionConnection.js', async () => {
     releaseCodexSubscriptionRefreshLock: repos.releaseLock,
     loadCodexSubscriptionSecrets: repos.loadSecrets,
     revokeCodexSubscriptionConnection: repos.revokeConnection,
+    updateCodexAccessTokenInPlace: repos.updateInPlace,
+    persistCodexChatgptAccountId: repos.persistAccountId,
   }
 })
 
@@ -53,6 +57,7 @@ const {
   CODEX_OAUTH_DEVICE_VERIFICATION_URI,
   handleCodexBrowserCallback,
   pollCodexDevice,
+  ensureFreshCodexAccessToken,
   refreshCodexSubscriptionConnection,
   revokeCodexSubscription,
   startCodexBrowserConnect,
@@ -61,8 +66,13 @@ const {
 
 const KEY = deriveOAuthEncryptionKey('ab'.repeat(32))
 
-function idTokenFor(subject: string): string {
-  const payload = Buffer.from(JSON.stringify({ sub: subject })).toString('base64url')
+function idTokenFor(subject: string, accountId?: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      sub: subject,
+      ...(accountId ? { chatgpt_account_id: accountId } : {}),
+    })
+  ).toString('base64url')
   return `hdr.${payload}.sig`
 }
 
@@ -386,6 +396,7 @@ describe('codex subscription OAuth broker', () => {
       refreshToken: 'old-refresh',
       accessToken: null,
       accessTokenExpiresAt: null,
+      chatgptAccountId: null,
       credentialRevision: 7,
     })
     const fetchFn = vi.fn().mockResolvedValue({
@@ -414,11 +425,45 @@ describe('codex subscription OAuth broker', () => {
     assertNoLeak(refreshed)
   })
 
+  it('refreshes an expiring access token in place without rotating credential_revision', async () => {
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'refresh-secret',
+      accessToken: 'stale-access',
+      accessTokenExpiresAt: new Date(Date.now() + 30_000),
+      chatgptAccountId: null,
+      credentialRevision: 3,
+    })
+    repos.acquireLock.mockResolvedValue(true)
+    repos.updateInPlace.mockResolvedValue({
+      connectionKey: 'deployment-default',
+      status: 'connected',
+      credentialRevision: 3,
+      accountFingerprint: 'fp',
+    })
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        access_token: 'access-secret',
+        id_token: idTokenFor('acct_raw_123', 'acct_live_9'),
+      }),
+    })
+    await ensureFreshCodexAccessToken(deps(fetchFn))
+    expect(repos.updateInPlace).toHaveBeenCalledWith(
+      expect.anything(),
+      KEY,
+      3,
+      expect.objectContaining({ accessToken: 'access-secret', chatgptAccountId: 'acct_live_9' })
+    )
+    expect(repos.rotate).not.toHaveBeenCalled()
+    expect(repos.releaseLock).toHaveBeenCalled()
+  })
+
   it('revokes locally even when upstream revoke fails', async () => {
     repos.loadSecrets.mockResolvedValue({
       refreshToken: 'refresh-secret',
       accessToken: 'access-secret',
       accessTokenExpiresAt: null,
+      chatgptAccountId: null,
       credentialRevision: 3,
     })
     repos.revokeConnection.mockResolvedValue({

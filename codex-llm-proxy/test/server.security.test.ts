@@ -141,6 +141,28 @@ describe('codex-llm-proxy security surface', () => {
     expect(res.status).toBe(413)
   })
 
+  it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
+    const { runtimeApp } = createProxyApps(config())
+    const foreign = sign(
+      {
+        sub: 'default/other-host',
+        hostRefs: ['other-host'],
+        workflowControlScopes: ['llm:codex:execute'],
+      },
+      'workflow-approvals'
+    )
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${foreign}`)
+      .send({
+        executionTicket: ticket(),
+        requestHash: 'a'.repeat(64),
+        request: {},
+      })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('host_binding_mismatch')
+  })
+
   it('rejects missing, zero, and unbounded config', () => {
     expect(() => loadConfig({ CODEX_LLM_PROXY_RUNTIME_PORT: '0' })).toThrow(/greater than zero/)
     expect(() =>

@@ -39,7 +39,8 @@ const ROOT_KEYS = new Set([
   'deadlineMs',
   'transportHints',
 ])
-const MESSAGE_KEYS = new Set(['role', 'content', 'name', 'toolCallId'])
+const MESSAGE_KEYS = new Set(['role', 'content', 'name', 'toolCallId', 'toolCalls'])
+const TOOL_CALL_KEYS = new Set(['id', 'name', 'arguments'])
 const TOOL_KEYS = new Set(['name', 'description', 'parameters'])
 const GENERATION_KEYS = new Set(['temperature', 'maxOutputTokens', 'toolChoice'])
 const HINT_KEYS = new Set(['promptCacheKey'])
@@ -179,6 +180,42 @@ function parseMessages(raw) {
     if (item.toolCallId !== undefined) {
       if (!isBoundedId(item.toolCallId)) return fail('invalid', `messages[${i}].toolCallId is invalid`)
       message.toolCallId = item.toolCallId
+    }
+    if (item.toolCalls !== undefined) {
+      if (item.role !== 'assistant') {
+        return fail('invalid', `messages[${i}].toolCalls is only allowed on assistant`)
+      }
+      if (!Array.isArray(item.toolCalls) || item.toolCalls.length === 0) {
+        return fail('invalid', `messages[${i}].toolCalls must be a non-empty array`)
+      }
+      if (item.toolCalls.length > LIMITS.maxTools) {
+        return fail('limit', `messages[${i}].toolCalls exceed ${LIMITS.maxTools}`)
+      }
+      const toolCalls = []
+      for (let j = 0; j < item.toolCalls.length; j++) {
+        const call = item.toolCalls[j]
+        if (!isPlainObject(call)) {
+          return fail('invalid', `messages[${i}].toolCalls[${j}] must be an object`)
+        }
+        const callExtra = rejectUnknown(call, TOOL_CALL_KEYS, `messages[${i}].toolCalls[${j}]`)
+        if (callExtra) return callExtra
+        if (!isBoundedId(call.id)) {
+          return fail('invalid', `messages[${i}].toolCalls[${j}].id is invalid`)
+        }
+        if (!isBoundedId(call.name)) {
+          return fail('invalid', `messages[${i}].toolCalls[${j}].name is invalid`)
+        }
+        if (!isPlainObject(call.arguments)) {
+          return fail('invalid', `messages[${i}].toolCalls[${j}].arguments must be an object`)
+        }
+        const finiteArgs = assertFiniteTree(
+          call.arguments,
+          `messages[${i}].toolCalls[${j}].arguments`
+        )
+        if (finiteArgs) return finiteArgs
+        toolCalls.push({ id: call.id, name: call.name, arguments: call.arguments })
+      }
+      message.toolCalls = toolCalls
     }
     messages.push(message)
   }
@@ -322,6 +359,24 @@ function hashCodexCompletionRequestV1(request) {
   return createHash('sha256').update(stableStringify(request)).digest('hex')
 }
 
+/**
+ * Grant-binding digest for a Codex authorize attempt. Must match
+ * control-api's expected hash: SHA-256 of lexicographic stableStringify of
+ * { catalogRevision, credentialRevision, model, provider }.
+ */
+function computeCodexPolicyHash(input) {
+  return createHash('sha256')
+    .update(
+      stableStringify({
+        catalogRevision: input.catalogRevision,
+        credentialRevision: input.credentialRevision,
+        model: input.model,
+        provider: PROVIDER_ID,
+      })
+    )
+    .digest('hex')
+}
+
 function requireId(obj, key) {
   if (!isBoundedId(obj[key])) return fail('invalid', `${key} is invalid`)
   return null
@@ -455,6 +510,7 @@ module.exports = {
   stableStringify,
   parseCodexCompletionRequestV1,
   hashCodexCompletionRequestV1,
+  computeCodexPolicyHash,
   parseCodexExecutionTicketClaims,
   parseAuthorizeAttemptResponse,
   parseCodexAttemptReceiptV1,

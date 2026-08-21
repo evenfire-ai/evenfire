@@ -625,6 +625,31 @@ spec:
         - port: 8082
           protocol: TCP
 ---
+# Allow control-api catalog/health admin calls to the Codex LLM proxy.
+# deny-all-control-plane blocks intra-namespace traffic; proxy ingress already
+# admits control-api:8081, but control-api egress must match.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: control-api-to-codex-llm-proxy
+  namespace: control-plane
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app: control-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: codex-llm-proxy
+      ports:
+        - port: 8081
+          protocol: TCP
+---
 # Ingress side: allow control-api to reach WRC
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

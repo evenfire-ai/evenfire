@@ -61,4 +61,48 @@ describe('CodexLlmProxyClient', () => {
     ).rejects.toMatchObject({ code: 'canceled' })
     expect(client['options'].fetchFn).not.toHaveBeenCalled()
   })
+
+  it('surfaces the proxy error code with the HTTP status', async () => {
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({ error: 'origin_denied' }),
+      }) as unknown as typeof fetch,
+    })
+    await expect(
+      client.stream({
+        executionTicket: 'ticket-123456',
+        requestHash: 'a'.repeat(64),
+        request: {},
+      })
+    ).rejects.toMatchObject({
+      code: 'origin_denied',
+      message: 'proxy stream failed with 403 (origin_denied)',
+    })
+  })
+
+  it('fails closed when the proxy emits an SSE error frame after headers', async () => {
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: vi.fn().mockResolvedValue({
+        ok: true,
+        body: sse([{ type: 'error', code: 'origin_denied' }]),
+      }) as unknown as typeof fetch,
+    })
+    await expect(
+      client.stream({
+        executionTicket: 'ticket-123456',
+        requestHash: 'a'.repeat(64),
+        request: {},
+      })
+    ).rejects.toMatchObject({ code: 'origin_denied' })
+  })
 })

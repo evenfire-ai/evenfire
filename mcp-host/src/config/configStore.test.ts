@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { register } from 'prom-client'
 import { ALL_PROVIDERS, descriptorFor } from '../llm/registryCore'
-import { ConfigStore, PROVIDER_ENV_NAMES } from './configStore'
+import {
+  CATALOG_REVISION_ANNOTATION,
+  CONNECTION_REVISION_ANNOTATION,
+  ConfigStore,
+  PROVIDER_ENV_NAMES,
+} from './configStore'
 
 const ALLOWLIST_CM = 'clerum-llm-allowed-models'
 const ALLOWLIST_WATCH_KEY = `/api/v1/namespaces/mcp-host/configmaps|metadata.name=${ALLOWLIST_CM}`
@@ -71,9 +76,11 @@ interface FakeCoreApi {
 function makeFakeCoreApi(initial: {
   secrets?: Record<string, Record<string, string>>
   configMaps?: Record<string, Record<string, string>>
+  configMapAnnotations?: Record<string, Record<string, string>>
 }): FakeCoreApi {
   const secrets = { ...(initial.secrets ?? {}) }
   const configMaps = { ...(initial.configMaps ?? {}) }
+  const configMapAnnotations = { ...(initial.configMapAnnotations ?? {}) }
   return {
     readNamespacedSecret: vi.fn(async (req: { name: string }) => {
       const data = secrets[req.name]
@@ -89,7 +96,10 @@ function makeFakeCoreApi(initial: {
         const err: { code?: number; statusCode?: number } = { code: 404, statusCode: 404 }
         throw err
       }
-      return { data }
+      return {
+        data,
+        metadata: { name: req.name, annotations: configMapAnnotations[req.name] },
+      }
     }),
   }
 }
@@ -99,10 +109,15 @@ function build(opts: {
   provider?: 'openai' | 'claude' | 'zai' | 'bailian' | null
   secrets?: Record<string, Record<string, string>>
   configMaps?: Record<string, Record<string, string>>
+  configMapAnnotations?: Record<string, Record<string, string>>
   allowlistConfigMapName?: string | null
 }): { store: ConfigStore; watch: FakeWatch; api: FakeCoreApi } {
   const watch = makeFakeWatch()
-  const api = makeFakeCoreApi({ secrets: opts.secrets, configMaps: opts.configMaps })
+  const api = makeFakeCoreApi({
+    secrets: opts.secrets,
+    configMaps: opts.configMaps,
+    configMapAnnotations: opts.configMapAnnotations,
+  })
   const store = new ConfigStore({
     namespace: 'mcp-host',
     hostRef: 'trader',
@@ -539,6 +554,51 @@ describe('ConfigStore — allowlist tier (R3)', () => {
       { model: 'gpt-5.4', displayName: 'GPT 5.4', contextWindowTokens: 400000, vendor: 'OpenAI' },
     ])
     expect(store.allowedModels().get('claude')).toEqual([{ model: 'claude-opus-4-8' }])
+    expect(store.codexPolicyBinding()).toBeNull()
+  })
+
+  it('exposes Codex catalog/credential revisions from allowlist annotations', async () => {
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: { openai: JSON.stringify([{ model: 'gpt-5.4' }]) },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          [CATALOG_REVISION_ANNOTATION]: '7',
+          [CONNECTION_REVISION_ANNOTATION]: '3',
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+
+    expect(store.codexPolicyBinding()).toEqual({
+      catalogRevision: 7,
+      credentialRevision: 3,
+    })
+
+    const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
+    expect(handle).toBeDefined()
+    handle!.emit('MODIFIED', {
+      metadata: {
+        name: ALLOWLIST_CM,
+        annotations: {
+          [CATALOG_REVISION_ANNOTATION]: '8',
+          [CONNECTION_REVISION_ANNOTATION]: '3',
+        },
+      },
+      data: { openai: JSON.stringify([{ model: 'gpt-5.4' }]) },
+    })
+    expect(store.codexPolicyBinding()).toEqual({
+      catalogRevision: 8,
+      credentialRevision: 3,
+    })
+
+    handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })
+    expect(store.codexPolicyBinding()).toBeNull()
   })
 
   it('hot-reloads: a MODIFIED event makes the new allowlist visible + fires allowlistChanged', async () => {

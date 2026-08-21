@@ -252,6 +252,7 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
     )
     expect(nps).toContain('codex-llm-proxy-ingress')
     expect(nps).toContain('codex-llm-proxy-egress')
+    expect(nps).toContain('control-api-to-codex-llm-proxy')
   })
 
   it('deny-all policies exist in secured namespaces', ctx => {

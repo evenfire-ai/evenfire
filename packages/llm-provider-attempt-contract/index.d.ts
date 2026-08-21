@@ -28,11 +28,18 @@ export type ContractResult<T> =
 
 export type CodexMessageRole = 'system' | 'user' | 'assistant' | 'tool'
 
+export interface CodexAssistantToolCallV1 {
+  id: string
+  name: string
+  arguments: Record<string, unknown>
+}
+
 export interface CodexMessageV1 {
   role: CodexMessageRole
   content: string
   name?: string
   toolCallId?: string
+  toolCalls?: CodexAssistantToolCallV1[]
 }
 
 export interface CodexToolDefinitionV1 {
@@ -107,7 +114,7 @@ export type RedeemAttemptResponse = {
 export type CodexTransportMetadataV1 = {
   protocolVersion: 'codex-subscription-transport.v1'
   completionsOrigin: 'https://chatgpt.com/backend-api/codex/responses'
-  catalogOrigin: 'https://chatgpt.com/backend-api/codex/models'
+  catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0'
   operation: 'completion_stream' | 'completion_cancel' | 'connection_test'
   servedModel: string
   maxStreamDurationMs: number
@@ -130,6 +137,11 @@ export declare function parseCodexCompletionRequestV1(
 export declare function hashCodexCompletionRequestV1(
   request: CodexCompletionRequestV1
 ): string
+export declare function computeCodexPolicyHash(input: {
+  model: string
+  catalogRevision: number
+  credentialRevision: number
+}): string
 export declare function parseCodexExecutionTicketClaims(
   input: unknown
 ): ContractResult<CodexExecutionTicketClaims>

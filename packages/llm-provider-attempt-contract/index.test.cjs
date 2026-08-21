@@ -111,10 +111,86 @@ test('hash is SHA-256 of lexicographic stableStringify of the projection', () =>
   assert.equal(contract.hashCodexCompletionRequestV1(parsed.value), expected)
 })
 
+test('computeCodexPolicyHash is SHA-256 of lexicographic stableStringify of the binding', () => {
+  const binding = {
+    catalogRevision: 4,
+    credentialRevision: 3,
+    model: 'gpt-5.1',
+    provider: 'codex-subscription',
+  }
+  const expected = crypto
+    .createHash('sha256')
+    .update(contract.stableStringify(binding))
+    .digest('hex')
+  assert.equal(
+    contract.computeCodexPolicyHash({
+      model: 'gpt-5.1',
+      catalogRevision: 4,
+      credentialRevision: 3,
+    }),
+    expected
+  )
+  assert.equal(
+    contract.computeCodexPolicyHash({
+      credentialRevision: 3,
+      catalogRevision: 4,
+      model: 'gpt-5.1',
+    }),
+    expected
+  )
+  assert.notEqual(
+    contract.computeCodexPolicyHash({
+      model: 'gpt-5.6-luna',
+      catalogRevision: 4,
+      credentialRevision: 3,
+    }),
+    expected
+  )
+})
+
 test('stableStringify sorts object keys and drops undefined like control-api', () => {
   assert.equal(contract.stableStringify({ b: 1, a: 2 }), '{"a":2,"b":1}')
   assert.equal(contract.stableStringify({ a: undefined, b: 1 }), '{"b":1}')
   assert.equal(contract.stableStringify([1, undefined, 2]), '[1,null,2]')
+})
+
+test('assistant toolCalls are hashed into the request and rejected on other roles', () => {
+  const withTools = contract.parseCodexCompletionRequestV1({
+    ...BASE,
+    messages: [
+      { role: 'user', content: 'hi' },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call-1', name: 'echo', arguments: { x: 1 } }],
+      },
+      { role: 'tool', content: 'ok', toolCallId: 'call-1' },
+    ],
+  })
+  assert.equal(withTools.ok, true)
+  const digest = contract.hashCodexCompletionRequestV1(withTools.value)
+  const without = contract.parseCodexCompletionRequestV1({
+    ...BASE,
+    messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '' },
+      { role: 'tool', content: 'ok', toolCallId: 'call-1' },
+    ],
+  })
+  assert.equal(without.ok, true)
+  assert.notEqual(contract.hashCodexCompletionRequestV1(without.value), digest)
+
+  const onUser = contract.parseCodexCompletionRequestV1({
+    ...BASE,
+    messages: [
+      {
+        role: 'user',
+        content: 'hi',
+        toolCalls: [{ id: 'call-1', name: 'echo', arguments: {} }],
+      },
+    ],
+  })
+  assert.equal(onUser.ok, false)
 })
 
 test('ticket and receipt types stay credential-free at the contract boundary', () => {

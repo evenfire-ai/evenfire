@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { chatgptAccountIdFromJwt } from './chatgptAccountId.js'
 import {
   type CodexSubscriptionSafeConnection,
   CodexSubscriptionStaleRevisionError,
@@ -8,9 +9,11 @@ import {
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
   loadCodexSubscriptionSecrets,
+  persistCodexChatgptAccountId,
   releaseCodexSubscriptionRefreshLock,
   revokeCodexSubscriptionConnection,
   rotateCodexSubscriptionCredentials,
+  updateCodexAccessTokenInPlace,
 } from './codexSubscriptionConnection.js'
 import {
   type CodexSubscriptionOAuthIntent,
@@ -39,6 +42,7 @@ const DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
 const TOKEN_TIMEOUT_MS = 15_000
 const REFRESH_LOCK_TTL_MS = 30_000
 const BROWSER_STATE_TTL_MS = 10 * 60_000
+const ACCESS_TOKEN_REFRESH_SKEW_MS = 5 * 60_000
 
 export type CodexOAuthErrorCode =
   | 'disabled'
@@ -277,6 +281,7 @@ export async function refreshCodexSubscriptionConnection(
           refreshToken: token.refreshToken ?? secrets.refreshToken,
           accessToken: token.accessToken,
           accessTokenExpiresAt: token.expiresAt,
+          chatgptAccountId: token.chatgptAccountId,
           accountFingerprint: token.accountFingerprint,
         }
       )
@@ -335,6 +340,7 @@ async function persistGrantedTokens(
     refreshToken: parsed.refreshToken ?? '',
     accessToken: parsed.accessToken,
     accessTokenExpiresAt: parsed.expiresAt,
+    chatgptAccountId: parsed.chatgptAccountId,
     accountFingerprint: parsed.accountFingerprint,
     status: 'connected' as const,
   }
@@ -370,6 +376,60 @@ type ParsedCodexToken = {
   refreshToken: string | null
   expiresAt: Date | null
   accountFingerprint: string
+  chatgptAccountId?: string
+}
+
+/**
+ * Refresh the ChatGPT access token without bumping credential_revision.
+ * Authorize tickets bind that revision; rotating it after issue invalidates them.
+ */
+export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise<void> {
+  requireEnabled(deps)
+  const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey)
+  if (!secrets) {
+    throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
+  }
+  let accountId = secrets.chatgptAccountId || chatgptAccountIdFromJwt(secrets.accessToken)
+  const expiring =
+    secrets.accessTokenExpiresAt != null &&
+    secrets.accessTokenExpiresAt.getTime() - Date.now() < ACCESS_TOKEN_REFRESH_SKEW_MS
+  if (secrets.accessToken && !expiring && accountId) {
+    if (!secrets.chatgptAccountId) {
+      await persistCodexChatgptAccountId(deps.db, deps.encryptionKey, accountId)
+    }
+    return
+  }
+
+  const lockToken = randomBytes(16).toString('hex')
+  const locked = await acquireCodexSubscriptionRefreshLock(deps.db, lockToken, REFRESH_LOCK_TTL_MS)
+  if (!locked) {
+    await new Promise(resolve => setTimeout(resolve, 400))
+    return
+  }
+  try {
+    const latest = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey)
+    if (!latest) {
+      throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
+    }
+    const token = await exchangeRefreshToken(deps, latest.refreshToken)
+    accountId = token.chatgptAccountId || chatgptAccountIdFromJwt(token.accessToken) || accountId
+    await updateCodexAccessTokenInPlace(deps.db, deps.encryptionKey, latest.credentialRevision, {
+      accessToken: token.accessToken,
+      accessTokenExpiresAt: token.expiresAt,
+      refreshToken: token.refreshToken,
+      chatgptAccountId: accountId,
+    })
+  } catch (err) {
+    if (err instanceof CodexSubscriptionStaleRevisionError) {
+      throw new CodexSubscriptionOAuthError(
+        'stale_revision',
+        'in-place refresh lost the credential race'
+      )
+    }
+    throw err
+  } finally {
+    await releaseCodexSubscriptionRefreshLock(deps.db, lockToken)
+  }
 }
 
 async function exchangeAuthorizationCode(
@@ -495,12 +555,15 @@ function parseTokenResponse(body: Record<string, unknown>): ParsedCodexToken {
   const accessToken = requiredString(body.access_token, 'access_token')
   const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : null
   const expiresIn = typeof body.expires_in === 'number' ? body.expires_in : null
-  const subject = subjectFromIdToken(typeof body.id_token === 'string' ? body.id_token : null)
+  const idToken = typeof body.id_token === 'string' ? body.id_token : null
+  const subject = subjectFromIdToken(idToken)
+  const chatgptAccountId = chatgptAccountIdFromJwt(idToken) || chatgptAccountIdFromJwt(accessToken)
   return {
     accessToken,
     refreshToken,
     expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
     accountFingerprint: fingerprintAccount(subject),
+    ...(chatgptAccountId ? { chatgptAccountId } : {}),
   }
 }
 
