@@ -63,6 +63,21 @@ describe('GfsFileThumbnail', () => {
     expect(mockCreateObjectUrl).toHaveBeenCalledTimes(1)
   })
 
+  it('rewraps the blob with image/svg+xml when the proxy returns SVG bytes', async () => {
+    const svgBytes = new Blob(['<svg></svg>'], { type: 'application/octet-stream' })
+    mockGfsFetchFileBlob.mockResolvedValueOnce(svgBytes)
+    renderThumb({
+      byteLength: 64 * 1024,
+      fileName: 'logo.svg',
+      rid: 'r-svg',
+    })
+
+    await screen.findByAltText('Thumbnail of logo.svg')
+    expect(mockCreateObjectUrl).toHaveBeenCalledTimes(1)
+    const blobArg = mockCreateObjectUrl.mock.calls[0]?.[0] as Blob
+    expect(blobArg.type).toBe('image/svg+xml')
+  })
+
   it('falls back to the image glyph when the proxy fetch rejects', async () => {
     mockGfsFetchFileBlob.mockRejectedValueOnce(new Error('boom'))
     renderThumb({

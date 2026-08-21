@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { IconImage } from '@components/Sidebar/icons'
 import { GFS_FILE_THUMBNAIL_MAX_BYTES } from '@constants/gfsFileThumbnail'
 import { gfsFetchFileBlob } from '@lib/api'
+import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import type { GfsFileThumbnailProps } from './types'
 
 /**
@@ -32,13 +33,21 @@ export function GfsFileThumbnail({
 
     async function load(): Promise<void> {
       try {
-        const blob = await gfsFetchFileBlob(rid)
+        const fetched = await gfsFetchFileBlob(rid)
         if (cancelled) return
-        if (blob.size > GFS_FILE_THUMBNAIL_MAX_BYTES) {
+        if (fetched.size > GFS_FILE_THUMBNAIL_MAX_BYTES) {
           setFailed(true)
           return
         }
-        objectUrl = URL.createObjectURL(blob)
+        // SVG (and other image) previews render through <img>, which
+        // only paints the data when the object URL's blob carries the
+        // right MIME type. The proxy may return application/octet-stream
+        // for SVG bodies, so wrap with the type the image preview
+        // modal already computes.
+        const mimeType = gfsImagePreviewMimeType(fileName) ?? fetched.type
+        objectUrl = URL.createObjectURL(
+          mimeType && mimeType !== fetched.type ? new Blob([fetched], { type: mimeType }) : fetched
+        )
         setSrc(objectUrl)
       } catch {
         if (!cancelled) setFailed(true)
@@ -50,7 +59,7 @@ export function GfsFileThumbnail({
       cancelled = true
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [rid, shouldSkip])
+  }, [fileName, rid, shouldSkip])
 
   if (failed || !src) {
     return <IconImage />

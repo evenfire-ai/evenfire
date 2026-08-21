@@ -1,5 +1,5 @@
 import { type DragEvent as ReactDragEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
@@ -150,6 +150,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
+  const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
   const {
     current,
@@ -169,6 +170,39 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     resolving,
     refreshAffordances,
   } = ctrl
+
+  // Warm the cache for every directory row visible in the current view
+  // so clicking into a folder is instant. Re-runs whenever the listing
+  // changes (folder navigation, refresh, …) and silently no-ops if a
+  // folder was already prefetched. TanStack Query's staleTime:Infinity
+  // (set in lib/queryClient.ts) keeps the cached data hot until the user
+  // actually navigates there.
+  useEffect(() => {
+    if (!sessionScope) return
+    const folders = items.filter(item => item.kind === 'directory')
+    if (folders.length === 0) return
+    let cancelled = false
+    void Promise.all(
+      folders.map(folder =>
+        queryClient
+          .fetchInfiniteQuery({
+            queryKey: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, 'main'),
+            queryFn: ({ pageParam }) =>
+              window.clerum.gfs.listChildren(folder.resourceId, 'main', pageParam),
+            initialPageParam: undefined as string | undefined,
+          })
+          .catch(() => {
+            // Pre-fetch failures (offline, permission) are non-fatal; the
+            // real navigation will surface the error normally.
+          })
+      )
+    ).then(() => {
+      if (cancelled) return
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [items, queryClient, sessionScope])
 
   const teamDirectoryQuery = useQuery({
     queryKey: desktopQueryKeys.teamsDirectory,

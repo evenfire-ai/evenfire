@@ -62,6 +62,21 @@ describe('GfsFileThumbnail', () => {
     expect(mockCreateObjectUrl).toHaveBeenCalledTimes(1)
   })
 
+  it('rewraps the blob with image/svg+xml when the download returns SVG bytes', async () => {
+    const svgBytes = new TextEncoder().encode('<svg></svg>').buffer
+    mockDownload.mockResolvedValueOnce({ bytes: svgBytes })
+    renderThumb({
+      byteLength: 64 * 1024,
+      fileName: 'logo.svg',
+      rid: 'r-svg',
+    })
+
+    await screen.findByAltText('Thumbnail of logo.svg')
+    expect(mockCreateObjectUrl).toHaveBeenCalledTimes(1)
+    const blobArg = mockCreateObjectUrl.mock.calls[0]?.[0] as Blob
+    expect(blobArg.type).toBe('image/svg+xml')
+  })
+
   it('falls back to the image glyph when the download rejects', async () => {
     let rejectDownload: (() => void) | undefined
     const slowDownload = new Promise<{ bytes: ArrayBuffer }>((_, reject) => {

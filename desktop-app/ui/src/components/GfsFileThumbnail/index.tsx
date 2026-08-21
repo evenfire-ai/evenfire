@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { IconImage } from '@components/SidebarNav/icons'
 import { GFS_FILE_THUMBNAIL_MAX_BYTES } from '@constants/gfsFileThumbnail'
+import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import type { GfsFileThumbnailProps } from './types'
 
 /**
@@ -31,7 +32,13 @@ export function GfsFileThumbnail({ byteLength, fileName, rid }: GfsFileThumbnail
           setFailed(true)
           return
         }
-        objectUrl = URL.createObjectURL(new Blob([bytes]))
+        // SVG thumbnails need image/svg+xml on the object URL, but the
+        // download IPC can hand us application/octet-stream. Wrap the
+        // bytes with the type the preview modal already computes so the
+        // <img> can actually paint the SVG.
+        const mimeType = gfsImagePreviewMimeType(fileName)
+        const blob = mimeType !== null ? new Blob([bytes], { type: mimeType }) : new Blob([bytes])
+        objectUrl = URL.createObjectURL(blob)
         setSrc(objectUrl)
       } catch {
         if (!cancelled) setFailed(true)
@@ -43,7 +50,7 @@ export function GfsFileThumbnail({ byteLength, fileName, rid }: GfsFileThumbnail
       cancelled = true
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [rid, shouldSkip])
+  }, [fileName, rid, shouldSkip])
 
   if (failed || !src) {
     return <IconImage />

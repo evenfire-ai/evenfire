@@ -223,6 +223,30 @@ describe('GfsBrowser', () => {
     expect(path?.getAttribute('stroke-width')).toBe('32')
   })
 
+  it('prefetches every folder child into the in-memory cache', async () => {
+    mockApiGet
+      .mockResolvedValueOnce({
+        items: [
+          child('alpha', 'directory', 1),
+          child('beta', 'directory', 2),
+          child('notes.md', 'file', 3),
+        ],
+        nextCursor: null,
+      })
+      // The prefetch effect fans out one request per directory row.
+      .mockResolvedValue({ items: [], nextCursor: null })
+
+    renderBrowser()
+
+    await waitFor(() => expect(mockApiGet).toHaveBeenCalledTimes(3))
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
+      drive: 'main',
+    })
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-2/children', {
+      drive: 'main',
+    })
+  })
+
   it('uses the paperclip header, labels the root as main, and ignores current-crumb clicks', async () => {
     mockApiGet.mockResolvedValueOnce({ items: [], nextCursor: null })
     renderBrowser()
@@ -719,12 +743,14 @@ describe('GfsBrowser', () => {
         items: [child('org', 'directory', 1), child('report.md', 'file', 2)],
         nextCursor: null,
       })
+      // The 'org' folder prefetch resolves with an empty children page
+      // so the cache holds something realistic.
       .mockResolvedValueOnce({ items: [], nextCursor: null })
+      // Navigate back: re-fetch the root listing.
       .mockResolvedValueOnce({
         items: [child('org', 'directory', 1), child('report.md', 'file', 2)],
         nextCursor: null,
       })
-      .mockResolvedValueOnce({ items: [], nextCursor: null })
     mockApiSend.mockResolvedValueOnce({ ok: true })
     renderBrowser()
 
@@ -795,13 +821,20 @@ describe('GfsBrowser', () => {
   it('navigates into a directory and lists its children', async () => {
     mockApiGet
       .mockResolvedValueOnce({ items: [child('org', 'directory', 1)], nextCursor: null })
+      // Prefetch returns org's children so the cache is populated.
       .mockResolvedValueOnce({ items: [child('eng', 'directory', 3)], nextCursor: null })
+      // After the click navigates into eng, the prefetcher also reaches
+      // for eng's children. Empty page is fine — eng has no folders.
+      .mockResolvedValueOnce({ items: [], nextCursor: null })
+      // Navigate back: re-fetch the root listing.
       .mockResolvedValueOnce({ items: [child('org', 'directory', 1)], nextCursor: null })
     renderBrowser()
     const orgButton = (await screen.findAllByRole('button', { name: 'org' }))[0]
     fireEvent.click(orgButton)
     await screen.findAllByText(/eng/)
-    expect(mockApiGet).toHaveBeenLastCalledWith('/api/v1/gfs/resources/id-1/children', {
+    // The click handler is served from the prefetch cache; the recorded
+    // apiGet covers the org children fetch that primed the cache.
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
       drive: 'main',
     })
     // Navigate back to the drive root via the breadcrumb root crumb (Back/Forward were removed).

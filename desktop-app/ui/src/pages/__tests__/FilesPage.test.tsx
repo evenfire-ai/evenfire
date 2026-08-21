@@ -2079,4 +2079,75 @@ describe('FilesPage', () => {
 
     expect((screen.getByLabelText('Folder name') as HTMLInputElement).value).toBe('')
   })
+
+  it('prefetches each folder child into the TanStack cache so the next click is instant', async () => {
+    const listChildren = vi.fn(async () => ({
+      items: [],
+      nextCursor: null,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          list: () => ({ items: [] }),
+          download: vi.fn(),
+          listChildren,
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'folder-a',
+          rid: 'folder-a',
+          gfsUri: 'gfs://main/folder-a',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Alpha',
+          kind: 'directory',
+          path: '/Product/Alpha',
+          version: 1,
+          bytes: 0,
+        },
+        {
+          resourceId: 'folder-b',
+          rid: 'folder-b',
+          gfsUri: 'gfs://main/folder-b',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Beta',
+          kind: 'directory',
+          path: '/Product/Beta',
+          version: 1,
+          bytes: 0,
+        },
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.md',
+          kind: 'file',
+          path: '/Product/notes.md',
+          version: 1,
+          bytes: 12,
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    expect(listChildren).toHaveBeenCalledWith('folder-a', 'main', undefined)
+    expect(listChildren).toHaveBeenCalledWith('folder-b', 'main', undefined)
+  })
 })

@@ -209,7 +209,52 @@ export function GfsBrowser(): React.JSX.Element {
     })
   }
 
+  // Cache of prefetched directory children, keyed by the folder's
+  // resourceId. Refs over state because we don't want to re-render
+  // every time a prefetch resolves — the data is consumed lazily in
+  // openDirectory(). Survives across navigation; cleared on unmount.
+  const childCacheRef = useRef<Map<string, TreePage>>(new Map())
+  // True after openDirectory() served cached data; the next useEffect
+  // pass skips the redundant load() so the user keeps seeing the
+  // cached rows instead of a flash of empty items + spinner.
+  const skipNextLoadRef = useRef(false)
+
+  // Warm the cache for every folder row visible in the current view.
+  // Re-runs whenever the listing changes (folder navigation, refresh,
+  // …) and silently no-ops if a folder was already cached. Failed
+  // prefetches are non-fatal; the real navigation surfaces the error.
   useEffect(() => {
+    const folders = items.filter(child => child.kind === 'directory')
+    if (folders.length === 0) return
+    let cancelled = false
+    folders.forEach(folder => {
+      if (childCacheRef.current.has(folder.resourceId)) return
+      const response = apiGet(
+        `/api/v1/gfs/resources/${encodeURIComponent(folder.resourceId)}/children`,
+        { drive: DRIVE }
+      )
+      if (!response || typeof (response as Promise<TreePage>).then !== 'function') {
+        return
+      }
+      void (response as Promise<TreePage>)
+        .then(page => {
+          if (cancelled) return
+          childCacheRef.current.set(folder.resourceId, page)
+        })
+        .catch(() => {
+          /* ignore — openDirectory will surface the real error */
+        })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [items])
+
+  useEffect(() => {
+    if (skipNextLoadRef.current) {
+      skipNextLoadRef.current = false
+      return
+    }
     void load(current)
     // Reload whenever the current folder changes (navigation).
   }, [current, load])
@@ -225,8 +270,21 @@ export function GfsBrowser(): React.JSX.Element {
 
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
-    setLoading(true)
     setCrumbs(prev => [...prev, { id: child.resourceId, rid: child.rid, name: child.name }])
+    const cached = childCacheRef.current.get(child.resourceId)
+    if (cached) {
+      // Render the cached listing immediately. The useEffect-driven
+      // load() will refresh in the background and overwrite if the
+      // server state diverged, so the user still gets fresh data —
+      // they just don't see the loading spinner.
+      setItems(sortChildrenWithDirectoriesFirst(cached.items))
+      setNextCursor(cached.nextCursor)
+      setError('')
+      setLoading(false)
+      skipNextLoadRef.current = true
+      return
+    }
+    setLoading(true)
   }
 
   function openFilePreview(child: GfsChild): boolean {
