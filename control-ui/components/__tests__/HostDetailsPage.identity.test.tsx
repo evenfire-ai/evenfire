@@ -46,8 +46,10 @@ vi.mock('../../lib/api', () => ({
   getAgentUsers: vi.fn(),
   getHost: vi.fn(),
   getHostDetailBundle: vi.fn(),
+  getMcpServers: vi.fn(),
   updateAdminTeamAgents: vi.fn(),
   updateAdminUserAgents: vi.fn(),
+  updateContext: vi.fn(),
   // The model picker loads the operator allowlist via useLlmAllowedModels.
   getLlmModels: vi.fn().mockResolvedValue({ rows: [] }),
   isSilentApiError: vi.fn().mockReturnValue(false),
@@ -118,7 +120,7 @@ describe('HostDetailsPage identity integration', () => {
       'Overview',
       'Identity',
       'Models & creds',
-      'Context',
+      'Connectors',
       'Access',
       'Advanced',
     ])
@@ -269,54 +271,4 @@ describe('HostDetailsPage identity integration', () => {
     expect(putCall![2].spec.host).toBe('foo-display')
   })
 
-  // Collateral regression: resetOverviewDrafts must NOT clobber a LIVE Context-tab
-  // edit. contextRefDraft is written by both saveHost (Overview) and the Context
-  // tab's own editingContext session; reverting it on Overview Edit-open/Cancel
-  // while that session is open silently discards the operator's in-progress pick.
-  it('preserves a live Context-tab selection across an Overview Edit-open/Cancel', async () => {
-    // Two contexts so the Context tab can switch selection; saved = ctx-a.
-    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      host: { ...host, spec: { ...host.spec, contextRef: 'ctx-a' } },
-      contexts: [
-        { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a' } },
-        { metadata: { name: 'ctx-b' }, spec: { contextId: 'ctx-b' } },
-      ],
-      secrets: [{ name: 'openai-secret' }],
-      users: [],
-      teams: [],
-      agentUsers: [],
-      agentTeams: [],
-    })
-
-    // Land on the Context tab, open its edit session, pick a DIFFERENT context.
-    mockParams = { name: 'foo', tab: 'contexts' }
-    const view = render(<HostDetailsPage />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit context' }))
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ctx-b' } })
-    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('ctx-b')
-
-    // Switch to Overview and fire BOTH resetOverviewDrafts sites: Edit-open, Cancel.
-    mockParams = { name: 'foo' }
-    view.rerender(
-      <ToastProvider>
-        <HostDetailsPage />
-      </ToastProvider>
-    )
-    const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
-    await waitFor(() => expect(overviewEditButton).toBeEnabled())
-    fireEvent.click(overviewEditButton)
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-
-    // Back on the Context tab (still editing): the in-progress ctx-b must survive.
-    mockParams = { name: 'foo', tab: 'contexts' }
-    view.rerender(
-      <ToastProvider>
-        <HostDetailsPage />
-      </ToastProvider>
-    )
-
-    // PINNING (T4): the Context select still shows the unsaved ctx-b, not the
-    // reverted saved ctx-a. Pre-collateral-fix this reads 'ctx-a'.
-    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('ctx-b')
-  })
 })

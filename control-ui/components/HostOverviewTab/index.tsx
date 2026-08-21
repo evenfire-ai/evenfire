@@ -244,7 +244,7 @@ export function HostOverviewTab({
               </ul>
             ) : (
               <p className="cu-muted" style={{ margin: '0.5rem 0 0', fontSize: '0.875rem' }}>
-                {hasContext ? 'No connectors attached.' : 'No context selected.'}
+                {hasContext ? 'No connectors attached.' : 'No connectors attached yet.'}
               </p>
             )}
           </div>

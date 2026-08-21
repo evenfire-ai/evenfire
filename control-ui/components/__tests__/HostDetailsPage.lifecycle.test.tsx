@@ -46,10 +46,12 @@ vi.mock('../../lib/api', () => ({
   getAgentUsers: vi.fn(),
   getHost: vi.fn(),
   getHostDetailBundle: vi.fn(),
+  getMcpServers: vi.fn(),
   getLlmModels: vi.fn().mockResolvedValue({ rows: [] }),
   isSilentApiError: vi.fn().mockReturnValue(false),
   updateAdminTeamAgents: vi.fn(),
   updateAdminUserAgents: vi.fn(),
+  updateContext: vi.fn(),
 }))
 
 const baseSpec = {

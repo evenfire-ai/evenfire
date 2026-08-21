@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { SelectionDropdown } from '@components/SelectionDropdown'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -16,7 +17,15 @@ import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
-import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
+import {
+  apiSend,
+  getHost,
+  getHostDetailBundle,
+  getMcpServers,
+  updateContext,
+} from '../../../lib/api'
+import type { ContextResource, ContextSpec } from '../../../lib/api'
+import { buildContextUpdatePayload, contextMutationError } from '../../../lib/contextMutation'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
@@ -85,6 +94,32 @@ function friendlyLifecycleReason(reason: string): string {
     return 'Not suspending: active scheduled tasks keep this agent awake'
   }
   return reason
+}
+
+function contextResourceName(context: ContextResource | null): string {
+  return String(context?.metadata?.name || context?.spec?.contextId || '').trim()
+}
+
+function normalizeConnectorNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return Array.from(
+    new Set(
+      value
+        .map(String)
+        .map(name => name.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function agentConnectorMutationError(error: unknown): string {
+  if ((error as { status?: unknown } | null)?.status === 409) {
+    return 'This agent’s connectors changed since they were loaded. Reload the agent and try again.'
+  }
+  if (error instanceof Error && /context version is unavailable/i.test(error.message)) {
+    return 'This agent’s connector settings are missing a server version. Reload the agent and try again.'
+  }
+  return contextMutationError(error, 'Failed to update connectors for this agent.')
 }
 
 function AgentActionsMenu({ busy, onDelete }: { busy: boolean; onDelete: () => void }) {
@@ -217,6 +252,15 @@ export default function HostDetailsPage() {
   const [guardrailsData, setGuardrailsData] = useState<HostGuardrails | undefined>(undefined)
   // Overview tab — read-only summary. Kept in sync with the host spec by loadData.
   const [contextMcpServers, setContextMcpServers] = useState<string[]>([])
+  // The agent's private connector context is an implementation detail. Keep the
+  // full resource locally so connector writes can preserve additive spec fields
+  // and carry the resourceVersion without exposing the context in the UI.
+  const [agentContext, setAgentContext] = useState<ContextResource | null>(null)
+  const [availableConnectorNames, setAvailableConnectorNames] = useState<string[]>([])
+  const [connectorCatalogLoaded, setConnectorCatalogLoaded] = useState(false)
+  const [connectorCatalogLoading, setConnectorCatalogLoading] = useState(false)
+  const [showAddConnector, setShowAddConnector] = useState(false)
+  const [selectedConnectorNames, setSelectedConnectorNames] = useState<string[]>([])
   const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
   const [hostStatusTone, setHostStatusTone] = useState<'active' | 'inactive' | 'unknown'>('unknown')
   const [hostCreatedAt, setHostCreatedAt] = useState('')
@@ -330,17 +374,10 @@ export default function HostDetailsPage() {
         // Overview read-only summary: linked context's MCP servers + access counts.
         const ref = overview.contextRef.trim()
         const matched = (contextsList || []).find(
-          (item: { spec?: { contextId?: string }; metadata?: { name?: string } }) =>
-            String(item.spec?.contextId || item.metadata?.name || '').trim() === ref
-        )
-        const servers = Array.isArray(
-          (matched as { spec?: { mcpServers?: unknown[] } } | undefined)?.spec?.mcpServers
-        )
-          ? ((matched as { spec?: { mcpServers?: unknown[] } }).spec!.mcpServers as unknown[])
-              .map(String)
-              .map(v => v.trim())
-              .filter(Boolean)
-          : []
+          item => String(item.spec?.contextId || item.metadata?.name || '').trim() === ref
+        ) as ContextResource | undefined
+        setAgentContext(matched ?? null)
+        const servers = normalizeConnectorNames(matched?.spec?.mcpServers)
         setContextMcpServers(servers)
         setAccessSummary({
           memberCount: Array.isArray(agentUsers) ? agentUsers.length : 0,
@@ -464,9 +501,104 @@ export default function HostDetailsPage() {
     void loadData()
   }, [routeName])
 
+  async function openAddConnectorDialog() {
+    setSelectedConnectorNames([])
+    setShowAddConnector(true)
+    setError('')
+    if (connectorCatalogLoaded || connectorCatalogLoading) return
+
+    setConnectorCatalogLoading(true)
+    try {
+      const response = await getMcpServers()
+      const names = (response.items || [])
+        .map(item => String(item.metadata?.name || '').trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b))
+      setAvailableConnectorNames(Array.from(new Set(names)))
+      setConnectorCatalogLoaded(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load available connectors.')
+    } finally {
+      setConnectorCatalogLoading(false)
+    }
+  }
+
+  async function saveAgentConnectors(nextServers: string[]): Promise<boolean> {
+    const contextName = contextResourceName(agentContext)
+    const contextVersion = agentContext?.metadata?.resourceVersion
+    if (!contextName) {
+      setError(
+        'Connector settings are not available for this agent yet. Reload the agent and try again.'
+      )
+      return false
+    }
+
+    const normalizedServers = normalizeConnectorNames(nextServers)
+    const currentSpec = (agentContext?.spec || {}) as Record<string, unknown>
+    const contextId = String(currentSpec.contextId || contextName).trim()
+    if (!contextId) {
+      setError(
+        'Connector settings are not available for this agent yet. Reload the agent and try again.'
+      )
+      return false
+    }
+
+    setBusy(true)
+    setError('')
+    try {
+      const updated = await updateContext(
+        contextName,
+        buildContextUpdatePayload(contextVersion, {
+          ...currentSpec,
+          contextId,
+          mcpServers: normalizedServers,
+        } as ContextSpec)
+      )
+      const updatedContext: ContextResource = {
+        ...agentContext,
+        ...updated,
+        metadata: { ...agentContext.metadata, ...(updated?.metadata || {}) },
+        spec: {
+          ...agentContext.spec,
+          ...(updated?.spec || {}),
+          contextId,
+          mcpServers: normalizedServers,
+        },
+      }
+      setAgentContext(updatedContext)
+      setContextMcpServers(normalizedServers)
+      showToast('Connectors updated.', { tone: 'success' })
+      return true
+    } catch (e) {
+      setError(agentConnectorMutationError(e))
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function removeAgentConnector(server: string) {
+    const shouldRemove = await confirm({
+      title: 'Remove connector from this agent?',
+      message: `Remove ${server} from ${routeName}?`,
+      confirmLabel: 'Remove connector',
+      tone: 'danger',
+    })
+    if (!shouldRemove) return
+    await saveAgentConnectors(contextMcpServers.filter(item => item !== server))
+  }
+
   const currentSecretKeys = useMemo(
     () => secretKeysByName[secretRefDraft] ?? [],
     [secretKeysByName, secretRefDraft]
+  )
+
+  const connectorOptions = useMemo(
+    () =>
+      availableConnectorNames
+        .filter(name => !contextMcpServers.includes(name))
+        .map(name => ({ value: name, label: name })),
+    [availableConnectorNames, contextMcpServers]
   )
 
   // Track fallback removals: when a fallback with its OWN stored extra slot is
@@ -1052,9 +1184,21 @@ export default function HostDetailsPage() {
 
         {activeTab === 'contexts' && (
           <>
-            <p className="cu-muted" style={{ fontSize: '0.875rem', marginBottom: '1rem' }}>
-              Connectors available to this agent.
-            </p>
+            <div className="cu-agent-detail-heading">
+              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
+                Connectors available to this agent.
+              </p>
+              <div className="cu-agent-detail-heading__actions">
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--primary cu-btn--sm"
+                  onClick={() => void openAddConnectorDialog()}
+                  disabled={busy || !agentContext}
+                >
+                  Add connector
+                </button>
+              </div>
+            </div>
             <div className="cu-table-wrap">
               <table className="cu-table cu-table--header-band cu-table--static-rows">
                 <thead>
@@ -1073,9 +1217,7 @@ export default function HostDetailsPage() {
                   ) : contextMcpServers.length === 0 ? (
                     <tr>
                       <td colSpan={2} className="cu-empty">
-                        {contextRefDraft.trim()
-                          ? 'No connectors attached to this context.'
-                          : 'No context selected.'}
+                        No connectors attached yet.
                       </td>
                     </tr>
                   ) : (
@@ -1085,7 +1227,16 @@ export default function HostDetailsPage() {
                           <span className="cu-table__cell-name">{server}</span>
                         </td>
                         <td className="cu-table__cell-actions">
-                          <span className="cu-table__cell-muted">—</span>
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                            onClick={() => void removeAgentConnector(server)}
+                            disabled={busy}
+                            aria-label={`Remove connector ${server}`}
+                            title="Remove connector"
+                          >
+                            <IconX width={16} height={16} />
+                          </button>
                         </td>
                       </tr>
                     ))
@@ -1094,6 +1245,105 @@ export default function HostDetailsPage() {
               </table>
             </div>
           </>
+        )}
+
+        {showAddConnector && (
+          <div
+            className="cu-modal-backdrop"
+            role="presentation"
+            onMouseDown={event => {
+              if (event.target === event.currentTarget && !busy) {
+                setShowAddConnector(false)
+                setSelectedConnectorNames([])
+              }
+            }}
+          >
+            <section
+              className="cu-modal-panel cu-modal-panel--selection"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="add-agent-connector-title"
+              onMouseDown={event => event.stopPropagation()}
+            >
+              <div className="cu-modal-panel__head">
+                <h3 id="add-agent-connector-title" className="cu-modal-panel__title">
+                  Add connectors
+                </h3>
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--icon cu-btn--ghost"
+                  onClick={() => {
+                    setShowAddConnector(false)
+                    setSelectedConnectorNames([])
+                  }}
+                  disabled={busy}
+                  aria-label="Close"
+                >
+                  <IconX width={18} height={18} />
+                </button>
+              </div>
+
+              <p className="cu-modal-copy">
+                Select the connectors this agent can use. You can change this later.
+              </p>
+
+              {connectorCatalogLoading ? (
+                <div className="cu-empty">Loading available connectors…</div>
+              ) : (
+                <div className="cu-field">
+                  <label htmlFor="agent-connector-picker">Connectors</label>
+                  <SelectionDropdown
+                    id="agent-connector-picker"
+                    inline
+                    value={selectedConnectorNames}
+                    onChange={setSelectedConnectorNames}
+                    options={connectorOptions}
+                    placeholder="Select connectors"
+                    searchPlaceholder="Search connectors..."
+                    selectionLabel="Selected connectors"
+                    emptyLabel="No additional connectors available."
+                    disabled={busy}
+                  />
+                </div>
+              )}
+
+              <div className="cu-modal-panel__foot">
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--ghost cu-btn--sm"
+                  onClick={() => {
+                    setShowAddConnector(false)
+                    setSelectedConnectorNames([])
+                  }}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--primary"
+                  onClick={async () => {
+                    const saved = await saveAgentConnectors([
+                      ...contextMcpServers,
+                      ...selectedConnectorNames,
+                    ])
+                    if (saved) {
+                      setShowAddConnector(false)
+                      setSelectedConnectorNames([])
+                    }
+                  }}
+                  disabled={
+                    busy ||
+                    connectorCatalogLoading ||
+                    selectedConnectorNames.length === 0 ||
+                    !agentContext
+                  }
+                >
+                  {selectedConnectorNames.length > 1 ? 'Add connectors' : 'Add connector'}
+                </button>
+              </div>
+            </section>
+          </div>
         )}
 
         {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
