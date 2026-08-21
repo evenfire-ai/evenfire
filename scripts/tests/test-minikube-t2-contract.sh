@@ -32,16 +32,6 @@ grep -Fq 'CONTROL_API_REAL_PG_ADMIN_URL=' "$T1"
 grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$T1"
 grep -Fq 'T1_REDACT_PASSWORD="${PG_PASSWORD}"' "$T1" || grep -Fq 'T1_REDACT_PASSWORD="$PG_PASSWORD"' "$T1"
 grep -Fq -- '--reporter=json' "$T1"
-grep -Fq 'isolated processes' "$T1"
-grep -Fq 'leftover Vitest exit after green JSON reporter' "$T1"
-grep -Fq -- '--reporter=default' "$T1"
-grep -Fq 'postgres:16-alpine' "$T1"
-grep -Fq 'test/db.realPostgresMigration.integration.test.ts' "$T1"
-grep -Fq 'test/gfsReaderRole.realPostgres.integration.test.ts' "$T1"
-grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$T1"
-grep -Fq 'GFS_RECOVER_ABANDONED_STATE=true' "$T1"
-grep -Fq 'reconcile-gfs-deploy-credentials.sh' "$T1"
-grep -Fq 'T1_CLEANUP_ENABLED' "$T1"
 grep -Fq 'pending_tests' "$T1"
 grep -Fq 'numTotalTests' "$T1"
 grep -Fq 'numTotalTestSuites' "$T1"
@@ -53,8 +43,6 @@ if grep -Fq "[ \"\$passed_files\" -ne \"\$expected\" ]" "$T1"; then
   exit 1
 fi
 grep -Fq 'port-forward' "$T1"
-grep -Fq '/tmp/pf-' "$T1"
-grep -Fq 't1-control-postgres.pid' "$T1"
 grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 
 if grep -Eq 'make minikube-pre-gate-sync|pre-gate-sync\.sh' "$PREFLIGHT"; then

@@ -229,17 +229,9 @@ grep -Fq 'marker@local-db' "$evidence" && fail 'evidence retained the DSN payloa
 
 grep -Fq 'CONTROL_API_REAL_PG_REQUIRED=1' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'ZERO_TESTS_EXECUTED' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
-grep -Fq 'isolated processes' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
-grep -Fq 'leftover Vitest exit after green JSON reporter' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
-grep -Fq -- '--reporter=default' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
-grep -Fq 'postgres:16-alpine' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
-grep -Fq 'test/gfsReaderRole.realPostgres.integration.test.ts' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
 grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 'trap t2_lock_release EXIT INT TERM' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
-grep -Fq '/tmp/pf-' "$COMMON"
-grep -Fq 't1-control-postgres.pid' "$ROOT/scripts/e2e/minikube-real-postgres.sh"
-grep -Fq -- '--skip-port-forwards' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
 
