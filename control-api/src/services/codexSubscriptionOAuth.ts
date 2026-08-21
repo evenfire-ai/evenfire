@@ -46,6 +46,7 @@ export type CodexOAuthErrorCode =
   | 'provider_unavailable'
   | 'no_grant'
   | 'invalid_callback'
+  | 'browser_oauth_unregistered'
 
 export class CodexSubscriptionOAuthError extends Error {
   readonly code: CodexOAuthErrorCode

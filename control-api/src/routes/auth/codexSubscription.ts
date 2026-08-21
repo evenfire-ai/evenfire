@@ -9,6 +9,11 @@ import {
   CodexSubscriptionOAuthError,
   handleCodexBrowserCallback,
 } from '../../services/codexSubscriptionOAuth.js'
+import {
+  buildCodexBrowserRedirectUri,
+  buildCodexBrowserReturnLocation,
+  resolveCodexCallbackControlUiBaseUrl,
+} from '../../services/codexSubscriptionRedirectUri.js'
 
 const log = rootLogger.child({ module: 'auth-codex-subscription' })
 
@@ -20,18 +25,27 @@ function oauthDeps(req: {
   protocol: string
   get: (h: string) => string | undefined
 }): CodexOAuthDeps {
-  const origin =
-    config.oauthCallbackBaseUrl && config.oauthCallbackBaseUrl.length > 0
-      ? config.oauthCallbackBaseUrl.replace(/\/+$/, '')
-      : `${req.protocol}://${req.get('host') ?? 'localhost'}`
+  const controlUiOrigin = resolveCodexCallbackControlUiBaseUrl({
+    configuredBaseUrl: config.controlUiBaseUrl,
+    forwardedHost: req.get('x-forwarded-host'),
+    forwardedProto: req.get('x-forwarded-proto'),
+    originHeader: req.get('origin'),
+  })
   return {
     db: dbClient(),
     encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
     fetchFn: fetch,
     clientId: config.codexOAuthClientId,
-    redirectUri: `${origin}/api/v1/auth/codex-subscription/callback`,
+    redirectUri: buildCodexBrowserRedirectUri(controlUiOrigin),
     enabled: config.codexSubscriptionEnabled,
   }
+}
+
+function redirectToCodexSurface(
+  res: { redirect: (status: number, location: string) => void },
+  outcome: string
+) {
+  res.redirect(303, buildCodexBrowserReturnLocation(outcome))
 }
 
 export function createAuthCodexSubscriptionRouter(): Router {
@@ -43,17 +57,16 @@ export function createAuthCodexSubscriptionRouter(): Router {
       const code = typeof req.query.code === 'string' ? req.query.code : ''
       const state = typeof req.query.state === 'string' ? req.query.state : ''
       try {
-        const connection = await handleCodexBrowserCallback(oauthDeps(req), { code, state })
-        res.status(200).json({
-          status: connection.status,
-          accountFingerprint: connection.accountFingerprint,
-          credentialRevision: connection.credentialRevision,
-        })
+        await handleCodexBrowserCallback(oauthDeps(req), { code, state })
+        redirectToCodexSurface(res, 'connected')
       } catch (err) {
         if (err instanceof CodexSubscriptionOAuthError) {
-          const status = err.code === 'disabled' ? 404 : 400
           log.warn({ event: 'codex_oauth_callback_denied', code: err.code }, 'callback denied')
-          res.status(status).json({ error: err.code })
+          if (err.code === 'disabled') {
+            res.status(404).json({ error: err.code })
+            return
+          }
+          redirectToCodexSurface(res, err.code)
           return
         }
         throw err

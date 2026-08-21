@@ -234,3 +234,21 @@ export async function syncCodexSubscriptionCatalog(): Promise<CodexCatalogSyncVi
 export async function revokeCodexSubscription(): Promise<CodexSubscriptionConnectionView> {
   return sanitizeCodexConnection(await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/revoke`))
 }
+
+const CODEX_OAUTH_QUERY_PARAM = 'codex_oauth'
+
+export function readCodexOAuthQueryParam(
+  searchParams: URLSearchParams | null | undefined
+): string | null {
+  if (!searchParams) return null
+  const value = searchParams.get(CODEX_OAUTH_QUERY_PARAM)
+  return value && value.trim() ? value.trim() : null
+}
+
+export function isCodexBrowserOAuthUnavailableError(error: unknown): boolean {
+  return (
+    Boolean(error) &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === 'browser_oauth_unregistered'
+  )
+}

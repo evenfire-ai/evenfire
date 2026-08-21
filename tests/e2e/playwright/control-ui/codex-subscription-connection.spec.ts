@@ -39,4 +39,28 @@ test.describe('Codex subscription connection', () => {
     await expect(page.getByRole('button', { name: 'Use device code' })).toBeVisible()
     await expect(page.getByText(/sk-|access token|account id/i)).toHaveCount(0)
   })
+
+  test('browser connect fails loud with the default CLI client and keeps device code available', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await loginControlUiVisible(page)
+    await page.getByRole('link', { name: 'LLM Models' }).click()
+    await page.getByRole('link', { name: 'Codex subscription' }).click()
+    await expect(page).toHaveURL(/\/llm-models\/providers\/codex-subscription/)
+
+    const browserStart = page.waitForResponse(
+      response =>
+        response.url().includes('/api/v1/admin/llm/providers/codex-subscription/browser/start') &&
+        response.request().method() === 'POST'
+    )
+    await page.getByRole('button', { name: 'Connect in browser' }).click()
+    const response = await browserStart
+    expect(response.status(), 'default CLI client must not open browser OAuth').toBe(400)
+    const body = (await response.json()) as { error?: string }
+    expect(body.error).toBe('browser_oauth_unregistered')
+    await expect(page.getByTestId('codex-browser-oauth-blocked')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Use device code' })).toBeVisible()
+    await expect(page).not.toHaveURL(/auth\.openai\.com/)
+  })
 })

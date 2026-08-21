@@ -85,15 +85,19 @@ test.describe('Codex subscription workflow recipe authoring', () => {
       await page.goto('/')
       await loginControlUiVisible(page)
 
-      await page.getByRole('link', { name: 'Installed plugins' }).click()
-      await expect(page).toHaveURL(/\/plugins/)
-
       const listRecipes = page.waitForResponse(
         response =>
-          response.url().includes('/api/v1/admin/recipes') && response.request().method() === 'GET'
+          response.url().includes('/api/v1/admin/recipes') && response.request().method() === 'GET',
+        { timeout: 20_000 }
       )
+      await page.getByRole('link', { name: 'Installed plugins' }).click()
+      await expect(page).toHaveURL(/\/plugins/)
+      const recipesResponse = await listRecipes
+      expect(
+        recipesResponse.ok(),
+        `recipe list must succeed, got ${recipesResponse.status()}`
+      ).toBe(true)
       await expect(page.getByLabel('Search plugins')).toBeVisible({ timeout: 20_000 })
-      await listRecipes
 
       await page.getByLabel('Search plugins').fill(recipeName)
       const recipeLink = page.getByRole('link', { name: new RegExp(`Open ${recipeName}`, 'i') })

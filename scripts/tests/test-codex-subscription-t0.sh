@@ -153,6 +153,9 @@ require_ci_matrix_entry "packages/llm-provider-attempt-contract"
 run_group "shared-contract" "packages/llm-provider-attempt-contract" "index.test.cjs"
 
 run_group "control-api" "control-api" \
+  "test/codexSubscriptionRedirectUri.test.ts" \
+  "test/routes.admin.codexSubscription.test.ts" \
+  "test/routes.auth.codexSubscriptionCallback.test.ts" \
   "test/llmProviders.test.ts" \
   "test/services.codexSubscriptionOAuth.test.ts" \
   "test/services.codexSubscriptionCatalog.test.ts" \

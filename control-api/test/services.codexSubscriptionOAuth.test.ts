@@ -80,7 +80,7 @@ function deps(fetchFn: typeof fetch) {
     encryptionKey: KEY,
     fetchFn,
     clientId: 'app_test_client',
-    redirectUri: 'https://control.example/api/v1/auth/codex-subscription/callback',
+    redirectUri: 'https://control.example.com/control-api/api/v1/auth/codex-subscription/callback',
     enabled: true,
   }
 }
@@ -107,10 +107,12 @@ describe('codex subscription OAuth broker', () => {
         createdAt: new Date(),
       })
     )
-    const result = await startCodexBrowserConnect(deps(vi.fn()), 'connect')
+    const oauthDeps = deps(vi.fn())
+    const result = await startCodexBrowserConnect(oauthDeps, 'connect')
     expect(result.authorizeUrl.startsWith(CODEX_OAUTH_AUTHORIZE_URL)).toBe(true)
     expect(result.authorizeUrl).toContain('code_challenge_method=S256')
     expect(result.authorizeUrl).toContain('state=')
+    expect(result.authorizeUrl).toContain(encodeURIComponent(oauthDeps.redirectUri))
     expect(repos.insertState.mock.calls[0]?.[2]).toMatchObject({
       flow: 'browser',
       intent: 'connect',

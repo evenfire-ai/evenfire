@@ -97,9 +97,8 @@ describe('LlmModelsSurface', () => {
       </ToastProvider>
     )
 
-    expect(await screen.findByRole('link', { name: 'Codex subscription' })).toHaveAttribute(
-      'href',
-      '/llm-models/providers/codex-subscription'
-    )
+    const link = await screen.findByRole('link', { name: 'Codex subscription' })
+    expect(link).toHaveAttribute('href', '/llm-models/providers/codex-subscription')
+    expect(screen.getByTestId('codex-subscription-catalog-link')).toBeInTheDocument()
   })
 })

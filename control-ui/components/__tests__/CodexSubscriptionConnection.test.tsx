@@ -1,7 +1,11 @@
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { sanitizeCodexConnection } from '@lib/codexSubscription'
+import {
+  isCodexBrowserOAuthUnavailableError,
+  readCodexOAuthQueryParam,
+  sanitizeCodexConnection,
+} from '@lib/codexSubscription'
 import type { CodexSubscriptionConnectionView } from '@lib/codexSubscription'
 import {
   getCodexSubscriptionConnection,
@@ -16,9 +20,13 @@ import { CodexSubscriptionConnection } from '../CodexSubscriptionConnection'
 import { ToastProvider } from '../Toast'
 
 const confirmMock = vi.fn()
+const replaceMock = vi.fn()
+let searchParams = new URLSearchParams()
+const assignMock = vi.fn()
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: replaceMock }),
+  useSearchParams: () => searchParams,
 }))
 
 vi.mock('@components/ConfirmDialog', () => ({
@@ -69,13 +77,26 @@ function renderSurface() {
   )
 }
 
+function browserOAuthUnavailableError() {
+  const error = new Error('400 Bad Request - browser_oauth_unregistered') as Error & {
+    code?: string
+    status?: number
+  }
+  error.code = 'browser_oauth_unregistered'
+  error.status = 400
+  return error
+}
+
 describe('CodexSubscriptionConnection', () => {
   beforeEach(() => {
     confirmMock.mockReset()
+    replaceMock.mockReset()
+    assignMock.mockReset()
+    searchParams = new URLSearchParams()
     confirmMock.mockResolvedValue(true)
     vi.mocked(loadCodexSubscriptionCapability).mockResolvedValue({ enabled: true })
     vi.mocked(getCodexSubscriptionConnection).mockResolvedValue(connected)
-    vi.stubGlobal('open', vi.fn())
+    vi.stubGlobal('location', { assign: assignMock })
   })
 
   afterEach(() => {
@@ -117,7 +138,7 @@ describe('CodexSubscriptionConnection', () => {
     expect(await screen.findByTestId('codex-connection-status')).toHaveTextContent(label)
   })
 
-  it('starts a browser connect without rendering secrets', async () => {
+  it('starts a browser connect in the same tab without rendering secrets', async () => {
     vi.mocked(startCodexBrowserConnect).mockResolvedValue({
       authorizeUrl: 'https://auth.openai.com/oauth/authorize?state=abc',
       state: 'abc',
@@ -129,12 +150,26 @@ describe('CodexSubscriptionConnection', () => {
     await waitFor(() => {
       expect(startCodexBrowserConnect).toHaveBeenCalledWith('connect')
     })
-    expect(window.open).toHaveBeenCalledWith(
-      'https://auth.openai.com/oauth/authorize?state=abc',
-      '_blank',
-      'noopener,noreferrer'
-    )
+    expect(assignMock).toHaveBeenCalledWith('https://auth.openai.com/oauth/authorize?state=abc')
     expect(document.body.textContent).not.toMatch(/sk-|deviceCode|accessToken/i)
+  })
+
+  it('shows a device-code fallback banner when browser OAuth is unregistered', async () => {
+    vi.mocked(startCodexBrowserConnect).mockRejectedValue(browserOAuthUnavailableError())
+    renderSurface()
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect in browser' }))
+    expect(await screen.findByTestId('codex-browser-oauth-blocked')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Use device code' })).toBeVisible()
+    expect(assignMock).not.toHaveBeenCalled()
+  })
+
+  it('reloads connection after a successful browser callback query param', async () => {
+    searchParams = new URLSearchParams('codex_oauth=connected')
+    renderSurface()
+    await waitFor(() => {
+      expect(replaceMock).toHaveBeenCalledWith('/llm-models/providers/codex-subscription')
+    })
+    expect(await screen.findByTestId('codex-connection-status')).toHaveTextContent('Connected')
   })
 
   it('shows device-code progress without the secret device code', async () => {
@@ -217,5 +252,15 @@ describe('CodexSubscriptionConnection', () => {
     expect(await screen.findByTestId('codex-connection-status')).toHaveTextContent('Unavailable')
     expect(document.body.textContent).not.toContain('sk-should-not-render')
     expect(document.body.textContent).not.toContain('accessToken')
+  })
+})
+
+describe('codex subscription query helpers', () => {
+  it('reads the oauth callback query param', () => {
+    expect(readCodexOAuthQueryParam(new URLSearchParams('codex_oauth=connected'))).toBe('connected')
+  })
+
+  it('detects browser oauth unregistered API errors', () => {
+    expect(isCodexBrowserOAuthUnavailableError(browserOAuthUnavailableError())).toBe(true)
   })
 })
