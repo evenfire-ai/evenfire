@@ -140,7 +140,7 @@ run_suite() {
     cd "$PROJECT_DIR/$package"
     CONTROL_API_REAL_PG_ADMIN_URL="$ADMIN_DSN" \
     CONTROL_API_REAL_PG_REQUIRED=1 FORCE_COLOR=0 NO_COLOR=1 \
-      npm test -- --run realPostgres --reporter=json --outputFile="$json_file"
+      npm test -- --run realPostgres --reporter=default --reporter=json --outputFile="$json_file"
   ) >"$log_file" 2>&1; then
     sanitize_file "$log_file"
     sanitize_file "$json_file"

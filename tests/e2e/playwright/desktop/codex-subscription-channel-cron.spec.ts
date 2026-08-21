@@ -17,7 +17,7 @@ import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginDesktopVisible } from '../helpers/visible-login'
 
 test.describe('Codex subscription channel and cron', () => {
-  test('channel or cron delivery creates a Codex provider attempt', async () => {
+  test('plugins workspace hides Codex delivery controls without a connected catalog', async () => {
     test.skip(process.env.PLAYWRIGHT_DESKTOP_BUILT !== 'true', 'Desktop build is required')
     const app = await launchDesktopApp()
     const page = await app.firstWindow()

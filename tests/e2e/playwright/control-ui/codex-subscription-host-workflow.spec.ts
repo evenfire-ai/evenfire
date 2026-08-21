@@ -30,6 +30,10 @@ test.describe('Codex subscription host and workflow authoring', () => {
     await expect(page).toHaveURL(/\/(?:hosts|agents)\/new$/)
     const catalogResponse = await catalog
     expect(catalogResponse.ok()).toBe(true)
+    const catalogBody = (await catalogResponse.json()) as {
+      rows?: Array<{ provider?: string; enabled?: boolean }>
+    }
+    expect(Array.isArray(catalogBody.rows)).toBe(true)
 
     await page.getByPlaceholder('agent-name').fill('e2e-codex-authoring')
     await page.getByRole('button', { name: 'Next' }).click()
@@ -45,5 +49,6 @@ test.describe('Codex subscription host and workflow authoring', () => {
     ).toBeVisible()
     await expect(page.getByLabel('Secret name')).toHaveCount(0)
     await expect(page.getByLabel(/OpenAI API key/i)).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Next' })).toBeDisabled()
   })
 })
