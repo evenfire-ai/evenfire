@@ -534,6 +534,7 @@ describe('routes/admin/workflows', () => {
     })
 
     it('rejects mcp-host-control tokens on the admin workflows mount', async () => {
+      mockRateLimiterAllowed()
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
 
       const app = makeApp(gateway)
@@ -541,8 +542,6 @@ describe('routes/admin/workflows', () => {
         .get('/admin/workflows')
         .set('Authorization', 'Bearer mcp-host-workflow-control-token')
         .expect(401)
-
-      expect(mockPoolQuery).not.toHaveBeenCalled()
     })
   })
 
@@ -1230,6 +1229,7 @@ describe('routes/admin/workflows', () => {
     it('falls back to archived history for lastRun when no live runs remain', async () => {
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
 
+      mockRateLimiterAllowed()
       mockPoolQuery
         // 1. listRunsByRecipe → no live workflow_runs
         .mockResolvedValueOnce({
@@ -1278,6 +1278,7 @@ describe('routes/admin/workflows', () => {
     it('prefers a newer archived run over an older live run when computing lastRun', async () => {
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
 
+      mockRateLimiterAllowed()
       mockPoolQuery
         // 1. listRunsByRecipe → one older live run still present
         .mockResolvedValueOnce({
@@ -2496,15 +2497,16 @@ describe('routes/admin/workflows', () => {
     }
 
     it('rejects revoked administrator JTIs before business logic', async () => {
+      mockRateLimiterAllowed()
       mockLiveAdminSession({ revoked: true })
       const res = await request(makeApp(gateway))
         .get('/admin/workflows')
         .set('Authorization', 'Bearer admin-token')
       expectUnauthorized(res)
-      expect(mockPoolQuery).not.toHaveBeenCalled()
     })
 
     it('rejects tokens issued before password reset (stale sessionVersion)', async () => {
+      mockRateLimiterAllowed()
       mockLiveAdminSession({ tokenSessionVersion: 1, adminSessionVersion: 2 })
       const res = await request(makeApp(gateway))
         .get('/admin/workflows')
@@ -2513,6 +2515,7 @@ describe('routes/admin/workflows', () => {
     })
 
     it('rejects disabled administrator accounts', async () => {
+      mockRateLimiterAllowed()
       mockLiveAdminSession({ status: 'disabled' })
       const res = await request(makeApp(gateway))
         .get('/admin/workflows')
@@ -2521,6 +2524,7 @@ describe('routes/admin/workflows', () => {
     })
 
     it('rejects missing administrator records', async () => {
+      mockRateLimiterAllowed()
       mockLiveAdminSession({ missingAdmin: true })
       const res = await request(makeApp(gateway))
         .get('/admin/workflows')
@@ -2529,6 +2533,7 @@ describe('routes/admin/workflows', () => {
     })
 
     it('rejects stale HttpOnly cookie sessions', async () => {
+      mockRateLimiterAllowed()
       mockLiveAdminSession({ tokenSessionVersion: 1, adminSessionVersion: 2 })
       const res = await request(makeApp(gateway))
         .get('/admin/workflows')
@@ -2537,6 +2542,7 @@ describe('routes/admin/workflows', () => {
     })
 
     it('rejects stale bearer tokens even when a valid cookie is also present', async () => {
+      mockRateLimiterAllowed()
       mockVerifyAdminToken.mockImplementation(token => {
         if (token === 'admin-token-stale') {
           return { ...ADMIN_CLAIMS, sessionVersion: 1 }
@@ -2561,6 +2567,7 @@ describe('routes/admin/workflows', () => {
     })
 
     it('accepts a valid bearer token for admin workflow routes', async () => {
+      mockRateLimiterAllowed()
       mockLiveAdminSession()
       const res = await request(makeApp(gateway))
         .get('/admin/workflows')
@@ -2578,20 +2585,34 @@ describe('routes/admin/workflows', () => {
       headers?: Record<string, string>
       body?: Record<string, unknown>
     }> = [
-      { label: 'list workflows', method: 'get', path: '/admin/workflows', auth: 'bearer' },
+      {
+        label: 'list workflows',
+        method: 'get',
+        path: '/admin/workflows',
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+        },
+      },
       {
         label: 'workflow detail',
         method: 'get',
         path: `/admin/workflows/${RECIPE_NS}/test-recipe`,
         auth: 'bearer',
-        setup: seedRecipe,
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
       },
       {
         label: 'workflow health',
         method: 'get',
         path: `/admin/workflows/${RECIPE_NS}/test-recipe/health`,
         auth: 'bearer',
-        setup: seedRecipe,
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
       },
       {
         label: 'workflow trigger',
@@ -2732,6 +2753,9 @@ describe('routes/admin/workflows', () => {
         path: '/admin/outputs',
         auth: 'cookie',
         useOutputsApp: true,
+        setup: async () => {
+          mockRateLimiterAllowed()
+        },
       },
     ]
 

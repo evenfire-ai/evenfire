@@ -7,6 +7,9 @@ import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
 const WORKFLOW_GRANT_READ_PER_MINUTE = 60
 const WORKFLOW_GRANT_WRITE_PER_MINUTE = 20
+const WORKFLOW_ADMIN_READ_PER_MINUTE = 60
+const ADMIN_OUTPUTS_READ_PER_MINUTE = 30
+const WORKFLOW_TRIGGER_PER_MINUTE = 10
 
 /**
  * Credential surface matched by requireAdminWorkflowCaller: bearer for automation,
@@ -86,18 +89,71 @@ export function workflowGrantWriteRateLimits() {
   return [workflowGrantWriteEdgeRateLimit(), workflowGrantWriteRateLimit()] as const
 }
 
+function workflowAdminReadEdgeRateLimit() {
+  return rateLimit({
+    windowMs: 60_000,
+    limit: WORKFLOW_ADMIN_READ_PER_MINUTE,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: workflowGrantEdgeRateKey('workflow_admin_read_edge'),
+    handler: workflowGrantEdgeRateLimitHandler,
+  })
+}
+
+function adminOutputsReadEdgeRateLimit() {
+  return rateLimit({
+    windowMs: 60_000,
+    limit: ADMIN_OUTPUTS_READ_PER_MINUTE,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: workflowGrantEdgeRateKey('admin_outputs_read_edge'),
+    handler: workflowGrantEdgeRateLimitHandler,
+  })
+}
+
+export function workflowAdminReadRateLimits() {
+  return [workflowAdminReadEdgeRateLimit(), workflowAdminReadRateLimit()] as const
+}
+
+export function adminOutputsReadRateLimits() {
+  return [adminOutputsReadEdgeRateLimit(), adminOutputsReadRateLimit()] as const
+}
+
+function workflowTriggerRateLimitCredential(req: Request): string | null {
+  const bearer = extractBearerToken(req)
+  if (bearer) return bearer
+  const userSessionToken = String(req.header('x-user-session-token') || '').trim()
+  if (userSessionToken) return userSessionToken
+  const cookie = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+  return cookie || null
+}
+
 export function workflowTriggerRateLimit() {
   return rateLimitMiddleware({
     bucketType: 'workflow_trigger',
-    maxPerMinute: 10,
+    maxPerMinute: WORKFLOW_TRIGGER_PER_MINUTE,
     getBucketKey: (req: Request) => {
-      const bearer = extractBearerToken(req)
-      const userSessionToken = req.header('x-user-session-token')
-      const token = bearer || userSessionToken
-      if (!token) return null
-      const hash = createHash('sha256').update(token).digest('hex').slice(0, 32)
+      const credential = workflowTriggerRateLimitCredential(req)
+      if (!credential) return null
+      const hash = createHash('sha256').update(credential).digest('hex').slice(0, 32)
       return `workflow_trigger:${hash}`
     },
+  })
+}
+
+function workflowAdminReadRateLimit() {
+  return rateLimitMiddleware({
+    bucketType: 'workflow_admin_read',
+    maxPerMinute: WORKFLOW_ADMIN_READ_PER_MINUTE,
+    getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_admin_read'),
+  })
+}
+
+function adminOutputsReadRateLimit() {
+  return rateLimitMiddleware({
+    bucketType: 'admin_outputs_read',
+    maxPerMinute: ADMIN_OUTPUTS_READ_PER_MINUTE,
+    getBucketKey: hashedAdminWorkflowCredentialBucket('admin_outputs_read'),
   })
 }
 

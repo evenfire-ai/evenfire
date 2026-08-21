@@ -58,6 +58,29 @@ export async function requireAdminWorkflowCallerMiddleware(
   }
 }
 
+export function adminWorkflowCaller(
+  req: Request
+): AdminWorkflowAuthedRequest['adminWorkflowCaller'] {
+  return (req as AdminWorkflowAuthedRequest).adminWorkflowCaller
+}
+
+export function requireBoundAdminWorkflowCaller(req: Request, res: Response) {
+  const caller = adminWorkflowCaller(req)
+  if (!caller) {
+    if (!res.headersSent) {
+      res.status(401).json({ error: 'Unauthorized' })
+    }
+    return null
+  }
+  return caller
+}
+
+export function bindAdminWorkflowAuth(req: Request, res: Response, next: NextFunction): void {
+  void requireAdminWorkflowCallerMiddleware(req as AdminWorkflowAuthedRequest, res, next).catch(
+    next
+  )
+}
+
 export async function requireExternalWorkflowCaller(
   req: Request,
   res: Response

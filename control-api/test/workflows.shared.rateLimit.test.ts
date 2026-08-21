@@ -68,6 +68,31 @@ describe('routes/workflows/shared/rateLimit', () => {
     await request(app).get('/grants').set('Authorization', 'Bearer bogus-3').expect(429)
   })
 
+  it('workflowTriggerRateLimit meters cookie-only admin workflow triggers', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const { workflowTriggerRateLimit } = await import('../src/routes/workflows/shared/rateLimit.js')
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=admin-cookie-token')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+  })
+
   it('workflowGrantReadRateLimit meters cookie-only admin workflow callers', async () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
