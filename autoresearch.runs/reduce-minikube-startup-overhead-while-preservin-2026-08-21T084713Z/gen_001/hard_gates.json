@@ -1,9 +1,0 @@
-{
-  "eval_harness_unchanged": true,
-  "finite_primary_metric": true,
-  "fresh_packet": true,
-  "no_eval_gaming": true,
-  "no_scope_violation": true,
-  "no_secret_leak": true,
-  "tests_pass": true
-}

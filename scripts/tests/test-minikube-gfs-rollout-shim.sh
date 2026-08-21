@@ -39,6 +39,19 @@ chmod +x "$tmp/realbin/kubectl"
 export FAKE_KUBECTL_LOG="$tmp/kubectl.log"
 shim_path="$(dirname "$SHIM"):$tmp/realbin:/usr/bin:/bin"
 
+# Two active worktrees can each prepend their own copy of the development
+# shim. Both copies must skip the other harness directory and reach kubectl.
+second_shim_dir="$tmp/second-worktree/scripts/minikube/gfs-rollout-shim"
+mkdir -p "$second_shim_dir"
+cp "$SHIM" "$second_shim_dir/kubectl"
+chmod +x "$second_shim_dir/kubectl"
+chain_shim_path="$second_shim_dir:$(dirname "$SHIM"):$tmp/realbin:/usr/bin:/bin"
+
+: >"$FAKE_KUBECTL_LOG"
+PATH="$chain_shim_path" kubectl --context=fake -n gfs get secret chain-check >/dev/null
+grep -q -- '--context=fake -n gfs get secret chain-check' "$FAKE_KUBECTL_LOG" \
+  || fail 'two shim copies did not reach the real kubectl binary'
+
 # 1. Ordinary invocations pass through to the real kubectl unchanged.
 : >"$FAKE_KUBECTL_LOG"
 PATH="$shim_path" kubectl --context=fake -n gfs get secret whatever >/dev/null

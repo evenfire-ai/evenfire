@@ -97,6 +97,10 @@ docs/analysis/
 .local-notes/
 .ralph/plans/
 
+# AutoResearch session outputs (local-only; may contain workstation paths)
+autoresearch.*
+autoresearch.runs/
+
 # Agent session transcripts can contain internal infrastructure details.
 session-ses_*.md
 

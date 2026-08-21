@@ -1,3 +1,0 @@
-METRIC evenfire_minikube_healthy_start_calls=0
-METRIC evenfire_minikube_partial_start_calls=1
-PASS: strict profile readiness and healthy-profile startup reuse

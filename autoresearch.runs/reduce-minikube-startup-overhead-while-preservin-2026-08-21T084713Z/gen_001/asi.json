@@ -1,9 +1,0 @@
-{
-  "evidence": "candidate_patch=captured (tracked_diff_detected); metrics=evenfire_minikube_healthy_start_calls=0.0, evenfire_minikube_partial_start_calls=1.0; baseline=0.0; delta=0.0; hard_gates=all true.",
-  "family": "autoresearch",
-  "hypothesis": "The captured candidate may improve the configured goal: Reduce Minikube startup overhead while preserving strict branch-profile ownership and readiness gates.",
-  "lane": "local",
-  "next_action_hint": "Review the candidate evidence, metric delta, and hard gates before logging a keep/discard decision.",
-  "risk": "candidate_requires_review",
-  "rollback_reason": "Revert the scoped candidate changes if validation fails or the candidate is discarded."
-}

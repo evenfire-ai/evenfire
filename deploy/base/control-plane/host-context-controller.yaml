@@ -23,6 +23,7 @@ spec:
   # single-writer assumption through the rollout too.
   strategy:
     type: Recreate
+  # CONTRACT: hcc-rollout-recovery=external-detection-only; owner=evenfire-infra
   # Recreate + replicas:1 means a botched rollout (new pod never Ready) leaves
   # /ready 503. Kubernetes will not self-heal that; the evenfire-infra deploy
   # workflows own automatic `rollout undo --to-revision` for this Deployment

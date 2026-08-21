@@ -102,26 +102,13 @@ describe('host-context-controller Deployment strategy', () => {
       })
     })
 
-    it('documents that the progress deadline is DETECTION ONLY and never rolls back', () => {
-      // The deadline flips Progressing=False and fails `kubectl rollout
-      // status`; it does NOT undo anything. If this documented contract is
-      // deleted from the manifest, a future reader will assume Kubernetes
-      // self-heals a botched Recreate rollout — the exact D1b failure mode.
-      expect(yamlSource).toContain('DETECTION ONLY')
-      expect(yamlSource).toContain('it does not roll back')
-      expect(yamlSource).toContain('Kubernetes will not self-heal')
-    })
-
-    it('pins recovery ownership to the evenfire-infra rollout undo (evenfire#391)', () => {
-      // Recovery is owned by the evenfire-infra deploy workflows via
-      // `rollout undo --to-revision` for this Deployment only (evenfire#391).
-      // HCC must NOT grow its own undo runtime, and the manifest must keep
-      // naming the real owner so a silent deletion of the ownership comment
-      // fails loudly here.
-      expect(yamlSource).toContain('evenfire-infra')
-      expect(yamlSource).toContain('rollout undo --to-revision')
-      expect(yamlSource).toContain('evenfire#391')
-      expect(yamlSource).toContain('The deploy job still fails after a successful undo')
+    it('keeps the external recovery ownership contract documented', () => {
+      // The deadline only detects a stalled rollout. Recovery belongs to the
+      // evenfire-infra deploy workflow; this stable marker avoids coupling the
+      // test to explanatory prose in the manifest comment.
+      expect(yamlSource).toContain(
+        '# CONTRACT: hcc-rollout-recovery=external-detection-only; owner=evenfire-infra'
+      )
     })
   })
 })

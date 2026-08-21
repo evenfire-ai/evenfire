@@ -33,6 +33,31 @@ assert_contains() {
   fi
 }
 
+assert_file_contains() {
+  local path="$1" needle="$2"
+  if grep -Fq "$needle" "$REPO_ROOT/$path"; then
+    echo "PASS: $path contains '$needle'"
+  else
+    echo "FAIL: $path missing '$needle'"
+    FAIL=1
+  fi
+}
+
+assert_not_contains() {
+  local target="$1" needle="$2"
+  local out
+  out="$(make -n "$target" 2>&1 || true)"
+  if [[ "$out" == *"$needle"* ]]; then
+    echo "FAIL: make -n $target unexpectedly contains '$needle'"
+    echo "---"
+    echo "$out"
+    echo "---"
+    FAIL=1
+  else
+    echo "PASS: make -n $target omits '$needle'"
+  fi
+}
+
 assert_make_contains() {
   local needle="$1"
   shift
@@ -64,6 +89,13 @@ assert_contains minikube-sync-auth-key-body "--context=clerum-test"
 assert_contains minikube-sync-auth-key-body "scripts/minikube/sync-auth-key.sh"
 assert_contains minikube-verify-networkpolicies "verify-networkpolicies.sh --overlay minikube"
 assert_contains minikube-sync-auth-key-if-present "rpc-proxy-secrets"
+assert_file_contains Makefile "T2_MUTATION_LOCK_WRAPPED"
+assert_contains minikube-sync-auth-key-if-present "minikube-sync-auth-key"
+assert_not_contains minikube-sync-auth-key-if-present "canonical T2 profile lock is not held"
+assert_contains minikube-deploy-all-body "set -o pipefail"
+assert_contains minikube-deploy-all-body "mktemp"
+assert_contains minikube-deploy-all-body "filtered_manifest"
+assert_contains minikube-deploy-crds-body '!= "true"'
 
 assert_make_contains "deployment/chatllm" minikube-deploy-service SVC=mcp-host NS=mcp-host
 assert_make_contains "deployment/chatllm" minikube-restart-deploy SVC=mcp-host NS=mcp-host

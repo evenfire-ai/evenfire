@@ -264,17 +264,36 @@ minikube-deploy-all-body:
 	@# acquisition recorded. It runs HERE, after minikube-detect-k8s-api-ip
 	@# above, because an overridden tag renders from a copy of deploy/ that must
 	@# already contain the generated k8s-api-ip.yaml.
+	@set -o pipefail; \
 	render_dir="$$(bash scripts/minikube/image-mode.sh --render-dir)" && \
 	if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
 		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | kubectl --context=$(MINIKUBE_PROFILE) apply -f -; \
 	else \
-		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | python3 scripts/minikube/filter-gfs-resources.py | kubectl --context=$(MINIKUBE_PROFILE) apply -f -; \
+		filtered_manifest="$$(mktemp "$${TMPDIR:-/tmp}/evenfire-gfs-filter.XXXXXX")"; \
+		trap 'rm -f -- "$$filtered_manifest"' EXIT; \
+		if ! kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | python3 scripts/minikube/filter-gfs-resources.py >"$$filtered_manifest"; then \
+			echo "[minikube-deploy-all] failed to render or filter the non-GFS overlay" >&2; exit 1; \
+		fi; \
+		if [ -s "$$filtered_manifest" ]; then \
+			kubectl --context=$(MINIKUBE_PROFILE) apply -f "$$filtered_manifest"; \
+		else \
+			echo "[minikube-deploy-all] filtered overlay contains no non-GFS resources; skipping apply"; \
+		fi; \
 	fi
 	CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-inter-service-tokens.sh
 	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
 		$(KC) apply -f deploy/overlays/minikube/instances/; \
 	else \
-		python3 scripts/minikube/filter-gfs-resources.py deploy/overlays/minikube/instances/*.yaml | $(KC) apply -f -; \
+		filtered_manifest="$$(mktemp "$${TMPDIR:-/tmp}/evenfire-gfs-instances-filter.XXXXXX")"; \
+		trap 'rm -f -- "$$filtered_manifest"' EXIT; \
+		if ! python3 scripts/minikube/filter-gfs-resources.py deploy/overlays/minikube/instances/*.yaml >"$$filtered_manifest"; then \
+			echo "[minikube-deploy-all] failed to filter the non-GFS instance resources" >&2; exit 1; \
+		fi; \
+		if [ -s "$$filtered_manifest" ]; then \
+			$(KC) apply -f "$$filtered_manifest"; \
+		else \
+			echo "[minikube-deploy-all] filtered instances contain no non-GFS resources; skipping apply"; \
+		fi; \
 	fi
 	@# Kustomize reapplies the persisted mcp-host ConfigMap, which can overwrite
 	@# CLERUM_AUTH_JWT_PUBLIC_KEY with an older repo value. Always re-sync from
@@ -341,7 +360,7 @@ minikube-deploy-crds-body:
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
 	kubectl --context=$(MINIKUBE_PROFILE) apply -f deploy/base/namespaces.yaml
-	@if [ "$(MINIKUBE_GFS_MUTATION)" = "false" ]; then \
+	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then \
 		echo "[minikube-deploy-crds] GFS CRD mutation disabled for this non-T2 gate"; \
 		helm upgrade --install --skip-crds --kube-context=$(MINIKUBE_PROFILE) clerum-crds ./charts/clerum-crds; \
 		for crd in ./charts/clerum-crds/crds/*.yaml; do \
@@ -392,7 +411,7 @@ minikube-gen-keys-body:
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
-		@scripts/minikube/generate-keys.sh
+	@scripts/minikube/generate-keys.sh
 	@if [ -f deploy/minikube/secrets/jwt-signing-keys.yaml ]; then \
 	  $(KC) apply -f deploy/minikube/secrets/jwt-signing-keys.yaml; \
 	else \
@@ -451,11 +470,12 @@ minikube-sync-auth-key-body:
 
 .PHONY: minikube-sync-auth-key-if-present
 minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube auth resources already exist
-	@if [ -z "$(T2_LOCK_TOKEN)" ]; then echo "Skipping auth key sync (canonical T2 profile lock is not held)."; exit 0; fi
 	@if ! $(KC) get secret rpc-proxy-secrets -n rpc-proxy >/dev/null 2>&1; then \
 	  echo "Skipping auth key sync (rpc-proxy-secrets not found yet)."; \
 	elif ! $(KC) get configmap mcp-host-config -n mcp-host >/dev/null 2>&1; then \
 	  echo "Skipping auth key sync (mcp-host-config not found yet)."; \
+	elif [ "$(T2_MUTATION_LOCK_WRAPPED)" = "true" ]; then \
+	  $(MAKE) --no-print-directory minikube-sync-auth-key-body; \
 	else \
 	  $(MAKE) --no-print-directory minikube-sync-auth-key; \
 	fi

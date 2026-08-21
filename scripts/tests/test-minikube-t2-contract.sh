@@ -36,6 +36,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"; do
   bash -n "$file"
 done
+"$ROOT/scripts/tests/test-minikube-filter-gfs-resources.sh"
 python3 - "$GFS_FILTER" "$TMP_ROOT" <<'PY'
 import os
 import py_compile

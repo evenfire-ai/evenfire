@@ -19,6 +19,12 @@ for dir in $PATH; do
   [ -n "$dir" ] || continue
   resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || continue
   [ "$resolved" = "$SELF_DIR" ] && continue
+  # A second worktree can prepend its own copy of this development shim. Skip
+  # every harness directory, not only this copy, or two shims will bounce
+  # between each other instead of reaching the real kubectl binary.
+  case "$resolved" in
+    */gfs-rollout-shim) continue ;;
+  esac
   if [ -f "${dir}/kubectl" ] && [ -x "${dir}/kubectl" ]; then
     REAL_KUBECTL="${dir}/kubectl"
     break
