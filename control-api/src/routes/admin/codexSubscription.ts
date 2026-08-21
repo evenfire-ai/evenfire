@@ -21,6 +21,11 @@ import {
   startCodexDeviceConnect,
 } from '../../services/codexSubscriptionOAuth.js'
 import type { CodexSubscriptionOAuthIntent } from '../../services/codexSubscriptionOAuthState.js'
+import {
+  buildCodexBrowserRedirectUri,
+  isPublicCodexCliClient,
+  resolveCodexControlUiBaseUrl,
+} from '../../services/codexSubscriptionRedirectUri.js'
 
 const log = rootLogger.child({ module: 'admin-codex-subscription' })
 const BASE = '/admin/llm/providers/codex-subscription'
@@ -29,27 +34,23 @@ function dbClient() {
   return { query: (text: string, values?: unknown[]) => pool.query(text, values) }
 }
 
-function buildRedirectUri(req: {
-  protocol: string
-  get: (h: string) => string | undefined
-}): string {
-  const origin =
-    config.oauthCallbackBaseUrl && config.oauthCallbackBaseUrl.length > 0
-      ? config.oauthCallbackBaseUrl.replace(/\/+$/, '')
-      : `${req.protocol}://${req.get('host') ?? 'localhost'}`
-  return `${origin}/api/v1/auth/codex-subscription/callback`
+function resolveBrowserRedirectUri(req: { get: (h: string) => string | undefined }): string {
+  const controlUiOrigin = resolveCodexControlUiBaseUrl(config.controlUiBaseUrl, req.get('origin'))
+  return buildCodexBrowserRedirectUri(controlUiOrigin)
 }
 
-function oauthDeps(req: {
-  protocol: string
-  get: (h: string) => string | undefined
-}): CodexOAuthDeps {
+function oauthDeps(
+  req: {
+    get: (h: string) => string | undefined
+  },
+  redirectUri = resolveBrowserRedirectUri(req)
+): CodexOAuthDeps {
   return {
     db: dbClient(),
     encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
     fetchFn: fetch,
     clientId: config.codexOAuthClientId,
-    redirectUri: buildRedirectUri(req),
+    redirectUri,
     enabled: config.codexSubscriptionEnabled,
   }
 }
@@ -104,8 +105,15 @@ export function createAdminCodexSubscriptionRouter(
     `${BASE}/browser/start`,
     asyncHandler(async (req, res) => {
       try {
+        const redirectUri = resolveBrowserRedirectUri(req)
+        if (isPublicCodexCliClient(config.codexOAuthClientId)) {
+          throw new CodexSubscriptionOAuthError(
+            'browser_oauth_unregistered',
+            'browser OAuth requires a deployment-registered OpenAI client'
+          )
+        }
         const started = await startCodexBrowserConnect(
-          oauthDeps(req),
+          oauthDeps(req, redirectUri),
           parseIntent(req.body?.intent)
         )
         res.status(200).json(started)

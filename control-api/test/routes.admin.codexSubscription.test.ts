@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import request from 'supertest'
 import { CodexSubscriptionOAuthError } from '../src/services/codexSubscriptionOAuth.js'
+import { PUBLIC_CODEX_CLI_CLIENT_ID } from '../src/services/codexSubscriptionRedirectUri.js'
 
 const oauth = vi.hoisted(() => ({
   getConnection: vi.fn(),
@@ -53,10 +54,14 @@ function assertNoLeak(body: unknown): void {
 
 describe('admin Codex subscription routes', () => {
   let app: ReturnType<typeof makeAuthedApp>
+  const originalClientId = config.codexOAuthClientId
+  const originalControlUiBaseUrl = config.controlUiBaseUrl
 
   beforeEach(() => {
     app = makeAuthedApp()
     config.codexSubscriptionEnabled = true
+    config.codexOAuthClientId = originalClientId
+    config.controlUiBaseUrl = originalControlUiBaseUrl
     for (const fn of Object.values(oauth)) fn.mockReset()
   })
 
@@ -81,13 +86,44 @@ describe('admin Codex subscription routes', () => {
     assertNoLeak(res.body)
   })
 
-  it('starts browser and device flows without tokens or cookies', async () => {
+  it('blocks browser start for the public Codex CLI client', async () => {
+    config.codexOAuthClientId = PUBLIC_CODEX_CLI_CLIENT_ID
+    const res = await request(app)
+      .post('/admin/llm/providers/codex-subscription/browser/start')
+      .set('Origin', 'http://127.0.0.1:36148')
+      .send({ intent: 'connect' })
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'browser_oauth_unregistered' })
+    expect(oauth.startBrowser).not.toHaveBeenCalled()
+    assertNoLeak(res.body)
+  })
+
+  it('starts browser OAuth with a control-ui derived redirect for custom clients', async () => {
+    config.codexOAuthClientId = 'app_evenfire_custom'
+    config.controlUiBaseUrl = 'http://127.0.0.1:3000'
     oauth.startBrowser.mockResolvedValue({
       authorizeUrl: 'https://auth.openai.com/oauth/authorize?state=abc',
       state: 'abc',
       intent: 'connect',
       expiresAt: new Date().toISOString(),
     })
+    const res = await request(app)
+      .post('/admin/llm/providers/codex-subscription/browser/start')
+      .set('Host', 'control-api.control-plane.svc.cluster.local:8090')
+      .set('Origin', 'http://127.0.0.1:36148')
+      .send({ intent: 'connect' })
+    expect(res.status).toBe(200)
+    expect(oauth.startBrowser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        redirectUri: 'http://127.0.0.1:36148/control-api/api/v1/auth/codex-subscription/callback',
+      }),
+      'connect'
+    )
+    assertNoLeak(res.body)
+  })
+
+  it('starts device flow without tokens or cookies even with the public client', async () => {
+    config.codexOAuthClientId = PUBLIC_CODEX_CLI_CLIENT_ID
     oauth.startDevice.mockResolvedValue({
       userCode: 'ABCD-EFGH',
       verificationUri: 'https://auth.openai.com/codex/device',
@@ -95,14 +131,6 @@ describe('admin Codex subscription routes', () => {
       state: 'dev',
       intent: 'connect',
     })
-    const browser = await request(app)
-      .post('/admin/llm/providers/codex-subscription/browser/start')
-      .send({ intent: 'connect' })
-    expect(browser.status).toBe(200)
-    expect(browser.body.authorizeUrl).toContain('https://auth.openai.com/oauth/authorize')
-    expect(browser.headers['set-cookie']).toBeUndefined()
-    assertNoLeak(browser.body)
-
     const device = await request(app)
       .post('/admin/llm/providers/codex-subscription/device/start')
       .send({ intent: 'replace' })
@@ -113,6 +141,7 @@ describe('admin Codex subscription routes', () => {
   })
 
   it('maps replacement and refresh races to 409 without leaking tokens', async () => {
+    config.codexOAuthClientId = 'app_evenfire_custom'
     oauth.startBrowser.mockRejectedValue(
       new CodexSubscriptionOAuthError('replacement_required', 'replace')
     )

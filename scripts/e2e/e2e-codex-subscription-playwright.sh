@@ -63,6 +63,9 @@ load_branch_profile_ports() {
     urls_preconfigured=true
   fi
   if [[ "${ctx}" =~ ^clerum-(codex|detached)- ]] || [[ "${ctx}" =~ ^clerum-.+-[0-9a-f]{7,8}$ ]]; then
+    if [[ -z "${ports_env}" ]]; then
+      ports_env="${HOME}/.cache/clerum/minikube-profiles/${ctx}/ports.env"
+    fi
     if [[ -z "${ports_env}" && "${urls_preconfigured}" != "true" ]]; then
       die "branch-owned context ${ctx} requires ports.env from branch-profile preflight, or explicit CONTROL_UI_URL and CONTROL_API_URL"
     fi
@@ -71,6 +74,9 @@ load_branch_profile_ports() {
   fi
   if [[ -n "${ports_env}" && -f "${ports_env}" ]]; then
     dotenv_load_file "${ports_env}"
+  fi
+  if [[ -n "${ports_env}" ]]; then
+    export CLERUM_PROFILE_PORTS_ENV="${ports_env}"
   fi
 }
 
@@ -120,6 +126,14 @@ export CONTROL_API_BASE_URL="${CONTROL_API_BASE_URL:-${CONTROL_API_URL}}"
 
 require_random_local_port_for_branch_context "CONTROL_UI_URL" "${CONTROL_UI_URL}" "3000"
 require_random_local_port_for_branch_context "CONTROL_API_URL" "${CONTROL_API_URL}" "8090"
+
+log "Syncing Codex subscription Control UI origin into control-api"
+sync_args=(--context "${PROFILE}")
+if [[ -n "${CLERUM_PROFILE_PORTS_ENV:-}" ]]; then
+  sync_args+=(--ports-env "${CLERUM_PROFILE_PORTS_ENV}")
+fi
+"${ROOT}/scripts/minikube/sync-codex-subscription-control-ui-url.sh" "${sync_args[@]}" \
+  || die "failed to sync Codex subscription Control UI URL"
 
 if [[ "${E2E_USE_EXISTING_PORT_FORWARDS:-false}" != "true" ]]; then
   log "Starting held port-forwards (log: ${PF_LOG})"

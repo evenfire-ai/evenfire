@@ -783,7 +783,8 @@ export const config: Config = {
   // Codex subscription management and admission dark.
   codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
   // Public native client used by the Codex CLI ChatGPT login. This is not a
-  // confidential client secret.
+  // confidential client secret. Browser OAuth requires a deployment-registered
+  // client id; the default CLI client supports device-code connect only.
   codexOAuthClientId:
     process.env.CONTROL_API_CODEX_OAUTH_CLIENT_ID || 'app_EMoamEEZ73f0CkXaXp7hrann',
   // Default 24h. Validated (not merely parsed): the value goes straight into

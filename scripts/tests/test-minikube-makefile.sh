@@ -59,6 +59,8 @@ assert_contains minikube-start "--context=clerum-test"
 assert_contains minikube-deploy-all "minikube-sync-auth-key"
 assert_contains minikube-sync-auth-key "--context=clerum-test"
 assert_contains minikube-sync-auth-key "scripts/minikube/sync-auth-key.sh"
+assert_succeeds_dry minikube-sync-codex-subscription-url
+assert_contains minikube-sync-codex-subscription-url "scripts/minikube/sync-codex-subscription-control-ui-url.sh"
 assert_contains minikube-verify-networkpolicies "verify-networkpolicies.sh --overlay minikube"
 assert_contains minikube-sync-auth-key-if-present "rpc-proxy-secrets"
 

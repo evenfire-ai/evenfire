@@ -147,6 +147,11 @@ function copyRequestHeaders(req: NextRequest): Headers {
       headers.set(key, value)
     }
   })
+  const host = req.headers.get('host') ?? req.nextUrl.host
+  if (host) {
+    headers.set('x-forwarded-host', host)
+    headers.set('x-forwarded-proto', req.nextUrl.protocol.replace(':', ''))
+  }
   return headers
 }
 

@@ -1,19 +1,22 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
-import { IconModels } from '@components/Sidebar/icons'
+import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { useToast } from '@components/Toast'
+import { Button, FormSection } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { isSilentApiError } from '@lib/api'
 import {
   type CodexOAuthIntent,
   type CodexSubscriptionConnectionView,
   getCodexSubscriptionConnection,
+  isCodexBrowserOAuthUnavailableError,
   pollCodexDevice,
+  readCodexOAuthQueryParam,
   refreshCodexSubscriptionConnection,
   revokeCodexSubscription,
   startCodexBrowserConnect,
@@ -24,7 +27,12 @@ import {
   isCodexSubscriptionUiEnabled,
   loadCodexSubscriptionCapability,
 } from '@lib/codexSubscriptionFeature'
-import { type CodexSubscriptionUiStatus, mapConnectionStatus } from './types'
+import {
+  type CodexSubscriptionUiStatus,
+  mapConnectionStatus,
+  statusLabel,
+  statusTagClass,
+} from './types'
 
 function failureClass(error: unknown): string {
   if (
@@ -38,27 +46,39 @@ function failureClass(error: unknown): string {
   return 'unavailable'
 }
 
-function statusLabel(status: CodexSubscriptionUiStatus): string {
-  switch (status) {
-    case 'connected':
-      return 'Connected'
-    case 'connecting':
-      return 'Connecting'
-    case 'device-pending':
-      return 'Device code pending'
-    case 'reauth-required':
-      return 'Reauthorization required'
-    case 'revoking':
-      return 'Revoking'
-    case 'unavailable':
-      return 'Unavailable'
-    default:
-      return 'Disconnected'
-  }
+function CodexHeaderIcon() {
+  return (
+    <span className="cu-codex-subscription-header-icon" aria-hidden="true">
+      <LlmProviderIcon provider="openai" label="OpenAI" />
+      <LlmProviderIcon provider="codex-subscription" label="Codex subscription" />
+    </span>
+  )
+}
+
+function ConnectionDetailRow({
+  label,
+  value,
+  testId,
+}: {
+  label: string
+  value: React.ReactNode
+  testId?: string
+}) {
+  return (
+    <div className="cu-settings-row">
+      <div className="cu-settings-row__main">
+        <span className="cu-settings-row__label">{label}</span>
+        <span className="cu-settings-row__value" {...(testId ? { 'data-testid': testId } : {})}>
+          {value}
+        </span>
+      </div>
+    </div>
+  )
 }
 
 export function CodexSubscriptionConnection() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [capabilityReady, setCapabilityReady] = useState(false)
@@ -71,6 +91,7 @@ export function CodexSubscriptionConnection() {
   const [pollMs, setPollMs] = useState(5000)
   const [syncSummary, setSyncSummary] = useState<string | null>(null)
   const [errorClass, setErrorClass] = useState<string | null>(null)
+  const [browserOAuthBlocked, setBrowserOAuthBlocked] = useState(false)
   const [busy, setBusy] = useState(false)
 
   function applyConnection(next: CodexSubscriptionConnectionView) {
@@ -103,6 +124,23 @@ export function CodexSubscriptionConnection() {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    const outcome = readCodexOAuthQueryParam(searchParams)
+    if (!outcome) return
+    router.replace(CONTROL_ROUTES.llmModels.codexSubscription)
+    if (outcome === 'connected') {
+      void loadConnection().then(() => {
+        showToast('Codex subscription connected.', { tone: 'success' })
+      })
+      return
+    }
+    setErrorClass(outcome)
+    if (outcome === 'browser_oauth_unregistered') {
+      setBrowserOAuthBlocked(true)
+    }
+    setUiStatus('disconnected')
+  }, [router, searchParams, showToast])
 
   useEffect(() => {
     if (!deviceState || uiStatus !== 'device-pending') return undefined
@@ -145,14 +183,19 @@ export function CodexSubscriptionConnection() {
   async function startBrowser(intent: CodexOAuthIntent) {
     setBusy(true)
     setErrorClass(null)
+    setBrowserOAuthBlocked(false)
     setUiStatus('connecting')
     try {
       const started = await startCodexBrowserConnect(intent)
-      window.open(started.authorizeUrl, '_blank', 'noopener,noreferrer')
-      showToast('Complete Codex sign-in in the browser window.', { tone: 'info' })
-      await loadConnection()
+      window.location.assign(started.authorizeUrl)
     } catch (error) {
       if (isSilentApiError(error)) return
+      if (isCodexBrowserOAuthUnavailableError(error)) {
+        setBrowserOAuthBlocked(true)
+        setErrorClass('browser_oauth_unregistered')
+        setUiStatus(connection ? mapConnectionStatus(connection.status) : 'disconnected')
+        return
+      }
       if (
         error &&
         typeof error === 'object' &&
@@ -267,7 +310,7 @@ export function CodexSubscriptionConnection() {
       <CreateFlowPanel
         header={
           <CreatePageHeader
-            icon={<IconModels />}
+            icon={<CodexHeaderIcon />}
             title="Codex subscription"
             subtitle="This provider is not enabled on the control plane."
             backLabel="Back to models"
@@ -286,107 +329,153 @@ export function CodexSubscriptionConnection() {
     <CreateFlowPanel
       header={
         <CreatePageHeader
-          icon={<IconModels />}
+          icon={<CodexHeaderIcon />}
           title="Codex subscription"
-          subtitle="Connect a broker-backed Codex catalog without storing tokens in the browser."
+          subtitle="Connect OpenAI Codex through the OAuth broker without storing tokens in the browser."
           backLabel="Back to models"
           onBack={backToModels}
           backDisabled={busy}
         />
       }
     >
-      <div className="cu-llm-models-layout">
-        <p data-testid="codex-connection-status">Status: {statusLabel(uiStatus)}</p>
-        {connection ? (
-          <dl>
-            <div>
-              <dt>Fingerprint</dt>
-              <dd data-testid="codex-fingerprint">{fingerprint}</dd>
-            </div>
-            <div>
-              <dt>Credential revision</dt>
-              <dd>{connection.credentialRevision}</dd>
-            </div>
-            <div>
-              <dt>Catalog revision</dt>
-              <dd>{connection.catalogRevision}</dd>
-            </div>
-            <div>
-              <dt>Catalog</dt>
-              <dd>{connection.catalogStatus}</dd>
-            </div>
-          </dl>
-        ) : null}
-        {deviceUserCode ? (
-          <p data-testid="codex-device-code">
-            Enter device code {deviceUserCode}
-            {deviceVerificationUri ? ` at ${deviceVerificationUri}` : ''}
-          </p>
-        ) : null}
-        {syncSummary ? <p data-testid="codex-sync-summary">{syncSummary}</p> : null}
-        {errorClass ? (
-          <div className="cu-banner cu-banner--error" role="alert">
-            Connection failed ({errorClass}).
+      <div className="cu-create-content cu-px-form cu-codex-subscription-panel">
+        <FormSection
+          title="Connection"
+          description="Authorize OpenAI Codex once for this deployment. Tokens stay on the control plane."
+        >
+          <div className="cu-codex-subscription-panel__status-row">
+            <span className="cu-settings-row__label">Status</span>
+            <span className={statusTagClass(uiStatus)} data-testid="codex-connection-status">
+              {statusLabel(uiStatus)}
+            </span>
           </div>
-        ) : null}
-        <div>
-          <button
-            type="button"
-            className="cu-btn cu-btn--primary cu-btn--sm"
-            disabled={busy}
-            onClick={() => void startBrowser('connect')}
-          >
-            Connect in browser
-          </button>
-          <button
-            type="button"
-            className="cu-btn cu-btn--ghost cu-btn--sm"
-            disabled={busy}
-            onClick={() => void startDevice('connect')}
-          >
-            Use device code
-          </button>
-          <button
-            type="button"
-            className="cu-btn cu-btn--ghost cu-btn--sm"
-            disabled={busy || !connection}
-            onClick={() => void startBrowser('reconnect')}
-          >
-            Reconnect
-          </button>
-          <button
-            type="button"
-            className="cu-btn cu-btn--ghost cu-btn--sm"
-            disabled={busy || !connection}
-            onClick={() => void handleReplace()}
-          >
-            Replace account
-          </button>
-          <button
-            type="button"
-            className="cu-btn cu-btn--ghost cu-btn--sm"
-            disabled={busy || uiStatus !== 'connected'}
-            onClick={() => void handleSync()}
-          >
-            Sync catalog
-          </button>
-          <button
-            type="button"
-            className="cu-btn cu-btn--ghost cu-btn--sm"
-            disabled={busy || uiStatus !== 'connected'}
-            onClick={() => void handleTest()}
-          >
-            Test connection
-          </button>
-          <button
-            type="button"
-            className="cu-btn cu-btn--ghost cu-btn--sm"
-            disabled={busy || uiStatus === 'disconnected'}
-            onClick={() => void handleRevoke()}
-          >
-            Revoke
-          </button>
-        </div>
+
+          {connection ? (
+            <div className="cu-settings-list">
+              <ConnectionDetailRow
+                label="Account fingerprint"
+                value={fingerprint}
+                testId="codex-fingerprint"
+              />
+              <ConnectionDetailRow
+                label="Credential revision"
+                value={connection.credentialRevision}
+              />
+              <ConnectionDetailRow label="Catalog revision" value={connection.catalogRevision} />
+              <ConnectionDetailRow label="Catalog status" value={connection.catalogStatus} />
+            </div>
+          ) : null}
+
+          {deviceUserCode ? (
+            <div
+              className="cu-banner cu-banner--info"
+              role="status"
+              data-testid="codex-device-code"
+            >
+              Enter device code <strong>{deviceUserCode}</strong>
+              {deviceVerificationUri ? (
+                <>
+                  {' '}
+                  at{' '}
+                  <a href={deviceVerificationUri} target="_blank" rel="noopener noreferrer">
+                    {deviceVerificationUri}
+                  </a>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          {syncSummary ? (
+            <div className="cu-banner cu-banner--ok" role="status" data-testid="codex-sync-summary">
+              {syncSummary}
+            </div>
+          ) : null}
+
+          {errorClass ? (
+            <div className="cu-banner cu-banner--error" role="alert">
+              Connection failed ({errorClass}).
+            </div>
+          ) : null}
+
+          {browserOAuthBlocked ? (
+            <div
+              className="cu-banner cu-banner--info"
+              role="status"
+              data-testid="codex-browser-oauth-blocked"
+            >
+              Browser sign-in needs a deployment-registered OpenAI OAuth client for this
+              cluster&apos;s control-ui callback URL. Use device code to connect with the default
+              Codex client.
+            </div>
+          ) : null}
+
+          <div className="cu-form-inline">
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={busy}
+              onClick={() => void startBrowser('connect')}
+            >
+              Connect in browser
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => void startDevice('connect')}
+            >
+              Use device code
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy || !connection}
+              onClick={() => void startBrowser('reconnect')}
+            >
+              Reconnect
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy || !connection}
+              onClick={() => void handleReplace()}
+            >
+              Replace account
+            </Button>
+          </div>
+        </FormSection>
+
+        <FormSection
+          title="Catalog and health"
+          description="Sync discovered models into the allowlist and verify the broker grant."
+        >
+          <div className="cu-form-inline">
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={busy || uiStatus !== 'connected'}
+              onClick={() => void handleSync()}
+            >
+              Sync catalog
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy || uiStatus !== 'connected'}
+              onClick={() => void handleTest()}
+            >
+              Test connection
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={busy || uiStatus === 'disconnected'}
+              onClick={() => void handleRevoke()}
+            >
+              Revoke
+            </Button>
+          </div>
+        </FormSection>
       </div>
       {confirmDialog}
     </CreateFlowPanel>

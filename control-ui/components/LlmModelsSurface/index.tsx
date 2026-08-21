@@ -29,6 +29,7 @@ import {
 import { getProviderDisplayLabel } from '@lib/llm'
 import { buildUnpricedKeys } from '@lib/llmModelUnpriced'
 import { CatalogAttentionBanner } from './CatalogAttentionBanner'
+import { CodexSubscriptionCatalogLink } from './CodexSubscriptionCatalogLink'
 import type { LlmModelsSurfaceProps, LlmModelsTab } from './types'
 
 const CONFIGMAP_DEFERRED_WARNING =
@@ -185,11 +186,7 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
       {activeTab === 'catalog' ? (
         <CatalogAttentionBanner refreshSignal={attentionRefreshKey} />
       ) : null}
-      {activeTab === 'catalog' && codexEnabled ? (
-        <p>
-          <a href={CONTROL_ROUTES.llmModels.codexSubscription}>Codex subscription</a>
-        </p>
-      ) : null}
+      {activeTab === 'catalog' && codexEnabled ? <CodexSubscriptionCatalogLink /> : null}
       {activeTab === 'catalog' ? (
         <LlmModelTable
           items={models}

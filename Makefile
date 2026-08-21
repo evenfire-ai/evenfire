@@ -384,6 +384,10 @@ minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube aut
 	  $(MAKE) --no-print-directory minikube-sync-auth-key; \
 	fi
 
+.PHONY: minikube-sync-codex-subscription-url
+minikube-sync-codex-subscription-url: ## Resolve branch Control UI URL and sync CONTROL_API_CONTROL_UI_BASE_URL for Codex OAuth
+	@bash scripts/minikube/sync-codex-subscription-control-ui-url.sh --context=$(MINIKUBE_PROFILE)
+
 # ── Minikube Port Forwards ──────────────────────────────────────────
 .PHONY: minikube-pf-control-ui
 minikube-pf-control-ui: ## Port-forward Control UI → localhost:3000
