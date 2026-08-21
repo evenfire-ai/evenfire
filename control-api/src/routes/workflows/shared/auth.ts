@@ -1,8 +1,7 @@
 import { Request, Response } from 'express'
 import { isCurrentExternalSession } from '../../../middleware/externalSessionAuth.js'
-import { isAdminTokenRevoked } from '../../../services/adminAuthService.js'
+import { authenticateAdminSession } from '../../../services/adminSessionAuth.js'
 import type { WorkflowCaller } from '../../../services/workflows/types.js'
-import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
 import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
 import {
   type McpHostControlScope,
@@ -34,10 +33,8 @@ export async function requireAdminWorkflowCaller(
   res: Response
 ): Promise<Extract<WorkflowCaller, { kind: 'admin-ui' }> | null> {
   const adminToken = getAdminUiToken(req)
-  if (!adminToken || adminToken.length > 4096) return unauthorized(res)
-
-  const adminClaims = verifyAdminToken(adminToken)
-  if (!adminClaims || (await isAdminTokenRevoked(adminClaims.jti))) return unauthorized(res)
+  const adminClaims = await authenticateAdminSession(adminToken)
+  if (!adminClaims) return unauthorized(res)
   return { kind: 'admin-ui', userId: adminClaims.sub }
 }
 

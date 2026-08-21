@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { createAdminOutputsRouter } from '../src/routes/admin/outputs.js'
 import { createWorkflowsAdminRouter } from '../src/routes/admin/workflows/index.js'
 import { createMcpHostWorkflowRoutes } from '../src/routes/mcp-host/workflows/index.js'
 import { currentAdministrativeRequestContext } from '../src/services/tracing/adminOperationContext.js'
@@ -18,6 +19,7 @@ const mockIsHostRefAuthorized = vi.fn()
 const mockVerifyAdminToken = vi.fn()
 const mockVerifyExternalSessionToken = vi.fn()
 const mockIsAdminTokenRevoked = vi.fn()
+const mockFindAdminById = vi.fn()
 const mockListWorkflowGrants = vi.fn()
 const mockSetWorkflowGrants = vi.fn()
 const mockListTeamWorkflowGrants = vi.fn()
@@ -63,6 +65,7 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
 
 vi.mock('../src/services/adminAuthService.js', () => ({
   isAdminTokenRevoked: (...args: unknown[]) => mockIsAdminTokenRevoked(...args),
+  findAdminById: (...args: unknown[]) => mockFindAdminById(...args),
 }))
 
 vi.mock('../src/services/directory/index.js', () => ({
@@ -137,6 +140,8 @@ const USER_SESSION_CLAIMS = {
   exp: Math.floor(Date.now() / 1000) + 3600,
 }
 
+const ADMIN_SESSION_VERSION = 2
+
 const ADMIN_CLAIMS = {
   // Production `signAdminToken` always sets `sub` to `users.id`, which is a
   // UUID. Using a valid UUID here (instead of 'admin-1') keeps the fixture
@@ -148,6 +153,38 @@ const ADMIN_CLAIMS = {
   role: 'admin' as const,
   jti: 'admin-jti',
   exp: Math.floor(Date.now() / 1000) + 3600,
+  sessionVersion: ADMIN_SESSION_VERSION,
+}
+
+function mockLiveAdminSession(
+  overrides: {
+    tokenSessionVersion?: number
+    adminSessionVersion?: number
+    status?: 'active' | 'disabled'
+    revoked?: boolean
+    missingAdmin?: boolean
+  } = {}
+) {
+  const tokenSessionVersion = overrides.tokenSessionVersion ?? ADMIN_SESSION_VERSION
+  mockVerifyAdminToken.mockImplementation(token =>
+    token === 'admin-token' || token === 'admin-token-stale'
+      ? { ...ADMIN_CLAIMS, sessionVersion: tokenSessionVersion }
+      : null
+  )
+  mockIsAdminTokenRevoked.mockResolvedValue(overrides.revoked ?? false)
+  if (overrides.missingAdmin) {
+    mockFindAdminById.mockResolvedValue(null)
+    return
+  }
+  mockFindAdminById.mockResolvedValue({
+    id: ADMIN_CLAIMS.sub,
+    status: overrides.status ?? 'active',
+    sessionVersion: overrides.adminSessionVersion ?? ADMIN_SESSION_VERSION,
+  })
+}
+
+function mockRateLimiterAllowed() {
+  mockPoolQuery.mockResolvedValueOnce({ rows: [{ count: 1 }], rowCount: 1 })
 }
 
 const WORKFLOW_CONTROL_CLAIMS = {
@@ -184,6 +221,13 @@ function makeApiRuntimeApp(gateway: MockGateway) {
   return app
 }
 
+function makeOutputsApp(gateway: MockGateway) {
+  const app = express()
+  app.use(express.json())
+  app.use(createAdminOutputsRouter(gateway as never))
+  return app
+}
+
 describe('routes/admin/workflows', () => {
   let gateway: MockGateway
 
@@ -197,6 +241,7 @@ describe('routes/admin/workflows', () => {
     mockVerifyAdminToken.mockReset()
     mockVerifyExternalSessionToken.mockReset()
     mockIsAdminTokenRevoked.mockReset()
+    mockFindAdminById.mockReset()
     mockListWorkflowGrants.mockReset()
     mockSetWorkflowGrants.mockReset()
     mockListTeamWorkflowGrants.mockReset()
@@ -211,11 +256,9 @@ describe('routes/admin/workflows', () => {
       expiresInSeconds: 600,
     })
     mockIsAdminTokenRevoked.mockResolvedValue(false)
+    mockLiveAdminSession()
     mockVerifyExternalSessionToken.mockImplementation(token =>
       token === 'user-session-token' ? USER_SESSION_CLAIMS : null
-    )
-    mockVerifyAdminToken.mockImplementation(token =>
-      token === 'admin-token' ? ADMIN_CLAIMS : null
     )
     mockVerifyWorkflowControlToken.mockImplementation(token =>
       token === 'mcp-host-workflow-control-token' ? WORKFLOW_CONTROL_CLAIMS : null
@@ -2421,5 +2464,285 @@ describe('routes/admin/workflows', () => {
 
       expect(res.body).toEqual({ teamId: VALID_TEAM_UUID, removed: false })
     })
+  })
+
+  describe('live administrator session enforcement (F4)', () => {
+    const VALID_TEAM_UUID = '11111111-2222-4333-8444-555555555555'
+    const VALID_GRANT_UUID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const RUN_ID = '00000000-0000-4000-8000-000000000456'
+
+    async function seedRecipe(): Promise<void> {
+      await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
+    }
+
+    function expectUnauthorized(res: { status: number; body: { error?: string } }): void {
+      expect(res.status).toBe(401)
+      expect(res.body).toEqual({ error: 'Unauthorized' })
+    }
+
+    it('rejects revoked administrator JTIs before business logic', async () => {
+      mockLiveAdminSession({ revoked: true })
+      const res = await request(makeApp(gateway))
+        .get('/admin/workflows')
+        .set('Authorization', 'Bearer admin-token')
+      expectUnauthorized(res)
+      expect(mockPoolQuery).not.toHaveBeenCalled()
+    })
+
+    it('rejects tokens issued before password reset (stale sessionVersion)', async () => {
+      mockLiveAdminSession({ tokenSessionVersion: 1, adminSessionVersion: 2 })
+      const res = await request(makeApp(gateway))
+        .get('/admin/workflows')
+        .set('Authorization', 'Bearer admin-token-stale')
+      expectUnauthorized(res)
+    })
+
+    it('rejects disabled administrator accounts', async () => {
+      mockLiveAdminSession({ status: 'disabled' })
+      const res = await request(makeApp(gateway))
+        .get('/admin/workflows')
+        .set('Authorization', 'Bearer admin-token')
+      expectUnauthorized(res)
+    })
+
+    it('rejects missing administrator records', async () => {
+      mockLiveAdminSession({ missingAdmin: true })
+      const res = await request(makeApp(gateway))
+        .get('/admin/workflows')
+        .set('Authorization', 'Bearer admin-token')
+      expectUnauthorized(res)
+    })
+
+    it('rejects stale HttpOnly cookie sessions', async () => {
+      mockLiveAdminSession({ tokenSessionVersion: 1, adminSessionVersion: 2 })
+      const res = await request(makeApp(gateway))
+        .get('/admin/workflows')
+        .set('Cookie', 'control_ui_admin_session=admin-token-stale')
+      expectUnauthorized(res)
+    })
+
+    it('rejects stale bearer tokens even when a valid cookie is also present', async () => {
+      mockVerifyAdminToken.mockImplementation(token => {
+        if (token === 'admin-token-stale') {
+          return { ...ADMIN_CLAIMS, sessionVersion: 1 }
+        }
+        if (token === 'admin-token') {
+          return { ...ADMIN_CLAIMS, sessionVersion: ADMIN_SESSION_VERSION }
+        }
+        return null
+      })
+      mockIsAdminTokenRevoked.mockResolvedValue(false)
+      mockFindAdminById.mockResolvedValue({
+        id: ADMIN_CLAIMS.sub,
+        status: 'active',
+        sessionVersion: ADMIN_SESSION_VERSION,
+      })
+
+      const res = await request(makeApp(gateway))
+        .get('/admin/workflows')
+        .set('Authorization', 'Bearer admin-token-stale')
+        .set('Cookie', 'control_ui_admin_session=admin-token')
+      expectUnauthorized(res)
+    })
+
+    it('accepts a valid bearer token for admin workflow routes', async () => {
+      mockLiveAdminSession()
+      const res = await request(makeApp(gateway))
+        .get('/admin/workflows')
+        .set('Authorization', 'Bearer admin-token')
+      expect(res.status).toBe(200)
+    })
+
+    const staleHandlerMatrix: Array<{
+      label: string
+      method: 'get' | 'post' | 'put' | 'delete'
+      path: string
+      auth: 'bearer' | 'cookie'
+      useOutputsApp?: boolean
+      setup?: () => Promise<void>
+      headers?: Record<string, string>
+      body?: Record<string, unknown>
+    }> = [
+      { label: 'list workflows', method: 'get', path: '/admin/workflows', auth: 'bearer' },
+      {
+        label: 'workflow detail',
+        method: 'get',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe`,
+        auth: 'bearer',
+        setup: seedRecipe,
+      },
+      {
+        label: 'workflow health',
+        method: 'get',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/health`,
+        auth: 'bearer',
+        setup: seedRecipe,
+      },
+      {
+        label: 'workflow trigger',
+        method: 'post',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/trigger`,
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
+        headers: { 'Idempotency-Key': 'stale-trigger-key' },
+        body: { inputs: { topic: 'alpha' } },
+      },
+      {
+        label: 'workflow grants read',
+        method: 'get',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/grants`,
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
+      },
+      {
+        label: 'workflow grants write',
+        method: 'put',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/grants`,
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
+        body: { userIds: [] },
+      },
+      {
+        label: 'team grants read',
+        method: 'get',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/team-grants`,
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
+      },
+      {
+        label: 'team grants write',
+        method: 'put',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/team-grants`,
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
+        body: { teamIds: [] },
+      },
+      {
+        label: 'approval allowlist read',
+        method: 'get',
+        path: `/admin/workflow-recipes/${RECIPE_NS}/test-recipe/allowed-teams`,
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
+      },
+      {
+        label: 'approval allowlist grant',
+        method: 'put',
+        path: `/admin/workflow-recipes/${RECIPE_NS}/test-recipe/allowed-teams/${VALID_TEAM_UUID}`,
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
+      },
+      {
+        label: 'approval allowlist revoke',
+        method: 'delete',
+        path: `/admin/workflow-recipes/${RECIPE_NS}/test-recipe/allowed-teams/${VALID_TEAM_UUID}`,
+        auth: 'bearer',
+        setup: async () => {
+          mockRateLimiterAllowed()
+          await seedRecipe()
+        },
+      },
+      { label: 'workflow leader', method: 'get', path: '/admin/workflows/leader', auth: 'bearer' },
+      {
+        label: 'runs stream',
+        method: 'get',
+        path: '/admin/workflows/runs/stream',
+        auth: 'cookie',
+      },
+      {
+        label: 'workflow runs list',
+        method: 'get',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/runs`,
+        auth: 'bearer',
+        setup: seedRecipe,
+      },
+      {
+        label: 'workflow run detail',
+        method: 'get',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/runs/${RUN_ID}`,
+        auth: 'bearer',
+        setup: seedRecipe,
+      },
+      {
+        label: 'run artifacts list',
+        method: 'get',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/runs/${RUN_ID}/artifacts`,
+        auth: 'bearer',
+        setup: seedRecipe,
+      },
+      {
+        label: 'run artifact download',
+        method: 'get',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/runs/${RUN_ID}/artifacts/report.md/download`,
+        auth: 'bearer',
+        setup: seedRecipe,
+      },
+      {
+        label: 'run artifact delete',
+        method: 'delete',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/runs/${RUN_ID}/artifacts/report.md`,
+        auth: 'bearer',
+        setup: seedRecipe,
+      },
+      {
+        label: 'run artifacts bulk delete',
+        method: 'delete',
+        path: `/admin/workflows/${RECIPE_NS}/test-recipe/runs/${RUN_ID}/artifacts`,
+        auth: 'bearer',
+        setup: seedRecipe,
+      },
+      {
+        label: 'admin outputs',
+        method: 'get',
+        path: '/admin/outputs',
+        auth: 'cookie',
+        useOutputsApp: true,
+      },
+    ]
+
+    it.each(staleHandlerMatrix)(
+      'rejects stale administrator sessions on $label',
+      async ({ method, path, auth, useOutputsApp, setup, headers, body }) => {
+        mockLiveAdminSession({ tokenSessionVersion: 1, adminSessionVersion: 2 })
+        if (setup) await setup()
+
+        const app = useOutputsApp ? makeOutputsApp(gateway) : makeApp(gateway)
+        let req = request(app)[method](path)
+        if (auth === 'bearer') {
+          req = req.set('Authorization', 'Bearer admin-token-stale')
+        } else {
+          req = req.set('Cookie', 'control_ui_admin_session=admin-token-stale')
+        }
+        for (const [header, value] of Object.entries(headers ?? {})) {
+          req = req.set(header, value)
+        }
+        if (body) req = req.send(body)
+
+        const res = await req
+        expectUnauthorized(res)
+        expect(mockListWorkflowGrants).not.toHaveBeenCalled()
+        expect(mockSetWorkflowGrants).not.toHaveBeenCalled()
+      }
+    )
   })
 })

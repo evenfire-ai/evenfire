@@ -16,6 +16,23 @@ const adminSvcMock = vi.hoisted(() => ({
 vi.mock('../src/utils/auth/adminAuthToken.js', () => adminTokenMock)
 vi.mock('../src/services/adminAuthService.js', () => adminSvcMock)
 
+const BASE_CLAIMS = {
+  sub: 'admin-id',
+  typ: 'user' as const,
+  role: 'admin' as const,
+  jti: 'j1',
+  exp: 9999999999,
+  sessionVersion: 2,
+}
+
+function makeProtectedApp() {
+  const app = express()
+  app.get('/protected', requireAuthForControlUI, (req: UiAuthedRequest, res) => {
+    res.status(200).json({ adminId: req.adminAuth?.sub })
+  })
+  return app
+}
+
 describe('middleware/controlUIAuth', () => {
   beforeEach(() => {
     adminTokenMock.verifyAdminToken.mockReset()
@@ -24,14 +41,7 @@ describe('middleware/controlUIAuth', () => {
   })
 
   it('accepts the HttpOnly admin session cookie as the UI auth token', async () => {
-    adminTokenMock.verifyAdminToken.mockReturnValue({
-      sub: 'admin-id',
-      typ: 'user',
-      role: 'admin',
-      jti: 'j1',
-      exp: 9999999999,
-      sessionVersion: 2,
-    })
+    adminTokenMock.verifyAdminToken.mockReturnValue(BASE_CLAIMS)
     adminSvcMock.isAdminTokenRevoked.mockResolvedValue(false)
     adminSvcMock.findAdminById.mockResolvedValue({
       id: 'admin-id',
@@ -39,12 +49,7 @@ describe('middleware/controlUIAuth', () => {
       sessionVersion: 2,
     })
 
-    const app = express()
-    app.get('/protected', requireAuthForControlUI, (req: UiAuthedRequest, res) => {
-      res.status(200).json({ adminId: req.adminAuth?.sub })
-    })
-
-    const res = await request(app)
+    const res = await request(makeProtectedApp())
       .get('/protected')
       .set('cookie', 'control_ui_admin_session=admin-cookie-token')
       .expect(200)
@@ -54,13 +59,76 @@ describe('middleware/controlUIAuth', () => {
   })
 
   it('rejects legacy bearer tokens for Control UI browser auth', async () => {
+    await request(makeProtectedApp())
+      .get('/protected')
+      .set('authorization', 'Bearer old-admin-token')
+      .expect(401)
+
+    expect(adminTokenMock.verifyAdminToken).not.toHaveBeenCalled()
+  })
+
+  it('rejects revoked administrator JTIs', async () => {
+    adminTokenMock.verifyAdminToken.mockReturnValue(BASE_CLAIMS)
+    adminSvcMock.isAdminTokenRevoked.mockResolvedValue(true)
+
+    await request(makeProtectedApp())
+      .get('/protected')
+      .set('cookie', 'control_ui_admin_session=admin-cookie-token')
+      .expect(401)
+
+    expect(adminSvcMock.findAdminById).not.toHaveBeenCalled()
+  })
+
+  it('rejects stale sessionVersion claims after password reset', async () => {
+    adminTokenMock.verifyAdminToken.mockReturnValue({ ...BASE_CLAIMS, sessionVersion: 1 })
+    adminSvcMock.isAdminTokenRevoked.mockResolvedValue(false)
+    adminSvcMock.findAdminById.mockResolvedValue({
+      id: 'admin-id',
+      status: 'active',
+      sessionVersion: 2,
+    })
+
+    await request(makeProtectedApp())
+      .get('/protected')
+      .set('cookie', 'control_ui_admin_session=admin-cookie-token')
+      .expect(401)
+  })
+
+  it('rejects disabled administrator accounts', async () => {
+    adminTokenMock.verifyAdminToken.mockReturnValue(BASE_CLAIMS)
+    adminSvcMock.isAdminTokenRevoked.mockResolvedValue(false)
+    adminSvcMock.findAdminById.mockResolvedValue({
+      id: 'admin-id',
+      status: 'disabled',
+      sessionVersion: 2,
+    })
+
+    await request(makeProtectedApp())
+      .get('/protected')
+      .set('cookie', 'control_ui_admin_session=admin-cookie-token')
+      .expect(401)
+  })
+
+  it('propagates findAdminById failures via Express error handling', async () => {
+    adminTokenMock.verifyAdminToken.mockReturnValue(BASE_CLAIMS)
+    adminSvcMock.isAdminTokenRevoked.mockResolvedValue(false)
+    adminSvcMock.findAdminById.mockRejectedValue(new Error('pg connection terminated'))
+
     const app = express()
     app.get('/protected', requireAuthForControlUI, (_req, res) => {
       res.status(200).json({ ok: true })
     })
+    app.use(
+      (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+        res.status(500).json({ error: err.message })
+      }
+    )
 
-    await request(app).get('/protected').set('authorization', 'Bearer old-admin-token').expect(401)
+    const res = await request(app)
+      .get('/protected')
+      .set('cookie', 'control_ui_admin_session=admin-cookie-token')
+      .expect(500)
 
-    expect(adminTokenMock.verifyAdminToken).not.toHaveBeenCalled()
+    expect(res.body).toEqual({ error: 'pg connection terminated' })
   })
 })
