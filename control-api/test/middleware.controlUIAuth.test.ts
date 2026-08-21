@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import type { UiAuthedRequest } from '../src/middleware/controlUIAuth.js'
 import { requireAuthForControlUI } from '../src/middleware/controlUIAuth.js'
+import { rateLimitMiddleware } from '../src/middleware/rateLimitMiddleware.js'
 
 const adminTokenMock = vi.hoisted(() => ({
   verifyAdminToken: vi.fn(),
@@ -13,8 +14,22 @@ const adminSvcMock = vi.hoisted(() => ({
   isAdminTokenRevoked: vi.fn(),
 }))
 
+const mockCheckAndIncrement = vi.hoisted(() => vi.fn())
+
 vi.mock('../src/utils/auth/adminAuthToken.js', () => adminTokenMock)
 vi.mock('../src/services/adminAuthService.js', () => adminSvcMock)
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: (...args: unknown[]) => mockCheckAndIncrement(...args),
+}))
+vi.mock('../src/observability/metrics.js', () => ({
+  rateLimitHitsTotal: { inc: vi.fn() },
+}))
+
+const testAuthRateLimit = rateLimitMiddleware({
+  bucketType: 'control_ui_auth_test',
+  maxPerMinute: 100,
+  getBucketKey: () => 'control-ui-auth-test',
+})
 
 const BASE_CLAIMS = {
   sub: 'admin-id',
@@ -27,7 +42,7 @@ const BASE_CLAIMS = {
 
 function makeProtectedApp() {
   const app = express()
-  app.get('/protected', requireAuthForControlUI, (req: UiAuthedRequest, res) => {
+  app.get('/protected', testAuthRateLimit, requireAuthForControlUI, (req: UiAuthedRequest, res) => {
     res.status(200).json({ adminId: req.adminAuth?.sub })
   })
   return app
@@ -38,6 +53,14 @@ describe('middleware/controlUIAuth', () => {
     adminTokenMock.verifyAdminToken.mockReset()
     adminSvcMock.findAdminById.mockReset()
     adminSvcMock.isAdminTokenRevoked.mockReset()
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 99,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
   })
 
   it('accepts the HttpOnly admin session cookie as the UI auth token', async () => {
@@ -115,7 +138,7 @@ describe('middleware/controlUIAuth', () => {
     adminSvcMock.findAdminById.mockRejectedValue(new Error('pg connection terminated'))
 
     const app = express()
-    app.get('/protected', requireAuthForControlUI, (_req, res) => {
+    app.get('/protected', testAuthRateLimit, requireAuthForControlUI, (_req, res) => {
       res.status(200).json({ ok: true })
     })
     app.use(

@@ -2468,7 +2468,6 @@ describe('routes/admin/workflows', () => {
 
   describe('live administrator session enforcement (F4)', () => {
     const VALID_TEAM_UUID = '11111111-2222-4333-8444-555555555555'
-    const VALID_GRANT_UUID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
     const RUN_ID = '00000000-0000-4000-8000-000000000456'
 
     async function seedRecipe(): Promise<void> {
