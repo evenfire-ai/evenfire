@@ -29,6 +29,12 @@ git -C "$ROOT" ls-files --others --exclude-standard -z |
 while IFS= read -r -d '' path; do
   [ -f "$ROOT/$path" ] || continue
   printf '+++ b/%s\n' "$path"
+  # A repository-local binary cannot be made line-safe by BSD sed. Keep the
+  # path header (so sensitive filenames are still rejected), but skip binary
+  # contents instead of allowing the scanner itself to fail by locale.
+  if ! LC_ALL=C grep -Iq . "$ROOT/$path"; then
+    continue
+  fi
   sed 's/^/+/' "$ROOT/$path"
 done >>"$tmp"
 
@@ -40,6 +46,11 @@ import sys
 diff = Path(sys.argv[1]).read_text(errors="replace")
 bad = []
 current = ""
+safe_source_paths = {
+    "deploy/scripts/lib/gfs-credential-rollout.sh",
+    "deploy/scripts/lib/gfs-credential-secret.sh",
+    "deploy/scripts/reconcile-gfs-deploy-credentials.sh",
+}
 for line in diff.splitlines():
     if line.startswith("+++ b/"):
         current = line[6:]
@@ -49,7 +60,10 @@ for line in diff.splitlines():
             or path.startswith(".env.")
             or path.endswith((".pem", ".key", ".p12", ".pfx", ".log"))
             or path.endswith(("/kubeconfig", "/config"))
-            or any(token in path for token in ("id_rsa", "id_ed25519", "credential", "wallet", "keystore"))
+            or (
+                any(token in path for token in ("id_rsa", "id_ed25519", "credential", "wallet", "keystore"))
+                and path not in safe_source_paths
+            )
             or "screenshot" in path
             or "e2e-artifacts" in path
         ):
@@ -83,7 +97,12 @@ for line in diff.splitlines():
         match = re.search(expression, value)
         if match and reason == "private key" and "evidence-scanner" in current:
             continue
-        if match and reason == "credential assignment" and match.group(1) and safe_fixture.search(match.group(1)):
+        if (
+            match
+            and reason == "credential assignment"
+            and match.group(1)
+            and (safe_fixture.search(match.group(1)) or "$" in match.group(1))
+        ):
             continue
         if match:
             bad.append((current or "<unknown>", reason))

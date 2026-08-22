@@ -39,13 +39,14 @@ export CALL_LOG="$TMP/calls.log"
 # through the ALLOWED_CONTEXTS override — the same mechanism a self-hosted dev
 # pipeline uses for a GKE dev context that the generic patterns do not name.
 for run in first-upgrade idempotent-rerun; do
+  : "$run"
   ALLOWED_CONTEXTS=clerum-dev-test PATH="$TMP/bin:$PATH" /bin/bash "$ROOT/deploy/scripts/provision-gfs-runtime.sh" \
     --context clerum-dev-test \
     --overlay "$TMP/overlay" \
     --skip-auth-sync >/dev/null
 done
 PATH="$TMP/bin:$PATH" /bin/bash "$ROOT/deploy/scripts/provision-gfs-runtime.sh" \
-  --context gke-prod-test \
+  --context gke_prod_test \
   --overlay "$TMP/overlay" \
   --allow-prod \
   --skip-auth-sync \
@@ -54,6 +55,16 @@ PATH="$TMP/bin:$PATH" /bin/bash "$ROOT/deploy/scripts/provision-gfs-runtime.sh" 
 reconcile="$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
 [ "$(grep -Fc "bash $reconcile" "$CALL_LOG")" -eq 3 ] || {
   echo 'FAIL: post-overlay credential reconciliation did not run once per deploy' >&2
+  exit 1
+}
+grep -Fq 'GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT"' \
+  "$ROOT/deploy/scripts/provision-gfs-runtime.sh" || {
+  echo 'FAIL: post-overlay credential reconciliation did not carry explicit context authorization' >&2
+  exit 1
+}
+grep -Fq 'sync-auth-key.sh --context "$CONTEXT" --require-gfs' \
+  "$ROOT/deploy/scripts/provision-gfs-runtime.sh" || {
+  echo 'FAIL: GFS runtime provisioning does not require its auth source and target' >&2
   exit 1
 }
 [ "$(grep -Fc "rollout status deployment/host-context-controller --timeout=${HCC_ROLLOUT_TIMEOUT_S}s" "$CALL_LOG")" -eq 3 ] || {
