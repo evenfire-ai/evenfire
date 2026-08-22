@@ -9,6 +9,8 @@ STATE_DIR="${TMP_DIR}/state"
 LOG_FILE="${TMP_DIR}/kubectl.log"
 OUT_FILE="${TMP_DIR}/sync-auth-key.out"
 mkdir -p "${STATE_DIR}"
+printf 'old-key' >"${STATE_DIR}/mcp.key"
+printf 'old-gfs-key' >"${STATE_DIR}/gfs.key"
 
 # The production helper requires a live parent T2 lease. Keep the behavior
 # tests isolated with a lease owned by this test shell rather than adding a
@@ -99,11 +101,12 @@ fi
 if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "mcp-host-config" ]]; then
   if has_output_flag "$@"; then
     if [[ "$*" == *'-o json' ]]; then
-      printf '%s' '{"metadata":{"resourceVersion":"42","annotations":{}},"data":{"CLERUM_AUTH_JWT_PUBLIC_KEY":"old-key"}}'
+      printf '{"metadata":{"name":"mcp-host-config","namespace":"mcp-host","uid":"mcp-host-config-uid","resourceVersion":"42","annotations":{}},"data":{"CLERUM_AUTH_JWT_PUBLIC_KEY":"%s"}}' \
+        "$(cat "${TEST_STATE_DIR}/mcp.key")"
     elif [[ "$*" == *auth-key-applied-sha256* ]]; then
       printf '%s' "${TEST_MCP_APPLIED_HASH:-old-hash}"
     else
-      printf 'old-key'
+      cat "${TEST_STATE_DIR}/mcp.key"
     fi
   fi
   exit 0
@@ -116,21 +119,24 @@ if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "gfs-config" ]
   fi
   if has_output_flag "$@"; then
     if [[ "$*" == *'-o json' ]]; then
-      printf '%s' '{"metadata":{"resourceVersion":"42","annotations":{}},"data":{"jwt-public-key":"old-gfs-key"}}'
+      printf '{"metadata":{"resourceVersion":"42","annotations":{}},"data":{"jwt-public-key":"%s"}}' \
+        "$(cat "${TEST_STATE_DIR}/gfs.key")"
     elif [[ "$*" == *auth-key-applied-sha256* ]]; then
       printf '%s' "${TEST_GFS_APPLIED_HASH:-old-hash}"
     else
-      printf 'old-gfs-key'
+      cat "${TEST_STATE_DIR}/gfs.key"
     fi
   fi
   exit 0
 fi
 
 if [[ "${1:-}" == "patch" && "${2:-}" == "configmap" && "${3:-}" == "mcp-host-config" ]]; then
+  [[ "$*" == *'"data"'* ]] && printf 'public-key' >"${TEST_STATE_DIR}/mcp.key"
   exit 0
 fi
 
 if [[ "${1:-}" == "patch" && "${2:-}" == "configmap" && "${3:-}" == "gfs-config" ]]; then
+  [[ "$*" == *'"data"'* ]] && printf 'public-key' >"${TEST_STATE_DIR}/gfs.key"
   exit 0
 fi
 
@@ -145,8 +151,12 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" && "${3:-}" == "gfs-controller-d
   exit 0
 fi
 
-if [[ "${1:-}" == "get" && "${2:-}" == "deployment" && "${3:-}" == "-l" ]]; then
-  printf 'deployment.apps/chatllm\ndeployment.apps/mcp-host\ndeployment.apps/custom-host\n'
+if [[ "${1:-}" == "get" && ( "${2:-}" == "deployment" || "${2:-}" == "deployments" ) && "$*" == *'-o json'* ]]; then
+  printf '%s' '{"apiVersion":"v1","kind":"List","items":[
+    {"metadata":{"name":"chatllm","namespace":"mcp-host","uid":"chatllm-uid","resourceVersion":"30"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"chatllm"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}},
+    {"metadata":{"name":"mcp-host","namespace":"mcp-host","uid":"mcp-host-uid","resourceVersion":"30"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"mcp-host"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}},
+    {"metadata":{"name":"custom-host","namespace":"mcp-host","uid":"custom-host-uid","resourceVersion":"30"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"custom-host"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}}
+  ]}'
   exit 0
 fi
 
@@ -175,7 +185,15 @@ fi
 
 if [[ "${1:-}" == "exec" ]]; then
   payload="$(cat)"
-  [[ "${TEST_CONSUMER_KEY_MATCH:-1}" == "1" && "${payload}" == "public-key" ]]
+  if [[ "$*" == *chatllm-pod* ]]; then
+    [[ -f "${TEST_STATE_DIR}/chatllm.restart-count" && "${payload}" == "public-key" ]]
+  elif [[ "$*" == *mcp-host-pod* ]]; then
+    [[ -f "${TEST_STATE_DIR}/mcp-host.restart-count" && "${payload}" == "public-key" ]]
+  elif [[ "$*" == *custom-host-pod* ]]; then
+    [[ -f "${TEST_STATE_DIR}/custom-host.restart-count" && "${payload}" == "public-key" ]]
+  else
+    [[ "${TEST_CONSUMER_KEY_MATCH:-1}" == "1" && "${payload}" == "public-key" ]]
+  fi
   exit
 fi
 
@@ -358,6 +376,7 @@ fi
 grep -q 'patch configmap gfs-config' "${LOG_FILE}"
 
 : >"${LOG_FILE}"
+printf 'old-gfs-key' >"${STATE_DIR}/gfs.key"
 if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
   TEST_GFS_CONFIG_PRESENT=1 TEST_GFS_DEPLOYMENTS=1 \
   PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \
@@ -368,6 +387,7 @@ fi
 grep -q 'gfs-controller-db.connection-string is empty' "${OUT_FILE}"
 
 : >"${LOG_FILE}"
+printf 'old-gfs-key' >"${STATE_DIR}/gfs.key"
 if ! TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
   TEST_GFS_CONFIG_PRESENT=1 TEST_GFS_DEPLOYMENTS=1 \
   GFS_AUTH_SYNC_ALLOW_STAGED=true \
@@ -386,6 +406,7 @@ if grep -q 'rollout restart deployment/gfsc-' "${LOG_FILE}"; then
 fi
 
 : >"${LOG_FILE}"
+printf 'old-gfs-key' >"${STATE_DIR}/gfs.key"
 if TEST_KUBECTL_LOG="${LOG_FILE}" TEST_STATE_DIR="${STATE_DIR}" \
   TEST_GFS_CONFIG_PRESENT=1 TEST_GFS_DSN_PRESENT=1 TEST_GFS_DEPLOYMENTS=1 TEST_GFS_STATUS_FAILURE=42 \
   PATH="${TMP_DIR}:$PATH" bash "${ROOT}/scripts/minikube/sync-auth-key.sh" \

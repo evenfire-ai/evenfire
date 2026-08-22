@@ -62,7 +62,7 @@ grep -Fq 'GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT"' \
   echo 'FAIL: post-overlay credential reconciliation did not carry explicit context authorization' >&2
   exit 1
 }
-grep -Fq 'sync-auth-key.sh --context "$CONTEXT" --require-gfs' \
+grep -Fq 'bash "$ROOT/scripts/minikube/sync-auth-key.sh" --context "$CONTEXT" --require-gfs' \
   "$ROOT/deploy/scripts/provision-gfs-runtime.sh" || {
   echo 'FAIL: GFS runtime provisioning does not require its auth source and target' >&2
   exit 1

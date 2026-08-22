@@ -131,12 +131,12 @@ CONFIGMAP="mcp-host-config"
 CONFIG_NAMESPACE="mcp-host"
 SOURCE_KEY="RPC_PROXY_JWT_PUBLIC_KEY"
 TARGET_KEY="CLERUM_AUTH_JWT_PUBLIC_KEY"
-MCP_HOST_ROLLOUT_TIMEOUT="180s"
+MCP_CONSUMER_ROLLOUT_TIMEOUT="180s"
 # This ConfigMap annotation is the durable commit record for a completed
 # rollout. It is written only after every active consumer proves its in-process
 # environment contains the source key; matching data without this hash resumes.
 APPLIED_HASH_ANNOTATION="clerum.io/auth-key-applied-sha256"
-MCP_DEPLOY_SELECTOR="clerum.io/managed-by=host-context-controller"
+MCP_BINDING_DISCOVERY="${ROOT}/scripts/minikube/discover-configmap-key-consumers.py"
 
 # gfsc verifies gfs access tokens with the SAME platform public key (open core
 # reuses one keypair). gfsc fails closed without it (empty key ⇒ no read serving),
@@ -270,6 +270,61 @@ deployment_desired_replicas() {
   printf '%s' "${desired}"
 }
 
+discover_mcp_consumer_snapshot() {
+  local deployments_json references inventory_records="" snapshot
+  local kind name required resource sanitized extra
+  if ! deployments_json="$("${KCTL[@]}" get deployments -n "${CONFIG_NAMESPACE}" -o json 2>&1)"; then
+    log "cannot enumerate Deployment pod templates in ${CONFIG_NAMESPACE}: ${deployments_json}" >&2
+    return 1
+  fi
+
+  if ! references="$(printf '%s' "${deployments_json}" | python3 "${MCP_BINDING_DISCOVERY}" \
+    --mode references --namespace "${CONFIG_NAMESPACE}" \
+    --config-map "${CONFIGMAP}" --key "${TARGET_KEY}" 2>&1)"; then
+    log "cannot enumerate references that affect ${CONFIGMAP}.${TARGET_KEY} bindings: ${references}" >&2
+    return 1
+  fi
+
+  while IFS=$'\x1f' read -r kind name required extra; do
+    [[ -n "${kind}" ]] || continue
+    [[ -n "${name}" && ( "${required}" == "true" || "${required}" == "false" ) && -z "${extra}" ]] || {
+      log "consumer reference discovery returned an incomplete object record" >&2
+      return 1
+    }
+    case "${kind}" in
+      ConfigMap) resource=configmap ;;
+      Secret) resource=secret ;;
+      *)
+        log "consumer reference discovery returned unsupported object kind ${kind}" >&2
+        return 1
+        ;;
+    esac
+    if ! sanitized="$(
+      "${KCTL[@]}" get "${resource}" "${name}" -n "${CONFIG_NAMESPACE}" \
+        --ignore-not-found -o json |
+        python3 "${MCP_BINDING_DISCOVERY}" --mode sanitize-object \
+          --namespace "${CONFIG_NAMESPACE}" --config-map "${CONFIGMAP}" --key "${TARGET_KEY}" \
+          --object-kind "${kind}" --object-name "${name}" --required "${required}" 2>&1
+    )"; then
+      log "cannot snapshot referenced ${kind} ${CONFIG_NAMESPACE}/${name}: ${sanitized}" >&2
+      return 1
+    fi
+    if [[ -n "${inventory_records}" ]]; then
+      inventory_records+=$'\n'
+    fi
+    inventory_records+="${sanitized}"
+  done <<<"${references}"
+
+  if ! snapshot="$(printf '%s' "${deployments_json}" | \
+    CONSUMER_OBJECT_INVENTORY="${inventory_records}" \
+      python3 "${MCP_BINDING_DISCOVERY}" --mode resolve \
+        --namespace "${CONFIG_NAMESPACE}" --config-map "${CONFIGMAP}" --key "${TARGET_KEY}" 2>&1)"; then
+    log "cannot derive ${CONFIGMAP}.${TARGET_KEY} consumer bindings: ${snapshot}" >&2
+    return 1
+  fi
+  printf '%s' "${snapshot}"
+}
+
 write_source_key() {
   SOURCE_KEY_B64="${source_key_b64}" python3 - <<'PY'
 import base64
@@ -323,9 +378,14 @@ print("%s\t%s\t%s" % (
 PY
 }
 
-consumer_pods_use_key() {
-  local namespace="$1" selector="$2" container="$3" env_name="$4" consumer="$5"
-  local rows pod ready deleting pod_count=0
+deployment_pods_use_key_bindings() {
+  local namespace="$1" selector="$2" bindings="$3" consumer="$4"
+  local rows pod ready deleting container env_name pod_count=0 binding_count=0
+
+  [[ -n "${selector}" && -n "${bindings}" ]] || {
+    log "${consumer} has no provable selector or environment binding" >&2
+    return 1
+  }
 
   if ! rows="$("${KCTL[@]}" get pods -n "${namespace}" -l "${selector}" -o \
     'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>&1)"; then
@@ -341,24 +401,70 @@ consumer_pods_use_key() {
       return 1
     fi
     pod_count=$((pod_count + 1))
-    if ! write_source_key | "${KCTL[@]}" exec -i "${pod}" -n "${namespace}" -c "${container}" -- \
-      node -e 'const fs=require("fs");const expected=fs.readFileSync(0,"utf8");process.exit(process.env[process.argv[1]]===expected?0:42)' \
-      "${env_name}" >/dev/null; then
-      log "${consumer} pod ${namespace}/${pod} has not consumed the target auth key" >&2
-      return 1
-    fi
+    while IFS=$'\x1f' read -r container env_name; do
+      [[ -n "${container}" && -n "${env_name}" ]] || {
+        log "${consumer} contains an incomplete environment binding" >&2
+        return 1
+      }
+      binding_count=$((binding_count + 1))
+      if ! write_source_key | "${KCTL[@]}" exec -i "${pod}" -n "${namespace}" -c "${container}" -- \
+        node -e 'const fs=require("fs");const expected=fs.readFileSync(0,"utf8");process.exit(process.env[process.argv[1]]===expected?0:42)' \
+        -- "${env_name}" >/dev/null; then
+        log "${consumer} pod ${namespace}/${pod} binding ${container}/${env_name} has not consumed the target auth key" >&2
+        return 1
+      fi
+    done <<<"${bindings}"
   done <<<"${rows}"
 
   if [[ "${pod_count}" -eq 0 ]]; then
     log "${consumer} has a deployment but no active pod proved consumption of the target auth key" >&2
     return 1
   fi
+  if [[ "${binding_count}" -eq 0 ]]; then
+    log "${consumer} has no environment binding that proved consumption of the target auth key" >&2
+    return 1
+  fi
+}
+
+consumer_pods_use_key() {
+  local namespace="$1" selector="$2" container="$3" env_name="$4" consumer="$5"
+  local binding="${container}"$'\x1f'"${env_name}"
+  deployment_pods_use_key_bindings "${namespace}" "${selector}" "${binding}" "${consumer}"
 }
 
 verify_consumer_pods_use_key() {
   local namespace="$1" selector="$2" container="$3" env_name="$4" consumer="$5"
   if ! consumer_pods_use_key "${namespace}" "${selector}" "${container}" "${env_name}" "${consumer}"; then
     die "${consumer} did not prove consumption of the target auth key after rollout"
+  fi
+}
+
+reconcile_mcp_consumer_deployment() {
+  local namespace="$1" deployment="$2" desired_replicas="$3" selector="$4" bindings="$5"
+  local consumer="auth-key consumer deployment/${deployment}" rollout_output
+
+  if [[ "${desired_replicas}" == "0" ]]; then
+    log "Skipping suspended ${namespace}/${deployment}; desired replicas=0"
+    return 0
+  fi
+  [[ "${desired_replicas}" =~ ^[0-9]+$ ]] ||
+    die "cannot determine desired replicas for ${namespace}/deployment/${deployment}"
+
+  if deployment_pods_use_key_bindings "${namespace}" "${selector}" "${bindings}" "${consumer}"; then
+    log "${namespace}/${deployment} already consumes the target auth key"
+    return 0
+  fi
+
+  log "Restarting ${namespace}/${deployment} after auth key drift"
+  if ! rollout_restart_with_retry "${namespace}" "${deployment}" >/dev/null; then
+    die "cannot restart ${namespace}/deployment/${deployment} after auth key drift"
+  fi
+  if ! rollout_output="$("${KCTL[@]}" rollout status "deployment/${deployment}" -n "${namespace}" \
+    --timeout="${MCP_CONSUMER_ROLLOUT_TIMEOUT}" 2>&1)"; then
+    die "${namespace}/deployment/${deployment} did not become Ready after auth key drift: ${rollout_output}"
+  fi
+  if ! deployment_pods_use_key_bindings "${namespace}" "${selector}" "${bindings}" "${consumer}"; then
+    die "${consumer} did not prove all target auth-key bindings after rollout"
   fi
 }
 
@@ -397,8 +503,8 @@ if [[ "${REQUIRE_MCP}" == "true" ]] && \
   die "required MCP auth target ${CONFIG_NAMESPACE}/${CONFIGMAP} is missing or unreadable: ${mcp_target_probe}"
 fi
 
-# ── Target 1: mcp-host-config (restart named chatllm/mcp-host with retry) ──────
-sync_mcp_host() {
+# ── Target 1: mcp-host-config (discover and prove effective pod bindings) ─────
+sync_mcp_consumers() {
   local target_probe=""
   if ! target_probe="$("${KCTL[@]}" get configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" 2>&1)"; then
     if [[ "${REQUIRE_MCP}" == "true" ]]; then
@@ -417,11 +523,9 @@ sync_mcp_host() {
   if ! applied_hash="$(read_applied_hash "${CONFIG_NAMESPACE}" "${CONFIGMAP}" 2>&1)"; then
     die "cannot read auth convergence marker from ${CONFIG_NAMESPACE}/${CONFIGMAP}: ${applied_hash}"
   fi
-  local force_rollout=false
   if [[ "${source_hash}" != "${current_hash}" ]]; then
     log "Patching ${CONFIGMAP}.${TARGET_KEY}"
     "${KCTL[@]}" patch configmap "${CONFIGMAP}" -n "${CONFIG_NAMESPACE}" --type=merge -p "$(make_patch "${source_key_b64}" "${TARGET_KEY}")" >/dev/null
-    force_rollout=true
   else
     if [[ "${applied_hash}" == "${source_hash}" ]]; then
       log "${CONFIGMAP}.${TARGET_KEY} matches source; checking active consumers before declaring convergence"
@@ -429,48 +533,70 @@ sync_mcp_host() {
       log "${CONFIGMAP}.${TARGET_KEY} matches source but consumer attestation is pending; resuming convergence"
     fi
   fi
-  local deployment_resources deployment resource_name desired_replicas
-  local deployments=()
-  if ! deployment_resources="$("${KCTL[@]}" get deployment -l "${MCP_DEPLOY_SELECTOR}" \
-    -n "${CONFIG_NAMESPACE}" -o name 2>&1)"; then
-    die "cannot enumerate mcp-host consumers before auth key rollout: ${deployment_resources}"
-  fi
-  while IFS= read -r resource_name; do
-    [[ -n "${resource_name}" ]] || continue
-    case "${resource_name}" in
-      deployment/*|deployment.apps/*) deployment="${resource_name#*/}" ;;
-      *) die "unexpected mcp-host consumer resource from Kubernetes: ${resource_name}" ;;
-    esac
-    [[ -n "${deployment}" ]] || die "Kubernetes returned an empty mcp-host deployment name"
-    deployments+=("${deployment}")
-  done <<<"${deployment_resources}"
 
-  if (( ${#deployments[@]} == 0 )); then
-    log "No mcp-host deployments exist yet; auth key is synced for future pods"
-  else
-    for deployment in "${deployments[@]}"; do
-      desired_replicas="$(deployment_desired_replicas "${CONFIG_NAMESPACE}" "${deployment}")" ||
-        die "cannot determine desired replicas for mcp-host deployment/${deployment}"
-      if [[ "${desired_replicas}" == "0" ]]; then
-        # HCC intentionally suspends stateless Hosts by scaling their managed
-        # Deployment to zero. There is no consumer to restart or prove; the
-        # patched ConfigMap is the authoritative input for the next pod.
-        log "Skipping suspended ${CONFIG_NAMESPACE}/${deployment}; desired replicas=0"
-        continue
-      fi
-      if [[ "${force_rollout}" != true ]] && \
-         consumer_pods_use_key "${CONFIG_NAMESPACE}" "app=${deployment}" mcp-host \
-           "${TARGET_KEY}" "mcp-host deployment/${deployment}"; then
-        log "${CONFIG_NAMESPACE}/${deployment} already consumes the target auth key"
-        continue
-      fi
-      log "Restarting ${CONFIG_NAMESPACE}/${deployment} after auth key drift"
-      rollout_restart_with_retry "${CONFIG_NAMESPACE}" "${deployment}" >/dev/null
-      "${KCTL[@]}" rollout status "deployment/${deployment}" -n "${CONFIG_NAMESPACE}" --timeout="${MCP_HOST_ROLLOUT_TIMEOUT}"
-      verify_consumer_pods_use_key "${CONFIG_NAMESPACE}" "app=${deployment}" mcp-host \
-        "${TARGET_KEY}" "mcp-host deployment/${deployment}"
-    done
+  local consumer_snapshot snapshot_header snapshot_hash snapshot_tag snapshot_extra binding_records
+  if ! consumer_snapshot="$(discover_mcp_consumer_snapshot)"; then
+    die "cannot enumerate effective ${CONFIGMAP}.${TARGET_KEY} consumers before auth key rollout"
   fi
+  snapshot_header="${consumer_snapshot%%$'\n'*}"
+  IFS=$'\x1f' read -r snapshot_tag snapshot_hash snapshot_extra <<<"${snapshot_header}"
+  [[ "${snapshot_tag}" == "@snapshot" && "${snapshot_hash}" =~ ^[0-9a-f]{64}$ && \
+     -z "${snapshot_extra}" ]] ||
+    die "consumer discovery returned an invalid contract snapshot"
+  if [[ "${consumer_snapshot}" == *$'\n'* ]]; then
+    binding_records="${consumer_snapshot#*$'\n'}"
+  else
+    binding_records=""
+  fi
+  if [[ -z "${binding_records}" ]]; then
+    log "No effective Deployment bindings consume ${CONFIGMAP}.${TARGET_KEY}; auth key is synced for future consumers"
+  else
+    local namespace deployment desired_replicas selector container env_name
+    local current_namespace="" current_deployment="" current_replicas="" current_selector=""
+    local current_bindings=""
+    while IFS=$'\x1f' read -r namespace deployment desired_replicas selector container env_name; do
+      [[ -n "${namespace}" && -n "${deployment}" && -n "${desired_replicas}" && \
+         -n "${container}" && -n "${env_name}" ]] ||
+        die "consumer discovery returned an incomplete binding record"
+      if [[ -n "${current_deployment}" && \
+            ( "${namespace}" != "${current_namespace}" || "${deployment}" != "${current_deployment}" ) ]]; then
+        reconcile_mcp_consumer_deployment "${current_namespace}" "${current_deployment}" \
+          "${current_replicas}" "${current_selector}" "${current_bindings}"
+        current_bindings=""
+      fi
+      if [[ -z "${current_bindings}" ]]; then
+        current_namespace="${namespace}"
+        current_deployment="${deployment}"
+        current_replicas="${desired_replicas}"
+        current_selector="${selector}"
+      elif [[ "${namespace}" != "${current_namespace}" || \
+              "${deployment}" != "${current_deployment}" || \
+              "${desired_replicas}" != "${current_replicas}" || \
+              "${selector}" != "${current_selector}" ]]; then
+        die "consumer discovery returned inconsistent Deployment metadata for ${namespace}/${deployment}"
+      fi
+      if [[ -n "${current_bindings}" ]]; then
+        current_bindings+=$'\n'
+      fi
+      current_bindings+="${container}"$'\x1f'"${env_name}"
+    done <<<"${binding_records}"
+    if [[ -n "${current_deployment}" ]]; then
+      reconcile_mcp_consumer_deployment "${current_namespace}" "${current_deployment}" \
+        "${current_replicas}" "${current_selector}" "${current_bindings}"
+    fi
+  fi
+
+  local final_consumer_snapshot final_hash
+  if ! final_consumer_snapshot="$(discover_mcp_consumer_snapshot)"; then
+    die "cannot re-enumerate effective ${CONFIGMAP}.${TARGET_KEY} consumers before attestation"
+  fi
+  [[ "${final_consumer_snapshot}" == "${consumer_snapshot}" ]] ||
+    die "${CONFIGMAP}.${TARGET_KEY} consumer contracts changed during convergence"
+  if ! final_hash="$(configmap_key_hash "${CONFIG_NAMESPACE}" "${CONFIGMAP}" "${TARGET_KEY}" 2>&1)"; then
+    die "cannot re-read auth target ${CONFIG_NAMESPACE}/${CONFIGMAP} before attestation: ${final_hash}"
+  fi
+  [[ "${final_hash}" == "${source_hash}" ]] ||
+    die "auth target ${CONFIG_NAMESPACE}/${CONFIGMAP}.${TARGET_KEY} changed before attestation"
   if [[ "${applied_hash}" != "${source_hash}" ]]; then
     mark_key_applied "${CONFIG_NAMESPACE}" "${CONFIGMAP}"
   fi
@@ -592,7 +718,7 @@ sync_gfs() {
   fi
 }
 
-sync_mcp_host
+sync_mcp_consumers
 if [[ "${SYNC_GFS}" == "true" ]]; then
   sync_gfs
 fi
