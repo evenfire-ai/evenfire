@@ -4,6 +4,7 @@ import request from 'supertest'
 import {
   adminOutputsReadRateLimits,
   adminWorkflowRateLimitCredential,
+  adminWorkflowTriggerRateLimit,
   shouldSkipWorkflowGrantEdgeRateLimit,
   verifiedAdminRateLimitSubject,
   workflowAdminReadRateLimits,
@@ -85,6 +86,26 @@ describe('routes/workflows/shared/rateLimit', () => {
   })
 
   it('workflowGrantEdgeRateLimitKey isolates verified admin subjects on the same IP', () => {
+    const reqA = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=signed-admin-a' : undefined,
+    } as express.Request
+    const reqB = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=signed-admin-b' : undefined,
+    } as express.Request
+
+    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).not.toBe(
+      workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqB)
+    )
+  })
+
+  it('keeps rotated signed sessions in separate pre-auth buckets', () => {
+    mockVerifyAdminToken.mockImplementation((value: string) =>
+      value.startsWith('signed-') ? signedClaims('same-admin') : null
+    )
     const reqA = {
       ip: '203.0.113.10',
       header: (name: string) =>
@@ -331,6 +352,39 @@ describe('routes/workflows/shared/rateLimit', () => {
 
     expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+  })
+
+  it('adminWorkflowTriggerRateLimit isolates rotated signed sessions', async () => {
+    mockVerifyAdminToken.mockImplementation((value: string) =>
+      value.startsWith('signed-') ? signedClaims('same-admin') : null
+    )
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', adminWorkflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-b')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).not.toBe(
+      mockCheckAndIncrement.mock.calls[1]?.[0]
+    )
   })
 
   it('workflowGrantReadRateLimit meters cookie-only admin workflow callers', async () => {

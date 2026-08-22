@@ -20,10 +20,11 @@ const BASE = '/admin/workflows'
 
 export function createAdminWorkflowReadRoutes(gateway: K8sGateway): Router {
   const router = Router()
+  const readRateLimits = workflowAdminReadRateLimits()
 
   router.get(
     BASE,
-    ...workflowAdminReadRateLimits(),
+    ...readRateLimits,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireBoundAdminWorkflowCaller(req, res)
@@ -36,7 +37,7 @@ export function createAdminWorkflowReadRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name`,
-    ...workflowAdminReadRateLimits(),
+    ...readRateLimits,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireBoundAdminWorkflowCaller(req, res)
@@ -67,7 +68,7 @@ export function createAdminWorkflowReadRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/health`,
-    ...workflowAdminReadRateLimits(),
+    ...readRateLimits,
     bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireBoundAdminWorkflowCaller(req, res)

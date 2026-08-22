@@ -23,7 +23,7 @@ export function adminWorkflowRateLimitCredential(req: Request): string | null {
   return cookie || null
 }
 
-/** Persist PG buckets only for cryptographically verified admin subjects. */
+/** Extract the signed administrator subject for direct callers. */
 export function verifiedAdminRateLimitSubject(credential: string | null): string | null {
   if (!credential) return null
   const claims = verifyAdminToken(credential)
@@ -33,9 +33,9 @@ export function verifiedAdminRateLimitSubject(credential: string | null): string
 function hashedAdminWorkflowCredentialBucket(prefix: string) {
   return (req: Request): string | null => {
     const credential = adminWorkflowRateLimitCredential(req)
-    const subject = verifiedAdminRateLimitSubject(credential)
-    if (subject) {
-      const hash = createHash('sha256').update(subject).digest('hex').slice(0, 32)
+    const sessionIdentity = verifiedAdminRateLimitIdentity(credential)
+    if (sessionIdentity) {
+      const hash = createHash('sha256').update(sessionIdentity).digest('hex').slice(0, 32)
       return `${prefix}:${hash}`
     }
     if (!credential) return null
@@ -55,13 +55,13 @@ export function shouldSkipWorkflowGrantEdgeRateLimit(req: Request): boolean {
 
 /**
  * Edge backstop key:
- * - Verified admin cookie/bearer → per-subject bucket (isolates Control UI admins)
+ * - Verified admin cookie/bearer → per-session bucket (isolates live sessions)
  * - Unverified credential → IP bucket (rotation cannot mint fresh identities)
  */
 export function workflowGrantEdgeRateLimitKey(prefix: string, req: Request): string {
-  const subject = verifiedAdminRateLimitSubject(adminWorkflowRateLimitCredential(req))
-  if (subject) {
-    const hash = createHash('sha256').update(subject).digest('hex').slice(0, 32)
+  const sessionIdentity = verifiedAdminRateLimitIdentity(adminWorkflowRateLimitCredential(req))
+  if (sessionIdentity) {
+    const hash = createHash('sha256').update(sessionIdentity).digest('hex').slice(0, 32)
     return `${prefix}:sub:${hash}`
   }
   return `${prefix}:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
@@ -95,8 +95,8 @@ function createWorkflowEdgeRateLimit(prefix: string, limit: number) {
 }
 
 /**
- * Fresh stack per call so route tests stay isolated. Shared MemoryStore
- * across grant-write registrations is a follow-up (Low 1), not this PR.
+ * Fresh stack per call so route factories and tests can scope their stores.
+ * Routers that own a rate-limit family instantiate the tuple once and reuse it.
  */
 export function workflowGrantReadEdgeRateLimit() {
   return createWorkflowEdgeRateLimit('workflow_grants_read_edge', WORKFLOW_GRANT_READ_PER_MINUTE)
@@ -128,6 +128,25 @@ export function workflowAdminReadRateLimits() {
 
 export function adminOutputsReadRateLimits() {
   return [adminOutputsReadEdgeRateLimit(), adminOutputsReadRateLimit()] as const
+}
+
+function adminWorkflowTriggerRateLimitKey(req: Request): string | null {
+  const value = adminWorkflowRateLimitCredential(req)
+  if (!value) return null
+  const identity = verifiedAdminRateLimitIdentity(value)
+  if (identity) {
+    const hash = createHash('sha256').update(identity).digest('hex').slice(0, 32)
+    return `workflow_trigger_admin:${hash}`
+  }
+  return `workflow_trigger_admin:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
+export function adminWorkflowTriggerRateLimit() {
+  return rateLimitMiddleware({
+    bucketType: 'workflow_trigger',
+    maxPerMinute: WORKFLOW_TRIGGER_PER_MINUTE,
+    getBucketKey: adminWorkflowTriggerRateLimitKey,
+  })
 }
 
 function workflowTriggerRateLimitCredential(req: Request): string | null {
@@ -190,4 +209,10 @@ export function workflowGrantWriteRateLimit() {
     maxPerMinute: WORKFLOW_GRANT_WRITE_PER_MINUTE,
     getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_grants_write'),
   })
+}
+
+/** Keep distinct signed sessions in distinct pre-auth quota buckets. */
+export function verifiedAdminRateLimitIdentity(input: string | null): string | null {
+  if (!input || !verifiedAdminRateLimitSubject(input)) return null
+  return input
 }
