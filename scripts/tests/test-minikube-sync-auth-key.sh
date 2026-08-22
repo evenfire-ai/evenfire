@@ -101,7 +101,7 @@ fi
 if [[ "${1:-}" == "get" && "${2:-}" == "configmap" && "${3:-}" == "mcp-host-config" ]]; then
   if has_output_flag "$@"; then
     if [[ "$*" == *'-o json' ]]; then
-      printf '{"metadata":{"resourceVersion":"42","annotations":{}},"data":{"CLERUM_AUTH_JWT_PUBLIC_KEY":"%s"}}' \
+      printf '{"metadata":{"name":"mcp-host-config","namespace":"mcp-host","uid":"mcp-host-config-uid","resourceVersion":"42","annotations":{}},"data":{"CLERUM_AUTH_JWT_PUBLIC_KEY":"%s"}}' \
         "$(cat "${TEST_STATE_DIR}/mcp.key")"
     elif [[ "$*" == *auth-key-applied-sha256* ]]; then
       printf '%s' "${TEST_MCP_APPLIED_HASH:-old-hash}"
@@ -153,9 +153,9 @@ fi
 
 if [[ "${1:-}" == "get" && ( "${2:-}" == "deployment" || "${2:-}" == "deployments" ) && "$*" == *'-o json'* ]]; then
   printf '%s' '{"apiVersion":"v1","kind":"List","items":[
-    {"metadata":{"name":"chatllm","namespace":"mcp-host"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"chatllm"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}},
-    {"metadata":{"name":"mcp-host","namespace":"mcp-host"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"mcp-host"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}},
-    {"metadata":{"name":"custom-host","namespace":"mcp-host"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"custom-host"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}}
+    {"metadata":{"name":"chatllm","namespace":"mcp-host","uid":"chatllm-uid","resourceVersion":"30"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"chatllm"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}},
+    {"metadata":{"name":"mcp-host","namespace":"mcp-host","uid":"mcp-host-uid","resourceVersion":"30"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"mcp-host"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}},
+    {"metadata":{"name":"custom-host","namespace":"mcp-host","uid":"custom-host-uid","resourceVersion":"30"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"custom-host"}},"template":{"spec":{"containers":[{"name":"mcp-host","envFrom":[{"configMapRef":{"name":"mcp-host-config"}}]}]}}}}
   ]}'
   exit 0
 fi

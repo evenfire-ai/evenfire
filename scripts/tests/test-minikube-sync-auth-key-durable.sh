@@ -38,6 +38,139 @@ PROCESS_START=${T2_PROCESS_START}
 EOF
 export T2_PROJECT_DIR="${ROOT}" T2_PROFILE=fake T2_CONTEXT=fake T2_LOCK_ROOT T2_LOCK_TOKEN
 
+# The discovery helper resolves target-key provenance from a sanitized view of
+# the exact ConfigMaps and Secrets referenced by candidate containers. These
+# fixtures exercise kubelet ordering without exposing object values.
+DISCOVERY_INVENTORY='[
+  {"kind":"ConfigMap","namespace":"mcp-host","name":"mcp-host-config","present":true,"uid":"target-uid","resourceVersion":"10","keys":["CLERUM_AUTH_JWT_PUBLIC_KEY"]},
+  {"kind":"ConfigMap","namespace":"mcp-host","name":"override-present","present":true,"uid":"override-uid","resourceVersion":"11","keys":["CLERUM_AUTH_JWT_PUBLIC_KEY"]},
+  {"kind":"ConfigMap","namespace":"mcp-host","name":"override-key-absent","present":true,"uid":"override-empty-uid","resourceVersion":"12","keys":["OTHER_KEY"]},
+  {"kind":"ConfigMap","namespace":"mcp-host","name":"optional-config-absent","present":false,"keys":[]},
+  {"kind":"Secret","namespace":"mcp-host","name":"secret-present","present":true,"uid":"secret-uid","resourceVersion":"13","keys":["CLERUM_AUTH_JWT_PUBLIC_KEY"]},
+  {"kind":"Secret","namespace":"mcp-host","name":"secret-key-absent","present":true,"uid":"secret-empty-uid","resourceVersion":"14","keys":["OTHER_KEY"]},
+  {"kind":"Secret","namespace":"mcp-host","name":"optional-secret-absent","present":false,"keys":[]}
+]'
+
+write_discovery_fixture() {
+  DISCOVERY_FIXTURE="$1" python3 - <<'PY'
+import json
+import os
+
+target = {"configMapRef": {"name": "mcp-host-config"}}
+
+
+def key_ref(kind, name, key="CLERUM_AUTH_JWT_PUBLIC_KEY", optional=False):
+    field = "configMapKeyRef" if kind == "ConfigMap" else "secretKeyRef"
+    return {"valueFrom": {field: {"name": name, "key": key, "optional": optional}}}
+
+
+def env_from(kind, name, prefix="", optional=False):
+    field = "configMapRef" if kind == "ConfigMap" else "secretRef"
+    source = {field: {"name": name, "optional": optional}}
+    if prefix:
+        source["prefix"] = prefix
+    return source
+
+
+def deployment(name, container, expression=None):
+    selector = {"matchLabels": {"app": name}}
+    if expression is not None:
+        selector = {"matchExpressions": [expression]}
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": name,
+            "namespace": "mcp-host",
+            "uid": f"{name}-uid",
+            "resourceVersion": "20",
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": selector,
+            "template": {"spec": {"containers": [{"name": "runtime", **container}]}},
+        },
+    }
+
+
+fixture = os.environ["DISCOVERY_FIXTURE"]
+if fixture == "effective":
+    items = [
+        deployment("optional-cm-absent", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("ConfigMap", "optional-config-absent", optional=True)}]}),
+        deployment("optional-cm-key-absent", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("ConfigMap", "override-key-absent", optional=True)}]}),
+        deployment("optional-cm-key-present", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("ConfigMap", "override-present", optional=True)}]}),
+        deployment("optional-secret-absent", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("Secret", "optional-secret-absent", optional=True)}]}),
+        deployment("optional-secret-key-absent", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("Secret", "secret-key-absent", optional=True)}]}),
+        deployment("optional-secret-key-present", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("Secret", "secret-present", optional=True)}]}),
+        deployment("self-expansion", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", "value": "$(CLERUM_AUTH_JWT_PUBLIC_KEY)"}]}),
+        deployment("cm-shadow", {"envFrom": [target, env_from("ConfigMap", "override-present")]}),
+        deployment("cm-no-shadow", {"envFrom": [target, env_from("ConfigMap", "override-key-absent")]}),
+        deployment("optional-envfrom-cm-absent", {"envFrom": [target, env_from("ConfigMap", "optional-config-absent", optional=True)]}),
+        deployment("secret-shadow", {"envFrom": [target, env_from("Secret", "secret-present")]}),
+        deployment("secret-no-shadow", {"envFrom": [target, env_from("Secret", "secret-key-absent")]}),
+        deployment("optional-envfrom-secret-absent", {"envFrom": [target, env_from("Secret", "optional-secret-absent", optional=True)]}),
+        deployment("target-last", {"envFrom": [env_from("ConfigMap", "override-present"), target]}),
+        deployment("secret-target-last", {"envFrom": [env_from("Secret", "secret-present"), target]}),
+        deployment("prefix-shadow", {"envFrom": [env_from("ConfigMap", "mcp-host-config", "AUTH_"), env_from("ConfigMap", "override-present", "AUTH_")]}),
+        deployment("prefix-distinct", {"envFrom": [env_from("ConfigMap", "mcp-host-config", "AUTH_"), env_from("ConfigMap", "override-present", "OTHER_")]}),
+    ]
+elif fixture == "required-missing":
+    items = [deployment("required-missing", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("ConfigMap", "optional-config-absent")}]} )]
+elif fixture == "complex-expansion":
+    items = [deployment("complex-expansion", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", "value": "$(CLERUM_AUTH_JWT_PUBLIC_KEY)$(EMPTY)"}]})]
+elif fixture == "empty-selectors":
+    items = [
+        deployment("selector-in-empty", {"envFrom": [target]}, {"key": "tier", "operator": "In", "values": [""]}),
+        deployment("selector-notin-empty", {"envFrom": [target]}, {"key": "tier", "operator": "NotIn", "values": [""]}),
+    ]
+else:
+    raise SystemExit(f"unknown discovery fixture: {fixture}")
+
+print(json.dumps({"apiVersion": "v1", "kind": "DeploymentList", "items": items}))
+PY
+}
+
+resolve_discovery_fixture() {
+  local fixture="$1"
+  write_discovery_fixture "${fixture}" | CONSUMER_OBJECT_INVENTORY="${DISCOVERY_INVENTORY}" \
+    python3 "${ROOT}/scripts/minikube/discover-configmap-key-consumers.py" \
+      --namespace mcp-host --config-map mcp-host-config --key CLERUM_AUTH_JWT_PUBLIC_KEY
+}
+
+effective_output="$(resolve_discovery_fixture effective)" || {
+  echo 'FAIL: effective-binding fixture was not resolvable' >&2
+  exit 1
+}
+for expected in optional-cm-absent optional-cm-key-absent optional-secret-absent \
+  optional-secret-key-absent optional-envfrom-cm-absent optional-envfrom-secret-absent \
+  self-expansion cm-no-shadow secret-no-shadow target-last secret-target-last prefix-distinct; do
+  grep -q "${expected}" <<<"${effective_output}" || {
+    echo "FAIL: ${expected} lost its effective target binding" >&2
+    exit 1
+  }
+done
+for shadowed in optional-cm-key-present optional-secret-key-present cm-shadow secret-shadow prefix-shadow; do
+  if grep -q "${shadowed}" <<<"${effective_output}"; then
+    echo "FAIL: ${shadowed} retained a shadowed target binding" >&2
+    exit 1
+  fi
+done
+
+if resolve_discovery_fixture required-missing >/dev/null 2>&1; then
+  echo 'FAIL: a missing required override was treated as a provable contract' >&2
+  exit 1
+fi
+if resolve_discovery_fixture complex-expansion >/dev/null 2>&1; then
+  echo 'FAIL: a composite target-derived expansion was treated as a provable contract' >&2
+  exit 1
+fi
+selector_output="$(resolve_discovery_fixture empty-selectors)" || {
+  echo 'FAIL: valid empty selector values were rejected' >&2
+  exit 1
+}
+grep -q 'tier in ()' <<<"${selector_output}"
+grep -q 'tier notin ()' <<<"${selector_output}"
+
 cat >"${TMP_DIR}/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -91,7 +224,9 @@ state = Path(os.environ['TEST_STATE_DIR'])
 annotations = {}
 if (state / 'mcp.applied').exists():
     annotations['clerum.io/auth-key-applied-sha256'] = (state / 'mcp.applied').read_text()
-print(json.dumps({'metadata': {'resourceVersion': '42', 'annotations': annotations},
+print(json.dumps({'metadata': {'name': 'mcp-host-config', 'namespace': 'mcp-host',
+                               'uid': 'mcp-host-config-uid', 'resourceVersion': '42',
+                               'annotations': annotations},
                   'data': {'CLERUM_AUTH_JWT_PUBLIC_KEY': (state / 'mcp.key').read_text()}}))
 PY
   elif [[ "$*" == *jsonpath* ]]; then
@@ -152,6 +287,8 @@ def deployment(name, labels, containers, replicas=1, managed_by="host-context-co
         "metadata": {
             "name": name,
             "namespace": "mcp-host",
+            "uid": f"{name}-uid",
+            "resourceVersion": "30",
             "labels": {"clerum.io/managed-by": managed_by},
         },
         "spec": {
@@ -247,7 +384,49 @@ elif mode == "multiple-bindings":
                     "envFrom": [target_ref],
                     "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", "value": "literal-override"}],
                 },
+                {
+                    "name": "optional-kept",
+                    "envFrom": [target_ref],
+                    "env": [
+                        {
+                            "name": "CLERUM_AUTH_JWT_PUBLIC_KEY",
+                            "valueFrom": {
+                                "configMapKeyRef": {
+                                    "name": "optional-config-absent",
+                                    "key": "CLERUM_AUTH_JWT_PUBLIC_KEY",
+                                    "optional": True,
+                                }
+                            },
+                        }
+                    ],
+                },
+                {
+                    "name": "self-expanded",
+                    "envFrom": [target_ref],
+                    "env": [
+                        {
+                            "name": "CLERUM_AUTH_JWT_PUBLIC_KEY",
+                            "value": "$(CLERUM_AUTH_JWT_PUBLIC_KEY)",
+                        }
+                    ],
+                },
+                {
+                    "name": "shadowed",
+                    "envFrom": [
+                        target_ref,
+                        {"configMapRef": {"name": "override-present"}},
+                    ],
+                },
             ],
+            replicas,
+        )
+    ]
+elif mode == "option-binding":
+    items = [
+        deployment(
+            "option-consumer",
+            {"app": "option-runtime"},
+            [{"name": "option-runtime", "env": [{"name": "--version", **direct_ref}]}],
             replicas,
         )
     ]
@@ -257,6 +436,21 @@ else:
 print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}))
 PY
   exit 0
+fi
+
+if [[ "${1:-}" == get && "${2:-}" == configmap && "${3:-}" == override-present ]]; then
+  if [[ "$*" == *'-o json'* ]]; then
+    printf '%s' '{"metadata":{"name":"override-present","namespace":"mcp-host","uid":"override-present-uid","resourceVersion":"50"},"data":{"CLERUM_AUTH_JWT_PUBLIC_KEY":"shadow"}}'
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == get && "${2:-}" == configmap && "${3:-}" == optional-config-absent ]]; then
+  if [[ "$*" == *--ignore-not-found* ]]; then
+    exit 0
+  fi
+  echo 'Error from server (NotFound): configmaps "optional-config-absent" not found' >&2
+  exit 1
 fi
 
 if [[ "${1:-}" == get && "${2:-}" == deployment && "${3:-}" == -l ]]; then
@@ -290,7 +484,7 @@ fi
 
 if [[ "${1:-}" == get && "${2:-}" == deployment/* ]]; then
   case "${2}" in
-    deployment/chatllm|deployment/custom-host|deployment/wfc-21352205ce|deployment/hcc-unrelated)
+    deployment/chatllm|deployment/custom-host|deployment/wfc-21352205ce|deployment/hcc-unrelated|deployment/multi-consumer|deployment/option-consumer)
       [[ "$*" == *'.spec.replicas'* ]] && printf '%s' "${TEST_MCP_REPLICAS:-1}"
       exit 0 ;;
     deployment/mcp-host) echo 'Error from server (NotFound): deployments.apps "mcp-host" not found' >&2; exit 1 ;;
@@ -344,6 +538,7 @@ if [[ "${1:-}" == get && "${2:-}" == pods ]]; then
       fi
       ;;
     *'app=multi-runtime,clerum.io/host=multi'*) printf 'multi-consumer-pod|True|\n' ;;
+    *app=option-runtime*) printf 'option-consumer-pod|True|\n' ;;
     *gfsc-role=writer*) printf 'gfsc-writer-pod|True|\n' ;;
     *gfsc-role=reader*) printf 'gfsc-reader-pod|True|\n' ;;
     *) echo "unexpected pod selector: $*" >&2; exit 92 ;;
@@ -353,7 +548,6 @@ fi
 
 if [[ "${1:-}" == exec ]]; then
   input_file="${TEST_STATE_DIR}/exec-input"
-  expected_file="${TEST_STATE_DIR}/exec-expected"
   cat >"${input_file}"
   expected_key="${TEST_RUNTIME_KEY}"
   [[ "$*" == *GFS_JWT_PUBLIC_KEY* ]] && expected_key="${TEST_RUNTIME_KEY_GFS:-${expected_key}}"
@@ -376,6 +570,7 @@ if [[ "${1:-}" == exec ]]; then
     custom-host-pod) deployment_name=custom-host ;;
     wfc-21352205ce-pod) deployment_name=wfc-21352205ce ;;
     multi-consumer-pod) deployment_name=multi-consumer ;;
+    option-consumer-pod) deployment_name=option-consumer ;;
     gfsc-writer-pod) deployment_name=gfsc-writer ;;
     gfsc-reader-pod) deployment_name=gfsc-reader ;;
     *) deployment_name="${pod%-pod}" ;;
@@ -389,9 +584,20 @@ if [[ "${1:-}" == exec ]]; then
   if [[ ",${TEST_PERSIST_STALE_BINDINGS:-}," == *",${binding},"* ]]; then
     expected_key=old-key
   fi
-  printf '%s' "${expected_key}" >"${expected_file}"
-  cmp -s "${input_file}" "${expected_file}"
-  exit
+  remote_argv=()
+  capture_remote=false
+  for argument in "$@"; do
+    if [[ "${capture_remote}" == true ]]; then
+      remote_argv+=("${argument}")
+    elif [[ "${argument}" == -- ]]; then
+      capture_remote=true
+    fi
+  done
+  (( ${#remote_argv[@]} > 0 )) || {
+    echo 'kubectl exec fixture did not receive a remote argv' >&2
+    exit 93
+  }
+  /usr/bin/env -- "${env_name}=${expected_key}" "${remote_argv[@]}" <"${input_file}"
 fi
 
 echo "unexpected kubectl invocation: $*" >&2
@@ -584,7 +790,7 @@ if grep -q 'deployment/wrc-recipe-host' "${LOG_FILE}"; then
   exit 1
 fi
 grep -q -- '-l app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host' "${LOG_FILE}"
-grep -q -- '-c workspace-files-controller -- node -e .* WSF_JWT_PUBLIC_KEY' "${LOG_FILE}"
+grep -q -- '-c workspace-files-controller -- node -e .* -- WSF_JWT_PUBLIC_KEY' "${LOG_FILE}"
 
 # A rotation must restart only the stale MCP host. WFC is independently
 # verified through its own binding and remains untouched.
@@ -622,7 +828,7 @@ fi
 [[ ! -e "${STATE_DIR}/chatllm-restart.count" ]]
 grep -q 'rollout restart deployment/wfc-21352205ce' "${LOG_FILE}"
 grep -q -- '-l app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host' "${LOG_FILE}"
-grep -q -- '-c workspace-files-controller -- node -e .* WSF_JWT_PUBLIC_KEY' "${LOG_FILE}"
+grep -q -- '-c workspace-files-controller -- node -e .* -- WSF_JWT_PUBLIC_KEY' "${LOG_FILE}"
 
 # A rollout that still yields no Ready, provable WFC pod must fail closed and
 # leave the convergence marker absent.
@@ -656,10 +862,17 @@ if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=multiple-bind
   exit 1
 fi
 [[ ! -e "${STATE_DIR}/multi-consumer-restart.count" ]]
-grep -q -- '-c prefixed -- node -e .* AUTH_CLERUM_AUTH_JWT_PUBLIC_KEY' "${LOG_FILE}"
-grep -q -- '-c direct -- node -e .* DIRECT_JWT_PUBLIC_KEY' "${LOG_FILE}"
+grep -q -- '-c prefixed -- node -e .* -- AUTH_CLERUM_AUTH_JWT_PUBLIC_KEY' "${LOG_FILE}"
+grep -q -- '-c direct -- node -e .* -- DIRECT_JWT_PUBLIC_KEY' "${LOG_FILE}"
+grep -q -- '-c optional-kept -- node -e .* -- CLERUM_AUTH_JWT_PUBLIC_KEY' "${LOG_FILE}"
+grep -q -- '-c self-expanded -- node -e .* -- CLERUM_AUTH_JWT_PUBLIC_KEY' "${LOG_FILE}"
 if grep -q -- '-c overridden --' "${LOG_FILE}"; then
   echo 'FAIL: an explicit literal env override was treated as a ConfigMap binding' >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+if grep -q -- '-c shadowed --' "${LOG_FILE}"; then
+  echo 'FAIL: a later envFrom source that contains the key did not shadow the target binding' >&2
   cat "${LOG_FILE}" >&2
   exit 1
 fi
@@ -679,6 +892,28 @@ if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=multiple-bind
 fi
 [[ "$(cat "${STATE_DIR}/multi-consumer-restart.count")" == 1 ]]
 [[ "$(grep -c 'rollout restart deployment/multi-consumer' "${LOG_FILE}")" == 1 ]]
+
+# A Kubernetes-valid environment name that resembles a Node option must still
+# reach the comparison script as data. It starts stale, triggers exactly one
+# rollout, and can pass only after the fake runtime switches to the source key.
+rm -f "${STATE_DIR}/mcp.applied" "${STATE_DIR}/option-consumer-restart.count"
+: >"${LOG_FILE}"
+if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=option-binding \
+  TEST_STALE_BINDINGS='option-consumer/option-runtime/--version' \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo 'FAIL: option-like env binding did not converge after one rollout' >&2
+  exit 1
+fi
+if [[ ! -f "${STATE_DIR}/option-consumer-restart.count" || \
+      "$(cat "${STATE_DIR}/option-consumer-restart.count")" != 1 ]]; then
+  echo 'FAIL: Node accepted an option-like env name without executing the stale-value probe' >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+grep -q -- '-c option-runtime -- node -e .* -- --version' "${LOG_FILE}"
 
 # A source rotation after consumer proof must invalidate the run before the
 # final success message, even when the previous convergence marker was already

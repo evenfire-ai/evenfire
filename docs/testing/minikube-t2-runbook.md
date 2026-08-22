@@ -163,11 +163,13 @@ when `gfs-config.jwt-public-key` is empty — the overlay re-applies the base
 ConfigMap with an empty value — so `full-setup.sh` and `pre-gate-sync` re-run
 `scripts/minikube/sync-auth-key.sh` before each GFS reconcile; otherwise no
 new reader pod can start and the readiness wait can only time out. Auth sync
-commits a SHA-256 convergence annotation only after every active managed
-mcp-host and the exact `gfsc-writer`/`gfsc-reader` consumers prove—through a
-stdin-only in-process check—that they loaded the target public key. A matching
-ConfigMap without that annotation is an interrupted rollout and is resumed;
-it is never treated as converged.
+commits a SHA-256 convergence annotation only after every active Deployment
+binding whose effective source is
+`mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY`—including Workspace Files
+Controllers—and the exact `gfsc-writer`/`gfsc-reader` consumers prove through
+a stdin-only in-process check that they loaded the target public key. A
+matching ConfigMap without that annotation is an interrupted rollout and is
+resumed; it is never treated as converged.
 `pre-gate-sync` provisions GFS serving with the same opt-ins only in the
 `minikube-t2` transition (including its "no cluster sync required" fast path).
 Other platform security gates refresh MCP auth with `--skip-gfs` and do not
