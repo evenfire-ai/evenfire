@@ -13,10 +13,13 @@ import {
   replaceWorkflowRecipeTeamGrants,
   revokeWorkflowRecipeApprovalTeam,
 } from '../../../services/workflows/workflowGrantManagementService.js'
-import { requireAdminWorkflowCaller } from '../../workflows/shared/auth.js'
 import {
-  workflowGrantReadRateLimit,
-  workflowGrantWriteRateLimit,
+  bindAdminWorkflowAuth,
+  requireBoundAdminWorkflowCaller,
+} from '../../workflows/shared/auth.js'
+import {
+  workflowGrantReadRateLimits,
+  workflowGrantWriteRateLimits,
 } from '../../workflows/shared/rateLimit.js'
 
 const BASE = '/admin/workflows'
@@ -36,13 +39,15 @@ function withAdministrativeTraceContext<T>(req: Request, operatorSub: string, wo
 // product contracts, even though both mutate workflow authorization policy.
 export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
   const router = Router()
+  const readRateLimits = workflowGrantReadRateLimits()
+  const writeRateLimits = workflowGrantWriteRateLimits()
 
   router.get(
     `${BASE}/:ns/:name/grants`,
-    workflowGrantReadRateLimit(),
+    ...readRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
-      if (!caller) return
+      if (!requireBoundAdminWorkflowCaller(req, res)) return
 
       try {
         const users = await listWorkflowRecipeGrants(gateway, req.params.ns, req.params.name)
@@ -59,9 +64,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `${BASE}/:ns/:name/grants`,
-    workflowGrantWriteRateLimit(),
+    ...writeRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
+      const caller = requireBoundAdminWorkflowCaller(req, res)
       if (!caller) return
 
       try {
@@ -104,10 +110,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/team-grants`,
-    workflowGrantReadRateLimit(),
+    ...readRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
-      if (!caller) return
+      if (!requireBoundAdminWorkflowCaller(req, res)) return
 
       try {
         const teams = await listWorkflowRecipeTeamGrants(gateway, req.params.ns, req.params.name)
@@ -124,9 +130,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `${BASE}/:ns/:name/team-grants`,
-    workflowGrantWriteRateLimit(),
+    ...writeRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
+      const caller = requireBoundAdminWorkflowCaller(req, res)
       if (!caller) return
 
       try {
@@ -169,10 +176,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `/admin/workflow-recipes/:ns/:name/allowed-teams`,
-    workflowGrantReadRateLimit(),
+    ...readRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
-      if (!caller) return
+      if (!requireBoundAdminWorkflowCaller(req, res)) return
 
       try {
         const teams = await listWorkflowRecipeApprovalTeams({
@@ -193,9 +200,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.put(
     `/admin/workflow-recipes/:ns/:name/allowed-teams/:teamId`,
-    workflowGrantWriteRateLimit(),
+    ...writeRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
+      const caller = requireBoundAdminWorkflowCaller(req, res)
       if (!caller) return
 
       try {
@@ -232,9 +240,10 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
 
   router.delete(
     `/admin/workflow-recipes/:ns/:name/allowed-teams/:teamId`,
-    workflowGrantWriteRateLimit(),
+    ...writeRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
+      const caller = requireBoundAdminWorkflowCaller(req, res)
       if (!caller) return
 
       try {
