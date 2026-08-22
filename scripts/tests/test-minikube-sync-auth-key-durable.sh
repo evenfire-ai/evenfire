@@ -125,10 +125,147 @@ PY
   exit 0
 fi
 
+# Runtime-contract discovery reads the real Deployment pod templates in one
+# namespace-scoped snapshot. Keep these fixtures faithful to Kubernetes JSON:
+# selectors are independent from Deployment names, WFC uses an explicit
+# configMapKeyRef, and an HCC-owned unrelated Deployment has no target binding.
+if [[ "${1:-}" == get && ( "${2:-}" == deployment || "${2:-}" == deployments ) && "$*" == *'-o json'* ]]; then
+  python3 - <<'PY'
+import json
+import os
+
+target_ref = {"configMapRef": {"name": "mcp-host-config"}}
+direct_ref = {
+    "valueFrom": {
+        "configMapKeyRef": {
+            "name": "mcp-host-config",
+            "key": "CLERUM_AUTH_JWT_PUBLIC_KEY",
+        }
+    }
+}
+
+
+def deployment(name, labels, containers, replicas=1, managed_by="host-context-controller"):
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": name,
+            "namespace": "mcp-host",
+            "labels": {"clerum.io/managed-by": managed_by},
+        },
+        "spec": {
+            "replicas": replicas,
+            "selector": {"matchLabels": labels},
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {"containers": containers},
+            },
+        },
+    }
+
+
+def mcp(name="chatllm", replicas=1, selector=None):
+    labels = selector or {"app": name}
+    return deployment(
+        name,
+        labels,
+        [{"name": "mcp-host", "envFrom": [target_ref], "env": []}],
+        replicas,
+    )
+
+
+def wfc(replicas=1):
+    return deployment(
+        "wfc-21352205ce",
+        {
+            "app": "workspace-files-controller",
+            "clerum.io/sharedfilesystem": "workspace-alpha",
+            "clerum.io/sharedfilesystem-namespace": "mcp-host",
+        },
+        [{"name": "workspace-files-controller", "env": [{"name": "WSF_JWT_PUBLIC_KEY", **direct_ref}]}],
+        replicas,
+    )
+
+
+mode = os.environ.get("TEST_MCP_DEPLOYMENTS", "chatllm")
+replicas = int(os.environ.get("TEST_MCP_REPLICAS", "1"))
+if mode == "none":
+    items = []
+elif mode == "custom":
+    items = [mcp("custom-host", replicas)]
+elif mode == "runtime-contract":
+    items = [
+        mcp("chatllm", replicas, {"app": "mcp-runtime", "clerum.io/host": "alpha"}),
+        wfc(replicas),
+        deployment(
+            "hcc-unrelated",
+            {"app": "unrelated-runtime"},
+            [{"name": "unrelated", "envFrom": [{"configMapRef": {"name": "unrelated-config"}}]}],
+            replicas,
+        ),
+        deployment(
+            "wrc-recipe-host",
+            {"app": "workflow-recipe-runtime"},
+            [
+                {
+                    "name": "mcp-host",
+                    "env": [
+                        {
+                            "name": "CLERUM_AUTH_JWT_PUBLIC_KEY",
+                            "valueFrom": {
+                                "configMapKeyRef": {
+                                    "name": "clerum-wrc-public-key",
+                                    "key": "CLERUM_WRC_SIGNING_PUBLIC_KEY",
+                                }
+                            },
+                        }
+                    ],
+                }
+            ],
+            replicas,
+            managed_by="wrc",
+        ),
+    ]
+elif mode == "multiple-bindings":
+    items = [
+        deployment(
+            "multi-consumer",
+            {"app": "multi-runtime", "clerum.io/host": "multi"},
+            [
+                {
+                    "name": "prefixed",
+                    "envFrom": [{"prefix": "AUTH_", **target_ref}],
+                    "env": [],
+                },
+                {
+                    "name": "direct",
+                    "env": [{"name": "DIRECT_JWT_PUBLIC_KEY", **direct_ref}],
+                },
+                {
+                    "name": "overridden",
+                    "envFrom": [target_ref],
+                    "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", "value": "literal-override"}],
+                },
+            ],
+            replicas,
+        )
+    ]
+else:
+    items = [mcp("chatllm", replicas)]
+
+print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}))
+PY
+  exit 0
+fi
+
 if [[ "${1:-}" == get && "${2:-}" == deployment && "${3:-}" == -l ]]; then
   case "${TEST_MCP_DEPLOYMENTS:-chatllm}" in
     none) ;;
     custom) printf 'deployment.apps/custom-host\n' ;;
+    runtime-contract)
+      printf 'deployment.apps/chatllm\ndeployment.apps/wfc-21352205ce\ndeployment.apps/hcc-unrelated\n'
+      ;;
     *) printf 'deployment.apps/chatllm\n' ;;
   esac
   exit 0
@@ -153,7 +290,7 @@ fi
 
 if [[ "${1:-}" == get && "${2:-}" == deployment/* ]]; then
   case "${2}" in
-    deployment/chatllm|deployment/custom-host)
+    deployment/chatllm|deployment/custom-host|deployment/wfc-21352205ce|deployment/hcc-unrelated)
       [[ "$*" == *'.spec.replicas'* ]] && printf '%s' "${TEST_MCP_REPLICAS:-1}"
       exit 0 ;;
     deployment/mcp-host) echo 'Error from server (NotFound): deployments.apps "mcp-host" not found' >&2; exit 1 ;;
@@ -197,6 +334,16 @@ if [[ "${1:-}" == get && "${2:-}" == pods ]]; then
   case "$*" in
     *app=chatllm*) printf 'chatllm-pod|True|\n' ;;
     *app=custom-host*) printf 'custom-host-pod|True|\n' ;;
+    *'app=mcp-runtime,clerum.io/host=alpha'*) printf 'chatllm-pod|True|\n' ;;
+    *'app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host'*)
+      if [[ "${TEST_NO_READY_AFTER_ROLLOUT:-}" == wfc-21352205ce && \
+            -f "${TEST_STATE_DIR}/wfc-21352205ce-restart.count" ]]; then
+        :
+      else
+        printf 'wfc-21352205ce-pod|True|\n'
+      fi
+      ;;
+    *'app=multi-runtime,clerum.io/host=multi'*) printf 'multi-consumer-pod|True|\n' ;;
     *gfsc-role=writer*) printf 'gfsc-writer-pod|True|\n' ;;
     *gfsc-role=reader*) printf 'gfsc-reader-pod|True|\n' ;;
     *) echo "unexpected pod selector: $*" >&2; exit 92 ;;
@@ -211,6 +358,37 @@ if [[ "${1:-}" == exec ]]; then
   expected_key="${TEST_RUNTIME_KEY}"
   [[ "$*" == *GFS_JWT_PUBLIC_KEY* ]] && expected_key="${TEST_RUNTIME_KEY_GFS:-${expected_key}}"
   [[ "$*" == *CLERUM_AUTH_JWT_PUBLIC_KEY* ]] && expected_key="${TEST_RUNTIME_KEY_MCP:-${expected_key}}"
+  [[ "$*" == *WSF_JWT_PUBLIC_KEY* ]] && expected_key="${TEST_RUNTIME_KEY_WFC:-${expected_key}}"
+
+  pod="${3:-}"
+  container=""
+  previous=""
+  for argument in "$@"; do
+    if [[ "${previous}" == -c ]]; then
+      container="${argument}"
+      break
+    fi
+    previous="${argument}"
+  done
+  env_name="${!#}"
+  case "${pod}" in
+    chatllm-pod) deployment_name=chatllm ;;
+    custom-host-pod) deployment_name=custom-host ;;
+    wfc-21352205ce-pod) deployment_name=wfc-21352205ce ;;
+    multi-consumer-pod) deployment_name=multi-consumer ;;
+    gfsc-writer-pod) deployment_name=gfsc-writer ;;
+    gfsc-reader-pod) deployment_name=gfsc-reader ;;
+    *) deployment_name="${pod%-pod}" ;;
+  esac
+  binding="${deployment_name}/${container}/${env_name}"
+  if [[ ",${TEST_STALE_BINDINGS:-}," == *",${binding},"* ]]; then
+    if [[ ! -f "${TEST_STATE_DIR}/${deployment_name}-restart.count" ]]; then
+      expected_key=old-key
+    fi
+  fi
+  if [[ ",${TEST_PERSIST_STALE_BINDINGS:-}," == *",${binding},"* ]]; then
+    expected_key=old-key
+  fi
   printf '%s' "${expected_key}" >"${expected_file}"
   cmp -s "${input_file}" "${expected_file}"
   exit
@@ -371,6 +549,137 @@ if grep -q 'rollout restart deployment/' "${LOG_FILE}"; then
   exit 1
 fi
 
+# ConfigMap drift and process drift are independent. Both the envFrom-backed
+# MCP host and the direct configMapKeyRef-backed WFC already run with the
+# source key, so repairing the ConfigMap must not restart either Deployment.
+# The HCC-owned unrelated Deployment and the WRC recipe host deliberately use
+# other ConfigMaps and must be ignored despite the broad owner label or the
+# recipe host's identical effective environment-variable name.
+printf 'old-mcp-key' >"${STATE_DIR}/mcp.key"
+rm -f "${STATE_DIR}/mcp.applied"
+: >"${LOG_FILE}"
+if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_RUNTIME_KEY_MCP=public-key \
+  TEST_RUNTIME_KEY_WFC=public-key TEST_MCP_DEPLOYMENTS=runtime-contract \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo 'FAIL: runtime-contract consumers did not converge after ConfigMap repair' >&2
+  exit 1
+fi
+[[ "$(cat "${STATE_DIR}/mcp.applied")" == "${SOURCE_HASH}" ]]
+if grep -q 'rollout restart deployment/' "${LOG_FILE}"; then
+  echo 'FAIL: ConfigMap-only drift restarted already-converged runtime consumers' >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+if grep -q 'deployment/hcc-unrelated' "${LOG_FILE}"; then
+  echo 'FAIL: unrelated HCC Deployment was treated as an auth-key consumer' >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+if grep -q 'deployment/wrc-recipe-host' "${LOG_FILE}"; then
+  echo 'FAIL: a WRC recipe host using clerum-wrc-public-key was treated as a platform auth-key consumer' >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+grep -q -- '-l app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host' "${LOG_FILE}"
+grep -q -- '-c workspace-files-controller -- node -e .* WSF_JWT_PUBLIC_KEY' "${LOG_FILE}"
+
+# A rotation must restart only the stale MCP host. WFC is independently
+# verified through its own binding and remains untouched.
+printf 'public-key' >"${STATE_DIR}/mcp.key"
+rm -f "${STATE_DIR}/mcp.applied" \
+  "${STATE_DIR}/chatllm-restart.count" "${STATE_DIR}/wfc-21352205ce-restart.count"
+: >"${LOG_FILE}"
+if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=runtime-contract \
+  TEST_STALE_BINDINGS='chatllm/mcp-host/CLERUM_AUTH_JWT_PUBLIC_KEY' \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo 'FAIL: stale MCP host did not converge after its selective rollout' >&2
+  exit 1
+fi
+[[ "$(cat "${STATE_DIR}/chatllm-restart.count")" == 1 ]]
+[[ ! -e "${STATE_DIR}/wfc-21352205ce-restart.count" ]]
+
+# The inverse rotation proves the production WFC contract: real selector,
+# real container, and effective env name. Only WFC may restart.
+rm -f "${STATE_DIR}/mcp.applied" \
+  "${STATE_DIR}/chatllm-restart.count" "${STATE_DIR}/wfc-21352205ce-restart.count"
+: >"${LOG_FILE}"
+if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=runtime-contract \
+  TEST_STALE_BINDINGS='wfc-21352205ce/workspace-files-controller/WSF_JWT_PUBLIC_KEY' \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo 'FAIL: stale WFC did not converge after its selective rollout' >&2
+  exit 1
+fi
+[[ "$(cat "${STATE_DIR}/wfc-21352205ce-restart.count")" == 1 ]]
+[[ ! -e "${STATE_DIR}/chatllm-restart.count" ]]
+grep -q 'rollout restart deployment/wfc-21352205ce' "${LOG_FILE}"
+grep -q -- '-l app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host' "${LOG_FILE}"
+grep -q -- '-c workspace-files-controller -- node -e .* WSF_JWT_PUBLIC_KEY' "${LOG_FILE}"
+
+# A rollout that still yields no Ready, provable WFC pod must fail closed and
+# leave the convergence marker absent.
+rm -f "${STATE_DIR}/mcp.applied" \
+  "${STATE_DIR}/chatllm-restart.count" "${STATE_DIR}/wfc-21352205ce-restart.count"
+: >"${LOG_FILE}"
+if run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=runtime-contract \
+  TEST_STALE_BINDINGS='wfc-21352205ce/workspace-files-controller/WSF_JWT_PUBLIC_KEY' \
+  TEST_NO_READY_AFTER_ROLLOUT=wfc-21352205ce \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  echo 'FAIL: auth-key sync accepted WFC without a Ready pod after rollout' >&2
+  exit 1
+fi
+[[ "$(cat "${STATE_DIR}/wfc-21352205ce-restart.count")" == 1 ]]
+[[ ! -e "${STATE_DIR}/mcp.applied" ]]
+grep -q 'no active pod proved consumption of the target auth key' "${OUT_FILE}"
+
+# Multiple containers and effective bindings must all be proved. envFrom
+# prefix changes the runtime name; an explicit literal env overrides the
+# unprefixed envFrom value and therefore is not a target-key binding.
+rm -f "${STATE_DIR}/mcp.applied" "${STATE_DIR}/multi-consumer-restart.count"
+: >"${LOG_FILE}"
+if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=multiple-bindings \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo 'FAIL: multiple effective auth-key bindings were not proved' >&2
+  exit 1
+fi
+[[ ! -e "${STATE_DIR}/multi-consumer-restart.count" ]]
+grep -q -- '-c prefixed -- node -e .* AUTH_CLERUM_AUTH_JWT_PUBLIC_KEY' "${LOG_FILE}"
+grep -q -- '-c direct -- node -e .* DIRECT_JWT_PUBLIC_KEY' "${LOG_FILE}"
+if grep -q -- '-c overridden --' "${LOG_FILE}"; then
+  echo 'FAIL: an explicit literal env override was treated as a ConfigMap binding' >&2
+  cat "${LOG_FILE}" >&2
+  exit 1
+fi
+
+# One stale binding makes the whole Deployment stale, but it is restarted only
+# once and every binding is re-proved after rollout.
+rm -f "${STATE_DIR}/mcp.applied" "${STATE_DIR}/multi-consumer-restart.count"
+: >"${LOG_FILE}"
+if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=multiple-bindings \
+  TEST_STALE_BINDINGS='multi-consumer/direct/DIRECT_JWT_PUBLIC_KEY' \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  cat "${OUT_FILE}" >&2
+  cat "${LOG_FILE}" >&2
+  echo 'FAIL: multiple-binding Deployment did not converge after one rollout' >&2
+  exit 1
+fi
+[[ "$(cat "${STATE_DIR}/multi-consumer-restart.count")" == 1 ]]
+[[ "$(grep -c 'rollout restart deployment/multi-consumer' "${LOG_FILE}")" == 1 ]]
+
 # A source rotation after consumer proof must invalidate the run before the
 # final success message, even when the previous convergence marker was already
 # written. This is the race the resourceVersion+key snapshot closes.
@@ -390,5 +699,27 @@ grep -q 'auth source rotated during convergence' "${OUT_FILE}" || {
   echo 'FAIL: auth-key sync did not report the final source rotation' >&2
   exit 1
 }
+
+# Preserve the remote fail-closed barriers used by evenfire-infra. A substring
+# match is not authorization, and shared-profile bootstrap can never carry the
+# remote capability.
+: >"${LOG_FILE}"
+if GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=not-fake run_sync env \
+  TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=none \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+  >"${OUT_FILE}" 2>&1; then
+  echo 'FAIL: remote auth reconciliation accepted a non-exact context match' >&2
+  exit 1
+fi
+grep -q 'remote auth-key convergence requires an explicit allowlisted context' "${OUT_FILE}"
+
+if GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=fake run_sync env \
+  TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=none \
+  bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
+    --shared-profile-bootstrap >"${OUT_FILE}" 2>&1; then
+  echo 'FAIL: shared-profile bootstrap accepted remote reconciliation authorization' >&2
+  exit 1
+fi
+grep -q -- '--shared-profile-bootstrap cannot carry remote reconciliation authorization' "${OUT_FILE}"
 
 echo "PASS: auth-key convergence is durable, resumable, consumer-proven, and idempotent"
