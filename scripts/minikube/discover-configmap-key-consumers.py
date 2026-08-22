@@ -28,7 +28,7 @@ OTHER = "OTHER"
 LITERAL = "LITERAL"
 EXACT_EXPANSION = re.compile(r"^\$\(([^)]+)\)$")
 ANY_EXPANSION = re.compile(r"\$\(([^)]+)\)")
-C_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ENV_VAR_NAME = re.compile(r"^[-._A-Za-z][-._A-Za-z0-9]*$")
 
 
 class ConsumerContractError(ValueError):
@@ -81,6 +81,16 @@ def boolean(value: Any, field: str, *, default: bool = False) -> bool:
     if not isinstance(value, bool):
         raise ConsumerContractError(f"{field} is not a boolean")
     return value
+
+
+def is_env_var_name(value: str) -> bool:
+    """Mirror Kubernetes IsEnvVarName for envFrom effective names."""
+
+    return (
+        bool(ENV_VAR_NAME.fullmatch(value))
+        and value != "."
+        and not value.startswith("..")
+    )
 
 
 def env_from_reference(source: dict[str, Any], field: str) -> tuple[str, dict[str, Any]]:
@@ -311,10 +321,10 @@ def effective_bindings(
         ref_name = text(ref.get("name"), f"{field}.name")
         for raw_key in obj["keys"]:
             effective_name = text(prefix + raw_key, f"{field} effective environment name")
-            # Kubelet skips envFrom keys whose effective name is not a C
-            # identifier. Do not report a binding for a variable that cannot
-            # exist in the process environment.
-            if not C_IDENTIFIER.fullmatch(effective_name):
+            # Kubelet validates the prefix+key result with IsEnvVarName, which
+            # deliberately accepts dots and hyphens but rejects digit-leading
+            # names and the reserved chdir-style "."/"..*" forms.
+            if not is_env_var_name(effective_name):
                 continue
             state[effective_name] = (
                 TARGET
@@ -448,7 +458,7 @@ def resolve_records(
     items = sequence(payload.get("items"), "DeploymentList.items")
     discovered: list[tuple[str, ...]] = []
     deployment_snapshots: list[dict[str, Any]] = []
-    reference_contract = referenced_objects(payload, args)
+    reference_contract: dict[tuple[str, str], bool] = {}
 
     for index, raw_deployment in enumerate(items):
         deployment = mapping(raw_deployment, f"DeploymentList.items[{index}]")
@@ -475,6 +485,10 @@ def resolve_records(
             container = mapping(raw_container, f"deployment {namespace}/{name} container")
             if not container_references_target(container, args.config_map, args.key):
                 continue
+            for identity, required in container_object_references(container).items():
+                reference_contract[identity] = (
+                    reference_contract.get(identity, False) or required
+                )
             container_name = text(container.get("name"), "container.name")
             env_from = sequence(container.get("envFrom"), f"container {container_name}.envFrom")
             env = sequence(container.get("env"), f"container {container_name}.env")
@@ -489,7 +503,7 @@ def resolve_records(
 
         bindings = sorted(set(bindings))
         replicas = desired_replicas(deployment)
-        selector = "" if replicas == 0 or not bindings else render_selector(deployment)
+        selector = render_selector(deployment) if bindings else ""
         # A legitimate rollout and its status updates change Deployment
         # resourceVersion. Hash only the immutable identity and normalized
         # binding contract so that the expected rollout is not mistaken for

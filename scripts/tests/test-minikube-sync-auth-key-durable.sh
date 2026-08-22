@@ -72,7 +72,7 @@ def env_from(kind, name, prefix="", optional=False):
     return source
 
 
-def deployment(name, container, expression=None):
+def deployment(name, container, expression=None, replicas=1):
     selector = {"matchLabels": {"app": name}}
     if expression is not None:
         selector = {"matchExpressions": [expression]}
@@ -86,7 +86,7 @@ def deployment(name, container, expression=None):
             "resourceVersion": "20",
         },
         "spec": {
-            "replicas": 1,
+            "replicas": replicas,
             "selector": selector,
             "template": {"spec": {"containers": [{"name": "runtime", **container}]}},
         },
@@ -113,15 +113,23 @@ if fixture == "effective":
         deployment("secret-target-last", {"envFrom": [env_from("Secret", "secret-present"), target]}),
         deployment("prefix-shadow", {"envFrom": [env_from("ConfigMap", "mcp-host-config", "AUTH_"), env_from("ConfigMap", "override-present", "AUTH_")]}),
         deployment("prefix-distinct", {"envFrom": [env_from("ConfigMap", "mcp-host-config", "AUTH_"), env_from("ConfigMap", "override-present", "OTHER_")]}),
+        deployment("dot-prefix", {"envFrom": [env_from("ConfigMap", "mcp-host-config", ".")]}),
+        deployment("hyphen-prefix", {"envFrom": [env_from("ConfigMap", "mcp-host-config", "-")]}),
     ]
 elif fixture == "required-missing":
     items = [deployment("required-missing", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("ConfigMap", "optional-config-absent")}]} )]
+elif fixture == "required-config-key-missing":
+    items = [deployment("required-config-key-missing", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("ConfigMap", "override-key-absent")}]} )]
+elif fixture == "required-secret-key-missing":
+    items = [deployment("required-secret-key-missing", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("Secret", "secret-key-absent")}]} )]
 elif fixture == "complex-expansion":
     items = [deployment("complex-expansion", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", "value": "$(CLERUM_AUTH_JWT_PUBLIC_KEY)$(EMPTY)"}]})]
 elif fixture == "escaped-expansion":
     items = [deployment("escaped-expansion", {"envFrom": [target], "env": [{"name": "ESCAPED_LITERAL", "value": "$$(CLERUM_AUTH_JWT_PUBLIC_KEY)"}]})]
 elif fixture == "invalid-prefix":
-    items = [deployment("invalid-prefix", {"envFrom": [env_from("ConfigMap", "mcp-host-config", "-")]})]
+    items = [deployment("invalid-prefix", {"envFrom": [env_from("ConfigMap", "mcp-host-config", "..")]})]
+elif fixture == "zero-replicas":
+    items = [deployment("zero-replicas", {"envFrom": [target]}, replicas=0)]
 elif fixture == "empty-selectors":
     items = [
         deployment("selector-in-empty", {"envFrom": [target]}, {"key": "tier", "operator": "In", "values": [""]}),
@@ -185,12 +193,15 @@ effective_output="$(resolve_discovery_fixture effective)" || {
 }
 for expected in optional-cm-absent optional-cm-key-absent optional-secret-absent \
   optional-secret-key-absent optional-envfrom-cm-absent optional-envfrom-secret-absent \
-  self-expansion cm-no-shadow secret-no-shadow target-last secret-target-last prefix-distinct; do
+  self-expansion cm-no-shadow secret-no-shadow target-last secret-target-last prefix-distinct \
+  dot-prefix hyphen-prefix; do
   grep -q "${expected}" <<<"${effective_output}" || {
     echo "FAIL: ${expected} lost its effective target binding" >&2
     exit 1
   }
 done
+assert_text_contains "${effective_output}" '\.CLERUM_AUTH_JWT_PUBLIC_KEY' 'dot-prefixed effective name'
+assert_text_contains "${effective_output}" '-CLERUM_AUTH_JWT_PUBLIC_KEY' 'hyphen-prefixed effective name'
 escaped_output="$(resolve_discovery_fixture escaped-expansion)" || {
   echo 'FAIL: escaped-expansion fixture was not resolvable' >&2
   exit 1
@@ -207,6 +218,14 @@ if resolve_discovery_fixture required-missing >/dev/null 2>&1; then
   echo 'FAIL: a missing required override was treated as a provable contract' >&2
   exit 1
 fi
+if resolve_discovery_fixture required-config-key-missing >/dev/null 2>&1; then
+  echo 'FAIL: a present ConfigMap missing a required key was treated as provable' >&2
+  exit 1
+fi
+if resolve_discovery_fixture required-secret-key-missing >/dev/null 2>&1; then
+  echo 'FAIL: a present Secret missing a required key was treated as provable' >&2
+  exit 1
+fi
 if resolve_discovery_fixture complex-expansion >/dev/null 2>&1; then
   echo 'FAIL: a composite target-derived expansion was treated as a provable contract' >&2
   exit 1
@@ -219,6 +238,11 @@ if grep -q 'invalid-prefix' <<<"${invalid_prefix_output}"; then
   echo 'FAIL: kubelet-invalid envFrom name was reported as a target binding' >&2
   exit 1
 fi
+zero_replicas_output="$(resolve_discovery_fixture zero-replicas)" || {
+  echo 'FAIL: replicas-zero discovery fixture was not resolvable' >&2
+  exit 1
+}
+assert_text_contains "${zero_replicas_output}" 'app=zero-replicas' 'replicas-zero selector'
 selector_output="$(resolve_discovery_fixture empty-selectors)" || {
   echo 'FAIL: valid empty selector values were rejected' >&2
   exit 1
@@ -508,18 +532,6 @@ if [[ "${1:-}" == get && "${2:-}" == configmap && "${3:-}" == optional-config-ab
   exit 1
 fi
 
-if [[ "${1:-}" == get && "${2:-}" == deployment && "${3:-}" == -l ]]; then
-  case "${TEST_MCP_DEPLOYMENTS:-chatllm}" in
-    none) ;;
-    custom) printf 'deployment.apps/custom-host\n' ;;
-    runtime-contract)
-      printf 'deployment.apps/chatllm\ndeployment.apps/wfc-21352205ce\ndeployment.apps/hcc-unrelated\n'
-      ;;
-    *) printf 'deployment.apps/chatllm\n' ;;
-  esac
-  exit 0
-fi
-
 if [[ "${1:-}" == patch && "${2:-}" == configmap ]]; then
   target="${3}"
   patch_payload=""
@@ -539,10 +551,6 @@ fi
 
 if [[ "${1:-}" == get && "${2:-}" == deployment/* ]]; then
   case "${2}" in
-    deployment/chatllm|deployment/custom-host|deployment/wfc-21352205ce|deployment/hcc-unrelated|deployment/multi-consumer|deployment/option-consumer)
-      [[ "$*" == *'.spec.replicas'* ]] && printf '%s' "${TEST_MCP_REPLICAS:-1}"
-      exit 0 ;;
-    deployment/mcp-host) echo 'Error from server (NotFound): deployments.apps "mcp-host" not found' >&2; exit 1 ;;
     deployment/gfsc-writer|deployment/gfsc-reader)
       if [[ "${TEST_GFS_DEPLOYMENTS:-0}" == 1 ]]; then
         [[ "$*" == *'.spec.replicas'* ]] && printf '1'
@@ -552,13 +560,6 @@ if [[ "${1:-}" == get && "${2:-}" == deployment/* ]]; then
       exit 1 ;;
     *) exit 1 ;;
   esac
-fi
-
-if [[ "${1:-}" == get && "${2:-}" == deployment && "${3:-}" == gfsc-reader ]]; then
-  if [[ "$*" == *'.spec.replicas'* || "$*" == *'.status.readyReplicas'* ]]; then
-    printf '1'
-    exit 0
-  fi
 fi
 
 if [[ "${1:-}" == get && "${2:-}" == secret && "${3:-}" == gfs-controller-db ]]; then

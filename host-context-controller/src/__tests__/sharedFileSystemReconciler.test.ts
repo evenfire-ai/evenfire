@@ -309,18 +309,30 @@ describe('SharedFileSystemReconciler — idempotence', () => {
     expect(mocks.appsApi.replaceNamespacedDeployment).toHaveBeenCalled()
   })
 
-  it('preserves an external pod-template restart marker during HCC replacement', async () => {
+  it('preserves external annotations without replacing the desired Deployment spec', async () => {
     const mocks = makeMocks()
     mocks.appsApi.createNamespacedDeployment.mockRejectedValueOnce(alreadyExists())
     mocks.appsApi.readNamespacedDeployment.mockResolvedValue({
       metadata: { resourceVersion: '7', annotations: { 'operator.example/keep': 'yes' } },
       spec: {
+        replicas: 9,
+        strategy: { type: 'RollingUpdate' },
+        selector: { matchLabels: { app: 'stale-wfc' } },
         template: {
           metadata: {
+            labels: { app: 'stale-wfc' },
             annotations: {
               'kubectl.kubernetes.io/restartedAt': '2026-08-22T12:00:00Z',
               'operator.example/pod-marker': 'keep',
             },
+          },
+          spec: {
+            automountServiceAccountToken: true,
+            imagePullSecrets: [{ name: 'stale-pull-secret' }],
+            securityContext: { runAsUser: 2000 },
+            initContainers: [{ name: 'stale-init', image: 'registry.example/stale-init:old' }],
+            containers: [{ name: 'stale-wfc', image: 'registry.example/stale-wfc:old' }],
+            volumes: [{ name: 'stale-volume', emptyDir: {} }],
           },
         },
       },
@@ -330,12 +342,26 @@ describe('SharedFileSystemReconciler — idempotence', () => {
 
     await reconciler.reconcile(makeSfs())
 
+    const desiredBody = mocks.appsApi.createNamespacedDeployment.mock.calls[0][0].body
     const replaceBody = mocks.appsApi.replaceNamespacedDeployment.mock.calls[0][0].body
     expect(replaceBody.metadata.annotations).toMatchObject({ 'operator.example/keep': 'yes' })
     expect(replaceBody.spec.template.metadata.annotations).toEqual({
       'kubectl.kubernetes.io/restartedAt': '2026-08-22T12:00:00Z',
       'operator.example/pod-marker': 'keep',
     })
+    expect(replaceBody.spec.replicas).toBe(desiredBody.spec.replicas)
+    expect(replaceBody.spec.strategy).toEqual(desiredBody.spec.strategy)
+    expect(replaceBody.spec.selector).toEqual(desiredBody.spec.selector)
+    expect(replaceBody.spec.template.metadata.labels).toEqual(
+      desiredBody.spec.template.metadata.labels
+    )
+    expect(replaceBody.spec.template.spec.containers).toEqual(
+      desiredBody.spec.template.spec.containers
+    )
+    expect(replaceBody.spec.template.spec.initContainers).toEqual(
+      desiredBody.spec.template.spec.initContainers
+    )
+    expect(replaceBody.spec.template.spec).toEqual(desiredBody.spec.template.spec)
   })
 
   it('never creates a Job across repeated reconciles', async () => {
