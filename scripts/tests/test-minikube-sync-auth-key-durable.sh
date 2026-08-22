@@ -118,6 +118,10 @@ elif fixture == "required-missing":
     items = [deployment("required-missing", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", **key_ref("ConfigMap", "optional-config-absent")}]} )]
 elif fixture == "complex-expansion":
     items = [deployment("complex-expansion", {"envFrom": [target], "env": [{"name": "CLERUM_AUTH_JWT_PUBLIC_KEY", "value": "$(CLERUM_AUTH_JWT_PUBLIC_KEY)$(EMPTY)"}]})]
+elif fixture == "escaped-expansion":
+    items = [deployment("escaped-expansion", {"envFrom": [target], "env": [{"name": "ESCAPED_LITERAL", "value": "$$(CLERUM_AUTH_JWT_PUBLIC_KEY)"}]})]
+elif fixture == "invalid-prefix":
+    items = [deployment("invalid-prefix", {"envFrom": [env_from("ConfigMap", "mcp-host-config", "-")]})]
 elif fixture == "empty-selectors":
     items = [
         deployment("selector-in-empty", {"envFrom": [target]}, {"key": "tier", "operator": "In", "values": [""]}),
@@ -137,6 +141,44 @@ resolve_discovery_fixture() {
       --namespace mcp-host --config-map mcp-host-config --key CLERUM_AUTH_JWT_PUBLIC_KEY
 }
 
+assert_file_equals() {
+  local file="$1" expected="$2" label="$3" actual
+  if ! actual="$(cat "${file}" 2>&1)"; then
+    echo "FAIL: ${label} could not read ${file}: ${actual}" >&2
+    exit 1
+  fi
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "FAIL: ${label}: expected '${expected}', got '${actual}'" >&2
+    exit 1
+  fi
+}
+
+assert_file_absent() {
+  local file="$1" label="$2"
+  if [[ -e "${file}" ]]; then
+    echo "FAIL: ${label}: unexpected file ${file}" >&2
+    exit 1
+  fi
+}
+
+assert_file_contains() {
+  local file="$1" pattern="$2" label="$3"
+  if ! grep -q -- "${pattern}" "${file}"; then
+    echo "FAIL: ${label}: pattern not found: ${pattern}" >&2
+    cat "${file}" >&2 || true
+    exit 1
+  fi
+}
+
+assert_text_contains() {
+  local text="$1" pattern="$2" label="$3"
+  if ! grep -q -- "${pattern}" <<<"${text}"; then
+    echo "FAIL: ${label}: pattern not found: ${pattern}" >&2
+    printf '%s\n' "${text}" >&2
+    exit 1
+  fi
+}
+
 effective_output="$(resolve_discovery_fixture effective)" || {
   echo 'FAIL: effective-binding fixture was not resolvable' >&2
   exit 1
@@ -149,6 +191,11 @@ for expected in optional-cm-absent optional-cm-key-absent optional-secret-absent
     exit 1
   }
 done
+escaped_output="$(resolve_discovery_fixture escaped-expansion)" || {
+  echo 'FAIL: escaped-expansion fixture was not resolvable' >&2
+  exit 1
+}
+assert_text_contains "${escaped_output}" 'escaped-expansion' 'escaped expansion target binding'
 for shadowed in optional-cm-key-present optional-secret-key-present cm-shadow secret-shadow prefix-shadow; do
   if grep -q "${shadowed}" <<<"${effective_output}"; then
     echo "FAIL: ${shadowed} retained a shadowed target binding" >&2
@@ -164,12 +211,20 @@ if resolve_discovery_fixture complex-expansion >/dev/null 2>&1; then
   echo 'FAIL: a composite target-derived expansion was treated as a provable contract' >&2
   exit 1
 fi
+invalid_prefix_output="$(resolve_discovery_fixture invalid-prefix)" || {
+  echo 'FAIL: invalid envFrom prefix did not fail closed as a non-binding' >&2
+  exit 1
+}
+if grep -q 'invalid-prefix' <<<"${invalid_prefix_output}"; then
+  echo 'FAIL: kubelet-invalid envFrom name was reported as a target binding' >&2
+  exit 1
+fi
 selector_output="$(resolve_discovery_fixture empty-selectors)" || {
   echo 'FAIL: valid empty selector values were rejected' >&2
   exit 1
 }
-grep -q 'tier in ()' <<<"${selector_output}"
-grep -q 'tier notin ()' <<<"${selector_output}"
+assert_text_contains "${selector_output}" 'tier in ()' 'In selector with empty value'
+assert_text_contains "${selector_output}" 'tier notin ()' 'NotIn selector with empty value'
 
 cat >"${TMP_DIR}/kubectl" <<'SH'
 #!/usr/bin/env bash
@@ -597,7 +652,7 @@ if [[ "${1:-}" == exec ]]; then
     echo 'kubectl exec fixture did not receive a remote argv' >&2
     exit 93
   }
-  /usr/bin/env -- "${env_name}=${expected_key}" "${remote_argv[@]}" <"${input_file}"
+  exec /usr/bin/env -- "${env_name}=${expected_key}" "${remote_argv[@]}" <"${input_file}"
 fi
 
 echo "unexpected kubectl invocation: $*" >&2
@@ -628,13 +683,9 @@ if run_sync env TEST_RUNTIME_KEY=old-key \
   echo "FAIL: MCP sync accepted a pod that had not consumed the target key" >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/mcp.key")" == public-key ]]
-[[ ! -e "${STATE_DIR}/mcp.applied" ]]
-grep -q 'has not consumed the target auth key' "${OUT_FILE}" || {
-  cat "${OUT_FILE}" >&2
-  echo "FAIL: interrupted MCP sync did not report failed consumer proof" >&2
-  exit 1
-}
+assert_file_equals "${STATE_DIR}/mcp.key" public-key 'MCP ConfigMap patch'
+assert_file_absent "${STATE_DIR}/mcp.applied" 'failed MCP proof marker'
+assert_file_contains "${OUT_FILE}" 'has not consumed the target auth key' 'interrupted MCP consumer diagnostic'
 
 # The key now matches, but the absent marker must resume—not skip—consumer
 # convergence. A live pod that already consumed the target key need not restart.
@@ -642,10 +693,10 @@ grep -q 'has not consumed the target auth key' "${OUT_FILE}" || {
 run_sync env TEST_RUNTIME_KEY=public-key \
   bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
   >"${OUT_FILE}" 2>&1
-[[ "$(cat "${STATE_DIR}/mcp.applied")" == "${SOURCE_HASH}" ]]
-[[ "$(cat "${STATE_DIR}/mcp-data-patch.count")" == 1 ]]
-[[ "$(cat "${STATE_DIR}/chatllm-restart.count")" == 1 ]]
-grep -q 'matches source but consumer attestation is pending; resuming convergence' "${OUT_FILE}"
+assert_file_equals "${STATE_DIR}/mcp.applied" "${SOURCE_HASH}" 'resumed MCP marker'
+assert_file_equals "${STATE_DIR}/mcp-data-patch.count" 1 'MCP data patch count'
+assert_file_equals "${STATE_DIR}/chatllm-restart.count" 1 'MCP restart count'
+assert_file_contains "${OUT_FILE}" 'matches source but consumer attestation is pending; resuming convergence' 'MCP resume diagnostic'
 
 # A fully attested rerun is idempotent and must not touch the deployment.
 : >"${LOG_FILE}"
@@ -654,7 +705,7 @@ grep -q 'matches source but consumer attestation is pending; resuming convergenc
 run_sync env TEST_RUNTIME_KEY=public-key \
   bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
   >"${OUT_FILE}" 2>&1
-[[ "$(cat "${STATE_DIR}/chatllm-restart.count")" == 1 ]]
+assert_file_equals "${STATE_DIR}/chatllm-restart.count" 1 'idempotent MCP restart count'
 if grep -Eq '^(rollout|patch)' "${LOG_FILE}"; then
   echo "FAIL: converged MCP sync was not idempotent" >&2
   cat "${LOG_FILE}" >&2
@@ -671,7 +722,7 @@ if run_sync env TEST_RUNTIME_KEY=old-key TEST_MCP_DEPLOYMENTS=custom \
   echo "FAIL: newly created MCP consumer with stale key was accepted" >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/custom-host-restart.count")" == 1 ]]
+assert_file_equals "${STATE_DIR}/custom-host-restart.count" 1 'new consumer restart count'
 
 # A stateless HCC Host can be intentionally suspended at replicas=0. The
 # ConfigMap still converges, but there is no pod to restart or prove; a future
@@ -681,15 +732,15 @@ rm -f "${STATE_DIR}/mcp.applied"
 run_sync env TEST_MCP_REPLICAS=0 TEST_RUNTIME_KEY=old-key \
   bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
   >"${OUT_FILE}" 2>&1
-[[ "$(cat "${STATE_DIR}/mcp.key")" == public-key ]]
-[[ "$(cat "${STATE_DIR}/mcp.applied")" == "${SOURCE_HASH}" ]]
-[[ "$(cat "${STATE_DIR}/chatllm-restart.count")" == 1 ]]
-grep -q 'Skipping suspended mcp-host/chatllm' "${OUT_FILE}"
+assert_file_equals "${STATE_DIR}/mcp.key" public-key 'replicas-zero ConfigMap value'
+assert_file_equals "${STATE_DIR}/mcp.applied" "${SOURCE_HASH}" 'replicas-zero marker'
+assert_file_equals "${STATE_DIR}/chatllm-restart.count" 1 'replicas-zero restart count'
+assert_file_contains "${OUT_FILE}" 'Skipping suspended mcp-host/chatllm' 'replicas-zero diagnostic'
 
 run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=custom \
   bash "${ROOT}/scripts/minikube/sync-auth-key.sh" --context fake --require-mcp --skip-gfs \
   >"${OUT_FILE}" 2>&1
-[[ "$(cat "${STATE_DIR}/custom-host-restart.count")" == 1 ]]
+assert_file_equals "${STATE_DIR}/custom-host-restart.count" 1 'custom consumer restart count'
 
 # Repeat the interrupted-then-resumed contract for the two real GFSC
 # deployments. This also prevents a regression to deployment/gfs-controller.
@@ -708,7 +759,7 @@ fi
   echo "FAIL: GFS ConfigMap was not patched before consumer proof" >&2
   exit 1
 }
-[[ ! -e "${STATE_DIR}/gfs.applied" ]]
+assert_file_absent "${STATE_DIR}/gfs.applied" 'failed GFSC proof marker'
 
 : >"${LOG_FILE}"
 if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_RUNTIME_KEY_MCP=public-key TEST_RUNTIME_KEY_GFS=public-key \
@@ -720,9 +771,9 @@ if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_RUNTIME_KEY_MCP=public-key TE
   echo "FAIL: GFS sync did not resume after an interrupted consumer proof" >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/gfs.applied")" == "${SOURCE_HASH}" ]]
-[[ "$(cat "${STATE_DIR}/gfsc-writer-restart.count")" == 1 ]]
-[[ ! -e "${STATE_DIR}/gfsc-reader-restart.count" ]]
+assert_file_equals "${STATE_DIR}/gfs.applied" "${SOURCE_HASH}" 'GFSC marker'
+assert_file_equals "${STATE_DIR}/gfsc-writer-restart.count" 1 'GFSC writer restart count'
+assert_file_absent "${STATE_DIR}/gfsc-reader-restart.count" 'converged GFSC reader restart'
 if grep -q 'rollout restart deployment/gfsc-' "${LOG_FILE}"; then
   echo "FAIL: already-converged GFSC pods were restarted unnecessarily" >&2
   cat "${LOG_FILE}" >&2
@@ -748,7 +799,7 @@ if ! TEST_SOURCE_HASH_OVERRIDE="${NEWLINE_SOURCE_HASH}" run_sync env \
   echo "FAIL: auth-key sync rejected an exact PEM-style trailing newline" >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/mcp.applied")" == "${NEWLINE_SOURCE_HASH}" ]]
+assert_file_equals "${STATE_DIR}/mcp.applied" "${NEWLINE_SOURCE_HASH}" 'trailing-newline source marker'
 if grep -q 'rollout restart deployment/' "${LOG_FILE}"; then
   echo "FAIL: exact trailing-newline convergence triggered an unnecessary rollout" >&2
   cat "${LOG_FILE}" >&2
@@ -773,7 +824,7 @@ if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_RUNTIME_KEY_MCP=public-key \
   echo 'FAIL: runtime-contract consumers did not converge after ConfigMap repair' >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/mcp.applied")" == "${SOURCE_HASH}" ]]
+assert_file_equals "${STATE_DIR}/mcp.applied" "${SOURCE_HASH}" 'runtime-contract marker'
 if grep -q 'rollout restart deployment/' "${LOG_FILE}"; then
   echo 'FAIL: ConfigMap-only drift restarted already-converged runtime consumers' >&2
   cat "${LOG_FILE}" >&2
@@ -789,8 +840,8 @@ if grep -q 'deployment/wrc-recipe-host' "${LOG_FILE}"; then
   cat "${LOG_FILE}" >&2
   exit 1
 fi
-grep -q -- '-l app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host' "${LOG_FILE}"
-grep -q -- '-c workspace-files-controller -- node -e .* -- WSF_JWT_PUBLIC_KEY' "${LOG_FILE}"
+assert_file_contains "${LOG_FILE}" '-l app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host' 'WFC selector proof'
+assert_file_contains "${LOG_FILE}" '-c workspace-files-controller -- node -e .* -- WSF_JWT_PUBLIC_KEY' 'WFC binding proof'
 
 # A rotation must restart only the stale MCP host. WFC is independently
 # verified through its own binding and remains untouched.
@@ -807,8 +858,8 @@ if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=runtime-contr
   echo 'FAIL: stale MCP host did not converge after its selective rollout' >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/chatllm-restart.count")" == 1 ]]
-[[ ! -e "${STATE_DIR}/wfc-21352205ce-restart.count" ]]
+assert_file_equals "${STATE_DIR}/chatllm-restart.count" 1 'selective MCP restart count'
+assert_file_absent "${STATE_DIR}/wfc-21352205ce-restart.count" 'unnecessary WFC restart'
 
 # The inverse rotation proves the production WFC contract: real selector,
 # real container, and effective env name. Only WFC may restart.
@@ -824,11 +875,11 @@ if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=runtime-contr
   echo 'FAIL: stale WFC did not converge after its selective rollout' >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/wfc-21352205ce-restart.count")" == 1 ]]
-[[ ! -e "${STATE_DIR}/chatllm-restart.count" ]]
-grep -q 'rollout restart deployment/wfc-21352205ce' "${LOG_FILE}"
-grep -q -- '-l app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host' "${LOG_FILE}"
-grep -q -- '-c workspace-files-controller -- node -e .* -- WSF_JWT_PUBLIC_KEY' "${LOG_FILE}"
+assert_file_equals "${STATE_DIR}/wfc-21352205ce-restart.count" 1 'selective WFC restart count'
+assert_file_absent "${STATE_DIR}/chatllm-restart.count" 'unnecessary MCP restart'
+assert_file_contains "${LOG_FILE}" 'rollout restart deployment/wfc-21352205ce' 'WFC rollout'
+assert_file_contains "${LOG_FILE}" '-l app=workspace-files-controller,clerum.io/sharedfilesystem=workspace-alpha,clerum.io/sharedfilesystem-namespace=mcp-host' 'WFC selector after rollout'
+assert_file_contains "${LOG_FILE}" '-c workspace-files-controller -- node -e .* -- WSF_JWT_PUBLIC_KEY' 'WFC binding after rollout'
 
 # A rollout that still yields no Ready, provable WFC pod must fail closed and
 # leave the convergence marker absent.
@@ -844,9 +895,9 @@ if run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=runtime-contrac
   echo 'FAIL: auth-key sync accepted WFC without a Ready pod after rollout' >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/wfc-21352205ce-restart.count")" == 1 ]]
-[[ ! -e "${STATE_DIR}/mcp.applied" ]]
-grep -q 'no active pod proved consumption of the target auth key' "${OUT_FILE}"
+assert_file_equals "${STATE_DIR}/wfc-21352205ce-restart.count" 1 'failed WFC rollout restart count'
+assert_file_absent "${STATE_DIR}/mcp.applied" 'failed WFC rollout marker'
+assert_file_contains "${OUT_FILE}" 'no active pod proved consumption of the target auth key' 'no-ready WFC diagnostic'
 
 # Multiple containers and effective bindings must all be proved. envFrom
 # prefix changes the runtime name; an explicit literal env overrides the
@@ -861,11 +912,11 @@ if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=multiple-bind
   echo 'FAIL: multiple effective auth-key bindings were not proved' >&2
   exit 1
 fi
-[[ ! -e "${STATE_DIR}/multi-consumer-restart.count" ]]
-grep -q -- '-c prefixed -- node -e .* -- AUTH_CLERUM_AUTH_JWT_PUBLIC_KEY' "${LOG_FILE}"
-grep -q -- '-c direct -- node -e .* -- DIRECT_JWT_PUBLIC_KEY' "${LOG_FILE}"
-grep -q -- '-c optional-kept -- node -e .* -- CLERUM_AUTH_JWT_PUBLIC_KEY' "${LOG_FILE}"
-grep -q -- '-c self-expanded -- node -e .* -- CLERUM_AUTH_JWT_PUBLIC_KEY' "${LOG_FILE}"
+assert_file_absent "${STATE_DIR}/multi-consumer-restart.count" 'unnecessary multi-binding restart'
+assert_file_contains "${LOG_FILE}" '-c prefixed -- node -e .* -- AUTH_CLERUM_AUTH_JWT_PUBLIC_KEY' 'prefixed binding proof'
+assert_file_contains "${LOG_FILE}" '-c direct -- node -e .* -- DIRECT_JWT_PUBLIC_KEY' 'direct binding proof'
+assert_file_contains "${LOG_FILE}" '-c optional-kept -- node -e .* -- CLERUM_AUTH_JWT_PUBLIC_KEY' 'optional binding proof'
+assert_file_contains "${LOG_FILE}" '-c self-expanded -- node -e .* -- CLERUM_AUTH_JWT_PUBLIC_KEY' 'self-expanded binding proof'
 if grep -q -- '-c overridden --' "${LOG_FILE}"; then
   echo 'FAIL: an explicit literal env override was treated as a ConfigMap binding' >&2
   cat "${LOG_FILE}" >&2
@@ -890,8 +941,8 @@ if ! run_sync env TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=multiple-bind
   echo 'FAIL: multiple-binding Deployment did not converge after one rollout' >&2
   exit 1
 fi
-[[ "$(cat "${STATE_DIR}/multi-consumer-restart.count")" == 1 ]]
-[[ "$(grep -c 'rollout restart deployment/multi-consumer' "${LOG_FILE}")" == 1 ]]
+assert_file_equals "${STATE_DIR}/multi-consumer-restart.count" 1 'multi-binding restart count'
+assert_file_equals <(grep -c 'rollout restart deployment/multi-consumer' "${LOG_FILE}") 1 'multi-binding rollout count'
 
 # A Kubernetes-valid environment name that resembles a Node option must still
 # reach the comparison script as data. It starts stale, triggers exactly one
@@ -913,7 +964,7 @@ if [[ ! -f "${STATE_DIR}/option-consumer-restart.count" || \
   cat "${LOG_FILE}" >&2
   exit 1
 fi
-grep -q -- '-c option-runtime -- node -e .* -- --version' "${LOG_FILE}"
+assert_file_contains "${LOG_FILE}" '-c option-runtime -- node -e .* -- --version' 'option-like binding proof'
 
 # A source rotation after consumer proof must invalidate the run before the
 # final success message, even when the previous convergence marker was already
@@ -929,11 +980,7 @@ if TEST_ROTATE_ON_SOURCE_SNAPSHOT=3 run_sync env \
   echo 'FAIL: auth-key sync certified a source that rotated after consumer proof' >&2
   exit 1
 fi
-grep -q 'auth source rotated during convergence' "${OUT_FILE}" || {
-  cat "${OUT_FILE}" >&2
-  echo 'FAIL: auth-key sync did not report the final source rotation' >&2
-  exit 1
-}
+assert_file_contains "${OUT_FILE}" 'auth source rotated during convergence' 'final source rotation diagnostic'
 
 # Preserve the remote fail-closed barriers used by evenfire-infra. A substring
 # match is not authorization, and shared-profile bootstrap can never carry the
@@ -946,7 +993,7 @@ if GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=not-fake run_sync env \
   echo 'FAIL: remote auth reconciliation accepted a non-exact context match' >&2
   exit 1
 fi
-grep -q 'remote auth-key convergence requires an explicit allowlisted context' "${OUT_FILE}"
+assert_file_contains "${OUT_FILE}" 'remote auth-key convergence requires an explicit allowlisted context' 'remote allowlist diagnostic'
 
 if GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=fake run_sync env \
   TEST_RUNTIME_KEY=public-key TEST_MCP_DEPLOYMENTS=none \
@@ -955,6 +1002,6 @@ if GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=fake run_sync env \
   echo 'FAIL: shared-profile bootstrap accepted remote reconciliation authorization' >&2
   exit 1
 fi
-grep -q -- '--shared-profile-bootstrap cannot carry remote reconciliation authorization' "${OUT_FILE}"
+assert_file_contains "${OUT_FILE}" '--shared-profile-bootstrap cannot carry remote reconciliation authorization' 'shared-profile authorization diagnostic'
 
 echo "PASS: auth-key convergence is durable, resumable, consumer-proven, and idempotent"

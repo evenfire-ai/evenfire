@@ -309,6 +309,35 @@ describe('SharedFileSystemReconciler — idempotence', () => {
     expect(mocks.appsApi.replaceNamespacedDeployment).toHaveBeenCalled()
   })
 
+  it('preserves an external pod-template restart marker during HCC replacement', async () => {
+    const mocks = makeMocks()
+    mocks.appsApi.createNamespacedDeployment.mockRejectedValueOnce(alreadyExists())
+    mocks.appsApi.readNamespacedDeployment.mockResolvedValue({
+      metadata: { resourceVersion: '7', annotations: { 'operator.example/keep': 'yes' } },
+      spec: {
+        template: {
+          metadata: {
+            annotations: {
+              'kubectl.kubernetes.io/restartedAt': '2026-08-22T12:00:00Z',
+              'operator.example/pod-marker': 'keep',
+            },
+          },
+        },
+      },
+      status: { readyReplicas: 1, availableReplicas: 1 },
+    })
+    const reconciler = makeReconciler(mocks)
+
+    await reconciler.reconcile(makeSfs())
+
+    const replaceBody = mocks.appsApi.replaceNamespacedDeployment.mock.calls[0][0].body
+    expect(replaceBody.metadata.annotations).toMatchObject({ 'operator.example/keep': 'yes' })
+    expect(replaceBody.spec.template.metadata.annotations).toEqual({
+      'kubectl.kubernetes.io/restartedAt': '2026-08-22T12:00:00Z',
+      'operator.example/pod-marker': 'keep',
+    })
+  })
+
   it('never creates a Job across repeated reconciles', async () => {
     const mocks = makeMocks()
     const reconciler = makeReconciler(mocks)

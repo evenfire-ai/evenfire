@@ -3,7 +3,7 @@
 
 The helper is intentionally pure: Kubernetes JSON is read from stdin and a
 sanitized object inventory is supplied by the shell caller. It never invokes
-kubectl and never receives ConfigMap or Secret values.
+kubectl and never emits or persists ConfigMap or Secret values.
 
 Binding records use ASCII unit separator (0x1f): namespace, Deployment,
 desired replicas, exact label selector, container, and effective environment
@@ -28,6 +28,7 @@ OTHER = "OTHER"
 LITERAL = "LITERAL"
 EXACT_EXPANSION = re.compile(r"^\$\(([^)]+)\)$")
 ANY_EXPANSION = re.compile(r"\$\(([^)]+)\)")
+C_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ConsumerContractError(ValueError):
@@ -310,6 +311,11 @@ def effective_bindings(
         ref_name = text(ref.get("name"), f"{field}.name")
         for raw_key in obj["keys"]:
             effective_name = text(prefix + raw_key, f"{field} effective environment name")
+            # Kubelet skips envFrom keys whose effective name is not a C
+            # identifier. Do not report a binding for a variable that cannot
+            # exist in the process environment.
+            if not C_IDENTIFIER.fullmatch(effective_name):
+                continue
             state[effective_name] = (
                 TARGET
                 if kind == "ConfigMap" and ref_name == config_map and raw_key == key
@@ -329,7 +335,10 @@ def effective_bindings(
                 source_name = text(exact.group(1), f"{field}.value expansion")
                 state[env_name] = state.get(source_name, LITERAL)
                 continue
-            dependencies = ANY_EXPANSION.findall(value)
+            # Kubelet treats $$ as an escaped literal dollar. Remove escaped
+            # pairs before looking for real expansion dependencies so
+            # $$(TARGET) does not abort a valid pod contract.
+            dependencies = ANY_EXPANSION.findall(value.replace("$$", "\x00"))
             if any(state.get(dependency) == TARGET for dependency in dependencies):
                 raise ConsumerContractError(
                     f"{field}.value has an ambiguous composite expansion of the target key"
