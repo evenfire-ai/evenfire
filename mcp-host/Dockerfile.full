@@ -14,7 +14,8 @@ WORKDIR /app
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 
-# Install dependencies (file: dep resolves to ../packages/llm-providers)
+# Install dependencies (file: deps resolve to ../packages/llm-providers and
+# ../packages/llm-provider-attempt-contract)
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci

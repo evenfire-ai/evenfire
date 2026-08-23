@@ -42,8 +42,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/lib/chromium/chromium
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# mcp-host application (kept under /app/mcp-host so the file: dep on
-# ../packages/llm-providers resolves, mirroring the other variants).
+# mcp-host application (kept under /app/mcp-host so file: deps on
+# ../packages/llm-providers and ../packages/llm-provider-attempt-contract
+# resolve, mirroring the other variants).
 WORKDIR /app
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
