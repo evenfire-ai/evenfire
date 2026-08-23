@@ -15,9 +15,16 @@ assert_broken_profile_is_recreated() {
 
   cat > "$tmp/docker" <<'STUB'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "info" ]]; then
-  exit 0
-fi
+case "${1:-} ${2:-}" in
+  "context inspect")
+    if [[ "$*" == *'TLSMaterial'* ]]; then
+      printf 'unix:///private/tmp/evenfire-test-docker.sock\tfalse\t{}\n'
+    else
+      printf 'unix:///private/tmp/evenfire-test-docker.sock\n'
+    fi
+    ;;
+  "info ") ;;
+esac
 exit 0
 STUB
 
@@ -131,9 +138,16 @@ assert_healthy_profile_skips_recreate() {
 
   cat > "$tmp/docker" <<'STUB'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "info" ]]; then
-  exit 0
-fi
+case "${1:-} ${2:-}" in
+  "context inspect")
+    if [[ "$*" == *'TLSMaterial'* ]]; then
+      printf 'unix:///private/tmp/evenfire-test-docker.sock\tfalse\t{}\n'
+    else
+      printf 'unix:///private/tmp/evenfire-test-docker.sock\n'
+    fi
+    ;;
+  "info ") ;;
+esac
 exit 0
 STUB
 
@@ -355,6 +369,22 @@ assert_pipefail_head_guard_prevents_abort() {
     pass "pipefail SIGPIPE guard (|| true) prevents the abort the bare pipeline hits"
   else
     fail "SIGPIPE guard behaved unexpectedly (bare_rc=$bare_rc guarded_rc=$guarded_rc)"
+  fi
+}
+
+assert_setup_runtime_operations_are_bounded() {
+  local setup="scripts/minikube/full-setup.sh"
+  if grep -Fq 'run_setup_with_deadline minikube-setup-status' "$setup" && \
+     grep -Fq 'run_setup_with_deadline minikube-setup-delete' "$setup" && \
+     grep -Fq 'run_setup_with_deadline minikube-setup-start' "$setup" && \
+     grep -Fq 'run_setup_with_deadline minikube-setup-validate' "$setup" && \
+     grep -Fq 'bash "${SCRIPT_DIR}/docker-cli-env.sh" --check-info' "$setup" && \
+     grep -Fq 'if (( status >= 124 )); then' "$setup" && \
+     ! grep -Fq 'minikube -p "$PROFILE" status 2>/dev/null || true' "$setup" && \
+     ! grep -Eq '(^|[[:space:]])docker info([[:space:]]|$)' "$setup"; then
+    pass "full-setup bounds profile lifecycle and isolates its Docker probe"
+  else
+    fail "full-setup contains an unbounded profile lifecycle or ambient Docker probe"
   fi
 }
 
@@ -1242,6 +1272,7 @@ assert_reuse_db_normalizer_precedes_flag_loop
 assert_reset_db_flag_backcompat
 assert_skip_build_staleness_find_is_sigpipe_guarded
 assert_pipefail_head_guard_prevents_abort
+assert_setup_runtime_operations_are_bounded
 assert_ghcr_is_the_default_image_source
 assert_image_source_local_is_honoured
 assert_bootstrap_seed_deferral_is_opt_in

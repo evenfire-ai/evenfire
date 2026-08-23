@@ -64,4 +64,46 @@ fi
   exit 1
 }
 
+full_plan="$(make -n -C "${ROOT}" minikube-build-images 2>&1)"
+full_body_plan="$(make -n -C "${ROOT}" minikube-build-images-body 2>&1)"
+targeted_plan="$(make -n -C "${ROOT}" minikube-deploy-service SVC=control-api NS=control-plane 2>&1)"
+targeted_body_plan="$(make -n -C "${ROOT}" minikube-deploy-service-body SVC=control-api NS=control-plane 2>&1)"
+restart_plan="$(make -n -C "${ROOT}" minikube-restart-deploy SVC=control-api NS=control-plane 2>&1)"
+restart_body_plan="$(make -n -C "${ROOT}" minikube-restart-deploy-body SVC=control-api NS=control-plane 2>&1)"
+e2e_fixture_plan="$(make -n -C "${ROOT}" minikube-build-e2e-fixtures 2>&1)"
+e2e_fixture_body_plan="$(make -n -C "${ROOT}" minikube-build-e2e-fixtures-body 2>&1)"
+verify_plan="$(make -n -C "${ROOT}" minikube-verify-images 2>&1)"
+
+[[ "$full_plan" == *"with-t2-mutation-lock.sh"* \
+  && "$full_body_plan" == *"require-t2-mutation-lock.sh"* ]] || {
+  echo 'FAIL: full local image build is not enclosed by the T2 mutation lease' >&2
+  exit 1
+}
+[[ "$targeted_plan" == *"with-t2-mutation-lock.sh"* \
+  && "$targeted_body_plan" == *"require-t2-mutation-lock.sh"* \
+  && "$targeted_body_plan" == *"build-images.sh --only=control-api"* ]] || {
+  echo 'FAIL: targeted local image build is not enclosed by the T2 mutation lease' >&2
+  exit 1
+}
+[[ "$restart_plan" == *"with-t2-mutation-lock.sh"* \
+  && "$restart_body_plan" == *"require-t2-mutation-lock.sh"* \
+  && "$restart_body_plan" == *"rollout restart deployment/control-api"* ]] || {
+  echo 'FAIL: targeted deployment restart is not enclosed by the T2 mutation lease' >&2
+  exit 1
+}
+[[ "$e2e_fixture_plan" == *"with-t2-mutation-lock.sh"* \
+  && "$e2e_fixture_body_plan" == *"require-t2-mutation-lock.sh"* \
+  && "$e2e_fixture_body_plan" == *"build-images.sh --only=workflow-custom-sdk-e2e"* \
+  && "$e2e_fixture_body_plan" == *"build-images.sh --only=workflow-plugin-sdk-e2e"* ]] || {
+  echo 'FAIL: E2E fixture image builds are not enclosed by one T2 mutation lease' >&2
+  exit 1
+}
+[[ "$verify_plan" != *"with-t2-mutation-lock.sh"* \
+  && "$verify_plan" != *"require-t2-mutation-lock.sh"* \
+  && "$verify_plan" == *"build-images.sh --verify-only"* ]] || {
+  echo 'FAIL: read-only image verification was incorrectly placed behind a mutation lease' >&2
+  exit 1
+}
+
 printf 'PASS: child mutation boundary requires the exact live profile lease and target context\n'
+printf 'PASS: image builds and targeted deployment mutations require the lease while verify-only stays read-only\n'

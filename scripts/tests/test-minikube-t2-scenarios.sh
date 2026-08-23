@@ -32,6 +32,8 @@ expect_code() {
   }
 }
 
+"$ROOT/scripts/tests/test-minikube-profile-owner.sh"
+
 repo="$tmp/evenfire"
 mkdir -p "$repo"
 repo="$(cd "$repo" && pwd -P)"
@@ -55,7 +57,7 @@ profile_root="$tmp/profiles/$profile"
 mkdir -p "$profile_root"
 printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
   "$profile" "$(git -C "$repo" rev-parse --short=8 HEAD)" "$repo" >"$profile_root/profile.env"
-printf 'PORT_BASE=23117\nCONTROL_API_URL=profile-owned-url\n' >"$profile_root/ports.env"
+printf 'PORT_BASE=23117\nCONTROL_API_PORT=23207\nCONTROL_API_URL=http://127.0.0.1:23207\n' >"$profile_root/ports.env"
 
 repo_env=(
   T2_PROJECT_DIR="$repo"
@@ -82,7 +84,7 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED protected-branch protected-branch \
 git -C "$repo" switch -q feat/scenario
 
 missing_profile_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/missing-profile.env")
-expect_code DEVELOPMENT_SCOPE_REQUIRED missing-profile missing-profile \
+expect_code PROFILE_OWNERSHIP_MISMATCH missing-profile missing-profile \
   env "${missing_profile_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
 
 expect_code DEVELOPMENT_SCOPE_REQUIRED shared-profile shared-profile \
@@ -158,9 +160,37 @@ expect_code PROFILE_OWNERSHIP_MISMATCH profile-ownership profile-ownership \
   env "${ownership_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
 
 stale_profile_env="$tmp/stale-profile.env"
-printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=oldsha1\nDIRTY=false\nREPO_DIR=%s\n' \
+printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=deadbeef\nDIRTY=false\nREPO_DIR=%s\n' \
   "$profile" "$repo" >"$stale_profile_env"
 env "${repo_env[@]}" T2_PROFILE_ENV="$stale_profile_env" \
+  bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
+worktree_id="$(bash -c 'source "$1"; t2_worktree_id "$2"' bash "$ROOT/scripts/minikube/t2-worktree-id.sh" "$repo")"
+owner_id="$(bash -c 'source "$1"; t2_profile_owner_id "$2" "$3"' bash "$ROOT/scripts/minikube/t2-worktree-id.sh" "$repo" feat/scenario)"
+v2_profile_env="$tmp/v2-profile.env"
+cat >"$v2_profile_env" <<EOF
+PROFILE_SCHEMA_VERSION=2
+WORKTREE_ID=$worktree_id
+OWNER_ID=$owner_id
+CREATED_HEAD=$feature_sha
+PROFILE=$profile
+REPO_DIR=$repo
+BRANCH=feat/scenario
+EOF
+env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
+  bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
+bad_v2_owner_env="$tmp/bad-v2-owner.env"
+sed 's/^OWNER_ID=.*/OWNER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$v2_profile_env" >"$bad_v2_owner_env"
+expect_code PROFILE_OWNERSHIP_MISMATCH v2-owner-mismatch v2-owner-mismatch \
+  env "${repo_env[@]}" T2_PROFILE_ENV="$bad_v2_owner_env" \
+  bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
+bad_ports_env="$tmp/bad-ports.env"
+printf 'PORT_BASE=not-a-port\n' >"$bad_ports_env"
+expect_code PROFILE_OWNERSHIP_MISMATCH corrupt-profile-ports corrupt-profile-ports \
+  env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" T2_PORTS_ENV="$bad_ports_env" \
   bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
 
 marker_env=("${repo_env[@]}" T2_HEAD="$feature_sha" T2_WORKTREE_ID=worktree-a)
@@ -394,112 +424,11 @@ grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 't2_mutation_lock' "$COMMON"
 grep -Fq 't2_lock_validate_inherited' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
-grep -Fq 'while read -r uid pid ppid rest' "$COMMON" || fail 't2_process_check must split ps -ef fields'
-grep -Fq 'IFS= read -r uid pid ppid rest' "$COMMON" && fail 'IFS= read disables PID split and silences PORT_FORWARD_CONFLICT'
-grep -Fq '([^[:space:]]*\/)?kubectl([[:space:]]|$)' "$COMMON" || fail 't2_process_check awk must match a kubectl argv0/path token'
-grep -Fq '[[:space:]]port-forward([[:space:]]|$)' "$COMMON" || fail 't2_process_check awk must match a standalone port-forward token'
-grep -Fq 'kubectl[[:space:]]+port-forward' "$COMMON" && fail 't2_process_check awk still requires kubectl/port-forward adjacency'
-grep -Fq '[0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?' "$COMMON" && fail 't2_process_check awk still anchors on a TIME-column regex'
-
-# Real launcher argv (flags between kubectl and port-forward). TIME prefixes
-# are only ps -ef wrappers. The dead adjacency regex must miss these lines.
-pf_profile="clerum-t2-pf-fixture"
-pf_all='user 4242 1 0 10:00 ttys000 0:00 kubectl --context='"${pf_profile}"' -n control-plane port-forward --address=127.0.0.1 svc/control-ui 3000:3000'
-pf_ctl='user 4243 1 0 10:00 ttys000 0:00.03 kubectl -n control-plane port-forward svc/control-api 8090:8090'
-pf_e2e='user 4244 1 0 10:00 pts/0 00:00:00 kubectl --context '"${pf_profile}"' port-forward svc/control-ui -n control-plane 3000:3000'
-bare_pf='user 4245 1 0 10:00 ttys000 0:00 kubectl port-forward --context='"${pf_profile}"' svc/x 8080:80'
-path_pf='user 4246 1 0 10:00 pts/0 00:00:00 /usr/local/bin/kubectl --context='"${pf_profile}"' -n control-plane port-forward --address=127.0.0.1 svc/control-api 8090:8090'
-wrapper_pf='user 4247 1 0 10:00 ttys000 0:00 bash -c echo kubectl port-forward --context='"${pf_profile}"
-awk_pf="$(sed -n '/^t2_process_check()/,/^}/p' "$COMMON" | sed -n "s/.*awk '\\(.*\\)' .*/\\1/p")"
-[ -n "$awk_pf" ] || fail 'could not extract t2_process_check awk program'
-printf '%s\n' "$awk_pf" | grep -Fq 'kubectl[[:space:]]+port-forward' && fail 'extracted awk still requires kubectl/port-forward adjacency'
-dead_awk='/[[:space:]][0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?[[:space:]]+([^[:space:]]*\/)?kubectl[[:space:]]+port-forward([[:space:]]|$)/ {print}'
-printf '%s\n' "$pf_all" "$pf_ctl" "$pf_e2e" | awk "$dead_awk" >"$tmp/pf-dead-awk.out"
-[ ! -s "$tmp/pf-dead-awk.out" ] || fail 'real-launcher fixtures still match the dead adjacency regex — fixtures are wrong'
-printf '%s\n' "$pf_all" "$pf_ctl" "$pf_e2e" "$bare_pf" "$path_pf" "$wrapper_pf" | awk "$awk_pf" >"$tmp/pf-awk.out"
-grep -Fq -- "--context=${pf_profile} -n control-plane port-forward --address=127.0.0.1" "$tmp/pf-awk.out" || fail 'awk missed pf-all-stack real launcher'
-grep -Fq 'kubectl -n control-plane port-forward svc/control-api' "$tmp/pf-awk.out" || fail 'awk missed pf-control-stack real launcher'
-grep -Fq -- "--context ${pf_profile} port-forward svc/control-ui" "$tmp/pf-awk.out" || fail 'awk missed run-e2e real launcher'
-grep -Fq 'kubectl port-forward --context=' "$tmp/pf-awk.out" || fail 'awk missed a bare kubectl port-forward'
-grep -Fq '/usr/local/bin/kubectl --context=' "$tmp/pf-awk.out" || fail 'awk missed a path kubectl with flags before port-forward'
-read -r _ pid _ _ <<<"$pf_all"
-[ "$pid" = 4242 ] || fail "ps field split left pid='$pid' instead of 4242"
-
-pf_root="$tmp/pf-check-profiles"
-mkdir -p "$pf_root/$pf_profile/pids"
-pf_bin="$tmp/pf-ps-bin"
-mkdir -p "$pf_bin"
-cat >"$pf_bin/ps" <<'EOF'
-#!/usr/bin/env bash
-if [ "${1:-}" = "-ef" ]; then
-  cat "${T2_PS_EF_FILE:?}"
-  exit 0
-fi
-pid=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -p)
-      pid="$2"
-      shift 2
-      ;;
-    -p*)
-      pid="${1#-p}"
-      shift
-      ;;
-    *)
-      shift
-      ;;
-  esac
-done
-case "$pid" in
-  4242|4243|4244|4245|4246) printf '%s\n' kubectl ;;
-  4247) printf '%s\n' bash ;;
-  *) printf '\n' ;;
-esac
-EOF
-chmod +x "$pf_bin/ps"
-
-run_process_check() {
-  local ef_file="$1" out="$2"
-  T2_PS_EF_FILE="$ef_file" PATH="$pf_bin:$PATH" \
-    T2_PROFILE="$pf_profile" T2_CONTEXT="$pf_profile" \
-    MINIKUBE_PROFILE="$pf_profile" \
-    T2_PROFILE_ROOT="$pf_root" \
-    T2_PROJECT_DIR="$ROOT" \
-    T2_LOCK_ROOT="$tmp/locks" \
-    bash -c 'source "$1"; t2_process_check' bash "$COMMON" >"$out" 2>&1
-}
-
-printf '%s\n' "$pf_all" >"$tmp/ps-ef-real.out"
-if run_process_check "$tmp/ps-ef-real.out" "$tmp/pf-real.err"; then
-  fail 't2_process_check did not fail a foreign real launcher (PORT_FORWARD_CONFLICT)'
-fi
-grep -Fq 'PORT_FORWARD_CONFLICT' "$tmp/pf-real.err" || fail 'foreign real launcher did not report PORT_FORWARD_CONFLICT'
-
-printf '%s\n' "$wrapper_pf" >"$tmp/ps-ef-wrap.out"
-if ! run_process_check "$tmp/ps-ef-wrap.out" "$tmp/pf-wrap.err"; then
-  fail 't2_process_check failed on a wrapper that only mentions kubectl (comm=bash)'
-fi
-
-printf '%s\n' "$pf_ctl" >"$tmp/ps-ef-contextless.out"
-if ! run_process_check "$tmp/ps-ef-contextless.out" "$tmp/pf-contextless.err"; then
-  fail 't2_process_check rejected an unrelated context-less port-forward'
-fi
+grep -Fq 'port-forward-owner.sh' "$COMMON" || fail 'T2 must load the shared exact port-forward owner'
+grep -Fq 'matching_records' "$COMMON" || fail 'T2 must require exactly one structured ownership record'
+bash "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
-
-forward_tmp="$tmp/port-forward-check"
-mkdir -p "$forward_tmp/bin" "$forward_tmp/profile-cache/profile-a/pids"
-cat >"$forward_tmp/bin/ps" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' 'root 4242 1 0 00:00 ? 00:00:00 kubectl --context=profile-a -n control-plane port-forward svc/control-api 30100:8090'
-EOF
-chmod +x "$forward_tmp/bin/ps"
-printf '4242\nPROCESS_START=unavailable\n' >"/tmp/pf-profile-a-control-api.pid"
-forward_check="$(env PATH="$forward_tmp/bin:$PATH" T2_PROFILE=profile-a T2_CONTEXT=profile-a \
-  T2_PROFILE_ROOT="$forward_tmp/profile-cache" bash -c 'source "$1"; t2_process_check; printf PASS' bash "$COMMON")"
-rm -f "/tmp/pf-profile-a-control-api.pid"
-[ "$forward_check" = PASS ] || fail "canonical /tmp port-forward ownership was rejected: $forward_check"
 
 printf 'PASS: local Minikube T0/T1/T2 scenario checks\n'

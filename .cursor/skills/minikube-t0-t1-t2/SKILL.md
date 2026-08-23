@@ -22,17 +22,27 @@ Before running anything, verify ALL of these:
       branch).
 - [ ] Identify the branch-owned `MINIKUBE_PROFILE` for THIS worktree. Reuse it.
       Do NOT create a new profile because HEAD, gate, or command changed.
+      Resolve it with the primary checkout `.local-notes/minikube-profiles/branch.mk`;
+      profile identity is stable for canonical worktree + branch, while the
+      pre-gate marker—not a profile-name SHA—proves exact-HEAD freshness.
 - [ ] Confirm the profile is not owned by another active branch/worktree. If
       ownership is ambiguous, stop and use a dedicated profile instead.
 - [ ] Every `kubectl` you run manually uses `--context=<owned profile>`.
       Never change the global kubectl current-context.
+- [ ] Docker resolves to a local Unix socket or loopback TCP endpoint. The
+      harness pins that endpoint into an empty task-local config; do not use a
+      remote Docker context or copy ambient registry credentials into it.
+- [ ] Mutating image builds use the public Make target/orchestrator and inherit
+      its exact profile lease. Do not call `build-images.sh` directly;
+      `--verify-only` is the read-only exception.
 - [ ] Never read `~/.cache/clerum/minikube-profiles/` directly (HARD DENY —
       it holds private profile state). The harness reads it for you.
 
 ## Step 1 — Plan (read-only)
 
 ```bash
-make minikube-t2-preflight MINIKUBE_PROFILE=<owned-profile>
+MINIKUBE_PROFILE=<owned-profile> CONTROL_API_REAL_PG_CONTEXT=<owned-profile> \
+  make minikube-t2-preflight
 ```
 
 This is a planner, NOT a lane. `T2_PREFLIGHT_PASS` is NOT a T2 verdict.
@@ -44,9 +54,11 @@ expected, not an error to work around.
 
 ```text
 transition = already-synced AND T0+T1 already green on this exact HEAD?
-  └── yes → make minikube-t2-runtime MINIKUBE_PROFILE=<owned-profile>
+  └── yes → MINIKUBE_PROFILE=<owned-profile> CONTROL_API_REAL_PG_CONTEXT=<owned-profile>
+            make minikube-t2-runtime
             (T2-only close; refused unless marker matches HEAD)
-  └── no  → make minikube-t2 MINIKUBE_PROFILE=<owned-profile>
+  └── no  → MINIKUBE_PROFILE=<owned-profile> CONTROL_API_REAL_PG_CONTEXT=<owned-profile>
+            make minikube-t2
             (full: T0 → bootstrap/reconcile/targeted-sync → T1 → T2 verdict)
 
 transition = full-bootstrap (fresh/uninitialized profile)?
@@ -79,12 +91,22 @@ Rules that override any shortcut idea:
 ## Step 3 — T1 specifics (Real PostgreSQL)
 
 T1 runs inside `make minikube-t2`, or explicitly via
-`make minikube-t2-real-postgres MINIKUBE_PROFILE=<owned-profile>`.
+`MINIKUBE_PROFILE=<owned-profile> CONTROL_API_REAL_PG_CONTEXT=<owned-profile>
+make minikube-t2-real-postgres`.
 
+- The orchestrator runs a fast Node/package/Docker preflight before T0. Fix
+  that first instead of paying T0/bootstrap cost for a missing local dependency.
+  Docker probes, pulls, builds, image loads, Minikube metadata reads, and the
+  targeted user-facing health command are bounded and terminate their process
+  groups on timeout or interrupt.
+- T1 is intentionally serial (`VITEST_MAX_WORKERS=1`, no file parallelism).
+  The Real PostgreSQL fixtures and cluster-global roles make wider concurrency
+  unsafe, not an optimization.
 - T1 is fail-loud: an unavailable DSN, an isolated server that did not start,
   or zero executed tests is FAIL. Never report green from skipped suites. The
-  JSON reporter must be complete and green, and the Vitest process must also
-  exit zero; a green reporter cannot hide teardown, worker, OOM, or signal
+  JSON reporter must be complete and green, must identify exactly every
+  selected physical file, and the Vitest process must also exit zero; a green
+  reporter cannot hide teardown, worker, OOM, signal, or partial-selection
   failure.
 - Role-reset suites (cluster-global role drop/rewrite) run against a
   throwaway `postgres:16-alpine`, never the shared `control-postgres`.
@@ -112,14 +134,17 @@ MINIKUBE_T2_PASS
 T0=PASS|SKIPPED
 T1=PASS|SKIPPED
 T2=PASS
+NP08_HCC_AUTHORIZATION=PASS
+Health=PASS|NOT_RUN
 Playwright=PASS|NOT_RUN
 evidence=<path under .local-notes/infra/runs/>
 ```
 
 Report to the user exactly these lane statuses plus HEAD, profile, and the
 evidence path. `SKIPPED` is legitimate only for T0/T1 previously green on the
-same HEAD (say so explicitly). Optional user-facing checks are opt-in:
-`T2_HEALTHCHECK_COMMAND`, `T2_PLAYWRIGHT_COMMAND`
+same HEAD (say so explicitly). `T2_HEALTHCHECK_COMMAND` is mandatory for
+`targeted-sync` and bounded by `T2_HEALTHCHECK_TIMEOUT_SECONDS` (default 120s);
+it is optional for other transitions. `T2_PLAYWRIGHT_COMMAND` remains opt-in
 (`T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey).
 
 Evidence stays under the ignored `.local-notes/infra/runs/`. Never commit it.
@@ -128,6 +153,11 @@ Before committing anything else, run `make minikube-t2-public-boundary`.
 ## Step 5 — On failure
 
 Failures print a stable code and a next safe command. Repair the FIRST
-reported precondition and re-run the same entry point on the same HEAD.
+reported precondition on the same HEAD. While debugging T1, use the standalone
+Real PostgreSQL target; finish with one full certification run. If T0/T1 lane
+evidence is already green and NP08, health, or Playwright fails, retry with
+`minikube-t2-runtime` on the same profile instead of repeating T0/T1. NP08 may
+observe a newer same-binding access token but must never refresh/reissue or
+consume the Host refresh-token lineage.
 Do not widen the command, switch clusters, reset PVCs, or delete locks with a
 live owner. Code-by-code guidance is in `reference.md`.

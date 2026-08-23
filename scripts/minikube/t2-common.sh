@@ -9,6 +9,10 @@ T2_SCRIPT_DIR="$T2_SCRIPT_DIR"
 if [ -z "$T2_SCRIPT_DIR" ]; then T2_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"; fi
 # shellcheck source=t2-worktree-id.sh
 . "$T2_SCRIPT_DIR/t2-worktree-id.sh"
+# shellcheck source=profile-owner.sh
+. "$T2_SCRIPT_DIR/profile-owner.sh"
+# shellcheck source=port-forward-owner.sh
+. "$T2_SCRIPT_DIR/port-forward-owner.sh"
 # shellcheck source=profile-readiness.sh
 . "$T2_SCRIPT_DIR/profile-readiness.sh"
 T2_PROJECT_DIR="$T2_PROJECT_DIR"
@@ -16,10 +20,23 @@ if [ -z "$T2_PROJECT_DIR" ]; then T2_PROJECT_DIR="$(cd -- "$T2_SCRIPT_DIR/../.."
 T2_PROFILE="$T2_PROFILE"
 if [ -z "$T2_PROFILE" ]; then T2_PROFILE="$MINIKUBE_PROFILE"; fi
 T2_CONTEXT="$T2_CONTEXT"
-if [ -z "$T2_CONTEXT" ]; then T2_CONTEXT="$CONTROL_API_REAL_PG_CONTEXT"; fi
-if [ -z "$T2_CONTEXT" ]; then T2_CONTEXT="$K8S_CONTEXT"; fi
-if [ -z "$T2_CONTEXT" ]; then T2_CONTEXT="$KUBECONTEXT"; fi
-if [ -z "$T2_CONTEXT" ]; then T2_CONTEXT="$T2_PROFILE"; fi
+T2_CONTEXT_SOURCE=explicit-t2-context
+if [ -z "$T2_CONTEXT" ] && [ -n "$CONTROL_API_REAL_PG_CONTEXT" ]; then
+  T2_CONTEXT="$CONTROL_API_REAL_PG_CONTEXT"
+  T2_CONTEXT_SOURCE=explicit-control-api-real-pg-context
+fi
+if [ -z "$T2_CONTEXT" ] && [ -n "$K8S_CONTEXT" ]; then
+  T2_CONTEXT="$K8S_CONTEXT"
+  T2_CONTEXT_SOURCE=explicit-k8s-context
+fi
+if [ -z "$T2_CONTEXT" ] && [ -n "$KUBECONTEXT" ]; then
+  T2_CONTEXT="$KUBECONTEXT"
+  T2_CONTEXT_SOURCE=explicit-kubecontext
+fi
+if [ -z "$T2_CONTEXT" ]; then
+  T2_CONTEXT="$T2_PROFILE"
+  T2_CONTEXT_SOURCE=implicit-profile-fallback
+fi
 T2_TIMEOUT_SECONDS="$T2_TIMEOUT_SECONDS"
 if [ -z "$T2_TIMEOUT_SECONDS" ]; then T2_TIMEOUT_SECONDS="$T2_TIMEOUT"; fi
 if [ -z "$T2_TIMEOUT_SECONDS" ]; then T2_TIMEOUT_SECONDS=180; fi
@@ -68,6 +85,8 @@ T2_LOCK_DIR=""
 T2_LOCK_KEY=""
 T2_EVIDENCE_DIR=""
 T2_EVIDENCE_FILE=""
+T2_EVIDENCE_KIND="$T2_EVIDENCE_KIND"
+if [ -z "$T2_EVIDENCE_KIND" ]; then T2_EVIDENCE_KIND=certification; fi
 T2_LOCK_HELD=false
 T2_LOCK_RELEASED=false
 T2_LOCK_TOKEN="$T2_LOCK_TOKEN"
@@ -143,6 +162,13 @@ t2_mk() {
   minikube -p "$T2_PROFILE" "$@"
 }
 
+t2_require_explicit_context() {
+  if [ "$T2_CONTEXT_SOURCE" = implicit-profile-fallback ]; then
+    T2_NEXT_COMMAND='set CONTROL_API_REAL_PG_CONTEXT (or T2_CONTEXT) to the generated branch-owned context'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'Kubernetes context must be supplied explicitly; profile-name fallback is not accepted'
+  fi
+}
+
 t2_canonical_path() {
   (cd -- "$1" 2>/dev/null && pwd -P)
 }
@@ -197,6 +223,7 @@ t2_repo_metadata() {
 }
 
 t2_profile_scope() {
+  t2_require_explicit_context
   if [ -z "$T2_PROFILE" ] || [ -z "$T2_CONTEXT" ] || [ "$T2_PROFILE" != "$T2_CONTEXT" ]; then
     T2_NEXT_COMMAND='set MINIKUBE_PROFILE and CONTROL_API_REAL_PG_CONTEXT to the same generated profile'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'an explicit branch-owned profile and matching Kubernetes context are required'
@@ -210,40 +237,22 @@ t2_profile_scope() {
     T2_NEXT_COMMAND='use the generated profile name without shell metacharacters'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'profile name is not a valid local Minikube identifier'
   fi
-  if [ ! -f "$T2_PROFILE_ENV" ]; then
-    T2_NEXT_COMMAND='generate profile.env and ports.env with the branch profile helper, then retry'
-    t2_fail DEVELOPMENT_SCOPE_REQUIRED "generated profile metadata is missing: $T2_PROFILE_ENV"
+  if ! profile_owner_validate_selection "$T2_PROFILE_ENV" "$T2_PORTS_ENV" \
+    "$T2_PROJECT_DIR" "$T2_BRANCH" "$T2_PROFILE"; then
+    case "$PROFILE_OWNER_ERROR_CODE" in
+      PROFILE_METADATA_MISSING)
+        T2_NEXT_COMMAND='resolve or generate profile.env with the branch profile helper, then retry' ;;
+      PROFILE_PORTS_MISSING)
+        T2_NEXT_COMMAND='restore the persisted profile-owned ports.env; never regenerate adopted ports' ;;
+      PROFILE_PORTS_INVALID)
+        T2_NEXT_COMMAND='repair the selected profile metadata through the branch profile helper; do not invent ports' ;;
+      *)
+        T2_NEXT_COMMAND='resolve the unique profile owned by this canonical worktree and branch, then retry' ;;
+    esac
+    t2_fail PROFILE_OWNERSHIP_MISMATCH "$PROFILE_OWNER_ERROR_MESSAGE"
   fi
-  local profile_name profile_repo profile_branch profile_sha profile_dirty
-  profile_name="$(awk -F= '$1 == "PROFILE" {print substr($0, index($0,"=")+1); exit}' "$T2_PROFILE_ENV" 2>/dev/null || true)"
-  profile_repo="$(awk -F= '$1 == "REPO_DIR" {print substr($0, index($0,"=")+1); exit}' "$T2_PROFILE_ENV" 2>/dev/null || true)"
-  profile_branch="$(awk -F= '$1 == "BRANCH" {print substr($0, index($0,"=")+1); exit}' "$T2_PROFILE_ENV" 2>/dev/null || true)"
-  profile_sha="$(awk -F= '$1 == "SHA_SHORT" {print substr($0, index($0,"=")+1); exit}' "$T2_PROFILE_ENV" 2>/dev/null || true)"
-  profile_dirty="$(awk -F= '$1 == "DIRTY" {print substr($0, index($0,"=")+1); exit}' "$T2_PROFILE_ENV" 2>/dev/null || true)"
-  if [ "$profile_name" != "$T2_PROFILE" ] || [ -z "$profile_repo" ] || [ -z "$profile_branch" ] || [ -z "$profile_sha" ]; then
-    T2_NEXT_COMMAND='regenerate the profile metadata from the current worktree, then retry'
-    t2_fail PROFILE_OWNERSHIP_MISMATCH 'profile metadata is incomplete or names a different profile'
-  fi
-  if [ "$profile_dirty" = true ]; then
-    T2_NEXT_COMMAND='commit or restore the worktree, then regenerate the profile metadata'
-    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'profile metadata was generated from a dirty worktree'
-  fi
-  if [ "$(t2_canonical_path "$profile_repo")" != "$T2_PROJECT_DIR" ]; then
-    T2_NEXT_COMMAND='use the profile generated by this Evenfire worktree, not another worktree'
-    t2_fail PROFILE_OWNERSHIP_MISMATCH 'profile metadata belongs to another worktree'
-  fi
-  if [ "$profile_branch" != "$T2_BRANCH" ]; then
-    T2_NEXT_COMMAND='regenerate the profile for the current branch'
-    t2_fail PROFILE_OWNERSHIP_MISMATCH 'profile branch does not match current branch'
-  fi
-  # A healthy branch-owned profile is reusable across commits. The cache SHA
-  # is historical naming metadata; exact runtime identity is enforced below
-  # by the pre-gate marker's gitHead/worktreeId pair, not by recreating a
-  # Minikube cluster for every commit.
-  if [ ! -f "$T2_PORTS_ENV" ]; then
-    T2_NEXT_COMMAND='generate the profile-owned random ports before starting a gate'
-    t2_fail DEVELOPMENT_SCOPE_REQUIRED "profile-owned ports.env is missing: $T2_PORTS_ENV"
-  fi
+  # CREATED_HEAD/SHA_SHORT is historical creation metadata only. Exact runtime
+  # freshness remains the marker's gitHead + worktreeId + clusterFingerprint.
 }
 
 t2_context_check() {
@@ -660,65 +669,82 @@ PY
   fi
 }
 
+t2_port_forward_targets_context() {
+  local command_line="$1" index context_matches=false port_forward=false
+  local -a argv=()
+  read -r -a argv <<<"$command_line"
+  [ "${#argv[@]}" -gt 0 ] || return 1
+  [ "${argv[0]##*/}" = kubectl ] || return 1
+  for ((index = 1; index < ${#argv[@]}; index += 1)); do
+    case "${argv[$index]}" in
+      port-forward) port_forward=true ;;
+      "--context=$T2_CONTEXT") context_matches=true ;;
+      --context)
+        if [ $((index + 1)) -lt "${#argv[@]}" ] &&
+           [ "${argv[$((index + 1))]}" = "$T2_CONTEXT" ]; then
+          context_matches=true
+        fi
+        ;;
+    esac
+  done
+  [ "$port_forward" = true ] && [ "$context_matches" = true ]
+}
+
 t2_pid_file_matches_process() {
-  local pid_file="$1" pid="$2" recorded_pid recorded_start actual_start
-  recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
-  recorded_start="$(sed -n 's/^PROCESS_START=//p' "$pid_file" 2>/dev/null | head -1 || true)"
-  [ "$recorded_pid" = "$pid" ] || return 1
-  [ -n "$recorded_start" ] || return 1
-  [ "$recorded_start" = unavailable ] && return 0
-  actual_start="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//' || true)"
-  [ -n "$actual_start" ] && [ "$actual_start" = "$recorded_start" ]
+  local pid_file="$1" pid="$2" actual_start command_line
+  pf_owner_read_record "$pid_file" || return 1
+  [ "$PF_OWNER_RECORD_FIRST_PID" = "$pid" ] || return 1
+  [ "$PF_OWNER_RECORD_PROFILE" = "$T2_PROFILE" ] || return 1
+  [ "$PF_OWNER_RECORD_CONTEXT" = "$T2_CONTEXT" ] || return 1
+  [ "$PF_OWNER_RECORD_WORKTREE" = "$T2_PROJECT_DIR" ] || return 1
+  actual_start="$(pf_owner_process_start "$pid")" || return 1
+  [ "$actual_start" = "$PF_OWNER_RECORD_START" ] || return 1
+  command_line="$(pf_owner_process_command "$pid")" || return 1
+  pf_owner_command_matches "$command_line" "$PF_OWNER_RECORD_CONTEXT" \
+    "$PF_OWNER_RECORD_NAMESPACE" "$PF_OWNER_RECORD_SERVICE" \
+    "$PF_OWNER_RECORD_LOCAL_PORT" "$PF_OWNER_RECORD_REMOTE_PORT" || return 1
+  actual_start="$(pf_owner_process_start "$pid")" || return 1
+  [ "$actual_start" = "$PF_OWNER_RECORD_START" ]
 }
 
 t2_process_check() {
-  local uid pid ppid rest command_line comm allowed pid_file recorded_pid
-  local safe_profile
-  safe_profile="$(printf '%s' "$T2_PROFILE" | tr -c 'A-Za-z0-9_.-' '_')"
+  local uid pid ppid rest command_line comm pid_file recorded_pid
+  local matching_records invalid_record
   # Only real kubectl port-forward processes. A wrapper whose argv merely
-  # mentions those words is not a port-forward (rejected by comm=kubectl).
+  # mentions those words is not a port-forward (rejected by exact argv0/comm).
   # Default IFS so UID/PID/PPID split. `IFS=` left pid empty and skipped every line.
   # awk is a loose pre-filter: kubectl as argv0/path token AND a later
   # standalone port-forward token. Flags may sit between those tokens.
   while read -r uid pid ppid rest; do
     [ -n "$pid" ] || continue
-    command_line="$uid $pid $ppid $rest"
+    command_line="$(pf_owner_process_command "$pid" 2>/dev/null || true)"
+    [ -n "$command_line" ] || continue
     comm="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
-    case "$comm" in
-      *kubectl*) ;;
+    case "${comm##*/}" in
+      kubectl) ;;
       *) continue ;;
     esac
-    allowed=false
-    for pid_file in \
-      "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid \
-      /tmp/pf-"$safe_profile"-*.pid; do
-      [ -f "$pid_file" ] || continue
-      recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
-      if [ "$recorded_pid" = "$pid" ] && t2_pid_file_matches_process "$pid_file" "$pid"; then
-        allowed=true
-      fi
-    done
-    # pf-all-stack.sh is the canonical gate forwarder and records its child
-    # PIDs in /tmp/pf-<profile>-*.pid. Accept those PIDs as profile-owned too;
-    # otherwise T1 rejects the forwards that pre-gate-sync just started.
-    for pid_file in "/tmp/pf-${safe_profile}-"*.pid; do
-      [ -f "$pid_file" ] || continue
-      recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
-      if [[ -n "$recorded_pid" && "$command_line" == *" $recorded_pid "* ]] &&
-         t2_pid_file_matches_process "$pid_file" "$recorded_pid"; then
-        allowed=true
-      fi
-    done
-    # Unrelated developer forwards launched without --context are not
-    # attributable to this profile and must not make its gate red. A forward
-    # that names this profile/context, or one recorded in this profile's PID
-    # registry, is attributable and must be owned by this run.
-    if [[ "$command_line" != *"$T2_PROFILE"* && "$command_line" != *"$T2_CONTEXT"* && "$allowed" != true ]]; then
+    # Context-less or differently pinned developer forwards are not
+    # attributable to this profile. Exact-token matching prevents a profile
+    # name that is merely a substring of another context from becoming ours.
+    if ! t2_port_forward_targets_context "$command_line"; then
       continue
     fi
-    if [ "$allowed" != true ]; then
+    matching_records=0
+    invalid_record=false
+    for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid; do
+      [ -f "$pid_file" ] || continue
+      recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+      [ "$recorded_pid" = "$pid" ] || continue
+      if t2_pid_file_matches_process "$pid_file" "$pid"; then
+        matching_records=$((matching_records + 1))
+      else
+        invalid_record=true
+      fi
+    done
+    if [ "$invalid_record" = true ] || [ "$matching_records" -ne 1 ]; then
       T2_NEXT_COMMAND='stop the unrelated profile port-forward or select the owner worktree; do not share it'
-      t2_fail PORT_FORWARD_CONFLICT 'a port-forward for this profile is owned by another process'
+      t2_fail PORT_FORWARD_CONFLICT 'a port-forward for this profile lacks one exact ownership record'
       return 1
     fi
   done < <(ps -ef 2>/dev/null | awk '/([^[:space:]]*\/)?kubectl([[:space:]]|$)/ && /[[:space:]]port-forward([[:space:]]|$)/ {print}' || true)
@@ -990,7 +1016,7 @@ t2_evidence_write() {
   T2_WORKTREE_ID="$T2_WORKTREE_ID" T2_RUN_ID="$T2_RUN_ID" T2_GATE_ID="$T2_GATE_ID" \
   T2_PROFILE="$T2_PROFILE" T2_CONTEXT="$T2_CONTEXT" T2_CLUSTER_FINGERPRINT="$T2_CLUSTER_FINGERPRINT" \
   T2_PROFILE_STATUS="$T2_PROFILE_STATUS" T2_PROFILE_HEALTHY="$T2_PROFILE_HEALTHY" \
-  T2_EVIDENCE_DIR="$T2_EVIDENCE_DIR" \
+  T2_EVIDENCE_DIR="$T2_EVIDENCE_DIR" T2_EVIDENCE_KIND="$T2_EVIDENCE_KIND" \
   T2_IMAGE_MANIFEST="$T2_IMAGE_MANIFEST" T2_IMAGE_SOURCE="$T2_IMAGE_SOURCE" T2_IMAGE_TAG="$T2_IMAGE_TAG" \
   python3 - "$file" "$T2_EVIDENCE_FILE" <<'PY'
 import json
@@ -1004,14 +1030,24 @@ if prior_path.exists():
     try: prior = json.loads(prior_path.read_text())
     except ValueError: prior = {}
 prior.setdefault("evidenceVersion", 1)
-prior["certificationVersion"] = 1
+evidence_kind = os.environ.get("T2_EVIDENCE_KIND", "certification")
+if evidence_kind not in {"certification", "planner"}:
+    raise SystemExit(f"unsupported T2 evidence kind: {evidence_kind}")
+prior["evidenceKind"] = evidence_kind
+if evidence_kind == "certification":
+    prior["certificationVersion"] = 1
+else:
+    prior.pop("certificationVersion", None)
 prior.setdefault("runId", os.environ.get("T2_RUN_ID", ""))
 now = datetime.now(timezone.utc)
-prior.setdefault("attestationStartedAt", now.isoformat().replace("+00:00", "Z"))
-prior.setdefault(
-    "attestationExpiresAt",
-    (now + timedelta(hours=24)).isoformat().replace("+00:00", "Z"),
-)
+if evidence_kind == "certification":
+    prior.setdefault("attestationStartedAt", now.isoformat().replace("+00:00", "Z"))
+    prior.setdefault(
+        "attestationExpiresAt",
+        (now + timedelta(hours=24)).isoformat().replace("+00:00", "Z"),
+    )
+else:
+    prior.setdefault("plannerStartedAt", now.isoformat().replace("+00:00", "Z"))
 def redact(value):
     import re
     value = str(value or "")
@@ -1021,6 +1057,7 @@ def redact(value):
     value = re.sub(r"(?i)(?:password|token|secret|api[_-]?key|private[_-]?key)\s*[:=]\s*[^\s,;]+", "<secret-assignment-redacted>", value)
     return value
 
+detail = redact(os.environ.get("DETAIL", ""))
 prior.update({
     "repository": os.environ.get("T2_PROJECT_DIR", ""),
     "branch": os.environ.get("T2_BRANCH", ""),
@@ -1042,27 +1079,46 @@ prior.update({
     "imageTag": os.environ.get("T2_IMAGE_TAG", ""),
     "phase": os.environ.get("PHASE", ""),
     "status": os.environ.get("STATUS", ""),
-    "detail": redact(os.environ.get("DETAIL", "")),
+    "detail": detail,
 })
 phase = os.environ.get("PHASE", "")
 status = os.environ.get("STATUS", "")
-attestation = prior.get("attestationStatus", "IN_PROGRESS")
-if status in {"FAIL", "INVALIDATED"}:
-    attestation = "INVALIDATED"
-elif phase == "complete" and status == "PASS":
-    attestation = "PASS"
-prior["attestationStatus"] = attestation
-lane_attestation = prior.get("laneAttestationStatus", "IN_PROGRESS")
-if phase == "lanes" and status == "PASS":
-    lane_attestation = "PASS"
-elif phase == "lock-cleanup" and status == "INVALIDATED":
-    lane_attestation = "INVALIDATED"
-prior["laneAttestationStatus"] = lane_attestation
-prior.setdefault("phases", []).append({
+if evidence_kind == "planner":
+    planner_status = prior.get("plannerStatus", "IN_PROGRESS")
+    if status in {"FAIL", "INVALIDATED"}:
+        planner_status = "FAIL"
+    elif phase == "preflight" and status == "PASS":
+        planner_status = "PASS"
+    prior["plannerStatus"] = planner_status
+    prior["attestationStatus"] = "NOT_APPLICABLE"
+    prior["laneAttestationStatus"] = "NOT_APPLICABLE"
+else:
+    attestation = prior.get("attestationStatus", "IN_PROGRESS")
+    if status in {"FAIL", "INVALIDATED"}:
+        attestation = "INVALIDATED"
+    elif phase == "complete" and status == "PASS":
+        attestation = "PASS"
+    prior["attestationStatus"] = attestation
+    lane_attestation = prior.get("laneAttestationStatus", "IN_PROGRESS")
+    if phase == "lanes" and status == "PASS":
+        lane_attestation = "PASS"
+    elif phase == "lock-cleanup" and status == "INVALIDATED":
+        lane_attestation = "INVALIDATED"
+    prior["laneAttestationStatus"] = lane_attestation
+phase_entry = {
     "name": os.environ.get("PHASE", ""),
     "status": os.environ.get("STATUS", ""),
+    "detail": detail,
     "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat().replace("+00:00", "Z"),
-})
+}
+import re
+duration_match = re.search(r"(?:^|[;\s])duration(?:Seconds)?=(\d+(?:\.\d+)?)(ms|s)?(?:$|[;\s])", detail)
+if duration_match:
+    duration = float(duration_match.group(1))
+    if duration_match.group(2) == "ms":
+        duration /= 1000
+    phase_entry["durationSeconds"] = duration
+prior.setdefault("phases", []).append(phase_entry)
 path.write_text(json.dumps(prior, indent=2, sort_keys=True) + "\n")
 PY
   mv -- "$file" "$T2_EVIDENCE_FILE"

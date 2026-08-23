@@ -3,25 +3,72 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+WORKTREE_ROOT="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel 2>/dev/null)" || {
+  echo 'ERROR: unable to resolve the port-forward worktree root' >&2
+  exit 1
+}
+WORKTREE_ROOT="$(cd -- "${WORKTREE_ROOT}" && pwd -P)"
+# shellcheck source=scripts/minikube/port-forward-owner.sh
+source "${SCRIPT_DIR}/port-forward-owner.sh"
+
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
-KC=(kubectl --context="${PROFILE}")
+CONTEXT="${KUBECONTEXT:-${PROFILE}}"
+KC=(kubectl "--context=${CONTEXT}")
 HOLD=false
-PIDS=()
 PIDFILES=()
+PIDFILE_NAMESPACES=()
 PIDFILE_SERVICES=()
+PIDFILE_LOCAL_PORTS=()
+PIDFILE_REMOTE_PORTS=()
 SAFE_PROFILE="${PROFILE//[^A-Za-z0-9_.-]/_}"
 HAS_PROFILE_OWNED_PORTS=false
 STARTUP_COMPLETE=false
+PROFILE_PIDS_DIR=''
+HEALTH_ATTEMPTS="${PF_HEALTH_ATTEMPTS:-20}"
+HEALTH_DELAY="${PF_HEALTH_DELAY:-0.5}"
+STARTUP_DELAY="${PF_STARTUP_DELAY:-0.2}"
 if [[ ! "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
   echo "ERROR: invalid Minikube profile identifier: $PROFILE" >&2
   exit 1
 fi
-set +u
-PROFILE_PID_ROOT="$CLERUM_PROFILE_CACHE_ROOT"
-set -u
-if [[ -z "$PROFILE_PID_ROOT" ]]; then
-  PROFILE_PID_ROOT="$HOME/.cache/clerum/minikube-profiles"
+if [[ "${CONTEXT}" != "${PROFILE}" ]]; then
+  echo "ERROR: Minikube profile/context mismatch (${PROFILE} != ${CONTEXT}); refusing a foreign port-forward" >&2
+  exit 1
 fi
+if [[ ! "${HEALTH_ATTEMPTS}" =~ ^[1-9][0-9]*$ ||
+      ! "${HEALTH_DELAY}" =~ ^[0-9]+([.][0-9]+)?$ ||
+      ! "${STARTUP_DELAY}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo 'ERROR: invalid port-forward startup/health wait configuration' >&2
+  exit 1
+fi
+PROFILE_PID_ROOT="${CLERUM_PROFILE_CACHE_ROOT:-${HOME}/.cache/clerum/minikube-profiles}"
+[[ "${PROFILE_PID_ROOT}" == /* ]] || {
+  echo "ERROR: profile cache root must be absolute: ${PROFILE_PID_ROOT}" >&2
+  exit 1
+}
+
+ensure_private_directory() {
+  local directory="$1"
+  [[ ! -L "${directory}" ]] || {
+    echo "ERROR: refusing a symlinked profile cache directory: ${directory}" >&2
+    return 1
+  }
+  mkdir -p -- "${directory}"
+  [[ -d "${directory}" && ! -L "${directory}" ]] || {
+    echo "ERROR: profile cache path is not a private directory: ${directory}" >&2
+    return 1
+  }
+}
+
+prepare_profile_pid_directory() {
+  local profile_dir="${PROFILE_PID_ROOT}/${PROFILE}"
+  ensure_private_directory "${PROFILE_PID_ROOT}"
+  ensure_private_directory "${profile_dir}"
+  PROFILE_PIDS_DIR="${profile_dir}/pids"
+  ensure_private_directory "${PROFILE_PIDS_DIR}"
+  chmod 700 "${PROFILE_PIDS_DIR}"
+}
 
 load_branch_profile_ports_env() {
   local file="$1"
@@ -60,7 +107,7 @@ load_branch_profile_ports_env() {
   done < "${file}"
 }
 
-BRANCH_PROFILE_PORTS_ENV="${CLERUM_PROFILE_PORTS_ENV:-${HOME}/.cache/clerum/minikube-profiles/${PROFILE}/ports.env}"
+BRANCH_PROFILE_PORTS_ENV="${CLERUM_PROFILE_PORTS_ENV:-${PROFILE_PID_ROOT}/${PROFILE}/ports.env}"
 if [[ -f "${BRANCH_PROFILE_PORTS_ENV}" ]]; then
   load_branch_profile_ports_env "${BRANCH_PROFILE_PORTS_ENV}"
   HAS_PROFILE_OWNED_PORTS=true
@@ -129,58 +176,32 @@ require_random_port_for_branch_profile REGISTRY_API_PORT "${REGISTRY_API_PORT}" 
 require_random_port_for_branch_profile WORKFLOW_APPROVAL_READER_PORT "${WORKFLOW_APPROVAL_READER_PORT}" 8098
 require_random_port_for_branch_profile MCP_HOST_PORT "${MCP_HOST_PORT}" 8080
 
+prepare_profile_pid_directory
+umask 077
+
 cleanup() {
-  if [[ "${HOLD}" != "true" && "${STARTUP_COMPLETE}" == "true" ]]; then
-    return 0
-  fi
-  local index
-  for index in "${!PIDFILES[@]}"; do
-    kill_owned_pidfile "${PIDFILES[$index]}" "${PIDFILE_SERVICES[$index]}" || true
-  done
-}
-
-kill_owned_pidfile() {
-  local pidfile="$1"
-  local service="$2"
-  local pid command_line expected_start actual_start
-  [[ -f "$pidfile" ]] || return 0
-  pid="$(sed -n '1p' "$pidfile" 2>/dev/null || true)"
-  if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
-    rm -f -- "$pidfile"
-    return 0
-  fi
-  if ! kill -0 "$pid" 2>/dev/null; then
-    rm -f -- "$pidfile"
-    return 0
-  fi
-  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  if [[ "$command_line" != *port-forward* ||
-        "$command_line" != *"svc/$service"* ||
-        "$command_line" != *"$PROFILE"* ]]; then
-    echo "ERROR: refusing to kill PID $pid from $pidfile; it is not the $PROFILE $service port-forward" >&2
-    return 1
-  fi
-  expected_start="$(sed -n 's/^PROCESS_START=//p' "$pidfile" 2>/dev/null | head -1 || true)"
-  if [[ -z "$expected_start" ]]; then
-    echo "ERROR: refusing to kill PID $pid from $pidfile; its process-start signature is missing" >&2
-    return 1
-  fi
-  if [[ "$expected_start" != unavailable ]]; then
-    actual_start="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//' || true)"
-    if [[ -z "$actual_start" || "$actual_start" != "$expected_start" ]]; then
-      echo "ERROR: refusing to kill PID $pid from $pidfile; its process-start signature changed" >&2
-      return 1
+  local index cleanup_status=0
+  for ((index = ${#PIDFILES[@]} - 1; index >= 0; index -= 1)); do
+    if ! pf_owner_cleanup_record "${PIDFILES[$index]}" "${PROFILE}" "${CONTEXT}" \
+      "${WORKTREE_ROOT}" "${PIDFILE_NAMESPACES[$index]}" \
+      "${PIDFILE_SERVICES[$index]}" "${PIDFILE_LOCAL_PORTS[$index]}" \
+      "${PIDFILE_REMOTE_PORTS[$index]}"; then
+      cleanup_status=1
     fi
-  fi
-  kill "$pid" 2>/dev/null || true
-  rm -f -- "$pidfile"
+  done
+  return "${cleanup_status}"
 }
 
-write_pidfile() {
-  local pidfile="$1" pid="$2" process_start
-  process_start="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//' || true)"
-  [ -n "$process_start" ] || process_start=unavailable
-  printf '%s\nPROCESS_START=%s\n' "$pid" "$process_start" >"$pidfile"
+on_exit() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  if [[ "${HOLD}" == true || "${STARTUP_COMPLETE}" != true || "${status}" -ne 0 ]]; then
+    cleanup || cleanup_status=$?
+  fi
+  if [[ "${status}" -eq 0 && "${cleanup_status}" -ne 0 ]]; then
+    status="${cleanup_status}"
+  fi
+  exit "${status}"
 }
 
 start_pf() {
@@ -190,37 +211,62 @@ start_pf() {
   local ports="$4"
   local health_url="${5:-}"
   local log="/tmp/pf-${SAFE_PROFILE}-${name}.log"
-  local pidfile="/tmp/pf-${SAFE_PROFILE}-${name}.pid"
-  local profile_pids_dir="$PROFILE_PID_ROOT/$SAFE_PROFILE/pids"
-  local profile_pidfile="${profile_pids_dir}/${name}.pid"
+  local legacy_pidfile="/tmp/pf-${SAFE_PROFILE}-${name}.pid"
+  local profile_pidfile="${PROFILE_PIDS_DIR}/${name}.pid"
+  local local_port remote_port pid attempt
 
-  mkdir -p "$profile_pids_dir"
-  kill_owned_pidfile "$pidfile" "$service"
-  kill_owned_pidfile "$profile_pidfile" "$service"
+  [[ "${ports}" =~ ^([0-9]{1,5}):([0-9]{1,5})$ ]] || {
+    echo "ERROR: invalid port mapping for ${name}: ${ports}" >&2
+    return 1
+  }
+  local_port="${BASH_REMATCH[1]}"
+  remote_port="${BASH_REMATCH[2]}"
+  [[ -n "${health_url}" ]] || {
+    echo "ERROR: ${name} has no required health endpoint" >&2
+    return 1
+  }
+
+  # Do not migrate or kill a live legacy /tmp record: it has no canonical
+  # worktree binding. A dead legacy record is unambiguous and can be pruned.
+  if [[ -e "${legacy_pidfile}" || -L "${legacy_pidfile}" ]]; then
+    pf_owner_cleanup_record "${legacy_pidfile}" "${PROFILE}" "${CONTEXT}" \
+      "${WORKTREE_ROOT}" "${namespace}" "${service}" "${local_port}" "${remote_port}"
+  fi
+  pf_owner_cleanup_record "${profile_pidfile}" "${PROFILE}" "${CONTEXT}" \
+    "${WORKTREE_ROOT}" "${namespace}" "${service}" "${local_port}" "${remote_port}"
 
   nohup "${KC[@]}" -n "${namespace}" port-forward --address=127.0.0.1 "svc/${service}" "${ports}" >"${log}" 2>&1 </dev/null &
-  write_pidfile "${pidfile}" "$!"
-  write_pidfile "${profile_pidfile}" "$!"
-  PIDS+=("$!")
-  PIDFILES+=("$pidfile" "$profile_pidfile")
-  PIDFILE_SERVICES+=("$service" "$service")
-  echo "  ${name}: pid=$(cat "${pidfile}") ns=${namespace} svc=${service} ports=${ports}"
-  sleep 0.2
-  if ! kill -0 "$!" 2>/dev/null; then
-    echo "  ERROR: ${name} port-forward failed to stay running" >&2
-    sed -n '1,80p' "${log}" >&2 || true
-    exit 1
+  pid=$!
+  pf_owner_pause "${STARTUP_DELAY}"
+  if ! pf_owner_record_process "${profile_pidfile}" "${pid}" "${PROFILE}" \
+    "${CONTEXT}" "${WORKTREE_ROOT}" "${namespace}" "${service}" \
+    "${local_port}" "${remote_port}"; then
+    echo "  ERROR: ${name} port-forward ownership could not be recorded" >&2
+    pf_owner_abort_child "${pid}" "${CONTEXT}" "${namespace}" "${service}" \
+      "${local_port}" "${remote_port}" || true
+    return 1
   fi
 
-  if [[ -n "${health_url}" ]]; then
-    for _ in $(seq 1 20); do
-      if curl -sf -m 2 "${health_url}" >/dev/null 2>&1; then
-        return 0
-      fi
-      sleep 0.5
-    done
-    echo "  WARN: ${name} did not become healthy yet (${health_url})"
+  PIDFILES+=("${profile_pidfile}")
+  PIDFILE_NAMESPACES+=("${namespace}")
+  PIDFILE_SERVICES+=("${service}")
+  PIDFILE_LOCAL_PORTS+=("${local_port}")
+  PIDFILE_REMOTE_PORTS+=("${remote_port}")
+  echo "  ${name}: pid=${pid} ns=${namespace} svc=${service} ports=${ports}"
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    echo "  ERROR: ${name} port-forward failed to stay running" >&2
+    sed -n '1,80p' "${log}" >&2 || true
+    return 1
   fi
+
+  for ((attempt = 0; attempt < HEALTH_ATTEMPTS; attempt += 1)); do
+    if curl -sf -m 2 "${health_url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    pf_owner_pause "${HEALTH_DELAY}"
+  done
+  echo "  ERROR: ${name} did not become healthy (${health_url})" >&2
+  return 1
 }
 
 start_optional_pf() {
@@ -229,12 +275,21 @@ start_optional_pf() {
   local service="$3"
   local ports="$4"
   local health_url="${5:-}"
+  local namespace_resource service_resource
 
-  if ! "${KC[@]}" get namespace "${namespace}" >/dev/null 2>&1; then
+  if ! namespace_resource="$("${KC[@]}" get namespace "${namespace}" --ignore-not-found -o name)"; then
+    echo "  ERROR: ${name} could not inspect namespace ${namespace}" >&2
+    return 1
+  fi
+  if [[ -z "${namespace_resource}" ]]; then
     echo "  ${name}: skipped (namespace ${namespace} not present)"
     return 0
   fi
-  if ! "${KC[@]}" -n "${namespace}" get svc "${service}" >/dev/null 2>&1; then
+  if ! service_resource="$("${KC[@]}" -n "${namespace}" get svc "${service}" --ignore-not-found -o name)"; then
+    echo "  ERROR: ${name} could not inspect service ${namespace}/${service}" >&2
+    return 1
+  fi
+  if [[ -z "${service_resource}" ]]; then
     echo "  ${name}: skipped (service ${namespace}/${service} not present)"
     return 0
   fi
@@ -249,29 +304,76 @@ start_optional_deployment_pf() {
   local service="$4"
   local ports="$5"
   local health_url="${6:-}"
+  local namespace_resource deployment_resource desired
 
-  if ! "${KC[@]}" get namespace "${namespace}" >/dev/null 2>&1; then
+  if ! namespace_resource="$("${KC[@]}" get namespace "${namespace}" --ignore-not-found -o name)"; then
+    echo "  ERROR: ${name} could not inspect namespace ${namespace}" >&2
+    return 1
+  fi
+  if [[ -z "${namespace_resource}" ]]; then
     echo "  ${name}: skipped (namespace ${namespace} not present)"
     return 0
   fi
-  if ! "${KC[@]}" -n "${namespace}" get deploy "${deployment}" >/dev/null 2>&1; then
+  if ! deployment_resource="$("${KC[@]}" -n "${namespace}" get deploy "${deployment}" --ignore-not-found -o name)"; then
+    echo "  ERROR: ${name} could not inspect deployment ${namespace}/${deployment}" >&2
+    return 1
+  fi
+  if [[ -z "${deployment_resource}" ]]; then
     echo "  ${name}: skipped (deployment ${namespace}/${deployment} not present)"
     return 0
   fi
-  local desired
-  desired="$("${KC[@]}" -n "${namespace}" get deploy "${deployment}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  if [[ -z "${desired}" || "${desired}" == "0" ]]; then
-    echo "  ${name}: skipped (deployment ${namespace}/${deployment} scaled to ${desired:-0})"
+  if ! desired="$("${KC[@]}" -n "${namespace}" get deploy "${deployment}" -o jsonpath='{.spec.replicas}')"; then
+    echo "  ERROR: ${name} could not read desired replicas for ${namespace}/${deployment}" >&2
+    return 1
+  fi
+  [[ "${desired}" =~ ^[0-9]+$ ]] || {
+    echo "  ERROR: ${name} received invalid desired replicas for ${namespace}/${deployment}: ${desired:-<empty>}" >&2
+    return 1
+  }
+  if [[ "${desired}" == "0" ]]; then
+    echo "  ${name}: skipped (deployment ${namespace}/${deployment} scaled to 0)"
     return 0
   fi
 
   start_optional_pf "${name}" "${namespace}" "${service}" "${ports}" "${health_url}"
 }
 
+start_optional_mcp_host_pf() {
+  local namespace_resource service_resource
+  if ! namespace_resource="$("${KC[@]}" get namespace mcp-host --ignore-not-found -o name)"; then
+    echo '  ERROR: mcp-host could not inspect namespace mcp-host' >&2
+    return 1
+  fi
+  if [[ -z "${namespace_resource}" ]]; then
+    echo '  mcp-host: skipped (namespace mcp-host not present)'
+    return 0
+  fi
+  if ! service_resource="$("${KC[@]}" -n mcp-host get svc chatllm --ignore-not-found -o name)"; then
+    echo '  ERROR: mcp-host could not inspect service mcp-host/chatllm' >&2
+    return 1
+  fi
+  if [[ -n "${service_resource}" ]]; then
+    start_pf mcp-host mcp-host chatllm "${MCP_HOST_PORT}:8080" \
+      "http://127.0.0.1:${MCP_HOST_PORT}/v1/runtime/health"
+    return
+  fi
+  if ! service_resource="$("${KC[@]}" -n mcp-host get svc mcp-host --ignore-not-found -o name)"; then
+    echo '  ERROR: mcp-host could not inspect service mcp-host/mcp-host' >&2
+    return 1
+  fi
+  if [[ -n "${service_resource}" ]]; then
+    start_pf mcp-host mcp-host mcp-host "${MCP_HOST_PORT}:8080" \
+      "http://127.0.0.1:${MCP_HOST_PORT}/v1/runtime/health"
+    return
+  fi
+  echo '  mcp-host: skipped (service mcp-host/chatllm or mcp-host/mcp-host not present)'
+}
+
 # Install the cleanup boundary before the first background process is started.
 # A later start_pf failure must not strand forwards that were already launched.
-trap cleanup EXIT
-trap 'cleanup; exit 0' INT TERM
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "=== Starting gate port-forwards (${PROFILE}) ==="
 start_pf control-ui control-plane control-ui "${CONTROL_UI_PORT}:3000" "http://127.0.0.1:${CONTROL_UI_PORT}"
@@ -281,12 +383,7 @@ start_pf external-rest-api profiles external-rest-api "${EXTERNAL_REST_API_PORT}
 start_pf rpc-proxy rpc-proxy rpc-proxy "${RPC_PROXY_PORT}:8094" "http://127.0.0.1:${RPC_PROXY_PORT}/health"
 start_optional_pf registry-api registry registry-api "${REGISTRY_API_PORT}:8085" "http://127.0.0.1:${REGISTRY_API_PORT}/health"
 start_optional_deployment_pf workflow-approval-request-reader channels clerum-workflow-approval-request-reader workflow-approval-request-reader "${WORKFLOW_APPROVAL_READER_PORT}:8098" "http://127.0.0.1:${WORKFLOW_APPROVAL_READER_PORT}/health"
-
-if "${KC[@]}" get svc chatllm -n mcp-host >/dev/null 2>&1; then
-  start_pf mcp-host mcp-host chatllm "${MCP_HOST_PORT}:8080" "http://127.0.0.1:${MCP_HOST_PORT}/v1/runtime/health"
-elif "${KC[@]}" get svc mcp-host -n mcp-host >/dev/null 2>&1; then
-  start_pf mcp-host mcp-host mcp-host "${MCP_HOST_PORT}:8080" "http://127.0.0.1:${MCP_HOST_PORT}/v1/runtime/health"
-fi
+start_optional_mcp_host_pf
 
 STARTUP_COMPLETE=true
 echo "=== Port-forwards refreshed ==="

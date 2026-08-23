@@ -25,6 +25,36 @@ INCREMENTAL_UNMAPPED=()
 INCREMENTAL_REPULL_ALL=false
 INCREMENTAL_SHADOWED=()
 INCREMENTAL_DOCKER_ENV_APPLIED=false
+INCREMENTAL_DEADLINE_RUNNER="${INCREMENTAL_DEADLINE_RUNNER:-${PROJECT_DIR}/scripts/minikube/run-with-deadline.mjs}"
+INCREMENTAL_RUNTIME_TIMEOUT_SECONDS="${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS:-30}"
+INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS="${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS:-1800}"
+
+incremental_validate_deadline() {
+  local name="$1" value="$2" maximum="$3"
+  if ! [[ "${value}" =~ ^[1-9][0-9]*$ ]] || (( 10#${value} > maximum )); then
+    log "ERROR: ${name} must be an integer from 1 to ${maximum}" >&2
+    return 1
+  fi
+}
+
+incremental_validate_deadline INCREMENTAL_RUNTIME_TIMEOUT_SECONDS \
+  "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" 300 || exit 1
+incremental_validate_deadline INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS \
+  "${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS}" 3600 || exit 1
+[[ -f "${INCREMENTAL_DEADLINE_RUNNER}" ]] || {
+  log "ERROR: bounded runtime helper is missing: ${INCREMENTAL_DEADLINE_RUNNER}" >&2
+  exit 1
+}
+
+incremental_run_with_deadline() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  node "${INCREMENTAL_DEADLINE_RUNNER}" \
+    --timeout-seconds "${timeout_seconds}" \
+    --heartbeat-seconds "${MINIKUBE_DOCKER_HEARTBEAT_SECONDS:-20}" \
+    --kill-grace-seconds "${MINIKUBE_DOCKER_KILL_GRACE_SECONDS:-5}" \
+    --label "${label}" -- "$@"
+}
 
 incremental_add_target() {
   local selector="$1" namespace="$2" deployment="$3" target
@@ -77,7 +107,9 @@ incremental_use_minikube_docker() {
     INCREMENTAL_DOCKER_ENV_APPLIED=true
     return 0
   fi
-  if ! env_script="$(minikube -p "${PROFILE}" docker-env)"; then
+  if ! env_script="$(incremental_run_with_deadline incremental-docker-env \
+    "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
+    minikube -p "${PROFILE}" docker-env --shell bash)"; then
     # >&2 because this runs inside a command substitution on the baseline
     # path, where anything on stdout would be captured AS the baseline.
     log "ERROR: could not point Docker at minikube's daemon; a shadow build would land in the wrong daemon" >&2
@@ -101,7 +133,9 @@ incremental_release_baseline_commit() {
   incremental_use_minikube_docker
   for probe in control-api workflow-recipes external-rest-api; do
     ref="ghcr.io/evenfire-ai/${probe}:${IMAGE_TAG}"
-    revision="$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${ref}" 2>&1)"
+    revision="$(incremental_run_with_deadline incremental-image-inspect \
+      "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
+      docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${ref}")"
     rc=$?
     if [[ "${rc}" -ne 0 ]]; then
       continue
@@ -324,12 +358,16 @@ incremental_shadow_selector() {
       log "  ${local_ref} has no published counterpart; the local build is what runs"
       continue
     fi
-    if ! docker tag "${local_ref}" "${shadow_ref}"; then
+    if ! incremental_run_with_deadline incremental-image-tag \
+      "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
+      docker tag "${local_ref}" "${shadow_ref}"; then
       log "ERROR: could not shadow ${shadow_ref} with ${local_ref}; the gate would test undeployed code"
       exit 1
     fi
     if [[ "${MINIKUBE_MULTI_NODE:-false}" == "true" ]]; then
-      minikube -p "${PROFILE}" image load "${shadow_ref}" >/dev/null
+      incremental_run_with_deadline incremental-image-load \
+        "${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS}" \
+        minikube -p "${PROFILE}" image load "${shadow_ref}" >/dev/null
     fi
     INCREMENTAL_SHADOWED+=("${shadow_ref} <- ${local_ref}")
     shadowed=$((shadowed + 1))

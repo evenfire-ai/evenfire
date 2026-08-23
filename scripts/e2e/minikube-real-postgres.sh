@@ -7,6 +7,10 @@ set +x
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 source "$PROJECT_DIR/scripts/minikube/t2-common.sh"
+# shellcheck source=scripts/minikube/docker-cli-env.sh
+source "$PROJECT_DIR/scripts/minikube/docker-cli-env.sh"
+# shellcheck source=real-postgres-local-preflight.sh
+source "$SCRIPT_DIR/real-postgres-local-preflight.sh"
 
 PG_NAMESPACE="$T2_CONTROL_NAMESPACE"
 PG_SERVICE=control-postgres
@@ -16,16 +20,21 @@ PG_SECRET=control-postgres
 # throwaway PostgreSQL 16 that matches CI; the shared branch-profile database
 # is reserved for the non-control-api lane.
 T1_ISOLATED_PG_IMAGE="${T1_ISOLATED_PG_IMAGE:-postgres:16-alpine}"
+T1_DOCKER_RUN_TIMEOUT_SECONDS="${T1_DOCKER_RUN_TIMEOUT_SECONDS:-$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS}"
+T1_DOCKER_EXEC_TIMEOUT_SECONDS="${T1_DOCKER_EXEC_TIMEOUT_SECONDS:-$MINIKUBE_DOCKER_START_PROBE_TIMEOUT_SECONDS}"
+T1_DOCKER_REMOVE_TIMEOUT_SECONDS="${T1_DOCKER_REMOVE_TIMEOUT_SECONDS:-$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS}"
 T1_TIMEOUT="$T2_TIMEOUT_SECONDS"
 T1_TMP_ROOT="$T2_TMP_ROOT"
 if [ -z "$T1_TMP_ROOT" ]; then T1_TMP_ROOT=/tmp; fi
 T1_TMP_DIR=""
 PORT_FORWARD_PID=""
+PORT_FORWARD_RECORD=""
 LOCAL_PORT=""
 ADMIN_DSN=""
 ISOLATED_DSN=""
 ISOLATED_CONTAINER=""
 ISOLATED_PORT=""
+T1_DOCKER_ENV_PREPARED=false
 PG_USER=""
 PG_PASSWORD=""
 PG_DATABASE=""
@@ -35,6 +44,10 @@ T1_NEXT_COMMAND='repair the first reported Real PostgreSQL precondition, then re
 T1_TOTAL_TESTS=0
 T1_PASSED_TESTS=0
 T1_PENDING_TESTS=0
+T1_EXPECTED_FILES=0
+T1_REPORTED_FILES=0
+T1_STARTED_SECONDS="$SECONDS"
+T1_DURATION_SECONDS=0
 # Armed just before the Real PostgreSQL suites run. The exit trap must not
 # reconcile cluster credentials for a run that never reached the suites
 # (e.g. a failed precondition, or this file being sourced by a harness test).
@@ -55,35 +68,58 @@ die_t1() {
 
 stop_isolated_postgres() {
   [ -n "$ISOLATED_CONTAINER" ] || return 0
-  if docker rm -f "$ISOLATED_CONTAINER" >/dev/null 2>&1; then
+  [ "$T1_DOCKER_ENV_PREPARED" = true ] || return 1
+  if docker_cli_run_public t1-postgres-remove "$T1_DOCKER_REMOVE_TIMEOUT_SECONDS" \
+    docker rm -f "$ISOLATED_CONTAINER" >/dev/null 2>&1; then
     ISOLATED_CONTAINER=""
     return 0
   fi
   return 1
 }
 
-stop_control_postgres_forward() {
-  [ -n "$PORT_FORWARD_PID" ] || return 0
-  if ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+cleanup_t1_docker_env() {
+  [ "$T1_DOCKER_ENV_PREPARED" = true ] || return 0
+  if docker_cli_env_cleanup; then
+    T1_DOCKER_ENV_PREPARED=false
     return 0
   fi
-  local command_line
-  command_line="$(ps -p "$PORT_FORWARD_PID" -o command= 2>/dev/null || true)"
-  if [[ "$command_line" != *port-forward* || "$command_line" != *svc/control-postgres* ]]; then
-    printf '[minikube-t1] ERROR: T1 port-forward PID is not the expected control-postgres child; refusing to report cleanup success\n' >&2
+  return 1
+}
+
+prepare_t1_docker() {
+  docker_cli_env_validate_seconds T1_DOCKER_RUN_TIMEOUT_SECONDS \
+    "$T1_DOCKER_RUN_TIMEOUT_SECONDS" 3600 || return $?
+  docker_cli_env_validate_seconds T1_DOCKER_EXEC_TIMEOUT_SECONDS \
+    "$T1_DOCKER_EXEC_TIMEOUT_SECONDS" 300 || return $?
+  docker_cli_env_validate_seconds T1_DOCKER_REMOVE_TIMEOUT_SECONDS \
+    "$T1_DOCKER_REMOVE_TIMEOUT_SECONDS" 300 || return $?
+  docker_cli_env_prepare false || return $?
+  T1_DOCKER_ENV_PREPARED=true
+}
+
+stop_control_postgres_forward() {
+  [ -n "$PORT_FORWARD_PID" ] || return 0
+  [ -n "$PORT_FORWARD_RECORD" ] || {
+    printf '[minikube-t1] ERROR: T1 port-forward has no structured ownership record; refusing ambiguous cleanup\n' >&2
     return 1
-  fi
-  if ! kill "$PORT_FORWARD_PID" >/dev/null 2>&1 && kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-    return 1
-  fi
-  if kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-    if wait "$PORT_FORWARD_PID" >/dev/null 2>&1; then
-      :
+  }
+  if [ ! -e "$PORT_FORWARD_RECORD" ] && [ ! -L "$PORT_FORWARD_RECORD" ]; then
+    if [ "$(pf_owner_process_state "$PORT_FORWARD_PID")" = dead ]; then
+      PORT_FORWARD_PID=""
+      PORT_FORWARD_RECORD=""
+      return 0
     fi
-  fi
-  if kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+    printf '[minikube-t1] ERROR: T1 port-forward ownership record disappeared while its process may still be live\n' >&2
     return 1
   fi
+  if ! pf_owner_cleanup_record "$PORT_FORWARD_RECORD" "$T2_PROFILE" \
+    "$T2_CONTEXT" "$PROJECT_DIR" "$PG_NAMESPACE" "$PG_SERVICE" \
+    "$LOCAL_PORT" 5432; then
+    printf '[minikube-t1] ERROR: T1 port-forward ownership validation or cleanup failed\n' >&2
+    return 1
+  fi
+  PORT_FORWARD_PID=""
+  PORT_FORWARD_RECORD=""
   return 0
 }
 
@@ -154,13 +190,17 @@ cleanup_t1() {
   if ! stop_isolated_postgres; then
     status=1
   fi
+  if ! cleanup_t1_docker_env; then
+    status=1
+  fi
   if ! restore_gfs_runtime_credentials; then
     status=1
   fi
+  T1_DURATION_SECONDS=$((SECONDS - T1_STARTED_SECONDS))
   if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi
   if [ "$status" -eq 0 ] && [ "$T1_STATUS" = PASS ]; then
-    t2_evidence_write T1 PASS "Real PostgreSQL suites passed; tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS; cleanup=PASS"
-    t2_evidence_write complete PASS "T1=PASS tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS cleanup=PASS"
+    t2_evidence_write T1 PASS "Real PostgreSQL suites passed; files=$T1_REPORTED_FILES/$T1_EXPECTED_FILES tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS duration=${T1_DURATION_SECONDS}s; cleanup=PASS"
+    t2_evidence_write complete PASS "T1=PASS files=$T1_REPORTED_FILES/$T1_EXPECTED_FILES tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS duration=${T1_DURATION_SECONDS}s cleanup=PASS"
   elif [ "$T1_STATUS" = PASS ]; then
     t2_evidence_write T1 FAIL "Real PostgreSQL suites passed but cleanup failed; cleanup=FAIL"
   fi
@@ -172,16 +212,9 @@ trap 'handle_t1_signal INT' INT
 trap 'handle_t1_signal TERM' TERM
 
 require_t1_commands() {
-  local command_name
-  for command_name in npm node docker; do
-    if ! command -v "$command_name" >/dev/null 2>&1; then
-      T1_NEXT_COMMAND="install or enable $command_name, then re-run the Real PostgreSQL lane"
-      die_t1 LOCAL_DEPENDENCY_MISSING "required local dependency is unavailable: $command_name"
-    fi
-  done
-  if ! docker info >/dev/null 2>&1; then
-    T1_NEXT_COMMAND='start Docker Desktop or the Docker daemon, then re-run T1'
-    die_t1 LOCAL_DEPENDENCY_MISSING 'Docker is required to start the isolated T1 PostgreSQL'
+  if ! real_pg_local_preflight "$PROJECT_DIR" true; then
+    T1_NEXT_COMMAND='repair the reported local prerequisite, then re-run the standalone Real PostgreSQL lane'
+    die_t1 "$REAL_PG_PREFLIGHT_ERROR_CODE" "$REAL_PG_PREFLIGHT_ERROR_MESSAGE"
   fi
 }
 
@@ -275,9 +308,15 @@ require_isolated_control_api_files() {
 }
 
 start_isolated_postgres() {
+  if ! prepare_t1_docker; then
+    T1_NEXT_COMMAND='repair the isolated Docker runtime configuration, then re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE \
+      'isolated T1 Docker runtime could not be prepared safely'
+  fi
   ISOLATED_PORT="$(choose_local_port)"
   ISOLATED_CONTAINER="evenfire-t1-isolated-pg-$$"
-  if ! docker run -d --rm --name "$ISOLATED_CONTAINER" \
+  if ! docker_cli_run_public t1-postgres-run "$T1_DOCKER_RUN_TIMEOUT_SECONDS" \
+    docker run -d --rm --name "$ISOLATED_CONTAINER" \
     -e POSTGRES_USER=postgres \
     -e POSTGRES_DB=postgres \
     -e POSTGRES_HOST_AUTH_METHOD=trust \
@@ -294,7 +333,8 @@ start_isolated_postgres() {
   local deadline ready=false
   deadline=$((SECONDS + T1_TIMEOUT))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if docker exec "$ISOLATED_CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
+    if docker_cli_run_public t1-postgres-ready-probe "$T1_DOCKER_EXEC_TIMEOUT_SECONDS" \
+      docker exec "$ISOLATED_CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
       ready=true
       break
     fi
@@ -314,7 +354,8 @@ print("postgresql://postgres@127.0.0.1:" + port + "/postgres", end="")
 
 run_suite() {
   local package="$1" lane="$2" admin_url="$3"
-  local expected_files=0 file log_file json_file stats
+  local expected_files=0 reported_files=0 file log_file json_file stats
+  local suite_started_seconds="$SECONDS" suite_duration_seconds=0
   local -a files=() vitest_filters=()
 
   while IFS= read -r file; do
@@ -354,8 +395,9 @@ run_suite() {
   (
     cd "$PROJECT_DIR/$package"
     CONTROL_API_REAL_PG_ADMIN_URL="$admin_url" \
-    CONTROL_API_REAL_PG_REQUIRED=1 FORCE_COLOR=0 NO_COLOR=1 \
-      npm test -- --run "${vitest_filters[@]}" --reporter=json --outputFile="$json_file"
+    CONTROL_API_REAL_PG_REQUIRED=1 FORCE_COLOR=0 NO_COLOR=1 VITEST_MAX_WORKERS=1 \
+      npm test -- --run --no-file-parallelism --maxWorkers=1 \
+        "${vitest_filters[@]}" --reporter=json --outputFile="$json_file"
   ) >"$log_file" 2>&1 || suite_status=$?
   sanitize_file "$log_file"
   sanitize_file "$json_file"
@@ -364,14 +406,37 @@ run_suite() {
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
     die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter produced no result for $package ($lane)"
   }
-  # Vitest's suite counters include nested describe blocks, so they are not
-  # comparable to the number of physical *realPostgres*.test.ts files above.
-  # Validate the reporter's own total/passed suite counts instead; the file
-  # discovery count remains a separate zero-selection guard.
-  if ! stats="$(python3 - "$json_file" <<'PY'
+  # Vitest's suite counters include nested describe blocks, so compare the
+  # physical selection with testResults[].name instead of suite counters.
+  # This proves that every discovered file, and no unexpected file, ran.
+  if ! stats="$(python3 - "$json_file" "$PROJECT_DIR/$package" "${vitest_filters[@]}" <<'PY'
 import json
 import sys
-result = json.loads(open(sys.argv[1]).read())
+from pathlib import Path
+
+result = json.loads(Path(sys.argv[1]).read_text())
+package_root = Path(sys.argv[2]).resolve()
+expected = [(package_root / value).resolve() for value in sys.argv[3:]]
+test_results = result.get("testResults")
+if not isinstance(test_results, list) or not test_results:
+    print("reporter testResults is missing or empty", file=sys.stderr)
+    sys.exit(2)
+reported = []
+for item in test_results:
+    name = item.get("name") if isinstance(item, dict) else None
+    if not isinstance(name, str) or not name:
+        print("reporter contains a test result without a physical file name", file=sys.stderr)
+        sys.exit(2)
+    path = Path(name)
+    reported.append((path if path.is_absolute() else package_root / path).resolve())
+if len(reported) != len(set(reported)):
+    print("reporter contains duplicate physical file names", file=sys.stderr)
+    sys.exit(2)
+if set(reported) != set(expected):
+    missing = sorted(str(path) for path in set(expected) - set(reported))
+    unexpected = sorted(str(path) for path in set(reported) - set(expected))
+    print(f"reporter physical file mismatch missing={missing} unexpected={unexpected}", file=sys.stderr)
+    sys.exit(2)
 total_suites = int(result.get("numTotalTestSuites") or 0)
 passed_suites = int(result.get("numPassedTestSuites") or 0)
 failed_suites = int(result.get("numFailedTestSuites") or 0)
@@ -382,16 +447,19 @@ pending_tests = int(result.get("numPendingTests") or 0)
 total_tests = int(result.get("numTotalTests") or 0)
 success = bool(result.get("success"))
 print(total_suites, passed_suites, failed_suites, passed_tests, failed_tests,
-      pending_files, pending_tests, total_tests, int(success))
+      pending_files, pending_tests, total_tests, int(success), len(expected),
+      len(reported))
 PY
   )"; then
     cat "$log_file" >&2 || true
     cat "$json_file" >&2 || true
     T1_NEXT_COMMAND='inspect the Vitest reporter output, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED "Real PostgreSQL reporter was unreadable for $package ($lane)"
+    die_t1 REAL_PG_REPORT_INCOMPLETE "Real PostgreSQL reporter did not prove the exact file set for $package ($lane)"
   fi
   read -r total_suites passed_suites failed_suites passed_tests failed_tests \
-    pending_files pending_tests total_tests success <<< "$stats"
+    pending_files pending_tests total_tests success expected_files reported_files <<< "$stats"
+  T1_EXPECTED_FILES=$((T1_EXPECTED_FILES + expected_files))
+  T1_REPORTED_FILES=$((T1_REPORTED_FILES + reported_files))
   T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))
   T1_PASSED_TESTS=$((T1_PASSED_TESTS + passed_tests))
   T1_PENDING_TESTS=$((T1_PENDING_TESTS + pending_tests))
@@ -413,8 +481,9 @@ PY
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
     die_t1 REAL_PG_SUITE_FAILED "Vitest process exited $suite_status for $package ($lane)"
   fi
-  printf '[minikube-t1] PASS %s %s files=%s tests=%s skipped=0\n' \
-    "$package" "$lane" "$expected_files" "$passed_tests"
+  suite_duration_seconds=$((SECONDS - suite_started_seconds))
+  printf '[minikube-t1] PASS %s %s files=%s/%s tests=%s skipped=0 duration=%ss\n' \
+    "$package" "$lane" "$reported_files" "$expected_files" "$passed_tests" "$suite_duration_seconds"
 }
 
 main() {
@@ -466,13 +535,26 @@ main() {
     --address=127.0.0.1 svc/"$PG_SERVICE" "$LOCAL_PORT:5432" \
     >"$T1_TMP_DIR/port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
+  PORT_FORWARD_RECORD="$T1_TMP_DIR/control-postgres-forward.pid"
+  # Give the direct child one bounded scheduling turn to exec kubectl before
+  # recording exact argv/process-start identity. If that identity cannot be
+  # proven, signal only the still-owned shell child and fail the lane.
+  pf_owner_pause 0.2
+  if ! pf_owner_record_process "$PORT_FORWARD_RECORD" "$PORT_FORWARD_PID" \
+    "$T2_PROFILE" "$T2_CONTEXT" "$PROJECT_DIR" "$PG_NAMESPACE" \
+    "$PG_SERVICE" "$LOCAL_PORT" 5432; then
+    pf_owner_abort_child "$PORT_FORWARD_PID" "$T2_CONTEXT" "$PG_NAMESPACE" \
+      "$PG_SERVICE" "$LOCAL_PORT" 5432 || true
+    T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward ownership could not be proven'
+  fi
   if ! wait_for_tcp "$LOCAL_PORT"; then
     sanitize_file "$T1_TMP_DIR/port-forward.log"
     cat "$T1_TMP_DIR/port-forward.log" >&2 || true
     T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres port-forward did not become reachable'
   fi
-  if ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+  if [ "$(pf_owner_process_state "$PORT_FORWARD_PID")" != live ]; then
     sanitize_file "$T1_TMP_DIR/port-forward.log"
     cat "$T1_TMP_DIR/port-forward.log" >&2 || true
     T1_NEXT_COMMAND='repair the profile-owned port-forward and re-run T1'
@@ -498,7 +580,16 @@ print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.dec
   run_suite gfs-controller shared "$ADMIN_DSN"
   unset PG_USER PG_PASSWORD PG_DATABASE T1_REDACT_PASSWORD
   unset ADMIN_DSN ISOLATED_DSN
-  stop_isolated_postgres
+  if ! stop_isolated_postgres; then
+    T1_NEXT_COMMAND='remove the isolated T1 PostgreSQL container, then re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE \
+      'isolated T1 PostgreSQL cleanup failed or exceeded its deadline'
+  fi
+  if ! cleanup_t1_docker_env; then
+    T1_NEXT_COMMAND='repair the task-local Docker configuration cleanup, then re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE \
+      'isolated T1 Docker runtime cleanup failed'
+  fi
   T1_STATUS=PASS
   # PASS evidence is finalized by cleanup_t1 only after the profile restore and
   # lock release path has completed successfully.
@@ -506,6 +597,9 @@ print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.dec
   printf 'T1_TESTS=%s\n' "$T1_TOTAL_TESTS"
   printf 'T1_PASSED_TESTS=%s\n' "$T1_PASSED_TESTS"
   printf 'T1_PENDING_TESTS=%s\n' "$T1_PENDING_TESTS"
+  printf 'T1_EXPECTED_FILES=%s\n' "$T1_EXPECTED_FILES"
+  printf 'T1_REPORTED_FILES=%s\n' "$T1_REPORTED_FILES"
+  printf 'T1_DURATION_SECONDS=%s\n' "$((SECONDS - T1_STARTED_SECONDS))"
   printf 'T1_EVIDENCE=%s\n' "$T2_EVIDENCE_FILE"
   printf '[minikube-t1] T1 PASS: Real PostgreSQL executed against the verified local profile\n'
 }

@@ -8,12 +8,16 @@ URLs, DSNs, credentials, customer data, or raw runtime logs.
 
 The contract is local-development-only. It requires a clean development
 branch descended from the current `origin/dev`, a generated profile owned by
-that worktree and `HEAD`, and an explicit Kubernetes context for that profile.
+that canonical worktree path plus branch, and an explicit Kubernetes context
+for that profile. Exact-HEAD freshness is proved by the deployed marker and
+gate evidence, not by reallocating a profile after every commit.
 It refuses protected branches, production/GKE/Cloudflare contexts, shared
 profiles, ambiguous ownership, and Kubernetes contexts whose cluster endpoint
 does not resolve to a local Minikube address.
 
-Run the read-only planner first. It is not T0, T1, or T2. Default
+Run the cluster-read-only planner first. It may write ignored local
+lock/evidence metadata, but it does not mutate the cluster and is not T0, T1,
+or T2. Default
 `T2_PLAN_MODE=false` fails loud on `full-bootstrap` and never calls
 `pre-gate-sync`:
 
@@ -42,8 +46,11 @@ matches HEAD. `make minikube-pre-gate-sync` reconciles the profile; it does
 not emit a T2 verdict.
 
 The profile helper that generated the profile remains the source of truth for
-the profile metadata and random localhost port mapping. Do not copy ports from
-another worktree or use shared fixed ports.
+the profile metadata and random localhost port mapping. Resolve it from the
+primary checkout `.local-notes/minikube-profiles/branch.mk`. A legacy creation
+SHA is historical metadata; it does not override stable worktree+branch
+ownership. Persisted `ports.env` is allocated once. Missing, corrupt, or
+ambiguous metadata fails closed; never regenerate or copy another lane's ports.
 
 ## State transitions
 
@@ -101,6 +108,13 @@ The pre-gate marker must contain the current worktree identifier, exact `HEAD`,
 cluster fingerprint, and image coordinate. A mismatch stops with a stable
 error code instead of allowing a mixed-commit run.
 
+Mutating image builds and targeted deploys are children of that same exact
+profile lease. Public Make targets acquire it; private body targets and
+`build-images.sh` validate the inherited token again before the first Docker,
+Minikube, or Kubernetes operation. `build-images.sh --verify-only` is the
+read-only exception. Empty/unknown selectors fail before the lease or runtime
+is touched.
+
 ### Orphaned lock recovery
 
 If `PROFILE_BUSY` reports that the lock has no valid owner PID, or that a stale
@@ -123,13 +137,27 @@ the `control-postgres` PVC/deployment, all required deployment readiness, the
 image manifest/source, and real `kubectl port-forward` processes for this
 profile. The conflict check is a loose argv pre-filter (`kubectl` as argv0 or
 path token plus a later standalone `port-forward` token; flags may sit
-between them) plus a `comm=kubectl` hardening and a PID allowlist.
-Allowed port-forward PIDs live in
-`$HOME/.cache/clerum/minikube-profiles/<profile>/pids/*.pid` (and the
-legacy `/tmp/pf-<profile>-*.pid` files written by `pf-all-stack.sh`).
+between them), followed by exact `comm`, argv, PID/start-time, profile,
+context, canonical worktree, Service, and port bindings. Each live process
+must have exactly one atomic `0600` ownership record under
+`$HOME/.cache/clerum/minikube-profiles/<profile>/pids/`. A live legacy
+`/tmp/pf-<profile>-*.pid` record cannot be adopted or killed because it lacks
+the full binding; dead legacy records may be pruned.
 `make minikube-t2` invokes `pre-gate-sync` with `--skip-port-forwards` so the
 orchestrator does not plant forwards that fail its own T2 check. Secret values
-are never printed. The local Real PostgreSQL lane resolves the
+are never printed.
+
+Docker endpoint discovery runs before isolation and accepts only an explicit
+local Unix socket or loopback TCP endpoint. The endpoint is then pinned while
+Docker uses an empty task-local config; ambient auth, credential helpers,
+custom headers, and context precedence do not cross that boundary. Public
+pulls remain unauthenticated. A private pull must opt in with an explicit
+`MINIKUBE_DOCKER_AUTH_CONFIG`, scoped only to that pull. Docker probes, pulls,
+builds, Minikube image operations, Minikube status/docker-env, Kubernetes node
+inventory, and targeted health commands all have validated finite deadlines
+and process-group cleanup on timeout or interrupt.
+
+The local Real PostgreSQL lane resolves the
 `control-postgres` Secret using the explicit context, constructs its admin DSN
 only in process memory, and passes it only to the shared-server suites. Suites
 that drop or rewrite cluster-global roles (`db.realPostgresMigration`,
@@ -210,17 +238,20 @@ non-T2 scope guard.
   `control-postgres`, except the role-reset suites which use an isolated
   Postgres 16; the lane reports `PASS`, `FAIL`, `SKIPPED`, and `NOT_RUN`
   separately and fails on an unavailable DSN, an isolated server that did not
-  start, or zero executed tests. The JSON reporter must be complete and green
-  (expected files, executed/passed, zero failures, zero pending), and the
-  Vitest process must also exit zero; a green reporter cannot hide teardown,
-  worker, OOM, or signal failure.
+  start, or zero executed tests. A fast Node/package/Docker preflight runs
+  before T0. T1 is serial by contract (`VITEST_MAX_WORKERS=1`, no file
+  parallelism). The JSON reporter must be complete and green, its
+  `testResults[].name` set must exactly equal the selected physical files, and
+  the Vitest process must also exit zero; a green reporter cannot hide
+  teardown, worker, OOM, signal, or partial-selection failure.
 * **T2** — the final exact-head preflight inside `make minikube-t2` (or
   `make minikube-t2-runtime`): the marker matches this worktree/`HEAD`, the
   image manifest is current, PostgreSQL and required namespaces/Services are
   present, deployments are Ready, and no foreign `kubectl port-forward` owns
-  this profile. User-facing health and Control UI/Desktop Playwright journeys
-  are opt-in via `T2_HEALTHCHECK_COMMAND` / `T2_PLAYWRIGHT_COMMAND` and are
-  recorded as separate evidence statuses (`NOT_RUN` by default;
+  this profile. A targeted sync requires a bounded user-facing journey via
+  `T2_HEALTHCHECK_COMMAND`; other transitions may leave it opt-in. Control
+  UI/Desktop Playwright remains opt-in via `T2_PLAYWRIGHT_COMMAND`. Both are
+  recorded as separate evidence statuses (`NOT_RUN` when optional;
   `T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey). Product E2E scripts
   such as `scripts/e2e/e2e-hcc-rollout-readiness.sh` are not T2.
 
@@ -247,6 +278,14 @@ profile:
 
 The canonical T2 journey remains
 `scripts/e2e/e2e-np08-hcc-authorization.sh`; these helpers do not replace it.
+That journey observes the existing Host access-token lineage. It may reread a
+newer persisted access token only when the sole `hostRefs` entry,
+`recipeNamespace`, and `recipeName` exactly match the mounted access-token
+binding. It never reads a
+refresh token or calls refresh/reissue; mcp-host remains the sole writer of the
+single-use lineage. Before fixture mutation it requires the in-pod runtime
+health endpoint, and a 401 triggers a bounded access-state reread rather than a
+second writer.
 Their manual status must be recorded as `PASS`, `FAIL`, or `NOT_RUN` in the
 sanitized run evidence rather than inferred from unit or CI results.
 
@@ -262,6 +301,14 @@ development-only flag and the exact expected PVC UID; a mismatched UID is
 refused. An interrupted bootstrap leaves the profile intact and can be safely
 retried after the reported prerequisite is repaired. Do not reuse evidence
 from a different `HEAD` or profile.
+
+Retry by phase. During a T1 failure, iterate with
+`minikube-t2-real-postgres`, then run one full `minikube-t2` certification once
+green. After exact-head T0/T1 lane evidence is already `PASS`, a failure in
+NP08, a user-facing health check, or Playwright is repaired and retried with
+`minikube-t2-runtime` on the same profile/context; repeating T0/T1 adds cost
+without new evidence. A bootstrap, marker, infrastructure, or final-preflight
+failure still uses the full target.
 
 ## Evidence and redaction
 

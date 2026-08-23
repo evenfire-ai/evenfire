@@ -77,7 +77,14 @@ STUB
 #!/usr/bin/env bash
 printf 'minikube %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "$*" in
-  *docker-env*) echo 'export DOCKER_HOST="tcp://127.0.0.1:2376"'; exit 0 ;;
+  *docker-env*)
+    if [ "${TEST_MINIKUBE_HANG_DOCKER_ENV:-0}" = "1" ]; then
+      trap '' TERM
+      while :; do sleep 1; done
+    fi
+    echo 'export DOCKER_HOST="tcp://127.0.0.1:2376"'
+    exit 0
+    ;;
 esac
 exit 0
 STUB
@@ -953,6 +960,26 @@ assert_the_touched_scripts_parse() {
   fi
 }
 
+assert_incremental_runtime_calls_are_bounded() {
+  local d out rc=0
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  out="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    TEST_MINIKUBE_HANG_DOCKER_ENV=1 \
+    INCREMENTAL_RUNTIME_TIMEOUT_SECONDS=1 \
+    MINIKUBE_DOCKER_KILL_GRACE_SECONDS=1 \
+      run_incremental "$d" 'incremental_use_minikube_docker'
+  )" || rc=$?
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq '[HARNESS_DEADLINE] label=incremental-docker-env event=timeout' <<< "$out"; then
+    pass "incremental Docker daemon selection terminates at its explicit deadline"
+  else
+    fail "incremental docker-env was not bounded (rc=$rc out=$out)"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
@@ -997,6 +1024,7 @@ assert_the_pinned_render_dir_is_not_gated_on_the_generated_patch
 assert_an_unknown_image_source_is_rejected
 assert_a_targeted_build_carries_the_recorded_coordinate_forward
 assert_the_touched_scripts_parse
+assert_incremental_runtime_calls_are_bounded
 assert_every_defined_case_is_invoked
 
 exit $FAIL

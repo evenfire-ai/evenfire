@@ -7,6 +7,15 @@ iterations. Do not create a new profile merely because the current commit,
 gate, or test command changes. Preserve the verified profile by passing its
 explicit `MINIKUBE_PROFILE` value into the next operation.
 
+Resolve that profile through the primary checkout
+`.local-notes/minikube-profiles/branch.mk`; do not derive a profile from the
+current `HEAD` or invent ports. Profile identity is stable for the canonical
+worktree path plus branch, while deployed freshness is owned by the exact
+`gitHead` + `worktreeId` + `clusterFingerprint` marker. A creation SHA in
+legacy profile metadata is historical, not a reason to allocate another
+profile. Reuse the persisted `ports.env` byte-for-byte; missing, corrupt, or
+ambiguous ownership metadata must fail closed instead of regenerating ports.
+
 Before reusing a profile, record and compare all of the following:
 
 - active worktree path, branch, `HEAD`, and `origin/dev`;
@@ -23,6 +32,20 @@ also required when the selected profile is missing or unhealthy. Never use
 shared fixed localhost ports for branch-owned profiles; use the profile-owned
 random port mapping already recorded for that profile.
 
+Port-forwards are owned by atomic `0600` records bound to the exact profile,
+context, canonical worktree, namespace, Service, local/remote ports, PID,
+process start time, and `kubectl` argv. Never kill or adopt a live legacy
+`/tmp/pf-*.pid` process: it lacks enough provenance and must fail closed.
+
+All image builds and targeted deploys must enter through the documented Make
+targets or the T2 orchestrator so they inherit the exact live profile mutation
+lease. Calling `scripts/minikube/build-images.sh` directly is unsupported for
+mutating work; `--verify-only` is the read-only exception. Docker and Minikube
+operations must use finite deadlines. Docker endpoint discovery must resolve
+to an explicit local Unix socket or loopback TCP endpoint before switching to
+an empty task-local Docker config. Ambient registry credentials are never
+copied; a private pull requires an explicit `MINIKUBE_DOCKER_AUTH_CONFIG`.
+
 ## Incremental local image updates
 
 For a service-only change in an already healthy profile, rebuild and restart
@@ -31,7 +54,7 @@ only the affected workload. Prefer the existing targeted path:
 ```bash
 MINIKUBE_PROFILE=<verified-profile> \
   make minikube-deploy-service SVC=<image-selector> NS=<namespace> \
-  MINIKUBE_DEPLOYMENT=<deployment>
+  DEPLOYMENT=<deployment>
 ```
 
 Examples: `control-api` / `control-plane` / `control-api`,
@@ -68,12 +91,13 @@ runbook.
 Use these canonical entry points:
 
 ```text
-make minikube-t2-preflight
-make minikube-t2
-make minikube-t2-runtime
+MINIKUBE_PROFILE=<verified-profile> CONTROL_API_REAL_PG_CONTEXT=<verified-context> make minikube-t2-preflight
+MINIKUBE_PROFILE=<verified-profile> CONTROL_API_REAL_PG_CONTEXT=<verified-context> make minikube-t2
+MINIKUBE_PROFILE=<verified-profile> CONTROL_API_REAL_PG_CONTEXT=<verified-context> make minikube-t2-runtime
 ```
 
-`make minikube-t2-preflight` is a read-only planner. It is not T0, T1, or T2.
+`make minikube-t2-preflight` is a cluster-read-only planner; it may write its
+ignored local lock/evidence metadata. It is not T0, T1, or T2.
 With the default `T2_PLAN_MODE=false` it fails loud on an unbootstrapped
 profile and does not call `pre-gate-sync`. `make minikube-t2` is the full
 orchestrator: T0, the selected bootstrap/reconcile, T1, then T2. A T2 verdict
@@ -110,17 +134,30 @@ Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by
 silently skipping the suites. The JSON reporter must be complete and green,
-and the Vitest process must also exit zero; a green reporter cannot hide a
-teardown, worker, OOM, or signal failure.
+must identify the exact selected physical files, and the Vitest process must
+also exit zero; a green reporter cannot hide a teardown, worker, OOM, signal,
+or partial-selection failure. Run the local Node/package/Docker preflight
+before expensive T0 work. T1 is serial by safety contract
+(`VITEST_MAX_WORKERS=1`, no file parallelism); do not widen it for speed.
 Suites that drop or rewrite cluster-global roles must use the harness throwaway
 Postgres 16, never the shared `control-postgres`.
+
+NP08 observes the existing Host access-token lineage and may reread a newer,
+same-binding persisted access token. It must never consume a refresh token,
+call refresh/reissue, or weaken single-use rotation. After T0/T1 have emitted
+an exact-head lane attestation, failures in NP08, a user-facing health check, or
+Playwright retry through `minikube-t2-runtime`; T1 failures may use the
+standalone Real PostgreSQL target while iterating, followed by one full
+certification run once green.
 
 T0 (static/unit/contract checks), T1 (real PostgreSQL), T2 (validated runtime),
 CI, Control UI/Desktop Playwright, and product E2E scripts such as
 `scripts/e2e/e2e-hcc-rollout-readiness.sh` are separate evidence lanes. One
-lane does not stand in for another. User-facing health and Playwright journeys
-are opt-in on T2 via `T2_HEALTHCHECK_COMMAND` and `T2_PLAYWRIGHT_COMMAND`
-(`T2_REQUIRE_PLAYWRIGHT=true` to refuse `NOT_RUN`). Private operational state,
+lane does not stand in for another. User-facing health is mandatory and bounded
+for a `targeted-sync` transition via `T2_HEALTHCHECK_COMMAND`; it remains
+opt-in for bootstrap, full reconcile, and already-synced runs. Playwright is
+opt-in via `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses
+`NOT_RUN`). Private operational state,
 generated ports, profile metadata, logs, and evidence belong under the ignored
 `.local-notes/infra/runs/` path and must never be committed.
 

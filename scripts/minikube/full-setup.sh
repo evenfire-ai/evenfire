@@ -348,8 +348,30 @@ T2_PROFILE="${T2_PROFILE:-${PROFILE}}"
 T2_CONTEXT="${T2_CONTEXT:-${PROFILE}}"
 T2_GATE_ID="${T2_GATE_ID:-minikube-setup}"
 T2_SKIP_LOCK="${T2_SKIP_LOCK:-false}"
+T2_SETUP_HANDOFF_REQUIRED="${T2_SETUP_HANDOFF_REQUIRED:-false}"
+T2_SETUP_HANDOFF_TRANSITION="${T2_SETUP_HANDOFF_TRANSITION:-}"
+T2_SETUP_HANDOFF_ROOT="${T2_SETUP_HANDOFF_ROOT:-${PROJECT_DIR}/.local-notes/infra/t2-setup-handoffs}"
+T2_SETUP_HANDOFF_TTL_SECONDS="${T2_SETUP_HANDOFF_TTL_SECONDS:-300}"
 # shellcheck source=scripts/minikube/t2-common.sh
 source "${SCRIPT_DIR}/t2-common.sh"
+case "${T2_SETUP_HANDOFF_REQUIRED}" in
+  true|false) ;;
+  *) err "T2_SETUP_HANDOFF_REQUIRED must be true or false"; exit 1 ;;
+esac
+if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
+  if [ "${T2_SKIP_LOCK}" != true ] || [ -z "${T2_RUN_ID}" ]; then
+    err "T2 setup handoff requires the live inherited T2 lease and run identity"
+    exit 1
+  fi
+  case "${T2_SETUP_HANDOFF_TRANSITION}" in
+    full-bootstrap|full-reconcile) ;;
+    *) err "T2 setup handoff requires a full-bootstrap or full-reconcile transition"; exit 1 ;;
+  esac
+  if [ "${IMAGE_SOURCE}" != local ]; then
+    err "T2 setup handoff requires IMAGE_SOURCE=local"
+    exit 1
+  fi
+fi
 TOTAL_STEPS=12
 # MINIKUBE_IMAGE_TAG overrides the committed pin AT RENDER TIME ONLY.
 #
@@ -468,9 +490,55 @@ if [ "${MINIKUBE_FULL_SETUP_CONFIG_ONLY:-false}" = "true" ]; then
 fi
 
 MINIKUBE_START_SCRIPT="${MINIKUBE_START_SCRIPT:-${SCRIPT_DIR}/start.sh}"
+MINIKUBE_SETUP_DEADLINE_RUNNER="${MINIKUBE_SETUP_DEADLINE_RUNNER:-${SCRIPT_DIR}/run-with-deadline.mjs}"
+MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS="${MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS:-60}"
+MINIKUBE_SETUP_START_TIMEOUT_SECONDS="${MINIKUBE_SETUP_START_TIMEOUT_SECONDS:-900}"
+MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS="${MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS:-300}"
+MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS="${MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS:-300}"
+MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS="${MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS:-30}"
+
+validate_setup_deadline() {
+  local name="$1" value="$2" maximum="$3"
+  if ! [[ "${value}" =~ ^[1-9][0-9]*$ ]] || (( 10#${value} > maximum )); then
+    err "${name} must be an integer from 1 to ${maximum}"
+    return 1
+  fi
+}
+
+validate_setup_deadline MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS "${MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS}" 300
+validate_setup_deadline MINIKUBE_SETUP_START_TIMEOUT_SECONDS "${MINIKUBE_SETUP_START_TIMEOUT_SECONDS}" 1800
+validate_setup_deadline MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS "${MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS}" 900
+validate_setup_deadline MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS "${MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS}" 900
+validate_setup_deadline MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS "${MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS}" 300
+[[ -f "${MINIKUBE_SETUP_DEADLINE_RUNNER}" ]] || {
+  err "bounded runtime helper is missing: ${MINIKUBE_SETUP_DEADLINE_RUNNER}"
+  exit 1
+}
+
+run_setup_with_deadline() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  node "${MINIKUBE_SETUP_DEADLINE_RUNNER}" \
+    --timeout-seconds "${timeout_seconds}" \
+    --heartbeat-seconds "${MINIKUBE_DOCKER_HEARTBEAT_SECONDS:-20}" \
+    --kill-grace-seconds "${MINIKUBE_DOCKER_KILL_GRACE_SECONDS:-5}" \
+    --label "${label}" -- "$@"
+}
 
 minikube_status_snapshot() {
-  minikube -p "$PROFILE" status 2>/dev/null || true
+  local output status=0
+  output="$(run_setup_with_deadline minikube-setup-status \
+    "${MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS}" \
+    minikube -p "$PROFILE" status)" || status=$?
+  # `minikube status` legitimately returns a small non-zero code for an absent
+  # or partially started profile while still printing the state we classify
+  # below. Runner timeout/signal/spawn failures are operational failures and
+  # must not be reinterpreted as permission to start or recreate a profile.
+  if (( status >= 124 )); then
+    err "Minikube status probe failed before profile state could be classified (status ${status})"
+    return "$status"
+  fi
+  printf '%s' "$output"
 }
 
 minikube_status_is_healthy() {
@@ -496,7 +564,12 @@ recreate_broken_minikube_profile() {
     exit 1
   fi
   warn "Minikube profile '${PROFILE}' is partially started (host up, control plane down). Recreating it from scratch..."
-  minikube delete -p "$PROFILE" >/dev/null 2>&1 || true
+  if ! run_setup_with_deadline minikube-setup-delete \
+    "${MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS}" \
+    minikube delete -p "$PROFILE" >/dev/null; then
+    err "Failed to delete explicitly confirmed broken profile '${PROFILE}' within the deadline"
+    exit 1
+  fi
   ok "Removed broken '${PROFILE}' profile"
 }
 
@@ -507,7 +580,9 @@ start_minikube_cluster() {
   MINIKUBE_PROFILE="${PROFILE}" \
     MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}" \
     MINIKUBE_NODES="${MINIKUBE_NODES:-}" \
-    "${MINIKUBE_START_SCRIPT}"
+    run_setup_with_deadline minikube-setup-start \
+      "${MINIKUBE_SETUP_START_TIMEOUT_SECONDS}" \
+      "${MINIKUBE_START_SCRIPT}"
   ok "Minikube cluster '${PROFILE}' started"
 }
 
@@ -516,12 +591,18 @@ validate_minikube_cluster() {
   MINIKUBE_PROFILE="${PROFILE}" \
     MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}" \
     MINIKUBE_NODES="${MINIKUBE_NODES:-}" \
-    "${MINIKUBE_START_SCRIPT}" --validate-only
+    run_setup_with_deadline minikube-setup-validate \
+      "${MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS}" \
+      "${MINIKUBE_START_SCRIPT}" --validate-only
   ok "Minikube cluster '${PROFILE}' validated"
 }
 
 maybe_exit_after_cluster_step() {
   if [ "${MINIKUBE_SETUP_EXIT_AFTER_CLUSTER:-false}" = "true" ]; then
+    if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
+      err "T2 strict setup cannot stop after cluster verification"
+      return 1
+    fi
     log "MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true — stopping after cluster verification"
     exit 0
   fi
@@ -554,8 +635,12 @@ ensure_control_postgres_ready() {
 # ======================================================================
 step_header 1 $TOTAL_STEPS "Preconditions"
 
-# Check Docker is running
-if ! docker info &>/dev/null; then
+# Check Docker through the same isolated, bounded local-endpoint contract used
+# by T1 and image builds. This avoids paying setup cost after an ambient Docker
+# context or credential helper has stalled.
+if ! MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS="${MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS}" \
+  MINIKUBE_DOCKER_START_PROBE_TIMEOUT_SECONDS="${MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS}" \
+  bash "${SCRIPT_DIR}/docker-cli-env.sh" --check-info >/dev/null; then
   err "Docker is not running. Please start Docker Desktop first."
   exit 1
 fi
@@ -1637,6 +1722,36 @@ done
 
 echo ""
 echo -e "${BOLD}================================================================${NC}"
+if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
+  # The ordinary setup summary historically gates only CORE_DEPLOYS and may
+  # return zero after printing "partially complete". A T2 handoff is stricter:
+  # reuse the final T2 deployment inventory contract (including additional
+  # deployed workloads) and make an unready/missing required deployment block
+  # both publication and setup success.
+  prior_bootstrap_required="${T2_BOOTSTRAP_REQUIRED}"
+  prior_plan_mode="${T2_PLAN_MODE}"
+  T2_BOOTSTRAP_REQUIRED=false
+  T2_PLAN_MODE=false
+  if ! t2_deployment_check; then
+    all_ready=false
+  fi
+  T2_BOOTSTRAP_REQUIRED="${prior_bootstrap_required}"
+  T2_PLAN_MODE="${prior_plan_mode}"
+  if ! T2_PROJECT_DIR="${T2_PROJECT_DIR}" T2_WORKTREE_ID="${T2_WORKTREE_ID}" \
+    T2_RUN_ID="${T2_RUN_ID}" T2_PROFILE="${T2_PROFILE}" T2_CONTEXT="${T2_CONTEXT}" \
+    T2_BRANCH="${T2_BRANCH}" T2_HEAD="${T2_HEAD}" T2_SKIP_LOCK="${T2_SKIP_LOCK}" \
+    T2_LOCK_KEY="${T2_LOCK_KEY}" T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" \
+    T2_IMAGE_MANIFEST="${T2_IMAGE_MANIFEST}" \
+    T2_SETUP_HANDOFF_ROOT="${T2_SETUP_HANDOFF_ROOT}" \
+    T2_SETUP_HANDOFF_TTL_SECONDS="${T2_SETUP_HANDOFF_TTL_SECONDS}" \
+    T2_SETUP_HANDOFF_TRANSITION="${T2_SETUP_HANDOFF_TRANSITION}" \
+    T2_SETUP_HANDOFF_SETUP_COMPLETE="${all_ready}" \
+      bash "${SCRIPT_DIR}/t2-setup-handoff.sh" create; then
+    err "T2 strict setup is incomplete; refusing setup success and handoff"
+    exit 1
+  fi
+  ok "Created the one-shot T2 setup-complete handoff"
+fi
 if [ "$all_ready" = true ]; then
   echo -e "${GREEN}${BOLD}  Minikube setup complete! All core services ready.${NC}"
 else
