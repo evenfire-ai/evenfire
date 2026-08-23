@@ -30,19 +30,49 @@ vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
 }))
 
+const { pool } = await import('../src/db.js')
+
 const { config } = await import('../src/config.js')
+const { createCodexCatalogTransportFromEnv } =
+  await import('../src/services/codexSubscriptionCatalog.js')
 const { createAdminCodexSubscriptionRouter } =
   await import('../src/routes/admin/codexSubscription.js')
 
-function makeAuthedApp() {
+function makeAuthedApp(gateway?: { listResource: ReturnType<typeof vi.fn> }) {
   const app = express()
   app.use(express.json())
   app.use((req: Request & { adminAuth?: { sub: string } }, _res: Response, next: NextFunction) => {
     req.adminAuth = { sub: 'admin-1' }
     next()
   })
-  app.use(createAdminCodexSubscriptionRouter())
+  app.use(
+    gateway
+      ? createAdminCodexSubscriptionRouter(createCodexCatalogTransportFromEnv(), gateway as never)
+      : createAdminCodexSubscriptionRouter()
+  )
   return app
+}
+
+function safeCreatedRow(connectionKey: string, displayName: string) {
+  return {
+    id: `id-${connectionKey}`,
+    connection_key: connectionKey,
+    display_name: displayName,
+    created_by: null,
+    status: 'disconnected',
+    credential_revision: 1,
+    catalog_revision: 0,
+    account_fingerprint: null,
+    catalog_status: 'never_synced',
+    catalog_synced_at: null,
+    last_refresh_at: null,
+    last_auth_at: null,
+    refresh_lock_token: null,
+    refresh_lock_expires_at: null,
+    revoked_at: null,
+    created_at: new Date(),
+    updated_at: new Date(),
+  }
 }
 
 function assertNoLeak(body: unknown): void {
@@ -183,6 +213,61 @@ describe('admin Codex subscription routes', () => {
     const res = await request(app).post('/admin/llm/providers/codex-subscription/revoke')
     expect(res.status).toBe(200)
     expect(res.body.status).toBe('revoked')
+    assertNoLeak(res.body)
+  })
+
+  it('creates two connections with the same display name and distinct generated keys', async () => {
+    vi.mocked(pool.query).mockImplementation(async (_sql: string, values?: unknown[]) => ({
+      rows: [safeCreatedRow(String(values?.[0]), String(values?.[1]))],
+      rowCount: 1,
+    }))
+    const first = await request(app)
+      .post('/admin/llm/providers/codex-subscription/connections')
+      .send({ displayName: 'Codex subscription' })
+    const second = await request(app)
+      .post('/admin/llm/providers/codex-subscription/connections')
+      .send({ displayName: 'Codex subscription' })
+    expect(first.status).toBe(201)
+    expect(second.status).toBe(201)
+    expect(first.body.connectionKey).toMatch(/^codex-[a-f0-9]{16}$/)
+    expect(second.body.connectionKey).toMatch(/^codex-[a-f0-9]{16}$/)
+    expect(first.body.connectionKey).not.toBe(second.body.connectionKey)
+    expect(first.body.displayName).toBe('Codex subscription')
+    expect(second.body.displayName).toBe('Codex subscription')
+    expect(first.body.assignedHostsUnavailable).toBe(true)
+    assertNoLeak(first.body)
+    assertNoLeak(second.body)
+  })
+
+  it('marks assigned hosts unavailable when the Host list fails', async () => {
+    oauth.getConnection.mockResolvedValue({
+      connectionKey: 'team-plus',
+      status: 'connected',
+      credentialRevision: 2,
+      catalogRevision: 1,
+      accountFingerprint: 'fp',
+    })
+    const gateway = { listResource: vi.fn().mockRejectedValue(new Error('k8s down')) }
+    const hosted = makeAuthedApp(gateway)
+    const res = await request(hosted).get(
+      '/admin/llm/providers/codex-subscription/connections/team-plus'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.assignedHostsUnavailable).toBe(true)
+    expect(res.body.assignedHosts).toBeUndefined()
+    expect(gateway.listResource).toHaveBeenCalled()
+    assertNoLeak(res.body)
+  })
+
+  it('maps a keyed poll connection mismatch to 409', async () => {
+    oauth.pollDevice.mockRejectedValue(
+      new CodexSubscriptionOAuthError('connection_mismatch', 'bound elsewhere')
+    )
+    const res = await request(app).get(
+      '/admin/llm/providers/codex-subscription/connections/other-key/device/poll'
+    )
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'connection_mismatch' })
     assertNoLeak(res.body)
   })
 })

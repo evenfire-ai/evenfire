@@ -83,16 +83,20 @@ export function opaqueAttemptReceipt(input: {
 
 export type RedeemAttemptDeps = {
   enabled: boolean
+  db: { query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }> }
   withTransaction: typeof withTransaction
   loadSecrets: typeof loadCodexSubscriptionSecrets
+  getConnectionById: typeof getSafeCodexSubscriptionConnectionById
   encryptionKey: Buffer
   ensureFreshAccessToken?: (connectionKey?: string) => Promise<void>
 }
 
 const defaultRedeemDeps = (): RedeemAttemptDeps => ({
   enabled: config.codexSubscriptionEnabled,
+  db: { query: (text, values) => pool.query(text, values) },
   withTransaction,
   loadSecrets: loadCodexSubscriptionSecrets,
+  getConnectionById: getSafeCodexSubscriptionConnectionById,
   encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
   ensureFreshAccessToken: connectionKey =>
     ensureFreshCodexAccessToken({
@@ -134,10 +138,7 @@ export async function redeemLlmProviderAttempt(
     try {
       let refreshKey: string | undefined
       if (claims.connectionId) {
-        const assigned = await getSafeCodexSubscriptionConnectionById(
-          { query: (text, values) => pool.query(text, values) },
-          claims.connectionId
-        )
+        const assigned = await deps.getConnectionById(deps.db, claims.connectionId)
         refreshKey = assigned?.connectionKey
       }
       await deps.ensureFreshAccessToken(refreshKey)

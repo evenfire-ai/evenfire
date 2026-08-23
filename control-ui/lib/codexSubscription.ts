@@ -29,6 +29,7 @@ export type CodexSubscriptionConnectionView = {
   lastAuthAt: string | null
   refreshLockHeld: boolean
   assignedHosts?: CodexAssignedHost[]
+  assignedHostsUnavailable?: boolean
 }
 
 export type CodexBrowserStartView = {
@@ -129,6 +130,7 @@ export function sanitizeCodexConnection(raw: unknown): CodexSubscriptionConnecti
           )
           .map(entry => ({ name: entry.name }))
       : undefined,
+    assignedHostsUnavailable: raw.assignedHostsUnavailable === true,
     status,
     credentialRevision: pickNumber(raw.credentialRevision),
     catalogRevision: pickNumber(raw.catalogRevision),

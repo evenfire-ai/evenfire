@@ -90,6 +90,8 @@ describe('redeemLlmProviderAttempt', () => {
       { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
       {
         enabled: true,
+        db: { query: vi.fn() },
+        getConnectionById: vi.fn(),
         withTransaction: async work => work({ query: vi.fn() } as never),
         loadSecrets: async () => ({
           refreshToken: 'refresh-secret',
@@ -123,6 +125,8 @@ describe('redeemLlmProviderAttempt', () => {
         { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
         {
           enabled: true,
+          db: { query: vi.fn() },
+          getConnectionById: vi.fn(),
           withTransaction: async work => work({ query: vi.fn() } as never),
           loadSecrets: async () => {
             throw new Error('should not load secrets')
@@ -163,6 +167,8 @@ describe('redeemLlmProviderAttempt', () => {
         { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
         {
           enabled: true,
+          db: { query: vi.fn() },
+          getConnectionById: vi.fn(),
           withTransaction: async work => work({ query: vi.fn() } as never),
           loadSecrets: async () => {
             throw new Error('should not load secrets after revoke')
@@ -179,6 +185,8 @@ describe('redeemLlmProviderAttempt', () => {
         { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
         {
           enabled: false,
+          db: { query: vi.fn() },
+          getConnectionById: vi.fn(),
           withTransaction: async () => {
             throw new Error('should not run')
           },
@@ -195,6 +203,8 @@ describe('redeemLlmProviderAttempt', () => {
         { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
         {
           enabled: true,
+          db: { query: vi.fn() },
+          getConnectionById: vi.fn(),
           withTransaction: async work => work({ query: vi.fn() } as never),
           loadSecrets: async () => ({
             refreshToken: 'refresh-secret',

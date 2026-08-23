@@ -51,26 +51,23 @@ export function CodexAgentAssignment({
     if (!isCodexSubscriptionUiEnabled()) return
     const rows = await listCodexSubscriptionConnections()
     setConnections(rows)
-    const current =
-      rows.find(row => row.connectionKey === connectionRef) ??
-      rows.find(row => row.connectionKey === 'deployment-default') ??
-      rows[0] ??
-      null
+    const current = rows.find(row => row.connectionKey === connectionRef) ?? null
     setSelected(current)
-    if (current && current.connectionKey !== connectionRef) {
-      onConnectionRefChange(current.connectionKey)
-    }
     if (current?.status === 'connected') {
       const models = await listCodexConnectionModels(current.connectionKey)
       onModelsChange?.(models.filter(row => row.enabled && !row.stale).map(row => row.model))
     } else {
       onModelsChange?.([])
     }
-  }, [connectionRef, onConnectionRefChange, onModelsChange])
+  }, [connectionRef, onModelsChange])
 
   useEffect(() => {
-    void load().catch(() => undefined)
-  }, [load])
+    void load().catch(err => {
+      showToast(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions', {
+        tone: 'error',
+      })
+    })
+  }, [load, showToast])
 
   const assignable = connections.filter(
     row => row.status !== 'revoked' || row.connectionKey === connectionRef
@@ -87,10 +84,8 @@ export function CodexAgentAssignment({
       onConnectionRefChange(created.connectionKey)
       await load()
     } catch (err) {
-      showToast({
-        type: 'error',
-        title: 'Could not create subscription',
-        message: err instanceof Error ? err.message : 'Request failed',
+      showToast(err instanceof Error ? err.message : 'Could not create subscription', {
+        tone: 'error',
       })
     } finally {
       setBusy(false)
@@ -120,11 +115,7 @@ export function CodexAgentAssignment({
         if (polled.status === 'expired' || polled.status === 'denied') break
       }
     } catch (err) {
-      showToast({
-        type: 'error',
-        title: 'ChatGPT sign-in failed',
-        message: err instanceof Error ? err.message : 'Request failed',
-      })
+      showToast(err instanceof Error ? err.message : 'ChatGPT sign-in failed', { tone: 'error' })
     } finally {
       setBusy(false)
     }
@@ -136,18 +127,19 @@ export function CodexAgentAssignment({
     try {
       await syncCodexSubscriptionCatalog(selected.connectionKey)
       await load()
-      showToast({
-        type: 'success',
-        title: 'Catalog synced',
-        message: selected.displayName ?? selected.connectionKey,
+      showToast(`Catalog synced: ${selected.displayName ?? selected.connectionKey}`, {
+        tone: 'success',
       })
     } catch (err) {
       const code = (err as { code?: string } | null)?.code
-      showToast({
-        type: 'error',
-        title: code === 'no_grant' ? 'Connect ChatGPT first' : 'Catalog sync failed',
-        message: err instanceof Error ? err.message : 'Request failed',
-      })
+      showToast(
+        err instanceof Error
+          ? err.message
+          : code === 'no_grant'
+            ? 'Connect ChatGPT first'
+            : 'Catalog sync failed',
+        { tone: 'error' }
+      )
     } finally {
       setBusy(false)
     }
@@ -158,8 +150,9 @@ export function CodexAgentAssignment({
     const names = assignedHostNames(selected)
     const confirmed = await confirm({
       title: 'Revoke this ChatGPT subscription?',
-      message:
-        names.length > 0
+      message: selected.assignedHostsUnavailable
+        ? 'The agent assignment list could not be loaded. Revoke still fail-closes every Host that points at this grant.'
+        : names.length > 0
           ? `This subscription is used by ${names.length} agent(s): ${names.join(', ')}. Revoke disconnects all of them.${
               selected.connectionKey === 'deployment-default'
                 ? ' Workflow recipes that use a ChatGPT subscription also fail closed on this grant.'
@@ -189,10 +182,13 @@ export function CodexAgentAssignment({
         <label htmlFor="codex-subscription">ChatGPT subscription</label>
         <select
           id="codex-subscription"
-          value={selected?.connectionKey ?? ''}
+          value={selected?.connectionKey ?? connectionRef}
           disabled={disabled || busy}
           onChange={event => onConnectionRefChange(event.target.value)}
         >
+          {!selected && connectionRef ? (
+            <option value={connectionRef}>{connectionRef} (unavailable)</option>
+          ) : null}
           {assignable.map(row => (
             <option
               key={row.connectionKey}

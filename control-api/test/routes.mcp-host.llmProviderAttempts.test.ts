@@ -133,6 +133,16 @@ describe('resolveHostAssignedConnectionKey', () => {
     )
   })
 
+  it('aliases a recipe caller to deployment-default without a Host GET', async () => {
+    const gateway = {
+      getResource: vi.fn(),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
+    ).resolves.toBe('deployment-default')
+    expect(gateway.getResource).not.toHaveBeenCalled()
+  })
+
   it('fails closed when the Host cannot be attested', async () => {
     const gateway = {
       getResource: vi.fn().mockRejectedValue(Object.assign(new Error('nf'), { code: 404 })),

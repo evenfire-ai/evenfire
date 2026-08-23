@@ -521,4 +521,130 @@ describe('codex subscription OAuth broker', () => {
     expect(err).toBeInstanceOf(Error)
     expect(err.code).toBe('replacement_required')
   })
+
+  it('persists a named browser grant from the OAuth state, not from empty deps', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        access_token: 'access-secret',
+        refresh_token: 'refresh-secret',
+        expires_in: 60,
+        id_token: idTokenFor('acct_raw_123'),
+      }),
+    })
+    repos.consumeState.mockResolvedValue({
+      safe: {
+        state: 'state-named',
+        flow: 'browser',
+        intent: 'connect',
+        status: 'consumed',
+        connectionKey: 'team-plus',
+        expiresAt: new Date(Date.now() + 1000),
+        consumedAt: new Date(),
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      pkceVerifier: 'verifier',
+    })
+    repos.getSafe.mockResolvedValue(null)
+    repos.insertInitial.mockResolvedValue({
+      connectionKey: 'team-plus',
+      status: 'connected',
+      credentialRevision: 1,
+    })
+    const result = await handleCodexBrowserCallback(deps(fetchFn), {
+      code: 'code-1',
+      state: 'state-named',
+    })
+    expect(result.connectionKey).toBe('team-plus')
+    expect(repos.insertInitial.mock.calls[0]?.[3]).toBe('team-plus')
+    expect(repos.getSafe.mock.calls[0]?.[1]).toBe('team-plus')
+  })
+
+  it('rejects a device poll whose route key does not match the state', async () => {
+    repos.peekState.mockResolvedValue({
+      safe: {
+        state: 'state-1',
+        flow: 'device',
+        intent: 'connect',
+        status: 'pending',
+        connectionKey: 'team-plus',
+        expiresAt: new Date(Date.now() + 60_000),
+        consumedAt: null,
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      deviceCode: JSON.stringify({ deviceAuthId: 'id', userCode: 'ABCD' }),
+    })
+    await expect(
+      pollCodexDevice({ ...deps(vi.fn()), connectionKey: 'deployment-default' }, 'state-1')
+    ).rejects.toMatchObject({
+      code: 'connection_mismatch',
+    })
+    expect(repos.consumeState).not.toHaveBeenCalled()
+  })
+
+  it('persists a keyed device poll onto the matching state connection', async () => {
+    const handle = JSON.stringify({ deviceAuthId: 'deviceauth_secret', userCode: 'ABCD-EFGH' })
+    repos.peekState.mockResolvedValue({
+      safe: {
+        state: 'state-match',
+        flow: 'device',
+        intent: 'connect',
+        status: 'pending',
+        connectionKey: 'team-plus',
+        expiresAt: new Date(Date.now() + 60_000),
+        consumedAt: null,
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      deviceCode: handle,
+    })
+    repos.consumeState.mockResolvedValue({
+      safe: {
+        state: 'state-match',
+        flow: 'device',
+        intent: 'connect',
+        status: 'consumed',
+        connectionKey: 'team-plus',
+        expiresAt: new Date(Date.now() + 60_000),
+        consumedAt: new Date(),
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      deviceCode: handle,
+    })
+    repos.getSafe.mockResolvedValue(null)
+    repos.insertInitial.mockResolvedValue({
+      connectionKey: 'team-plus',
+      status: 'connected',
+      credentialRevision: 1,
+    })
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          authorization_code: 'authz-code',
+          code_verifier: 'pkce-from-poll',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'access-secret',
+          refresh_token: 'refresh-secret',
+          expires_in: 60,
+          id_token: idTokenFor('acct_raw_123'),
+        }),
+      })
+    const result = await pollCodexDevice(
+      { ...deps(fetchFn), connectionKey: 'team-plus' },
+      'state-match'
+    )
+    expect(result).toMatchObject({ status: 'connected' })
+    expect(repos.insertInitial.mock.calls[0]?.[3]).toBe('team-plus')
+  })
 })

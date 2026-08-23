@@ -16,9 +16,20 @@ function multiGrantConfigMap() {
             status: 'connected',
             catalogRevision: 1,
             connectionRevision: 1,
+            models: ['gpt-5.3-codex'],
           },
-          'team-plus': { status: 'revoked', catalogRevision: 3, connectionRevision: 8 },
-          'personal-pro': { status: 'connected', catalogRevision: 4, connectionRevision: 2 },
+          'team-plus': {
+            status: 'revoked',
+            catalogRevision: 3,
+            connectionRevision: 8,
+            models: ['gpt-5.3-codex'],
+          },
+          'personal-pro': {
+            status: 'connected',
+            catalogRevision: 4,
+            connectionRevision: 2,
+            models: ['gpt-5.3-codex'],
+          },
         }),
       },
     },
@@ -48,5 +59,18 @@ describe('parseAllowedModelsSnapshot per assigned connection', () => {
     const snapshot = parseAllowedModelsSnapshot(multiGrantConfigMap())
     expect(snapshot.connectionStatus).toBe('connected')
     expect(snapshot.catalogRevision).toBe(1)
+  })
+
+  it('does not mark a Host eligible for a model that only another grant serves', () => {
+    const cm = multiGrantConfigMap()
+    const parsed = JSON.parse(
+      String(cm.metadata.annotations['clerum.io/codex-connections'])
+    ) as Record<string, { models: string[] }>
+    parsed['personal-pro'].models = ['gpt-5.1']
+    cm.metadata.annotations['clerum.io/codex-connections'] = JSON.stringify(parsed)
+    const snapshot = parseAllowedModelsSnapshot(cm, 'personal-pro')
+    const spec = { model: { provider: 'codex-subscription', name: 'gpt-5.3-codex' } }
+    expect(projectCodexExecution(spec, snapshot).eligibility).toBe('ineligible')
+    expect(projectCodexExecution(spec, snapshot).derivedScopes).toEqual([])
   })
 })

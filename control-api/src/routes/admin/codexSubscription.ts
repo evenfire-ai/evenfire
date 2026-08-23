@@ -15,6 +15,7 @@ import {
   CodexSubscriptionInvalidConnectionKeyError,
   assertCodexConnectionKey,
   createNamedCodexSubscriptionConnection,
+  generateCodexConnectionKey,
   listSafeCodexSubscriptionConnections,
   loadCodexSubscriptionSecrets,
   normalizeCodexConnectionKey,
@@ -82,7 +83,9 @@ function sendOAuthError(
     const status =
       err.code === 'disabled'
         ? 404
-        : err.code === 'replacement_required' || err.code === 'fingerprint_in_use'
+        : err.code === 'replacement_required' ||
+            err.code === 'fingerprint_in_use' ||
+            err.code === 'connection_mismatch'
           ? 409
           : err.code === 'refresh_in_flight' || err.code === 'stale_revision'
             ? 409
@@ -99,16 +102,6 @@ function sendOAuthError(
   throw err
 }
 
-function slugFromDisplayName(displayName: string): string {
-  const slug = displayName
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 63)
-  return slug || `codex-${Date.now().toString(36)}`
-}
-
 function hostConnectionRef(spec: unknown): string | null {
   if (!spec || typeof spec !== 'object') return null
   const model = (spec as { model?: { provider?: string; connectionRef?: string } }).model
@@ -122,27 +115,43 @@ export function createAdminCodexSubscriptionRouter(
 ): Router {
   const router = Router()
 
-  async function assignedHostsFor(connectionKey: string): Promise<Array<{ name: string }>> {
-    if (!gateway) return []
+  async function listHostsOrUnavailable(): Promise<Array<{
+    metadata?: { name?: string }
+    spec?: unknown
+  }> | null> {
+    if (!gateway) return null
     try {
-      const hosts = (await gateway.listResource('hosts', config.hostsNamespace)) as Array<{
+      return (await gateway.listResource('hosts', config.hostsNamespace)) as Array<{
         metadata?: { name?: string }
         spec?: unknown
       }>
-      return hosts
-        .filter(host => hostConnectionRef(host.spec) === connectionKey)
-        .map(host => ({ name: String(host.metadata?.name ?? '') }))
-        .filter(host => host.name)
     } catch (err) {
       log.warn({ event: 'codex_assigned_hosts_list_failed', err }, 'failed to list assigned hosts')
-      return []
+      return null
     }
   }
 
-  async function withAssignedHosts<T extends { connectionKey: string }>(connection: T) {
+  function hostsForConnection(
+    hosts: Array<{ metadata?: { name?: string }; spec?: unknown }>,
+    connectionKey: string
+  ): Array<{ name: string }> {
+    return hosts
+      .filter(host => hostConnectionRef(host.spec) === connectionKey)
+      .map(host => ({ name: String(host.metadata?.name ?? '') }))
+      .filter(host => host.name)
+  }
+
+  async function withAssignedHosts<T extends { connectionKey: string }>(
+    connection: T,
+    hosts?: Array<{ metadata?: { name?: string }; spec?: unknown }> | null
+  ) {
+    const resolved = hosts === undefined ? await listHostsOrUnavailable() : hosts
+    if (resolved === null) {
+      return { ...connection, assignedHostsUnavailable: true as const }
+    }
     return {
       ...connection,
-      assignedHosts: await assignedHostsFor(connection.connectionKey),
+      assignedHosts: hostsForConnection(resolved, connection.connectionKey),
     }
   }
 
@@ -280,9 +289,10 @@ export function createAdminCodexSubscriptionRouter(
         return
       }
       const rows = await listSafeCodexSubscriptionConnections(dbClient())
+      const hosts = await listHostsOrUnavailable()
       const connections = []
       for (const row of rows) {
-        connections.push(await withAssignedHosts(row))
+        connections.push(await withAssignedHosts(row, hosts))
       }
       res.status(200).json({ connections })
     })
@@ -302,10 +312,10 @@ export function createAdminCodexSubscriptionRouter(
             : 'Codex subscription'
         const requestedKey =
           typeof req.body?.connectionKey === 'string' && req.body.connectionKey.trim()
-            ? req.body.connectionKey.trim()
-            : slugFromDisplayName(displayName)
+            ? assertCodexConnectionKey(req.body.connectionKey.trim())
+            : generateCodexConnectionKey()
         const created = await createNamedCodexSubscriptionConnection(dbClient(), {
-          connectionKey: assertCodexConnectionKey(requestedKey),
+          connectionKey: requestedKey,
           displayName,
         })
         res.status(201).json(await withAssignedHosts(created))

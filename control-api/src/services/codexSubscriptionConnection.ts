@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import type { DbClient } from '../db.js'
 import { decryptOAuthSecret, encryptOAuthSecret } from '../oauth/encryption.js'
 
@@ -16,6 +17,10 @@ export function assertCodexConnectionKey(value: string): string {
     throw new CodexSubscriptionInvalidConnectionKeyError(key)
   }
   return key
+}
+
+export function generateCodexConnectionKey(): string {
+  return `codex-${randomBytes(8).toString('hex')}`
 }
 
 export class CodexSubscriptionInvalidConnectionKeyError extends Error {
@@ -587,8 +592,13 @@ export async function recordCodexCatalogOutcome(
 }
 
 function remapFingerprintConflict(err: unknown): never | Error {
-  const code = (err as { code?: string } | null)?.code
-  if (code === '23505') return new CodexSubscriptionFingerprintConflictError()
+  const conflict = err as { code?: string; constraint?: string } | null
+  if (
+    conflict?.code === '23505' &&
+    conflict.constraint === 'codex_subscription_connections_active_fingerprint'
+  ) {
+    return new CodexSubscriptionFingerprintConflictError()
+  }
   throw err
 }
 

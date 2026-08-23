@@ -4,7 +4,10 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
-import { normalizeCodexConnectionKey } from '../../services/codexSubscriptionConnection.js'
+import {
+  CODEX_SUBSCRIPTION_CONNECTION_KEY,
+  normalizeCodexConnectionKey,
+} from '../../services/codexSubscriptionConnection.js'
 import {
   LlmProviderAttemptAuthorizeError,
   authorizeLlmProviderAttempt,
@@ -41,6 +44,9 @@ export async function resolveHostAssignedConnectionKey(
   gateway: Pick<K8sGateway, 'getResource'>,
   hostRef: string
 ): Promise<string> {
+  if (hostRef.includes('/')) {
+    return CODEX_SUBSCRIPTION_CONNECTION_KEY
+  }
   try {
     const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace)) as {
       spec?: { model?: { connectionRef?: string } }

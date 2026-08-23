@@ -61,6 +61,7 @@ export type CodexOAuthErrorCode =
   | 'invalid_callback'
   | 'browser_oauth_unregistered'
   | 'fingerprint_in_use'
+  | 'connection_mismatch'
 
 export class CodexSubscriptionOAuthError extends Error {
   readonly code: CodexOAuthErrorCode
@@ -84,6 +85,24 @@ export type CodexOAuthDeps = {
 
 function connectionKeyOf(deps: CodexOAuthDeps): string {
   return normalizeCodexConnectionKey(deps.connectionKey)
+}
+
+function completionConnectionKey(deps: CodexOAuthDeps, stateKey: string): string {
+  const target = normalizeCodexConnectionKey(stateKey)
+  if (deps.connectionKey !== undefined) {
+    const requested = normalizeCodexConnectionKey(deps.connectionKey)
+    if (requested !== target) {
+      log.warn(
+        { event: 'codex_oauth_connection_mismatch', requested, target },
+        'OAuth completion key does not match the state'
+      )
+      throw new CodexSubscriptionOAuthError(
+        'connection_mismatch',
+        'OAuth state is bound to a different connection'
+      )
+    }
+  }
+  return target
 }
 
 export type CodexBrowserStartResult = {
@@ -210,7 +229,12 @@ export async function handleCodexBrowserCallback(
     throw new CodexSubscriptionOAuthError('invalid_callback', 'state is not a browser PKCE flow')
   }
   const token = await exchangeAuthorizationCode(deps, input.code, consumed.pkceVerifier)
-  return persistGrantedTokens(deps, consumed.safe.intent, token)
+  return persistGrantedTokens(
+    deps,
+    consumed.safe.intent,
+    token,
+    completionConnectionKey(deps, consumed.safe.connectionKey)
+  )
 }
 
 export async function pollCodexDevice(
@@ -222,6 +246,7 @@ export async function pollCodexDevice(
   if (!pending) {
     throw new CodexSubscriptionOAuthError('state_replayed', 'device state is not pending')
   }
+  completionConnectionKey(deps, pending.safe.connectionKey)
   if (pending.safe.expiresAt.getTime() <= Date.now()) {
     await expireCodexSubscriptionOAuthState(deps.db, state)
     return { status: 'expired' }
@@ -259,7 +284,12 @@ export async function pollCodexDevice(
       'device state was consumed concurrently'
     )
   }
-  const connection = await persistGrantedTokens(deps, consumed.safe.intent, tokenResult.parsed)
+  const connection = await persistGrantedTokens(
+    deps,
+    consumed.safe.intent,
+    tokenResult.parsed,
+    completionConnectionKey(deps, consumed.safe.connectionKey)
+  )
   return { status: 'connected', connection }
 }
 
@@ -352,9 +382,10 @@ export async function revokeCodexSubscription(
 async function persistGrantedTokens(
   deps: CodexOAuthDeps,
   intent: CodexSubscriptionOAuthIntent,
-  parsed: ParsedCodexToken
+  parsed: ParsedCodexToken,
+  connectionKey: string
 ): Promise<CodexSubscriptionSafeConnection> {
-  const key = connectionKeyOf(deps)
+  const key = normalizeCodexConnectionKey(connectionKey)
   const existing = await getSafeCodexSubscriptionConnection(deps.db, key)
   if (
     existing?.accountFingerprint &&
@@ -381,16 +412,25 @@ async function persistGrantedTokens(
     )
   }
   if (!existing) {
-    return insertInitialCodexSubscriptionConnection(deps.db, deps.encryptionKey, write, key)
+    const created = await insertInitialCodexSubscriptionConnection(
+      deps.db,
+      deps.encryptionKey,
+      write,
+      key
+    )
+    log.info({ event: 'codex_oauth_persisted', connectionKey: key }, 'Codex grant persisted')
+    return created
   }
   try {
-    return await rotateCodexSubscriptionCredentials(
+    const rotated = await rotateCodexSubscriptionCredentials(
       deps.db,
       deps.encryptionKey,
       existing.credentialRevision,
       write,
       key
     )
+    log.info({ event: 'codex_oauth_persisted', connectionKey: key }, 'Codex grant persisted')
+    return rotated
   } catch (err) {
     if (err instanceof CodexSubscriptionStaleRevisionError) {
       throw new CodexSubscriptionOAuthError(

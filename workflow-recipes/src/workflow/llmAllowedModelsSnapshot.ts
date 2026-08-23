@@ -14,6 +14,38 @@ export function snapshotFromConfigMapError(error: CodexSnapshotError): CodexCata
   return { flagEnabled: false, snapshotError: error }
 }
 
+const CODEX_PROVIDER_PREFIX = 'codex-subscription:'
+
+function dropCodexModels(enabledModels: Set<string>, staleModels: Set<string>): void {
+  for (const key of [...enabledModels]) {
+    if (key.startsWith(CODEX_PROVIDER_PREFIX)) {
+      enabledModels.delete(key)
+      staleModels.delete(key)
+    }
+  }
+}
+
+function intersectCodexModels(
+  enabledModels: Set<string>,
+  staleModels: Set<string>,
+  models: string[] | undefined,
+  connectionKey: string
+): void {
+  if (!Array.isArray(models)) {
+    if (connectionKey !== 'deployment-default') dropCodexModels(enabledModels, staleModels)
+    return
+  }
+  const allowed = new Set(models.filter(model => typeof model === 'string' && model.trim()))
+  for (const key of [...enabledModels]) {
+    if (!key.startsWith(CODEX_PROVIDER_PREFIX)) continue
+    const model = key.slice(CODEX_PROVIDER_PREFIX.length)
+    if (!allowed.has(model)) {
+      enabledModels.delete(key)
+      staleModels.delete(key)
+    }
+  }
+}
+
 function parseOptionalIntegerAnnotation(
   annotations: Record<string, string>,
   key: string
@@ -62,7 +94,12 @@ export function parseAllowedModelsSnapshot(
     try {
       const parsed = JSON.parse(rawMap) as Record<
         string,
-        { status?: string; catalogRevision?: number; connectionRevision?: number }
+        {
+          status?: string
+          catalogRevision?: number
+          connectionRevision?: number
+          models?: string[]
+        }
       >
       const assigned = parsed[connectionKey]
       if (assigned) {
@@ -74,8 +111,10 @@ export function parseAllowedModelsSnapshot(
         if (Number.isInteger(assigned.connectionRevision)) {
           connectionRevision = assigned.connectionRevision as number
         }
+        intersectCodexModels(enabledModels, staleModels, assigned.models, connectionKey)
       } else if (connectionKey !== 'deployment-default') {
         connectionStatus = 'disconnected'
+        dropCodexModels(enabledModels, staleModels)
       }
     } catch {
       return snapshotFromConfigMapError('malformed')

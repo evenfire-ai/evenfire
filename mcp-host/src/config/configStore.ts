@@ -117,6 +117,7 @@ export type CodexPolicyBinding = {
   catalogRevision: number
   credentialRevision: number
   connectionKey: string
+  models?: string[]
 }
 
 export const CATALOG_REVISION_ANNOTATION = 'clerum.io/catalog-revision'
@@ -558,11 +559,11 @@ export class ConfigStore {
     data?: Record<string, string>
     metadata?: { annotations?: Record<string, string> }
   }): boolean {
-    const modelsChanged = this.applyAllowlistData(cm.data ?? {})
     const nextBinding = parseCodexPolicyBinding(
       cm.metadata?.annotations,
       this.opts.connectionRef?.trim() || 'deployment-default'
     )
+    const modelsChanged = this.applyAllowlistData(cm.data ?? {}, nextBinding)
     const bindingChanged = !codexBindingsEqual(this.codexBinding, nextBinding)
     this.codexBinding = nextBinding
     return modelsChanged || bindingChanged
@@ -578,7 +579,10 @@ export class ConfigStore {
    * allowlist — callers use this to notify subscribers only on a real content
    * change (so routine watch reconnects don't re-fire the R3.7 signal).
    */
-  private applyAllowlistData(data: Record<string, string>): boolean {
+  private applyAllowlistData(
+    data: Record<string, string>,
+    binding: CodexPolicyBinding | null = null
+  ): boolean {
     const next = new Map<string, AllowedModelEntry[]>()
     for (const [provider, raw] of Object.entries(data)) {
       let parsed: unknown
@@ -598,7 +602,7 @@ export class ConfigStore {
         console.error(`[ConfigStore] allowlist key '${provider}' is not a JSON array — skipping`)
         continue
       }
-      const entries: AllowedModelEntry[] = []
+      let entries: AllowedModelEntry[] = []
       for (const item of parsed) {
         if (!item || typeof item !== 'object') {
           console.error(
@@ -623,6 +627,14 @@ export class ConfigStore {
         }
         if (typeof rec.vendor === 'string') entry.vendor = rec.vendor
         entries.push(entry)
+      }
+      if (provider === 'codex-subscription') {
+        if (Array.isArray(binding?.models)) {
+          const allowed = new Set(binding.models)
+          entries = entries.filter(entry => allowed.has(entry.model))
+        } else if (binding && binding.connectionKey !== 'deployment-default') {
+          entries = []
+        }
       }
       next.set(provider, entries)
     }
@@ -933,7 +945,7 @@ function parseCodexPolicyBinding(
     try {
       const parsed = JSON.parse(rawMap) as Record<
         string,
-        { catalogRevision?: number; connectionRevision?: number }
+        { catalogRevision?: number; connectionRevision?: number; models?: string[] }
       >
       const assigned = parsed[connectionKey]
       if (
@@ -943,6 +955,12 @@ function parseCodexPolicyBinding(
       ) {
         catalogRevision = assigned.catalogRevision as number
         credentialRevision = assigned.connectionRevision as number
+        return {
+          catalogRevision,
+          credentialRevision,
+          connectionKey,
+          models: Array.isArray(assigned.models) ? assigned.models.filter(Boolean) : undefined,
+        }
       }
     } catch {
       return null
@@ -965,7 +983,8 @@ function codexBindingsEqual(a: CodexPolicyBinding | null, b: CodexPolicyBinding 
   return (
     a.catalogRevision === b.catalogRevision &&
     a.credentialRevision === b.credentialRevision &&
-    a.connectionKey === b.connectionKey
+    a.connectionKey === b.connectionKey &&
+    JSON.stringify(a.models ?? null) === JSON.stringify(b.models ?? null)
   )
 }
 

@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto'
 import { config } from '../config.js'
 import type { DbClient } from '../db.js'
 import { pool } from '../db.js'
+import { listEnabledCodexModelsGroupedByConnection } from './codexSubscriptionCatalog.js'
 import {
   type CodexSubscriptionSafeConnection,
   getSafeCodexSubscriptionConnection,
@@ -64,7 +65,8 @@ export function mapCodexConnectionStatusForSnapshot(
 
 export function buildCodexReadinessAnnotations(
   connection: CodexSubscriptionSafeConnection | null,
-  connections: CodexSubscriptionSafeConnection[] = []
+  connections: CodexSubscriptionSafeConnection[] = [],
+  modelsByKey: Record<string, string[]> = {}
 ): Record<string, string> {
   const annotations: Record<string, string> = {
     [CODEX_ENABLED_ANNOTATION]: config.codexSubscriptionEnabled ? 'true' : 'false',
@@ -85,6 +87,7 @@ export function buildCodexReadinessAnnotations(
       status: ReturnType<typeof mapCodexConnectionStatusForSnapshot>
       catalogRevision: number
       connectionRevision: number
+      models: string[]
     }
   > = {}
   for (const row of connections) {
@@ -92,6 +95,7 @@ export function buildCodexReadinessAnnotations(
       status: mapCodexConnectionStatusForSnapshot(row),
       catalogRevision: row.catalogRevision,
       connectionRevision: row.credentialRevision,
+      models: modelsByKey[row.connectionKey] ?? [],
     }
   }
   if (Object.keys(map).length > 0) {
@@ -157,11 +161,13 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
     const grouped = await listEnabledGroupedByProvider(db)
     const { data, contentHash } = buildConfigMapData(grouped)
     const connections = await listSafeCodexSubscriptionConnections(db).catch(() => [])
+    const modelsByKey = await listEnabledCodexModelsGroupedByConnection(db).catch(() => ({}))
     const readiness = buildCodexReadinessAnnotations(
       connections.find(row => row.connectionKey === 'deployment-default') ??
         connections[0] ??
         (await loadCodexConnection(db)),
-      connections
+      connections,
+      modelsByKey
     )
     let lastError: unknown
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {

@@ -243,11 +243,11 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
+  const connectionKey = normalizeCodexConnectionKey(
+    await resolvedDeps.resolveConnectionKey(caller.hostRef)
+  )
   return resolvedDeps.withTransaction(async tx => {
     const db: DbClient = tx
-    const connectionKey = normalizeCodexConnectionKey(
-      await resolvedDeps.resolveConnectionKey(caller.hostRef)
-    )
     const connection = await resolvedDeps.getConnection(db, connectionKey)
     if (
       !connection ||

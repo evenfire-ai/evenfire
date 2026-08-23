@@ -175,6 +175,27 @@ export async function isCodexAssignmentAllowed(
   return Boolean(state?.enabled && !state.stale)
 }
 
+export async function listEnabledCodexModelsGroupedByConnection(
+  db: DbClient
+): Promise<Record<string, string[]>> {
+  const result = await db.query(
+    `SELECT c.connection_key AS connection_key, m.model
+       FROM codex_catalog_models m
+       JOIN codex_subscription_connections c ON c.id = m.connection_id
+      WHERE c.revoked_at IS NULL
+        AND m.enabled
+        AND m.stale = false
+      ORDER BY c.connection_key ASC, m.model ASC`
+  )
+  const grouped: Record<string, string[]> = {}
+  for (const row of result.rows as Array<{ connection_key: string; model: string }>) {
+    const key = String(row.connection_key)
+    grouped[key] ??= []
+    grouped[key].push(String(row.model))
+  }
+  return grouped
+}
+
 export async function listCodexCatalogModels(
   db: DbClient,
   connectionId: string
@@ -193,6 +214,8 @@ export async function listCodexCatalogModels(
   }))
 }
 
+// Derived cache for the LLM Models table. Runtime eligibility uses
+// `codex_catalog_models` per connection, not these global toggles.
 export async function rebuildLiveCodexUnionAllowlist(db: DbClient): Promise<void> {
   await db.query(
     `INSERT INTO llm_allowed_models

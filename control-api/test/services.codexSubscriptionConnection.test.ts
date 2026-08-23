@@ -3,6 +3,7 @@ import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encry
 import {
   CodexSubscriptionFingerprintConflictError,
   CodexSubscriptionStaleRevisionError,
+  generateCodexConnectionKey,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
   rotateCodexSubscriptionCredentials,
@@ -112,7 +113,12 @@ describe('codex subscription connection repository', () => {
   })
 
   it('maps a unique active fingerprint violation to fingerprint_in_use', async () => {
-    query.mockRejectedValueOnce(Object.assign(new Error('duplicate'), { code: '23505' }))
+    query.mockRejectedValueOnce(
+      Object.assign(new Error('duplicate'), {
+        code: '23505',
+        constraint: 'codex_subscription_connections_active_fingerprint',
+      })
+    )
     await expect(
       insertInitialCodexSubscriptionConnection(
         { query },
@@ -126,6 +132,25 @@ describe('codex subscription connection repository', () => {
     ).rejects.toBeInstanceOf(CodexSubscriptionFingerprintConflictError)
   })
 
+  it('does not remap an unrelated unique violation to fingerprint_in_use', async () => {
+    const err = Object.assign(new Error('duplicate key'), {
+      code: '23505',
+      constraint: 'codex_subscription_connections_pkey',
+    })
+    query.mockRejectedValueOnce(err)
+    await expect(
+      insertInitialCodexSubscriptionConnection(
+        { query },
+        KEY,
+        {
+          refreshToken: 'plain-refresh',
+          accountFingerprint: 'fp_other',
+        },
+        'team-plus'
+      )
+    ).rejects.toBe(err)
+  })
+
   it('rejects a stale credential_revision writer', async () => {
     query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     await expect(
@@ -136,5 +161,13 @@ describe('codex subscription connection repository', () => {
     ).rejects.toBeInstanceOf(CodexSubscriptionStaleRevisionError)
     const [sql] = query.mock.calls[0] as [string]
     expect(sql).toMatch(/credential_revision = \$/)
+  })
+
+  it('generates distinct identity keys that are not derived from the display name', () => {
+    const keys = new Set(Array.from({ length: 8 }, () => generateCodexConnectionKey()))
+    expect(keys.size).toBe(8)
+    for (const key of keys) {
+      expect(key).toMatch(/^codex-[a-f0-9]{16}$/)
+    }
   })
 })

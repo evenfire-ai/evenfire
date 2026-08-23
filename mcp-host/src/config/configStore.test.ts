@@ -106,7 +106,8 @@ function makeFakeCoreApi(initial: {
 
 function build(opts: {
   llmSecretRef?: string | null
-  provider?: 'openai' | 'claude' | 'zai' | 'bailian' | null
+  provider?: 'openai' | 'claude' | 'zai' | 'bailian' | 'codex-subscription' | null
+  connectionRef?: string | null
   secrets?: Record<string, Record<string, string>>
   configMaps?: Record<string, Record<string, string>>
   configMapAnnotations?: Record<string, Record<string, string>>
@@ -123,6 +124,7 @@ function build(opts: {
     hostRef: 'trader',
     llmSecretRef: opts.llmSecretRef ?? 'chatllm-api-keys',
     provider: opts.provider ?? 'openai',
+    connectionRef: opts.connectionRef,
     allowlistConfigMapName: opts.allowlistConfigMapName,
     coreApi: api as unknown as ConstructorParameters<typeof ConfigStore>[0]['coreApi'],
     watch: watch as unknown as ConstructorParameters<typeof ConfigStore>[0]['watch'],
@@ -787,5 +789,42 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(store.allowlistAvailable()).toBe(true)
     handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })
     expect(await counterValue('clerum_llm_allowlist_missing_total')).toBe(before + 2)
+  })
+
+  it('filters Codex models to the assigned grant catalog, not the union', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      connectionRef: 'personal-pro',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }, { model: 'gpt-5.1' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+          'clerum.io/codex-connections': JSON.stringify({
+            'personal-pro': {
+              catalogRevision: 4,
+              connectionRevision: 2,
+              models: ['gpt-5.1'],
+            },
+            'team-plus': {
+              catalogRevision: 3,
+              connectionRevision: 8,
+              models: ['gpt-5.3-codex'],
+            },
+          }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([{ model: 'gpt-5.1' }])
+    expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
+    expect(store.codexPolicyBinding()?.models).toEqual(['gpt-5.1'])
   })
 })

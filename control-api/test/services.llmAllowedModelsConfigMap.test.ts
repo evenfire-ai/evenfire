@@ -281,13 +281,18 @@ describe('Codex readiness annotations', () => {
       catalogStatus: 'ready' as const,
     }
     expect(mapCodexConnectionStatusForSnapshot(revoked)).toBe('revoked')
-    const annotations = buildCodexReadinessAnnotations(live, [revoked, live])
+    const annotations = buildCodexReadinessAnnotations(live, [revoked, live], {
+      'personal-pro': ['gpt-5.3-codex'],
+      'team-plus': ['gpt-5.1'],
+    })
     const map = JSON.parse(annotations['clerum.io/codex-connections'] as string) as Record<
       string,
-      { status: string }
+      { status: string; models: string[] }
     >
     expect(map['team-plus'].status).toBe('revoked')
     expect(map['personal-pro'].status).toBe('connected')
+    expect(map['personal-pro'].models).toEqual(['gpt-5.3-codex'])
+    expect(map['team-plus'].models).toEqual(['gpt-5.1'])
   })
 
   it('omits revision annotations when the connection row is absent', () => {

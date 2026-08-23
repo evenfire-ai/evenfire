@@ -10,6 +10,7 @@ export type CodexSubscriptionOAuthSafeState = {
   flow: CodexSubscriptionOAuthFlow
   intent: CodexSubscriptionOAuthIntent
   status: CodexSubscriptionOAuthStateStatus
+  connectionKey: string
   expiresAt: Date
   consumedAt: Date | null
   cancelledAt: Date | null
@@ -38,6 +39,7 @@ type SafeOAuthStateRow = {
   flow: CodexSubscriptionOAuthFlow
   intent: CodexSubscriptionOAuthIntent
   status: CodexSubscriptionOAuthStateStatus
+  connection_key: string | null
   expires_at: Date | string
   consumed_at: Date | string | null
   cancelled_at: Date | string | null
@@ -54,6 +56,7 @@ const SAFE_OAUTH_STATE_COLUMNS = `
   flow,
   intent,
   status,
+  connection_key,
   expires_at,
   consumed_at,
   cancelled_at,
@@ -227,6 +230,10 @@ function toSafeOAuthState(row: SafeOAuthStateRow): CodexSubscriptionOAuthSafeSta
     flow: row.flow,
     intent: row.intent,
     status: row.status,
+    connectionKey:
+      typeof row.connection_key === 'string' && row.connection_key.trim()
+        ? row.connection_key.trim()
+        : 'deployment-default',
     expiresAt: asDate(row.expires_at) ?? new Date(0),
     consumedAt: asDate(row.consumed_at),
     cancelledAt: asDate(row.cancelled_at),
