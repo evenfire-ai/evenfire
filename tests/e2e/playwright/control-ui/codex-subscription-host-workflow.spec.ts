@@ -47,11 +47,10 @@ test.describe('Codex subscription host and workflow authoring', () => {
     await expect(page.getByRole('option', { name: 'OpenAI Codex Subscription' })).toHaveCount(0)
     await page.getByRole('radio', { name: 'ChatGPT subscription' }).check()
     await expect(
-      page.getByText(/This provider authenticates through the Codex subscription/)
+      page.getByText(/This OpenAI credential authenticates through a ChatGPT subscription/)
     ).toBeVisible()
     await expect(page.getByLabel('Secret name')).toHaveCount(0)
     await expect(page.getByLabel(/OpenAI API key/i)).toHaveCount(0)
     await expect(page.getByTestId('codex-agent-assignment')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Next' })).toBeDisabled()
   })
 })

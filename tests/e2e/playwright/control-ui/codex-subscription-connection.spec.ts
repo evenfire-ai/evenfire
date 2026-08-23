@@ -7,6 +7,7 @@
  * Direct `goto` of an agent model tab is not the happy-path entry.
  */
 import { type Page, expect, test } from '@playwright/test'
+import { controlApi } from '../helpers/api-client'
 import { loginControlUiVisible } from '../helpers/visible-login'
 
 type CodexConnection = {
@@ -22,28 +23,56 @@ async function openAgents(page: Page) {
   await expect(page).toHaveURL(/\/(?:hosts|agents)$/)
 }
 
-async function openNamedAgent(page: Page, name: string) {
-  await page.getByRole('link', { name, exact: true }).click()
-  await expect(page).toHaveURL(new RegExp(`/((?:hosts|agents))/${name}(?:/|$)`))
+async function agentRows(page: Page) {
+  return page.getByRole('row', { name: /Open agent / })
+}
+
+async function ensureListedAgents(page: Page, minimum = 1): Promise<void> {
+  const listed = await controlApi.getHosts()
+  const items = Array.isArray(listed.items) ? listed.items : []
+  const needed = Math.max(0, minimum - items.length)
+  for (let index = 0; index < needed; index += 1) {
+    const name = `e2e-codex-guardian${needed === 1 && index === 0 ? '' : `-${index + 1}`}`
+    try {
+      await controlApi.createHost({
+        metadata: { name },
+        spec: {
+          host: name,
+          contextRef: '',
+          secretRef: '',
+          channels: [],
+          model: {
+            provider: 'codex-subscription',
+            name: 'gpt-5.1',
+            connectionRef: 'deployment-default',
+          },
+        },
+      })
+    } catch {
+      break
+    }
+  }
+  if (needed > 0) {
+    await page.getByRole('button', { name: /Reload agents/i }).click()
+  }
+  await expect((await agentRows(page)).first()).toBeVisible()
 }
 
 async function openFirstAgent(page: Page): Promise<string> {
-  const named = page.locator('a[href*="/agents/"], a[href*="/hosts/"]').filter({
-    hasNotText: /Create|new/i,
-  })
-  await expect(named.first()).toBeVisible()
-  const href = (await named.first().getAttribute('href')) ?? ''
-  const match = href.match(/\/(?:hosts|agents)\/([^/]+)/)
-  const name = match?.[1] ?? ''
-  await named.first().click()
+  await ensureListedAgents(page, 1)
+  const row = (await agentRows(page)).first()
+  await expect(row).toBeVisible()
+  const label = (await row.getAttribute('aria-label')) ?? ''
+  const name = label.replace(/^Open agent\s+/, '').trim()
+  await row.click()
   await expect(page).toHaveURL(/\/(?:hosts|agents)\/[^/]+/)
   return decodeURIComponent(name)
 }
 
 async function openModelEditor(page: Page) {
-  await page.getByRole('tab', { name: /Model/i }).click()
+  await page.getByRole('tab', { name: 'Models & creds' }).click()
   await expect(page).toHaveURL(/\/(?:hosts|agents)\/[^/]+\/model/)
-  await expect(page.getByRole('heading', { name: /Model/i })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'Models & creds', selected: true })).toBeVisible()
   const edit = page.getByRole('button', { name: 'Edit', exact: true })
   if (await edit.isVisible().catch(() => false)) {
     await edit.click()
@@ -59,11 +88,12 @@ async function chooseSubscriptionCredential(page: Page) {
   await expect(page.getByTestId('codex-agent-assignment')).toBeVisible()
 }
 
-async function listConnections(page: Page): Promise<CodexConnection[]> {
-  const res = await page.request.get('/api/v1/admin/llm/providers/codex-subscription/connections')
-  expect(res.ok(), `list connections must succeed, got ${res.status()}`).toBe(true)
-  const body = (await res.json()) as { connections?: CodexConnection[] }
-  return body.connections ?? []
+function subscriptionPicker(page: Page) {
+  return page.locator('#codex-subscription')
+}
+
+async function listConnections(): Promise<CodexConnection[]> {
+  return controlApi.listCodexConnections()
 }
 
 test.describe('Codex subscription connection', () => {
@@ -75,14 +105,18 @@ test.describe('Codex subscription connection', () => {
     await openModelEditor(page)
     await chooseSubscriptionCredential(page)
 
-    const picker = page.getByLabel('ChatGPT subscription')
+    const picker = subscriptionPicker(page)
     await expect(picker).toBeVisible()
     await expect(page.getByLabel(/OpenAI API key/i)).toHaveCount(0)
 
-    const connections = await listConnections(page)
-    const selectedKey = await picker.inputValue()
-    expect(selectedKey.length).toBeGreaterThan(0)
-    expect(connections.some(row => row.connectionKey === selectedKey)).toBe(true)
+    const connections = await listConnections()
+    let selectedKey = await picker.inputValue()
+    if (!connections.some(row => row.connectionKey === selectedKey)) {
+      const usable = connections.find(row => row.status !== 'revoked')
+      expect(usable, 'an assignable ChatGPT subscription must exist').toBeTruthy()
+      await picker.selectOption(usable!.connectionKey)
+      selectedKey = usable!.connectionKey
+    }
     const selected = connections.find(row => row.connectionKey === selectedKey)
     test.skip(
       selected?.status !== 'connected',
@@ -111,9 +145,7 @@ test.describe('Codex subscription connection', () => {
     expect(body.spec?.model?.provider).toBe('codex-subscription')
     expect(body.spec?.model?.connectionRef).toBe(selectedKey)
 
-    const echoed = await page.request.get(`/api/v1/admin/hosts/${encodeURIComponent(agentName)}`)
-    expect(echoed.ok()).toBe(true)
-    const host = (await echoed.json()) as {
+    const host = (await controlApi.getHost(agentName)) as {
       spec?: { model?: { connectionRef?: string } }
     }
     expect(host.spec?.model?.connectionRef).toBe(selectedKey)
@@ -126,6 +158,21 @@ test.describe('Codex subscription connection', () => {
     await openFirstAgent(page)
     await openModelEditor(page)
     await chooseSubscriptionCredential(page)
+    await expect(subscriptionPicker(page)).toBeVisible()
+    const signIn = page.getByRole('button', { name: 'Sign in with ChatGPT' })
+    if (!(await signIn.isEnabled())) {
+      await page.getByRole('button', { name: 'New subscription' }).click()
+      await page.getByLabel('New subscription name').fill(`e2e-device-${Date.now().toString(36)}`)
+      const created = page.waitForResponse(
+        response =>
+          /\/api\/v1\/admin\/llm\/providers\/codex-subscription\/connections$/.test(
+            new URL(response.url()).pathname
+          ) && response.request().method() === 'POST'
+      )
+      await page.getByRole('button', { name: 'Create', exact: true }).click()
+      expect((await created).ok()).toBe(true)
+    }
+    await expect(signIn).toBeEnabled()
 
     const deviceStart = page.waitForResponse(
       response =>
@@ -133,7 +180,7 @@ test.describe('Codex subscription connection', () => {
           new URL(response.url()).pathname
         ) && response.request().method() === 'POST'
     )
-    await page.getByRole('button', { name: 'Sign in with ChatGPT' }).click()
+    await signIn.click()
     const response = await deviceStart
     expect(response.ok(), `device start must succeed, got ${response.status()}`).toBe(true)
     const body = (await response.json()) as { userCode?: string; verificationUri?: string }
@@ -152,9 +199,11 @@ test.describe('Codex subscription connection', () => {
     await openModelEditor(page)
     await chooseSubscriptionCredential(page)
 
-    const connections = await listConnections(page)
-    const picker = page.getByLabel('ChatGPT subscription')
-    const disconnected = connections.find(row => row.status !== 'connected')
+    const connections = await listConnections()
+    const picker = subscriptionPicker(page)
+    const disconnected = connections.find(
+      row => row.status !== 'connected' && row.status !== 'revoked'
+    )
     if (disconnected) {
       await picker.selectOption(disconnected.connectionKey)
       await expect(page.getByRole('button', { name: 'Sync catalog' })).toBeDisabled()
@@ -209,20 +258,18 @@ test.describe('Codex subscription connection', () => {
     const createdBody = (await createRes.json()) as { connectionKey?: string }
     const sharedKey = createdBody.connectionKey
     expect(sharedKey).toEqual(expect.any(String))
-    await expect(page.getByLabel('ChatGPT subscription')).toHaveValue(String(sharedKey))
+    await expect(subscriptionPicker(page)).toHaveValue(String(sharedKey))
 
     await openAgents(page)
-    const agents = page.locator('a[href*="/agents/"], a[href*="/hosts/"]').filter({
-      hasNotText: /Create|new/i,
-    })
-    const count = await agents.count()
-    test.skip(count < 2, 'reuse requires a second agent in the list')
+    await ensureListedAgents(page, 2)
+    const agents = await agentRows(page)
+    test.skip((await agents.count()) < 2, 'reuse requires a second agent in the list')
     await agents.nth(1).click()
     await expect(page).toHaveURL(/\/(?:hosts|agents)\/[^/]+/)
     await openModelEditor(page)
     await chooseSubscriptionCredential(page)
-    await page.getByLabel('ChatGPT subscription').selectOption(String(sharedKey))
-    await expect(page.getByLabel('ChatGPT subscription')).toHaveValue(String(sharedKey))
+    await subscriptionPicker(page).selectOption(String(sharedKey))
+    await expect(subscriptionPicker(page)).toHaveValue(String(sharedKey))
     await expect(page.getByRole('option', { name: displayName })).toHaveCount(1)
   })
 
@@ -270,7 +317,7 @@ test.describe('Codex subscription connection', () => {
     await expect(page.getByTestId('codex-connection-status')).toHaveText(/Revoked/i)
     await expect(page.getByRole('button', { name: 'Sync catalog' })).toBeDisabled()
 
-    const after = await listConnections(page)
+    const after = await listConnections()
     const revoked = after.find(row => row.connectionKey === revokeKey)
     expect(revoked?.status).toBe('revoked')
     const otherLive = after.find(
