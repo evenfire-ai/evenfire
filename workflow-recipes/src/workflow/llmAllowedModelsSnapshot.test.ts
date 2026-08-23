@@ -54,6 +54,8 @@ describe('WRC parseAllowedModelsSnapshot per assigned connection', () => {
     cm.metadata.annotations['clerum.io/codex-connections'] = JSON.stringify(parsed)
     const snapshot = parseAllowedModelsSnapshot(cm, 'deployment-default')
     expect(snapshot.connectionStatus).toBe('disconnected')
-    expect(snapshot.enabledModels?.has('codex-subscription:gpt-5.3-codex')).toBe(false)
+    expect(Array.from(snapshot.enabledModels ?? [])).not.toContain(
+      'codex-subscription:gpt-5.3-codex'
+    )
   })
 })
