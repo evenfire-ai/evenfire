@@ -116,7 +116,7 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
     pool = new Pool({ connectionString })
     await initDb({ connect: () => pool.connect() })
-    await insertInitialCodexSubscriptionConnection(pool, KEY, {
+    const created = await insertInitialCodexSubscriptionConnection(pool, KEY, {
       refreshToken: 'refresh-authz',
       accountFingerprint: 'fp-authz',
     })
@@ -126,8 +126,10 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
       expectedCatalogRevision: 0,
     })
     await pool.query(
-      `INSERT INTO llm_allowed_models (provider, model, enabled, source, stale)
-       VALUES ('codex-subscription', 'gpt-5.1', true, 'discovery', false)`
+      `INSERT INTO codex_catalog_models
+         (connection_id, model, enabled, source, discovered_at, last_seen_at, stale)
+       VALUES ($1, 'gpt-5.1', true, 'discovery', NOW(), NOW(), false)`,
+      [created.id]
     )
   }, 60_000)
 
@@ -154,6 +156,7 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
         model: REQUEST.model,
         catalogRevision: current!.catalogRevision,
         credentialRevision: current!.credentialRevision,
+        connectionKey: current!.connectionKey,
       }),
     }
     const deps = testDeps()
@@ -192,6 +195,7 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
         model: REQUEST.model,
         catalogRevision: current!.catalogRevision,
         credentialRevision: current!.credentialRevision,
+        connectionKey: current!.connectionKey,
       }),
     }
 

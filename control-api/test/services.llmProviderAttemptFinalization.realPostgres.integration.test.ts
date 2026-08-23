@@ -75,6 +75,7 @@ describeRealPostgres('Codex attempt finalization on real PostgreSQL', () => {
     await insertInitialCodexSubscriptionConnection(pool, KEY, {
       refreshToken: 'refresh-secret',
       accessToken: 'access-usable',
+      chatgptAccountId: 'acct_test_1',
       accountFingerprint: 'fp-final',
     })
   }, 60_000)
