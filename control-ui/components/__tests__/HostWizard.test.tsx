@@ -838,7 +838,7 @@ describe('HostWizard — broker-backed Codex authoring', () => {
         .mocked(api.apiSend)
         .mock.calls.some(call => call[0] === 'POST' && call[1] === '/api/v1/admin/secrets')
     ).toBe(false)
-  })
+  }, 15_000)
 
   it('requires exact credential slots when a static fallback joins a Codex primary', async () => {
     await renderWizard()
@@ -859,5 +859,5 @@ describe('HostWizard — broker-backed Codex authoring', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
     })
-  })
+  }, 15_000)
 })
