@@ -16,24 +16,30 @@
 
 const COMPONENT_RE = /^\[([^\]]+)\]\s*/
 const SENSITIVE_KEY_RE =
-  /password|secret|token|authorization|cookie|api[_-]?key|dsn|private|refresh|credential/i
+  /password|secret|token|authorization|cookie|api[_-]?key|dsn|private|refresh|credential|account[_-]?id/i
+const UNSAFE_OBJECT_KEY = /^(?:__proto__|constructor|prototype)$/
 
 const originalLog = console.log.bind(console)
 const originalError = console.error.bind(console)
 const originalWarn = console.warn.bind(console)
 
+function redactReplacer(key: string, value: unknown): unknown {
+  if (value === process.env) return '[Redacted]'
+  if (UNSAFE_OBJECT_KEY.test(key)) return undefined
+  if (key && SENSITIVE_KEY_RE.test(key)) return '[Redacted]'
+  return value
+}
+
 export function redactUnknown(value: unknown, key?: string): unknown {
   if (value === process.env) return '[Redacted]'
   if (key && SENSITIVE_KEY_RE.test(key)) return '[Redacted]'
-  if (Array.isArray(value)) return value.map(item => redactUnknown(item))
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {}
-    for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) {
-      out[childKey] = redactUnknown(childValue, childKey)
-    }
-    return out
+  if (value === undefined) return undefined
+  if (typeof value !== 'object' || value === null) return value
+  try {
+    return JSON.parse(JSON.stringify(value, redactReplacer)) as unknown
+  } catch {
+    return '[Unserializable]'
   }
-  return value
 }
 
 function formatArgs(args: unknown[]): string {
@@ -66,7 +72,7 @@ function emit(level: string, args: unknown[]): void {
     entry.component = component
   }
 
-  const writer = level === 'error' ? originalError : originalLog
+  const writer = level === 'error' ? originalError : level === 'warn' ? originalWarn : originalLog
   writer(JSON.stringify(entry))
 }
 

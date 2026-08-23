@@ -5,7 +5,7 @@
  * the dev auto-detection priority order (§5.4/§5.9), the prototype-pollution
  * guard in `isLlmProvider` (§1), and the factory fail-safe (§5.7).
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { apiKeysFromEnv, createLLMProvider } from '../index'
 import { makeProvider } from '../registry'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider, primarySlot } from '../registryCore'
@@ -121,6 +121,23 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
       }
     )
     expect(result).toBeNull()
+  })
+
+  it('logs unknown providers without a format string or raw newlines', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    createLLMProvider(
+      { openai: { 'openai-api-key': 'sk-test' } },
+      {
+        provider: 'mystery\n[injected]' as 'openai',
+        name: 'whatever',
+      }
+    )
+    const logged = spy.mock.calls.map(args => args.map(String).join(' ')).join('\n')
+    spy.mockRestore()
+    expect(logged).toContain('[LLM] Unknown provider:')
+    expect(logged).toContain('mystery')
+    expect(logged).not.toContain('%s')
+    expect(logged).not.toMatch(/mystery\n/)
   })
 
   it('returns null when the matching key is missing', () => {
