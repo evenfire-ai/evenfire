@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { config } from '../config.js'
-import { pool, withTransaction } from '../db.js'
+import { type DbClient, pool, withTransaction } from '../db.js'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { rootLogger } from '../observability/logger.js'
 import { chatgptAccountIdFromJwt } from './chatgptAccountId.js'
@@ -83,7 +83,7 @@ export function opaqueAttemptReceipt(input: {
 
 export type RedeemAttemptDeps = {
   enabled: boolean
-  db: { query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }> }
+  db: DbClient
   withTransaction: typeof withTransaction
   loadSecrets: typeof loadCodexSubscriptionSecrets
   getConnectionById: typeof getSafeCodexSubscriptionConnectionById
@@ -93,7 +93,7 @@ export type RedeemAttemptDeps = {
 
 const defaultRedeemDeps = (): RedeemAttemptDeps => ({
   enabled: config.codexSubscriptionEnabled,
-  db: { query: (text, values) => pool.query(text, values) },
+  db: pool,
   withTransaction,
   loadSecrets: loadCodexSubscriptionSecrets,
   getConnectionById: getSafeCodexSubscriptionConnectionById,

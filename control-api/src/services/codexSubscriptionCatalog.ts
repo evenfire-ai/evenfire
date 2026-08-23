@@ -255,7 +255,7 @@ export async function syncCodexSubscriptionCatalog(
   db: DbClient,
   transport: CodexCatalogTransport,
   accessToken: string,
-  expected?: { credentialRevision: number; catalogRevision: number; connectionKey?: string }
+  expected?: { credentialRevision?: number; catalogRevision?: number; connectionKey?: string }
 ): Promise<{
   outcome: CodexCatalogOutcome
   connection: CodexSubscriptionSafeConnection | null
