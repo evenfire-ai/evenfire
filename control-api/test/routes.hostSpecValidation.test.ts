@@ -26,7 +26,7 @@ describe('validateHostSpec', () => {
       { isModelAllowed }
     )
     expect(res).toBeNull()
-    expect(isModelAllowed).toHaveBeenCalledWith('claude', 'claude-haiku-4-5')
+    expect(isModelAllowed).toHaveBeenCalledWith('claude', 'claude-haiku-4-5', undefined)
   })
 
   it('accepts a newly added provider (groq) as spec.model.provider', async () => {
@@ -36,7 +36,7 @@ describe('validateHostSpec', () => {
       { isModelAllowed }
     )
     expect(res).toBeNull()
-    expect(isModelAllowed).toHaveBeenCalledWith('groq', 'llama-3.3-70b-versatile')
+    expect(isModelAllowed).toHaveBeenCalledWith('groq', 'llama-3.3-70b-versatile', undefined)
   })
 
   it('accepts azure as a Host provider (host.yaml enum carries azure)', async () => {
@@ -48,7 +48,7 @@ describe('validateHostSpec', () => {
       { isModelAllowed }
     )
     expect(res).toBeNull()
-    expect(isModelAllowed).toHaveBeenCalledWith('azure', 'my-gpt-4o-deployment')
+    expect(isModelAllowed).toHaveBeenCalledWith('azure', 'my-gpt-4o-deployment', undefined)
   })
 
   it('rejects a present-but-non-string spec.model.name (fail-closed, no lookup)', async () => {

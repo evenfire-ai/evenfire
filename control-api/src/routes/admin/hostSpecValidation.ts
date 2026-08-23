@@ -248,7 +248,7 @@ const HostLifecycleSchema = z
 export async function validateHostSpec(
   spec: Record<string, unknown>,
   deps: HostSpecValidationDeps = {
-    isModelAllowed: isModelAllowedDefault,
+    isModelAllowed: (provider, model) => isModelAllowedDefault(provider, model),
     getModelAllowlistState: getModelAllowlistStateDefault,
   },
   context: HostSpecValidationContext = {}
