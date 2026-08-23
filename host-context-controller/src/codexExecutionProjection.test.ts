@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import {
   CODEX_EXECUTE_SCOPE,
   type CodexCatalogSnapshot,
@@ -10,7 +9,7 @@ import {
 } from './codexExecutionProjection'
 
 const fixturePath = join(
-  dirname(fileURLToPath(import.meta.url)),
+  __dirname,
   '../../tests/e2e/fixtures/codex-subscription/codex-target-eligibility.json'
 )
 

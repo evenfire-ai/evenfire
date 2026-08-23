@@ -1,6 +1,6 @@
 import { type Mock, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LlmError, LlmErrorCode } from '../../../core/errors'
-import { FailoverEngine } from '../engine'
+import { type ClassifiedLike, FailoverEngine } from '../engine'
 import type { FailoverSwitchEvent, LlmPolicy, ModelPair } from '../types'
 
 const PRIMARY: ModelPair = { provider: 'claude', model: 'claude-sonnet-4-6' }
@@ -349,9 +349,13 @@ describe('FailoverEngine', () => {
       undefined,
       'budget_denied'
     )
-    const classifyWithCode = (caught: unknown) => {
+    const classifyWithCode = (caught: unknown): ClassifiedLike | null => {
       if (caught instanceof LlmError) {
-        return { code: caught.code, retryable: caught.retryable, providerCode: caught.providerCode }
+        return {
+          code: caught.code as LlmErrorCode,
+          retryable: caught.retryable,
+          providerCode: caught.providerCode,
+        }
       }
       return classify(caught)
     }

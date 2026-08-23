@@ -170,7 +170,7 @@ function makeReconciler(
 
 describe('NetworkPolicyReconciler Codex boundary', () => {
   it('does not derive Codex scope or proxy egress - that belongs to HostReconciler', () => {
-    const source = readFileSync(new URL('./networkPolicyReconciler.ts', import.meta.url), 'utf8')
+    const source = readFileSync(join(__dirname, 'networkPolicyReconciler.ts'), 'utf8')
     expect(source).not.toContain('llm:codex:execute')
     expect(source).not.toContain('codex-llm-proxy')
     expect(source).not.toContain('codex-proxy-egress')
