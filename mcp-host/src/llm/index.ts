@@ -63,7 +63,7 @@ export function createLLMProvider(
   const modelName = modelConfig?.name
 
   if (!isLlmProvider(provider)) {
-    console.error(`[LLM] Unknown provider: ${provider}`)
+    console.error('[LLM] Unknown provider: %s', provider)
     return null
   }
 
@@ -74,7 +74,7 @@ export function createLLMProvider(
   const credentials = keys[provider] ?? {}
   for (const slot of descriptorFor(provider).credentialSlots) {
     if (slot.required && !credentials[slot.dataKey]) {
-      console.error(`[LLM] ${provider} credential '${slot.dataKey}' not found in secrets`)
+      console.error('[LLM] %s credential %s not found in secrets', provider, slot.dataKey)
       return null
     }
   }
@@ -94,8 +94,9 @@ export function createLLMProvider(
     )
   } catch (err) {
     console.error(
-      `[LLM] failed to construct ${provider}:`,
-      err instanceof Error ? err.message : String(err)
+      '[LLM] failed to construct %s: %s',
+      provider,
+      err instanceof Error ? err.message : 'error'
     )
     return null
   }

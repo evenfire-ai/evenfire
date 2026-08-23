@@ -28,7 +28,6 @@ import { ConfigStore } from './config/configStore'
 import {
   contextWindowForModel,
   hostSubsetAllowlistView,
-  isModelAllowed,
   projectModels,
   resolveSessionModel,
 } from './config/modelResolution'
@@ -98,9 +97,9 @@ import {
 import { PluginWorkloadSdkBootstrapServer } from './pluginWorkloadSdk/bootstrapServer'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
-import { getDisplayName, sanitizeError } from './progress/intentExtraction'
+import { sanitizeError } from './progress/intentExtraction'
 import { progressReporterRegistry } from './progress/sseProgressReporter'
-import { MessageQueue, Task, TaskResponsePayload } from './queue'
+import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'

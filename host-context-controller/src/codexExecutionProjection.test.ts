@@ -77,6 +77,30 @@ describe('projectCodexExecution', () => {
     expect(projection.requiresCodexProxyEgress).toBe(false)
   })
 
+  it('keeps the runtime drift hash stable across catalog content refreshes', () => {
+    const spec = { model: { provider: 'codex-subscription', name: 'gpt-5.3-codex' } }
+    const first = projectCodexExecution(spec, {
+      flagEnabled: true,
+      connectionStatus: 'connected',
+      catalogContentHash: 'aaa',
+      catalogRevision: 1,
+      connectionRevision: 4,
+      enabledModels: ['codex-subscription:gpt-5.3-codex'],
+      staleModels: [],
+    })
+    const second = projectCodexExecution(spec, {
+      flagEnabled: true,
+      connectionStatus: 'connected',
+      catalogContentHash: 'bbb',
+      catalogRevision: 9,
+      connectionRevision: 4,
+      enabledModels: ['codex-subscription:gpt-5.3-codex'],
+      staleModels: [],
+    })
+    expect(first.driftHashInput).toBe(second.driftHashInput)
+    expect(first.catalogContentHash).not.toBe(second.catalogContentHash)
+  })
+
   it('anti-false-positive: uncertain never defaults to eligible', () => {
     // A reversible mutation that defaulted eligibility to `eligible` must make
     // this assertion RED. The committed code stays fail-closed.

@@ -186,6 +186,17 @@ export function codexOAuthCallbackRateLimits() {
   ] as const
 }
 
+function mcpHostAttemptRateLimitKey(req: Request): string {
+  const claims = req.mcpHostJwt
+  if (claims?.sub) return `llm_provider_attempt:${claims.sub}`
+  const bearer = extractBearerToken(req)
+  if (bearer) {
+    const hash = createHash('sha256').update(bearer).digest('hex').slice(0, 32)
+    return `llm_provider_attempt:bearer:${hash}`
+  }
+  return `llm_provider_attempt:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
 export function llmProviderAttemptAuthorizeRateLimits() {
   return [
     rateLimit({
@@ -193,22 +204,13 @@ export function llmProviderAttemptAuthorizeRateLimits() {
       limit: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
       standardHeaders: 'draft-7',
       legacyHeaders: false,
-      skip: (req: Request) => !req.mcpHostJwt,
-      keyGenerator: (req: Request) => {
-        const claims = req.mcpHostJwt
-        if (!claims) return `llm_provider_attempt:anon:${ipKeyGenerator(req.ip ?? 'unknown')}`
-        return `llm_provider_attempt:${claims.sub}`
-      },
+      keyGenerator: mcpHostAttemptRateLimitKey,
       handler: workflowGrantEdgeRateLimitHandler,
     }),
     rateLimitMiddleware({
       bucketType: 'llm_provider_attempt_authorize',
       maxPerMinute: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
-      getBucketKey: (req: Request) => {
-        const claims = req.mcpHostJwt
-        if (!claims) return null
-        return `llm_provider_attempt:${claims.sub}`
-      },
+      getBucketKey: mcpHostAttemptRateLimitKey,
     }),
   ] as const
 }

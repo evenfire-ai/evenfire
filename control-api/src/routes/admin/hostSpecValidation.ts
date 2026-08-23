@@ -339,14 +339,7 @@ export async function validateHostSpec(
       }
     }
     const connectionRef =
-      provider === 'codex-subscription' && isPlainObject(model)
-        ? typeof model.connectionRef === 'string' && model.connectionRef.trim()
-          ? model.connectionRef.trim()
-          : 'deployment-default'
-        : undefined
-    if (provider === 'codex-subscription' && isPlainObject(model) && !model.connectionRef) {
-      model.connectionRef = 'deployment-default'
-    }
+      provider === 'codex-subscription' ? resolvedCodexConnectionRef(model) : undefined
     const allowed = await deps.isModelAllowed(provider, name, connectionRef)
     // Switching connectionRef is a new assignment even when (provider, model)
     // already lived on the Host. A revoked/unknown grant must not ride the
@@ -381,13 +374,16 @@ export async function validateHostSpec(
   // (same fail-closed gate as spec.model.name), so a broken fallback is caught
   // on write instead of surfacing only during the incident it was meant to
   // absorb (spec V16). `credentialSlot`, when present, is format-checked only.
-  const policyErrors = await validateLlmPolicy(spec.llmPolicy, deps, tol)
+  const hostCodexConnectionRef = resolvedCodexConnectionRef(
+    isPlainObject(spec.model) ? spec.model : undefined
+  )
+  const policyErrors = await validateLlmPolicy(spec.llmPolicy, deps, tol, hostCodexConnectionRef)
   if (policyErrors) return policyErrors
 
   // Topic 3a per-host allowlist. Runs AFTER the global-allowlist gates above, so
   // by the time coherence is checked the primary + fallbacks are already known
   // to be valid GLOBAL pairs; this narrows them to the host's offered subset.
-  const allowedModelsErrors = await validateAllowedModels(spec, deps, tol)
+  const allowedModelsErrors = await validateAllowedModels(spec, deps, tol, hostCodexConnectionRef)
   if (allowedModelsErrors) return allowedModelsErrors
 
   // The write PASSED validation: hand the queued tolerations to the caller via
@@ -546,6 +542,17 @@ async function maybeWarnStale(
  * audit event (not emitted until the whole write persists) and returns true so
  * the gate skips its rejection.
  */
+function resolvedCodexConnectionRef(model: unknown): string {
+  if (
+    isPlainObject(model) &&
+    typeof model.connectionRef === 'string' &&
+    model.connectionRef.trim()
+  ) {
+    return model.connectionRef.trim()
+  }
+  return 'deployment-default'
+}
+
 function storedCodexConnectionRef(stored: Record<string, unknown> | undefined): string | undefined {
   if (!isPlainObject(stored) || !isPlainObject(stored.model)) return undefined
   const provider = typeof stored.model.provider === 'string' ? stored.model.provider.trim() : ''
@@ -603,7 +610,8 @@ function toleratePair(
 async function validateAllowedModels(
   spec: Record<string, unknown>,
   deps: HostSpecValidationDeps,
-  tol: HostToleranceBundle
+  tol: HostToleranceBundle,
+  connectionRef: string
 ): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
   const allowedModels = spec.allowedModels
   if (allowedModels === undefined) return null
@@ -645,7 +653,11 @@ async function validateAllowedModels(
     // catalog can never be offered by a host — unless tolerating a pre-existing
     // incoherence this write does not worsen (Pieza D). A tolerated pair is still
     // added to `offered` so the coherence gate below sees the host as offering it.
-    const allowed = await deps.isModelAllowed(provider, model)
+    const allowed = await deps.isModelAllowed(
+      provider,
+      model,
+      provider === 'codex-subscription' ? connectionRef : undefined
+    )
     if (!allowed && !toleratePair(provider, model, 'subset', tol)) {
       return {
         errors: [
@@ -724,7 +736,8 @@ async function validateAllowedModels(
 async function validateLlmPolicy(
   llmPolicy: unknown,
   deps: HostSpecValidationDeps,
-  tol: HostToleranceBundle
+  tol: HostToleranceBundle,
+  connectionRef: string
 ): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
   if (llmPolicy === undefined) return null
   if (!isPlainObject(llmPolicy)) {
@@ -813,7 +826,11 @@ async function validateLlmPolicy(
     // Allowlist gate LAST: it is the only async (DB) check, so cheap structural
     // rejections above avoid a needless query. Tolerated (Pieza D) when the pair
     // is a pre-existing incoherence this write does not worsen.
-    const allowed = await deps.isModelAllowed(provider, model)
+    const allowed = await deps.isModelAllowed(
+      provider,
+      model,
+      provider === 'codex-subscription' ? connectionRef : undefined
+    )
     if (!allowed && !toleratePair(provider, model, 'fallback', tol)) {
       return {
         errors: [

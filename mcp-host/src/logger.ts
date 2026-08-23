@@ -14,48 +14,62 @@
  *   import "./logger";
  */
 
-const COMPONENT_RE = /^\[([^\]]+)\]\s*/;
+const COMPONENT_RE = /^\[([^\]]+)\]\s*/
+const SENSITIVE_KEY_RE =
+  /password|secret|token|authorization|cookie|api[_-]?key|dsn|private|refresh|credential/i
 
-const originalLog = console.log.bind(console);
-const originalError = console.error.bind(console);
-const originalWarn = console.warn.bind(console);
+const originalLog = console.log.bind(console)
+const originalError = console.error.bind(console)
+const originalWarn = console.warn.bind(console)
+
+export function redactUnknown(value: unknown, key?: string): unknown {
+  if (value === process.env) return '[Redacted]'
+  if (key && SENSITIVE_KEY_RE.test(key)) return '[Redacted]'
+  if (Array.isArray(value)) return value.map(item => redactUnknown(item))
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) {
+      out[childKey] = redactUnknown(childValue, childKey)
+    }
+    return out
+  }
+  return value
+}
 
 function formatArgs(args: unknown[]): string {
-  return args
-    .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
-    .join(" ");
+  return args.map(a => (typeof a === 'string' ? a : JSON.stringify(redactUnknown(a)))).join(' ')
 }
 
 function emit(level: string, args: unknown[]): void {
-  const raw = formatArgs(args);
+  const raw = formatArgs(args)
 
   // Skip empty lines and separator lines (====, ----)
-  const trimmed = raw.trim();
-  if (!trimmed || /^[=\-]{3,}$/.test(trimmed)) return;
+  const trimmed = raw.trim()
+  if (!trimmed || /^[=\-]{3,}$/.test(trimmed)) return
 
-  let component = "";
-  let msg = raw;
+  let component = ''
+  let msg = raw
 
-  const match = raw.match(COMPONENT_RE);
+  const match = raw.match(COMPONENT_RE)
   if (match) {
-    component = match[1];
-    msg = raw.slice(match[0].length);
+    component = match[1]
+    msg = raw.slice(match[0].length)
   }
 
   const entry: Record<string, string> = {
     timestamp: new Date().toISOString(),
     level,
     msg: msg.trim(),
-  };
-
-  if (component) {
-    entry.component = component;
   }
 
-  const writer = level === "error" ? originalError : originalLog;
-  writer(JSON.stringify(entry));
+  if (component) {
+    entry.component = component
+  }
+
+  const writer = level === 'error' ? originalError : originalLog
+  writer(JSON.stringify(entry))
 }
 
-console.log = (...args: unknown[]) => emit("info", args);
-console.error = (...args: unknown[]) => emit("error", args);
-console.warn = (...args: unknown[]) => emit("warn", args);
+console.log = (...args: unknown[]) => emit('info', args)
+console.error = (...args: unknown[]) => emit('error', args)
+console.warn = (...args: unknown[]) => emit('warn', args)

@@ -632,7 +632,7 @@ export class ConfigStore {
         if (Array.isArray(binding?.models)) {
           const allowed = new Set(binding.models)
           entries = entries.filter(entry => allowed.has(entry.model))
-        } else if (binding && binding.connectionKey !== 'deployment-default') {
+        } else if (!binding || binding.connectionKey !== 'deployment-default') {
           entries = []
         }
       }
@@ -962,10 +962,12 @@ function parseCodexPolicyBinding(
           models: Array.isArray(assigned.models) ? assigned.models.filter(Boolean) : undefined,
         }
       }
+      return null
     } catch {
       return null
     }
   }
+  if (connectionKey !== 'deployment-default') return null
   if (
     catalogRevision === null ||
     catalogRevision === 'invalid' ||

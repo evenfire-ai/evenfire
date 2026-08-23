@@ -5,6 +5,9 @@ import {
   createCodexSubscriptionConnection,
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
+  pollCodexDevice,
+  revokeCodexSubscription,
+  startCodexDeviceConnect,
 } from '@lib/codexSubscription'
 import { CodexAgentAssignment } from '../CodexAgentAssignment'
 import { ToastProvider } from '../Toast'
@@ -144,5 +147,45 @@ describe('CodexAgentAssignment', () => {
       expect(onConnectionRefChange).toHaveBeenCalledWith('codex-aabbccddeeff0011')
     })
     expect(onConnectionRefChange).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the device-code banner after the poll expires', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'team-plus', displayName: 'Team Plus' }),
+    ])
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: 'https://auth.openai.com/codex/device',
+      intervalSeconds: 0.01,
+      state: 'device-state',
+      intent: 'connect',
+    })
+    vi.mocked(pollCodexDevice).mockResolvedValue({ status: 'expired' })
+    renderAssignment('team-plus')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
+    await waitFor(() => {
+      expect(pollCodexDevice).toHaveBeenCalled()
+    })
+    expect(screen.queryByTestId('codex-device-code')).not.toBeInTheDocument()
+  })
+
+  it('surfaces a revoke API error instead of swallowing it', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'team-plus', displayName: 'Team Plus' }),
+    ])
+    confirmMock.mockResolvedValue(true)
+    vi.mocked(revokeCodexSubscription).mockRejectedValue(new Error('revoke exploded'))
+    const { onConnectionRefChange } = renderAssignment('team-plus')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Revoke' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+    await waitFor(() => {
+      expect(screen.getByText('revoke exploded')).toBeInTheDocument()
+    })
+    expect(onConnectionRefChange).not.toHaveBeenCalled()
   })
 })

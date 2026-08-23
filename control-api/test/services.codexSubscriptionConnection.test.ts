@@ -161,6 +161,8 @@ describe('codex subscription connection repository', () => {
     ).rejects.toBeInstanceOf(CodexSubscriptionStaleRevisionError)
     const [sql] = query.mock.calls[0] as [string]
     expect(sql).toMatch(/credential_revision = \$/)
+    expect(sql).toMatch(/revoked_at IS NULL/)
+    expect(sql).not.toMatch(/revoked_at = NULL/)
   })
 
   it('generates distinct identity keys that are not derived from the display name', () => {

@@ -111,13 +111,16 @@ export function parseAllowedModelsSnapshot(
           connectionRevision = assigned.connectionRevision as number
         }
         intersectCodexModels(enabledModels, staleModels, assigned.models, connectionKey)
-      } else if (connectionKey !== 'deployment-default') {
+      } else {
         connectionStatus = 'disconnected'
         dropCodexModels(enabledModels, staleModels)
       }
     } catch {
       return snapshotFromConfigMapError('malformed')
     }
+  } else if (connectionKey !== 'deployment-default') {
+    connectionStatus = 'disconnected'
+    dropCodexModels(enabledModels, staleModels)
   }
   return {
     flagEnabled: annotations[CODEX_ENABLED_ANNOTATION] === 'true',

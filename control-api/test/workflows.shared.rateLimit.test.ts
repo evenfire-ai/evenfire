@@ -72,6 +72,25 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(adminWorkflowRateLimitCredential(req)).toBe('admin-cookie-token')
   })
 
+  it('llmProviderAttemptAuthorizeRateLimits meters callers before JWT is attached', async () => {
+    mockCheckAndIncrement.mockReset()
+    const app = express()
+    app.post('/authorize', ...llmProviderAttemptAuthorizeRateLimits(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    for (let i = 0; i < 60; i++) {
+      pgAllows()
+      await request(app).post('/authorize').expect(200)
+    }
+    pgAllows()
+    const res = await request(app).post('/authorize').expect(429)
+    expect(res.body).toMatchObject({
+      error: 'Too Many Requests',
+      retryAfterSeconds: expect.any(Number),
+    })
+  })
+
   it('rate-limit factories pair an edge backstop with the PG limiter', () => {
     expect(workflowGrantReadRateLimits()).toHaveLength(2)
     expect(workflowGrantWriteRateLimits()).toHaveLength(2)

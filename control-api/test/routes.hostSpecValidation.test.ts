@@ -126,8 +126,8 @@ describe('validateHostSpec', () => {
         { isModelAllowed }
       )
       expect(res).toBeNull()
-      expect(isModelAllowed).toHaveBeenCalledWith('claude', 'claude-haiku-4-5')
-      expect(isModelAllowed).toHaveBeenCalledWith('openai', 'gpt-5.4')
+      expect(isModelAllowed).toHaveBeenCalledWith('claude', 'claude-haiku-4-5', undefined)
+      expect(isModelAllowed).toHaveBeenCalledWith('openai', 'gpt-5.4', undefined)
     })
 
     it('rejects a fallback model not in the allowlist (model_not_allowed, with index path)', async () => {
@@ -162,7 +162,7 @@ describe('validateHostSpec', () => {
         { isModelAllowed }
       )
       expect(res).toBeNull()
-      expect(isModelAllowed).toHaveBeenCalledWith('groq', 'llama-3.3-70b-versatile')
+      expect(isModelAllowed).toHaveBeenCalledWith('groq', 'llama-3.3-70b-versatile', undefined)
     })
 
     it('rejects an unknown fallback provider (fail-closed, no allowlist lookup)', async () => {

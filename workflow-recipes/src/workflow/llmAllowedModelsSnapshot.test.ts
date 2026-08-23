@@ -44,4 +44,16 @@ describe('WRC parseAllowedModelsSnapshot per assigned connection', () => {
     expect(snapshot.connectionStatus).toBe('connected')
     expect(snapshot.catalogRevision).toBe(4)
   })
+
+  it('does not rematch a missing deployment-default onto another grant in the map', () => {
+    const cm = multiGrantConfigMap()
+    const parsed = JSON.parse(
+      String(cm.metadata.annotations['clerum.io/codex-connections'])
+    ) as Record<string, unknown>
+    delete parsed['deployment-default']
+    cm.metadata.annotations['clerum.io/codex-connections'] = JSON.stringify(parsed)
+    const snapshot = parseAllowedModelsSnapshot(cm, 'deployment-default')
+    expect(snapshot.connectionStatus).toBe('disconnected')
+    expect(snapshot.enabledModels?.has('codex-subscription:gpt-5.3-codex')).toBe(false)
+  })
 })

@@ -361,10 +361,10 @@ export async function rotateCodexSubscriptionCredentials(
               credential_revision = credential_revision + 1,
               last_refresh_at = now(),
               last_auth_at = now(),
-              revoked_at = NULL,
               updated_at = now()
         WHERE connection_key = $7
           AND credential_revision = $8
+          AND revoked_at IS NULL
         RETURNING ${SAFE_CONNECTION_COLUMNS}`,
       [
         refreshTokenEncrypted,
@@ -397,7 +397,7 @@ export async function revokeCodexSubscriptionConnection(
             access_token_encrypted = NULL,
             access_token_expires_at = NULL,
             chatgpt_account_id_encrypted = NULL,
-            account_fingerprint = NULL,
+            catalog_status = 'never_synced',
             credential_revision = credential_revision + 1,
             refresh_lock_token = NULL,
             refresh_lock_expires_at = NULL,
@@ -409,7 +409,15 @@ export async function revokeCodexSubscriptionConnection(
     [key]
   )
   const row = result.rows[0] as SafeConnectionRow | undefined
-  return row ? toSafeConnection(row) : getSafeCodexSubscriptionConnection(db, key)
+  if (!row) return getSafeCodexSubscriptionConnection(db, key)
+  await db.query(
+    `UPDATE codex_catalog_models
+        SET enabled = false,
+            stale = true
+      WHERE connection_id = $1`,
+    [row.id]
+  )
+  return toSafeConnection(row)
 }
 
 export async function acquireCodexSubscriptionRefreshLock(

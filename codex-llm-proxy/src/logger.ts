@@ -3,6 +3,8 @@ import pino, { type DestinationStream } from 'pino'
 export const REDACT_PATHS = [
   'accessToken',
   'refreshToken',
+  'chatgptAccountId',
+  'accountId',
   'executionTicket',
   'authorization',
   'headers.authorization',

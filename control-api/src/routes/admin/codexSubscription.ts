@@ -72,7 +72,9 @@ function oauthDeps(
 }
 
 function keyFromReq(req: { params?: { key?: string } }): string {
-  return normalizeCodexConnectionKey(req.params?.key)
+  const raw = typeof req.params?.key === 'string' ? req.params.key.trim() : ''
+  if (!raw) return normalizeCodexConnectionKey(raw)
+  return assertCodexConnectionKey(raw)
 }
 
 function parseIntent(value: unknown): CodexSubscriptionOAuthIntent {
@@ -83,6 +85,10 @@ function sendOAuthError(
   res: { status: (n: number) => { json: (body: unknown) => void } },
   err: unknown
 ) {
+  if (err instanceof CodexSubscriptionInvalidConnectionKeyError) {
+    res.status(400).json({ error: 'invalid_connection_key' })
+    return
+  }
   if (err instanceof CodexSubscriptionOAuthError) {
     const status =
       err.code === 'disabled'

@@ -25,7 +25,6 @@ import { pool } from '../db.js'
 import { listEnabledCodexModelsGroupedByConnection } from './codexSubscriptionCatalog.js'
 import {
   type CodexSubscriptionSafeConnection,
-  getSafeCodexSubscriptionConnection,
   listSafeCodexSubscriptionConnections,
 } from './codexSubscriptionConnection.js'
 import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllowedModels.js'
@@ -117,14 +116,6 @@ export interface AllowedModelsConfigMapMaterializer {
  * ordered by the query (provider, model), so the serialized form — and thus the
  * hash — is stable for a given allowlist state.
  */
-async function loadCodexConnection(db: DbClient): Promise<CodexSubscriptionSafeConnection | null> {
-  try {
-    return await getSafeCodexSubscriptionConnection(db)
-  } catch {
-    return null
-  }
-}
-
 export function buildConfigMapData(grouped: Record<string, AllowedModelEntry[]>): {
   data: Record<string, string>
   contentHash: string
@@ -160,15 +151,11 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
   async materialize(db: DbClient = pool): Promise<void> {
     const grouped = await listEnabledGroupedByProvider(db)
     const { data, contentHash } = buildConfigMapData(grouped)
-    const connections = await listSafeCodexSubscriptionConnections(db).catch(() => [])
-    const modelsByKey = await listEnabledCodexModelsGroupedByConnection(db).catch(() => ({}))
-    const readiness = buildCodexReadinessAnnotations(
-      connections.find(row => row.connectionKey === 'deployment-default') ??
-        connections[0] ??
-        (await loadCodexConnection(db)),
-      connections,
-      modelsByKey
-    )
+    const connections = await listSafeCodexSubscriptionConnections(db)
+    const modelsByKey = await listEnabledCodexModelsGroupedByConnection(db)
+    const defaultConnection =
+      connections.find(row => row.connectionKey === 'deployment-default') ?? null
+    const readiness = buildCodexReadinessAnnotations(defaultConnection, connections, modelsByKey)
     let lastError: unknown
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {

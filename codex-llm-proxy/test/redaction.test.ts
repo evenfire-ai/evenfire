@@ -13,6 +13,8 @@ describe('proxy redaction', () => {
     probe.info({
       accessToken: 'sk-live-secret',
       refreshToken: 'rt-secret',
+      chatgptAccountId: 'acct_live_secret',
+      accountId: 'acct_live_secret',
       executionTicket: 'ticket-secret',
       attemptReceipt: 'receipt-secret',
       authorization: 'Bearer secret',
@@ -23,6 +25,7 @@ describe('proxy redaction', () => {
     expect(joined).toContain('codex_proxy_probe')
     expect(joined).not.toContain('sk-live-secret')
     expect(joined).not.toContain('rt-secret')
+    expect(joined).not.toContain('acct_live_secret')
     expect(joined).not.toContain('ticket-secret')
     expect(joined).not.toContain('receipt-secret')
     expect(joined).not.toContain('Bearer secret')

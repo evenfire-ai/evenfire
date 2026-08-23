@@ -60,7 +60,25 @@ describe('codex-subscription Host admission', () => {
       'gpt-5.1',
       'deployment-default'
     )
-    expect((spec.model as { connectionRef?: string }).connectionRef).toBe('deployment-default')
+    expect((spec.model as { connectionRef?: string }).connectionRef).toBeUndefined()
+  })
+
+  it('evaluates allowedModels and fallbacks against the Host connectionRef', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    const isModelAllowed = vi.fn().mockResolvedValue(true)
+    const res = await validateHostSpec(
+      {
+        model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'team-plus' },
+        allowedModels: [
+          { provider: 'codex-subscription', model: 'gpt-5.1' },
+          { provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+        ],
+      },
+      { isModelAllowed }
+    )
+    expect(res).toBeNull()
+    expect(isModelAllowed).toHaveBeenCalledWith('codex-subscription', 'gpt-5.1', 'team-plus')
+    expect(isModelAllowed).toHaveBeenCalledWith('codex-subscription', 'gpt-5.3-codex', 'team-plus')
   })
 
   it('does not tolerate switching to a revoked connectionRef with the same model', async () => {

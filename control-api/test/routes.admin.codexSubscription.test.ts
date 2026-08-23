@@ -188,6 +188,15 @@ describe('admin Codex subscription routes', () => {
     assertNoLeak(refresh.body)
   })
 
+  it('rejects a malformed nested connection key before starting OAuth', async () => {
+    const res = await request(app)
+      .post('/admin/llm/providers/codex-subscription/connections/Bad%20Key/device/start')
+      .send({ intent: 'connect' })
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid_connection_key' })
+    expect(oauth.startDevice).not.toHaveBeenCalled()
+  })
+
   it('maps a live fingerprint collision on a keyed device start to 409', async () => {
     oauth.startDevice.mockRejectedValue(
       new CodexSubscriptionOAuthError('fingerprint_in_use', 'account already connected')

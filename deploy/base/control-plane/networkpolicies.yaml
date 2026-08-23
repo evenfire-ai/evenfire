@@ -841,7 +841,7 @@ spec:
           kubernetes.io/metadata.name: sandbox-recipes
       podSelector:
         matchLabels:
-          clerum.io/managed-by: host-context-controller
+          clerum.io/component: workflow-mcp-host
     ports:
     - port: 8080
       protocol: TCP

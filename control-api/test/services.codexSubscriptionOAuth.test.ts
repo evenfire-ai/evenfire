@@ -222,6 +222,50 @@ describe('codex subscription OAuth broker', () => {
     expect(repos.rotate).toHaveBeenCalledTimes(1)
   })
 
+  it('refuses to persist tokens onto a revoked connection', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        access_token: 'access-secret',
+        refresh_token: 'refresh-secret',
+        id_token: idTokenFor('acct_other'),
+      }),
+    })
+    repos.consumeState.mockResolvedValue({
+      safe: {
+        state: 'state-revoked',
+        flow: 'browser',
+        intent: 'connect',
+        status: 'consumed',
+        expiresAt: new Date(Date.now() + 1000),
+        consumedAt: new Date(),
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      pkceVerifier: 'verifier',
+    })
+    repos.getSafe.mockResolvedValue({
+      connectionKey: 'team-plus',
+      status: 'revoked',
+      credentialRevision: 4,
+      catalogRevision: 2,
+      accountFingerprint: fingerprint('acct_raw_123'),
+      catalogStatus: 'ready',
+      catalogSyncedAt: null,
+      lastRefreshAt: null,
+      lastAuthAt: null,
+      refreshLockHeld: false,
+      revokedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    await expect(
+      handleCodexBrowserCallback(deps(fetchFn), { code: 'code-r', state: 'state-revoked' })
+    ).rejects.toMatchObject({ code: 'not_connected' })
+    expect(repos.rotate).not.toHaveBeenCalled()
+    expect(repos.insertInitial).not.toHaveBeenCalled()
+  })
+
   it('persists a different account only with explicit replace intent', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
@@ -457,6 +501,21 @@ describe('codex subscription OAuth broker', () => {
     )
     expect(repos.rotate).not.toHaveBeenCalled()
     expect(repos.releaseLock).toHaveBeenCalled()
+  })
+
+  it('fails loud when the refresh lock is held and the token stays stale', async () => {
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'refresh-secret',
+      accessToken: 'stale-access',
+      accessTokenExpiresAt: new Date(Date.now() + 30_000),
+      chatgptAccountId: null,
+      credentialRevision: 3,
+    })
+    repos.acquireLock.mockResolvedValue(false)
+    await expect(ensureFreshCodexAccessToken(deps(vi.fn()))).rejects.toMatchObject({
+      code: 'refresh_in_flight',
+    })
+    expect(repos.updateInPlace).not.toHaveBeenCalled()
   })
 
   it('revokes locally even when upstream revoke fails', async () => {

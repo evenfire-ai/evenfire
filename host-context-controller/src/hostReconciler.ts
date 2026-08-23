@@ -3955,7 +3955,9 @@ export class HostReconciler {
   }
 
   private async reconcileMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
-    if (this.projectCodexForHost(host).requiresCodexProxyEgress) {
+    const projection = this.projectCodexForHost(host)
+    if (projection.eligibility === 'uncertain') return
+    if (projection.requiresCodexProxyEgress) {
       await this.ensureMcpHostCodexProxyEgressNetworkPolicy(host)
       return
     }

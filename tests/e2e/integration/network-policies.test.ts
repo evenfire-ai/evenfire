@@ -190,6 +190,9 @@ describe('Codex LLM proxy NetworkPolicy contract (static)', () => {
     expect(rendered).toContain('name: codex-llm-proxy-ingress')
     expect(rendered).toContain('name: codex-llm-proxy-egress')
     expect(rendered).toMatch(/port: 8080[\s\S]*clerum.io\/managed-by: host-context-controller/)
+    expect(rendered).toMatch(
+      /kubernetes.io\/metadata.name: sandbox-recipes[\s\S]*clerum.io\/component: workflow-mcp-host/
+    )
     expect(rendered).toMatch(/app: control-api[\s\S]*port: 8081/)
     expect(rendered).toContain('kubernetes.io/metadata.name: monitoring')
     expect(rendered).not.toMatch(/codex-llm-proxy-ingress[\s\S]*namespaceSelector: \{\}/)

@@ -75,16 +75,22 @@ describe('projectCodexExecution (WRC)', () => {
     }
   })
 
-  it('anti-false-positive: changing the catalog revision used in the hash must drift', () => {
+  it('does not roll the drift hash on catalog refresh; credential revision still drifts', () => {
     const eligible = fixture.cases.find(testCase => testCase.id === 'flag-on-connected-ready')
     expect(eligible).toBeDefined()
     const baseline = projectCodexExecution(eligible!.spec, eligible!.snapshot)
-    const mutated = projectCodexExecution(eligible!.spec, {
+    const catalogOnly = projectCodexExecution(eligible!.spec, {
       ...eligible!.snapshot,
       catalogRevision: (eligible!.snapshot.catalogRevision ?? 1) + 99,
+      catalogContentHash: 'catalog-only-refresh',
     })
-    expect(mutated.derivedScopes).toEqual(baseline.derivedScopes)
-    expect(mutated.driftHashInput).not.toBe(baseline.driftHashInput)
+    const credentialChanged = projectCodexExecution(eligible!.spec, {
+      ...eligible!.snapshot,
+      connectionRevision: (eligible!.snapshot.connectionRevision ?? 1) + 1,
+    })
+    expect(catalogOnly.derivedScopes).toEqual(baseline.derivedScopes)
+    expect(catalogOnly.driftHashInput).toBe(baseline.driftHashInput)
+    expect(credentialChanged.driftHashInput).not.toBe(baseline.driftHashInput)
   })
 
   it('treats a malformed empty broker model as ineligible', () => {

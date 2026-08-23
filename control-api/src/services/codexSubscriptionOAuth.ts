@@ -387,6 +387,12 @@ async function persistGrantedTokens(
 ): Promise<CodexSubscriptionSafeConnection> {
   const key = normalizeCodexConnectionKey(connectionKey)
   const existing = await getSafeCodexSubscriptionConnection(deps.db, key)
+  if (existing?.revokedAt || existing?.status === 'revoked') {
+    throw new CodexSubscriptionOAuthError(
+      'not_connected',
+      'revoked grant cannot be reused; create a new connection'
+    )
+  }
   if (
     existing?.accountFingerprint &&
     existing.accountFingerprint !== parsed.accountFingerprint &&
@@ -487,7 +493,21 @@ export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise
   )
   if (!locked) {
     await new Promise(resolve => setTimeout(resolve, 400))
-    return
+    const latest = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
+    if (!latest) {
+      throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
+    }
+    const waitedAccountId = latest.chatgptAccountId || chatgptAccountIdFromJwt(latest.accessToken)
+    const stillExpiring =
+      latest.accessTokenExpiresAt != null &&
+      latest.accessTokenExpiresAt.getTime() - Date.now() < ACCESS_TOKEN_REFRESH_SKEW_MS
+    if (latest.accessToken && !stillExpiring && waitedAccountId) {
+      if (!latest.chatgptAccountId) {
+        await persistCodexChatgptAccountId(deps.db, deps.encryptionKey, waitedAccountId, key)
+      }
+      return
+    }
+    throw new CodexSubscriptionOAuthError('refresh_in_flight', 'another refresh holds the lock')
   }
   try {
     const latest = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)

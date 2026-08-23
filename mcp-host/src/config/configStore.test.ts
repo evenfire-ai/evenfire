@@ -827,4 +827,35 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
     expect(store.codexPolicyBinding()?.models).toEqual(['gpt-5.1'])
   })
+
+  it('does not inherit another grant when the assigned connection is missing from the map', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      connectionRef: 'ghost-grant',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+          'clerum.io/codex-connections': JSON.stringify({
+            'personal-pro': {
+              catalogRevision: 4,
+              connectionRevision: 2,
+              models: ['gpt-5.3-codex'],
+            },
+          }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.codexPolicyBinding()).toBeNull()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([])
+  })
 })

@@ -122,9 +122,17 @@ export function CodexAgentAssignment({
           await load()
           return
         }
-        if (polled.status === 'expired' || polled.status === 'denied') break
+        if (polled.status === 'expired' || polled.status === 'denied') {
+          setUserCode(null)
+          setVerificationUri(null)
+          break
+        }
       }
+      setUserCode(null)
+      setVerificationUri(null)
     } catch (err) {
+      setUserCode(null)
+      setVerificationUri(null)
       showToast(err instanceof Error ? err.message : 'ChatGPT sign-in failed', { tone: 'error' })
     } finally {
       setBusy(false)
@@ -176,6 +184,8 @@ export function CodexAgentAssignment({
     try {
       await revokeCodexSubscription(selected.connectionKey)
       await load()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Revoke failed', { tone: 'error' })
     } finally {
       setBusy(false)
     }
