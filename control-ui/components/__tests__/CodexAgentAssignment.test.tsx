@@ -19,7 +19,9 @@ vi.mock('@components/ConfirmDialog', () => ({
 }))
 
 vi.mock('@lib/codexSubscriptionFeature', () => ({
-  isCodexSubscriptionUiEnabled: () => true,
+  isCodexSubscriptionUiEnabled: (capability?: { enabled?: boolean } | null) =>
+    capability?.enabled === true,
+  loadCodexSubscriptionCapability: async () => ({ enabled: true }),
 }))
 
 vi.mock('@lib/codexSubscription', async importOriginal => {

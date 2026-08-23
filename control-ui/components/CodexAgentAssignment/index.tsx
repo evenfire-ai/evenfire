@@ -13,7 +13,11 @@ import {
   startCodexDeviceConnect,
   syncCodexSubscriptionCatalog,
 } from '@lib/codexSubscription'
-import { isCodexSubscriptionUiEnabled } from '@lib/codexSubscriptionFeature'
+import {
+  type CodexSubscriptionCapability,
+  isCodexSubscriptionUiEnabled,
+  loadCodexSubscriptionCapability,
+} from '@lib/codexSubscriptionFeature'
 import {
   mapConnectionStatus,
   statusLabel,
@@ -46,9 +50,15 @@ export function CodexAgentAssignment({
   const [creating, setCreating] = useState(false)
   const [displayName, setDisplayName] = useState('')
   const [busy, setBusy] = useState(false)
+  const [capability, setCapability] = useState<CodexSubscriptionCapability | null>(null)
+  const enabled = isCodexSubscriptionUiEnabled(capability)
+
+  useEffect(() => {
+    void loadCodexSubscriptionCapability().then(setCapability)
+  }, [])
 
   const load = useCallback(async () => {
-    if (!isCodexSubscriptionUiEnabled()) return
+    if (!enabled) return
     const rows = await listCodexSubscriptionConnections()
     setConnections(rows)
     const current = rows.find(row => row.connectionKey === connectionRef) ?? null
@@ -59,7 +69,7 @@ export function CodexAgentAssignment({
     } else {
       onModelsChange?.([])
     }
-  }, [connectionRef, onModelsChange])
+  }, [connectionRef, enabled, onModelsChange])
 
   useEffect(() => {
     void load().catch(err => {
@@ -171,7 +181,7 @@ export function CodexAgentAssignment({
     }
   }
 
-  if (!isCodexSubscriptionUiEnabled()) return null
+  if (!enabled) return null
 
   const uiStatus = selected ? mapConnectionStatus(selected.status) : 'disconnected'
 
