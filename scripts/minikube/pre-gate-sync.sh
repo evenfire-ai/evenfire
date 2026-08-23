@@ -2,12 +2,18 @@
 # Enforces the "sync to minikube before every gate" rule from the platform E2E plan.
 
 set -euo pipefail
+set +u
+PRE_GATE_SYNC_CONFIG_ONLY="$PRE_GATE_SYNC_CONFIG_ONLY"
+set -u
+if [ -z "$PRE_GATE_SYNC_CONFIG_ONLY" ]; then PRE_GATE_SYNC_CONFIG_ONLY=false; fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
-WORKTREE_ID="$(printf '%s' "${PROJECT_DIR}" | shasum | awk '{print $1}')"
+# shellcheck source=t2-worktree-id.sh
+source "$SCRIPT_DIR/t2-worktree-id.sh"
+WORKTREE_ID="$(t2_worktree_id "${PROJECT_DIR}")"
 STATE_ROOT="${TMPDIR:-/tmp}/clerum-pre-gate-sync"
 STATE_DIR="${STATE_ROOT}/${WORKTREE_ID}"
 CLUSTER_SYNC_STATE_CONFIGMAP="${CLERUM_PRE_GATE_SYNC_CONFIGMAP:-clerum-pre-gate-sync-state}"
@@ -42,6 +48,25 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# The pre-gate entrypoint is also a mutating recovery boundary. It must carry
+# the same branch/profile identity as the T2 orchestrator, or acquire that
+# identity itself when invoked standalone.
+T2_PROJECT_DIR="$PROJECT_DIR"
+T2_PROFILE="$PROFILE"
+T2_CONTEXT="$PROFILE"
+T2_GATE_ID="$GATE_NAME"
+# shellcheck source=scripts/minikube/t2-common.sh
+source "$SCRIPT_DIR/t2-common.sh"
+if [ -z "$T2_SKIP_LOCK" ]; then T2_SKIP_LOCK=false; fi
+if [ "$PRE_GATE_SYNC_CONFIG_ONLY" != true ]; then
+  t2_require_commands
+  t2_repo_metadata
+  t2_profile_scope
+  t2_context_check
+  t2_profile_status
+  t2_profile_context_identity_check
+fi
 
 log() {
   printf '[pre-gate-sync] %s\n' "$*"
@@ -94,9 +119,14 @@ CONTROL_API_FENCED=false
 CONTROL_API_REPLICAS=1
 
 fence_workflow_reconciler() {
-  if ! ${KC} get deployment/workflow-recipes -n control-plane >/dev/null 2>&1; then
-    log "Workflow reconciler is not present; no rollout fence is required"
-    return 0
+  local deployment_probe
+  if ! deployment_probe="$(${KC} get deployment/workflow-recipes -n control-plane 2>&1)"; then
+    if [[ "${deployment_probe}" == *NotFound* || "${deployment_probe}" == *"not found"* ]]; then
+      log "Workflow reconciler is not present; no rollout fence is required"
+      return 0
+    fi
+    log "ERROR: unable to inspect workflow-recipes before schema migration; refusing to continue without its writer fence"
+    return 1
   fi
   WRC_REPLICAS="$(${KC} get deployment/workflow-recipes -n control-plane -o jsonpath='{.spec.replicas}')"
   WRC_REPLICAS="${WRC_REPLICAS:-1}"
@@ -112,20 +142,28 @@ restore_workflow_reconciler() {
   fi
   set +e
   log "Restoring workflow reconciler to ${WRC_REPLICAS} replica(s)"
-  ${KC} scale deployment/workflow-recipes -n control-plane --replicas="${WRC_REPLICAS}" >/dev/null
-  ${KC} rollout status deployment/workflow-recipes -n control-plane --timeout=120s >/dev/null
-  local restore_rc=$?
+  local scale_rc=0 rollout_rc=0
+  ${KC} scale deployment/workflow-recipes -n control-plane --replicas="${WRC_REPLICAS}" >/dev/null || scale_rc=$?
+  if [[ "${scale_rc}" -eq 0 ]]; then
+    ${KC} rollout status deployment/workflow-recipes -n control-plane --timeout=120s >/dev/null || rollout_rc=$?
+  fi
   set -e
-  if [[ "${restore_rc}" -ne 0 ]]; then
-    log "WARNING: workflow reconciler did not become Ready during pre-gate cleanup"
+  if [[ "${scale_rc}" -ne 0 || "${rollout_rc}" -ne 0 ]]; then
+    log "ERROR: workflow reconciler restore failed (scale=${scale_rc}, rollout=${rollout_rc}); leaving the writer fence armed"
+    return 1
   fi
   WRC_FENCED=false
 }
 
 fence_control_api() {
-  if ! ${KC} get deployment/control-api -n control-plane >/dev/null 2>&1; then
-    log "Control API is not present; no writer fence is required"
-    return 0
+  local deployment_probe
+  if ! deployment_probe="$(${KC} get deployment/control-api -n control-plane 2>&1)"; then
+    if [[ "${deployment_probe}" == *NotFound* || "${deployment_probe}" == *"not found"* ]]; then
+      log "Control API is not present; no writer fence is required"
+      return 0
+    fi
+    log "ERROR: unable to inspect control-api before schema migration; refusing to continue without its writer fence"
+    return 1
   fi
   CONTROL_API_REPLICAS="$(${KC} get deployment/control-api -n control-plane -o jsonpath='{.spec.replicas}')"
   CONTROL_API_REPLICAS="${CONTROL_API_REPLICAS:-1}"
@@ -145,25 +183,67 @@ restore_control_api() {
   fi
   set +e
   log "Restoring Control API to ${CONTROL_API_REPLICAS} replica(s)"
-  ${KC} scale deployment/control-api -n control-plane --replicas="${CONTROL_API_REPLICAS}" >/dev/null
-  ${KC} rollout status deployment/control-api -n control-plane --timeout=120s >/dev/null
-  local restore_rc=$?
+  local scale_rc=0 rollout_rc=0
+  ${KC} scale deployment/control-api -n control-plane --replicas="${CONTROL_API_REPLICAS}" >/dev/null || scale_rc=$?
+  if [[ "${scale_rc}" -eq 0 ]]; then
+    ${KC} rollout status deployment/control-api -n control-plane --timeout=120s >/dev/null || rollout_rc=$?
+  fi
   set -e
-  if [[ "${restore_rc}" -ne 0 ]]; then
-    log "WARNING: Control API did not become Ready during pre-gate cleanup"
+  if [[ "${scale_rc}" -ne 0 || "${rollout_rc}" -ne 0 ]]; then
+    log "ERROR: Control API restore failed (scale=${scale_rc}, rollout=${rollout_rc}); leaving the writer fence armed"
+    return 1
   fi
   CONTROL_API_FENCED=false
 }
 
 restore_pre_gate_writers() {
+  local status=0
   # Restore Control API first so it can serve the final readiness checks; WRC
   # remains last because it is the consumer that must stay stopped until every
   # migration, writer restart, and legacy-policy gate has completed.
-  restore_control_api
-  restore_workflow_reconciler
+  restore_control_api || status=1
+  restore_workflow_reconciler || status=1
+  return "$status"
 }
 
-trap restore_pre_gate_writers EXIT
+finalize_pre_gate_sync() {
+  local status=$? restore_status=0
+
+  # An EXIT trap's return value does not replace the script's exit status. Exit
+  # explicitly so a failed writer restore cannot turn a successful sync into a
+  # green exact-head attestation. Disable the trap first to avoid recursion.
+  trap - EXIT
+  if ! restore_pre_gate_writers; then
+    restore_status=1
+  fi
+  if [[ "${status}" -eq 0 && "${restore_status}" -ne 0 ]]; then
+    status=1
+  fi
+  # t2_lock_release returns the status passed to it; pass zero so an existing
+  # non-zero script status is preserved rather than misclassified as a lock
+  # cleanup failure.
+  t2_lock_release 0 || status=1
+  exit "${status}"
+}
+
+commit_cluster_sync_state() {
+  local cluster_fingerprint="$1" infra_fingerprint="$2"
+
+  # The exact-head marker is a certification artifact, not merely progress.
+  # Restore every fenced writer before publishing it so a cleanup failure can
+  # never leave a marker that claims the cluster is ready at this HEAD.
+  restore_pre_gate_writers || return 1
+  persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}" || return 1
+  persist_state cluster "${cluster_fingerprint}" || return 1
+  persist_state infra "${infra_fingerprint}" || return 1
+}
+
+if [ "$PRE_GATE_SYNC_CONFIG_ONLY" != true ]; then
+  t2_mutation_lock
+fi
+export T2_PROJECT_DIR T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV \
+  T2_SKIP_LOCK T2_LOCK_TOKEN
+trap finalize_pre_gate_sync EXIT
 
 fingerprint_dir() {
   pre_gate_marker_fingerprint_dir "${PROJECT_DIR}" "$1"
@@ -195,6 +275,21 @@ persist_state() {
   printf '%s' "${value}" >"$(state_file_for "${key}")"
 }
 
+cluster_marker_value() {
+  local field="$1" output
+  if output="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
+    -o "jsonpath={.data.${field}}" 2>&1)"; then
+    printf '%s' "${output}"
+    return 0
+  fi
+  if [[ "${output}" == *NotFound* || "${output}" == *"not found"* ]]; then
+    printf ''
+    return 0
+  fi
+  log "WARNING: unable to inspect ${CLUSTER_SYNC_STATE_CONFIGMAP}.${field}; treating marker as stale: ${output}" >&2
+  printf ''
+}
+
 cluster_marker_matches() {
   local expected_cluster_fingerprint="$1"
   local expected_worktree_id="$2"
@@ -203,18 +298,18 @@ cluster_marker_matches() {
 
   expected_git_head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || true)"
 
-  actual_cluster_fingerprint="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.clusterFingerprint}' 2>/dev/null || true)"
-  actual_worktree_id="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.worktreeId}' 2>/dev/null || true)"
-  actual_git_head="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.gitHead}' 2>/dev/null || true)"
+  actual_cluster_fingerprint="$(cluster_marker_value clusterFingerprint)"
+  actual_worktree_id="$(cluster_marker_value worktreeId)"
+  actual_git_head="$(cluster_marker_value gitHead)"
   # The image coordinate is part of "in sync". gitHead cannot tell a ghcr
   # cluster from a local one, nor v0.6.0 from latest, and the acquisition stamp
   # is what catches a `make minikube-setup` between two pre-gates: that re-pulls
   # every release image and discards any shadow build while leaving this marker
   # untouched, so without it no sync would run and the gate would silently test
   # release code.
-  actual_image_source="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imageSource}' 2>/dev/null || true)"
-  actual_image_tag="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imageTag}' 2>/dev/null || true)"
-  actual_images_generated_at="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
+  actual_image_source="$(cluster_marker_value imageSource)"
+  actual_image_tag="$(cluster_marker_value imageTag)"
+  actual_images_generated_at="$(cluster_marker_value imagesGeneratedAt)"
 
   [[ "${actual_cluster_fingerprint}" == "${expected_cluster_fingerprint}" ]] &&
     [[ "${actual_worktree_id}" == "${expected_worktree_id}" ]] &&
@@ -287,35 +382,190 @@ ensure_artifact() {
 }
 
 sync_mcp_host_auth_key() {
-  if ! ${KC} get secret rpc-proxy-secrets -n rpc-proxy >/dev/null 2>&1; then
-    log "Skipping mcp-host auth key sync (rpc-proxy-secrets not found)"
-    return 0
+  local source_probe target_probe
+  if ! source_probe="$(${KC} get secret rpc-proxy-secrets -n rpc-proxy 2>&1)"; then
+    if [[ "${source_probe}" == *NotFound* || "${source_probe}" == *"not found"* ]]; then
+      log "Skipping mcp-host auth key sync (rpc-proxy-secrets not found)"
+      return 0
+    fi
+    log "ERROR: unable to inspect rpc-proxy/rpc-proxy-secrets before MCP auth sync"
+    return 1
   fi
 
-  if ! ${KC} get configmap mcp-host-config -n mcp-host >/dev/null 2>&1; then
-    log "Skipping mcp-host auth key sync (mcp-host-config not found)"
-    return 0
+  if ! target_probe="$(${KC} get configmap mcp-host-config -n mcp-host 2>&1)"; then
+    if [[ "${target_probe}" == *NotFound* || "${target_probe}" == *"not found"* ]]; then
+      log "Skipping mcp-host auth key sync (mcp-host-config not found)"
+      return 0
+    fi
+    log "ERROR: unable to inspect mcp-host/mcp-host-config before MCP auth sync"
+    return 1
   fi
 
-  bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}"
+  bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}" --skip-gfs --require-mcp
+}
+
+sync_gfs_auth_key() {
+  local allow_staged="${1:-false}"
+  GFS_AUTH_SYNC_ALLOW_STAGED="${allow_staged}" \
+    bash "${PROJECT_DIR}/scripts/minikube/sync-auth-key.sh" --context "${PROFILE}" --require-gfs
+}
+
+settle_gfs_reader_rollout() {
+  T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
+    CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
+    T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
+    CONTEXT="$T2_CONTEXT" \
+      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
+}
+
+reconcile_gfs_credentials() {
+  PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
+    CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
+    T2_PROFILE_ENV="$T2_PROFILE_ENV" T2_PORTS_ENV="$T2_PORTS_ENV" \
+    CONTEXT="$T2_CONTEXT" \
+      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+}
+
+converge_gfs_reader_after_restore() {
+  # A reader whose runtime role was NOLOGIN keeps serving 503 from its
+  # already-started pod even after the role is restored. Converging it here
+  # keeps the repair inside the single orchestrated run instead of a manual
+  # `kubectl rollout restart deploy/gfsc-reader` side quest.
+  local deployment=gfsc-reader deployment_probe desired ready
+  if ! deployment_probe="$(${KC} get deployment "${deployment}" -n gfs 2>&1)"; then
+    if [[ "${deployment_probe}" == *NotFound* || "${deployment_probe}" == *"not found"* ]]; then
+      return 0
+    fi
+    log "ERROR: unable to inspect gfs/${deployment} before credential convergence"
+    return 1
+  fi
+  if ! desired="$(${KC} get deployment "${deployment}" -n gfs -o jsonpath='{.spec.replicas}' 2>/dev/null)"; then
+    log "ERROR: unable to read desired replicas for gfs/${deployment}"
+    return 1
+  fi
+  if [[ ! "${desired}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: desired replicas for gfs/${deployment} is not numeric"
+    return 1
+  fi
+  if [[ "${desired}" == "0" ]]; then
+    return 0
+  fi
+  if ! ready="$(${KC} get deployment "${deployment}" -n gfs -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"; then
+    log "ERROR: unable to read Ready replicas for gfs/${deployment}"
+    return 1
+  fi
+  # Kubernetes omits status.readyReplicas while a Deployment has zero Ready
+  # pods. An empty successful read is a real 0; an API failure above remains
+  # unknown and fails closed.
+  ready="${ready:-0}"
+  if [[ ! "${ready}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: Ready replicas for gfs/${deployment} is not numeric"
+    return 1
+  fi
+  if [[ "${ready}" == "${desired}" ]]; then
+    return 0
+  fi
+  log "Restarting gfs/${deployment} after credential restore (${ready:-0}/${desired} Ready)"
+  rollout_restart_with_retry gfs "${deployment}"
+  # HCC's gfsReconciler strips the restartedAt annotation, so the restart may
+  # not replace pods and a generation-based rollout status loops until
+  # timeout. Delete live unready reader pods once so they re-read the
+  # restored Secret without waiting out CrashLoopBackOff, then judge
+  # readiness directly.
+  local pod_rows pod_name pod_ready pod_deleting
+  if ! pod_rows="$(${KC} get pods -n gfs -l 'app=gfs-controller,clerum.io/gfsc-role=reader' -o \
+    'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' \
+    2>&1)"; then
+    if [[ "$pod_rows" == *NotFound* || "$pod_rows" == *"not found"* ]]; then
+      pod_rows=""
+    else
+      log "ERROR: unable to inspect gfs reader pods before convergence: $pod_rows"
+      return 1
+    fi
+  fi
+  while IFS='|' read -r pod_name pod_ready pod_deleting; do
+    [ -n "$pod_name" ] || continue
+    [ -z "$pod_deleting" ] || continue
+    [ "$pod_ready" != True ] || continue
+    if ! ${KC} delete pod "$pod_name" -n gfs --ignore-not-found --wait=false >/dev/null 2>&1; then
+      log "ERROR: unable to delete unready gfs reader pod $pod_name"
+      return 1
+    fi
+  done <<<"$pod_rows"
+  CONTEXT="${PROFILE}" \
+    bash "${PROJECT_DIR}/scripts/minikube/wait-gfs-reader-ready.sh"
 }
 
 provision_gfs_serving() {
+  if [[ "${GATE_NAME}" != "minikube-t2" ]]; then
+    # Other platform security gates must retain their read/verify contract.
+    # GFS credential recovery is a T2 transition because it can patch Secrets,
+    # restart GFSC, delete pods, and resume an abandoned rollout claim.
+    log "Skipping GFS serving mutation before ${GATE_NAME}; only minikube-t2 owns GFS recovery"
+    sync_mcp_host_auth_key
+    return 0
+  fi
   if ${KC} get configmap gfs-config -n gfs >/dev/null 2>&1; then
+    local reader_probe
+    if ! reader_probe="$(${KC} get deployment gfsc-reader -n gfs 2>&1)"; then
+      if [[ "${reader_probe}" == *NotFound* || "${reader_probe}" == *"not found"* ]]; then
+        log "Skipping gfs serving provisioning (gfsc-reader not found — GFS reader is not deployed)"
+        sync_mcp_host_auth_key
+        return 0
+      fi
+      log "ERROR: unable to inspect gfs/gfsc-reader before credential recovery"
+      return 1
+    fi
     log "Provisioning gfs serving before ${GATE_NAME}"
     # FAIL LOUD: with the GFS stack deployed, a broken gfs_controller credential
     # means every GFS operation 503s (issue #775). Continuing would burn the
     # whole gate run on a cluster that cannot pass.
-    if ! GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
-      CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
+    # GFS_RESTORE_ACTIVE_NOLOGIN=true: a role-reset T1 suite can leave the
+    # cluster-global reader role NOLOGIN. On this local branch-owned profile
+    # the committed Secret DSN is the source of truth, so the recovery helper
+    # may restore the role from it — the same contract the GFS T1 gate already
+    # applies on exit. The helper still fails loud when the restored
+    # credential cannot authenticate; no password is invented here.
+    # GFS_RECOVER_ABANDONED_STATE: a dead prior setup can leave
+    # rollout-running; this sync holds the T2 lock, so resume that claim.
+    # An interrupted prior setup can leave gfs-config.jwt-public-key empty
+    # (the overlay re-applies the base ConfigMap with an empty value); a
+    # reader pod cannot start without it and any readiness wait would only
+    # time out. Re-sync it first; this is a no-op when the key matches.
+    sync_gfs_auth_key true
+    # Settle a Ready reader first so reconcile does not restart it and
+    # race HCC's gfsReconciler during kubectl rollout status. If reconcile
+    # still needs a reader rollout, the gfs-rollout-shim PATH prefix makes
+    # that wait judge readiness instead of the template generation HCC keeps
+    # rewriting.
+    if ! settle_gfs_reader_rollout; then
+      log "ERROR: unable to settle the branch-owned GFS reader rollout before credential reconciliation"
+      exit 1
+    fi
+    if ! reconcile_gfs_credentials; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1
     fi
+    # The first staged sync may have deferred active-pod proof because this
+    # reconcile call is the producer of gfs-controller-db. Re-run strict proof
+    # after it so the durable marker is never published before consumers have
+    # the key and a usable DSN.
+    if ! sync_gfs_auth_key; then
+      log "ERROR: gfs auth-key convergence failed after credential reconciliation"
+      return 1
+    fi
+    if ! converge_gfs_reader_after_restore; then
+      log "ERROR: gfs reader did not converge after credential restoration"
+      return 1
+    fi
   else
     log "Skipping gfs serving provisioning (gfs-config not found — GFS stack not deployed)"
+    sync_mcp_host_auth_key
   fi
-
-  sync_mcp_host_auth_key
 }
 
 assert_no_legacy_prompt_bridge_grants() {
@@ -419,9 +669,16 @@ if [[ "${cluster_changed}" == "true" ]]; then
         "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ]]; then
     (
       cd "${PROJECT_DIR}"
-      make minikube-deploy-crds
+      gfs_crd_mutation=false
+      [[ "${GATE_NAME}" == "minikube-t2" ]] && gfs_crd_mutation=true
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" \
+        MINIKUBE_GFS_MUTATION="${gfs_crd_mutation}" make minikube-deploy-crds
     )
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+    if [[ "${GATE_NAME}" == "minikube-t2" ]]; then
+      CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+    else
+      log "Skipping GFS writer Secret mutation before ${GATE_NAME}; only minikube-t2 owns GFS recovery"
+    fi
     writer_dsn="$(${KC} -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
     if [[ -n "${writer_dsn}" ]]; then
       # Do not reconcile the GFS roles before the migration window. The
@@ -472,6 +729,14 @@ if [[ "${cluster_changed}" == "true" ]]; then
     provision_gfs_serving
   fi
 
+  if ! incremental_requires_database_reconcile; then
+    # No schema work is planned, but a role-reset T1 run may still have left
+    # the cluster-global GFS runtime roles NOLOGIN while every image and
+    # manifest matched. The T2 transition owns this idempotent convergence;
+    # security-gate invocations return through the non-mutating guard above.
+    provision_gfs_serving
+  fi
+
   # Schema/control-plane first: only after migrations, runtime roles, and
   # inventory gates have converged may the new consumer workloads be applied or
   # restarted. The workflow reconciler is fenced above for this window.
@@ -480,7 +745,10 @@ if [[ "${cluster_changed}" == "true" ]]; then
     (
       cd "${PROJECT_DIR}"
       make minikube-apply-secrets
-      make minikube-deploy-all
+      gfs_mutation=false
+      [[ "${GATE_NAME}" == "minikube-t2" ]] && gfs_mutation=true
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" MINIKUBE_GFS_MUTATION="${gfs_mutation}" \
+        make minikube-deploy-all
       if [[ "${FORCE_RESTART}" == "true" || "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ]]; then
         make minikube-restart-all
       fi
@@ -525,13 +793,6 @@ if [[ "${cluster_changed}" == "true" ]]; then
     rollout_if_present registry registry-api
   fi
 
-  # minikube-restart-all can recycle gfsc pods and leave reader NOLOGIN after the
-  # post-migration provision. Reconcile serving again only after control-api is
-  # Ready: the DSN probe execs into that Deployment.
-  rollout_if_present control-plane control-postgres
-  rollout_if_present control-plane control-api
-  provision_gfs_serving
-
   incremental_verify_gfs_if_required
 
   log "Cluster status after sync"
@@ -554,12 +815,15 @@ if [[ "${cluster_changed}" == "true" ]]; then
     log "ERROR: unable to recompute the infrastructure fingerprint after deployment; refusing to stamp the marker"
     exit 1
   fi
-  persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}"
-  persist_state cluster "${cluster_fingerprint}"
-  persist_state infra "${infra_fingerprint}"
+  commit_cluster_sync_state "${cluster_fingerprint}" "${infra_fingerprint}"
   log "Pre-gate cluster sync complete"
 else
   log "No cluster sync required before ${GATE_NAME}"
+  # Images and manifests match, yet the GFS runtime credentials can still be
+  # broken (a role-reset T1 leaves the reader NOLOGIN without changing any
+  # fingerprint). The T2 fast path repairs them in this single orchestrated
+  # run; non-T2 gates are fenced out by provision_gfs_serving.
+  provision_gfs_serving
   assert_no_legacy_prompt_bridge_grants
   ensure_evenfire_registry
   rollout_if_present control-plane nginx-workflow-approval-gateway

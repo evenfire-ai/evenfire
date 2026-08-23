@@ -10,7 +10,7 @@ fail() { echo "FAIL: $1"; FAIL=1; }
 
 assert_succeeds_dry() {
   local target="$1"
-  if make -n "$target" >/dev/null 2>&1; then
+  if make -n MAKE=: "$target" >/dev/null 2>&1; then
     echo "PASS: make -n $target parses"
   else
     echo "FAIL: make -n $target failed to parse"
@@ -33,6 +33,31 @@ assert_contains() {
   fi
 }
 
+assert_file_contains() {
+  local path="$1" needle="$2"
+  if grep -Fq -- "$needle" "$REPO_ROOT/$path"; then
+    echo "PASS: $path contains '$needle'"
+  else
+    echo "FAIL: $path missing '$needle'"
+    FAIL=1
+  fi
+}
+
+assert_not_contains() {
+  local target="$1" needle="$2"
+  local out
+  out="$(make -n "$target" 2>&1 || true)"
+  if [[ "$out" == *"$needle"* ]]; then
+    echo "FAIL: make -n $target unexpectedly contains '$needle'"
+    echo "---"
+    echo "$out"
+    echo "---"
+    FAIL=1
+  else
+    echo "PASS: make -n $target omits '$needle'"
+  fi
+}
+
 assert_make_contains() {
   local needle="$1"
   shift
@@ -51,18 +76,33 @@ assert_make_contains() {
 
 assert_succeeds_dry minikube-start
 assert_succeeds_dry minikube-deploy-all
-assert_succeeds_dry minikube-sync-auth-key-if-present
+assert_succeeds_dry minikube-deploy-all-body
 assert_succeeds_dry minikube-verify-networkpolicies
 
 assert_contains minikube-start "minikube-sync-auth-key-if-present"
 assert_contains minikube-start "--context=clerum-test"
-assert_contains minikube-deploy-all "minikube-sync-auth-key"
-assert_contains minikube-sync-auth-key "--context=clerum-test"
-assert_contains minikube-sync-auth-key "scripts/minikube/sync-auth-key.sh"
+assert_contains minikube-start "MINIKUBE_STARTUP_AUTH_SYNC_MODE=shared-profile-mcp"
+assert_contains minikube-deploy-all "with-t2-mutation-lock.sh"
+assert_contains minikube-deploy-all-body "minikube-sync-auth-key"
+assert_contains minikube-sync-auth-key "with-t2-mutation-lock.sh"
+assert_contains minikube-sync-auth-key-body "--context=clerum-test"
+assert_contains minikube-sync-auth-key-body "scripts/minikube/sync-auth-key.sh"
 assert_succeeds_dry minikube-sync-codex-subscription-url
 assert_contains minikube-sync-codex-subscription-url "scripts/minikube/sync-codex-subscription-control-ui-url.sh"
 assert_contains minikube-verify-networkpolicies "verify-networkpolicies.sh --overlay minikube"
 assert_contains minikube-sync-auth-key-if-present "rpc-proxy-secrets"
+assert_file_contains Makefile "T2_MUTATION_LOCK_WRAPPED"
+assert_contains minikube-sync-auth-key-if-present "minikube-sync-auth-key"
+assert_contains minikube-sync-auth-key-if-present "NotFound"
+assert_contains minikube-sync-auth-key-if-present "rpc_probe_status"
+assert_not_contains minikube-sync-auth-key-if-present "canonical T2 profile lock is not held"
+assert_contains minikube-sync-auth-key-shared-profile "--shared-profile-bootstrap"
+assert_not_contains minikube-sync-auth-key-shared-profile "with-t2-mutation-lock.sh"
+assert_file_contains scripts/minikube/sync-auth-key.sh "--shared-profile-bootstrap"
+assert_contains minikube-deploy-all-body "set -o pipefail"
+assert_contains minikube-deploy-all-body "mktemp"
+assert_contains minikube-deploy-all-body "filtered_manifest"
+assert_contains minikube-deploy-crds-body '!= "true"'
 
 assert_make_contains "deployment/chatllm" minikube-deploy-service SVC=mcp-host NS=mcp-host
 assert_make_contains "deployment/chatllm" minikube-restart-deploy SVC=mcp-host NS=mcp-host
@@ -225,5 +265,135 @@ assert_minikube_setup_e2e_builds_both_fixtures
 assert_minikube_setup_e2e_fixtures_are_gated_on_evaluated_image_source
 assert_minikube_setup_e2e_still_uses_the_pull_path
 assert_the_tag_override_reaches_the_setup_script
+
+# Resource probes may skip only an explicit NotFound. A forbidden/API failure
+# must stop the target before it can certify a partially reachable profile.
+assert_auth_probe_error_handling() {
+  local stub_root output status
+  stub_root="$(mktemp -d)"
+  output="$stub_root/output"
+  cat > "$stub_root/kubectl" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"get configmap mcp-host-config"* ]]; then
+  printf '%s\n' "${KUBECTL_MCP_PROBE_ERROR:-${KUBECTL_PROBE_ERROR:-}}" >&2
+  exit "${KUBECTL_MCP_PROBE_STATUS:-${KUBECTL_PROBE_STATUS:-1}}"
+fi
+printf '%s\n' "${KUBECTL_PROBE_ERROR:-}" >&2
+exit "${KUBECTL_PROBE_STATUS:-1}"
+STUB
+  chmod +x "$stub_root/kubectl"
+
+  if KUBECTL_PROBE_ERROR='Error from server (NotFound): secrets "rpc-proxy-secrets" not found' \
+    PATH="$stub_root:$PATH" make -C "$REPO_ROOT" minikube-sync-auth-key-if-present \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    pass "minikube-sync-auth-key-if-present skips an explicit NotFound"
+  else
+    fail "minikube-sync-auth-key-if-present did not skip an explicit NotFound: $(cat "$output")"
+  fi
+
+  if KUBECTL_PROBE_ERROR='Error from server (NotFound): configmaps "rpc-proxy-secrets" not found' \
+    PATH="$stub_root:$PATH" make -C "$REPO_ROOT" minikube-sync-auth-key-if-present \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    fail "minikube-sync-auth-key-if-present confused a wrong-kind NotFound with the Secret probe"
+  else
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      pass "minikube-sync-auth-key-if-present rejects a wrong-kind NotFound"
+    else
+      fail "minikube-sync-auth-key-if-present returned an unexpected status for a wrong-kind NotFound"
+    fi
+  fi
+
+  if KUBECTL_PROBE_STATUS=0 \
+    KUBECTL_MCP_PROBE_ERROR='Error from server (NotFound): configmaps "mcp-host-config" not found' \
+    KUBECTL_MCP_PROBE_STATUS=1 PATH="$stub_root:$PATH" \
+    make -C "$REPO_ROOT" minikube-sync-auth-key-if-present \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    pass "minikube-sync-auth-key-if-present skips an explicit ConfigMap NotFound"
+  else
+    fail "minikube-sync-auth-key-if-present did not skip an explicit ConfigMap NotFound: $(cat "$output")"
+  fi
+
+  if KUBECTL_PROBE_ERROR='Error from server (Forbidden): secrets is forbidden' \
+    PATH="$stub_root:$PATH" make -C "$REPO_ROOT" minikube-sync-auth-key-if-present \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    fail "minikube-sync-auth-key-if-present swallowed a Forbidden probe error: $(cat "$output")"
+  else
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      pass "minikube-sync-auth-key-if-present fails closed on a Forbidden probe error"
+    else
+      fail "minikube-sync-auth-key-if-present returned an unexpected status for a Forbidden probe error"
+    fi
+  fi
+
+  if KUBECTL_PROBE_STATUS=0 \
+    KUBECTL_MCP_PROBE_ERROR='Error from server (Forbidden): configmaps is forbidden' \
+    KUBECTL_MCP_PROBE_STATUS=1 PATH="$stub_root:$PATH" \
+    make -C "$REPO_ROOT" minikube-sync-auth-key-if-present \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    fail "minikube-sync-auth-key-if-present swallowed a ConfigMap Forbidden probe error: $(cat "$output")"
+  else
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      pass "minikube-sync-auth-key-if-present fails closed on a ConfigMap Forbidden probe error"
+    else
+      fail "minikube-sync-auth-key-if-present returned an unexpected status for a ConfigMap Forbidden probe error"
+    fi
+  fi
+
+  if KUBECTL_PROBE_ERROR='/bin/bash: kubectl: command not found' \
+    KUBECTL_PROBE_STATUS=127 PATH="$stub_root:$PATH" \
+    make -C "$REPO_ROOT" minikube-sync-auth-key-if-present \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    fail "minikube-sync-auth-key-if-present swallowed command-not-found"
+  else
+    status=$?
+    if [ "$status" -ne 0 ] && grep -Fq 'command not found' "$output"; then
+      pass "minikube-sync-auth-key-if-present propagates command-not-found"
+    else
+      fail "minikube-sync-auth-key-if-present did not preserve command-not-found failure: status=$status output=$(cat "$output")"
+    fi
+  fi
+
+  if KUBECTL_PROBE_ERROR='Unable to connect to the server: net/http: TLS handshake timeout' \
+    KUBECTL_PROBE_STATUS=1 PATH="$stub_root:$PATH" \
+    make -C "$REPO_ROOT" minikube-sync-auth-key-if-present \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    fail "minikube-sync-auth-key-if-present swallowed a timeout probe error"
+  else
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      pass "minikube-sync-auth-key-if-present propagates timeout probe errors"
+    else
+      fail "minikube-sync-auth-key-if-present returned an unexpected status for a timeout probe error"
+    fi
+  fi
+
+  if KUBECTL_PROBE_ERROR='error: context "probe-contract" does not exist' \
+    KUBECTL_PROBE_STATUS=1 PATH="$stub_root:$PATH" \
+    make -C "$REPO_ROOT" minikube-sync-auth-key-if-present \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    fail "minikube-sync-auth-key-if-present swallowed a context probe error"
+  else
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      pass "minikube-sync-auth-key-if-present propagates context probe errors"
+    else
+      fail "minikube-sync-auth-key-if-present returned an unexpected status for a context probe error"
+    fi
+  fi
+
+  if KUBECTL_PROBE_STATUS=0 KUBECTL_MCP_PROBE_STATUS=0 PATH="$stub_root:$PATH" \
+    make -C "$REPO_ROOT" minikube-sync-auth-key-if-present MAKE=: \
+    MINIKUBE_PROFILE=probe-contract >"$output" 2>&1; then
+    pass "minikube-sync-auth-key-if-present proceeds when both probes succeed"
+  else
+    fail "minikube-sync-auth-key-if-present rejected successful probes: $(cat "$output")"
+  fi
+  rm -rf "$stub_root"
+}
+
+assert_auth_probe_error_handling
 
 exit $FAIL

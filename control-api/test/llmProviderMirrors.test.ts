@@ -26,15 +26,11 @@ describe('hand-maintained provider mirrors (shell scripts)', () => {
     }
   })
 
-  it('check-prereqs.sh PROVIDER_KEYS maps every static provider to its primary env', () => {
+  it('check-prereqs.sh PROVIDER_KEYS maps every provider to its primary env', () => {
     const script = read('scripts/check-prereqs.sh')
     for (const id of PROVIDER_IDS) {
-      const primary = PROVIDER_CREDENTIAL_SLOTS[id][0]
-      // Zero-slot oauth-broker providers (codex-subscription) have no Secret env.
-      if (!primary) continue
-      expect(script, `missing provider key ${id}:${primary.envName}`).toContain(
-        `${id}:${primary.envName}`
-      )
+      const primaryEnv = PROVIDER_CREDENTIAL_SLOTS[id][0].envName
+      expect(script, `missing provider key ${id}:${primaryEnv}`).toContain(`${id}:${primaryEnv}`)
     }
   })
 
@@ -48,9 +44,7 @@ describe('hand-maintained provider mirrors (shell scripts)', () => {
       // multiple case blocks.
       const lines = read(rel).split('\n')
       for (const id of PROVIDER_IDS) {
-        const primarySlot = PROVIDER_CREDENTIAL_SLOTS[id][0]?.dataKey
-        // Zero-slot oauth-broker providers are not seeded via Secret case arms.
-        if (!primarySlot) continue
+        const primarySlot = PROVIDER_CREDENTIAL_SLOTS[id][0].dataKey
         const idArms = lines.filter(line => line.trimStart().startsWith(`${id})`))
         expect(idArms.length, `${rel}: missing case arm ${id})`).toBeGreaterThan(0)
         expect(

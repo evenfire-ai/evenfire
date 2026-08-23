@@ -51,7 +51,7 @@ A few rules that follow from this split, and that surprise people:
 
 ## 2. Which providers are supported
 
-**22 static-credential providers plus the `codex-subscription` oauth broker**, defined once in
+**22 providers**, defined once in
 [`packages/llm-providers/index.cjs`](../../packages/llm-providers/index.cjs) —
 the single source of truth consumed by mcp-host, control-api, the workflow
 runtime, the host controller and the Control UI.
@@ -115,8 +115,8 @@ authenticates with an `api-key` header instead of `Authorization: Bearer`, and
 
 | Surface                       | Providers supported                     |
 | ----------------------------- | --------------------------------------- |
-| Interactive Host (chat agent) | all **23**                              |
-| WorkflowRecipe LLM steps      | **21** — `bedrock` and `azure` excluded |
+| Interactive Host (chat agent) | all **22**                              |
+| WorkflowRecipe LLM steps      | **20** — `bedrock` and `azure` excluded |
 
 `bedrock` and `azure` are deliberately absent from the WorkflowRecipe CRD enum:
 the workflow `configure` transport carries a **single** credential string, so it

@@ -29,7 +29,7 @@ jobs:
         # mode 100644), which breaks `make minikube-setup` with Permission
         # denied on a fresh clone. Regression gate for the PR #93 fix.
         run: |
-          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" {print $4}' || true)
+          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" {print $4}')
           if [ -n "$bad" ]; then
             echo "::error::Non-executable shell scripts (mode must be 100755):"
             echo "$bad"
@@ -417,6 +417,12 @@ jobs:
 
       - name: Test HCC watch-churn readiness gate contract
         run: bash scripts/tests/test-hcc-watch-churn-readiness-gate.sh
+
+      - name: Test HCC rollout readiness gate contract
+        run: bash scripts/tests/test-hcc-rollout-readiness-gate.sh
+
+      - name: Test HCC rollout readiness guards (executable, cluster-free)
+        run: bash scripts/tests/test-hcc-rollout-readiness-guards.sh
 
       - name: Test HCC API gateway readiness separation
         run: bash scripts/tests/test-hcc-api-gateway-readiness.sh

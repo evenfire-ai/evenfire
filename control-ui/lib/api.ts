@@ -225,20 +225,27 @@ export async function apiGet(
       const text = await res.text().catch(() => '')
       let message = `${res.status} ${res.statusText}`
       let code: string | undefined
+      let body: Record<string, unknown> | undefined
       try {
-        const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
+        const parsed = JSON.parse(text) as unknown
         if (parsed && typeof parsed === 'object') {
-          if (typeof parsed.message === 'string' && parsed.message.trim()) {
-            message = parsed.message
+          body = parsed as Record<string, unknown>
+          if (typeof body.message === 'string' && body.message.trim()) {
+            message = body.message
           }
-          if (typeof parsed.error === 'string') code = parsed.error
+          if (typeof body.error === 'string') code = body.error
         }
       } catch {
         /* non-JSON error body: keep the status-text message */
       }
-      const error = new Error(message) as Error & { status?: number; code?: string }
+      const error = new Error(message) as Error & {
+        status?: number
+        code?: string
+        body?: Record<string, unknown>
+      }
       error.status = res.status
       if (code) error.code = code
+      if (body) error.body = body
       throw error
     }
     return parseJsonResponse(res)

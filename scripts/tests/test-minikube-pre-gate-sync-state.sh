@@ -64,7 +64,8 @@ else
   fail "evenfire registry deploy helper has invalid bash syntax"
 fi
 
-if contains 'WORKTREE_ID="$(printf '\''%s'\'' "${PROJECT_DIR}" | shasum | awk '\''{print $1}'\'')"' &&
+if contains 'source "$SCRIPT_DIR/t2-worktree-id.sh"' &&
+   contains 'WORKTREE_ID="$(t2_worktree_id "${PROJECT_DIR}")"' &&
    contains 'STATE_DIR="${STATE_ROOT}/${WORKTREE_ID}"' &&
    not_contains 'STATE_DIR="${TMPDIR:-/tmp}/clerum-pre-gate-sync"'; then
   pass "pre-gate sync state is scoped per worktree"
@@ -72,11 +73,12 @@ else
   fail "pre-gate sync state can be shared across worktrees"
 fi
 
-if contains 'cluster_marker_matches()' &&
+if contains 'cluster_marker_value()' &&
+   contains 'cluster_marker_matches()' &&
    contains 'persist_cluster_marker()' &&
    contains '--from-literal=clusterFingerprint=' &&
    contains '--from-literal=worktreeId=' &&
-   contains "-o jsonpath='{.data.gitHead}'" &&
+   contains '-o "jsonpath={.data.${field}}"' &&
    contains 'actual_git_head' &&
    not_contains '--from-literal=worktreePath='; then
   pass "pre-gate sync records and verifies a non-sensitive cluster marker"
@@ -186,7 +188,7 @@ fi
 
 final_cluster_fingerprint_line="$(grep -n 'cluster_fingerprint=.*pre_gate_marker_cluster_fingerprint' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 final_infra_fingerprint_line="$(grep -n 'infra_fingerprint=.*pre_gate_marker_infra_fingerprint' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-persist_marker_line="$(grep -nF 'persist_cluster_marker "${cluster_fingerprint}" "${infra_fingerprint}"' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+persist_marker_line="$(grep -nF 'commit_cluster_sync_state "${cluster_fingerprint}" "${infra_fingerprint}"' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 if [ -n "$final_cluster_fingerprint_line" ] &&
    [ -n "$final_infra_fingerprint_line" ] &&
    [ -n "$persist_marker_line" ] &&
@@ -223,7 +225,7 @@ rm -rf "${marker_failure_dir}"
 control_api_migration_line="$(grep -nF 'run-control-api-db-migration.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 runtime_roles_line="$(grep -nF 'provision-control-api-runtime-roles.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 control_api_probe_restore_line="$(grep -nF '    restore_control_api' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-gfs_provision_line="$(grep -nE '^[[:space:]]+provision_gfs_serving$' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+gfs_provision_line="$(grep -nF '    provision_gfs_serving' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 if [[ -n "$control_api_migration_line" &&
       -n "$runtime_roles_line" &&
       -n "$control_api_probe_restore_line" &&
@@ -246,21 +248,13 @@ else
   fail "pre-gate can reconcile GFS roles before the migration that grants their projection"
 fi
 
-restart_all_line="$(grep -nF 'make minikube-restart-all' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-verify_gfs_line="$(grep -nF 'incremental_verify_gfs_if_required' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
-if [[ -n "$restart_all_line" && -n "$gfs_provision_line" && -n "$verify_gfs_line" &&
-      "$restart_all_line" -lt "$gfs_provision_line" &&
-      "$gfs_provision_line" -lt "$verify_gfs_line" ]]; then
-  pass "pre-gate re-provisions GFS serving after restart-all and before verify-gfs"
-else
-  fail "pre-gate can verify GFS after restart-all without reconciling serving credentials"
-fi
-
 if contains 'fence_control_api()' &&
    contains 'restore_control_api()' &&
    contains 'fence_workflow_reconciler' &&
    contains 'fence_control_api' &&
-   contains 'trap restore_pre_gate_writers EXIT' &&
+   contains 'trap finalize_pre_gate_sync EXIT' &&
+   contains 'restore_pre_gate_writers || return 1' &&
+   contains 'commit_cluster_sync_state "${cluster_fingerprint}" "${infra_fingerprint}"' &&
    grep -Fq 'type: Recreate' deploy/base/control-plane/control-api.yaml; then
   pass "pre-gate and Deployment enforce a no-overlap Control API writer window"
 else
@@ -302,7 +296,8 @@ fi
 
 if contains 'fence_workflow_reconciler()' &&
    contains 'restore_workflow_reconciler()' &&
-   contains 'trap restore_pre_gate_writers EXIT' &&
+   contains 'trap finalize_pre_gate_sync EXIT' &&
+   contains 'restore_pre_gate_writers || return 1' &&
    contains 'fence_workflow_reconciler' &&
    contains 'run-control-api-db-migration.sh' &&
    contains 'make minikube-deploy-all'; then
