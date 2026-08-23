@@ -4,6 +4,7 @@ import {
   BEDROCK_CREDENTIAL_KEYS,
   LLM_CREDENTIAL_GROUPS,
   LLM_DEFAULT_MODEL_BY_PROVIDER,
+  LLM_SECRET_EDITOR_GROUPS,
   type LlmModelCatalogEntry,
   OPERATOR_PROVIDER_OPTIONS,
   brokerBackedRecipeAuthoringError,
@@ -190,6 +191,13 @@ describe('LLM_CREDENTIAL_GROUPS (spec R4.5.1/R4.5.2)', () => {
     expect(codex.nonSecretEnv).toEqual([])
     expect(LLM_DEFAULT_MODEL_BY_PROVIDER['codex-subscription']).toBeUndefined()
     expect(resolveDefaultModel('codex-subscription', ['gpt-5.1'])).toBe('')
+  })
+
+  it('keeps oauth-broker providers off the Kubernetes Secret editor list', () => {
+    expect(LLM_SECRET_EDITOR_GROUPS.some(group => group.provider === 'codex-subscription')).toBe(
+      false
+    )
+    expect(LLM_SECRET_EDITOR_GROUPS.every(group => group.slots.length > 0)).toBe(true)
   })
 })
 

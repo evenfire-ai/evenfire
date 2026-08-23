@@ -239,6 +239,12 @@ export function providerRequiresLlmSecret(provider: string): boolean {
   return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'static-credentials'
 }
 
+// Secrets editor: only providers that store Kubernetes Secret slots. OAuth
+// brokers (Codex) connect on their own page and must not appear in the picker.
+export const LLM_SECRET_EDITOR_GROUPS: LlmCredentialGroup[] = LLM_CREDENTIAL_GROUPS.filter(group =>
+  providerRequiresLlmSecret(group.provider)
+)
+
 // A Host/recipe LLM chain needs a Secret iff any target (primary or fallback)
 // uses static credentials. Codex-only chains save without `secretRef`.
 export function llmChainRequiresSecret(

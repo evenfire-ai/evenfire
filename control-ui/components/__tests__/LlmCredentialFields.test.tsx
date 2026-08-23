@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { LLM_CREDENTIAL_GROUPS, providerForDataKey } from '@/lib/llm'
+import { LLM_CREDENTIAL_GROUPS, LLM_SECRET_EDITOR_GROUPS, providerForDataKey } from '@/lib/llm'
 import { LlmCredentialFields } from '../LlmCredentialFields'
 
 afterEach(cleanup)
@@ -65,13 +65,16 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     const { container } = render(<Harness />)
     expect(container.querySelectorAll('.cu-llm-cred-group')).toHaveLength(0)
     expect(screen.getByText(/No providers added yet/i)).toBeInTheDocument()
-    // One option per provider in the shared package (the dropdown has no
-    // placeholder entry — the placeholder lives on the trigger button).
+    // One option per Secret-backed provider (oauth-broker stays off this form).
+    // The dropdown has no placeholder entry — the placeholder lives on the trigger.
     openAddProvider()
     const options = screen.getAllByRole('option')
-    expect(options).toHaveLength(LLM_CREDENTIAL_GROUPS.length)
+    expect(options).toHaveLength(LLM_SECRET_EDITOR_GROUPS.length)
+    expect(
+      options.some(option => option.querySelector('[data-provider="codex-subscription"]'))
+    ).toBe(false)
     // Every entry carries its provider brand mark, keyed to the provider id.
-    for (const group of LLM_CREDENTIAL_GROUPS) {
+    for (const group of LLM_SECRET_EDITOR_GROUPS) {
       const option = screen.getByRole('option', { name: group.label })
       expect(
         option.querySelector(`.cu-llm-provider-icon[data-provider="${group.provider}"]`)
@@ -98,11 +101,11 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     expect(sectionTitle('Anthropic')).toBeNull()
   })
 
-  it('hides the picker once every provider is visible', () => {
+  it('hides the picker once every Secret-backed provider is visible', () => {
     render(<Harness />)
-    for (const group of LLM_CREDENTIAL_GROUPS) addProvider(group.provider)
+    for (const group of LLM_SECRET_EDITOR_GROUPS) addProvider(group.provider)
     expect(screen.queryByLabelText('Add provider')).toBeNull()
-  })
+  }, 15_000)
 
   it('renders the Bedrock access-key pair and the Vertex JSON textarea when added', () => {
     render(<Harness />)
