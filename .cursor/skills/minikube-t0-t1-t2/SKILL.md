@@ -130,4 +130,6 @@ Before committing anything else, run `make minikube-t2-public-boundary`.
 Failures print a stable code and a next safe command. Repair the FIRST
 reported precondition and re-run the same entry point on the same HEAD.
 Do not widen the command, switch clusters, reset PVCs, or delete locks with a
-live owner. Code-by-code guidance is in `reference.md`.
+live owner. A T1 `next:` line is not permission to operate Docker
+(`docker run`, `docker desktop restart`, port probes). Code-by-code
+guidance is in `reference.md`.

@@ -45,6 +45,10 @@ repository — never mix its PRs or clusters into this lane.
  The JSON reporter must be complete and green and the Vitest process must also
  exit zero. Role-reset suites use the throwaway `postgres:16-alpine`, never
  shared `control-postgres`.
+- A T1 `next:` line or `REAL_PG_REQUIRED_BUT_UNAVAILABLE` is not a Docker
+  license. Do not `docker run` probes, `docker desktop restart` (destroys the
+  Minikube container), or experiment with published ports. Re-enter
+  `make minikube-t2` or `make minikube-t2-real-postgres` on the owned profile.
 - Self-healing single run: the orchestrator planner (`T2_PLAN_MODE=true`)
  selects `full-reconcile` (naming the deployment) for a bootstrapped profile
  with an unready required deployment — never `PROFILE_UNHEALTHY` before a

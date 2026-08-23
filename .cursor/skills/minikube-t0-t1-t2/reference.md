@@ -37,6 +37,13 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   green, and the Vitest process must also exit zero.
   Role-reset suites stay on the throwaway `postgres:16-alpine` (#412), never
   shared `control-postgres`.
+- **Do not treat a T1 `next:` line as a Docker repair license.**
+  `REAL_PG_REQUIRED_BUT_UNAVAILABLE` (isolated `postgres:16-alpine` not
+  reachable) still means re-enter `make minikube-t2` or
+  `make minikube-t2-real-postgres` on the owned profile. Forbidden:
+  `docker run` probes, `docker desktop restart` (destroys the Minikube
+  container and the owned profile), published-port experiments, and any
+  invented networking path between plan and verdict.
 
 ## Stable failure codes
 
@@ -49,6 +56,7 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | `DEVELOPMENT_SCOPE_REQUIRED` | Preflight/final preflight failed a precondition, or T2-only mode was attempted without `already-synced`. | Repair the first reported condition; if T2-only was refused, run full `make minikube-t2`. |
 | `ZERO_TESTS_EXECUTED` | A lane was configured off or executed nothing (including a required-but-missing Playwright journey). | Re-run with the lane enabled, or supply the required `T2_PLAYWRIGHT_COMMAND`. |
 | `POSTGRES_NOT_READY` | PostgreSQL precondition failed, or a PVC reset was requested without the exact expected UID. | Fix DB readiness; never guess a PVC UID. |
+| `REAL_PG_REQUIRED_BUT_UNAVAILABLE` | Isolated T1 `postgres:16-alpine` (or the shared-lane DSN/port-forward) did not become reachable. | Confirm Docker Desktop is up, then re-run `make minikube-t2` or `make minikube-t2-real-postgres` on the owned profile. Do not `docker run`, restart Docker Desktop, or probe published ports. |
 | `PROFILE_UNHEALTHY` | A required deployment is unready in a fail-loud check (`T2_PLAN_MODE=false`: standalone preflight or the final exact-head T2), or the opt-in user-facing health command failed. The orchestrator planner never emits this for an unready deployment — it selects `full-reconcile` instead. | Re-run `make minikube-t2` on the same HEAD; the single run reconciles and restores GFS credentials itself. Do not run manual repair scripts between runs. |
 
 ## GFS restore pointers (high level, no secrets)

@@ -284,11 +284,11 @@ start_isolated_postgres() {
     -p "127.0.0.1:${ISOLATED_PORT}:5432" \
     "$T1_ISOLATED_PG_IMAGE" >/dev/null; then
     ISOLATED_CONTAINER=""
-    T1_NEXT_COMMAND='repair Docker image postgres:16-alpine, then re-run T1'
+    T1_NEXT_COMMAND='confirm Docker Desktop can run postgres:16-alpine, then re-run make minikube-t2 or make minikube-t2-real-postgres on the owned profile; do not docker run probes or docker desktop restart'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'isolated T1 PostgreSQL container failed to start'
   fi
   if ! wait_for_tcp "$ISOLATED_PORT"; then
-    T1_NEXT_COMMAND='repair Docker networking for the isolated T1 PostgreSQL, then re-run T1'
+    T1_NEXT_COMMAND='re-run make minikube-t2 or make minikube-t2-real-postgres on the owned profile; do not docker run probes, docker desktop restart, or experiment with published ports'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'isolated T1 PostgreSQL did not become reachable'
   fi
   local deadline ready=false
@@ -301,7 +301,7 @@ start_isolated_postgres() {
     sleep 1
   done
   if [ "$ready" != true ]; then
-    T1_NEXT_COMMAND='inspect the isolated T1 PostgreSQL container, then re-run T1'
+    T1_NEXT_COMMAND='re-run make minikube-t2 or make minikube-t2-real-postgres on the owned profile; do not docker run probes, docker desktop restart, or experiment with published ports'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'isolated T1 PostgreSQL did not become ready'
   fi
   ISOLATED_DSN="$(printf '%s' "$ISOLATED_PORT" | python3 -c '
