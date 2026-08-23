@@ -14,6 +14,7 @@ import {
   buildCodexBrowserReturnLocation,
   resolveCodexCallbackControlUiBaseUrl,
 } from '../../services/codexSubscriptionRedirectUri.js'
+import { codexOAuthCallbackRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'auth-codex-subscription' })
 
@@ -53,6 +54,7 @@ export function createAuthCodexSubscriptionRouter(): Router {
 
   router.get(
     '/auth/codex-subscription/callback',
+    ...codexOAuthCallbackRateLimits(),
     asyncHandler(async (req, res) => {
       const code = typeof req.query.code === 'string' ? req.query.code : ''
       const state = typeof req.query.state === 'string' ? req.query.state : ''

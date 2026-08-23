@@ -17,6 +17,7 @@
   "dependencies": {
     "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.6.2",
     "jsonwebtoken": "^9.0.2",
     "pino": "^10.3.1",
     "prom-client": "^15.1.3",

@@ -36,6 +36,10 @@ import {
   isPublicCodexCliClient,
   resolveCodexControlUiBaseUrl,
 } from '../../services/codexSubscriptionRedirectUri.js'
+import {
+  adminCodexReadRateLimits,
+  adminCodexWriteRateLimits,
+} from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'admin-codex-subscription' })
 const BASE = '/admin/llm/providers/codex-subscription'
@@ -266,23 +270,40 @@ export function createAdminCodexSubscriptionRouter(
     }
   })
 
-  router.get(`${BASE}/connection`, getConnectionHandler)
-  router.post(`${BASE}/browser/start`, browserStartHandler)
-  router.post(`${BASE}/device/start`, deviceStartHandler)
-  router.get(`${BASE}/device/poll`, devicePollHandler)
-  router.post(`${BASE}/refresh`, refreshHandler)
-  router.post(`${BASE}/catalog/sync`, catalogSyncHandler)
-  router.post(`${BASE}/revoke`, revokeHandler)
-  router.get(`${BASE}/connections/:key`, getConnectionHandler)
-  router.post(`${BASE}/connections/:key/browser/start`, browserStartHandler)
-  router.post(`${BASE}/connections/:key/device/start`, deviceStartHandler)
-  router.get(`${BASE}/connections/:key/device/poll`, devicePollHandler)
-  router.post(`${BASE}/connections/:key/refresh`, refreshHandler)
-  router.post(`${BASE}/connections/:key/catalog/sync`, catalogSyncHandler)
-  router.post(`${BASE}/connections/:key/revoke`, revokeHandler)
+  router.get(`${BASE}/connection`, ...adminCodexReadRateLimits(), getConnectionHandler)
+  router.post(`${BASE}/browser/start`, ...adminCodexWriteRateLimits(), browserStartHandler)
+  router.post(`${BASE}/device/start`, ...adminCodexWriteRateLimits(), deviceStartHandler)
+  router.get(`${BASE}/device/poll`, ...adminCodexReadRateLimits(), devicePollHandler)
+  router.post(`${BASE}/refresh`, ...adminCodexWriteRateLimits(), refreshHandler)
+  router.post(`${BASE}/catalog/sync`, ...adminCodexWriteRateLimits(), catalogSyncHandler)
+  router.post(`${BASE}/revoke`, ...adminCodexWriteRateLimits(), revokeHandler)
+  router.get(`${BASE}/connections/:key`, ...adminCodexReadRateLimits(), getConnectionHandler)
+  router.post(
+    `${BASE}/connections/:key/browser/start`,
+    ...adminCodexWriteRateLimits(),
+    browserStartHandler
+  )
+  router.post(
+    `${BASE}/connections/:key/device/start`,
+    ...adminCodexWriteRateLimits(),
+    deviceStartHandler
+  )
+  router.get(
+    `${BASE}/connections/:key/device/poll`,
+    ...adminCodexReadRateLimits(),
+    devicePollHandler
+  )
+  router.post(`${BASE}/connections/:key/refresh`, ...adminCodexWriteRateLimits(), refreshHandler)
+  router.post(
+    `${BASE}/connections/:key/catalog/sync`,
+    ...adminCodexWriteRateLimits(),
+    catalogSyncHandler
+  )
+  router.post(`${BASE}/connections/:key/revoke`, ...adminCodexWriteRateLimits(), revokeHandler)
 
   router.get(
     `${BASE}/connections`,
+    ...adminCodexReadRateLimits(),
     asyncHandler(async (_req, res) => {
       if (!config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
@@ -300,6 +321,7 @@ export function createAdminCodexSubscriptionRouter(
 
   router.post(
     `${BASE}/connections`,
+    ...adminCodexWriteRateLimits(),
     asyncHandler(async (req, res) => {
       if (!config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
@@ -336,6 +358,7 @@ export function createAdminCodexSubscriptionRouter(
 
   router.get(
     `${BASE}/connections/:key/models`,
+    ...adminCodexReadRateLimits(),
     asyncHandler(async (req, res) => {
       if (!config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })

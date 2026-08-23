@@ -12,6 +12,7 @@ import {
   LlmProviderAttemptAuthorizeError,
   authorizeLlmProviderAttempt,
 } from '../../services/llmProviderAttemptAuthorizer.js'
+import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
 
@@ -65,6 +66,7 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
   router.post(
     '/mcp-host/llm/provider-attempts/authorize',
     requireMcpHostJwt,
+    ...llmProviderAttemptAuthorizeRateLimits(),
     asyncHandler(async (req: Request, res: Response) => {
       const claims = req.mcpHostJwt
       if (!claims) {

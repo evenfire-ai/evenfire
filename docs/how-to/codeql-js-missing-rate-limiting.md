@@ -59,6 +59,9 @@ Additional tiers shipped in PR #428:
 | Admin workflow read    | 60    | `workflowAdminReadRateLimits`   |
 | Admin outputs read     | 30    | `adminOutputsReadRateLimits`    |
 | Admin workflow trigger | 10    | `adminWorkflowTriggerRateLimit` |
+| Admin Codex read / write | 30 / 20 | `adminCodexReadRateLimits` / `adminCodexWriteRateLimits` |
+| Codex OAuth callback     | 20       | `codexOAuthCallbackRateLimits` (IP) |
+| mcp-host attempt authorize | 60     | `llmProviderAttemptAuthorizeRateLimits` |
 
 ## Out-of-scope dispositions (Layer 3)
 

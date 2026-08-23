@@ -1,4 +1,5 @@
 import express, { type Express, type Request, type Response } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { createServer, type Server } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
 import { z } from 'zod'
@@ -15,7 +16,7 @@ import type { CodexLlmProxyConfig } from './config.js'
 import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
 import { logger } from './logger.js'
 import { createProxyMetrics } from './metrics.js'
-import { OriginDeniedError } from './originPolicy.js'
+import { defaultAddressLookup, OriginDeniedError } from './originPolicy.js'
 import { RequestLimitError, streamGate } from './requestLimits.js'
 
 const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
@@ -84,10 +85,23 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       serviceToken: config.controlApiServiceToken,
     })
   const fetchFn = deps.fetchFn ?? fetch
+  const lookup = defaultAddressLookup
+  const runtimeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 60,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
+  const adminRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 30,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  })
 
   const runtimeApp = express()
   runtimeApp.use(express.json({ limit: config.maxBodyBytes }))
-  runtimeApp.post('/internal/runtime/v1/codex/completions', (req, res) => {
+  runtimeApp.post('/internal/runtime/v1/codex/completions', runtimeRateLimit, (req, res) => {
     if (!req.is('application/json')) {
       reject(res, 415, 'unsupported_media_type')
       return
@@ -159,6 +173,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
           redeem: input => client.redeem(input),
           finalize: input => client.finalize(input),
           fetchFn,
+          lookup,
           onFrame: frame => {
             res.write(`data: ${JSON.stringify(frame)}\n\n`)
           },
@@ -218,11 +233,19 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
     void (async () => {
       try {
         if (kind === 'models') {
-          const listed = await listCodexModels({ accessToken: parsed.data.accessToken, fetchFn })
+          const listed = await listCodexModels({
+            accessToken: parsed.data.accessToken,
+            fetchFn,
+            lookup,
+          })
           res.status(200).json(listed)
           return
         }
-        const tested = await testCodexConnection({ accessToken: parsed.data.accessToken, fetchFn })
+        const tested = await testCodexConnection({
+          accessToken: parsed.data.accessToken,
+          fetchFn,
+          lookup,
+        })
         res.status(200).json(tested)
       } catch (err) {
         const mapped = mapError(err)
@@ -230,8 +253,8 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       }
     })()
   }
-  adminApp.post('/internal/admin/v1/codex/models', adminHandler('models'))
-  adminApp.post('/internal/admin/v1/codex/test', adminHandler('test'))
+  adminApp.post('/internal/admin/v1/codex/models', adminRateLimit, adminHandler('models'))
+  adminApp.post('/internal/admin/v1/codex/test', adminRateLimit, adminHandler('test'))
   adminApp.use((_req, res) => reject(res, 404, 'not_found'))
   adminApp.use(boundedErrorHandler)
 

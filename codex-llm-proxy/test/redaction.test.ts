@@ -1,6 +1,5 @@
-import pino from 'pino'
 import { describe, expect, it } from 'vitest'
-import { logger } from '../src/logger.js'
+import { createProxyLogger, logger } from '../src/logger.js'
 
 describe('proxy redaction', () => {
   it('strips access tokens, tickets, receipts, and authorization headers', () => {
@@ -10,24 +9,8 @@ describe('proxy redaction', () => {
         messages.push(chunk)
       },
     }
-    const child = pino(
-      {
-        level: 'info',
-        redact: {
-          paths: [
-            'accessToken',
-            'refreshToken',
-            'executionTicket',
-            'authorization',
-            'headers.authorization',
-            'attemptReceipt',
-          ],
-          remove: true,
-        },
-      },
-      stream
-    )
-    child.info({
+    const probe = createProxyLogger(stream)
+    probe.info({
       accessToken: 'sk-live-secret',
       refreshToken: 'rt-secret',
       executionTicket: 'ticket-secret',

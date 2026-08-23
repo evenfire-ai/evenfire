@@ -2,9 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import {
+  adminCodexReadRateLimits,
+  adminCodexWriteRateLimits,
   adminOutputsReadRateLimits,
   adminWorkflowRateLimitCredential,
   adminWorkflowTriggerRateLimit,
+  codexOAuthCallbackRateLimits,
+  llmProviderAttemptAuthorizeRateLimits,
   shouldSkipWorkflowGrantEdgeRateLimit,
   verifiedAdminRateLimitSubject,
   workflowAdminReadRateLimits,
@@ -73,6 +77,10 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(workflowGrantWriteRateLimits()).toHaveLength(2)
     expect(workflowAdminReadRateLimits()).toHaveLength(2)
     expect(adminOutputsReadRateLimits()).toHaveLength(2)
+    expect(adminCodexReadRateLimits()).toHaveLength(2)
+    expect(adminCodexWriteRateLimits()).toHaveLength(2)
+    expect(codexOAuthCallbackRateLimits()).toHaveLength(2)
+    expect(llmProviderAttemptAuthorizeRateLimits()).toHaveLength(2)
   })
 
   it('shouldSkipWorkflowGrantEdgeRateLimit skips anonymous callers', () => {

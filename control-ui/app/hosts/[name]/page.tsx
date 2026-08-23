@@ -76,7 +76,7 @@ export default function HostDetailsPage() {
   const params = useParams<{ name: string; tab?: string }>()
   const router = useRouter()
   const { showToast } = useToast()
-  const { confirm, confirmDialog } = useConfirmDialog()
+  const { confirmDialog } = useConfirmDialog()
 
   const routeName = decodeURIComponent(params.name || '')
   const mountedRef = useRef(true)

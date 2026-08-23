@@ -14,8 +14,8 @@ export type LlmModelsTabBarProps = {
 }
 
 /**
- * Shared LLM Models section tabs. Subscriptions are broker-backed OAuth flows,
- * not API-key catalog rows, so Codex appears as its own tab beside Catalog.
+ * Shared LLM Models section tabs. Codex assignment lives on the agent model
+ * tab, so this bar is Catalog and Discovery review only.
  */
 export function LlmModelsTabBar({
   activeTab,

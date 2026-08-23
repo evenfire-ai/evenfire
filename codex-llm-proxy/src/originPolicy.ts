@@ -46,11 +46,18 @@ export function assertAllowedUpstreamUrl(raw: string, kind: UpstreamKind): URL {
   return parsed
 }
 
+export async function defaultAddressLookup(
+  hostname: string
+): Promise<Array<{ address: string; family: number }>> {
+  const { lookup } = await import('node:dns/promises')
+  const records = await lookup(hostname, { all: true })
+  return records.map(record => ({ address: record.address, family: record.family }))
+}
+
 export async function assertResolvedUpstream(
   url: URL,
-  lookup: OriginPolicyOptions['lookup']
+  lookup: OriginPolicyOptions['lookup'] = defaultAddressLookup
 ): Promise<void> {
-  if (!lookup) return
   const records = await lookup(url.hostname)
   if (!records.length) throw new OriginDeniedError('origin_denied')
   for (const record of records) {
@@ -68,7 +75,7 @@ export async function fetchFrozenOrigin(input: {
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
 }): Promise<Response> {
-  await assertResolvedUpstream(input.url, input.lookup)
+  await assertResolvedUpstream(input.url, input.lookup ?? defaultAddressLookup)
   const init: RequestInit = { ...input.init, redirect: 'manual' }
   const first = await input.fetchFn(input.url.href, init)
   if (first.status < 300 || first.status >= 400) return first

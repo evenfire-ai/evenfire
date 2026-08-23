@@ -49,6 +49,16 @@ describe('codex subscription redirect URI', () => {
     ).toBe('http://127.0.0.1:36148')
   })
 
+  it('ignores a non-loopback forwarded host that does not match the configured origin', () => {
+    expect(
+      resolveCodexCallbackControlUiBaseUrl({
+        configuredBaseUrl: 'https://control.example.com',
+        forwardedHost: 'evil.example.com',
+        forwardedProto: 'https',
+      })
+    ).toBe('https://control.example.com')
+  })
+
   it('identifies the public Codex CLI client id', () => {
     expect(isPublicCodexCliClient(PUBLIC_CODEX_CLI_CLIENT_ID)).toBe(true)
     expect(isPublicCodexCliClient('app_evenfire_custom')).toBe(false)

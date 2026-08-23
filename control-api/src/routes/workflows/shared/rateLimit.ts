@@ -11,6 +11,10 @@ const WORKFLOW_GRANT_WRITE_PER_MINUTE = 20
 const WORKFLOW_ADMIN_READ_PER_MINUTE = 60
 const ADMIN_OUTPUTS_READ_PER_MINUTE = 30
 const WORKFLOW_TRIGGER_PER_MINUTE = 10
+const ADMIN_CODEX_READ_PER_MINUTE = 30
+const ADMIN_CODEX_WRITE_PER_MINUTE = 20
+const CODEX_OAUTH_CALLBACK_PER_MINUTE = 20
+const LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE = 60
 
 /**
  * Credential surface matched by requireAdminWorkflowCaller: bearer for automation,
@@ -128,6 +132,85 @@ export function workflowAdminReadRateLimits() {
 
 export function adminOutputsReadRateLimits() {
   return [adminOutputsReadEdgeRateLimit(), adminOutputsReadRateLimit()] as const
+}
+
+function adminCodexReadEdgeRateLimit() {
+  return createWorkflowEdgeRateLimit('admin_codex_read_edge', ADMIN_CODEX_READ_PER_MINUTE)
+}
+
+function adminCodexWriteEdgeRateLimit() {
+  return createWorkflowEdgeRateLimit('admin_codex_write_edge', ADMIN_CODEX_WRITE_PER_MINUTE)
+}
+
+function adminCodexReadRateLimit() {
+  return rateLimitMiddleware({
+    bucketType: 'admin_codex_read',
+    maxPerMinute: ADMIN_CODEX_READ_PER_MINUTE,
+    getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_read'),
+  })
+}
+
+function adminCodexWriteRateLimit() {
+  return rateLimitMiddleware({
+    bucketType: 'admin_codex_write',
+    maxPerMinute: ADMIN_CODEX_WRITE_PER_MINUTE,
+    getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_write'),
+  })
+}
+
+export function adminCodexReadRateLimits() {
+  return [adminCodexReadEdgeRateLimit(), adminCodexReadRateLimit()] as const
+}
+
+export function adminCodexWriteRateLimits() {
+  return [adminCodexWriteEdgeRateLimit(), adminCodexWriteRateLimit()] as const
+}
+
+export function codexOAuthCallbackRateLimits() {
+  return [
+    rateLimit({
+      windowMs: 60_000,
+      limit: CODEX_OAUTH_CALLBACK_PER_MINUTE,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      keyGenerator: (req: Request) =>
+        `codex_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`,
+      handler: workflowGrantEdgeRateLimitHandler,
+    }),
+    rateLimitMiddleware({
+      bucketType: 'codex_oauth_callback',
+      maxPerMinute: CODEX_OAUTH_CALLBACK_PER_MINUTE,
+      getBucketKey: (req: Request) =>
+        `codex_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`,
+    }),
+  ] as const
+}
+
+export function llmProviderAttemptAuthorizeRateLimits() {
+  return [
+    rateLimit({
+      windowMs: 60_000,
+      limit: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      skip: (req: Request) => !req.mcpHostJwt,
+      keyGenerator: (req: Request) => {
+        const claims = req.mcpHostJwt
+        if (!claims) return `llm_provider_attempt:anon:${ipKeyGenerator(req.ip ?? 'unknown')}`
+        return `llm_provider_attempt:${claims.sub}`
+      },
+      handler: workflowGrantEdgeRateLimitHandler,
+    }),
+    rateLimitMiddleware({
+      bucketType: 'llm_provider_attempt_authorize',
+      maxPerMinute: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
+      getBucketKey: (req: Request) => {
+        const claims = req.mcpHostJwt
+        if (!claims) return null
+        return `llm_provider_attempt:${claims.sub}`
+      },
+    }),
+  ] as const
 }
 
 function adminWorkflowTriggerRateLimitKey(req: Request): string | null {

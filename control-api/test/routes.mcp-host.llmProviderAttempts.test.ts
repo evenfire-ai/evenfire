@@ -9,6 +9,24 @@ import { LlmProviderAttemptAuthorizeError } from '../src/services/llmProviderAtt
 import * as authorizer from '../src/services/llmProviderAttemptAuthorizer.js'
 import * as mcpHostJwt from '../src/utils/auth/mcpHostJwtToken.js'
 
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn().mockResolvedValue({
+    allowed: true,
+    remaining: 59,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+  }),
+}))
+
+vi.mock('../src/observability/metrics.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/observability/metrics.js')>()
+  return {
+    ...actual,
+    rateLimitHitsTotal: { inc: vi.fn() },
+  }
+})
+
 vi.mock('../src/services/llmProviderAttemptAuthorizer.js', async () => {
   const actual = await vi.importActual<
     typeof import('../src/services/llmProviderAttemptAuthorizer.js')

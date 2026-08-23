@@ -79,16 +79,21 @@ export function resolveCodexCallbackControlUiBaseUrl(input: {
   forwardedProto?: string | null
   originHeader?: string | null
 }): string {
+  const configured = resolveCodexControlUiBaseUrl(
+    input.configuredBaseUrl,
+    input.originHeader ?? undefined
+  )
   const forwardedHost = input.forwardedHost?.split(',')[0]?.trim()
   const forwardedProto = input.forwardedProto?.split(',')[0]?.trim()
-  if (forwardedHost && forwardedProto) {
-    try {
-      return normalizeControlUiOrigin(`${forwardedProto}://${forwardedHost}`)
-    } catch {
-      // Fall through to configured / Origin resolution.
-    }
+  if (!forwardedHost || !forwardedProto) return configured
+  try {
+    const forwarded = normalizeControlUiOrigin(`${forwardedProto}://${forwardedHost}`)
+    if (forwarded === configured) return forwarded
+    if (isLoopbackHttpOrigin(configured) && isLoopbackHttpOrigin(forwarded)) return forwarded
+  } catch {
+    return configured
   }
-  return resolveCodexControlUiBaseUrl(input.configuredBaseUrl, input.originHeader ?? undefined)
+  return configured
 }
 
 export function buildCodexBrowserReturnLocation(outcome: string): string {

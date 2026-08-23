@@ -19,6 +19,20 @@ vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
 }))
 
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn().mockResolvedValue({
+    allowed: true,
+    remaining: 19,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+  }),
+}))
+
+vi.mock('../src/observability/metrics.js', () => ({
+  rateLimitHitsTotal: { inc: vi.fn() },
+}))
+
 const { config } = await import('../src/config.js')
 const { createAuthCodexSubscriptionRouter } =
   await import('../src/routes/auth/codexSubscription.js')

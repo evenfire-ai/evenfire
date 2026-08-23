@@ -66,6 +66,7 @@ describe('originPolicy', () => {
     const allowed = await fetchFrozenOrigin({
       url: new URL(CODEX_COMPLETIONS_ORIGIN),
       init: { method: 'POST' },
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       fetchFn: (async () => {
         hops += 1
         if (hops === 1) {
@@ -84,6 +85,7 @@ describe('originPolicy', () => {
       fetchFrozenOrigin({
         url: new URL(CODEX_COMPLETIONS_ORIGIN),
         init: { method: 'POST' },
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
         fetchFn: (async () =>
           new Response(null, {
             status: 302,

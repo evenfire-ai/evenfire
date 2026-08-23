@@ -124,7 +124,7 @@ describe('codex-subscription contract freeze', () => {
       expect(isHttpsOrigin(origins?.[key]), `origins.${key} must be an exact https origin`).toBe(
         true
       )
-      expect(String(origins?.[key])).not.toMatch(/api\.openai\.com\/v1\/(?!responses\b)/)
+      expect(String(origins?.[key])).not.toMatch(/^https:\/\/api\.openai\.com\/v1\/(?!responses\b)/)
     }
     expect(Array.isArray(contract.forbiddenOrigins), 'forbiddenOrigins must be listed').toBe(true)
     expect(contract.forbiddenOrigins as unknown[]).toEqual(
