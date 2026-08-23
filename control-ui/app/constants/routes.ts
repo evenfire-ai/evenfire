@@ -71,7 +71,6 @@ export const CONTROL_ROUTES = {
     discovery: '/llm-models/discovery',
     new: '/llm-models/new',
     edit: (id: string) => `/llm-models/${segment(id)}/edit`,
-    codexSubscription: '/llm-models/providers/codex-subscription',
   },
   marketplace: {
     root: '/marketplace',

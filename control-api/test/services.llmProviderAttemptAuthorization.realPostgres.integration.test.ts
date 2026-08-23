@@ -5,12 +5,12 @@ import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { evaluateBudgetCheck } from '../src/services/budgets/check.js'
 import { getActiveReservation } from '../src/services/budgets/reservations.js'
+import { getCodexCatalogModelState } from '../src/services/codexSubscriptionCatalog.js'
 import {
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
   recordCodexCatalogOutcome,
 } from '../src/services/codexSubscriptionConnection.js'
-import { getModelAllowlistState } from '../src/services/llmAllowedModels.js'
 import {
   type LlmProviderAttemptAuthorizerDeps,
   authorizeLlmProviderAttempt,
@@ -100,7 +100,8 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
         }
       },
       getConnection: getSafeCodexSubscriptionConnection,
-      getModelState: getModelAllowlistState,
+      getModelState: getCodexCatalogModelState,
+      resolveConnectionKey: async () => 'deployment-default',
       evaluateBudget: evaluateBudgetCheck,
       getActiveReservation,
       getMaxGeneration: getMaxLlmProviderAttemptGeneration,

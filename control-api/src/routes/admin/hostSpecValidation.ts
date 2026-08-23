@@ -156,7 +156,7 @@ const HostApprovalSchema = z
   .optional()
 
 export interface HostSpecValidationDeps {
-  isModelAllowed: (provider: string, model: string) => Promise<boolean>
+  isModelAllowed: (provider: string, model: string, connectionRef?: string) => Promise<boolean>
   /**
    * Full `{ enabled, stale }` allowlist state for a pair (Fase 6). OPTIONAL and
    * defaulted so existing callers that inject only `isModelAllowed` keep working;
@@ -338,8 +338,29 @@ export async function validateHostSpec(
         ],
       }
     }
-    const allowed = await deps.isModelAllowed(provider, name)
-    if (!allowed && !toleratePair(provider, name, 'primary', tol)) {
+    const connectionRef =
+      provider === 'codex-subscription' && isPlainObject(model)
+        ? typeof model.connectionRef === 'string' && model.connectionRef.trim()
+          ? model.connectionRef.trim()
+          : 'deployment-default'
+        : undefined
+    if (provider === 'codex-subscription' && isPlainObject(model) && !model.connectionRef) {
+      model.connectionRef = 'deployment-default'
+    }
+    const allowed = await deps.isModelAllowed(provider, name, connectionRef)
+    // Switching connectionRef is a new assignment even when (provider, model)
+    // already lived on the Host. A revoked/unknown grant must not ride the
+    // identity/channels full-replace tolerance. An unchanged revoked ref stays
+    // tolerable so operators can still save unrelated fields.
+    const storedConnectionRef = storedCodexConnectionRef(context.stored)
+    const connectionAssignmentChanged =
+      provider === 'codex-subscription' &&
+      storedConnectionRef !== undefined &&
+      storedConnectionRef !== connectionRef
+    if (
+      !allowed &&
+      (connectionAssignmentChanged || !toleratePair(provider, name, 'primary', tol))
+    ) {
       return {
         errors: [
           {
@@ -525,6 +546,15 @@ async function maybeWarnStale(
  * audit event (not emitted until the whole write persists) and returns true so
  * the gate skips its rejection.
  */
+function storedCodexConnectionRef(stored: Record<string, unknown> | undefined): string | undefined {
+  if (!isPlainObject(stored) || !isPlainObject(stored.model)) return undefined
+  const provider = typeof stored.model.provider === 'string' ? stored.model.provider.trim() : ''
+  if (provider !== 'codex-subscription') return undefined
+  return typeof stored.model.connectionRef === 'string' && stored.model.connectionRef.trim()
+    ? stored.model.connectionRef.trim()
+    : 'deployment-default'
+}
+
 function toleratePair(
   provider: string,
   model: string,

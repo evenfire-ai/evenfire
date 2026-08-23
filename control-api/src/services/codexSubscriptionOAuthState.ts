@@ -24,6 +24,7 @@ export type CodexSubscriptionOAuthStateWrite = {
   /** Encrypted Codex device handle JSON: { deviceAuthId, userCode }. */
   deviceCode?: string
   expiresAt: Date
+  connectionKey?: string
 }
 
 export type CodexSubscriptionConsumedOAuthState = {
@@ -117,8 +118,9 @@ export async function insertCodexSubscriptionOAuthState(
        pkce_verifier_encrypted,
        device_code_encrypted,
        status,
-       expires_at
-     ) VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+       expires_at,
+       connection_key
+     ) VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
      RETURNING ${SAFE_OAUTH_STATE_COLUMNS}`,
     [
       input.state,
@@ -127,6 +129,7 @@ export async function insertCodexSubscriptionOAuthState(
       input.pkceVerifier ? encryptOAuthSecret(encryptionKey, input.pkceVerifier) : null,
       input.deviceCode ? encryptOAuthSecret(encryptionKey, input.deviceCode) : null,
       input.expiresAt,
+      input.connectionKey ?? 'deployment-default',
     ]
   )
   return toSafeOAuthState(result.rows[0] as SafeOAuthStateRow)

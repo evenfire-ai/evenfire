@@ -35,7 +35,10 @@ function claims(overrides: Partial<McpHostAccessClaims> = {}): McpHostAccessClai
 
 function connection(overrides: Record<string, unknown> = {}) {
   return {
+    id: '11111111-1111-1111-1111-111111111111',
     connectionKey: 'deployment-default',
+    displayName: 'Default deployment',
+    createdBy: null,
     status: 'connected',
     credentialRevision: 3,
     catalogRevision: 4,
@@ -223,6 +226,56 @@ describe('authorizeLlmProviderAttempt', () => {
         current
       )
     ).rejects.toMatchObject({ code: 'invalid_request' })
+  })
+
+  it('fails closed for every Host on a revoked grant and leaves another grant usable', async () => {
+    const teamPlus = connection({
+      id: '22222222-2222-4222-8222-222222222222',
+      connectionKey: 'team-plus',
+      status: 'revoked',
+      revokedAt: new Date(),
+      credentialRevision: 8,
+    })
+    const personal = connection({
+      id: '33333333-3333-4333-8333-333333333333',
+      connectionKey: 'personal-pro',
+    })
+    const getConnection = vi.fn(async (_db: unknown, key: string) => {
+      if (key === 'team-plus') return teamPlus
+      if (key === 'personal-pro') return personal
+      return null
+    })
+    const resolveConnectionKey = vi.fn(async (hostRef: string) =>
+      hostRef === 'agent-c' ? 'personal-pro' : 'team-plus'
+    )
+    const shared = deps({
+      getConnection: getConnection as never,
+      resolveConnectionKey,
+    })
+
+    await expect(
+      authorizeLlmProviderAttempt(claims({ hostRefs: ['agent-a'] }), body(), shared)
+    ).rejects.toMatchObject({ code: 'connection_unavailable' })
+    await expect(
+      authorizeLlmProviderAttempt(claims({ hostRefs: ['agent-b'] }), body(), shared)
+    ).rejects.toMatchObject({ code: 'connection_unavailable' })
+
+    const live = await authorizeLlmProviderAttempt(
+      claims({ hostRefs: ['agent-c'] }),
+      body({
+        policyHash: computeCodexPolicyHash({
+          model: REQUEST.model,
+          catalogRevision: 4,
+          credentialRevision: 3,
+          connectionKey: 'personal-pro',
+        }),
+      }),
+      shared
+    )
+    expect(live.executionTicket).toBe('ticket.jwt')
+    expect(resolveConnectionKey).toHaveBeenCalledWith('agent-a')
+    expect(resolveConnectionKey).toHaveBeenCalledWith('agent-b')
+    expect(resolveConnectionKey).toHaveBeenCalledWith('agent-c')
   })
 
   it('is disabled when the feature flag is off', async () => {

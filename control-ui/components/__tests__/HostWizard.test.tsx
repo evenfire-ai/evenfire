@@ -22,6 +22,10 @@ import { ToastProvider } from '../Toast'
  * These tests lock the new behavior so it cannot regress.
  */
 
+vi.mock('../CodexAgentAssignment', () => ({
+  CodexAgentAssignment: () => <div data-testid="codex-agent-assignment" />,
+}))
+
 // Mock lib/api BEFORE importing the component. vi.mock is hoisted.
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn().mockResolvedValue({ items: [] }),
@@ -785,10 +789,14 @@ async function walkToModelStep(opts?: { agentName?: string }) {
 
 async function selectCodexSubscription(model = 'gpt-5.1') {
   fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
-  fireEvent.click(screen.getByRole('option', { name: /OpenAI Codex Subscription/i }))
+  fireEvent.click(screen.getByRole('option', { name: /^OpenAI$/i }))
+  fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
   await waitFor(() => {
     expect(screen.queryByText(/Use an existing secret/i)).not.toBeInTheDocument()
   })
+  expect(
+    screen.queryByRole('option', { name: /OpenAI Codex Subscription/i })
+  ).not.toBeInTheDocument()
   fireEvent.click(screen.getByLabelText('Default model', { selector: '#llm-primary-model' }))
   fireEvent.click(screen.getByRole('option', { name: model }))
 }
@@ -811,7 +819,11 @@ describe('HostWizard — broker-backed Codex authoring', () => {
         expect.objectContaining({
           metadata: { name: 'codex-only' },
           spec: expect.objectContaining({
-            model: { provider: 'codex-subscription', name: 'gpt-5.1' },
+            model: {
+              provider: 'codex-subscription',
+              name: 'gpt-5.1',
+              connectionRef: 'deployment-default',
+            },
           }),
         })
       )

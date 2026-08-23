@@ -20,6 +20,7 @@ export type LlmProviderAttemptInsert = {
   policyHash: string
   budgetReservationId: string
   connectionRevision: number
+  connectionId?: string | null
   correlationId?: string | null
 }
 
@@ -76,6 +77,19 @@ export async function applyLlmProviderAttemptSchema(db: DbClient): Promise<void>
   `)
 }
 
+export async function applyLlmProviderAttemptConnectionIdSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE llm_provider_attempts
+      ADD COLUMN IF NOT EXISTS connection_id UUID REFERENCES codex_subscription_connections(id);
+
+    UPDATE llm_provider_attempts a
+       SET connection_id = c.id
+      FROM codex_subscription_connections c
+     WHERE a.connection_id IS NULL
+       AND c.connection_key = 'deployment-default';
+  `)
+}
+
 export async function applyLlmProviderAttemptTicketSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS llm_provider_attempt_tickets (
@@ -106,15 +120,15 @@ export async function insertLlmProviderAttempt(
        caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
        attempt_generation, provider_attempt_index, provider, model, request_hash,
        policy_revision, policy_hash, budget_reservation_id, connection_revision,
-       status, correlation_id
+       connection_id, status, correlation_id
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7, 'codex-subscription', $8, $9, $10, $11, $12, $13,
-       'authorized', $14
+       $14, 'authorized', $15
      )
      RETURNING id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
                attempt_generation, provider_attempt_index, provider, model, request_hash,
                policy_revision, policy_hash, budget_reservation_id, connection_revision,
-               status, outcome, created_at`,
+               connection_id, status, outcome, created_at`,
     [
       input.callerKind,
       input.hostRef,
@@ -129,6 +143,7 @@ export async function insertLlmProviderAttempt(
       input.policyHash,
       input.budgetReservationId,
       input.connectionRevision,
+      input.connectionId ?? null,
       input.correlationId ?? null,
     ]
   )
@@ -149,6 +164,7 @@ export async function insertLlmProviderAttempt(
     policyHash: String(row.policy_hash),
     budgetReservationId: String(row.budget_reservation_id),
     connectionRevision: Number(row.connection_revision),
+    connectionId: row.connection_id ? String(row.connection_id) : null,
     status: row.status as LlmProviderAttemptStatus,
     outcome: (row.outcome as LlmProviderAttemptOutcome | null) ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at)),
@@ -183,7 +199,7 @@ export async function loadLlmProviderAttempt(
     `SELECT id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
             attempt_generation, provider_attempt_index, provider, model, request_hash,
             policy_revision, policy_hash, budget_reservation_id, connection_revision,
-            status, outcome, created_at
+            connection_id, status, outcome, created_at
        FROM llm_provider_attempts
       WHERE id = $1`,
     [id]
@@ -206,6 +222,7 @@ export async function loadLlmProviderAttempt(
     policyHash: String(row.policy_hash),
     budgetReservationId: String(row.budget_reservation_id),
     connectionRevision: Number(row.connection_revision),
+    connectionId: row.connection_id ? String(row.connection_id) : null,
     status: row.status as LlmProviderAttemptStatus,
     outcome: (row.outcome as LlmProviderAttemptOutcome | null) ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at)),

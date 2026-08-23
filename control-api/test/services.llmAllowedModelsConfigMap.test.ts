@@ -212,7 +212,10 @@ describe('LlmAllowedModelsConfigMapWriter', () => {
 describe('Codex readiness annotations', () => {
   it('maps only connected+ready to the snapshot-facing connected status', () => {
     const base = {
+      id: '11111111-1111-1111-1111-111111111111',
       connectionKey: 'deployment-default',
+      displayName: 'Default deployment',
+      createdBy: null,
       credentialRevision: 1,
       catalogRevision: 2,
       accountFingerprint: null,
@@ -246,6 +249,45 @@ describe('Codex readiness annotations', () => {
       })
     ).toBe('unavailable')
     expect(mapCodexConnectionStatusForSnapshot(null)).toBe('disconnected')
+  })
+
+  it('maps revoked to a snapshot-facing revoked status and lists every key', () => {
+    const base = {
+      id: '11111111-1111-1111-1111-111111111111',
+      displayName: 'Default deployment',
+      createdBy: null,
+      credentialRevision: 1,
+      catalogRevision: 2,
+      accountFingerprint: null,
+      catalogSyncedAt: null,
+      lastRefreshAt: null,
+      lastAuthAt: null,
+      refreshLockHeld: false,
+      revokedAt: null,
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+    } as Omit<CodexSubscriptionSafeConnection, 'connectionKey' | 'status' | 'catalogStatus'>
+    const revoked = {
+      ...base,
+      connectionKey: 'team-plus',
+      status: 'revoked' as const,
+      catalogStatus: 'ready' as const,
+      revokedAt: new Date(),
+    }
+    const live = {
+      ...base,
+      connectionKey: 'personal-pro',
+      status: 'connected' as const,
+      catalogStatus: 'ready' as const,
+    }
+    expect(mapCodexConnectionStatusForSnapshot(revoked)).toBe('revoked')
+    const annotations = buildCodexReadinessAnnotations(live, [revoked, live])
+    const map = JSON.parse(annotations['clerum.io/codex-connections'] as string) as Record<
+      string,
+      { status: string }
+    >
+    expect(map['team-plus'].status).toBe('revoked')
+    expect(map['personal-pro'].status).toBe('connected')
   })
 
   it('omits revision annotations when the connection row is absent', () => {

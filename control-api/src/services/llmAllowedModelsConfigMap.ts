@@ -25,6 +25,7 @@ import { pool } from '../db.js'
 import {
   type CodexSubscriptionSafeConnection,
   getSafeCodexSubscriptionConnection,
+  listSafeCodexSubscriptionConnections,
 } from './codexSubscriptionConnection.js'
 import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllowedModels.js'
 
@@ -38,6 +39,7 @@ export const CATALOG_REVISION_ANNOTATION = 'clerum.io/catalog-revision'
 export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
 export const CODEX_CONNECTION_STATUS_ANNOTATION = 'clerum.io/codex-connection-status'
 export const CODEX_ENABLED_ANNOTATION = 'clerum.io/codex-enabled'
+export const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
 
 const KNOWN_CONNECTION_STATUSES = new Set([
   'disconnected',
@@ -49,8 +51,9 @@ const KNOWN_CONNECTION_STATUSES = new Set([
 
 export function mapCodexConnectionStatusForSnapshot(
   connection: CodexSubscriptionSafeConnection | null
-): 'connected' | 'disconnected' | 'reauth-required' | 'unavailable' {
+): 'connected' | 'disconnected' | 'reauth-required' | 'unavailable' | 'revoked' {
   if (!connection || !KNOWN_CONNECTION_STATUSES.has(connection.status)) return 'disconnected'
+  if (connection.status === 'revoked') return 'revoked'
   if (connection.status === 'reauth_required' || connection.catalogStatus === 'auth-rejected') {
     return 'reauth-required'
   }
@@ -60,7 +63,8 @@ export function mapCodexConnectionStatusForSnapshot(
 }
 
 export function buildCodexReadinessAnnotations(
-  connection: CodexSubscriptionSafeConnection | null
+  connection: CodexSubscriptionSafeConnection | null,
+  connections: CodexSubscriptionSafeConnection[] = []
 ): Record<string, string> {
   const annotations: Record<string, string> = {
     [CODEX_ENABLED_ANNOTATION]: config.codexSubscriptionEnabled ? 'true' : 'false',
@@ -74,6 +78,24 @@ export function buildCodexReadinessAnnotations(
   ) {
     annotations[CATALOG_REVISION_ANNOTATION] = String(connection.catalogRevision)
     annotations[CONNECTION_REVISION_ANNOTATION] = String(connection.credentialRevision)
+  }
+  const map: Record<
+    string,
+    {
+      status: ReturnType<typeof mapCodexConnectionStatusForSnapshot>
+      catalogRevision: number
+      connectionRevision: number
+    }
+  > = {}
+  for (const row of connections) {
+    map[row.connectionKey] = {
+      status: mapCodexConnectionStatusForSnapshot(row),
+      catalogRevision: row.catalogRevision,
+      connectionRevision: row.credentialRevision,
+    }
+  }
+  if (Object.keys(map).length > 0) {
+    annotations[CODEX_CONNECTIONS_ANNOTATION] = JSON.stringify(map)
   }
   return annotations
 }
@@ -134,7 +156,13 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
   async materialize(db: DbClient = pool): Promise<void> {
     const grouped = await listEnabledGroupedByProvider(db)
     const { data, contentHash } = buildConfigMapData(grouped)
-    const readiness = buildCodexReadinessAnnotations(await loadCodexConnection(db))
+    const connections = await listSafeCodexSubscriptionConnections(db).catch(() => [])
+    const readiness = buildCodexReadinessAnnotations(
+      connections.find(row => row.connectionKey === 'deployment-default') ??
+        connections[0] ??
+        (await loadCodexConnection(db)),
+      connections
+    )
     let lastError: unknown
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {

@@ -11,6 +11,7 @@ import type { LlmProvider } from './llm/registryCore'
 export interface ModelConfig {
   provider: LlmProvider
   name: string
+  connectionRef?: string
 }
 
 /** Phase 7–8: Workspace memory configuration. */

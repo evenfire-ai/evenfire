@@ -361,6 +361,7 @@ export interface ContextCRD {
 export interface HostModelSpec {
   provider?: LlmProviderId
   name?: string
+  connectionRef?: string
 }
 
 export interface HostAllowedModel {

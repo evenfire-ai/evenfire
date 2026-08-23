@@ -6,6 +6,7 @@ import { rootLogger } from '../observability/logger.js'
 import { chatgptAccountIdFromJwt } from './chatgptAccountId.js'
 import {
   getSafeCodexSubscriptionConnection,
+  getSafeCodexSubscriptionConnectionById,
   loadCodexSubscriptionSecrets,
 } from './codexSubscriptionConnection.js'
 import {
@@ -85,7 +86,7 @@ export type RedeemAttemptDeps = {
   withTransaction: typeof withTransaction
   loadSecrets: typeof loadCodexSubscriptionSecrets
   encryptionKey: Buffer
-  ensureFreshAccessToken?: () => Promise<void>
+  ensureFreshAccessToken?: (connectionKey?: string) => Promise<void>
 }
 
 const defaultRedeemDeps = (): RedeemAttemptDeps => ({
@@ -93,7 +94,7 @@ const defaultRedeemDeps = (): RedeemAttemptDeps => ({
   withTransaction,
   loadSecrets: loadCodexSubscriptionSecrets,
   encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
-  ensureFreshAccessToken: () =>
+  ensureFreshAccessToken: connectionKey =>
     ensureFreshCodexAccessToken({
       db: { query: (text, values) => pool.query(text, values) },
       encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
@@ -101,6 +102,7 @@ const defaultRedeemDeps = (): RedeemAttemptDeps => ({
       clientId: config.codexOAuthClientId,
       redirectUri: 'http://127.0.0.1/codex/oauth/callback',
       enabled: config.codexSubscriptionEnabled,
+      connectionKey,
     }),
 })
 
@@ -130,7 +132,15 @@ export async function redeemLlmProviderAttempt(
 
   if (deps.ensureFreshAccessToken) {
     try {
-      await deps.ensureFreshAccessToken()
+      let refreshKey: string | undefined
+      if (claims.connectionId) {
+        const assigned = await getSafeCodexSubscriptionConnectionById(
+          { query: (text, values) => pool.query(text, values) },
+          claims.connectionId
+        )
+        refreshKey = assigned?.connectionKey
+      }
+      await deps.ensureFreshAccessToken(refreshKey)
     } catch (err) {
       if (err instanceof CodexSubscriptionOAuthError) {
         throw new LlmProviderAttemptRedeemError(
@@ -183,12 +193,15 @@ export async function redeemLlmProviderAttempt(
       )
     }
 
-    const connection = await getSafeCodexSubscriptionConnection(tx)
+    const connection = attempt.connectionId
+      ? await getSafeCodexSubscriptionConnectionById(tx, attempt.connectionId)
+      : await getSafeCodexSubscriptionConnection(tx)
     if (
       !connection ||
       connection.status !== 'connected' ||
       connection.revokedAt ||
-      connection.credentialRevision !== attempt.connectionRevision
+      connection.credentialRevision !== attempt.connectionRevision ||
+      (attempt.connectionId && connection.id !== attempt.connectionId)
     ) {
       throw new LlmProviderAttemptRedeemError(
         'connection_unavailable',
@@ -201,7 +214,7 @@ export async function redeemLlmProviderAttempt(
       throw new LlmProviderAttemptRedeemError('ticket_replayed', 'execution ticket already used')
     }
 
-    const secrets = await deps.loadSecrets(tx, deps.encryptionKey)
+    const secrets = await deps.loadSecrets(tx, deps.encryptionKey, connection.connectionKey)
     if (!secrets?.accessToken) {
       throw new LlmProviderAttemptRedeemError(
         'connection_unavailable',

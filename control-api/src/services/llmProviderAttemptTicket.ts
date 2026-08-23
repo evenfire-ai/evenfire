@@ -26,6 +26,7 @@ export type CodexExecutionTicketClaims = {
   policyHash: string
   budgetReservationId: string
   connectionRevision: number
+  connectionId?: string
 }
 
 export type IssuedCodexExecutionTicket = {

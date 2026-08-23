@@ -91,6 +91,7 @@ export type CodexExecutionTicketClaims = {
   policyHash: string
   budgetReservationId: string
   connectionRevision: number
+  connectionId?: string
 }
 
 export type AuthorizeAttemptResponse = {
@@ -141,6 +142,7 @@ export declare function computeCodexPolicyHash(input: {
   model: string
   catalogRevision: number
   credentialRevision: number
+  connectionKey?: string
 }): string
 export declare function parseCodexExecutionTicketClaims(
   input: unknown

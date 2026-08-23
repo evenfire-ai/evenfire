@@ -466,6 +466,7 @@ export class HostReconciler {
   private readonly newTelemetryOccurrenceId: () => string
   private readonly statusMap: Map<string, HostRuntimeStatus> = new Map()
   private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
+  private lastCodexConfigMap: k8s.V1ConfigMap | undefined
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
   /**
    * host.name → image whose pull-policy refusal was already error-logged.
@@ -1376,7 +1377,11 @@ export class HostReconciler {
   }
 
   private projectCodexForHost(host: HostCRD): CodexExecutionProjection {
-    return projectCodexExecution(host.spec, this.codexSnapshot)
+    const connectionKey = host.spec.model?.connectionRef?.trim() || 'deployment-default'
+    const snapshot = this.lastCodexConfigMap
+      ? parseAllowedModelsSnapshot(this.lastCodexConfigMap, connectionKey)
+      : this.codexSnapshot
+    return projectCodexExecution(host.spec, snapshot)
   }
 
   private resolveEffectiveControlScopesForHost(
@@ -1407,12 +1412,14 @@ export class HostReconciler {
         name: ALLOWED_MODELS_CONFIGMAP_NAME,
         namespace: config.hccTargetNamespace,
       })
+      this.lastCodexConfigMap = cm
       this.codexSnapshot = parseAllowedModelsSnapshot(cm)
     } catch (err) {
       const timeout =
         err instanceof HostK8sRequestTimeoutError ||
         (err as { code?: string }).code === HOST_K8S_REQUEST_TIMEOUT_CODE
       if (timeout) {
+        this.lastCodexConfigMap = undefined
         this.codexSnapshot = snapshotFromConfigMapError('timeout')
         log.warn('Codex allowlist ConfigMap read timed out; failing closed', {
           configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
@@ -1422,6 +1429,7 @@ export class HostReconciler {
       }
       const code = getErrorCode(err)
       if (code === 401 || code === 403) {
+        this.lastCodexConfigMap = undefined
         this.codexSnapshot = snapshotFromConfigMapError('forbidden')
         log.warn('Codex allowlist ConfigMap read forbidden; failing closed', {
           configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
@@ -1430,6 +1438,7 @@ export class HostReconciler {
         })
         return
       }
+      this.lastCodexConfigMap = undefined
       this.codexSnapshot = snapshotFromConfigMapError('missing')
       log.warn('Codex allowlist ConfigMap unavailable; failing closed', {
         configMap: ALLOWED_MODELS_CONFIGMAP_NAME,

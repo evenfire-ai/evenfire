@@ -94,16 +94,14 @@ describe('LlmModelsSurface', () => {
     expect(screen.queryByRole('tab', { name: 'Codex subscription' })).not.toBeInTheDocument()
   })
 
-  it('shows the Codex subscription tab only after Control API proves the flag', async () => {
-    vi.mocked(loadCodexSubscriptionCapability).mockResolvedValue({ enabled: true })
+  it('never shows a Codex subscription tab on LLM Models', async () => {
     render(
       <ToastProvider>
         <LlmModelsSurface activeTab="catalog" />
       </ToastProvider>
     )
 
-    const tab = await screen.findByRole('tab', { name: 'Codex subscription' })
-    expect(tab).toHaveAttribute('href', '/llm-models/providers/codex-subscription')
-    expect(screen.queryByTestId('codex-subscription-catalog-link')).not.toBeInTheDocument()
+    expect(await screen.findByText('Model catalog')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Codex subscription' })).not.toBeInTheDocument()
   })
 })

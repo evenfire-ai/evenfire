@@ -21,6 +21,7 @@ function Harness({
   withCredentials = true,
   existingKeys,
   replacePrimaryModelWithAllowedModels = false,
+  subscriptionCredentialEnabled = false,
 }: {
   initialProvider?: LlmProvider
   initialModel?: string
@@ -29,6 +30,7 @@ function Harness({
   withCredentials?: boolean
   existingKeys?: string[]
   replacePrimaryModelWithAllowedModels?: boolean
+  subscriptionCredentialEnabled?: boolean
 }) {
   const [provider, setProvider] = useState<LlmProvider>(initialProvider)
   const [model, setModel] = useState(initialModel)
@@ -58,6 +60,7 @@ function Harness({
           : undefined
       }
       replacePrimaryModelWithAllowedModels={replacePrimaryModelWithAllowedModels}
+      subscriptionCredentialEnabled={subscriptionCredentialEnabled}
       secretKeys={existingKeys}
     />
   )
@@ -171,6 +174,18 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
       screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
     ).toHaveTextContent('OpenAI')
     expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toBeInTheDocument()
+  })
+
+  it('offers OpenAI plus a credential type instead of a Codex provider option', () => {
+    render(<Harness subscriptionCredentialEnabled />)
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    expect(screen.getByRole('option', { name: /^OpenAI$/i })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('option', { name: /OpenAI Codex Subscription/i })
+    ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
+    expect(screen.getByRole('radio', { name: /ChatGPT subscription/i })).toBeChecked()
+    expect(screen.getByText(/Connect and sync the grant first/i)).toBeInTheDocument()
   })
 })
 

@@ -76,3 +76,8 @@ and must not weaken this allowlist. Account identifiers stay redacted.
 The focused drift from spec SHA `7d56b10849458a67b15f7d9a0991fa62604913a3` to
 current `HEAD` did not change credential owner, data path, trust boundary,
 namespace/workload shape, gateway count, mTLS stance, or access-token recipient.
+
+Phase 2 grant binding hashes `{ catalogRevision, connectionKey,
+credentialRevision, model, provider }` so two named subscriptions with the
+same integer revisions do not collide. Host `spec.model.connectionRef` selects
+the grant; revoke of one key fail-closes only that assignment.

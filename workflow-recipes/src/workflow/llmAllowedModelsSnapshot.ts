@@ -7,6 +7,7 @@ export const CATALOG_REVISION_ANNOTATION = 'clerum.io/catalog-revision'
 export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
 export const CODEX_CONNECTION_STATUS_ANNOTATION = 'clerum.io/codex-connection-status'
 export const CODEX_ENABLED_ANNOTATION = 'clerum.io/codex-enabled'
+export const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
 export const ALLOWLIST_CONFIGMAP_NAMESPACE = process.env.CLERUM_MODEL_CONFIG_NAMESPACE ?? 'mcp-host'
 
 export function snapshotFromConfigMapError(error: CodexSnapshotError): CodexCatalogSnapshot {
@@ -22,7 +23,10 @@ function parseOptionalIntegerAnnotation(
   return Number.isInteger(parsed) ? parsed : 'invalid'
 }
 
-export function parseAllowedModelsSnapshot(cm: V1ConfigMap | undefined): CodexCatalogSnapshot {
+export function parseAllowedModelsSnapshot(
+  cm: V1ConfigMap | undefined,
+  connectionKey = 'deployment-default'
+): CodexCatalogSnapshot {
   if (!cm) return snapshotFromConfigMapError('missing')
   const annotations = cm.metadata?.annotations ?? {}
   const enabledModels = new Set<string>()
@@ -42,20 +46,44 @@ export function parseAllowedModelsSnapshot(cm: V1ConfigMap | undefined): CodexCa
       return snapshotFromConfigMapError('malformed')
     }
   }
-  const catalogRevision = parseOptionalIntegerAnnotation(annotations, CATALOG_REVISION_ANNOTATION)
-  const connectionRevision = parseOptionalIntegerAnnotation(
+  let catalogRevision = parseOptionalIntegerAnnotation(annotations, CATALOG_REVISION_ANNOTATION)
+  let connectionRevision = parseOptionalIntegerAnnotation(
     annotations,
     CONNECTION_REVISION_ANNOTATION
   )
   if (catalogRevision === 'invalid' || connectionRevision === 'invalid') {
     return snapshotFromConfigMapError('malformed')
   }
+  let connectionStatus =
+    (annotations[CODEX_CONNECTION_STATUS_ANNOTATION] as CodexCatalogSnapshot['connectionStatus']) ??
+    null
+  const rawMap = annotations[CODEX_CONNECTIONS_ANNOTATION]
+  if (rawMap) {
+    try {
+      const parsed = JSON.parse(rawMap) as Record<
+        string,
+        { status?: string; catalogRevision?: number; connectionRevision?: number }
+      >
+      const assigned = parsed[connectionKey]
+      if (assigned) {
+        connectionStatus =
+          (assigned.status as CodexCatalogSnapshot['connectionStatus']) ?? connectionStatus
+        if (Number.isInteger(assigned.catalogRevision)) {
+          catalogRevision = assigned.catalogRevision as number
+        }
+        if (Number.isInteger(assigned.connectionRevision)) {
+          connectionRevision = assigned.connectionRevision as number
+        }
+      } else if (connectionKey !== 'deployment-default') {
+        connectionStatus = 'disconnected'
+      }
+    } catch {
+      return snapshotFromConfigMapError('malformed')
+    }
+  }
   return {
     flagEnabled: annotations[CODEX_ENABLED_ANNOTATION] === 'true',
-    connectionStatus:
-      (annotations[
-        CODEX_CONNECTION_STATUS_ANNOTATION
-      ] as CodexCatalogSnapshot['connectionStatus']) ?? null,
+    connectionStatus,
     catalogContentHash: annotations[CONTENT_HASH_ANNOTATION] ?? null,
     catalogRevision,
     connectionRevision,

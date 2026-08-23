@@ -174,7 +174,7 @@ describe('CodexSubscriptionConnection', () => {
     searchParams = new URLSearchParams('codex_oauth=connected')
     renderSurface()
     await waitFor(() => {
-      expect(replaceMock).toHaveBeenCalledWith('/llm-models/providers/codex-subscription')
+      expect(replaceMock).toHaveBeenCalledWith(expect.stringMatching(/\/(hosts|agents)/))
     })
     expect(await screen.findByTestId('codex-connection-status')).toHaveTextContent('Connected')
   })
@@ -246,7 +246,7 @@ describe('CodexSubscriptionConnection', () => {
     await waitFor(() => {
       expect(revokeCodexSubscription).toHaveBeenCalled()
     })
-    expect(await screen.findByTestId('codex-connection-status')).toHaveTextContent('Disconnected')
+    expect(await screen.findByTestId('codex-connection-status')).toHaveTextContent('Revoked')
   })
 
   it('anti-false-positive: a leaked accessToken never reaches the DOM', async () => {

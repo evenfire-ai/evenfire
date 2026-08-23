@@ -59,13 +59,17 @@ describe('redeemLlmProviderAttempt', () => {
       policyHash: CLAIMS.policyHash,
       budgetReservationId: CLAIMS.budgetReservationId,
       connectionRevision: CLAIMS.connectionRevision,
+      connectionId: null,
       status: 'authorized',
       outcome: null,
       createdAt: new Date(),
     })
     vi.spyOn(store, 'markLlmProviderAttemptTicketRedeemed').mockResolvedValue(true)
     vi.spyOn(connection, 'getSafeCodexSubscriptionConnection').mockResolvedValue({
+      id: '11111111-1111-1111-1111-111111111111',
       connectionKey: 'deployment-default',
+      displayName: 'Default deployment',
+      createdBy: null,
       status: 'connected',
       credentialRevision: 3,
       catalogRevision: 4,
@@ -133,6 +137,40 @@ describe('redeemLlmProviderAttempt', () => {
     await expect(
       redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: 'c'.repeat(64) })
     ).rejects.toBeInstanceOf(LlmProviderAttemptRedeemError)
+  })
+
+  it('refuses to redeem a pre-revoke ticket after the grant is revoked', async () => {
+    vi.mocked(connection.getSafeCodexSubscriptionConnection).mockResolvedValueOnce({
+      id: '11111111-1111-1111-1111-111111111111',
+      connectionKey: 'team-plus',
+      displayName: 'Team Plus',
+      createdBy: null,
+      status: 'revoked',
+      credentialRevision: 4,
+      catalogRevision: 4,
+      accountFingerprint: null,
+      catalogStatus: 'ready',
+      catalogSyncedAt: new Date(),
+      lastRefreshAt: null,
+      lastAuthAt: new Date(),
+      refreshLockHeld: false,
+      revokedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    await expect(
+      redeemLlmProviderAttempt(
+        { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
+        {
+          enabled: true,
+          withTransaction: async work => work({ query: vi.fn() } as never),
+          loadSecrets: async () => {
+            throw new Error('should not load secrets after revoke')
+          },
+          encryptionKey: Buffer.alloc(32),
+        }
+      )
+    ).rejects.toMatchObject({ code: 'connection_unavailable' })
   })
 
   it('is disabled when the flag is off', async () => {

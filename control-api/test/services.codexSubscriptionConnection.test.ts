@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encryption.js'
 import {
+  CodexSubscriptionFingerprintConflictError,
   CodexSubscriptionStaleRevisionError,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
@@ -25,7 +26,10 @@ describe('codex subscription connection repository', () => {
     query.mockResolvedValueOnce({
       rows: [
         {
+          id: '11111111-1111-1111-1111-111111111111',
           connection_key: 'deployment-default',
+          display_name: 'Default deployment',
+          created_by: null,
           status: 'connected',
           refresh_token_encrypted: ciphertext,
           access_token_encrypted: encryptOAuthSecret(KEY, 'access-secret'),
@@ -71,7 +75,10 @@ describe('codex subscription connection repository', () => {
     query.mockResolvedValueOnce({
       rows: [
         {
+          id: '11111111-1111-1111-1111-111111111111',
           connection_key: 'deployment-default',
+          display_name: 'Default deployment',
+          created_by: null,
           status: 'connected',
           credential_revision: '1',
           catalog_revision: '0',
@@ -100,8 +107,23 @@ describe('codex subscription connection repository', () => {
     const [, params] = query.mock.calls[0] as [string, unknown[]]
     expect(params).not.toContain('plain-refresh')
     expect(params).not.toContain('plain-access')
-    expect(String(params[2])).toMatch(/^v1\./)
     expect(String(params[3])).toMatch(/^v1\./)
+    expect(String(params[4])).toMatch(/^v1\./)
+  })
+
+  it('maps a unique active fingerprint violation to fingerprint_in_use', async () => {
+    query.mockRejectedValueOnce(Object.assign(new Error('duplicate'), { code: '23505' }))
+    await expect(
+      insertInitialCodexSubscriptionConnection(
+        { query },
+        KEY,
+        {
+          refreshToken: 'plain-refresh',
+          accountFingerprint: 'fp_dup',
+        },
+        'team-plus'
+      )
+    ).rejects.toBeInstanceOf(CodexSubscriptionFingerprintConflictError)
   })
 
   it('rejects a stale credential_revision writer', async () => {

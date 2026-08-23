@@ -3,10 +3,12 @@ import { config } from '../config.js'
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import {
+  CODEX_SUBSCRIPTION_CONNECTION_KEY,
   type CodexSubscriptionCatalogStatus,
   type CodexSubscriptionConnectionStatus,
   type CodexSubscriptionSafeConnection,
   getSafeCodexSubscriptionConnection,
+  normalizeCodexConnectionKey,
   recordCodexCatalogOutcome,
 } from './codexSubscriptionConnection.js'
 
@@ -96,11 +98,141 @@ export function planCodexCatalogReconcile(
   }
 }
 
+export async function applyCodexCatalogModelsSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS codex_catalog_models (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      connection_id UUID NOT NULL REFERENCES codex_subscription_connections(id),
+      model TEXT NOT NULL,
+      display_name TEXT,
+      context_window_tokens INTEGER,
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      source TEXT NOT NULL CHECK (source IN ('manual', 'discovery')),
+      stale BOOLEAN NOT NULL DEFAULT false,
+      discovered_at TIMESTAMPTZ,
+      last_seen_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT codex_catalog_models_connection_model_unique UNIQUE (connection_id, model)
+    );
+
+    REVOKE ALL PRIVILEGES ON TABLE codex_catalog_models FROM PUBLIC;
+    REVOKE ALL PRIVILEGES ON TABLE codex_catalog_models
+      FROM trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT SELECT, INSERT, UPDATE ON TABLE codex_catalog_models TO control_api_runtime;
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE codex_catalog_models FROM control_api_runtime;
+
+    INSERT INTO codex_catalog_models (
+      connection_id, model, display_name, context_window_tokens, enabled, source, stale,
+      discovered_at, last_seen_at
+    )
+    SELECT c.id, m.model, m.display_name, m.context_window_tokens, m.enabled, m.source, m.stale,
+           m.discovered_at, m.last_seen_at
+      FROM llm_allowed_models m
+      JOIN codex_subscription_connections c
+        ON c.connection_key = '${CODEX_SUBSCRIPTION_CONNECTION_KEY}'
+     WHERE m.provider = '${PROVIDER}'
+    ON CONFLICT (connection_id, model) DO NOTHING;
+  `)
+}
+
+export async function getCodexCatalogModelState(
+  db: DbClient,
+  connectionId: string,
+  model: string
+): Promise<{ enabled: boolean; stale: boolean } | null> {
+  const result = await db.query(
+    `SELECT enabled, stale
+       FROM codex_catalog_models
+      WHERE connection_id = $1
+        AND model = $2
+      LIMIT 1`,
+    [connectionId, model]
+  )
+  const row = result.rows[0] as { enabled?: boolean; stale?: boolean } | undefined
+  if (!row) return null
+  return { enabled: row.enabled === true, stale: row.stale === true }
+}
+
+export async function isCodexAssignmentAllowed(
+  db: DbClient,
+  connectionRef: string,
+  model: string
+): Promise<boolean> {
+  const connection = await getSafeCodexSubscriptionConnection(
+    db,
+    normalizeCodexConnectionKey(connectionRef)
+  )
+  if (
+    !connection ||
+    connection.status !== 'connected' ||
+    connection.revokedAt ||
+    connection.catalogStatus !== 'ready'
+  ) {
+    return false
+  }
+  const state = await getCodexCatalogModelState(db, connection.id, model)
+  return Boolean(state?.enabled && !state.stale)
+}
+
+export async function listCodexCatalogModels(
+  db: DbClient,
+  connectionId: string
+): Promise<Array<{ model: string; enabled: boolean; stale: boolean }>> {
+  const result = await db.query(
+    `SELECT model, enabled, stale
+       FROM codex_catalog_models
+      WHERE connection_id = $1
+      ORDER BY model ASC`,
+    [connectionId]
+  )
+  return (result.rows as Array<Record<string, unknown>>).map(row => ({
+    model: String(row.model),
+    enabled: row.enabled === true,
+    stale: row.stale === true,
+  }))
+}
+
+export async function rebuildLiveCodexUnionAllowlist(db: DbClient): Promise<void> {
+  await db.query(
+    `INSERT INTO llm_allowed_models
+       (provider, model, enabled, source, stale, display_name, context_window_tokens, vendor, last_seen_at)
+     SELECT $1, m.model, true, 'discovery', false,
+            MIN(m.display_name), MAX(m.context_window_tokens), 'OpenAI', NOW()
+       FROM codex_catalog_models m
+       JOIN codex_subscription_connections c ON c.id = m.connection_id
+      WHERE c.revoked_at IS NULL
+        AND m.enabled
+        AND m.stale = false
+      GROUP BY m.model
+     ON CONFLICT (provider, model) DO UPDATE
+        SET enabled = true,
+            stale = false,
+            last_seen_at = NOW()`,
+    [PROVIDER]
+  )
+  await db.query(
+    `UPDATE llm_allowed_models
+        SET enabled = false,
+            stale = true
+      WHERE provider = $1
+        AND model NOT IN (
+          SELECT DISTINCT m.model
+            FROM codex_catalog_models m
+            JOIN codex_subscription_connections c ON c.id = m.connection_id
+           WHERE c.revoked_at IS NULL
+             AND m.enabled
+             AND m.stale = false
+        )`,
+    [PROVIDER]
+  )
+}
+
 export async function syncCodexSubscriptionCatalog(
   db: DbClient,
   transport: CodexCatalogTransport,
   accessToken: string,
-  expected?: { credentialRevision: number; catalogRevision: number }
+  expected?: { credentialRevision: number; catalogRevision: number; connectionKey?: string }
 ): Promise<{
   outcome: CodexCatalogOutcome
   connection: CodexSubscriptionSafeConnection | null
@@ -108,28 +240,31 @@ export async function syncCodexSubscriptionCatalog(
   refreshed: number
   staled: number
 }> {
-  const connection = await getSafeCodexSubscriptionConnection(db)
+  const connectionKey = normalizeCodexConnectionKey(expected?.connectionKey)
+  const connection = await getSafeCodexSubscriptionConnection(db, connectionKey)
   if (!connection || connection.status === 'revoked' || connection.status === 'disconnected') {
     throw new Error('codex_subscription_not_connected')
   }
   const expectedCredentialRevision = expected?.credentialRevision ?? connection.credentialRevision
   const expectedCatalogRevision = expected?.catalogRevision ?? connection.catalogRevision
   const result = await transport.listModels({ accessToken })
-  const existing = await loadCodexRows(db)
+  const existing = await loadCodexRows(db, connection.id)
   const plan = planCodexCatalogReconcile(existing, result)
   const recorded = await recordCodexCatalogOutcome(db, {
     catalogStatus: plan.catalogStatus as CodexSubscriptionCatalogStatus,
     connectionStatus: plan.connectionStatus,
     expectedCredentialRevision,
     expectedCatalogRevision,
+    connectionKey,
   })
   let added = 0
   let refreshed = 0
   let staled = 0
   if (recorded && plan.mutateRows) {
-    added = await insertDiscovered(db, plan.inserts)
-    refreshed = await refreshDiscovered(db, plan.refresh)
-    staled = await staleMissing(db, plan.stale)
+    added = await insertDiscovered(db, connection.id, plan.inserts)
+    refreshed = await refreshDiscovered(db, connection.id, plan.refresh)
+    staled = await staleMissing(db, connection.id, plan.stale)
+    await rebuildLiveCodexUnionAllowlist(db)
   }
   if (!recorded) {
     log.warn(
@@ -229,12 +364,12 @@ export function createCodexCatalogTransportFromEnv(
   return createCodexProxyCatalogTransport({ adminBaseUrl })
 }
 
-async function loadCodexRows(db: DbClient): Promise<CodexCatalogRow[]> {
+async function loadCodexRows(db: DbClient, connectionId: string): Promise<CodexCatalogRow[]> {
   const result = await db.query(
     `SELECT model, source, enabled, stale
-       FROM llm_allowed_models
-      WHERE provider = $1`,
-    [PROVIDER]
+       FROM codex_catalog_models
+      WHERE connection_id = $1`,
+    [connectionId]
   )
   return (result.rows as Array<Record<string, unknown>>).map(row => ({
     model: String(row.model),
@@ -244,44 +379,54 @@ async function loadCodexRows(db: DbClient): Promise<CodexCatalogRow[]> {
   }))
 }
 
-async function insertDiscovered(db: DbClient, models: CodexDiscoveredModel[]): Promise<number> {
+async function insertDiscovered(
+  db: DbClient,
+  connectionId: string,
+  models: CodexDiscoveredModel[]
+): Promise<number> {
   let added = 0
   for (const model of models) {
     const result = await db.query(
-      `INSERT INTO llm_allowed_models
-         (provider, model, enabled, source, discovered_at, last_seen_at, stale, display_name, context_window_tokens, vendor)
-       VALUES ($1, $2, false, 'discovery', NOW(), NOW(), false, $3, $4, 'OpenAI')
-       ON CONFLICT (provider, model) DO NOTHING`,
-      [PROVIDER, model.model, model.displayName ?? null, model.contextWindowTokens ?? null]
+      `INSERT INTO codex_catalog_models
+         (connection_id, model, enabled, source, discovered_at, last_seen_at, stale, display_name, context_window_tokens)
+       VALUES ($1, $2, true, 'discovery', NOW(), NOW(), false, $3, $4)
+       ON CONFLICT (connection_id, model) DO NOTHING`,
+      [connectionId, model.model, model.displayName ?? null, model.contextWindowTokens ?? null]
     )
     added += result.rowCount ?? 0
   }
   return added
 }
 
-async function refreshDiscovered(db: DbClient, models: string[]): Promise<number> {
+async function refreshDiscovered(
+  db: DbClient,
+  connectionId: string,
+  models: string[]
+): Promise<number> {
   if (models.length === 0) return 0
   const result = await db.query(
-    `UPDATE llm_allowed_models
+    `UPDATE codex_catalog_models
         SET last_seen_at = NOW(),
-            stale = false
-      WHERE provider = $1
+            stale = false,
+            updated_at = NOW()
+      WHERE connection_id = $1
         AND source = 'discovery'
         AND model = ANY($2::text[])`,
-    [PROVIDER, models]
+    [connectionId, models]
   )
   return result.rowCount ?? 0
 }
 
-async function staleMissing(db: DbClient, models: string[]): Promise<number> {
+async function staleMissing(db: DbClient, connectionId: string, models: string[]): Promise<number> {
   if (models.length === 0) return 0
   const result = await db.query(
-    `UPDATE llm_allowed_models
-        SET stale = true
-      WHERE provider = $1
+    `UPDATE codex_catalog_models
+        SET stale = true,
+            updated_at = NOW()
+      WHERE connection_id = $1
         AND source = 'discovery'
         AND model = ANY($2::text[])`,
-    [PROVIDER, models]
+    [connectionId, models]
   )
   return result.rowCount ?? 0
 }

@@ -1,15 +1,13 @@
 'use client'
 
-import { AuthGate } from '@components/AuthGate'
-import { CodexSubscriptionConnection } from '@components/CodexSubscriptionConnection'
-import { DashboardLayout } from '@components/DashboardLayout'
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 
 export default function CodexSubscriptionProviderPage() {
-  return (
-    <AuthGate>
-      <DashboardLayout isDetailPage>
-        <CodexSubscriptionConnection />
-      </DashboardLayout>
-    </AuthGate>
-  )
+  const router = useRouter()
+  useEffect(() => {
+    router.replace(CONTROL_ROUTES.agents.root)
+  }, [router])
+  return null
 }

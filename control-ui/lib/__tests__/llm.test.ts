@@ -5,13 +5,19 @@ import {
   LLM_CREDENTIAL_GROUPS,
   LLM_DEFAULT_MODEL_BY_PROVIDER,
   type LlmModelCatalogEntry,
+  OPERATOR_PROVIDER_OPTIONS,
   brokerBackedRecipeAuthoringError,
   budgetUnitAllowedForProviders,
+  catalogGroupKey,
   getAllModelOptions,
   getLlmGroupCompleteness,
   getModelOptions,
+  getProviderDisplayLabel,
+  getProviderLabel,
   inferProviderFromModels,
+  isOpenAiFamily,
   llmChainRequiresSecret,
+  openAiCredentialSources,
   providerRequiresLlmSecret,
   resolveDefaultModel,
   validateLlmSecretData,
@@ -59,6 +65,44 @@ describe('getModelOptions', () => {
       'gpt-5.1',
       'old-codex',
     ])
+  })
+})
+
+describe('OpenAI family presentation', () => {
+  it('does not offer Codex as a second provider in operator pickers', () => {
+    expect(OPERATOR_PROVIDER_OPTIONS.some(option => option.value === 'codex-subscription')).toBe(
+      false
+    )
+    expect(OPERATOR_PROVIDER_OPTIONS.some(option => option.value === 'openai')).toBe(true)
+  })
+
+  it('labels the subscription runtime id as OpenAI for operators', () => {
+    expect(getProviderLabel('codex-subscription')).toBe('OpenAI')
+    expect(getProviderDisplayLabel('codex-subscription')).toBe('OpenAI')
+    expect(getProviderLabel('openai')).toBe('OpenAI')
+  })
+
+  it('groups subscription catalog rows under OpenAI', () => {
+    expect(catalogGroupKey('codex-subscription')).toBe('openai')
+    expect(catalogGroupKey('openai')).toBe('openai')
+    expect(catalogGroupKey('claude')).toBe('claude')
+    expect(isOpenAiFamily('codex-subscription')).toBe(true)
+  })
+
+  it('marks a model as API key, subscription, or both', () => {
+    const catalog: LlmModelCatalogEntry[] = [
+      { provider: 'openai', model: 'gpt-5.1', enabled: true },
+      { provider: 'codex-subscription', model: 'gpt-5.1', enabled: true },
+      { provider: 'codex-subscription', model: 'gpt-5.3-codex', enabled: true },
+    ]
+    expect(openAiCredentialSources(catalog, 'gpt-5.1')).toEqual({
+      apiKey: true,
+      subscription: true,
+    })
+    expect(openAiCredentialSources(catalog, 'gpt-5.3-codex')).toEqual({
+      apiKey: false,
+      subscription: true,
+    })
   })
 })
 

@@ -17,7 +17,7 @@ export function createMcpHostRoutes(
   router.use(createUserApprovalRequestsRoutes(gateway, directRunAttributionBindingService))
   router.use(createMcpHostWorkflowRoutes(gateway))
   router.use(createMcpHostPluginWorkloadSdkRoutes())
-  router.use(createMcpHostLlmProviderAttemptRoutes())
+  router.use(createMcpHostLlmProviderAttemptRoutes(gateway))
   router.use(createMcpHostHostsHeartbeatRoutes(gateway))
   return router
 }

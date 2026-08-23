@@ -2,13 +2,16 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import { chatgptAccountIdFromJwt } from './chatgptAccountId.js'
+import { rebuildLiveCodexUnionAllowlist } from './codexSubscriptionCatalog.js'
 import {
+  CodexSubscriptionFingerprintConflictError,
   type CodexSubscriptionSafeConnection,
   CodexSubscriptionStaleRevisionError,
   acquireCodexSubscriptionRefreshLock,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
   loadCodexSubscriptionSecrets,
+  normalizeCodexConnectionKey,
   persistCodexChatgptAccountId,
   releaseCodexSubscriptionRefreshLock,
   revokeCodexSubscriptionConnection,
@@ -57,6 +60,7 @@ export type CodexOAuthErrorCode =
   | 'no_grant'
   | 'invalid_callback'
   | 'browser_oauth_unregistered'
+  | 'fingerprint_in_use'
 
 export class CodexSubscriptionOAuthError extends Error {
   readonly code: CodexOAuthErrorCode
@@ -75,6 +79,11 @@ export type CodexOAuthDeps = {
   clientId: string
   redirectUri: string
   enabled: boolean
+  connectionKey?: string
+}
+
+function connectionKeyOf(deps: CodexOAuthDeps): string {
+  return normalizeCodexConnectionKey(deps.connectionKey)
 }
 
 export type CodexBrowserStartResult = {
@@ -109,12 +118,10 @@ function requireEnabled(deps: CodexOAuthDeps): void {
 
 export async function getCodexSubscriptionConnection(
   deps: CodexOAuthDeps
-): Promise<
-  CodexSubscriptionSafeConnection | { connectionKey: 'deployment-default'; status: 'disconnected' }
-> {
+): Promise<CodexSubscriptionSafeConnection | { connectionKey: string; status: 'disconnected' }> {
   requireEnabled(deps)
-  const row = await getSafeCodexSubscriptionConnection(deps.db)
-  return row ?? { connectionKey: 'deployment-default', status: 'disconnected' }
+  const row = await getSafeCodexSubscriptionConnection(deps.db, connectionKeyOf(deps))
+  return row ?? { connectionKey: connectionKeyOf(deps), status: 'disconnected' }
 }
 
 export async function startCodexBrowserConnect(
@@ -131,6 +138,7 @@ export async function startCodexBrowserConnect(
     intent,
     pkceVerifier,
     expiresAt,
+    connectionKey: connectionKeyOf(deps),
   })
   const challenge = createHash('sha256').update(pkceVerifier).digest('base64url')
   const url = new URL(CODEX_OAUTH_AUTHORIZE_URL)
@@ -168,6 +176,7 @@ export async function startCodexDeviceConnect(
     intent,
     deviceCode: encodeDeviceAuthHandle({ deviceAuthId, userCode }),
     expiresAt,
+    connectionKey: connectionKeyOf(deps),
   })
   log.info({ event: 'codex_oauth_device_start', intent: safe.intent }, 'device OAuth start')
   return {
@@ -258,17 +267,23 @@ export async function refreshCodexSubscriptionConnection(
   deps: CodexOAuthDeps
 ): Promise<CodexSubscriptionSafeConnection> {
   requireEnabled(deps)
-  const current = await getSafeCodexSubscriptionConnection(deps.db)
+  const key = connectionKeyOf(deps)
+  const current = await getSafeCodexSubscriptionConnection(deps.db, key)
   if (!current || current.status === 'revoked' || current.status === 'disconnected') {
     throw new CodexSubscriptionOAuthError('not_connected', 'no active Codex subscription')
   }
   const lockToken = randomBytes(16).toString('hex')
-  const locked = await acquireCodexSubscriptionRefreshLock(deps.db, lockToken, REFRESH_LOCK_TTL_MS)
+  const locked = await acquireCodexSubscriptionRefreshLock(
+    deps.db,
+    lockToken,
+    REFRESH_LOCK_TTL_MS,
+    key
+  )
   if (!locked) {
     throw new CodexSubscriptionOAuthError('refresh_in_flight', 'another refresh holds the lock')
   }
   try {
-    const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey)
+    const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
     if (!secrets)
       throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
     const token = await exchangeRefreshToken(deps, secrets.refreshToken)
@@ -283,27 +298,41 @@ export async function refreshCodexSubscriptionConnection(
           accessTokenExpiresAt: token.expiresAt,
           chatgptAccountId: token.chatgptAccountId,
           accountFingerprint: token.accountFingerprint,
-        }
+        },
+        key
       )
     } catch (err) {
       if (err instanceof CodexSubscriptionStaleRevisionError) {
         throw new CodexSubscriptionOAuthError('stale_revision', 'refresh lost the credential race')
       }
+      if (err instanceof CodexSubscriptionFingerprintConflictError) {
+        throw new CodexSubscriptionOAuthError(
+          'fingerprint_in_use',
+          'a live Codex subscription already uses this ChatGPT account'
+        )
+      }
       throw err
     }
   } finally {
-    await releaseCodexSubscriptionRefreshLock(deps.db, lockToken)
+    await releaseCodexSubscriptionRefreshLock(deps.db, lockToken, key)
   }
 }
 
 export async function revokeCodexSubscription(
   deps: CodexOAuthDeps
-): Promise<
-  CodexSubscriptionSafeConnection | { connectionKey: 'deployment-default'; status: 'disconnected' }
-> {
+): Promise<CodexSubscriptionSafeConnection | { connectionKey: string; status: 'disconnected' }> {
   requireEnabled(deps)
-  const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey)
-  const local = await revokeCodexSubscriptionConnection(deps.db)
+  const key = connectionKeyOf(deps)
+  const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
+  const local = await revokeCodexSubscriptionConnection(deps.db, key)
+  try {
+    await rebuildLiveCodexUnionAllowlist(deps.db)
+  } catch (err) {
+    log.warn(
+      { event: 'codex_union_rebuild_after_revoke_failed', err },
+      'union allowlist rebuild failed'
+    )
+  }
   if (secrets?.refreshToken) {
     try {
       const revokePayload: Record<string, string> = {
@@ -317,7 +346,7 @@ export async function revokeCodexSubscription(
     }
   }
   log.info({ event: 'codex_oauth_revoked_local' }, 'local Codex subscription revoked')
-  return local ?? { connectionKey: 'deployment-default', status: 'disconnected' }
+  return local ?? { connectionKey: key, status: 'disconnected' }
 }
 
 async function persistGrantedTokens(
@@ -325,7 +354,8 @@ async function persistGrantedTokens(
   intent: CodexSubscriptionOAuthIntent,
   parsed: ParsedCodexToken
 ): Promise<CodexSubscriptionSafeConnection> {
-  const existing = await getSafeCodexSubscriptionConnection(deps.db)
+  const key = connectionKeyOf(deps)
+  const existing = await getSafeCodexSubscriptionConnection(deps.db, key)
   if (
     existing?.accountFingerprint &&
     existing.accountFingerprint !== parsed.accountFingerprint &&
@@ -351,20 +381,27 @@ async function persistGrantedTokens(
     )
   }
   if (!existing) {
-    return insertInitialCodexSubscriptionConnection(deps.db, deps.encryptionKey, write)
+    return insertInitialCodexSubscriptionConnection(deps.db, deps.encryptionKey, write, key)
   }
   try {
     return await rotateCodexSubscriptionCredentials(
       deps.db,
       deps.encryptionKey,
       existing.credentialRevision,
-      write
+      write,
+      key
     )
   } catch (err) {
     if (err instanceof CodexSubscriptionStaleRevisionError) {
       throw new CodexSubscriptionOAuthError(
         'stale_revision',
         'connection was replaced concurrently'
+      )
+    }
+    if (err instanceof CodexSubscriptionFingerprintConflictError) {
+      throw new CodexSubscriptionOAuthError(
+        'fingerprint_in_use',
+        'a live Codex subscription already uses this ChatGPT account'
       )
     }
     throw err
@@ -385,7 +422,8 @@ type ParsedCodexToken = {
  */
 export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise<void> {
   requireEnabled(deps)
-  const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey)
+  const key = connectionKeyOf(deps)
+  const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
   if (!secrets) {
     throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
   }
@@ -395,30 +433,41 @@ export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise
     secrets.accessTokenExpiresAt.getTime() - Date.now() < ACCESS_TOKEN_REFRESH_SKEW_MS
   if (secrets.accessToken && !expiring && accountId) {
     if (!secrets.chatgptAccountId) {
-      await persistCodexChatgptAccountId(deps.db, deps.encryptionKey, accountId)
+      await persistCodexChatgptAccountId(deps.db, deps.encryptionKey, accountId, key)
     }
     return
   }
 
   const lockToken = randomBytes(16).toString('hex')
-  const locked = await acquireCodexSubscriptionRefreshLock(deps.db, lockToken, REFRESH_LOCK_TTL_MS)
+  const locked = await acquireCodexSubscriptionRefreshLock(
+    deps.db,
+    lockToken,
+    REFRESH_LOCK_TTL_MS,
+    key
+  )
   if (!locked) {
     await new Promise(resolve => setTimeout(resolve, 400))
     return
   }
   try {
-    const latest = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey)
+    const latest = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
     if (!latest) {
       throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
     }
     const token = await exchangeRefreshToken(deps, latest.refreshToken)
     accountId = token.chatgptAccountId || chatgptAccountIdFromJwt(token.accessToken) || accountId
-    await updateCodexAccessTokenInPlace(deps.db, deps.encryptionKey, latest.credentialRevision, {
-      accessToken: token.accessToken,
-      accessTokenExpiresAt: token.expiresAt,
-      refreshToken: token.refreshToken,
-      chatgptAccountId: accountId,
-    })
+    await updateCodexAccessTokenInPlace(
+      deps.db,
+      deps.encryptionKey,
+      latest.credentialRevision,
+      {
+        accessToken: token.accessToken,
+        accessTokenExpiresAt: token.expiresAt,
+        refreshToken: token.refreshToken,
+        chatgptAccountId: accountId,
+      },
+      key
+    )
   } catch (err) {
     if (err instanceof CodexSubscriptionStaleRevisionError) {
       throw new CodexSubscriptionOAuthError(
@@ -428,7 +477,7 @@ export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise
     }
     throw err
   } finally {
-    await releaseCodexSubscriptionRefreshLock(deps.db, lockToken)
+    await releaseCodexSubscriptionRefreshLock(deps.db, lockToken, key)
   }
 }
 

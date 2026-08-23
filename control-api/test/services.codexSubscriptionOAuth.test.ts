@@ -452,7 +452,8 @@ describe('codex subscription OAuth broker', () => {
       expect.anything(),
       KEY,
       3,
-      expect.objectContaining({ accessToken: 'access-secret', chatgptAccountId: 'acct_live_9' })
+      expect.objectContaining({ accessToken: 'access-secret', chatgptAccountId: 'acct_live_9' }),
+      'deployment-default'
     )
     expect(repos.rotate).not.toHaveBeenCalled()
     expect(repos.releaseLock).toHaveBeenCalled()

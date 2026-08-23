@@ -3,6 +3,7 @@ import { CONTROL_API_MIGRATIONS, assertDbReady } from '../src/db.js'
 
 const LATEST_MIGRATION = CONTROL_API_MIGRATIONS.at(-1)!.version
 const CODEX_ACCOUNT_ID_MIGRATION = '00a4_codex_chatgpt_account_id'
+const CODEX_MULTI_CONNECTION_MIGRATION = '0101_codex_multi_connection'
 
 describe('assertDbReady', () => {
   it('accepts a database that recorded every registered migration', async () => {
@@ -36,6 +37,19 @@ describe('assertDbReady', () => {
 
     await expect(assertDbReady({ query })).rejects.toThrow(
       `missing migrations ${CODEX_ACCOUNT_ID_MIGRATION}`
+    )
+  })
+
+  it('fails closed when 0101 is absent after the catalog tail moved to 0100', async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: CONTROL_API_MIGRATIONS.filter(
+        migration => migration.version !== CODEX_MULTI_CONNECTION_MIGRATION
+      ).map(migration => ({ version: migration.version })),
+      rowCount: CONTROL_API_MIGRATIONS.length - 1,
+    })
+
+    await expect(assertDbReady({ query })).rejects.toThrow(
+      `missing migrations ${CODEX_MULTI_CONNECTION_MIGRATION}`
     )
   })
 })

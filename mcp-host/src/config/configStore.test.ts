@@ -578,6 +578,7 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(store.codexPolicyBinding()).toEqual({
       catalogRevision: 7,
       credentialRevision: 3,
+      connectionKey: 'deployment-default',
     })
 
     const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
@@ -595,6 +596,7 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(store.codexPolicyBinding()).toEqual({
       catalogRevision: 8,
       credentialRevision: 3,
+      connectionKey: 'deployment-default',
     })
 
     handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })

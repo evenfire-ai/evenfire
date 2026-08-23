@@ -4,6 +4,7 @@ agent_run_events	append
 budget_pending_reservations	legacy_dml
 codex_subscription_connections	upsert
 codex_subscription_oauth_states	upsert
+codex_catalog_models	upsert
 control_admin_deletion_audit	legacy_dml
 control_admin_email_change_requests	legacy_dml
 control_admin_invitations	legacy_dml

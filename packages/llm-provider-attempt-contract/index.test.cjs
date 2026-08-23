@@ -114,6 +114,7 @@ test('hash is SHA-256 of lexicographic stableStringify of the projection', () =>
 test('computeCodexPolicyHash is SHA-256 of lexicographic stableStringify of the binding', () => {
   const binding = {
     catalogRevision: 4,
+    connectionKey: 'deployment-default',
     credentialRevision: 3,
     model: 'gpt-5.1',
     provider: 'codex-subscription',
@@ -135,6 +136,7 @@ test('computeCodexPolicyHash is SHA-256 of lexicographic stableStringify of the 
       credentialRevision: 3,
       catalogRevision: 4,
       model: 'gpt-5.1',
+      connectionKey: 'deployment-default',
     }),
     expected
   )
@@ -143,6 +145,15 @@ test('computeCodexPolicyHash is SHA-256 of lexicographic stableStringify of the 
       model: 'gpt-5.6-luna',
       catalogRevision: 4,
       credentialRevision: 3,
+    }),
+    expected
+  )
+  assert.notEqual(
+    contract.computeCodexPolicyHash({
+      model: 'gpt-5.1',
+      catalogRevision: 4,
+      credentialRevision: 3,
+      connectionKey: 'team-plus',
     }),
     expected
   )

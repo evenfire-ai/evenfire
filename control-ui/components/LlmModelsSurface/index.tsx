@@ -21,10 +21,6 @@ import {
   isLlmModelConfigMapDeferred,
   isSilentApiError,
 } from '@lib/api'
-import {
-  isCodexSubscriptionUiEnabled,
-  loadCodexSubscriptionCapability,
-} from '@lib/codexSubscriptionFeature'
 import { getProviderDisplayLabel } from '@lib/llm'
 import { buildUnpricedKeys } from '@lib/llmModelUnpriced'
 import { CatalogAttentionBanner } from './CatalogAttentionBanner'
@@ -48,7 +44,6 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
   // Bumped after each successful mutation so the attention banner re-fetches
   // and drops any item the operator just resolved (on demand, no polling).
   const [attentionRefreshKey, setAttentionRefreshKey] = useState(0)
-  const [codexEnabled, setCodexEnabled] = useState(false)
 
   const unpricedKeys = useMemo(() => buildUnpricedKeys(unpriced), [unpriced])
 
@@ -144,9 +139,6 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
   useEffect(() => {
     if (authState.isLoggedIn && !authState.isLoading) {
       void loadAll()
-      void loadCodexSubscriptionCapability().then(capability => {
-        setCodexEnabled(isCodexSubscriptionUiEnabled(capability))
-      })
     }
   }, [activeTab, authState.isLoggedIn, authState.isLoading])
 
@@ -160,7 +152,6 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
     <LlmModelsTabBar
       activeTab={activeTab}
       catalogCount={models.length}
-      codexEnabled={codexEnabled}
       discoveryReviewCount={discoveryReviewCount}
     />
   )

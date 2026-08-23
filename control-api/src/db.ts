@@ -5,8 +5,10 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
+  applyCodexMultiConnectionSchema,
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
@@ -16,6 +18,7 @@ import {
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
 import {
+  applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptSchema,
   applyLlmProviderAttemptTicketSchema,
 } from './services/llmProviderAttemptStore.js'
@@ -5960,6 +5963,18 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         ON CONFLICT DO NOTHING;
       `)
     },
+  },
+  {
+    version: '0101_codex_multi_connection',
+    apply: applyCodexMultiConnectionSchema,
+  },
+  {
+    version: '0102_codex_catalog_models',
+    apply: applyCodexCatalogModelsSchema,
+  },
+  {
+    version: '0103_llm_provider_attempts_connection_id',
+    apply: applyLlmProviderAttemptConnectionIdSchema,
   },
 ]
 

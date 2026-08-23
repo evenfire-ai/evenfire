@@ -3,6 +3,39 @@ import { decryptOAuthSecret, encryptOAuthSecret } from '../oauth/encryption.js'
 
 export const CODEX_SUBSCRIPTION_CONNECTION_KEY = 'deployment-default' as const
 
+const CONNECTION_KEY_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+
+export function normalizeCodexConnectionKey(value?: string | null): string {
+  const trimmed = typeof value === 'string' ? value.trim() : ''
+  return trimmed || CODEX_SUBSCRIPTION_CONNECTION_KEY
+}
+
+export function assertCodexConnectionKey(value: string): string {
+  const key = value.trim()
+  if (!CONNECTION_KEY_RE.test(key)) {
+    throw new CodexSubscriptionInvalidConnectionKeyError(key)
+  }
+  return key
+}
+
+export class CodexSubscriptionInvalidConnectionKeyError extends Error {
+  readonly code = 'invalid_connection_key'
+
+  constructor(key: string) {
+    super(`Codex subscription connection key is invalid: ${key}`)
+    this.name = 'CodexSubscriptionInvalidConnectionKeyError'
+  }
+}
+
+export class CodexSubscriptionFingerprintConflictError extends Error {
+  readonly code = 'fingerprint_in_use'
+
+  constructor() {
+    super('A live Codex subscription already uses this ChatGPT account')
+    this.name = 'CodexSubscriptionFingerprintConflictError'
+  }
+}
+
 export type CodexSubscriptionConnectionStatus =
   | 'disconnected'
   | 'connecting'
@@ -17,7 +50,10 @@ export type CodexSubscriptionCatalogStatus =
   | 'unavailable'
 
 export type CodexSubscriptionSafeConnection = {
-  connectionKey: typeof CODEX_SUBSCRIPTION_CONNECTION_KEY
+  id: string
+  connectionKey: string
+  displayName: string
+  createdBy: string | null
   status: CodexSubscriptionConnectionStatus
   credentialRevision: number
   catalogRevision: number
@@ -50,7 +86,10 @@ export type CodexSubscriptionSecrets = {
 }
 
 type SafeConnectionRow = {
+  id: string
   connection_key: string
+  display_name: string | null
+  created_by: string | null
   status: CodexSubscriptionConnectionStatus
   credential_revision: string | number
   catalog_revision: string | number
@@ -67,7 +106,10 @@ type SafeConnectionRow = {
 }
 
 const SAFE_CONNECTION_COLUMNS = `
+  id,
   connection_key,
+  display_name,
+  created_by,
   status,
   credential_revision,
   catalog_revision,
@@ -152,63 +194,149 @@ export async function applyCodexChatgptAccountIdSchema(db: DbClient): Promise<vo
   `)
 }
 
+export async function applyCodexMultiConnectionSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE codex_subscription_connections
+      DROP CONSTRAINT IF EXISTS codex_subscription_connections_key_check;
+
+    ALTER TABLE codex_subscription_connections
+      ADD COLUMN IF NOT EXISTS display_name TEXT;
+
+    ALTER TABLE codex_subscription_connections
+      ADD COLUMN IF NOT EXISTS created_by TEXT;
+
+    UPDATE codex_subscription_connections
+       SET display_name = COALESCE(NULLIF(display_name, ''), 'Default deployment')
+     WHERE connection_key = '${CODEX_SUBSCRIPTION_CONNECTION_KEY}'
+       AND display_name IS NULL;
+
+    ALTER TABLE codex_subscription_oauth_states
+      ADD COLUMN IF NOT EXISTS connection_key TEXT;
+
+    UPDATE codex_subscription_oauth_states
+       SET connection_key = '${CODEX_SUBSCRIPTION_CONNECTION_KEY}'
+     WHERE connection_key IS NULL;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS codex_subscription_connections_active_fingerprint
+      ON codex_subscription_connections (account_fingerprint)
+      WHERE revoked_at IS NULL AND account_fingerprint IS NOT NULL;
+  `)
+}
+
 export async function getSafeCodexSubscriptionConnection(
-  db: DbClient
+  db: DbClient,
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<CodexSubscriptionSafeConnection | null> {
   const result = await db.query(
     `SELECT ${SAFE_CONNECTION_COLUMNS}
        FROM codex_subscription_connections
       WHERE connection_key = $1`,
-    [CODEX_SUBSCRIPTION_CONNECTION_KEY]
+    [normalizeCodexConnectionKey(connectionKey)]
   )
   const row = result.rows[0] as SafeConnectionRow | undefined
   return row ? toSafeConnection(row) : null
 }
 
+export async function getSafeCodexSubscriptionConnectionById(
+  db: DbClient,
+  connectionId: string
+): Promise<CodexSubscriptionSafeConnection | null> {
+  const result = await db.query(
+    `SELECT ${SAFE_CONNECTION_COLUMNS}
+       FROM codex_subscription_connections
+      WHERE id = $1`,
+    [connectionId]
+  )
+  const row = result.rows[0] as SafeConnectionRow | undefined
+  return row ? toSafeConnection(row) : null
+}
+
+export async function listSafeCodexSubscriptionConnections(
+  db: DbClient
+): Promise<CodexSubscriptionSafeConnection[]> {
+  const result = await db.query(
+    `SELECT ${SAFE_CONNECTION_COLUMNS}
+       FROM codex_subscription_connections
+      ORDER BY created_at ASC, connection_key ASC`
+  )
+  return (result.rows as SafeConnectionRow[]).map(toSafeConnection)
+}
+
+export async function createNamedCodexSubscriptionConnection(
+  db: DbClient,
+  input: { connectionKey: string; displayName: string; createdBy?: string | null }
+): Promise<CodexSubscriptionSafeConnection> {
+  const connectionKey = assertCodexConnectionKey(input.connectionKey)
+  const displayName = input.displayName.trim() || connectionKey
+  const result = await db.query(
+    `INSERT INTO codex_subscription_connections (
+       connection_key,
+       display_name,
+       created_by,
+       status,
+       credential_revision,
+       catalog_revision,
+       catalog_status
+     ) VALUES ($1, $2, $3, 'disconnected', 1, 0, 'never_synced')
+     RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+    [connectionKey, displayName, input.createdBy ?? null]
+  )
+  return toSafeConnection(result.rows[0] as SafeConnectionRow)
+}
+
 export async function insertInitialCodexSubscriptionConnection(
   db: DbClient,
   encryptionKey: Buffer,
-  input: CodexSubscriptionCredentialWrite
+  input: CodexSubscriptionCredentialWrite,
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<CodexSubscriptionSafeConnection> {
+  const key = assertCodexConnectionKey(normalizeCodexConnectionKey(connectionKey))
   const refreshTokenEncrypted = encryptOAuthSecret(encryptionKey, input.refreshToken)
   const accessTokenEncrypted =
     input.accessToken == null || input.accessToken === ''
       ? null
       : encryptOAuthSecret(encryptionKey, input.accessToken)
   const chatgptAccountIdEncrypted = encryptOptionalSecret(encryptionKey, input.chatgptAccountId)
-  const result = await db.query(
-    `INSERT INTO codex_subscription_connections (
-       connection_key,
-       status,
-       refresh_token_encrypted,
-       access_token_encrypted,
-       access_token_expires_at,
-       chatgpt_account_id_encrypted,
-       credential_revision,
-       catalog_revision,
-       account_fingerprint,
-       catalog_status,
-       last_auth_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, 1, 0, $7, 'never_synced', now())
-     RETURNING ${SAFE_CONNECTION_COLUMNS}`,
-    [
-      CODEX_SUBSCRIPTION_CONNECTION_KEY,
-      input.status ?? 'connected',
-      refreshTokenEncrypted,
-      accessTokenEncrypted,
-      input.accessTokenExpiresAt ?? null,
-      chatgptAccountIdEncrypted,
-      input.accountFingerprint,
-    ]
-  )
-  return toSafeConnection(result.rows[0] as SafeConnectionRow)
+  try {
+    const result = await db.query(
+      `INSERT INTO codex_subscription_connections (
+         connection_key,
+         display_name,
+         status,
+         refresh_token_encrypted,
+         access_token_encrypted,
+         access_token_expires_at,
+         chatgpt_account_id_encrypted,
+         credential_revision,
+         catalog_revision,
+         account_fingerprint,
+         catalog_status,
+         last_auth_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 0, $8, 'never_synced', now())
+       RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+      [
+        key,
+        key === CODEX_SUBSCRIPTION_CONNECTION_KEY ? 'Default deployment' : key,
+        input.status ?? 'connected',
+        refreshTokenEncrypted,
+        accessTokenEncrypted,
+        input.accessTokenExpiresAt ?? null,
+        chatgptAccountIdEncrypted,
+        input.accountFingerprint,
+      ]
+    )
+    return toSafeConnection(result.rows[0] as SafeConnectionRow)
+  } catch (err) {
+    throw remapFingerprintConflict(err)
+  }
 }
 
 export async function rotateCodexSubscriptionCredentials(
   db: DbClient,
   encryptionKey: Buffer,
   expectedRevision: number,
-  input: CodexSubscriptionCredentialWrite
+  input: CodexSubscriptionCredentialWrite,
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<CodexSubscriptionSafeConnection> {
   const refreshTokenEncrypted = encryptOAuthSecret(encryptionKey, input.refreshToken)
   const accessTokenEncrypted =
@@ -216,41 +344,47 @@ export async function rotateCodexSubscriptionCredentials(
       ? null
       : encryptOAuthSecret(encryptionKey, input.accessToken)
   const chatgptAccountIdEncrypted = encryptOptionalSecret(encryptionKey, input.chatgptAccountId)
-  const result = await db.query(
-    `UPDATE codex_subscription_connections
-        SET refresh_token_encrypted = $1,
-            access_token_encrypted = $2,
-            access_token_expires_at = $3,
-            chatgpt_account_id_encrypted = COALESCE($4, chatgpt_account_id_encrypted),
-            account_fingerprint = $5,
-            status = $6,
-            credential_revision = credential_revision + 1,
-            last_refresh_at = now(),
-            last_auth_at = now(),
-            revoked_at = NULL,
-            updated_at = now()
-      WHERE connection_key = $7
-        AND credential_revision = $8
-      RETURNING ${SAFE_CONNECTION_COLUMNS}`,
-    [
-      refreshTokenEncrypted,
-      accessTokenEncrypted,
-      input.accessTokenExpiresAt ?? null,
-      chatgptAccountIdEncrypted,
-      input.accountFingerprint,
-      input.status ?? 'connected',
-      CODEX_SUBSCRIPTION_CONNECTION_KEY,
-      expectedRevision,
-    ]
-  )
-  const row = result.rows[0] as SafeConnectionRow | undefined
-  if (!row) throw new CodexSubscriptionStaleRevisionError()
-  return toSafeConnection(row)
+  try {
+    const result = await db.query(
+      `UPDATE codex_subscription_connections
+          SET refresh_token_encrypted = $1,
+              access_token_encrypted = $2,
+              access_token_expires_at = $3,
+              chatgpt_account_id_encrypted = COALESCE($4, chatgpt_account_id_encrypted),
+              account_fingerprint = $5,
+              status = $6,
+              credential_revision = credential_revision + 1,
+              last_refresh_at = now(),
+              last_auth_at = now(),
+              revoked_at = NULL,
+              updated_at = now()
+        WHERE connection_key = $7
+          AND credential_revision = $8
+        RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+      [
+        refreshTokenEncrypted,
+        accessTokenEncrypted,
+        input.accessTokenExpiresAt ?? null,
+        chatgptAccountIdEncrypted,
+        input.accountFingerprint,
+        input.status ?? 'connected',
+        normalizeCodexConnectionKey(connectionKey),
+        expectedRevision,
+      ]
+    )
+    const row = result.rows[0] as SafeConnectionRow | undefined
+    if (!row) throw new CodexSubscriptionStaleRevisionError()
+    return toSafeConnection(row)
+  } catch (err) {
+    throw remapFingerprintConflict(err)
+  }
 }
 
 export async function revokeCodexSubscriptionConnection(
-  db: DbClient
+  db: DbClient,
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<CodexSubscriptionSafeConnection | null> {
+  const key = normalizeCodexConnectionKey(connectionKey)
   const result = await db.query(
     `UPDATE codex_subscription_connections
         SET status = 'revoked',
@@ -267,16 +401,17 @@ export async function revokeCodexSubscriptionConnection(
       WHERE connection_key = $1
         AND revoked_at IS NULL
       RETURNING ${SAFE_CONNECTION_COLUMNS}`,
-    [CODEX_SUBSCRIPTION_CONNECTION_KEY]
+    [key]
   )
   const row = result.rows[0] as SafeConnectionRow | undefined
-  return row ? toSafeConnection(row) : getSafeCodexSubscriptionConnection(db)
+  return row ? toSafeConnection(row) : getSafeCodexSubscriptionConnection(db, key)
 }
 
 export async function acquireCodexSubscriptionRefreshLock(
   db: DbClient,
   lockToken: string,
-  ttlMs: number
+  ttlMs: number,
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<boolean> {
   const result = await db.query(
     `UPDATE codex_subscription_connections
@@ -291,14 +426,15 @@ export async function acquireCodexSubscriptionRefreshLock(
           OR refresh_lock_expires_at <= now()
         )
       RETURNING refresh_lock_token`,
-    [lockToken, ttlMs, CODEX_SUBSCRIPTION_CONNECTION_KEY]
+    [lockToken, ttlMs, normalizeCodexConnectionKey(connectionKey)]
   )
   return (result.rowCount ?? 0) > 0
 }
 
 export async function releaseCodexSubscriptionRefreshLock(
   db: DbClient,
-  lockToken: string
+  lockToken: string,
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<boolean> {
   const result = await db.query(
     `UPDATE codex_subscription_connections
@@ -307,14 +443,15 @@ export async function releaseCodexSubscriptionRefreshLock(
             updated_at = now()
       WHERE connection_key = $1
         AND refresh_lock_token = $2`,
-    [CODEX_SUBSCRIPTION_CONNECTION_KEY, lockToken]
+    [normalizeCodexConnectionKey(connectionKey), lockToken]
   )
   return (result.rowCount ?? 0) > 0
 }
 
 export async function loadCodexSubscriptionSecrets(
   db: DbClient,
-  encryptionKey: Buffer
+  encryptionKey: Buffer,
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<CodexSubscriptionSecrets | null> {
   const result = await db.query(
     `SELECT refresh_token_encrypted,
@@ -325,7 +462,7 @@ export async function loadCodexSubscriptionSecrets(
        FROM codex_subscription_connections
       WHERE connection_key = $1
         AND revoked_at IS NULL`,
-    [CODEX_SUBSCRIPTION_CONNECTION_KEY]
+    [normalizeCodexConnectionKey(connectionKey)]
   )
   const row = result.rows[0] as
     | {
@@ -359,7 +496,8 @@ export async function updateCodexAccessTokenInPlace(
     accessTokenExpiresAt?: Date | null
     refreshToken?: string | null
     chatgptAccountId?: string | null
-  }
+  },
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<CodexSubscriptionSafeConnection> {
   const result = await db.query(
     `UPDATE codex_subscription_connections
@@ -378,7 +516,7 @@ export async function updateCodexAccessTokenInPlace(
       input.accessTokenExpiresAt ?? null,
       encryptOptionalSecret(encryptionKey, input.refreshToken),
       encryptOptionalSecret(encryptionKey, input.chatgptAccountId),
-      CODEX_SUBSCRIPTION_CONNECTION_KEY,
+      normalizeCodexConnectionKey(connectionKey),
       expectedRevision,
     ]
   )
@@ -390,7 +528,8 @@ export async function updateCodexAccessTokenInPlace(
 export async function persistCodexChatgptAccountId(
   db: DbClient,
   encryptionKey: Buffer,
-  chatgptAccountId: string
+  chatgptAccountId: string,
+  connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<void> {
   await db.query(
     `UPDATE codex_subscription_connections
@@ -399,7 +538,10 @@ export async function persistCodexChatgptAccountId(
       WHERE connection_key = $2
         AND revoked_at IS NULL
         AND chatgpt_account_id_encrypted IS NULL`,
-    [encryptOAuthSecret(encryptionKey, chatgptAccountId), CODEX_SUBSCRIPTION_CONNECTION_KEY]
+    [
+      encryptOAuthSecret(encryptionKey, chatgptAccountId),
+      normalizeCodexConnectionKey(connectionKey),
+    ]
   )
 }
 
@@ -418,6 +560,7 @@ export async function recordCodexCatalogOutcome(
     connectionStatus?: CodexSubscriptionConnectionStatus
     expectedCredentialRevision: number
     expectedCatalogRevision: number
+    connectionKey?: string
   }
 ): Promise<CodexSubscriptionSafeConnection | null> {
   const result = await db.query(
@@ -434,7 +577,7 @@ export async function recordCodexCatalogOutcome(
     [
       input.catalogStatus,
       input.connectionStatus ?? null,
-      CODEX_SUBSCRIPTION_CONNECTION_KEY,
+      normalizeCodexConnectionKey(input.connectionKey),
       input.expectedCredentialRevision,
       input.expectedCatalogRevision,
     ]
@@ -443,9 +586,18 @@ export async function recordCodexCatalogOutcome(
   return row ? toSafeConnection(row) : null
 }
 
+function remapFingerprintConflict(err: unknown): never | Error {
+  const code = (err as { code?: string } | null)?.code
+  if (code === '23505') return new CodexSubscriptionFingerprintConflictError()
+  throw err
+}
+
 function toSafeConnection(row: SafeConnectionRow): CodexSubscriptionSafeConnection {
   return {
-    connectionKey: CODEX_SUBSCRIPTION_CONNECTION_KEY,
+    id: String(row.id),
+    connectionKey: row.connection_key,
+    displayName: row.display_name?.trim() || row.connection_key,
+    createdBy: row.created_by,
     status: row.status,
     credentialRevision: Number(row.credential_revision),
     catalogRevision: Number(row.catalog_revision),

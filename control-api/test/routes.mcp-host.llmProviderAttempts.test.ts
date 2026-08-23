@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { createMcpHostLlmProviderAttemptRoutes } from '../src/routes/mcp-host/llmProviderAttempts.routes.js'
+import {
+  createMcpHostLlmProviderAttemptRoutes,
+  resolveHostAssignedConnectionKey,
+} from '../src/routes/mcp-host/llmProviderAttempts.routes.js'
 import { LlmProviderAttemptAuthorizeError } from '../src/services/llmProviderAttemptAuthorizer.js'
 import * as authorizer from '../src/services/llmProviderAttemptAuthorizer.js'
 import * as mcpHostJwt from '../src/utils/auth/mcpHostJwtToken.js'
@@ -23,7 +26,11 @@ function buildApp() {
   const app = express()
   app.use(express.json({ limit: '1mb' }))
   const api = express.Router()
-  api.use(createMcpHostLlmProviderAttemptRoutes())
+  api.use(
+    createMcpHostLlmProviderAttemptRoutes({
+      getResource: vi.fn(),
+    } as never)
+  )
   app.use('/api/v1', api)
   return app
 }
@@ -106,5 +113,32 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
       expiresAt: '2026-08-20T12:00:00.000Z',
     })
     expect(JSON.stringify(res.body)).not.toMatch(/refresh|access_token|Authorization/i)
+  })
+})
+
+describe('resolveHostAssignedConnectionKey', () => {
+  it('reads the Host connectionRef and defaults a Phase 1 Host', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({
+        spec: { model: { provider: 'codex-subscription', connectionRef: 'team-plus' } },
+      }),
+    }
+    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-a')).resolves.toBe('team-plus')
+
+    gateway.getResource.mockResolvedValueOnce({
+      spec: { model: { provider: 'codex-subscription' } },
+    })
+    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-b')).resolves.toBe(
+      'deployment-default'
+    )
+  })
+
+  it('fails closed when the Host cannot be attested', async () => {
+    const gateway = {
+      getResource: vi.fn().mockRejectedValue(Object.assign(new Error('nf'), { code: 404 })),
+    }
+    await expect(resolveHostAssignedConnectionKey(gateway, 'ghost')).rejects.toMatchObject({
+      code: 'host_binding_mismatch',
+    })
   })
 })

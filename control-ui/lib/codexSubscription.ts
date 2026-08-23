@@ -13,8 +13,12 @@ export type CodexCatalogStatus = 'never_synced' | 'ready' | 'auth-rejected' | 'u
 
 export type CodexOAuthIntent = 'connect' | 'reconnect' | 'replace'
 
+export type CodexAssignedHost = { name: string }
+
 export type CodexSubscriptionConnectionView = {
-  connectionKey: 'deployment-default'
+  id?: string
+  connectionKey: string
+  displayName?: string
   status: CodexConnectionStatus
   credentialRevision: number
   catalogRevision: number
@@ -24,6 +28,7 @@ export type CodexSubscriptionConnectionView = {
   lastRefreshAt: string | null
   lastAuthAt: string | null
   refreshLockHeld: boolean
+  assignedHosts?: CodexAssignedHost[]
 }
 
 export type CodexBrowserStartView = {
@@ -111,7 +116,19 @@ export function sanitizeCodexConnection(raw: unknown): CodexSubscriptionConnecti
       ? catalogStatus
       : 'never_synced'
   return {
-    connectionKey: 'deployment-default',
+    connectionKey:
+      typeof raw.connectionKey === 'string' && raw.connectionKey.trim()
+        ? raw.connectionKey.trim()
+        : 'deployment-default',
+    displayName: pickString(raw.displayName) ?? undefined,
+    assignedHosts: Array.isArray(raw.assignedHosts)
+      ? raw.assignedHosts
+          .filter(
+            (entry): entry is { name: string } =>
+              Boolean(entry) && typeof (entry as { name?: unknown }).name === 'string'
+          )
+          .map(entry => ({ name: entry.name }))
+      : undefined,
     status,
     credentialRevision: pickNumber(raw.credentialRevision),
     catalogRevision: pickNumber(raw.catalogRevision),
@@ -195,44 +212,96 @@ export function sanitizeCodexCatalogSync(raw: unknown): CodexCatalogSyncView {
   }
 }
 
-export async function getCodexSubscriptionConnection(): Promise<CodexSubscriptionConnectionView> {
-  return sanitizeCodexConnection(await apiGet(`${CODEX_SUBSCRIPTION_API_BASE}/connection`))
+export async function listCodexSubscriptionConnections(): Promise<
+  CodexSubscriptionConnectionView[]
+> {
+  const raw = (await apiGet(`${CODEX_SUBSCRIPTION_API_BASE}/connections`)) as {
+    connections?: unknown
+  }
+  return Array.isArray(raw.connections) ? raw.connections.map(sanitizeCodexConnection) : []
+}
+
+export async function createCodexSubscriptionConnection(input: {
+  displayName: string
+  connectionKey?: string
+}): Promise<CodexSubscriptionConnectionView> {
+  return sanitizeCodexConnection(
+    await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/connections`, input)
+  )
+}
+
+export async function listCodexConnectionModels(
+  connectionKey: string
+): Promise<Array<{ model: string; enabled: boolean; stale: boolean }>> {
+  const raw = (await apiGet(
+    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/models`
+  )) as { models?: Array<{ model?: string; enabled?: boolean; stale?: boolean }> }
+  return Array.isArray(raw.models)
+    ? raw.models
+        .filter(row => typeof row.model === 'string' && row.model.trim())
+        .map(row => ({
+          model: String(row.model),
+          enabled: row.enabled === true,
+          stale: row.stale === true,
+        }))
+    : []
+}
+
+export async function getCodexSubscriptionConnection(
+  connectionKey?: string
+): Promise<CodexSubscriptionConnectionView> {
+  const path = connectionKey
+    ? `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}`
+    : `${CODEX_SUBSCRIPTION_API_BASE}/connection`
+  return sanitizeCodexConnection(await apiGet(path))
+}
+
+function keyedPath(connectionKey: string | undefined, action: string): string {
+  if (!connectionKey) return `${CODEX_SUBSCRIPTION_API_BASE}/${action}`
+  return `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/${action}`
 }
 
 export async function startCodexBrowserConnect(
-  intent: CodexOAuthIntent
+  intent: CodexOAuthIntent,
+  connectionKey?: string
 ): Promise<CodexBrowserStartView> {
   return sanitizeCodexBrowserStart(
-    await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/browser/start`, { intent })
+    await apiSend('POST', keyedPath(connectionKey, 'browser/start'), { intent })
   )
 }
 
 export async function startCodexDeviceConnect(
-  intent: CodexOAuthIntent
+  intent: CodexOAuthIntent,
+  connectionKey?: string
 ): Promise<CodexDeviceStartView> {
   return sanitizeCodexDeviceStart(
-    await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/device/start`, { intent })
+    await apiSend('POST', keyedPath(connectionKey, 'device/start'), { intent })
   )
 }
 
-export async function pollCodexDevice(state: string): Promise<CodexDevicePollView> {
-  return sanitizeCodexDevicePoll(
-    await apiGet(`${CODEX_SUBSCRIPTION_API_BASE}/device/poll`, { state })
-  )
+export async function pollCodexDevice(
+  state: string,
+  connectionKey?: string
+): Promise<CodexDevicePollView> {
+  return sanitizeCodexDevicePoll(await apiGet(keyedPath(connectionKey, 'device/poll'), { state }))
 }
 
-export async function refreshCodexSubscriptionConnection(): Promise<CodexSubscriptionConnectionView> {
-  return sanitizeCodexConnection(await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/refresh`))
+export async function refreshCodexSubscriptionConnection(
+  connectionKey?: string
+): Promise<CodexSubscriptionConnectionView> {
+  return sanitizeCodexConnection(await apiSend('POST', keyedPath(connectionKey, 'refresh')))
 }
 
-export async function syncCodexSubscriptionCatalog(): Promise<CodexCatalogSyncView> {
-  return sanitizeCodexCatalogSync(
-    await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/catalog/sync`)
-  )
+export async function syncCodexSubscriptionCatalog(
+  connectionKey?: string
+): Promise<CodexCatalogSyncView> {
+  return sanitizeCodexCatalogSync(await apiSend('POST', keyedPath(connectionKey, 'catalog/sync')))
 }
 
-export async function revokeCodexSubscription(): Promise<CodexSubscriptionConnectionView> {
-  return sanitizeCodexConnection(await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/revoke`))
+export async function revokeCodexSubscription(
+  connectionKey?: string
+): Promise<CodexSubscriptionConnectionView> {
+  return sanitizeCodexConnection(await apiSend('POST', keyedPath(connectionKey, 'revoke')))
 }
 
 const CODEX_OAUTH_QUERY_PARAM = 'codex_oauth'

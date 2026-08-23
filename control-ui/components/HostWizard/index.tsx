@@ -1,6 +1,7 @@
 'use client'
 
 import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { CodexAgentAssignment } from '@/components/CodexAgentAssignment'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
@@ -246,6 +247,7 @@ function isStepValid(
     llmPolicy: LlmPolicy | undefined
     provider: LlmProvider
     modelName: string
+    connectionRef?: string
     selectedUserIds: string[]
     selectedTeamIds: string[]
     directoryLoadFailed: boolean
@@ -262,6 +264,7 @@ function isStepValid(
     // catalog model and no Secret. Any static primary/fallback still requires
     // the exact credential slots (existing Secret or a complete new one).
     if (!state.modelName.trim()) return false
+    if (state.provider === 'codex-subscription' && !state.connectionRef?.trim()) return false
     if (!llmChainRequiresSecret(state.provider, state.llmPolicy?.fallbacks)) return true
     // New secret: the PRIMARY provider must be usable (asymmetric gate — a
     // fallback missing its key only warns). Cross-slot mistakes (half Bedrock
@@ -339,6 +342,8 @@ export function HostWizard({
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelName, setModelName] = useState('')
+  const [connectionRef, setConnectionRef] = useState('deployment-default')
+  const [codexModels, setCodexModels] = useState<string[]>([])
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -392,9 +397,27 @@ export function HostWizard({
       null,
     [existingContexts, selectedExistingContext]
   )
+  const catalogForEditor = useMemo(() => {
+    if (provider !== 'codex-subscription' || codexModels.length === 0) return allowedCatalog
+    const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+    return [
+      ...others,
+      ...codexModels.map(model => ({
+        id: `codex:${model}`,
+        provider: 'codex-subscription',
+        model,
+        vendor: 'OpenAI',
+        display_name: model,
+        context_window_tokens: null,
+        enabled: true,
+        source: 'discovery' as const,
+        stale: false,
+      })),
+    ]
+  }, [allowedCatalog, provider, codexModels])
   const providerModelOptions = useMemo(
-    () => getModelOptions(allowedCatalog, provider),
-    [allowedCatalog, provider]
+    () => getModelOptions(catalogForEditor, provider),
+    [catalogForEditor, provider]
   )
   const chainRequiresSecret = llmChainRequiresSecret(provider, llmPolicy?.fallbacks)
   const handleExistingSecretChange = useCallback(
@@ -479,6 +502,7 @@ export function HostWizard({
       llmPolicy,
       provider,
       modelName,
+      connectionRef,
       selectedUserIds,
       selectedTeamIds,
       directoryLoadFailed: directoryLoadError.length > 0,
@@ -497,6 +521,7 @@ export function HostWizard({
     llmPolicy,
     provider,
     modelName,
+    connectionRef,
     selectedUserIds,
     selectedTeamIds,
     directoryLoadError,
@@ -778,6 +803,7 @@ export function HostWizard({
         model: {
           provider,
           name: modelName,
+          ...(provider === 'codex-subscription' ? { connectionRef } : {}),
         },
         // Opt-in fallback policy (spec §3-R5): only set when at least one
         // fallback is configured, so a Host without fallbacks behaves as today.
@@ -1068,6 +1094,45 @@ export function HostWizard({
 
         {step === 2 && (
           <div className="cu-form-stack cu-agent-form-stack">
+            <LlmProviderConfig
+              provider={provider}
+              model={modelName}
+              subscriptionCredentialEnabled
+              afterPrimaryProvider={
+                provider === 'codex-subscription' ? (
+                  <CodexAgentAssignment
+                    connectionRef={connectionRef}
+                    onConnectionRefChange={setConnectionRef}
+                    onModelsChange={setCodexModels}
+                  />
+                ) : null
+              }
+              onPrimaryChange={next => {
+                setProvider(next.provider)
+                setModelName(next.model)
+              }}
+              policy={llmPolicy}
+              onPolicyChange={setLlmPolicy}
+              allowedModels={allowedModels}
+              onAllowedModelsChange={setAllowedModels}
+              catalog={catalogForEditor}
+              catalogLoading={modelsLoading}
+              catalogError={modelsError}
+              modelLabel="Default model"
+              showAllowedModels={false}
+              credentials={
+                chainRequiresSecret && secretMode === 'new'
+                  ? {
+                      draft: llmKeyDraft,
+                      onChange: (dataKey, value) =>
+                        setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value })),
+                    }
+                  : undefined
+              }
+              secretKeys={chainRequiresSecret && secretMode === 'new' ? llmSecretKeys : []}
+              fallbackProvidersInitiallyCollapsed
+              disabled={busy}
+            />
             {chainRequiresSecret ? (
               <div className="cu-agent-access-section">
                 <strong>Credentials</strong>
@@ -1143,39 +1208,10 @@ export function HostWizard({
               </div>
             ) : (
               <p className="cu-muted cu-agent-access-hint">
-                This provider authenticates through the Codex subscription. No LLM secret is
-                required unless you add a static-credentials fallback.
+                This OpenAI credential authenticates through a ChatGPT subscription. No LLM secret
+                is required unless you add a static-credentials fallback.
               </p>
             )}
-            <LlmProviderConfig
-              provider={provider}
-              model={modelName}
-              onPrimaryChange={next => {
-                setProvider(next.provider)
-                setModelName(next.model)
-              }}
-              policy={llmPolicy}
-              onPolicyChange={setLlmPolicy}
-              allowedModels={allowedModels}
-              onAllowedModelsChange={setAllowedModels}
-              catalog={allowedCatalog}
-              catalogLoading={modelsLoading}
-              catalogError={modelsError}
-              modelLabel="Default model"
-              showAllowedModels={false}
-              credentials={
-                chainRequiresSecret && secretMode === 'new'
-                  ? {
-                      draft: llmKeyDraft,
-                      onChange: (dataKey, value) =>
-                        setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value })),
-                    }
-                  : undefined
-              }
-              secretKeys={chainRequiresSecret && secretMode === 'new' ? llmSecretKeys : []}
-              fallbackProvidersInitiallyCollapsed
-              disabled={busy}
-            />
           </div>
         )}
 

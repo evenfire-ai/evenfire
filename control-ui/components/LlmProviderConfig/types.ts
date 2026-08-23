@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { HostAllowedModel, LlmModelCatalogEntry, LlmPolicy, LlmProvider } from '@/lib/llm'
 
 // Write-only credential wiring. Values are NEVER read back from the server; the
@@ -58,4 +59,9 @@ export type LlmProviderConfigProps = {
   fallbackProvidersInitiallyCollapsed?: boolean
 
   disabled?: boolean
+
+  /** When true, OpenAI offers API key vs ChatGPT subscription. Runtime id stays separate. */
+  subscriptionCredentialEnabled?: boolean
+  /** Rendered after the OpenAI credential radios (grant picker). */
+  afterPrimaryProvider?: ReactNode
 }

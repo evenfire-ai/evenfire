@@ -158,6 +158,22 @@ describe('admin Codex subscription routes', () => {
     assertNoLeak(refresh.body)
   })
 
+  it('maps a live fingerprint collision on a keyed device start to 409', async () => {
+    oauth.startDevice.mockRejectedValue(
+      new CodexSubscriptionOAuthError('fingerprint_in_use', 'account already connected')
+    )
+    const res = await request(app)
+      .post('/admin/llm/providers/codex-subscription/connections/team-plus/device/start')
+      .send({ intent: 'connect' })
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'fingerprint_in_use' })
+    expect(oauth.startDevice).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionKey: 'team-plus' }),
+      'connect'
+    )
+    assertNoLeak(res.body)
+  })
+
   it('revokes without returning secrets', async () => {
     oauth.revoke.mockResolvedValue({
       connectionKey: 'deployment-default',

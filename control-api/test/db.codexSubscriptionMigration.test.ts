@@ -45,6 +45,18 @@ describe('00a0/00a1 Codex subscription persistence', () => {
     expect(dbSource.indexOf("version: '00a4_codex_chatgpt_account_id'")).toBeLessThan(
       dbSource.indexOf("version: '0100_seed_minimax_allowed_model'")
     )
+    expect(dbSource).toContain("version: '0101_codex_multi_connection'")
+    expect(dbSource).toContain("version: '0102_codex_catalog_models'")
+    expect(dbSource).toContain("version: '0103_llm_provider_attempts_connection_id'")
+    expect(dbSource.indexOf("version: '0100_seed_minimax_allowed_model'")).toBeLessThan(
+      dbSource.indexOf("version: '0101_codex_multi_connection'")
+    )
+    expect(dbSource.indexOf("version: '0101_codex_multi_connection'")).toBeLessThan(
+      dbSource.indexOf("version: '0102_codex_catalog_models'")
+    )
+    expect(dbSource.indexOf("version: '0102_codex_catalog_models'")).toBeLessThan(
+      dbSource.indexOf("version: '0103_llm_provider_attempts_connection_id'")
+    )
   })
 
   it('creates a single active deployment-default connection with ciphertext and revisions', () => {
@@ -123,5 +135,6 @@ describe('00a0/00a1 Codex subscription persistence', () => {
     const profile = runtimeAccessProfile()
     expect(profile.get('codex_subscription_connections')).toBe('upsert')
     expect(profile.get('codex_subscription_oauth_states')).toBe('upsert')
+    expect(profile.get('codex_catalog_models')).toBe('upsert')
   })
 })

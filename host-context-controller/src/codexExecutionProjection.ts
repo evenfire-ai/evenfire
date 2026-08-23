@@ -15,7 +15,13 @@ export type CodexSnapshotError = 'missing' | 'forbidden' | 'timeout' | 'malforme
 
 export type CodexCatalogSnapshot = {
   flagEnabled: boolean
-  connectionStatus?: 'connected' | 'disconnected' | 'reauth-required' | 'unavailable' | null
+  connectionStatus?:
+    | 'connected'
+    | 'disconnected'
+    | 'reauth-required'
+    | 'unavailable'
+    | 'revoked'
+    | null
   catalogContentHash?: string | null
   catalogRevision?: number | null
   connectionRevision?: number | null
@@ -25,7 +31,7 @@ export type CodexCatalogSnapshot = {
 }
 
 export type CodexHostSpec = {
-  model?: { provider?: string; name?: string }
+  model?: { provider?: string; name?: string; connectionRef?: string }
   allowedModels?: Array<{ provider?: string; model?: string }>
   llmPolicy?: { fallbacks?: Array<{ provider?: string; model?: string }> }
 }

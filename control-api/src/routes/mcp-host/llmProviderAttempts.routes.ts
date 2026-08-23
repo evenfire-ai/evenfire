@@ -1,7 +1,10 @@
 import { type Request, type Response, Router } from 'express'
+import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import type { K8sGateway } from '../../k8s.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
+import { normalizeCodexConnectionKey } from '../../services/codexSubscriptionConnection.js'
 import {
   LlmProviderAttemptAuthorizeError,
   authorizeLlmProviderAttempt,
@@ -34,7 +37,24 @@ function sendAuthorizeError(res: Response, err: unknown): void {
   throw err
 }
 
-export function createMcpHostLlmProviderAttemptRoutes(): Router {
+export async function resolveHostAssignedConnectionKey(
+  gateway: Pick<K8sGateway, 'getResource'>,
+  hostRef: string
+): Promise<string> {
+  try {
+    const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace)) as {
+      spec?: { model?: { connectionRef?: string } }
+    }
+    return normalizeCodexConnectionKey(host?.spec?.model?.connectionRef)
+  } catch {
+    throw new LlmProviderAttemptAuthorizeError(
+      'host_binding_mismatch',
+      'Host assignment could not be attested'
+    )
+  }
+}
+
+export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Router {
   const router = Router()
   router.post(
     '/mcp-host/llm/provider-attempts/authorize',
@@ -46,7 +66,9 @@ export function createMcpHostLlmProviderAttemptRoutes(): Router {
         return
       }
       try {
-        const result = await authorizeLlmProviderAttempt(claims, req.body)
+        const result = await authorizeLlmProviderAttempt(claims, req.body, {
+          resolveConnectionKey: hostRef => resolveHostAssignedConnectionKey(gateway, hostRef),
+        })
         res.status(200).json(result)
       } catch (err) {
         sendAuthorizeError(res, err)

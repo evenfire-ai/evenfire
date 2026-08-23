@@ -7,6 +7,7 @@ import { DetailPageShell } from '@components/DetailPageShell'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { CodexAgentAssignment } from '../../../components/CodexAgentAssignment'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import { HostGuardrailsSection } from '../../../components/HostGuardrailsSection'
@@ -27,6 +28,7 @@ import {
   getActiveCredentialKeys,
   getModelOptions,
   getProviderLabel,
+  isOpenAiFamily,
   isProviderUsable,
   llmChainRequiresSecret,
   normalizeAllowedModels,
@@ -124,6 +126,26 @@ export default function HostDetailsPage() {
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelNameDraft, setModelNameDraft] = useState('')
+  const [connectionRefDraft, setConnectionRefDraft] = useState('deployment-default')
+  const [codexModels, setCodexModels] = useState<string[]>([])
+  const catalogForEditor = useMemo(() => {
+    if (providerDraft !== 'codex-subscription' || codexModels.length === 0) return allowedCatalog
+    const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+    return [
+      ...others,
+      ...codexModels.map(model => ({
+        id: `codex:${model}`,
+        provider: 'codex-subscription',
+        model,
+        vendor: 'OpenAI',
+        display_name: model,
+        context_window_tokens: null,
+        enabled: true,
+        source: 'discovery' as const,
+        stale: false,
+      })),
+    ]
+  }, [allowedCatalog, providerDraft, codexModels])
   const [secretRefDraft, setSecretRefDraft] = useState('')
   // Fallback policy (spec §3-R5). `undefined` = the Host has no llmPolicy.
   const [llmPolicyDraft, setLlmPolicyDraft] = useState<LlmPolicy | undefined>(undefined)
@@ -156,8 +178,8 @@ export default function HostDetailsPage() {
   const [availableSecrets, setAvailableSecrets] = useState<string[]>([])
 
   const providerModelOptions = useMemo(
-    () => getModelOptions(allowedCatalog, providerDraft),
-    [allowedCatalog, providerDraft]
+    () => getModelOptions(catalogForEditor, providerDraft),
+    [catalogForEditor, providerDraft]
   )
   // The EFFECTIVE per-host subset to persist (Topic 3a): the raw draft pruned to
   // the providers actually in this host's domain (primary + fallbacks — so a
@@ -259,6 +281,11 @@ export default function HostDetailsPage() {
         setModelNameDraft(
           currentModel ||
             resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
+        )
+        setConnectionRefDraft(
+          String(
+            (spec.model as { connectionRef?: string } | undefined)?.connectionRef || ''
+          ).trim() || 'deployment-default'
         )
         setSecretRefDraft(String(spec.secretRef || ''))
         setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
@@ -522,6 +549,9 @@ export default function HostDetailsPage() {
         model: {
           provider: providerDraft,
           name: modelNameDraft.trim(),
+          ...(providerDraft === 'codex-subscription'
+            ? { connectionRef: connectionRefDraft.trim() || 'deployment-default' }
+            : {}),
         },
       }
       // Host identity is metadata.name / the route slug. Never persist
@@ -931,6 +961,22 @@ export default function HostDetailsPage() {
                   <label htmlFor="model-provider">Model provider</label>
                   <div className="cu-field__readonly">{getProviderLabel(providerDraft)}</div>
                 </div>
+                {isOpenAiFamily(providerDraft) ? (
+                  <div className="cu-field">
+                    <label htmlFor="model-openai-credential">OpenAI credential</label>
+                    <div className="cu-field__readonly">
+                      {providerDraft === 'codex-subscription' ? 'ChatGPT subscription' : 'API key'}
+                    </div>
+                  </div>
+                ) : null}
+                {providerDraft === 'codex-subscription' ? (
+                  <div className="cu-field">
+                    <label htmlFor="model-subscription">Subscription</label>
+                    <div className="cu-field__readonly">
+                      {connectionRefDraft || 'deployment-default'}
+                    </div>
+                  </div>
+                ) : null}
                 <div className="cu-field">
                   <label htmlFor="model-allowed">Allowed models</label>
                   {allowedModelsSummary.length > 0 ? (
@@ -1018,6 +1064,17 @@ export default function HostDetailsPage() {
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
+                  subscriptionCredentialEnabled
+                  afterPrimaryProvider={
+                    providerDraft === 'codex-subscription' ? (
+                      <CodexAgentAssignment
+                        connectionRef={connectionRefDraft}
+                        onConnectionRefChange={setConnectionRefDraft}
+                        onModelsChange={setCodexModels}
+                        disabled={busy}
+                      />
+                    ) : null
+                  }
                   onPrimaryChange={next => {
                     setProviderDraft(next.provider)
                     setModelNameDraft(next.model)
@@ -1026,7 +1083,7 @@ export default function HostDetailsPage() {
                   onPolicyChange={handlePolicyChange}
                   allowedModels={allowedModelsDraft}
                   onAllowedModelsChange={setAllowedModelsDraft}
-                  catalog={allowedCatalog}
+                  catalog={catalogForEditor}
                   catalogLoading={modelsLoading}
                   catalogError={modelsError}
                   replacePrimaryModelWithAllowedModels

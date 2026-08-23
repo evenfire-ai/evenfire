@@ -28,9 +28,7 @@ describe('CONTROL_ROUTES', () => {
     expect(CONTROL_ROUTES.globalFileSystem).toBe('/global-file-system')
   })
 
-  it('exposes the Codex subscription provider path without query tabs', () => {
-    expect(CONTROL_ROUTES.llmModels.codexSubscription).toBe(
-      '/llm-models/providers/codex-subscription'
-    )
+  it('does not expose an LLM Models Codex subscription owner path', () => {
+    expect('codexSubscription' in CONTROL_ROUTES.llmModels).toBe(false)
   })
 })

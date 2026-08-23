@@ -31,6 +31,10 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
+vi.mock('../CodexAgentAssignment', () => ({
+  CodexAgentAssignment: () => <div data-testid="codex-agent-assignment" />,
+}))
+
 vi.mock('../HostAccessTab', () => ({
   HostAccessTab: ({ hostName }: { hostName: string }) => (
     <div data-testid="access-tab">Access editor for {hostName}</div>
@@ -360,6 +364,8 @@ describe('HostDetailsPage identity integration', () => {
     render(<HostDetailsPage />)
 
     expect(await screen.findByText('Broker-backed — no LLM secret required')).toBeInTheDocument()
+    expect(screen.getByText('ChatGPT subscription')).toBeInTheDocument()
+    expect(screen.queryByText('OpenAI Codex Subscription')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -370,7 +376,11 @@ describe('HostDetailsPage identity integration', () => {
       c => c[0] === 'PUT' && c[1] === '/api/v1/admin/hosts/foo'
     )
     const payload = putCall![2]
-    expect(payload.spec.model).toEqual({ provider: 'codex-subscription', name: 'gpt-5.1' })
+    expect(payload.spec.model).toEqual({
+      provider: 'codex-subscription',
+      name: 'gpt-5.1',
+      connectionRef: 'deployment-default',
+    })
     expect(payload.spec.secretRef).toBeUndefined()
     expect(payload.spec.hostRef).toBeUndefined()
     expect(payload.spec.userId).toBeUndefined()

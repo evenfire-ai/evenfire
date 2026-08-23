@@ -15,6 +15,8 @@ import {
   type LlmCredentialField,
   type LlmCredentialGroup,
   type LlmProvider,
+  OPENAI_SUBSCRIPTION_PROVIDER,
+  OPERATOR_PROVIDER_OPTIONS,
   allowedModelsForProvider,
   constrainModelOptions,
   describeLlmCompleteness,
@@ -22,6 +24,7 @@ import {
   getModelOptions,
   getProviderLabel,
   getProviderSlotKeys,
+  isOpenAiFamily,
   isProviderAllowUnrestricted,
   mintFallbackSlot,
   normalizeProvider,
@@ -101,6 +104,8 @@ export function LlmProviderConfig({
   secretKeys = [],
   fallbackProvidersInitiallyCollapsed = false,
   disabled = false,
+  subscriptionCredentialEnabled = false,
+  afterPrimaryProvider,
 }: LlmProviderConfigProps) {
   const [fallbackProvidersOpen, setFallbackProvidersOpen] = useState(
     !fallbackProvidersInitiallyCollapsed
@@ -123,14 +128,18 @@ export function LlmProviderConfig({
     [catalog, allowedModels, provider]
   )
   const primaryModelOutOfAllowlist = Boolean(model) && !primaryModelOptions.includes(model)
+  const pickerOptions = subscriptionCredentialEnabled
+    ? OPERATOR_PROVIDER_OPTIONS
+    : LLM_PROVIDER_OPTIONS
   const primaryProviderOptions = useMemo(
     () =>
-      LLM_PROVIDER_OPTIONS.map(option => ({
+      pickerOptions.map(option => ({
         ...option,
         icon: <LlmProviderIcon provider={option.value} label={option.label} />,
       })),
-    []
+    [pickerOptions]
   )
+  const providerPickerValue = isOpenAiFamily(provider) ? 'openai' : provider
   const primaryModelSelectOptions = useMemo(() => {
     const options: SelectionDropdownOption[] = primaryModelOptions.map(option => ({
       value: option,
@@ -238,7 +247,7 @@ export function LlmProviderConfig({
             <SelectionDropdown
               id="llm-primary-provider"
               className="cu-llm-config__primary-select cu-llm-config__provider-select"
-              value={[provider]}
+              value={[providerPickerValue]}
               options={primaryProviderOptions}
               placeholder="Select provider…"
               searchPlaceholder="Search providers…"
@@ -250,19 +259,77 @@ export function LlmProviderConfig({
                 const nextProviderValue = next[0]
                 if (!nextProviderValue) return
                 const nextProvider = normalizeProvider(nextProviderValue)
-                // Default within this provider's per-host subset when it has one
-                // (matches the fallback rows), so switching to a provider that is
-                // already restricted never auto-selects an out-of-subset model.
+                const resolved =
+                  nextProvider === 'openai' && provider === OPENAI_SUBSCRIPTION_PROVIDER
+                    ? OPENAI_SUBSCRIPTION_PROVIDER
+                    : nextProvider
                 onPrimaryChange({
-                  provider: nextProvider,
+                  provider: resolved,
                   model: resolveDefaultModel(
-                    nextProvider,
-                    constrainModelOptions(catalog, allowedModels, nextProvider)
+                    resolved,
+                    constrainModelOptions(catalog, allowedModels, resolved)
                   ),
                 })
               }}
             />
           </Field>
+          {subscriptionCredentialEnabled && isOpenAiFamily(provider) ? (
+            <fieldset
+              className="cu-field cu-llm-config__credential-kind"
+              data-testid="openai-credential-kind"
+            >
+              <legend className="cu-field__label">OpenAI credential</legend>
+              <div
+                className="cu-agent-radio-group"
+                role="radiogroup"
+                aria-label="OpenAI credential"
+              >
+                <label className="cu-agent-radio">
+                  <input
+                    type="radio"
+                    name="openai-credential-kind"
+                    checked={provider === 'openai'}
+                    disabled={disabled}
+                    onChange={() =>
+                      onPrimaryChange({
+                        provider: 'openai',
+                        model: resolveDefaultModel(
+                          'openai',
+                          constrainModelOptions(catalog, allowedModels, 'openai')
+                        ),
+                      })
+                    }
+                  />
+                  API key
+                </label>
+                <label className="cu-agent-radio">
+                  <input
+                    type="radio"
+                    name="openai-credential-kind"
+                    checked={provider === OPENAI_SUBSCRIPTION_PROVIDER}
+                    disabled={disabled}
+                    onChange={() =>
+                      onPrimaryChange({
+                        provider: OPENAI_SUBSCRIPTION_PROVIDER,
+                        model: resolveDefaultModel(
+                          OPENAI_SUBSCRIPTION_PROVIDER,
+                          constrainModelOptions(
+                            catalog,
+                            allowedModels,
+                            OPENAI_SUBSCRIPTION_PROVIDER
+                          )
+                        ),
+                      })
+                    }
+                  />
+                  ChatGPT subscription
+                </label>
+              </div>
+            </fieldset>
+          ) : null}
+          {afterPrimaryProvider ? (
+            <div className="cu-llm-config__after-provider">{afterPrimaryProvider}</div>
+          ) : null}
 
           {replacePrimaryModelWithAllowedModels && showAllowedModels ? (
             <AllowedModelsField
@@ -302,7 +369,9 @@ export function LlmProviderConfig({
           <p className="cu-field__error">Couldn&apos;t load the model allowlist: {catalogError}</p>
         ) : !catalogLoading && primaryModelOptions.length === 0 ? (
           <p className="cu-field__error">
-            No enabled models for this provider. Add one under LLM Models first.
+            {provider === OPENAI_SUBSCRIPTION_PROVIDER
+              ? 'No enabled models for this subscription. Connect and sync the grant first.'
+              : 'No enabled models for this provider. Add one under LLM Models first.'}
           </p>
         ) : null}
 

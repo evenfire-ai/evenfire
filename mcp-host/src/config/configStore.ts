@@ -116,10 +116,12 @@ export interface AllowedModelEntry {
 export type CodexPolicyBinding = {
   catalogRevision: number
   credentialRevision: number
+  connectionKey: string
 }
 
 export const CATALOG_REVISION_ANNOTATION = 'clerum.io/catalog-revision'
 export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
+export const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
 
 export type ConfigStoreChangeHandler = (change: ConfigStoreChange) => void
 
@@ -132,6 +134,8 @@ export interface ConfigStoreOptions {
   llmSecretRef: string | null
   /** Configured LLM provider — selects which key inside the LLM Secret is exposed. */
   provider: LlmProvider | null
+  /** Assigned Codex grant; defaults to deployment-default. */
+  connectionRef?: string | null
   /**
    * Name of the operator-managed LLM allowlist ConfigMap to watch (R3). When
    * null/undefined the fourth tier is disabled entirely (no watch, no bootstrap)
@@ -555,7 +559,10 @@ export class ConfigStore {
     metadata?: { annotations?: Record<string, string> }
   }): boolean {
     const modelsChanged = this.applyAllowlistData(cm.data ?? {})
-    const nextBinding = parseCodexPolicyBinding(cm.metadata?.annotations)
+    const nextBinding = parseCodexPolicyBinding(
+      cm.metadata?.annotations,
+      this.opts.connectionRef?.trim() || 'deployment-default'
+    )
     const bindingChanged = !codexBindingsEqual(this.codexBinding, nextBinding)
     this.codexBinding = nextBinding
     return modelsChanged || bindingChanged
@@ -912,14 +919,35 @@ function parseOptionalIntegerAnnotation(
 }
 
 function parseCodexPolicyBinding(
-  annotations: Record<string, string> | undefined
+  annotations: Record<string, string> | undefined,
+  connectionKey = 'deployment-default'
 ): CodexPolicyBinding | null {
   if (!annotations) return null
-  const catalogRevision = parseOptionalIntegerAnnotation(annotations, CATALOG_REVISION_ANNOTATION)
-  const credentialRevision = parseOptionalIntegerAnnotation(
+  let catalogRevision = parseOptionalIntegerAnnotation(annotations, CATALOG_REVISION_ANNOTATION)
+  let credentialRevision = parseOptionalIntegerAnnotation(
     annotations,
     CONNECTION_REVISION_ANNOTATION
   )
+  const rawMap = annotations[CODEX_CONNECTIONS_ANNOTATION]
+  if (rawMap) {
+    try {
+      const parsed = JSON.parse(rawMap) as Record<
+        string,
+        { catalogRevision?: number; connectionRevision?: number }
+      >
+      const assigned = parsed[connectionKey]
+      if (
+        assigned &&
+        Number.isInteger(assigned.catalogRevision) &&
+        Number.isInteger(assigned.connectionRevision)
+      ) {
+        catalogRevision = assigned.catalogRevision as number
+        credentialRevision = assigned.connectionRevision as number
+      }
+    } catch {
+      return null
+    }
+  }
   if (
     catalogRevision === null ||
     catalogRevision === 'invalid' ||
@@ -928,13 +956,17 @@ function parseCodexPolicyBinding(
   ) {
     return null
   }
-  return { catalogRevision, credentialRevision }
+  return { catalogRevision, credentialRevision, connectionKey }
 }
 
 function codexBindingsEqual(a: CodexPolicyBinding | null, b: CodexPolicyBinding | null): boolean {
   if (a === b) return true
   if (!a || !b) return false
-  return a.catalogRevision === b.catalogRevision && a.credentialRevision === b.credentialRevision
+  return (
+    a.catalogRevision === b.catalogRevision &&
+    a.credentialRevision === b.credentialRevision &&
+    a.connectionKey === b.connectionKey
+  )
 }
 
 /**

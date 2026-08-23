@@ -12,6 +12,7 @@ export type CodexSubscriptionUiStatus =
   | 'connected'
   | 'reauth-required'
   | 'revoking'
+  | 'revoked'
   | 'unavailable'
 
 export type CodexSubscriptionConnectionProps = {
@@ -30,7 +31,7 @@ export function mapConnectionStatus(status: CodexConnectionStatus): CodexSubscri
   if (status === 'reauth_required') return 'reauth-required'
   if (status === 'connecting') return 'connecting'
   if (status === 'connected') return 'connected'
-  if (status === 'revoked') return 'disconnected'
+  if (status === 'revoked') return 'revoked'
   return 'disconnected'
 }
 
@@ -44,6 +45,8 @@ export function statusLabel(status: CodexSubscriptionUiStatus): string {
       return 'Device code pending'
     case 'reauth-required':
       return 'Reauthorization required'
+    case 'revoked':
+      return 'Revoked'
     case 'revoking':
       return 'Revoking'
     case 'unavailable':
@@ -60,6 +63,7 @@ export function statusTagClass(status: CodexSubscriptionUiStatus): string {
     case 'connecting':
     case 'device-pending':
       return 'cu-llm-config__block-tag cu-llm-config__block-tag--warning'
+    case 'revoked':
     case 'reauth-required':
     case 'unavailable':
       return 'cu-llm-config__block-tag cu-llm-config__block-tag--danger'

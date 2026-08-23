@@ -5,12 +5,11 @@ import { TabBar } from '@components/TabBar'
 import type { TabBarOption } from '@components/TabBar/types'
 import { CONTROL_ROUTES } from '@constants/routes'
 
-export type LlmModelsTabValue = 'catalog' | 'discovery' | 'codex-subscription'
+export type LlmModelsTabValue = 'catalog' | 'discovery'
 
 export type LlmModelsTabBarProps = {
   activeTab: LlmModelsTabValue
   catalogCount?: number
-  codexEnabled?: boolean
   discoveryReviewCount?: number
 }
 
@@ -21,7 +20,6 @@ export type LlmModelsTabBarProps = {
 export function LlmModelsTabBar({
   activeTab,
   catalogCount,
-  codexEnabled = false,
   discoveryReviewCount = 0,
 }: LlmModelsTabBarProps) {
   const options: TabBarOption<LlmModelsTabValue>[] = [
@@ -40,14 +38,6 @@ export function LlmModelsTabBar({
           : 'Discovery review',
     },
   ]
-
-  if (codexEnabled) {
-    options.push({
-      value: 'codex-subscription' as const,
-      href: CONTROL_ROUTES.llmModels.codexSubscription,
-      label: 'Codex subscription',
-    })
-  }
 
   return (
     <TabBar<LlmModelsTabValue>

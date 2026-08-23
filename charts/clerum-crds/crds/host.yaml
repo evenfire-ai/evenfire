@@ -88,6 +88,16 @@ spec:
                     name:
                       type: string
                       description: Model name (e.g. gpt-5.4-mini, claude-opus-4-7, glm-5.1).
+                    connectionRef:
+                      type: string
+                      maxLength: 63
+                      pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+                      description: >-
+                        Named Codex subscription key this Host is assigned to.
+                        Absent Codex Hosts default to deployment-default.
+                        ROLLOUT ORDER — CRD FIRST: apiextensions/v1 prunes unknown
+                        fields, so this property must be applied before control-api
+                        or Control UI persist spec.model.connectionRef.
                 allowedModels:
                   # Per-host model allowlist subset (spec v2 Topic 3a). OPTIONAL,
                   # ADDITIVE: when absent or empty, the host offers the FULL global

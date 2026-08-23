@@ -11,6 +11,7 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
+import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import { getModelAllowlistState, isModelAllowed } from '../../services/llmAllowedModels.js'
 import {
@@ -467,7 +468,10 @@ function hostModelLockNames(spec: unknown): string[] {
 // `maybeWarnStale` escape to the global pool under the lock (adenda A3).
 function hostValidationDeps(db: DbClient): HostSpecValidationDeps {
   return {
-    isModelAllowed: (provider, model) => isModelAllowed(provider, model, db),
+    isModelAllowed: (provider, model, connectionRef) =>
+      provider === 'codex-subscription'
+        ? isCodexAssignmentAllowed(db, connectionRef ?? 'deployment-default', model)
+        : isModelAllowed(provider, model, db),
     getModelAllowlistState: (provider, model) => getModelAllowlistState(provider, model, db),
   }
 }

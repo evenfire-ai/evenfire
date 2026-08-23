@@ -5,6 +5,7 @@ const POLICY_HASH_RE = /^[a-f0-9]{64}$/
 export type CodexPolicyBinding = {
   catalogRevision: number
   credentialRevision: number
+  connectionKey?: string
 }
 
 export type CodexAttemptPolicy = {
@@ -62,6 +63,7 @@ export function resolveCodexAttemptPolicy(input: {
       model: input.model,
       catalogRevision: binding.catalogRevision,
       credentialRevision: binding.credentialRevision,
+      connectionKey: binding.connectionKey,
     }),
   }
 }

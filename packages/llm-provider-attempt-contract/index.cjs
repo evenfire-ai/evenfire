@@ -62,6 +62,7 @@ const CLAIMS_KEYS = new Set([
   'policyHash',
   'budgetReservationId',
   'connectionRevision',
+  'connectionId',
 ])
 const AUTHORIZE_KEYS = new Set([
   'providerAttemptId',
@@ -362,13 +363,14 @@ function hashCodexCompletionRequestV1(request) {
 /**
  * Grant-binding digest for a Codex authorize attempt. Must match
  * control-api's expected hash: SHA-256 of lexicographic stableStringify of
- * { catalogRevision, credentialRevision, model, provider }.
+ * { catalogRevision, connectionKey, credentialRevision, model, provider }.
  */
 function computeCodexPolicyHash(input) {
   return createHash('sha256')
     .update(
       stableStringify({
         catalogRevision: input.catalogRevision,
+        connectionKey: input.connectionKey || 'deployment-default',
         credentialRevision: input.credentialRevision,
         model: input.model,
         provider: PROVIDER_ID,
@@ -431,6 +433,10 @@ function parseCodexExecutionTicketClaims(input) {
     policyHash: input.policyHash,
     budgetReservationId: input.budgetReservationId,
     connectionRevision: input.connectionRevision,
+  }
+  if (input.connectionId !== undefined) {
+    if (!isBoundedId(input.connectionId)) return fail('invalid', 'connectionId is invalid')
+    claims.connectionId = input.connectionId
   }
   if (input.recipeNamespace !== undefined) {
     if (!isBoundedId(input.recipeNamespace)) return fail('invalid', 'recipeNamespace is invalid')

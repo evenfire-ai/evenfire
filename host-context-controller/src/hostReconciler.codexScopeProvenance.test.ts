@@ -92,6 +92,15 @@ function eligibleCodexConfigMap(stale = false) {
         'clerum.io/connection-revision': '1',
         'clerum.io/codex-connection-status': 'connected',
         'clerum.io/codex-enabled': 'true',
+        'clerum.io/codex-connections': JSON.stringify({
+          'deployment-default': {
+            status: 'connected',
+            catalogRevision: 1,
+            connectionRevision: 1,
+          },
+          'team-plus': { status: 'revoked', catalogRevision: 3, connectionRevision: 8 },
+          'personal-pro': { status: 'connected', catalogRevision: 4, connectionRevision: 2 },
+        }),
       },
     },
     data: {
@@ -250,6 +259,36 @@ describe('HostReconciler Codex scope provenance', () => {
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
     expect(issuedScopes()).not.toContain('llm:codex:execute')
     expect(proxyPolicyBodies(networkingApi)).toEqual([])
+  })
+
+  it('keeps a Host on a live grant eligible when another assigned grant is revoked', async () => {
+    const { reconciler, coreApi, networkingApi } = createReconciler()
+    wireAllowlist(coreApi, eligibleCodexConfigMap())
+
+    await reconciler.reconcile(
+      makeCodexHost({
+        model: {
+          provider: 'codex-subscription',
+          name: 'gpt-5.3-codex',
+          connectionRef: 'personal-pro',
+        },
+      })
+    )
+    expect(issuedScopes()).toContain('llm:codex:execute')
+    expect(proxyPolicyBodies(networkingApi)).toHaveLength(1)
+
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    await reconciler.reconcile(
+      makeCodexHost({
+        host: 'revoked-host',
+        model: {
+          provider: 'codex-subscription',
+          name: 'gpt-5.3-codex',
+          connectionRef: 'team-plus',
+        },
+      })
+    )
+    expect(issuedScopes()).not.toContain('llm:codex:execute')
   })
 
   it('does not mint Codex scope or egress when the allowlist ConfigMap times out', async () => {

@@ -135,9 +135,8 @@ export function CodexSubscriptionConnection() {
     if (!enabled) return null
     return (
       <LlmModelsTabBar
-        activeTab="codex-subscription"
+        activeTab="catalog"
         catalogCount={tabModels.length}
-        codexEnabled
         discoveryReviewCount={discoveryReviewCount}
       />
     )
@@ -160,7 +159,7 @@ export function CodexSubscriptionConnection() {
   useEffect(() => {
     const outcome = readCodexOAuthQueryParam(searchParams)
     if (!outcome) return
-    router.replace(CONTROL_ROUTES.llmModels.codexSubscription)
+    router.replace(CONTROL_ROUTES.agents.root)
     if (outcome === 'connected') {
       void loadConnection().then(() => {
         showToast('Codex subscription connected.', { tone: 'success' })

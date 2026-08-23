@@ -67,6 +67,7 @@ import { FailoverEngine } from './llm/failover/engine'
 import { llmFallbackTotal } from './llm/failover/metrics'
 import { parseLlmPolicy } from './llm/failover/policy'
 import type { FailoverSwitchEvent, FallbackEntry, LlmPolicy } from './llm/failover/types'
+import { hostPrimaryLlmBindingChanged } from './llm/hostLlmBinding'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
@@ -631,6 +632,7 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
     hostRef: host.name,
     llmSecretRef: host.spec.secretRef ?? null,
     provider,
+    connectionRef: host.spec.model?.connectionRef ?? null,
     allowlistConfigMapName: config.llmAllowlistConfigMapName,
     // R5 — load the failover policy's referenced credential slots from the same
     // LLM Secret (kept out of the effective env; read via fallbackSlotValue).
@@ -1156,9 +1158,23 @@ async function onHostChange(host: HostCRD): Promise<void> {
 
   const contextChanged =
     currentHost !== null && currentHost.spec.contextRef !== host.spec.contextRef
-  const providerChanged = currentHost?.spec.model?.provider !== host.spec.model?.provider
-  const secretRefChanged = currentHost?.spec.secretRef !== host.spec.secretRef
-  const modelChanged = currentHost?.spec.model?.name !== host.spec.model?.name
+  const { providerChanged, secretRefChanged, modelChanged, connectionRefChanged } =
+    hostPrimaryLlmBindingChanged(
+      currentHost
+        ? {
+            provider: currentHost.spec.model?.provider,
+            name: currentHost.spec.model?.name,
+            connectionRef: currentHost.spec.model?.connectionRef,
+            secretRef: currentHost.spec.secretRef,
+          }
+        : null,
+      {
+        provider: host.spec.model?.provider,
+        name: host.spec.model?.name,
+        connectionRef: host.spec.model?.connectionRef,
+        secretRef: host.spec.secretRef,
+      }
+    )
 
   if (contextChanged) {
     // The old Context's authority must disappear before any asynchronous Host
@@ -1179,17 +1195,25 @@ async function onHostChange(host: HostCRD): Promise<void> {
   refreshFailoverPolicy(host)
   const fallbackSlotsChanged =
     JSON.stringify(prevFallbackSlots) !== JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
-  if (!configStore || providerChanged || secretRefChanged || fallbackSlotsChanged) {
-    console.log('[Main] Rebuilding ConfigStore (provider/secretRef/failover slots changed)')
+  if (
+    !configStore ||
+    providerChanged ||
+    secretRefChanged ||
+    connectionRefChanged ||
+    fallbackSlotsChanged
+  ) {
+    console.log(
+      '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
+    )
     await ensureConfigStore(host)
   }
   currentKeys = apiKeysFromConfigStore(configStore!)
-  // R5.10 — only a primary credential-surface change (secretRef/provider) may
-  // clear a sticky runtime cooldown; unrelated CR edits must not (see
+  // R5.10 — only a primary credential-surface change (secretRef/provider/grant)
+  // may clear a sticky runtime cooldown; unrelated CR edits must not (see
   // initializeProvider). A `secretRefChanged` rebuilds the ConfigStore fresh, so
   // the store.onChange clearCooldown path never fires for it — this covers it.
   await initializeProvider(host, currentKeys, {
-    llmConfigChanged: secretRefChanged || providerChanged,
+    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
   })
 
   // PMC-2 — the cached `stable` tier embeds the model+provider runtime line
@@ -1198,7 +1222,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
   // keeps serving the OLD model:/provider: line until eviction (generation is
   // correct — it uses the live provider — but the system prompt mislabels the
   // model). This is deliberately OUTSIDE the personalization branch below.
-  if (providerChanged || secretRefChanged || modelChanged) {
+  if (providerChanged || secretRefChanged || modelChanged || connectionRefChanged) {
     promptCache?.invalidateAll('model_change')
   }
 

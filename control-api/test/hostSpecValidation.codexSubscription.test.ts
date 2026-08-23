@@ -49,6 +49,101 @@ describe('codex-subscription Host admission', () => {
     expect(res!.errors[0].field).toBe('spec.secretRef')
   })
 
+  it('defaults a missing connectionRef to deployment-default and checks that grant', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    const isModelAllowed = vi.fn().mockResolvedValue(true)
+    const spec = { model: { provider: 'codex-subscription', name: 'gpt-5.1' } }
+    const res = await validateHostSpec(spec, { isModelAllowed })
+    expect(res).toBeNull()
+    expect(isModelAllowed).toHaveBeenCalledWith(
+      'codex-subscription',
+      'gpt-5.1',
+      'deployment-default'
+    )
+    expect((spec.model as { connectionRef?: string }).connectionRef).toBe('deployment-default')
+  })
+
+  it('does not tolerate switching to a revoked connectionRef with the same model', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    const isModelAllowed = vi.fn(async (_provider, _model, connectionRef) => {
+      return connectionRef === 'personal-pro'
+    })
+    const tolerations: Array<Record<string, unknown>> = []
+    const res = await validateHostSpec(
+      {
+        model: {
+          provider: 'codex-subscription',
+          name: 'gpt-5.1',
+          connectionRef: 'team-plus',
+        },
+      },
+      { isModelAllowed },
+      {
+        stored: {
+          model: {
+            provider: 'codex-subscription',
+            name: 'gpt-5.1',
+            connectionRef: 'personal-pro',
+          },
+        },
+        hostRef: { namespace: 'mcp-host', name: 'agent-a' },
+        tolerations,
+      }
+    )
+    expect(res).not.toBeNull()
+    expect(res!.errors[0].message).toContain('model_not_allowed')
+    expect(tolerations).toEqual([])
+  })
+
+  it('tolerates an unchanged revoked connectionRef so identity/channels PUTs can persist', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    const isModelAllowed = vi.fn().mockResolvedValue(false)
+    const tolerations: Array<Record<string, unknown>> = []
+    const spec = {
+      channels: ['telegram'],
+      model: {
+        provider: 'codex-subscription',
+        name: 'gpt-5.1',
+        connectionRef: 'team-plus',
+      },
+    }
+    const res = await validateHostSpec(
+      spec,
+      { isModelAllowed },
+      {
+        stored: {
+          model: {
+            provider: 'codex-subscription',
+            name: 'gpt-5.1',
+            connectionRef: 'team-plus',
+          },
+        },
+        hostRef: { namespace: 'mcp-host', name: 'agent-a' },
+        tolerations,
+      }
+    )
+    expect(res).toBeNull()
+    expect(tolerations).toHaveLength(1)
+  })
+
+  it('rejects a revoked or unknown connectionRef when the allowlist says no', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    const isModelAllowed = vi.fn().mockResolvedValue(false)
+    const res = await validateHostSpec(
+      {
+        model: {
+          provider: 'codex-subscription',
+          name: 'gpt-5.1',
+          connectionRef: 'team-plus',
+        },
+      },
+      { isModelAllowed }
+    )
+    expect(res).not.toBeNull()
+    expect(res!.errors[0].field).toBe('spec.model.name')
+    expect(isModelAllowed).toHaveBeenCalledWith('codex-subscription', 'gpt-5.1', 'team-plus')
+  })
+
   it('rejects credentialSlot on a broker fallback', async () => {
     process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
     const isModelAllowed = vi.fn().mockResolvedValue(true)
@@ -94,6 +189,15 @@ describe('codex-subscription CRD contract', () => {
     }
     const spec = doc.spec.versions[0].schema.openAPIV3Schema.properties.spec
     expect(spec.required).not.toContain('secretRef')
+    const modelProps = (
+      spec as {
+        properties?: {
+          model?: { properties?: { connectionRef?: { type?: string; pattern?: string } } }
+        }
+      }
+    ).properties?.model?.properties
+    expect(modelProps?.connectionRef?.type).toBe('string')
+    expect(modelProps?.connectionRef?.pattern).toContain('a-z0-9')
     const rules = spec['x-kubernetes-validations'] ?? []
     expect(
       rules.some(r => r.rule.includes('secretRef') && r.rule.includes('codex-subscription'))

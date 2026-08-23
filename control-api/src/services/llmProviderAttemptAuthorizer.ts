@@ -11,8 +11,12 @@ import type { McpHostAccessClaims } from '../utils/auth/mcpHostJwtToken.js'
 import { isPlainObject } from '../utils/isPlainObject.js'
 import { evaluateBudgetCheck } from './budgets/check.js'
 import { getActiveReservation } from './budgets/reservations.js'
-import { getSafeCodexSubscriptionConnection } from './codexSubscriptionConnection.js'
-import { getModelAllowlistState } from './llmAllowedModels.js'
+import { getCodexCatalogModelState } from './codexSubscriptionCatalog.js'
+import {
+  CODEX_SUBSCRIPTION_CONNECTION_KEY,
+  getSafeCodexSubscriptionConnection,
+  normalizeCodexConnectionKey,
+} from './codexSubscriptionConnection.js'
 import {
   getMaxLlmProviderAttemptGeneration,
   insertLlmProviderAttempt,
@@ -74,7 +78,8 @@ export type LlmProviderAttemptAuthorizerDeps = {
   db: DbClient
   withTransaction: typeof withTransaction
   getConnection: typeof getSafeCodexSubscriptionConnection
-  getModelState: typeof getModelAllowlistState
+  getModelState: typeof getCodexCatalogModelState
+  resolveConnectionKey: (hostRef: string) => Promise<string>
   evaluateBudget: typeof evaluateBudgetCheck
   getActiveReservation: typeof getActiveReservation
   getMaxGeneration: typeof getMaxLlmProviderAttemptGeneration
@@ -87,7 +92,8 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
   db: { query: (text, values) => pool.query(text, values) },
   withTransaction,
   getConnection: getSafeCodexSubscriptionConnection,
-  getModelState: getModelAllowlistState,
+  getModelState: getCodexCatalogModelState,
+  resolveConnectionKey: async () => CODEX_SUBSCRIPTION_CONNECTION_KEY,
   evaluateBudget: evaluateBudgetCheck,
   getActiveReservation,
   getMaxGeneration: getMaxLlmProviderAttemptGeneration,
@@ -160,9 +166,10 @@ function assertClaimBinding(body: Record<string, unknown>, claims: McpHostAccess
 export async function authorizeLlmProviderAttempt(
   claims: McpHostAccessClaims,
   body: unknown,
-  deps: LlmProviderAttemptAuthorizerDeps = defaultDeps()
+  deps: LlmProviderAttemptAuthorizerDeps | Partial<LlmProviderAttemptAuthorizerDeps> = defaultDeps()
 ): Promise<AuthorizeAttemptSuccess> {
-  if (!deps.enabled) {
+  const resolvedDeps: LlmProviderAttemptAuthorizerDeps = { ...defaultDeps(), ...deps }
+  if (!resolvedDeps.enabled) {
     throw new LlmProviderAttemptAuthorizeError('disabled', 'Codex subscription is disabled')
   }
   if (!claims.workflowControlScopes.includes(CODEX_EXECUTE_SCOPE)) {
@@ -236,9 +243,12 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
-  return deps.withTransaction(async tx => {
+  return resolvedDeps.withTransaction(async tx => {
     const db: DbClient = tx
-    const connection = await deps.getConnection(db)
+    const connectionKey = normalizeCodexConnectionKey(
+      await resolvedDeps.resolveConnectionKey(caller.hostRef)
+    )
+    const connection = await resolvedDeps.getConnection(db, connectionKey)
     if (
       !connection ||
       connection.status !== 'connected' ||
@@ -257,7 +267,7 @@ export async function authorizeLlmProviderAttempt(
       )
     }
 
-    const modelState = await deps.getModelState(PROVIDER, request.model, db)
+    const modelState = await resolvedDeps.getModelState(db, connection.id, request.model)
     if (!modelState || !modelState.enabled || modelState.stale) {
       throw new LlmProviderAttemptAuthorizeError(
         'model_not_allowed',
@@ -269,6 +279,7 @@ export async function authorizeLlmProviderAttempt(
       model: request.model,
       catalogRevision: connection.catalogRevision,
       credentialRevision: connection.credentialRevision,
+      connectionKey: connection.connectionKey,
     })
     if (policyRevision !== connection.catalogRevision || policyHash !== expectedPolicyHash) {
       throw new LlmProviderAttemptAuthorizeError(
@@ -277,7 +288,7 @@ export async function authorizeLlmProviderAttempt(
       )
     }
 
-    const maxGeneration = await deps.getMaxGeneration(db, invocationId)
+    const maxGeneration = await resolvedDeps.getMaxGeneration(db, invocationId)
     if (attemptGeneration < maxGeneration) {
       throw new LlmProviderAttemptAuthorizeError(
         'stale_generation',
@@ -288,7 +299,7 @@ export async function authorizeLlmProviderAttempt(
     const presentedReservationId =
       typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
     if (presentedReservationId) {
-      const active = await deps.getActiveReservation(db, {
+      const active = await resolvedDeps.getActiveReservation(db, {
         reservationId: presentedReservationId,
         hostRef: caller.hostRef,
       })
@@ -300,7 +311,7 @@ export async function authorizeLlmProviderAttempt(
       }
     }
 
-    const budget = await deps.evaluateBudget(
+    const budget = await resolvedDeps.evaluateBudget(
       {
         host_ref: caller.hostRef,
         context_ref: null,
@@ -331,7 +342,7 @@ export async function authorizeLlmProviderAttempt(
       budget.reservationIds?.[0] ?? (presentedReservationId || 'unbudgeted')
 
     try {
-      const attempt = await deps.insertAttempt(db, {
+      const attempt = await resolvedDeps.insertAttempt(db, {
         callerKind: caller.callerKind,
         hostRef: caller.hostRef,
         recipeNamespace: caller.recipeNamespace,
@@ -345,8 +356,9 @@ export async function authorizeLlmProviderAttempt(
         policyHash,
         budgetReservationId,
         connectionRevision: connection.credentialRevision,
+        connectionId: connection.id,
       })
-      const issued = await deps.issueTicket(db, {
+      const issued = await resolvedDeps.issueTicket(db, {
         sub: claims.sub,
         hostRef: caller.hostRef,
         recipeNamespace: caller.recipeNamespace ?? undefined,
@@ -361,6 +373,7 @@ export async function authorizeLlmProviderAttempt(
         policyHash,
         budgetReservationId,
         connectionRevision: connection.credentialRevision,
+        connectionId: connection.id,
       })
       log.info(
         {

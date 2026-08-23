@@ -5,13 +5,14 @@ import { IconTrash } from '@/components/icons'
 import { Button, CheckboxField, Field, SelectInput, TextInput } from '@/components/ui'
 import {
   LLM_DEFAULT_COOLDOWN_SECONDS,
-  LLM_PROVIDER_OPTIONS,
   LLM_TRIGGER_CLASSES,
   LLM_TRIGGER_LABELS,
   type LlmFallbackEntry,
   type LlmPolicy,
   type LlmProvider,
   type LlmTriggerClass,
+  OPENAI_SUBSCRIPTION_PROVIDER,
+  OPERATOR_PROVIDER_OPTIONS,
   constrainModelOptions,
   getCredentialSlotOptions,
   getProviderDisplayLabel,
@@ -310,11 +311,14 @@ function FallbackRow({
               })
             }}
           >
-            {LLM_PROVIDER_OPTIONS.map(option => (
+            {OPERATOR_PROVIDER_OPTIONS.map(option => (
               <option key={option.value} value={option.value}>
                 {option.label}
               </option>
             ))}
+            {entry.provider === OPENAI_SUBSCRIPTION_PROVIDER ? (
+              <option value={OPENAI_SUBSCRIPTION_PROVIDER}>OpenAI (ChatGPT subscription)</option>
+            ) : null}
           </SelectInput>
         </Field>
 

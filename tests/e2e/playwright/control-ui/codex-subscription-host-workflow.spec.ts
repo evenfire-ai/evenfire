@@ -5,7 +5,7 @@
  * - Entry point: application root `/` (E2E_GUARDIAN_ENTRY_POINT).
  * - Actions: visible login, open Agents, start Create agent, choose Codex.
  * - Route/state: `/agents/new` Model & credentials step.
- * - UI: OpenAI Codex Subscription is selectable and requires no LLM secret.
+ * - UI: OpenAI + ChatGPT subscription is selectable and requires no LLM secret.
  * - Business signal: waitForResponse on the allowlist catalog used to populate models.
  *
  * A live catalog model is not asserted: Sync/enable is the connection lane.
@@ -43,12 +43,15 @@ test.describe('Codex subscription host and workflow authoring', () => {
     await expect(page.getByText('Model & credentials', { exact: true })).toBeVisible()
 
     await page.getByLabel('Provider').click()
-    await page.getByRole('option', { name: 'OpenAI Codex Subscription' }).click()
+    await page.getByRole('option', { name: 'OpenAI', exact: true }).click()
+    await expect(page.getByRole('option', { name: 'OpenAI Codex Subscription' })).toHaveCount(0)
+    await page.getByRole('radio', { name: 'ChatGPT subscription' }).check()
     await expect(
       page.getByText(/This provider authenticates through the Codex subscription/)
     ).toBeVisible()
     await expect(page.getByLabel('Secret name')).toHaveCount(0)
     await expect(page.getByLabel(/OpenAI API key/i)).toHaveCount(0)
+    await expect(page.getByTestId('codex-agent-assignment')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Next' })).toBeDisabled()
   })
 })
