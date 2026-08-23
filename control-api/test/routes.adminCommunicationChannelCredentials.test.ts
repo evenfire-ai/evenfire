@@ -228,13 +228,28 @@ describe('admin communicationchannels — credentials cascade', () => {
       metadata: { name: 'foo', namespace: 'channels' },
       spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-foo-credentials' } },
     })
-    gatewayMock.mergeSecret.mockResolvedValue({})
+    gatewayMock.mergeSecret.mockResolvedValue({
+      name: 'cc-foo-credentials',
+      namespace: 'channels',
+      keys: ['telegram-bot-token'],
+    })
 
     const res = await request(makeApp())
       .put('/admin/communication-channels/foo/credentials')
       .send({ 'telegram-bot-token': 'new-token' })
 
     expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      name: 'foo',
+      secretName: 'cc-foo-credentials',
+      namespace: 'channels',
+      rotated: true,
+      result: {
+        name: 'cc-foo-credentials',
+        namespace: 'channels',
+        keys: ['telegram-bot-token'],
+      },
+    })
     expect(gatewayMock.mergeSecret).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'cc-foo-credentials',

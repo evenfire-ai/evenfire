@@ -4,6 +4,7 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import type { K8sGateway } from '../../k8s.js'
 import { secretKeyNames } from '../../services/secretKeyNames.js'
+import { toPublicSecretSummary } from '../../services/secretService.js'
 
 function ccCredentialsSecretName(ccName: string): string {
   return `cc-${ccName}-credentials`
@@ -115,7 +116,7 @@ export function registerCommunicationChannelCredentialsRoutes(
           secretName: existingSecretName,
           namespace: ns,
           rotated: true,
-          result: merged,
+          result: toPublicSecretSummary(merged),
         })
         return
       }

@@ -1,7 +1,24 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
+
+function writeSummary(body: unknown) {
+  const write = body as {
+    name: string
+    namespace?: string
+    data?: Record<string, string>
+    stringData?: Record<string, string>
+  }
+  return {
+    name: write.name,
+    namespace: write.namespace || 'default',
+    keys: [
+      ...new Set([...Object.keys(write.data ?? {}), ...Object.keys(write.stringData ?? {})]),
+    ].sort((a, b) => a.localeCompare(b)),
+  }
+}
 
 function createGateway() {
   return {
@@ -16,8 +33,8 @@ function createGateway() {
     getSecret: vi.fn(async (_name: string, _namespace?: string): Promise<unknown> => {
       throw new Error('not found')
     }),
-    createSecret: vi.fn(async (body: unknown) => body),
-    updateSecret: vi.fn(async (body: unknown) => body),
+    createSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+    updateSecret: vi.fn(async (body: unknown) => writeSummary(body)),
     deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
       deleted: true,
       name,
@@ -131,8 +148,8 @@ describe('routes/secrets', () => {
             data: entry.data,
           }
         }),
-        createSecret: vi.fn(async (body: unknown) => body),
-        updateSecret: vi.fn(async (body: unknown) => body),
+        createSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+        updateSecret: vi.fn(async (body: unknown) => writeSummary(body)),
         deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
           deleted: true,
           name,
@@ -181,7 +198,7 @@ describe('routes/secrets', () => {
             ]
           : []
       })
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
       const app = express()
       app.use(express.json())
       app.use(createAdminSecretsRouter(gateway as never))
@@ -191,9 +208,12 @@ describe('routes/secrets', () => {
       expect(res.body.items).toHaveLength(1)
       expect(res.body.items[0]).toMatchObject({ name: 'r1', namespace: 'sandbox-recipes' })
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('"event":"recipe-secret-namespace-list-degraded"')
+        expect.objectContaining({
+          event: 'recipe-secret-namespace-list-degraded',
+          namespace: 'sandbox-ui',
+        }),
+        'Recipe Secret namespace listing degraded'
       )
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"namespace":"sandbox-ui"'))
       warnSpy.mockRestore()
     })
 

@@ -6,6 +6,7 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { isValidDNSSubdomain } from '../../http/rfc1123.js'
 import { K8sGateway, extractHttpStatus } from '../../k8s.js'
+import { rootLogger } from '../../observability/logger.js'
 import {
   OWNER_RECIPE_LABEL_KEY,
   SHARED_LABEL_KEY,
@@ -13,9 +14,12 @@ import {
   parseSecretOwnership,
 } from '../../secretOwnership.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
+import { toPublicDeleteSecretSummary, toPublicSecretSummary } from '../../services/secretService.js'
 import { SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
+
+const logger = rootLogger
 
 // The bedrock credential-slot keys and the vertex service-account key, derived
 // from the shared provider package (never hardcoded here) so the write-side
@@ -142,7 +146,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         namespace: config.secretsNamespace,
       } as SecretUpsertRequest
       const created = await gateway.createSecret(body)
-      res.status(201).json(created)
+      res.status(201).json(toPublicSecretSummary(created))
     })
   )
 
@@ -242,7 +246,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           res.status(400).json({ error: llmSlotError })
           return
         }
-        await gateway.updateSecret({
+        const updated = await gateway.updateSecret({
           name: name.trim(),
           namespace: config.secretsNamespace,
           type: (req.body as { type?: string }).type,
@@ -252,11 +256,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         // base64 VALUES of every stored key — including keys the caller did NOT
         // send (other providers' credentials). The R4 contract is names-only
         // everywhere, so the response returns only the resulting key names.
-        res.status(200).json({
-          name: name.trim(),
-          namespace: config.secretsNamespace,
-          keys: Object.keys(mergedData).sort((a, b) => a.localeCompare(b)),
-        })
+        res.status(200).json(toPublicSecretSummary(updated))
         return
       }
 
@@ -291,7 +291,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         namespace: config.secretsNamespace,
       } as SecretUpsertRequest
       const updated = await gateway.updateSecret(body)
-      res.status(200).json(updated)
+      res.status(200).json(toPublicSecretSummary(updated))
     })
   )
 
@@ -300,7 +300,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     enforceNamespace(config.secretsNamespace),
     asyncHandler(async (req, res) => {
       const deleted = await gateway.deleteSecret(req.params.name, config.secretsNamespace)
-      res.status(200).json(deleted)
+      res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )
 
@@ -370,8 +370,8 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         stringData: data,
       }
 
-      const created = await gateway.createSecret(secretReq)
-      res.status(201).json({ name: name.trim(), namespace: targetNs, created: Boolean(created) })
+      await gateway.createSecret(secretReq)
+      res.status(201).json({ name: name.trim(), namespace: targetNs, created: true })
     })
   )
 
@@ -480,23 +480,21 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
 
-      await gateway.mergeSecret({ name, namespace: targetNs, stringData: data })
-
-      const keys = [...new Set([...Object.keys(existing.data || {}), ...Object.keys(data)])].sort(
-        (a, b) => a.localeCompare(b)
-      )
+      const merged = await gateway.mergeSecret({ name, namespace: targetNs, stringData: data })
 
       // The credential IS rotated at this point. Emit the audit record NOW,
       // before anything that could throw — a rotation that actually happened
       // must never go unlogged just because a later, secondary step failed.
       // Key NAMES are safe to log; values never are.
-      console.log(
-        JSON.stringify({
+      logger.info(
+        {
+          module: 'admin-secrets',
           event: 'mcp-secret-rotated',
           name,
           namespace: targetNs,
           rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
-        })
+        },
+        'MCP Secret rotated'
       )
 
       // affectedConnectors is a best-effort convenience for the UI ("who
@@ -516,18 +514,24 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           .map(item => (item as { metadata?: { name?: string } }).metadata?.name)
           .filter((connector): connector is string => typeof connector === 'string')
           .sort((a, b) => a.localeCompare(b))
-      } catch (err) {
-        console.warn(
-          JSON.stringify({
+      } catch {
+        logger.warn(
+          {
+            module: 'admin-secrets',
             event: 'mcp-secret-rotated-affected-connectors-unavailable',
             name,
             namespace: targetNs,
-            error: err instanceof Error ? err.message : String(err),
-          })
+          },
+          'Affected connectors unavailable after MCP Secret rotation'
         )
       }
 
-      res.status(200).json({ name, namespace: targetNs, keys, affectedConnectors })
+      res.status(200).json({
+        name: merged.name,
+        namespace: merged.namespace,
+        keys: [...merged.keys],
+        affectedConnectors,
+      })
     })
   )
 
@@ -545,7 +549,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       const deleted = await gateway.deleteSecret(req.params.name, config.mcpServersNamespace)
-      res.status(200).json(deleted)
+      res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )
 
@@ -642,12 +646,14 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           : typeof (err as { code?: unknown }).code === 'number'
             ? (err as { code: number }).code
             : undefined
-      console.warn(
-        JSON.stringify({
+      logger.warn(
+        {
+          module: 'admin-secrets',
           event: 'recipe-secret-namespace-list-degraded',
           namespace,
           statusCode,
-        })
+        },
+        'Recipe Secret namespace listing degraded'
       )
       return { namespace, items: [] }
     }
@@ -781,12 +787,12 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         stringData: data,
       }
 
-      const created = await gateway.createSecret(secretReq)
+      await gateway.createSecret(secretReq)
       res.status(201).json({
         name: name.trim(),
         namespace: targetNamespace,
         ownership,
-        created: Boolean(created),
+        created: true,
       })
     })
   )
@@ -876,7 +882,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       }
 
       const updated = await gateway.updateSecret(secretReq)
-      res.status(200).json(updated)
+      res.status(200).json(toPublicSecretSummary(updated))
     })
   )
 
@@ -896,7 +902,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       const deleted = await gateway.deleteSecret(name, targetNamespace)
-      res.status(200).json(deleted)
+      res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )
 

@@ -38,6 +38,7 @@ const VALID_KEYS: readonly string[] = [
 ]
 
 type CoreApiMock = {
+  listNamespacedSecret: ReturnType<typeof vi.fn>
   readNamespacedSecret: ReturnType<typeof vi.fn>
   createNamespacedSecret: ReturnType<typeof vi.fn>
   replaceNamespacedSecret: ReturnType<typeof vi.fn>
@@ -47,6 +48,7 @@ type CoreApiMock = {
 
 function createCoreApiMock(): CoreApiMock {
   return {
+    listNamespacedSecret: vi.fn().mockResolvedValue({ items: [] }),
     readNamespacedSecret: vi.fn().mockResolvedValue({ metadata: {}, type: 'Opaque', data: {} }),
     createNamespacedSecret: vi.fn().mockResolvedValue({ metadata: { name: 's' } }),
     replaceNamespacedSecret: vi.fn().mockResolvedValue({ metadata: { name: 's' } }),
@@ -54,6 +56,155 @@ function createCoreApiMock(): CoreApiMock {
     deleteNamespacedSecret: vi.fn().mockResolvedValue({}),
   }
 }
+
+const SENT_SECRET_VALUE = Buffer.from('caller-sent-value', 'utf8').toString('base64')
+const ADJACENT_SECRET_VALUE = Buffer.from('adjacent-owner-value', 'utf8').toString('base64')
+const RAW_WRITE_RESULT: k8s.V1Secret = {
+  apiVersion: 'v1',
+  kind: 'Secret',
+  metadata: {
+    name: 'credentials',
+    namespace: 'channels',
+    resourceVersion: '42',
+    uid: 'uid-1',
+  },
+  type: 'Opaque',
+  data: {
+    'caller-key': SENT_SECRET_VALUE,
+    'adjacent-owner-key': ADJACENT_SECRET_VALUE,
+  },
+}
+
+function expectNamesOnly(
+  result: unknown,
+  expected: { name: string; namespace: string; keys: string[] }
+): void {
+  expect(result).toEqual(expected)
+  const serialized = JSON.stringify(result)
+  expect(serialized).not.toContain(SENT_SECRET_VALUE)
+  expect(serialized).not.toContain(ADJACENT_SECRET_VALUE)
+  expect(result).not.toHaveProperty('data')
+  expect(result).not.toHaveProperty('stringData')
+}
+
+describe('SecretService — write responses are names-only', () => {
+  let coreApi: CoreApiMock
+  let svc: SecretService
+
+  beforeEach(() => {
+    coreApi = createCoreApiMock()
+    coreApi.createNamespacedSecret.mockResolvedValue(RAW_WRITE_RESULT)
+    coreApi.readNamespacedSecret.mockResolvedValue(RAW_WRITE_RESULT)
+    coreApi.replaceNamespacedSecret.mockResolvedValue(RAW_WRITE_RESULT)
+    coreApi.patchNamespacedSecret.mockResolvedValue(RAW_WRITE_RESULT)
+    svc = new SecretService(coreApi as unknown as k8s.CoreV1Api, 'default-ns')
+  })
+
+  it.each([
+    [
+      'createSecret',
+      () =>
+        svc.createSecret({
+          name: 'credentials',
+          namespace: 'channels',
+          stringData: { 'caller-key': 'caller-sent-value' },
+        }),
+    ],
+    [
+      'updateSecret',
+      () =>
+        svc.updateSecret({
+          name: 'credentials',
+          namespace: 'channels',
+          stringData: { 'caller-key': 'caller-sent-value' },
+        }),
+    ],
+    [
+      'mergeSecret',
+      () =>
+        svc.mergeSecret({
+          name: 'credentials',
+          namespace: 'channels',
+          stringData: { 'caller-key': 'caller-sent-value' },
+        }),
+    ],
+    [
+      'removeSecretKey',
+      () =>
+        svc.removeSecretKey({
+          name: 'credentials',
+          namespace: 'channels',
+          key: 'caller-key',
+        }),
+    ],
+  ])('%s returns only identity and sorted key names', async (_operation, invoke) => {
+    const result = await invoke()
+    expectNamesOnly(result, {
+      name: 'credentials',
+      namespace: 'channels',
+      keys: ['adjacent-owner-key', 'caller-key'],
+    })
+  })
+
+  it('uses the default namespace in the write summary', async () => {
+    coreApi.createNamespacedSecret.mockResolvedValue({
+      ...RAW_WRITE_RESULT,
+      metadata: { ...RAW_WRITE_RESULT.metadata, namespace: 'default-ns' },
+    })
+    const result = await svc.createSecret({
+      name: 'credentials',
+      stringData: { 'caller-key': 'caller-sent-value' },
+    })
+    expect((result as { namespace: string }).namespace).toBe('default-ns')
+  })
+
+  it('returns a names-only delete acknowledgement after the apiserver succeeds', async () => {
+    const result = await svc.deleteSecret('credentials', 'channels', {
+      uid: 'uid-1',
+      resourceVersion: '42',
+    })
+    expect(result).toEqual({ name: 'credentials', namespace: 'channels', deleted: true })
+    expect(coreApi.deleteNamespacedSecret.mock.calls[0][0].body.preconditions).toEqual({
+      uid: 'uid-1',
+      resourceVersion: '42',
+    })
+  })
+
+  it('propagates delete failures instead of synthesizing success', async () => {
+    coreApi.deleteNamespacedSecret.mockRejectedValueOnce(new Error('delete rejected'))
+    await expect(svc.deleteSecret('credentials', 'channels')).rejects.toThrow('delete rejected')
+  })
+
+  it('omits annotations from the list projection', async () => {
+    coreApi.listNamespacedSecret.mockResolvedValue({
+      items: [
+        {
+          metadata: {
+            name: 'credentials',
+            namespace: 'channels',
+            labels: { owner: 'platform' },
+            annotations: { 'example.invalid/private': 'do-not-return' },
+          },
+          type: 'Opaque',
+          data: { 'caller-key': SENT_SECRET_VALUE },
+        },
+      ],
+    })
+
+    const result = await svc.listSecrets('channels')
+    expect(result).toEqual([
+      {
+        metadata: {
+          name: 'credentials',
+          namespace: 'channels',
+          labels: { owner: 'platform' },
+        },
+        type: 'Opaque',
+        keys: ['caller-key'],
+      },
+    ])
+  })
+})
 
 describe('SecretService — invalid Secret keys never reach the apiserver', () => {
   let coreApi: CoreApiMock

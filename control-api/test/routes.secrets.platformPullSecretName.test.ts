@@ -17,14 +17,32 @@ import request from 'supertest'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
+function writeSummary(body: unknown) {
+  const write = body as {
+    name: string
+    namespace?: string
+    data?: Record<string, string>
+    stringData?: Record<string, string>
+  }
+  return {
+    name: write.name,
+    namespace: write.namespace || 'mcp-server',
+    keys: [...new Set([...Object.keys(write.data ?? {}), ...Object.keys(write.stringData ?? {})])],
+  }
+}
+
 function createGateway() {
   return {
     listSecrets: vi.fn(async () => []),
     listResource: vi.fn(async () => [] as unknown[]),
     getSecret: vi.fn(async () => null),
-    createSecret: vi.fn(async (body: unknown) => body),
-    updateSecret: vi.fn(async (body: unknown) => body),
-    deleteSecret: vi.fn(async (_name: string, _namespace?: string) => ({ deleted: true })),
+    createSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+    updateSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+    deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
+      name,
+      namespace: namespace || 'mcp-server',
+      deleted: true as const,
+    })),
   }
 }
 
@@ -99,7 +117,7 @@ describe('platform-managed Secret name is reserved', () => {
       type: 'kubernetes.io/dockerconfigjson',
       data: { '.dockerconfigjson': 'e30=' },
     })) as never
-    const mergeSecret = vi.fn(async (body: unknown) => body)
+    const mergeSecret = vi.fn(async (body: unknown) => writeSummary(body))
     ;(gateway as unknown as { mergeSecret: unknown }).mergeSecret = mergeSecret
 
     const res = await request(makeApp(gateway))
@@ -118,7 +136,7 @@ describe('platform-managed Secret name is reserved', () => {
       type: 'Opaque',
       data: {},
     })) as never
-    const mergeSecret = vi.fn(async (body: unknown) => body)
+    const mergeSecret = vi.fn(async (body: unknown) => writeSummary(body))
     ;(gateway as unknown as { mergeSecret: unknown }).mergeSecret = mergeSecret
 
     await request(makeApp(gateway))

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
 /** The write shape the admin routes hand to the gateway. */
@@ -12,15 +13,29 @@ type SecretWrite = {
   data?: Record<string, string>
 }
 
+function writeSummary(body: SecretWrite) {
+  return {
+    name: body.name,
+    namespace: body.namespace || 'mcp-server',
+    keys: [
+      ...new Set([...Object.keys(body.data ?? {}), ...Object.keys(body.stringData ?? {})]),
+    ].sort((a, b) => a.localeCompare(b)),
+  }
+}
+
 /**
  * Minimal mock gateway with methods used by the POST /admin/mcp-secrets handler.
  */
 function createGateway() {
   return {
     listSecrets: vi.fn(async () => []),
-    createSecret: vi.fn(async (body: unknown) => body),
-    updateSecret: vi.fn(async (body: unknown) => body),
-    deleteSecret: vi.fn(async (_name: string, _namespace?: string) => ({ deleted: true })),
+    createSecret: vi.fn(async (body: SecretWrite) => writeSummary(body)),
+    updateSecret: vi.fn(async (body: SecretWrite) => writeSummary(body)),
+    deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
+      name,
+      namespace: namespace || 'mcp-server',
+      deleted: true as const,
+    })),
     getSecret: vi.fn(
       async (
         name: string,
@@ -38,7 +53,11 @@ function createGateway() {
     // Secret, values included. A handler that echoed this back would leak
     // every stored credential, so the leak assertions below are meaningful.
     mergeSecret: vi.fn(async (body: SecretWrite) => ({
-      metadata: { name: body.name, namespace: 'mcp-server' },
+      name: body.name,
+      namespace: body.namespace || 'mcp-server',
+      keys: ['EXISTING_KEY', ...Object.keys(body.stringData ?? {})].sort((a, b) =>
+        a.localeCompare(b)
+      ),
       data: Object.fromEntries(
         Object.entries(body.stringData ?? {}).map(([key, value]) => [
           key,
@@ -350,7 +369,11 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
 
     const res = await request(app).delete('/admin/mcp-secrets/my-db-creds').expect(200)
 
-    expect(res.body).toEqual({ deleted: true })
+    expect(res.body).toEqual({
+      name: 'my-db-creds',
+      namespace: 'mcp-server',
+      deleted: true,
+    })
     expect(gateway.deleteSecret).toHaveBeenCalledOnce()
     expect(gateway.deleteSecret).toHaveBeenCalledWith('my-db-creds', 'mcp-server')
   })
@@ -640,17 +663,38 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     // The rotation itself succeeds; only the secondary affectedConnectors
     // lookup fails. The operator must see the rotation as the success it is,
     // not a 500 that suggests the credential is unchanged.
-    gateway.listResource.mockRejectedValueOnce(new Error('mcpservers list forbidden'))
+    const sentinel = 'RP231_NESTED_ERROR_SENTINEL'
+    gateway.listResource.mockRejectedValueOnce(
+      Object.assign(new Error('mcpservers list forbidden'), {
+        response: { body: { value: sentinel } },
+      })
+    )
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     const app = makeApp(gateway)
 
-    const res = await request(app)
-      .put('/admin/mcp-secrets/linear-credentials')
-      .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
-      .expect(200)
+    try {
+      const res = await request(app)
+        .put('/admin/mcp-secrets/linear-credentials')
+        .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
+        .expect(200)
 
-    expect(gateway.mergeSecret).toHaveBeenCalledOnce()
-    expect(res.body.name).toBe('linear-credentials')
-    expect(res.body.affectedConnectors).toEqual([])
+      expect(gateway.mergeSecret).toHaveBeenCalledOnce()
+      expect(res.body.name).toBe('linear-credentials')
+      expect(res.body.affectedConnectors).toEqual([])
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'mcp-secret-rotated-affected-connectors-unavailable',
+          name: 'linear-credentials',
+          namespace: 'mcp-server',
+        }),
+        'Affected connectors unavailable after MCP Secret rotation'
+      )
+      const [fields] = warnSpy.mock.calls[0]
+      expect(fields).not.toHaveProperty('err')
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(sentinel)
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('returns 500 when gateway.mergeSecret throws', async () => {

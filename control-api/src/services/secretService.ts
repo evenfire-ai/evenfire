@@ -2,6 +2,57 @@ import * as k8s from '@kubernetes/client-node'
 import { SecretPreconditions, SecretUpsertRequest } from '../types.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
 
+export interface SecretSummary {
+  name: string
+  namespace: string
+  keys: string[]
+}
+
+export interface DeleteSecretSummary {
+  name: string
+  namespace: string
+  deleted: true
+}
+
+export function toPublicSecretSummary(summary: SecretSummary): SecretSummary {
+  return {
+    name: summary.name,
+    namespace: summary.namespace,
+    keys: [...summary.keys],
+  }
+}
+
+export function toPublicDeleteSecretSummary(summary: DeleteSecretSummary): DeleteSecretSummary {
+  return {
+    name: summary.name,
+    namespace: summary.namespace,
+    deleted: true,
+  }
+}
+
+type Assert<T extends true> = T
+type HasExactKeys<T, Keys extends PropertyKey> =
+  Exclude<keyof T, Keys> extends never
+    ? Exclude<Keys, keyof T> extends never
+      ? true
+      : false
+    : false
+
+// Compile-time ratchet: adding `data`, `stringData`, or another field to either
+// public write DTO fails the production typecheck.
+type _SecretSummaryIsNamesOnly = Assert<HasExactKeys<SecretSummary, 'name' | 'namespace' | 'keys'>>
+type _DeleteSecretSummaryIsNamesOnly = Assert<
+  HasExactKeys<DeleteSecretSummary, 'name' | 'namespace' | 'deleted'>
+>
+
+function summarizeSecret(result: k8s.V1Secret, name: string, namespace: string): SecretSummary {
+  return toPublicSecretSummary({
+    name,
+    namespace,
+    keys: Object.keys(result.data ?? {}).sort((a, b) => a.localeCompare(b)),
+  })
+}
+
 export class SecretService {
   constructor(
     private readonly coreApi: k8s.CoreV1Api,
@@ -15,7 +66,6 @@ export class SecretService {
         name: s.metadata?.name,
         namespace: s.metadata?.namespace,
         labels: s.metadata?.labels || {},
-        annotations: s.metadata?.annotations || {},
       },
       type: s.type,
       keys: Object.keys(s.data || {}).sort((a, b) => a.localeCompare(b)),
@@ -30,14 +80,15 @@ export class SecretService {
     return this.coreApi.readNamespacedSecret({ namespace, name })
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async createSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     assertValidSecretWriteKeys(req)
+    const ns = req.namespace || this.defaultNamespace
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
       kind: 'Secret',
       metadata: {
         name: req.name,
-        namespace: req.namespace || this.defaultNamespace,
+        namespace: ns,
         labels: req.labels,
         annotations: req.annotations,
       },
@@ -46,10 +97,8 @@ export class SecretService {
       stringData: req.stringData,
     }
 
-    return this.coreApi.createNamespacedSecret({
-      namespace: req.namespace || this.defaultNamespace,
-      body,
-    })
+    const created = await this.coreApi.createNamespacedSecret({ namespace: ns, body })
+    return summarizeSecret(created, req.name, ns)
   }
 
   /**
@@ -77,7 +126,7 @@ export class SecretService {
   async updateSecret(
     req: SecretUpsertRequest,
     precondition?: SecretPreconditions
-  ): Promise<unknown> {
+  ): Promise<SecretSummary> {
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
     const existing = precondition?.resourceVersion
@@ -102,7 +151,12 @@ export class SecretService {
       stringData: req.stringData,
     }
 
-    return this.coreApi.replaceNamespacedSecret({ namespace: ns, name: req.name, body })
+    const updated = await this.coreApi.replaceNamespacedSecret({
+      namespace: ns,
+      name: req.name,
+      body,
+    })
+    return summarizeSecret(updated, req.name, ns)
   }
 
   /**
@@ -125,7 +179,7 @@ export class SecretService {
    * from a route targeting any OTHER namespace unless that namespace's Role
    * has been granted `patch`.
    */
-  async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async mergeSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
 
@@ -138,7 +192,7 @@ export class SecretService {
     if (req.labels !== undefined) body.metadata = { labels: req.labels }
     if (req.type !== undefined) body.type = req.type
 
-    return this.coreApi.patchNamespacedSecret(
+    const merged = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
         name: req.name,
@@ -148,14 +202,19 @@ export class SecretService {
         middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
       }
     )
+    return summarizeSecret(merged, req.name, ns)
   }
 
-  async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
+  async removeSecretKey(req: {
+    name: string
+    namespace?: string
+    key: string
+  }): Promise<SecretSummary> {
     assertValidSecretDataKey(req.key)
     const ns = req.namespace || this.defaultNamespace
     const body = { data: { [req.key]: null } } as unknown as Partial<k8s.V1Secret>
 
-    return this.coreApi.patchNamespacedSecret(
+    const updated = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
         name: req.name,
@@ -165,6 +224,7 @@ export class SecretService {
         middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
       }
     )
+    return summarizeSecret(updated, req.name, ns)
   }
 
   /**
@@ -182,10 +242,11 @@ export class SecretService {
     name: string,
     namespace?: string,
     precondition?: SecretPreconditions
-  ): Promise<unknown> {
+  ): Promise<DeleteSecretSummary> {
+    const ns = namespace || this.defaultNamespace
     const hasPrecondition = Boolean(precondition?.uid || precondition?.resourceVersion)
-    return this.coreApi.deleteNamespacedSecret({
-      namespace: namespace || this.defaultNamespace,
+    await this.coreApi.deleteNamespacedSecret({
+      namespace: ns,
       name,
       ...(hasPrecondition && {
         body: {
@@ -198,5 +259,6 @@ export class SecretService {
         },
       }),
     })
+    return { name, namespace: ns, deleted: true }
   }
 }

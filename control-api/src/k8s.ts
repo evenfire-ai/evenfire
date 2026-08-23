@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config.js'
+import { rootLogger } from './observability/logger.js'
 import { HostEnvService } from './services/hostEnvService.js'
 import { HostOverviewService } from './services/hostOverviewService.js'
 import {
@@ -7,13 +8,19 @@ import {
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
-import { SecretService } from './services/secretService.js'
+import {
+  type DeleteSecretSummary,
+  SecretService,
+  type SecretSummary,
+} from './services/secretService.js'
 import {
   ClerumResourceType,
   HostOverview,
   SecretPreconditions,
   SecretUpsertRequest,
 } from './types.js'
+
+const logger = rootLogger.child({ module: 'k8s-gateway' })
 
 /**
  * Namespaces where exec operations are permitted.
@@ -401,7 +408,7 @@ export class K8sGateway {
     return this.secrets.getSecret(name, namespace)
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async createSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     return this.secrets.createSecret(req)
   }
 
@@ -409,15 +416,19 @@ export class K8sGateway {
   async updateSecret(
     req: SecretUpsertRequest,
     precondition?: SecretPreconditions
-  ): Promise<unknown> {
+  ): Promise<SecretSummary> {
     return this.secrets.updateSecret(req, precondition)
   }
 
-  async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async mergeSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
     return this.secrets.mergeSecret(req)
   }
 
-  async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
+  async removeSecretKey(req: {
+    name: string
+    namespace?: string
+    key: string
+  }): Promise<SecretSummary> {
     return this.secrets.removeSecretKey(req)
   }
 
@@ -426,7 +437,7 @@ export class K8sGateway {
     name: string,
     namespace?: string,
     precondition?: SecretPreconditions
-  ): Promise<unknown> {
+  ): Promise<DeleteSecretSummary> {
     return this.secrets.deleteSecret(name, namespace, precondition)
   }
 
@@ -553,9 +564,14 @@ export class K8sGateway {
       if (isExecOutputLimitError(findError)) throw findError
       // BusyBox find (Alpine/node images) lacks -printf. Keep -type f in the
       // fallback so directories and symlinks do not become downloadable entries.
-      console.warn(
-        'find -printf failed, falling back to find -type f:',
-        findError instanceof Error ? findError.message : String(findError)
+      logger.warn(
+        {
+          event: 'artifact-listing-find-printf-unsupported',
+          podName,
+          namespace,
+          containerName,
+        },
+        'find -printf failed; falling back to find -type f'
       )
       return this.execRaw(
         podName,
@@ -727,9 +743,9 @@ export async function listRecipePodsAcrossNamespaces(
       } catch (err) {
         const status = extractHttpStatus(err)
         if (status === 403 || status === 404) {
-          console.warn(
-            `listPodsForRecipe: skipping namespace "${namespace}" (HTTP ${status}) — ` +
-              'control-api lacks pod list RBAC there or the namespace does not exist'
+          logger.warn(
+            { namespace, status, recipeName },
+            'Skipping recipe pod namespace without list access'
           )
           return []
         }
