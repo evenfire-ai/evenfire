@@ -88,7 +88,7 @@ assert_result "${proxy}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_808
 echo "PASS: live policy helper rejects an unscoped mcp-proxy TCP 8083 lane"
 
 proxy_range="$(mutate proxy-range 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host" }["spec"]["egress"] << { "to" => [{ "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "control-plane" } }, "podSelector" => { "matchLabels" => { "app" => "host-context-controller-api-gateway" } } }], "ports" => [{ "port" => 8000, "endPort" => 9000, "protocol" => "TCP" }] }')"
-assert_result "${proxy_range}" '{"egress_contract_ok":true,"hcc_lane":true,"proxy_8083":true}'
+assert_result "${proxy_range}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":true}'
 echo "PASS: live policy helper rejects a TCP range containing 8083"
 
 invalid_selector="$(mutate invalid-selector 'data["items"].select { |d| d["kind"] == "NetworkPolicy" && d.dig("metadata", "namespace") == "mcp-host" }.each { |d| d["spec"]["podSelector"] = { "matchLabels" => { "np08.invalid/never" => "true" } } }')"

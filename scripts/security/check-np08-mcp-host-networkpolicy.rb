@@ -121,7 +121,7 @@ end
 port_is_numeric = lambda do |port|
   port.is_a?(Hash) &&
     port["port"].is_a?(Integer) &&
-    (port["endPort"].nil? || port["endPort"].is_a?(Integer))
+    port["endPort"].nil?
 end
 
 allows_tcp_port = lambda do |rule, expected_port|
@@ -129,9 +129,7 @@ allows_tcp_port = lambda do |rule, expected_port|
     next false unless port.is_a?(Hash)
     next false unless port.fetch("protocol", "TCP") == "TCP"
 
-    first = port["port"]
-    last = port.fetch("endPort", first)
-    first.is_a?(Integer) && last.is_a?(Integer) && first <= expected_port && expected_port <= last
+    port["port"] == expected_port && port["endPort"].nil?
   end
 end
 
