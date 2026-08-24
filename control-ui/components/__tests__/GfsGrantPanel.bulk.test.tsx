@@ -185,6 +185,10 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(existing).getByText('Read')).toBeTruthy()
     expect(within(existing).getByText('Write')).toBeTruthy()
     expect(within(existing).getByText('X')).toBeTruthy()
+    expect(
+      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
+        .className
+    ).toContain('cu-gfs-existing-access__revoke')
 
     fireEvent.click(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })

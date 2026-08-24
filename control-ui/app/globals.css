@@ -12302,11 +12302,20 @@ button.cu-gfs-tree__button:focus-visible,
   padding: var(--cu-space-1) 0;
 }
 
+.cu-gfs-grant__scope-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+}
+
 .cu-gfs-grant__actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--cu-space-2);
   justify-content: flex-end;
+  margin-left: auto;
 }
 
 .cu-gfs-existing-access {
@@ -12427,6 +12436,29 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-existing-access__item > .cu-btn {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.cu-gfs-existing-access__revoke.cu-btn {
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--cu-danger);
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.cu-gfs-existing-access__revoke.cu-btn:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--cu-danger-hover);
+}
+
+.cu-gfs-existing-access__revoke.cu-btn:focus-visible {
+  border-color: transparent;
 }
 
 .cu-gfs-existing-access__error {

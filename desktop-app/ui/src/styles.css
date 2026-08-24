@@ -13741,6 +13741,15 @@ pre {
   flex-wrap: wrap;
   gap: var(--space-2);
   justify-content: flex-end;
+  margin-left: auto;
+}
+
+.da-gfs-delegation__scope-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .da-gfs-footer-actions {
@@ -14794,6 +14803,21 @@ pre {
   display: inline-flex;
   flex-wrap: wrap;
   gap: var(--space-1);
+}
+
+.da-gfs-grant-list__revoke.ui-icon-button {
+  color: var(--danger);
+  border-color: transparent;
+  background: transparent;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.da-gfs-grant-list__revoke.ui-icon-button:hover:enabled,
+.da-gfs-grant-list__revoke.ui-icon-button:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  color: var(--danger);
 }
 
 @media (max-width: 940px) {

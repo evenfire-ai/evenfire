@@ -136,27 +136,29 @@ export function GfsDelegationPanel({
           Agent selections are limited to read and write. Incompatible permissions were removed.
         </p>
       ) : null}
-      {isDirectory ? (
-        <label className="da-gfs-delegation__inherit">
-          <input
-            checked={inherit}
-            disabled={busy}
-            onChange={event => setInherit(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Include contents of this folder</span>
-        </label>
-      ) : null}
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
-      <div className="da-gfs-delegation__actions">
-        <Button
-          type="button"
-          loading={busy}
-          disabled={busy || subjectKeys.length === 0 || bits.length === 0}
-          onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
-        >
-          Grant access
-        </Button>
+      <div className="da-gfs-delegation__scope-actions">
+        {isDirectory ? (
+          <label className="da-gfs-delegation__inherit">
+            <input
+              checked={inherit}
+              disabled={busy}
+              onChange={event => setInherit(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Include contents of this folder</span>
+          </label>
+        ) : null}
+        <div className="da-gfs-delegation__actions">
+          <Button
+            type="button"
+            loading={busy}
+            disabled={busy || subjectKeys.length === 0 || bits.length === 0}
+            onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
+          >
+            Grant access
+          </Button>
+        </div>
       </div>
       {error !== null && <StatusBanner tone="error" text={error} />}
     </div>

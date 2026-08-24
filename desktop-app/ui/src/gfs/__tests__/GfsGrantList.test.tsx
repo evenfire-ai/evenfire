@@ -67,6 +67,9 @@ describe('GfsGrantList', () => {
     expect(within(agentRow).getByText('Write')).toBeTruthy()
     expect(within(agentRow).getByText('Includes contents')).toBeTruthy()
     expect(within(agentRow).getByText('X')).toBeTruthy()
+    expect(
+      within(agentRow).getByRole('button', { name: 'Revoke access for Chat LLM' }).className
+    ).toContain('da-gfs-grant-list__revoke')
 
     const userRow = screen.getByText('Test Two').closest('li')!
     expect(within(userRow).getByText('Read')).toBeTruthy()

@@ -1,4 +1,4 @@
-import { Badge, Button, Pill, StatusBanner } from '@components/Common'
+import { Badge, IconButton, Pill, StatusBanner } from '@components/Common'
 import { GFS_PERMISSION_LABELS } from '@/gfs/GfsPermissionDropdown/constants'
 import type {
   GfsAgentSubjectOption,
@@ -97,18 +97,18 @@ export function GfsGrantList({
               </span>
               {item.inherit ? <Badge tone="accent">Includes contents</Badge> : null}
             </span>
-            <Button
-              aria-label={`Revoke access for ${label}`}
+            <IconButton
               color="danger"
+              className="da-gfs-grant-list__revoke"
               data-testid={`gfs-revoke-grant-${item.id}`}
               disabled={revoking}
+              label={`Revoke access for ${label}`}
               onClick={() => void onRevoke(item, label)}
-              size="sm"
-              type="button"
-              variant="outline"
+              size="xs"
+              variant="ghost"
             >
               X
-            </Button>
+            </IconButton>
           </li>
         )
       })}
@@ -134,18 +134,18 @@ export function GfsGrantList({
               </span>
               {item.includeDescendants ? <Badge tone="accent">Includes contents</Badge> : null}
             </span>
-            <Button
-              aria-label={`Revoke shared access for ${label}`}
+            <IconButton
               color="danger"
+              className="da-gfs-grant-list__revoke"
               data-testid={`gfs-revoke-share-${item.id}`}
               disabled={revokingShare || !onRevokeShare}
+              label={`Revoke shared access for ${label}`}
               onClick={() => void onRevokeShare?.(item, label)}
-              size="sm"
-              type="button"
-              variant="outline"
+              size="xs"
+              variant="ghost"
             >
               X
-            </Button>
+            </IconButton>
           </li>
         )
       })}

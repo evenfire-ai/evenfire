@@ -393,19 +393,21 @@ export function GfsGrantPanel({
           removed.
         </p>
       ) : null}
-      {canIncludeDescendants ? (
-        <CheckboxField
-          className="cu-gfs-grant__scope"
-          label="Include contents of this folder"
-          checked={includeDescendants}
-          onChange={() => setIncludeDescendants(current => !current)}
-          disabled={actionPending}
-        />
-      ) : null}
-      <div className="cu-gfs-grant__actions">
-        <Button variant="primary" disabled={!canSubmit} onClick={() => submit('grant')}>
-          Grant access
-        </Button>
+      <div className="cu-gfs-grant__scope-actions">
+        {canIncludeDescendants ? (
+          <CheckboxField
+            className="cu-gfs-grant__scope"
+            label="Include contents of this folder"
+            checked={includeDescendants}
+            onChange={() => setIncludeDescendants(current => !current)}
+            disabled={actionPending}
+          />
+        ) : null}
+        <div className="cu-gfs-grant__actions">
+          <Button variant="primary" disabled={!canSubmit} onClick={() => submit('grant')}>
+            Grant access
+          </Button>
+        </div>
       </div>
       {error ? (
         <p role="alert" className="cu-field__error">
@@ -468,11 +470,13 @@ export function GfsGrantPanel({
                   </span>
                   <Button
                     aria-label={`Remove ${item.kind} access for ${label}`}
+                    className="cu-gfs-existing-access__revoke"
                     data-testid={`gfs-revoke-${item.kind}-${item.id}`}
                     title={`Remove ${item.kind} access for ${label}`}
                     size="sm"
                     disabled={actionPending}
                     onClick={() => void revokeAccess(item)}
+                    variant="ghost"
                   >
                     X
                   </Button>
