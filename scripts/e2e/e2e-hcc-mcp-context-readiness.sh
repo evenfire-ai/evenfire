@@ -716,19 +716,24 @@ function get(path) {
 }
 (async () => {
   const ready = await get('/ready');
-  const scoped = await get('/api/v1/mcpservers/context/' + encodeURIComponent(context));
-  const body = JSON.parse(scoped.body);
-  const fixture = body.servers?.find(server => server.name === expected);
+  const inventory = await get('/api/v1/mcpservers');
+  const body = JSON.parse(inventory.body);
+  const fixture = body.servers?.find(
+    server => server.name === expected && server.contextRef === context
+  );
   if (ready.status !== 200 || JSON.parse(ready.body).ready !== true) {
     throw new Error('readiness regressed: ' + ready.status + ' ' + ready.body);
   }
-  if (scoped.status !== 200 || !fixture || fixture.status?.ready !== true) {
-    throw new Error('latest Context did not converge in discovery: ' + scoped.status + ' ' + scoped.body);
+  if (inventory.status !== 200 || !fixture || fixture.status?.ready !== true) {
+    throw new Error(
+      'latest Context did not converge in global metadata inventory: ' +
+      inventory.status + ' ' + inventory.body
+    );
   }
   console.log(JSON.stringify({
     readyStatus: ready.status,
-    scopedDiscoveryStatus: scoped.status,
-    contextRef: body.contextRef,
+    globalInventoryStatus: inventory.status,
+    contextRef: fixture.contextRef,
     fixture: fixture.name,
     fixtureReady: fixture.status.ready
   }));
@@ -1773,10 +1778,10 @@ wait_until 300 "all peer MCP/Context runtimes to converge after releasing the he
 hcc_identity_is_stable ||
   die "HCC restarted instead of completing the released background convergence"
 final_probe="$(probe_hcc_final_context)" ||
-  die "HCC final Context-scoped discovery did not expose the converged fixture"
+  die "HCC final global metadata inventory did not expose the converged fixture in its Context"
 echo "$final_probe" | jq -e \
   --arg fixture "$MCP_NAME" --arg context "$CONTEXT_NAME" '
-    .readyStatus == 200 and .scopedDiscoveryStatus == 200 and
+    .readyStatus == 200 and .globalInventoryStatus == 200 and
     .fixture == $fixture and .fixtureReady == true and .contextRef == $context
   ' >/dev/null ||
   die "HCC final probe returned an invalid result: ${final_probe}"

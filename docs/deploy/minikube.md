@@ -221,6 +221,11 @@ single-node as the default, adds `--nodes=<n>` only when
 `MINIKUBE_MULTI_NODE=true` or `MINIKUBE_NODES>1`, enables
 `default-storageclass` and `storage-provisioner`, and fails if native minikube
 status or required node/storage readiness checks do not pass.
+After the cluster is ready, startup performs an explicit MCP-only auth-key
+bootstrap for the documented shared profile. It passes
+`--shared-profile-bootstrap --skip-gfs --require-mcp`, so it does not mutate
+the GFS plane or claim a branch-owned T2 lease. Standalone auth-key sync and
+all T2/GFS mutations remain behind the branch-profile lease.
 If `full-setup.sh` detects a broken profile, it refuses destructive recreation
 unless `MINIKUBE_RECREATE_PROFILE=true` and `CONFIRM_PROFILE=<profile>` are both
 set for that exact profile.

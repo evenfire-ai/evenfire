@@ -26,6 +26,7 @@ const NEW_SINGLE_KEY = [
   'moonshot',
   'nebius',
   'novita',
+  'minimax',
 ] as const
 
 function collectProviderEnums(crdFile: string): string[][] {
@@ -55,7 +56,7 @@ function collectProviderEnums(crdFile: string): string[][] {
 }
 
 describe('LLM provider CRD enums', () => {
-  it('host.yaml carries all 15 new providers (incl. azure) in both provider enums', () => {
+  it('host.yaml carries all 16 new providers (incl. azure) in both provider enums', () => {
     const enums = collectProviderEnums('host.yaml')
     // spec.model.provider + spec.llmPolicy.fallbacks[].provider
     expect(enums).toHaveLength(2)
@@ -69,7 +70,7 @@ describe('LLM provider CRD enums', () => {
     }
   })
 
-  it('workflowrecipe.yaml carries the 14 single-key providers but EXCLUDES azure and bedrock', () => {
+  it('workflowrecipe.yaml carries the 15 single-key providers but EXCLUDES azure and bedrock', () => {
     const enums = collectProviderEnums('workflowrecipe.yaml')
     // the two WRC provider enums (model.provider + a second one ~line 543)
     expect(enums).toHaveLength(2)

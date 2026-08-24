@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
+import { config } from '../config'
+import { ContextMapperRequestError } from '../contextMapperClient'
 import {
   admitDevelopmentMcpServers,
   createCoalescedPollRunner,
+  createMcpAuthorityPollFailureOptions,
+  createMcpAuthorityStalenessDeadline,
+  isMcpAuthorityStale,
   startContextMapperPolling,
   stopContextMapperPolling,
 } from '../main'
@@ -12,6 +17,7 @@ import {
   replaceAuthoritativeMcpFleet,
   runAuthoritativeMcpInitialization,
 } from '../mcp/authoritativeFleet'
+import { handleMcpAuthorityPollFailure } from '../mcp/authorityLifecycle'
 import { McpManager } from '../mcp/manager'
 import type { McpServerInfo } from '../types'
 
@@ -93,14 +99,13 @@ describe('runAuthoritativeMcpInitialization', () => {
         effects.push('ready')
         return true
       }),
-      listServersByContext: vi.fn(async () => {
+      listServersForHost: vi.fn(async () => {
         effects.push('snapshot')
         return []
       }),
     }
 
     await runAuthoritativeMcpInitialization({
-      contextRef: 'production',
       client,
       replaceFleet: async servers => {
         effects.push('replace')
@@ -126,10 +131,9 @@ describe('runAuthoritativeMcpInitialization', () => {
 
     await expect(
       runAuthoritativeMcpInitialization({
-        contextRef: 'production',
         client: {
           healthCheck: vi.fn().mockResolvedValue(true),
-          listServersByContext: vi.fn().mockRejectedValue(discoveryError),
+          listServersForHost: vi.fn().mockRejectedValue(discoveryError),
         },
         replaceFleet,
         sleep: vi.fn(),
@@ -175,10 +179,9 @@ describe('runAuthoritativeMcpInitialization', () => {
       )
 
       const initialization = runAuthoritativeMcpInitialization({
-        contextRef: 'production',
         client: {
           healthCheck: vi.fn().mockResolvedValue(true),
-          listServersByContext: vi.fn(async () => {
+          listServersForHost: vi.fn(async () => {
             discoveryStarted.resolve()
             return delayedDiscovery.promise
           }),
@@ -208,12 +211,11 @@ describe('runAuthoritativeMcpInitialization', () => {
     const replaceFleet = vi.fn()
     const sleep = vi.fn().mockResolvedValue(undefined)
     const healthCheck = vi.fn().mockResolvedValue(false)
-    const listServersByContext = vi.fn()
+    const listServersForHost = vi.fn()
 
     await expect(
       runAuthoritativeMcpInitialization({
-        contextRef: 'production',
-        client: { healthCheck, listServersByContext },
+        client: { healthCheck, listServersForHost },
         replaceFleet,
         sleep,
         maxRetries: 2,
@@ -222,7 +224,7 @@ describe('runAuthoritativeMcpInitialization', () => {
 
     expect(healthCheck).toHaveBeenCalledTimes(2)
     expect(sleep).toHaveBeenCalledTimes(1)
-    expect(listServersByContext).not.toHaveBeenCalled()
+    expect(listServersForHost).not.toHaveBeenCalled()
     expect(replaceFleet).not.toHaveBeenCalled()
   })
 })
@@ -527,16 +529,127 @@ describe('authoritative poll publication fence', () => {
 })
 
 describe('context-mapper polling lifecycle', () => {
+  it('wires the live manager and configured staleness ceiling into poll failure handling', () => {
+    const manager = {}
+    const lastSuccessAt = 1_000
+    const staleNow = lastSuccessAt + config.hccAuthorityMaxStalenessMs
+    const revoke = vi.fn()
+    const onCallerAuthorizationRejected = vi.fn()
+    const onInventoryAuthorityRevoked = vi.fn()
+    const onUnavailable = vi.fn()
+    const options = createMcpAuthorityPollFailureOptions({
+      getManager: () => manager,
+      lastSuccessAt: () => lastSuccessAt,
+      now: () => staleNow,
+      revoke,
+      onCallerAuthorizationRejected,
+      onInventoryAuthorityRevoked,
+      onUnavailable,
+    })
+
+    expect(options.maxStalenessMs).toBe(config.hccAuthorityMaxStalenessMs)
+    const disposition = handleMcpAuthorityPollFailure(
+      new ContextMapperRequestError(503, 'inventory', false),
+      options
+    )
+
+    expect(disposition).toBe('authority_stale')
+    expect(revoke).toHaveBeenCalledWith('authority_stale', true)
+    expect(onUnavailable).toHaveBeenCalledTimes(1)
+    expect(onCallerAuthorizationRejected).not.toHaveBeenCalled()
+    expect(onInventoryAuthorityRevoked).not.toHaveBeenCalled()
+
+    const noManagerRevoke = vi.fn()
+    const noManagerDisposition = handleMcpAuthorityPollFailure(
+      new ContextMapperRequestError(503, 'inventory', false),
+      createMcpAuthorityPollFailureOptions({
+        getManager: () => null,
+        lastSuccessAt: () => lastSuccessAt,
+        now: () => staleNow,
+        revoke: noManagerRevoke,
+        onCallerAuthorizationRejected: vi.fn(),
+        onInventoryAuthorityRevoked: vi.fn(),
+        onUnavailable: vi.fn(),
+      })
+    )
+    expect(noManagerDisposition).toBe('unavailable')
+    expect(noManagerRevoke).not.toHaveBeenCalled()
+  })
+
   it('keeps exactly one interval producer when polling is started again', () => {
     vi.useFakeTimers()
     try {
-      startContextMapperPolling('first-context')
+      startContextMapperPolling()
       expect(vi.getTimerCount()).toBe(1)
 
-      startContextMapperPolling('replacement-context')
+      startContextMapperPolling()
       expect(vi.getTimerCount()).toBe(1)
     } finally {
       stopContextMapperPolling()
+      vi.useRealTimers()
+    }
+  })
+
+  it('bounds transient authority preservation to the configured staleness window', () => {
+    expect(isMcpAuthorityStale(1_000, 60_999, 60_000)).toBe(false)
+    expect(isMcpAuthorityStale(1_000, 61_000, 60_000)).toBe(true)
+    expect(isMcpAuthorityStale(0, 1_000_000, 60_000)).toBe(false)
+    expect(isMcpAuthorityStale(1_000, 61_000, 0)).toBe(false)
+  })
+
+  it('revokes at the absolute staleness deadline without waiting for another poll', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-16T00:00:00.000Z'))
+    try {
+      const expired = vi.fn()
+      const deadline = createMcpAuthorityStalenessDeadline(60_000, expired)
+
+      deadline.recordSuccess()
+      vi.advanceTimersByTime(59_999)
+      expect(expired).not.toHaveBeenCalled()
+
+      vi.advanceTimersByTime(1)
+      expect(expired).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it('moves the absolute deadline forward only after a newer authoritative success', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-16T00:00:00.000Z'))
+    try {
+      const expired = vi.fn()
+      const deadline = createMcpAuthorityStalenessDeadline(60_000, expired)
+
+      deadline.recordSuccess()
+      vi.advanceTimersByTime(50_000)
+      deadline.recordSuccess()
+      vi.advanceTimersByTime(10_000)
+      expect(expired).not.toHaveBeenCalled()
+
+      vi.advanceTimersByTime(50_000)
+      expect(expired).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels the absolute deadline when authority is withdrawn explicitly', () => {
+    vi.useFakeTimers()
+    try {
+      const expired = vi.fn()
+      const deadline = createMcpAuthorityStalenessDeadline(60_000, expired)
+
+      deadline.recordSuccess()
+      deadline.clear()
+      vi.advanceTimersByTime(60_000)
+
+      expect(expired).not.toHaveBeenCalled()
+    } finally {
+      vi.clearAllTimers()
       vi.useRealTimers()
     }
   })
@@ -1533,6 +1646,54 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
     await expect(reconcileAuthoritativeMcpSnapshot(options)).resolves.toBeUndefined()
     expect(manager.replaceServer).toHaveBeenCalledTimes(2)
     expect(serverState.get(modified.name)).toBe(JSON.stringify(modified))
+  })
+
+  it('revokes the old bearer before admitting a changed credential revision', async () => {
+    const previous = readyServer({
+      auth: undefined,
+      authRequired: true,
+      credentialRevision: 'credential-revision-1',
+    })
+    const rotated = readyServer({
+      auth: undefined,
+      authRequired: true,
+      credentialRevision: 'credential-revision-2',
+    })
+    const connected = new Set([previous.name])
+    const effects: string[] = []
+    const manager = {
+      addServer: appliedAdmission(),
+      replaceServer: appliedAdmission(async (_server, authToken) => {
+        effects.push(`replace:${authToken}`)
+        connected.add(rotated.name)
+      }),
+      removeServer: vi.fn(),
+      detachServer: vi.fn((name: string) => {
+        effects.push('detach')
+        connected.delete(name)
+        return vi.fn().mockResolvedValue(undefined)
+      }),
+      getConnectedServers: vi.fn(() => [...connected]),
+      getKnownServers: vi.fn(() => [previous.name]),
+      recordAdmissionFailure: vi.fn(),
+    }
+    const getAuthToken = vi.fn(async () => {
+      effects.push('credential')
+      return 'rotated-token'
+    })
+    const serverState = new Map([[previous.name, JSON.stringify(previous)]])
+
+    await reconcileAuthoritativeMcpSnapshot({
+      servers: [rotated],
+      manager,
+      serverState,
+      getAuthToken,
+    })
+
+    expect(effects[0]).toBe('detach')
+    expect(getAuthToken).toHaveBeenCalledWith(rotated.name, 'credential-revision-2')
+    expect(effects).toEqual(['detach', 'credential', 'replace:rotated-token'])
+    expect(serverState.get(rotated.name)).toBe(JSON.stringify(rotated))
   })
 
   it('does not tear down a healthy connection for a status-only readiness degradation', async () => {

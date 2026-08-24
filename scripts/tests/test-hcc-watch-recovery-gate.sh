@@ -1613,6 +1613,24 @@ else
   fail "MCP readiness gate duplicates ownership or retains a deadline, pod-absence, or port edge"
 fi
 
+# The caller-selected v1 Context route is a 410 tombstone. This readiness gate
+# may use the temporary PR 2 global metadata inventory, but it must bind the
+# uniquely named fixture back to the expected Context before claiming success.
+mcp_final_context_probe="$(
+  sed -n '/^probe_hcc_final_context() {$/,/^probe_hcc_ready_pod() {$/p' \
+    "$MCP_READINESS_GATE"
+)"
+# Literal source-code assertions.
+# shellcheck disable=SC2016
+if [[ "$mcp_final_context_probe" == *"get('/api/v1/mcpservers')"* ]] &&
+   [[ "$mcp_final_context_probe" == *'server.contextRef === context'* ]] &&
+   [[ "$mcp_final_context_probe" == *'fixture.status?.ready !== true'* ]] &&
+   [[ "$mcp_final_context_probe" != *'/api/v1/mcpservers/context/'* ]]; then
+  pass "MCP readiness final probe uses global metadata and binds the fixture to its Context"
+else
+  fail "MCP readiness final probe calls a retired route or loses Context binding"
+fi
+
 # A single held McpServer proves the minimal failure, but this gate must also
 # cross the controller's bounded worker width with independent, gate-owned
 # McpServer/Context pairs. Keep this as a static contract so future edits do

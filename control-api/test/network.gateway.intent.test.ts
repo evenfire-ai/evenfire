@@ -601,13 +601,13 @@ describe('network/gateway intent (manifest-level)', () => {
     // agree with the profile funnel. It is not the Upload v2 product authority.
     const hccDeployment = read(`${BASE}/control-plane/host-context-controller.yaml`)
     const gfscCapMatch = hccDeployment.match(
-      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*"?(\d+)"?/
+      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*(["']?)(\d+)\1/
     )
     expect(
       gfscCapMatch,
       'GFS_MAX_WRITE_BODY_BYTES env must be set on the HCC deployment'
     ).not.toBeNull()
-    const legacyGfscWriteCap = Number(gfscCapMatch![1])
+    const legacyGfscWriteCap = Number(gfscCapMatch![2])
     const funnelConf = docContaining(
       yamlDocs(read(`${BASE}/profiles/configmaps.yaml`)),
       'name: profile-control-funnel-nginx'

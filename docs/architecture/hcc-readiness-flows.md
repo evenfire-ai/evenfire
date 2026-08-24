@@ -84,7 +84,13 @@ The coordinator is the **single owner** of external-egress reconcile cadence
 The HCC Deployment ships `strategy: Recreate`, `replicas: 1`, and
 `progressDeadlineSeconds: 1200`: the stateless single-writer safety model has no
 leader election, so two concurrently-running controllers must be impossible during a
-rollout. The trade-off (full HCC control-plane downtime per rollout; a rollout whose
-new pod never becomes Ready needs a manual `kubectl rollout undo`) is declared in the
-manifest and asserted by the bootstrap gate. `validate-postgres-single-writer-strategy.sh`
-enforces the invariant on the rendered manifest in CI.
+rollout. The trade-off (full HCC control-plane downtime per rollout; a botched Recreate
+leaves `/ready` 503) is declared in the manifest and asserted by the bootstrap
+gate. `progressDeadlineSeconds: 1200` is detection-only. Recovery is owned by
+the evenfire-infra deploy workflows: they capture the last-known-good revision,
+wait 90s for HCC, and run `rollout undo --to-revision` for
+`control-plane/host-context-controller` only. The cluster may return to
+last-known-good; the deploy job still fails (evenfire#391). Do not treat e2e
+`cleanup()` image restore as that pipeline recovery.
+`validate-postgres-single-writer-strategy.sh` enforces the Recreate +
+replicas:1 invariant on the rendered manifest in CI.
