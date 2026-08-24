@@ -72,10 +72,14 @@ const TEAM_GFS_STREAM_HEAD_SQL = `WITH requested AS (
       LIMIT requested.take
    ) candidate
 )
-SELECT kind, subject_id, resource_id::text AS logical_id
-  FROM heads
- ORDER BY ${catalogTextOrderSql('logical_id')}, ${catalogTextOrderSql('kind')},
-          ${catalogTextOrderSql('subject_id')}`
+SELECT ordered.kind, ordered.subject_id, ordered.logical_id
+  FROM (
+    SELECT kind, subject_id, resource_id::text AS logical_id
+      FROM heads
+  ) ordered
+ ORDER BY ${catalogTextOrderSql('ordered.logical_id')},
+          ${catalogTextOrderSql('ordered.kind')},
+          ${catalogTextOrderSql('ordered.subject_id')}`
 
 function compareHead(left: TeamGfsStreamHead, right: TeamGfsStreamHead): number {
   return (
