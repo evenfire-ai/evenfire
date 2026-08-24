@@ -76,7 +76,6 @@ export type CatalogPrincipalSnapshot = Readonly<{
   sessionContract: 'v1' | 'v2'
   sessionRevision: string
   userRevision: string
-  catalogRevision: string
   authorizationRevision: string
   memberships: readonly Readonly<{
     teamId: string

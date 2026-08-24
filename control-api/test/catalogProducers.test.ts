@@ -34,7 +34,6 @@ function context(
       sessionContract: 'v2',
       sessionRevision: 'session-1',
       userRevision: 'user-1',
-      catalogRevision: 'catalog-1',
       authorizationRevision: 'catalog-authorization-1',
       memberships: [],
     },
