@@ -23,6 +23,9 @@
   --success: #66b88f;
   --danger: #ec7c72;
   --warning: #d19452;
+  --search-match-bg: #ffff00;
+  --search-match-current-bg: #ff9632;
+  --search-match-text: #000000;
   --unknown: #e2dfef;
   --info: #0072c0;
   --text-inverse: #ffffff;
@@ -189,6 +192,9 @@
   --success: #2f8a66;
   --danger: #bf4d47;
   --warning: #a16b2b;
+  --search-match-bg: #ffff00;
+  --search-match-current-bg: #ff9632;
+  --search-match-text: #000000;
   --unknown: #6b5f8a;
   --info: #0072c0;
   --text-inverse: #ffffff;

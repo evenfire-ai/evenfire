@@ -80,6 +80,20 @@ const MAX_CONNECTION_TIMEOUT_MS = 30_000
 const MIN_STATEMENT_TIMEOUT_MS = 100
 const MAX_STATEMENT_TIMEOUT_MS = 30_000
 
+// R1-H3 fase 1 (host↔model serialization). The reductor (llm-model disable/
+// delete) and the referencer (host create/update) both take a per-MODEL-NAME
+// advisory lock and HOLD it across the K8s write (Decisión A of
+// work-tracker/reviews/pr-339/minispec-R1-H3-concurrency.md). While the carrier
+// transaction awaits the K8s API it is idle-in-transaction, so neither
+// statement_timeout nor lock_timeout bounds the lock/connection tenancy — only
+// idle_in_transaction_session_timeout does (adenda A2). We set it per-carrier-
+// transaction (SET LOCAL) so a hung K8s call fails fast and releases the lock +
+// the scarce pool connection (core pool max defaults to 10) instead of pinning
+// them indefinitely.
+const MIN_CARRIER_IDLE_TIMEOUT_MS = 1_000
+const MAX_CARRIER_IDLE_TIMEOUT_MS = 60_000
+const DEFAULT_CARRIER_IDLE_TIMEOUT_MS = 15_000
+
 const DEFAULT_CORE_POOL_MAX = 10
 const DEFAULT_CORE_POOL_IDLE_TIMEOUT_MS = 30_000
 const DEFAULT_CORE_POOL_CONNECTION_TIMEOUT_MS = 2_000
@@ -5903,11 +5917,29 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGfsUploadFinalizingSchema,
   },
   {
-    version: '0100_user_access_foundation',
+    version: '0100_seed_minimax_allowed_model',
+    apply: async db => {
+      // Seed one sensible default model for the newly added `minimax` provider
+      // (packages/llm-providers). Same shape as 0056/0057/0058: enabled=true (a
+      // provider without credentials is unusable regardless), a `vendor` label
+      // for UI grouping, and ON CONFLICT DO NOTHING so the migration stays
+      // idempotent and never clobbers an admin-edited row. `MiniMax-M2` mirrors
+      // registryCore's minimax defaultModel. Operators curate the rest via
+      // /llm-models.
+      await db.query(`
+        INSERT INTO llm_allowed_models (provider, model, vendor)
+        VALUES
+          ('minimax', 'MiniMax-M2', 'MiniMax')
+        ON CONFLICT DO NOTHING;
+      `)
+    },
+  },
+  {
+    version: '0101_user_access_foundation',
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0101_invitation_delivery_commands',
+    version: '0102_invitation_delivery_commands',
     apply: applyInvitationDeliveryCommandFoundation,
   },
 ]
@@ -6131,4 +6163,72 @@ export async function withTransaction<T>(
   } finally {
     client.release(releaseError)
   }
+}
+
+// ── R1-H3 fase 1: host↔model write serialization ────────────────────────────
+//
+// A single advisory-lock namespace for the LLM-model availability seam. EVERY
+// writer that can either reduce a model's availability (llm-model disable/delete,
+// the reductor) or create a live reference to it (Host CR create/update, the
+// referencer) takes THIS lock, so the impact enumeration and the mutation/write
+// cannot interleave and strand a reference (INV-1). The lock is derived from ONE
+// place (regla D4) so the two sides can never disagree on the key.
+//
+// GRANULARITY = MODEL NAME, not (provider, model): the impact enumeration matches
+// grants by model name only (`listGrantsReferencingModel`), and an
+// `allowed_models` entry may carry no derivable provider, so a per-pair key would
+// leave that seam unserialized (adenda A1). By name, a disable of (provA, M) and a
+// host-create of (provB, M) merely contend — harmless at admin QPS — while each
+// side's impact recompute is still per-pair, so independent pairs both win.
+const LLM_MODEL_LOCK_NAMESPACE = 'llm-model:'
+
+export const HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
+  'CONTROL_API_HOST_MODEL_WRITE_LOCK_IDLE_TIMEOUT_MS',
+  DEFAULT_CARRIER_IDLE_TIMEOUT_MS,
+  MIN_CARRIER_IDLE_TIMEOUT_MS,
+  MAX_CARRIER_IDLE_TIMEOUT_MS
+)
+
+/**
+ * Take the transaction-scoped advisory lock for one model NAME. Auto-released on
+ * COMMIT/ROLLBACK and on backend death, so it never orphans. Must be a statement
+ * inside an open transaction (`withTransaction`); the caller HOLDS it across the
+ * subsequent impact read + mutation / K8s write.
+ */
+export async function advisoryLockModelName(db: DbTransactionClient, model: string): Promise<void> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+    `${LLM_MODEL_LOCK_NAMESPACE}${model}`,
+  ])
+}
+
+/**
+ * Take the advisory locks for several model NAMES in one transaction. Dedups and
+ * acquires in a TOTAL (ascending) order to preclude deadlock when two operations
+ * reference an overlapping set (adenda A5). A host that references no allowlist
+ * pair acquires nothing (an empty set is a no-op). Key derivation stays in
+ * `advisoryLockModelName` (regla D4).
+ */
+export async function advisoryLockModelNames(
+  db: DbTransactionClient,
+  models: string[]
+): Promise<void> {
+  const ordered = Array.from(new Set(models)).sort()
+  for (const model of ordered) {
+    await advisoryLockModelName(db, model)
+  }
+}
+
+/**
+ * Bound the idle-in-transaction tenancy of a carrier transaction that HOLDS a
+ * model advisory lock across a Kubernetes write (Decisión A / adenda A2). While
+ * the transaction awaits the K8s API no statement runs, so this is the only
+ * timeout that can release the lock + connection if that call hangs. SET LOCAL
+ * scope: reverts on COMMIT/ROLLBACK. The value is milliseconds (the GUC's base
+ * unit) and comes from a bounded env, so it can never inject SQL.
+ */
+export async function boundCarrierTransactionIdleTimeout(
+  db: DbTransactionClient,
+  ms: number = HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS
+): Promise<void> {
+  await db.query(`SELECT set_config('idle_in_transaction_session_timeout', $1, true)`, [String(ms)])
 }

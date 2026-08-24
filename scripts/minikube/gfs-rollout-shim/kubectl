@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Development harness PATH shim, prepended only for the GFS credential
+# reconcile subprocess. The shared rollout library finishes a reader rollout
+# with `kubectl rollout status deployment/gfsc-reader`, but HCC's
+# gfsReconciler owns that Deployment template and strips the restartedAt
+# annotation `kubectl rollout restart` adds, so the generation-based wait
+# chases flapping revisions until it times out. Intercept exactly that wait
+# and judge readiness instead (wait-gfs-reader-ready.sh); every other kubectl
+# invocation is passed through to the real binary unchanged.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+REAL_KUBECTL=""
+old_ifs="${IFS}"
+IFS=:
+for dir in $PATH; do
+  IFS="$old_ifs"
+  [ -n "$dir" ] || continue
+  resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || continue
+  [ "$resolved" = "$SELF_DIR" ] && continue
+  # A second worktree can prepend its own copy of this development shim. Skip
+  # every harness directory, not only this copy, or two shims will bounce
+  # between each other instead of reaching the real kubectl binary.
+  case "$resolved" in
+    */gfs-rollout-shim) continue ;;
+  esac
+  if [ -f "${dir}/kubectl" ] && [ -x "${dir}/kubectl" ]; then
+    REAL_KUBECTL="${dir}/kubectl"
+    break
+  fi
+done
+IFS="$old_ifs"
+if [ -z "$REAL_KUBECTL" ]; then
+  printf '[gfs-rollout-shim] no real kubectl found on PATH\n' >&2
+  exit 127
+fi
+
+DEPLOY="${GFS_READER_DEPLOYMENT:-gfsc-reader}"
+joined=" $* "
+intercept=false
+case "$joined" in
+  *' rollout status '*)
+    case "$joined" in
+      *" deployment/${DEPLOY} "*|*" deploy/${DEPLOY} "*|\
+      *" deployment.apps/${DEPLOY} "*|*" deployment ${DEPLOY} "*)
+        intercept=true ;;
+    esac
+    ;;
+esac
+if [ "$intercept" != true ]; then
+  exec "$REAL_KUBECTL" "$@"
+fi
+
+context="${CONTEXT:-}"
+namespace="gfs"
+timeout_raw=""
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  a="${args[$i]}"
+  case "$a" in
+    --context=*) context="${a#--context=}" ;;
+    --context) i=$((i + 1)); context="${args[$i]}" ;;
+    --namespace=*) namespace="${a#--namespace=}" ;;
+    -n|--namespace) i=$((i + 1)); namespace="${args[$i]}" ;;
+    --timeout=*) timeout_raw="${a#--timeout=}" ;;
+    --timeout) i=$((i + 1)); timeout_raw="${args[$i]}" ;;
+  esac
+  i=$((i + 1))
+done
+
+# Honor the caller's rollout timeout. The harness caller that needs the
+# readiness default omits --timeout and receives 600s; silently flooring an
+# explicit short timeout would hide a dead reader and invalidate the caller's
+# fail-fast contract.
+if ! timeout_seconds="$(python3 - "$timeout_raw" <<'PY'
+import math
+import re
+import sys
+
+timeout_raw = sys.argv[1]
+
+def parse_duration(raw, default, label):
+    if raw == "":
+        return default
+    if re.fullmatch(r"[1-9][0-9]*", raw):
+        total = float(raw)
+    else:
+        tokens = re.findall(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)", raw)
+        if not tokens or "".join(number + unit for number, unit in tokens) != raw:
+            raise SystemExit(f"invalid {label}: expected a positive Go-style duration")
+        factors = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+        total = sum(float(number) * factors[unit] for number, unit in tokens)
+    if total <= 0 or total > 86400:
+        raise SystemExit(f"invalid {label}: value must be between 1 and 86400 seconds")
+    return max(1, math.ceil(total))
+
+print(parse_duration(timeout_raw, 600, "rollout timeout"))
+PY
+)"; then
+  printf '[gfs-rollout-shim] refusing an invalid rollout timeout\n' >&2
+  exit 2
+fi
+
+if [ -z "$context" ]; then
+  printf '[gfs-rollout-shim] cannot determine the kube-context for the %s readiness wait\n' "$DEPLOY" >&2
+  exit 1
+fi
+
+printf '[gfs-rollout-shim] waiting on %s/%s readiness instead of a generation-based rollout status (HCC owns the template)\n' \
+  "$namespace" "$DEPLOY" >&2
+CONTEXT="$context" GFS_NS="$namespace" GFS_READER_DEPLOYMENT="$DEPLOY" \
+  GFS_READER_WAIT_TIMEOUT_SECONDS="$timeout_seconds" \
+  exec bash "${SELF_DIR}/../wait-gfs-reader-ready.sh"

@@ -51,7 +51,11 @@ import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
-import { HostWatcher, getHost } from './k8sClient'
+import {
+  resolveGuardrailHookDescriptors,
+  withResolvedHookDescriptors,
+} from './guardrailHookResolver'
+import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
@@ -74,6 +78,14 @@ import {
   replaceAuthoritativeMcpFleet,
   runAuthoritativeMcpInitialization,
 } from './mcp/authoritativeFleet'
+import {
+  createMcpAuthorityStalenessDeadline,
+  handleMcpAuthorityPollFailure,
+  isMcpAuthorityStale,
+  revokeMcpAuthorityState,
+} from './mcp/authorityLifecycle'
+import type { HandleMcpAuthorityPollFailureOptions } from './mcp/authorityLifecycle'
+import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
 import {
@@ -164,13 +176,20 @@ let currentPolicy: LlmPolicy | null = null
 let failoverEngine: FailoverEngine | null = null
 let bootFallbackEntry: FallbackEntry | null = null
 let hostWatcher: HostWatcher | null = null
+let llmHookWatcher: LlmHookWatcher | null = null
 let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
+// Periodic guardrail re-resolve — a backstop for dropped LlmHook/Host watch
+// events (the LlmHookWatcher is the primary, immediate path). Host edits also
+// apply immediately via onHostChange.
+let guardrailResolveTimer: ReturnType<typeof setInterval> | null = null
+const GUARDRAIL_RESOLVE_INTERVAL_MS = 300_000
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
-let mcpStatusHeartbeatTimer: ReturnType<typeof setInterval> | null = null
+let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
 let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
 let mcpManager: McpManager | null = null
 let contextMapperClient: ContextMapperClient | null = null
+let mcpAuthorityLastSuccessAt = 0
 let activityHub: HostActivityHub | null = null
 let workspaceProvider: ScopedWorkspaceProvider | null = null
 let spilloverStorage: SpilloverStorage | null = null
@@ -777,8 +796,102 @@ export async function admitDevelopmentMcpServers(
   }
 }
 
-async function initializeMcpServers(contextRef: string): Promise<void> {
-  console.log(`[Main] Initializing MCP servers for context: ${contextRef}`)
+function ensureAuthenticatedContextMapperClient(): ContextMapperClient {
+  if (contextMapperClient) return contextMapperClient
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) {
+    throw new Error('MCP Host runtime authentication is required for HCC inventory')
+  }
+  const auth = runtimeAuth
+  contextMapperClient = getContextMapperClient({
+    getAccessToken: () => auth.accessToken,
+    refreshOnUnauthorized: () => refreshWithRecovery(auth),
+    onCallerAuthorizationFailure: status => revokeMcpAuthority(`caller_${status}`, true),
+  })
+  return contextMapperClient
+}
+
+export { createMcpAuthorityStalenessDeadline, isMcpAuthorityStale }
+
+type McpAuthorityPollFailureCallbacks = Pick<
+  HandleMcpAuthorityPollFailureOptions,
+  'revoke' | 'onCallerAuthorizationRejected' | 'onInventoryAuthorityRevoked' | 'onUnavailable'
+>
+
+/**
+ * Build the fail-closed polling options from the live main-process state.
+ * Keeping this adapter explicit gives the wiring a small, deterministic test
+ * seam instead of leaving the staleness/revocation callbacks as an untested
+ * inline object inside the timer callback.
+ */
+export function createMcpAuthorityPollFailureOptions(
+  dependencies: McpAuthorityPollFailureCallbacks & {
+    getManager: () => unknown | null
+    lastSuccessAt: () => number
+    now?: () => number
+  }
+): HandleMcpAuthorityPollFailureOptions {
+  return {
+    hasPublishedManager: () => dependencies.getManager() !== null,
+    lastSuccessAt: dependencies.lastSuccessAt,
+    now: dependencies.now ?? Date.now,
+    maxStalenessMs: config.hccAuthorityMaxStalenessMs,
+    revoke: dependencies.revoke,
+    onCallerAuthorizationRejected: dependencies.onCallerAuthorizationRejected,
+    onInventoryAuthorityRevoked: dependencies.onInventoryAuthorityRevoked,
+    onUnavailable: dependencies.onUnavailable,
+  }
+}
+
+const mcpAuthorityStalenessDeadline = createMcpAuthorityStalenessDeadline(
+  config.hccAuthorityMaxStalenessMs,
+  () => {
+    if (!isShuttingDown && !config.devMode && mcpManager) {
+      revokeMcpAuthority('authority_stale_deadline', true)
+    }
+  }
+)
+
+function recordMcpAuthoritySuccess(successAt: number = Date.now()): void {
+  mcpAuthorityLastSuccessAt = successAt
+  if (!config.devMode) mcpAuthorityStalenessDeadline.recordSuccess(successAt)
+}
+
+/**
+ * Revoke the complete locally-published MCP authority before awaiting any
+ * transport cleanup. A fresh poller may recover later with a newly verified
+ * Host JWT and live Host -> Context grant snapshot.
+ */
+function revokeMcpAuthority(reason: string, restartPolling: boolean): void {
+  revokeMcpAuthorityState({
+    reason,
+    restartPolling,
+    invalidateInitialization: () => {
+      mcpInitializationGeneration += 1
+    },
+    stopPolling: stopContextMapperPolling,
+    clearStalenessDeadline: () => mcpAuthorityStalenessDeadline.clear(),
+    withdrawManager: () => {
+      const closingManager = mcpManager
+      mcpManager = null
+      return closingManager
+    },
+    clearServerState: () => {
+      lastServerState = new Map()
+    },
+    clearLastSuccess: () => {
+      mcpAuthorityLastSuccessAt = 0
+    },
+    coordinator: mcpFleetCoordinator,
+    onCleanupFailure: () => console.error(`[Main] MCP authority cleanup failed (reason=${reason})`),
+    onRevoked: () => console.warn(`[Main] MCP authority revoked (reason=${reason})`),
+    shouldRestartPolling: () => !isShuttingDown && !config.devMode,
+    startPolling: startContextMapperPolling,
+  })
+}
+
+async function initializeMcpServers(): Promise<void> {
+  console.log('[Main] Initializing authenticated MCP server inventory')
   const initializationGeneration = ++mcpInitializationGeneration
   const isInitializationCurrent = (): boolean =>
     !isShuttingDown && mcpInitializationGeneration === initializationGeneration
@@ -789,19 +902,17 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
       servers,
       previousManager,
       createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
-      getAuthToken: async serverName => {
-        if (!contextMapperClient) {
-          throw new Error('Context Mapper client is required to fetch MCP server auth')
-        }
-        return contextMapperClient.getAuthToken(serverName)
+      getAuthToken: async (serverName, expectedRevision) => {
+        return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
       },
       installFleet: (nextManager, nextServerState) => {
         mcpManager = nextManager
         lastServerState = nextServerState
+        recordMcpAuthoritySuccess()
         agent?.setMcpManager(nextManager)
       },
       coordinator: mcpFleetCoordinator,
-      onColdStartPublished: () => ensureContextMapperPolling(contextRef),
+      onColdStartPublished: () => ensureContextMapperPolling(),
       isPreviousManagerCurrent: () => mcpManager === previousManager,
       isFleetLifecycleCurrent: isInitializationCurrent,
     })
@@ -810,13 +921,10 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
   // In production mode, fetch an authoritative snapshot before replacing the
   // current fleet. An unavailable Context Mapper leaves the prior state intact.
   if (!config.devMode) {
-    if (!contextMapperClient) {
-      contextMapperClient = getContextMapperClient()
-    }
+    const client = ensureAuthenticatedContextMapperClient()
 
     await runAuthoritativeMcpInitialization({
-      contextRef,
-      client: contextMapperClient,
+      client,
       replaceFleet,
       isCurrent: isInitializationCurrent,
     })
@@ -850,7 +958,7 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
 /**
  * Poll context-mapper for McpServer changes.
  */
-async function pollContextMapper(contextRef: string): Promise<void> {
+async function pollContextMapper(): Promise<void> {
   if (!contextMapperClient) return
 
   try {
@@ -858,13 +966,13 @@ async function pollContextMapper(contextRef: string): Promise<void> {
     // Retry the authoritative initialization instead of declaring an empty
     // fleet or permanently no-oping every reconciliation tick.
     if (!mcpManager) {
-      await initializeMcpServers(contextRef)
+      await initializeMcpServers()
       return
     }
 
     const manager = mcpManager
     await pollAuthoritativeMcpSnapshotIfCurrent({
-      poll: () => contextMapperClient!.pollServers(contextRef),
+      poll: () => contextMapperClient!.pollServers(),
       // A delayed fetch may resolve after shutdown or after a manager swap.
       // Never publish that stale snapshot into a closed/retired manager.
       isCurrent: () => !isShuttingDown && mcpManager === manager,
@@ -873,12 +981,28 @@ async function pollContextMapper(contextRef: string): Promise<void> {
           servers,
           manager,
           serverState: lastServerState,
-          getAuthToken: serverName => contextMapperClient!.getAuthToken(serverName),
+          getAuthToken: (serverName, expectedRevision) =>
+            contextMapperClient!.getAuthToken(serverName, expectedRevision),
           coordinator: mcpFleetCoordinator,
         }),
     })
+    if (!isShuttingDown && mcpManager === manager) {
+      recordMcpAuthoritySuccess()
+    }
   } catch (error) {
-    console.error('[Main] Error polling skill-mapper:', error)
+    handleMcpAuthorityPollFailure(
+      error,
+      createMcpAuthorityPollFailureOptions({
+        getManager: () => mcpManager,
+        lastSuccessAt: () => mcpAuthorityLastSuccessAt,
+        revoke: revokeMcpAuthority,
+        onCallerAuthorizationRejected: () =>
+          console.warn('[Main] HCC poll rejected caller authority'),
+        onInventoryAuthorityRevoked: () =>
+          console.warn('[Main] HCC inventory no longer resolves live Host authority'),
+        onUnavailable: () => console.error('[Main] HCC authority poll failed (reason=unavailable)'),
+      })
+    )
   }
 }
 
@@ -928,7 +1052,7 @@ export function createCoalescedPollRunner(poll: () => Promise<void>): {
 /**
  * Start polling context-mapper for McpServer changes.
  */
-export function startContextMapperPolling(contextRef: string): void {
+export function startContextMapperPolling(): void {
   if (isShuttingDown) return
   // Re-entry replaces the complete producer/runner pair. Stopping only the
   // runner would leave the previous interval dispatching into the new runner.
@@ -938,15 +1062,15 @@ export function startContextMapperPolling(contextRef: string): void {
     `[Main] Starting context-mapper polling (interval: ${config.contextMapperPollInterval}ms)`
   )
 
-  contextMapperPollRunner = createCoalescedPollRunner(() => pollContextMapper(contextRef))
+  contextMapperPollRunner = createCoalescedPollRunner(() => pollContextMapper())
   contextMapperPollTimer = setInterval(() => {
     contextMapperPollRunner?.trigger()
   }, config.contextMapperPollInterval)
 }
 
-export function ensureContextMapperPolling(contextRef: string): void {
+export function ensureContextMapperPolling(): void {
   if (isShuttingDown || (contextMapperPollTimer && contextMapperPollRunner)) return
-  startContextMapperPolling(contextRef)
+  startContextMapperPolling()
 }
 
 /**
@@ -968,34 +1092,74 @@ export function stopContextMapperPolling(): void {
  * the connection (spec §4.5, §7.1).
  */
 function startMcpStatusHeartbeat(): void {
-  if (mcpStatusHeartbeatTimer) return
+  if (mcpStatusHeartbeat) return
   const interval = config.mcpStatusHeartbeatInterval
-  console.log(`[Main] Starting MCP status heartbeat (interval: ${interval}ms)`)
-  mcpStatusHeartbeatTimer = setInterval(() => {
-    if (!mcpManager) return
-    mcpManager.refreshAllServerStatus().catch((err: unknown) => {
+  const timeoutMs = config.mcpStatusHeartbeatTimeoutMs
+  console.log(
+    `[Main] Starting MCP status heartbeat (interval: ${interval}ms, timeout: ${timeoutMs}ms)`
+  )
+  mcpStatusHeartbeat = new McpStatusHeartbeat({
+    intervalMs: interval,
+    timeoutMs,
+    getRefresher: () => mcpManager,
+    onError: (err: unknown) => {
       console.error('[Main] MCP status heartbeat failed:', err)
-    })
-  }, interval)
+    },
+  })
+  mcpStatusHeartbeat.start()
 }
 
 function stopMcpStatusHeartbeat(): void {
-  if (mcpStatusHeartbeatTimer) {
+  if (mcpStatusHeartbeat) {
     console.log('[Main] Stopping MCP status heartbeat')
-    clearInterval(mcpStatusHeartbeatTimer)
-    mcpStatusHeartbeatTimer = null
+    mcpStatusHeartbeat.stop()
+    mcpStatusHeartbeat = null
   }
 }
 
 /**
  * Handle host configuration change.
  */
+/**
+ * Resolve the current Host's installed-hook references (§8.2) into runtime
+ * descriptors and apply them to the agent. Live-callable: run at boot, on every
+ * Host change (onHostChange), on a referenced-LlmHook change (LlmHookWatcher),
+ * and on a periodic backstop tick — so an admin edit takes effect without a pod
+ * restart.
+ */
+async function applyResolvedGuardrails(): Promise<void> {
+  if (!agent) return
+  const hostGuardrails = currentHost?.spec.guardrails ?? config.guardrailsConfig
+  const resolved = await resolveGuardrailHookDescriptors(hostGuardrails, {
+    getLlmHook,
+    llmHooksNamespace: config.llmHooksNamespace,
+  }).catch(err => {
+    console.error('[Main] Guardrail hook resolution failed; running without installed hooks:', err)
+    return []
+  })
+  agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolved))
+}
+
 async function onHostChange(host: HostCRD): Promise<void> {
   console.log(`[Main] Host configuration changed: ${host.name}`)
 
+  const contextChanged =
+    currentHost !== null && currentHost.spec.contextRef !== host.spec.contextRef
   const providerChanged = currentHost?.spec.model?.provider !== host.spec.model?.provider
   const secretRefChanged = currentHost?.spec.secretRef !== host.spec.secretRef
   const modelChanged = currentHost?.spec.model?.name !== host.spec.model?.name
+
+  if (contextChanged) {
+    // The old Context's authority must disappear before any asynchronous Host
+    // reconciliation. HCC derives the new Context from the authenticated Host,
+    // so discovery can restart independently while provider state catches up.
+    revokeMcpAuthority('context_changed', false)
+    startMcpInitializationInBackground({
+      initialize: () => initializeMcpServers(),
+      afterInitialAttempt: () => ensureContextMapperPolling(),
+    })
+  }
+
   // R5 — refresh the failover policy BEFORE (re)building the ConfigStore so the
   // fallback credential slots are loaded. A policy change that alters which
   // Secret slots are needed forces a ConfigStore rebuild even if provider/
@@ -1043,6 +1207,11 @@ async function onHostChange(host: HostCRD): Promise<void> {
       console.error('[Main] Failed to apply identity files:', err)
     }
   }
+
+  // Re-resolve guardrails so a Host.spec.guardrails edit (added/removed hook,
+  // changed digest, capability/failMode change) takes effect without a restart
+  // (§8.2 "resolution is live").
+  await applyResolvedGuardrails()
 }
 
 /**
@@ -1050,6 +1219,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
  */
 function onHostDelete(): void {
   console.log('[Main] Host CRD deleted, shutting down')
+  revokeMcpAuthority('host_deleted', false)
   currentHost = null
   currentProvider = null
   process.exit(1)
@@ -1255,6 +1425,16 @@ async function initializeAgent(): Promise<void> {
   // Phase 6: Set approval config
   const approvalCfg = currentHost?.spec.approval || config.approvalConfig
   agent.setApprovalConfig(approvalCfg)
+
+  // Guardrails (spec §5/§6) — resolve installed-hook references (§8.2) into
+  // runtime descriptors so the LLM lane actually calls the hook pods.
+  await applyResolvedGuardrails()
+  if (!guardrailResolveTimer) {
+    guardrailResolveTimer = setInterval(
+      () => void applyResolvedGuardrails(),
+      GUARDRAIL_RESOLVE_INTERVAL_MS
+    )
+  }
   validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
   console.log(
     `[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'} (policy: ${approvalCfg?.defaultPolicy || 'none/cli_only'})`
@@ -2514,10 +2694,16 @@ async function shutdown(signal: string): Promise<void> {
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
   hostWatcher?.stop()
+  llmHookWatcher?.stop()
   configStore?.stop()
   stopContextMapperPolling()
+  mcpAuthorityStalenessDeadline.clear()
   stopMcpStatusHeartbeat()
   statelessHeartbeat?.stop()
+  if (guardrailResolveTimer) {
+    clearInterval(guardrailResolveTimer)
+    guardrailResolveTimer = null
+  }
 
   if (agent) {
     await agent.stop()
@@ -2668,8 +2854,6 @@ async function startProductionMode(): Promise<void> {
   console.log(`[Main] Namespace: ${config.namespace}`)
   console.log(`[Main] Context Mapper URL: ${config.contextMapperUrl}`)
 
-  contextMapperClient = getContextMapperClient()
-
   const host = await getHost(config.hostName)
 
   if (!host) {
@@ -2696,6 +2880,23 @@ async function startProductionMode(): Promise<void> {
   hostWatcher = new HostWatcher(config.hostName)
   await hostWatcher.start(onHostChange, onHostDelete)
 
+  // Watch this tenant's LlmHook CRs so a hook-CR edit (caps/path/failMode/target)
+  // that the current Host references re-resolves guardrails live (§8.2), without
+  // a restart. Namespace-scoped, so only this tenant's hooks are surfaced.
+  llmHookWatcher = new LlmHookWatcher()
+  await llmHookWatcher.start(name => {
+    const hooks = (
+      currentHost?.spec.guardrails as { hooks?: Record<string, Array<{ id?: string }>> } | undefined
+    )?.hooks
+    const referenced =
+      !!hooks &&
+      Object.values(hooks).some(refs => Array.isArray(refs) && refs.some(r => r?.id === name))
+    if (referenced) {
+      console.log(`[Main] Referenced LlmHook ${name} changed — re-resolving guardrails`)
+      void applyResolvedGuardrails()
+    }
+  })
+
   // Start MCP status heartbeat (keeps observedAt fresh for the desktop poll;
   // each tick no-ops until the MCP manager exists)
   startMcpStatusHeartbeat()
@@ -2710,8 +2911,8 @@ async function startProductionMode(): Promise<void> {
   // A failed initial attempt is logged loudly; the context-mapper poll then
   // reconciles the catalog (the platform tolerates the 'connecting' sweep).
   startMcpInitializationInBackground({
-    initialize: () => initializeMcpServers(host.spec.contextRef),
-    afterInitialAttempt: () => ensureContextMapperPolling(host.spec.contextRef),
+    initialize: () => initializeMcpServers(),
+    afterInitialAttempt: () => ensureContextMapperPolling(),
   })
 
   console.log(`[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'}`)
@@ -3040,6 +3241,18 @@ async function main(): Promise<void> {
 // side-effect free allows the authoritative initialization contract to be
 // regression-tested without starting the service.
 if (require.main === module) {
+  // Global crash guards (defense-in-depth): a throw that escapes a stray event
+  // listener (e.g. a transport listener) must be LOGGED, not a silent process
+  // exit. uncaughtException leaves the process in an undefined state, so we log
+  // and exit non-zero for a clean k8s restart; an unhandledRejection is logged
+  // for triage but is not treated as fatal on its own.
+  process.on('uncaughtException', (err, origin) => {
+    console.error(`[Main] FATAL uncaughtException (${origin}):`, err)
+    process.exit(1)
+  })
+  process.on('unhandledRejection', reason => {
+    console.error('[Main] unhandledRejection:', reason)
+  })
   main().catch(error => {
     console.error('[Main] Fatal error:', error)
     process.exit(1)

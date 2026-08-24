@@ -382,7 +382,7 @@ function promptTargets(value: unknown): PluginWorkloadSdkPromptTarget[] {
   })
 }
 
-function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
+export function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
   const family = row.capability_family
   if (!PLUGIN_WORKLOAD_SDK_FAMILIES.includes(family as PluginWorkloadSdkFamily)) {
     throw new Error(`unknown capability_family from db: ${String(family)}`)
@@ -524,9 +524,27 @@ export interface UpsertGrantParams {
 
 export async function upsertGrant(
   params: UpsertGrantParams,
-  operatorSub: string
+  operatorSub: string,
+  // When the caller already runs inside a carrier transaction (the grant
+  // write-gate, which holds the per-model advisory locks — R1-H3 fase 2), the
+  // upsert MUST reuse that same transaction so the recipe lock is taken AFTER
+  // the model locks (global order: `llm-model:*` before `plugin_workload_sdk:*`)
+  // and the enabled-ness revalidation + the write commit atomically. Every other
+  // caller passes no `db` and gets its own transaction, exactly as before.
+  // The carrier MUST be a real transaction session (branded, issue #375 M3):
+  // it holds the advisory locks and `notifyGrantUpdate` refuses `pool`.
+  db?: DbTransactionClient
 ): Promise<PluginWorkloadSdkGrant> {
-  return withTransaction(async db => {
+  if (db) return upsertGrantInTransaction(params, operatorSub, db)
+  return withTransaction(inner => upsertGrantInTransaction(params, operatorSub, inner))
+}
+
+async function upsertGrantInTransaction(
+  params: UpsertGrantParams,
+  operatorSub: string,
+  db: DbTransactionClient
+): Promise<PluginWorkloadSdkGrant> {
+  {
     // All capability families for a recipe share one lock. A family-scoped
     // lock permits an SDK-only revoke to race an upsert for the other family.
     const recipeLock = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}`
@@ -678,13 +696,20 @@ export async function upsertGrant(
       capabilityFamily: params.capabilityFamily,
     })
     return grant
-  })
+  }
 }
 
-export async function listGrants(filter?: {
-  recipeNamespace?: string
-  recipeName?: string
-}): Promise<PluginWorkloadSdkGrant[]> {
+export async function listGrants(
+  filter?: {
+    recipeNamespace?: string
+    recipeName?: string
+  },
+  // Accepts a transaction client so the grant write-gate can read the stored
+  // grant (Pieza D no-worsening context) on the SAME connection that holds the
+  // model advisory locks — no extra pool checkout under the lock (adenda A3).
+  // Defaults to the global pool for every other (unlocked) caller.
+  db: Pick<DbClient, 'query'> = pool
+): Promise<PluginWorkloadSdkGrant[]> {
   const clauses: string[] = []
   const values: unknown[] = []
   if (filter?.recipeNamespace) {
@@ -696,10 +721,48 @@ export async function listGrants(filter?: {
     clauses.push(`recipe_name = $${values.length}`)
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT * FROM plugin_workload_sdk_grants ${where}
      ORDER BY recipe_namespace, recipe_name, capability_family`,
     values
+  )
+  return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
+}
+
+/**
+ * Grants whose `allowed_models` list names `model` — the 4th source of the
+ * LLM-model impact enumeration (Fase 3, `llmModelImpact.ts`).
+ *
+ * MATCH BY MODEL NAME ONLY, deliberately NOT by `(provider, model)`. The
+ * `allowed_models` column is a provider-LESS flat model-name list and is NOT
+ * enforced to hold only models of the grant's `provider` column: the write-gate
+ * (`routes/admin/pluginWorkloadSdk.ts`) validates `prompt_targets` per-provider,
+ * but `allowed_models` is parsed from the request body free-form and passed
+ * straight through — and since `prompt_targets` can span multiple providers, the
+ * mirrored `allowed_models` set can too. Filtering by `provider` would therefore
+ * UNDER-report references, the unsafe direction for a safety gate that gates a
+ * destructive disable/delete. Matching by model name may over-report a same-named
+ * model under a different provider (extra operator friction, never silent
+ * breakage) — the fail-safe trade-off. This is exercised by the realPostgres
+ * integration test `db.listGrantsReferencingModel.realPostgres.integration`.
+ *
+ * No `policy_state` and no `provider IS NOT NULL` filter: a grant is surfaced
+ * whenever it names the model, including legacy NULL-provider and
+ * `revoking`/`disabled` rows (fail-loud — never hide a dangling reference).
+ *
+ * `allowed_models @> to_jsonb($1::text)` is jsonb array-contains-scalar: for a
+ * text `model`, `to_jsonb('m'::text)` is the JSON string `"m"`, and a jsonb
+ * array `@>` a scalar is true when the array contains that element.
+ */
+export async function listGrantsReferencingModel(
+  model: string,
+  db: DbClient = pool
+): Promise<PluginWorkloadSdkGrant[]> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_grants
+      WHERE allowed_models @> to_jsonb($1::text)
+      ORDER BY recipe_namespace, recipe_name, capability_family`,
+    [model]
   )
   return (result.rows as Record<string, unknown>[]).map(mapGrantRow)
 }

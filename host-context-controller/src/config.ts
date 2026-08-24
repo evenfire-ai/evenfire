@@ -32,6 +32,15 @@ export interface Config {
   // Kubernetes namespace where per-Host channel-reader Deployments live
   channelsNamespace: string
 
+  // Kubernetes namespace where LlmHook image workloads (guardrail hook pods)
+  // live and where the LlmHook CRDs are watched.
+  llmHooksNamespace: string
+
+  // Periodic LlmHook fullReconcile interval (seconds). Drives the reference-
+  // counted orphan sweep (guardrails phase-4 §3) and readiness convergence when
+  // a watch drops events. 0 disables.
+  llmHookResyncIntervalSec: number
+
   // Container image used for per-Host channel-reader Deployments
   channelReaderImage: string
 
@@ -147,6 +156,12 @@ export interface Config {
   // 1st-party mcp-host credentials.
   hccTargetNamespace: string
 
+  // Control API RS256 verifier contract for Host-scoped MCP API routes.
+  mcpHostJwtPublicKey: string
+  mcpHostJwtIssuer: string
+  mcpHostJwtMaxTtlSeconds: number
+  mcpHostApiRateLimitPerMinute: number
+
   // URL of the nginx gateway that mediates mcp-host → control-api traffic.
   // Injected into mcp-host pods as MCP_HOST_GATEWAY_URL. Per the architecture
   // diagram this is the "nginx (only /mcp-host)" allowlist-proxy.
@@ -197,6 +212,10 @@ export interface Config {
   // so accumulated IPs never expire between refreshes (issue #299).
   externalEgressResyncIntervalSec: number
 
+  // Deadline for one DNS resolution attempt. A silent resolver cannot block
+  // safety convergence indefinitely.
+  externalEgressDnsResolveTimeoutMs: number
+
   // Grace kept after a DNS TTL before an accumulated /32 may expire (seconds).
   // The sliding window that fixes #299: entries live for TTL + overlap, so a
   // provider that rotates a single A record still resolves through the union of
@@ -243,6 +262,17 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 5_000
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 2_147_483_647) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS must be a positive integer no greater than 2147483647, got '${raw}'`
+    )
+  }
+  return parsed
 }
 
 /**
@@ -506,6 +536,12 @@ export const config: Config = {
   // Per-Host channel-reader Deployments namespace
   channelsNamespace: getEnv('CONTEXT_MAPPER_CHANNELS_NAMESPACE', 'channels')!,
 
+  // LlmHook image-workload / CRD-watch namespace (guardrails phase-4).
+  llmHooksNamespace: getEnv('CONTEXT_MAPPER_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
+
+  // Periodic LlmHook resync (default 5 min, matching hostResyncIntervalSec).
+  llmHookResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_LLM_HOOK_RESYNC_SEC', 300),
+
   // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)
   channelReaderImage: getEnv('CONTEXT_MAPPER_CHANNEL_READER_IMAGE', 'clerum/channel-reader:0.9.5')!,
 
@@ -539,7 +575,16 @@ export const config: Config = {
     },
   },
 
-  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply
+  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply.
+  //
+  // llm-hooks is deliberately NOT listed: this list is a package deal, and its
+  // L1 pass grants namespace-wide DNS (`ensureDnsEgress` uses podSelector: {})
+  // plus HCC-gateway egress to every pod carrying clerum.io/managed-by — which
+  // hook pod templates do. That would hand a pure `/v1` responder the implicit
+  // DNS N5 forbids. The llm-hooks baseline is static instead
+  // (deploy/base/llm-hooks/networkpolicies.yaml: deny-all ingress + egress),
+  // with per-pod-key ingress and scoped CoreDNS emitted by LlmHookReconciler
+  // only for hooks that declare egressBindings.
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
     'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'
@@ -674,6 +719,14 @@ export const config: Config = {
   // HCC provisions the shared 1st-party mcp-host credentials by default.
   hccTargetNamespace: getEnv('HCC_TARGET_NAMESPACE')?.trim() || 'mcp-host',
 
+  mcpHostJwtPublicKey: getEnv('HCC_MCP_HOST_JWT_PUBLIC_KEY', '')!,
+  mcpHostJwtIssuer: getEnv('HCC_MCP_HOST_JWT_ISSUER', 'control-api')!,
+  mcpHostJwtMaxTtlSeconds: Math.max(1, getEnvInt('HCC_MCP_HOST_JWT_MAX_TTL_SECONDS', 600)),
+  mcpHostApiRateLimitPerMinute: Math.max(
+    1,
+    getEnvInt('HCC_MCP_HOST_API_RATE_LIMIT_PER_MINUTE', 120)
+  ),
+
   // URL of the nginx gateway that mediates mcp-host → control-api traffic.
   // Injected into mcp-host pods as MCP_HOST_GATEWAY_URL. Per the architecture
   // diagram this is the "nginx (only /mcp-host)" allowlist-proxy.
@@ -714,6 +767,9 @@ export const config: Config = {
   // they expire, closing the #299 rotation gap. 0 disables (reintroduces the
   // stale-snapshot risk; only for operators who explicitly opt out).
   externalEgressResyncIntervalSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
+  externalEgressDnsResolveTimeoutMs: parseExternalEgressDnsTimeoutMs(
+    getEnv('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS')
+  ),
   externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
   externalEgressRefreshFloorSec: getExternalEgressEnvInt(
     'HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC',

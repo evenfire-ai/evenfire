@@ -53,10 +53,10 @@ reference is platform-controlled:
 | `CONTEXT_MAPPER_EGRESS_PROXY_IMAGE`         | host-context-controller                                               | `clerum/nginx-egress-proxy:0.1.0` |
 | `CONTROL_API_REMOTE_MCP_EGRESS_PROXY_IMAGE` | control-api (registry install stamps `spec.image` for remote entries) | `clerum/nginx-egress-proxy:0.1.0` |
 
-HCC additionally canonicalizes `spec.image` of remote McpServers back to the
-platform image (`canonicalizeRemoteEgressProxyImage`) as best-effort cleanup;
-the enforcement is that Deployment rendering always stamps the configured
-platform image, so a CRD's `spec.image` is never what runs.
+HCC does not rewrite `spec.image` during reconciliation: that field remains
+desired state owned by the CRD author. Deployment rendering always stamps the
+configured platform image for remote egress proxies, so a remote CRD's
+`spec.image` is never what runs.
 
 ## Ports
 

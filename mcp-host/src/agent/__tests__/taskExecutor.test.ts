@@ -10,9 +10,11 @@ import {
 } from '../../core/tools/workflowEffectiveTargets'
 import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
-import type { Task, TaskError } from '../../queue/types'
+import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
+import { ClaudeProvider } from '../../llm/claude'
+import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
-import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
+import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
 
 vi.mock('../../config', () => ({
   config: {
@@ -261,6 +263,45 @@ describe('TaskExecutor', () => {
         message: 'LLM down',
         retryable: true,
         provider: 'openai',
+      })
+    )
+  })
+
+  it('surfaces a provider 404 as a non-retryable LLM_MODEL_NOT_AVAILABLE TaskError', async () => {
+    // Derive the LlmError from the real Claude classifier fed a real
+    // Anthropic.APIError (not a hand-built shape), then wrap it exactly as
+    // LlmPortAdapter.handleProviderError does, so the observable TaskError
+    // carries the classified code + additive fields (incl. the correctly-nested
+    // providerCode='not_found_error', not the envelope's 'error').
+    const provider = new ClaudeProvider('fake-key', 'claude-sonnet-4-6')
+    const err404 = anthropicApiError(404, 'not_found_error', 'model: x not found')
+    const c = provider.classifyError(err404)
+    const llmError = new LlmError(
+      c.message,
+      'claude',
+      c.code,
+      c.retryable,
+      undefined,
+      c.httpStatus,
+      c.providerCode
+    )
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockRejectedValueOnce(llmError)
+
+    const deps = createDeps()
+    const task = createTask('Hello')
+    const executor = new TaskExecutor(task, deps)
+
+    await executor.run()
+
+    expect(executor.executorState).toBe('failed')
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        code: 'LLM_MODEL_NOT_AVAILABLE',
+        retryable: false,
+        provider: 'claude',
+        httpStatus: 404,
+        providerCode: 'not_found_error',
       })
     )
   })
@@ -1468,5 +1509,27 @@ describe('D3 durability barrier — a turn is never ACKed when the persist fails
     expect(runToolUseLoop).not.toHaveBeenCalled()
     expect(task.responseCallback).not.toHaveBeenCalled()
     expect(deps.onFail).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('executionModeForSource (§6.3)', () => {
+  it('treats channel tasks as interactive — a person sent the message', () => {
+    expect(executionModeForSource('channel')).toBe('interactive')
+  })
+
+  it.each(['cron', 'internal'] as const)(
+    'treats %s tasks as unattended so a guardrail ask fails safe to deny',
+    source => {
+      expect(executionModeForSource(source)).toBe('unattended')
+    }
+  )
+
+  // The regression: `internal` fell through to 'interactive', so an `ask` took the
+  // suspension path and parked in pending_approval with no responder — the task
+  // hung. Not reachable today (createInternalTask has no production caller), which
+  // is exactly why the mapping needs pinning rather than the behaviour.
+  it('never labels an autonomous source interactive', () => {
+    const autonomous: TaskSource[] = ['cron', 'internal']
+    expect(autonomous.map(executionModeForSource)).not.toContain('interactive')
   })
 })
