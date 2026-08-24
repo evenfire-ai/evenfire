@@ -104,6 +104,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
             COALESCE(aur.revision, 1) AS user_revision,
             COALESCE(arr.revision, 1) AS resource_revision,
             CASE
+              WHEN u.lifecycle_state <> 'active' THEN FALSE
               WHEN $2::text = 'v2' THEN EXISTS (
                 SELECT 1
                   FROM external_user_sessions s
@@ -123,6 +124,8 @@ export async function loadPrincipalAuthoritySnapshot(input: {
               )
               ELSE (
                 $7::bigint IS NOT NULL
+                AND $8::bigint IS NOT NULL
+                AND u.lifecycle_version = $8::bigint
                 AND NOT EXISTS (
                   SELECT 1
                     FROM external_v1_session_revocations r
@@ -166,9 +169,9 @@ export async function loadPrincipalAuthoritySnapshot(input: {
        FROM users u
   LEFT JOIN authorization_user_revisions aur ON aur.user_id = u.id
   LEFT JOIN authorization_resource_revisions arr
-         ON arr.environment_id = $8
-        AND arr.resource_type = $9
-        AND arr.resource_id = $10
+         ON arr.environment_id = $9
+        AND arr.resource_type = $10
+        AND arr.resource_id = $11
   LEFT JOIN active_memberships am ON TRUE
       WHERE u.id = $1
    GROUP BY u.id, aur.revision, arr.revision`,
@@ -180,6 +183,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
       input.session.contract === 'v2' ? input.session.sessionVersion : null,
       input.session.contract === 'v1' ? input.session.tokenHash : null,
       input.session.contract === 'v1' ? input.session.issuedAt : null,
+      input.session.contract === 'v1' ? input.session.authGeneration : null,
       input.resource.environmentId,
       input.resource.type,
       input.resource.logicalId,

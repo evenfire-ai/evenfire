@@ -94,6 +94,7 @@ export async function loadCatalogRequestContext(input: {
      SELECT users.id AS user_id,
             COALESCE(user_revision.revision, 1)::text AS user_revision,
             CASE
+              WHEN users.lifecycle_state <> 'active' THEN FALSE
               WHEN $2::text = 'v2' THEN EXISTS (
                 SELECT 1
                   FROM external_user_sessions session
@@ -110,6 +111,8 @@ export async function loadCatalogRequestContext(input: {
               )
               ELSE (
                 $7::bigint IS NOT NULL
+                AND $8::bigint IS NOT NULL
+                AND users.lifecycle_version = $8::bigint
                 AND NOT EXISTS (
                   SELECT 1 FROM external_v1_session_revocations revoked
                    WHERE revoked.token_hash = $6 AND revoked.user_id = users.id
@@ -160,6 +163,7 @@ export async function loadCatalogRequestContext(input: {
       input.session.contract === 'v2' ? input.session.sessionVersion : null,
       input.session.contract === 'v1' ? input.session.tokenHash : null,
       input.session.contract === 'v1' ? input.session.issuedAt : null,
+      input.session.contract === 'v1' ? input.session.authGeneration : null,
     ]
   )
   const row = principalResult.rows[0] as Record<string, unknown> | undefined

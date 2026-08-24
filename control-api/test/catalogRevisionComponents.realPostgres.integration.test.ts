@@ -430,6 +430,7 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
       userId: userIds[0],
       tokenHash: randomBytes(32).toString('hex'),
       issuedAt: Math.floor(Date.now() / 1_000),
+      authGeneration: 1,
     }
     const first = await buildAccessCatalog(
       { session, families: ['team'], limit: 1 },
