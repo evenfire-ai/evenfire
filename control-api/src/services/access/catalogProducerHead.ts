@@ -5,6 +5,7 @@ import {
   type CatalogRequestContext,
   type ProducerContinuation,
   catalogKey,
+  compareCatalogText,
 } from './catalogContracts.js'
 import { catalogQuery } from './catalogProducerDatabase.js'
 import { CatalogProducerContractError } from './catalogProducerErrors.js'
@@ -113,7 +114,7 @@ export async function listBoundedProducerKeys(input: {
         }
         const sourceValue = sourceRow as Record<string, unknown>
         const logicalId = typeof sourceValue.logical_id === 'string' ? sourceValue.logical_id : ''
-        if (!logicalId || logicalId <= state.after) {
+        if (!logicalId || compareCatalogText(logicalId, state.after) <= 0) {
           throw new CatalogProducerContractError('keys_not_strictly_ordered')
         }
         let validUntil: string | null = null
@@ -158,7 +159,7 @@ export async function listBoundedProducerKeys(input: {
       )
       continue
     }
-    const logicalId = heads.map(head => head.candidate.logicalId).sort()[0]
+    const logicalId = heads.map(head => head.candidate.logicalId).sort(compareCatalogText)[0]
     const contributors = heads.filter(head => head.candidate.logicalId === logicalId)
     const validUntil =
       contributors

@@ -1,5 +1,5 @@
 import type { CatalogFamily } from './catalogContracts.js'
-import { boundedKeyUnionSql } from './catalogProducerSupport.js'
+import { boundedKeyUnionSql, catalogTextAfterSql } from './catalogProducerSupport.js'
 
 export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.freeze({
   user: boundedKeyUnionSql([
@@ -28,7 +28,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'host'
                AND resource.logical_id = $5::text || '/' || ua.agent_name
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-             WHERE ua.user_id = $1 AND ua.agent_name > $7`,
+             WHERE ua.user_id = $1 AND ${catalogTextAfterSql('ua.agent_name', '$7')}`,
       orderBy: 'source_key',
     },
     {
@@ -39,7 +39,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'host'
                AND resource.logical_id = $5::text || '/' || ta.agent_name
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-      WHERE tm.user_id = $1 AND tm.status = 'active' AND ta.agent_name > $7`,
+      WHERE tm.user_id = $1 AND tm.status = 'active'
+        AND ${catalogTextAfterSql('ta.agent_name', '$7')}`,
       orderBy: 'source_key',
       duplicateCapable: true,
     },
@@ -52,7 +53,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'context'
                AND resource.logical_id = $6::text || '/' || uc.context_id
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-      WHERE uc.user_id = $1 AND uc.context_id > $7`,
+      WHERE uc.user_id = $1 AND ${catalogTextAfterSql('uc.context_id', '$7')}`,
       orderBy: 'source_key',
     },
     {
@@ -63,7 +64,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                 ON resource.environment_id = $3 AND resource.resource_type = 'context'
                AND resource.logical_id = $6::text || '/' || tc.context_id
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-      WHERE tm.user_id = $1 AND tm.status = 'active' AND tc.context_id > $7`,
+      WHERE tm.user_id = $1 AND tm.status = 'active'
+        AND ${catalogTextAfterSql('tc.context_id', '$7')}`,
       orderBy: 'source_key',
       duplicateCapable: true,
     },
@@ -86,7 +88,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
-      WHERE uc.user_id = $1 AND edge.target_id > $2`,
+      WHERE uc.user_id = $1 AND ${catalogTextAfterSql('edge.target_id', '$2')}`,
       duplicateCapable: true,
     },
     {
@@ -107,7 +109,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
-      WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
+      WHERE tm.user_id = $1 AND tm.status = 'active'
+        AND ${catalogTextAfterSql('edge.target_id', '$2')}`,
       duplicateCapable: true,
     },
     {
@@ -137,7 +140,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
         AND target_resource.logical_id = mcp_edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
-      WHERE ua.user_id = $1 AND mcp_edge.target_id > $2`,
+      WHERE ua.user_id = $1 AND ${catalogTextAfterSql('mcp_edge.target_id', '$2')}`,
       duplicateCapable: true,
     },
     {
@@ -168,7 +171,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
         AND target_resource.logical_id = mcp_edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
-      WHERE tm.user_id = $1 AND tm.status = 'active' AND mcp_edge.target_id > $2`,
+      WHERE tm.user_id = $1 AND tm.status = 'active'
+        AND ${catalogTextAfterSql('mcp_edge.target_id', '$2')}`,
       duplicateCapable: true,
     },
   ]),
@@ -181,7 +185,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                AND resource.logical_id = uwt.recipe_namespace || '/' || uwt.recipe_name
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE uwt.user_id = $1
-               AND (uwt.recipe_namespace || '/' || uwt.recipe_name) > $2`,
+               AND ${catalogTextAfterSql("uwt.recipe_namespace || '/' || uwt.recipe_name", '$2')}`,
       orderBy: 'logical_id',
     },
     {
@@ -193,7 +197,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                AND resource.logical_id = twt.recipe_namespace || '/' || twt.recipe_name
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active'
-               AND (twt.recipe_namespace || '/' || twt.recipe_name) > $2`,
+               AND ${catalogTextAfterSql("twt.recipe_namespace || '/' || twt.recipe_name", '$2')}`,
       orderBy: 'logical_id',
       duplicateCapable: true,
     },
@@ -336,7 +340,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.resource_type = 'shared_filesystem'
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
-      WHERE uc.user_id = $1 AND edge.target_id > $2`,
+      WHERE uc.user_id = $1 AND ${catalogTextAfterSql('edge.target_id', '$2')}`,
       duplicateCapable: true,
     },
     {
@@ -358,7 +362,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND target_resource.resource_type = 'shared_filesystem'
         AND target_resource.logical_id = edge.target_id
         AND target_resource.enabled = TRUE AND target_resource.deleted_at IS NULL
-      WHERE tm.user_id = $1 AND tm.status = 'active' AND edge.target_id > $2`,
+      WHERE tm.user_id = $1 AND tm.status = 'active'
+        AND ${catalogTextAfterSql('edge.target_id', '$2')}`,
       duplicateCapable: true,
     },
   ]),
@@ -379,7 +384,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND edge.source_type = 'workflow_recipe'
         AND edge.relationship_type = 'exposes_sandbox_app'
         AND edge.target_type = 'sandbox_app'
-        AND edge.target_id > $2
+        AND ${catalogTextAfterSql('edge.target_id', '$2')}
         AND EXISTS (
           SELECT 1
             FROM user_workflow_triggers uwt
@@ -403,7 +408,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND edge.source_type = 'workflow_recipe'
         AND edge.relationship_type = 'exposes_sandbox_app'
         AND edge.target_type = 'sandbox_app'
-        AND edge.target_id > $2
+        AND ${catalogTextAfterSql('edge.target_id', '$2')}
         AND EXISTS (
           SELECT 1
             FROM team_workflow_triggers twt
