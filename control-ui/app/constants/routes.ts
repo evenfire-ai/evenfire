@@ -79,6 +79,10 @@ export const CONTROL_ROUTES = {
     // The org-named tab (design spec §4): everything this deployment owns.
     org: '/marketplace/org',
     orgEntries: '/marketplace/org/entries',
+    // Same section, pre-filtered by entry type (`?type=llm-hook`). The type is
+    // a filter over one list, not a section of its own, so it stays a query
+    // param rather than becoming a route segment.
+    orgEntriesFiltered: (query?: ControlRouteQuery) => withQuery('/marketplace/org/entries', query),
     orgImages: '/marketplace/org/images',
     orgCredentials: '/marketplace/org/credentials',
     orgConnection: '/marketplace/org/connection',

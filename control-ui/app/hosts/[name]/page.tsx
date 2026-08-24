@@ -10,7 +10,6 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import { CodexAgentAssignment } from '../../../components/CodexAgentAssignment'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
-import { HostGuardrailsSection } from '../../../components/HostGuardrailsSection'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
@@ -685,7 +684,9 @@ export default function HostDetailsPage() {
         // Reload guardrails/server state while preserving any drafts left open
         // in the Overview or Model tabs.
         await loadData('none')
-        showToast('Guardrails saved.', { tone: 'success' })
+        // No toast here on purpose: HostGuardrailsSection names the hook it
+        // just changed once this resolves, and a generic 'saved' alongside it
+        // would stack two success toasts on a single remove.
       } catch (e) {
         const status = (e as { status?: number } | null)?.status
         const code = (e as { code?: string } | null)?.code
@@ -696,8 +697,8 @@ export default function HostDetailsPage() {
         } else {
           setError(e instanceof Error ? e.message : 'Failed to save guardrails')
         }
-        // Re-throw so HostGuardrailsSection stays in edit mode and keeps the
-        // operator's draft alongside the error/conflict banner.
+        // Re-throw so HostGuardrailsSection knows the save failed and skips
+        // its success toast, leaving the error/conflict banner to explain.
         throw e
       } finally {
         setBusy(false)
@@ -1116,25 +1117,15 @@ export default function HostDetailsPage() {
         )}
 
         {activeTab === 'advanced' && (
-          <>
-            <HostAdvancedTab
-              busy={busy}
-              hostName={routeName}
-              initialLoading={initialLoading}
-              initialTools={approvalToolsData}
-              onSaveApprovalTools={persistApprovalTools}
-            />
-            {!initialLoading && (
-              <HostGuardrailsSection
-                initialGuardrails={guardrailsData}
-                onSave={persistGuardrails}
-                busy={busy}
-                canWrite={
-                  true /* TODO: wire to actual host:write check if/when per-field RBAC lands */
-                }
-              />
-            )}
-          </>
+          <HostAdvancedTab
+            busy={busy}
+            hostName={routeName}
+            initialGuardrails={guardrailsData}
+            initialLoading={initialLoading}
+            initialTools={approvalToolsData}
+            onSaveApprovalTools={persistApprovalTools}
+            onSaveGuardrails={persistGuardrails}
+          />
         )}
 
         {activeTab === 'contexts' && (
