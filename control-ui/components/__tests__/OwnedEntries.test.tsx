@@ -25,9 +25,11 @@ vi.mock('../ConfirmDialog', () => ({
   useConfirmDialog: () => ({ confirm: confirmMock, confirmDialog: null }),
 }))
 
-const navigation = vi.hoisted(() => ({ push: vi.fn() }))
+const navigation = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }))
+let mockSearchParams = new URLSearchParams()
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: navigation.push }),
+  useRouter: () => ({ push: navigation.push, replace: navigation.replace }),
+  useSearchParams: () => mockSearchParams,
 }))
 
 function render(ui: React.ReactNode) {
@@ -36,6 +38,7 @@ function render(ui: React.ReactNode) {
 afterEach(cleanup)
 beforeEach(() => {
   vi.clearAllMocks()
+  mockSearchParams = new URLSearchParams()
   confirmMock.mockResolvedValue(false)
   // Default: nothing installed, so entries show the Install CTA.
   vi.mocked(api.getRegistryCatalog).mockResolvedValue(EMPTY_INSTALLED as never)
@@ -165,6 +168,45 @@ describe('OwnedEntries', () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({ data: [] })
     render(<OwnedEntries orgScope="acme" />)
     expect(await screen.findByText(/haven’t published/i)).toBeInTheDocument()
+  })
+
+  it('?type=llm-hook narrows the list to guardrail hooks and offers Show all', async () => {
+    mockSearchParams = new URLSearchParams('type=llm-hook')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [
+        { name: '@acme/redactor', version: '1.0.0', entryType: 'llm-hook', status: 'published' },
+        { name: '@acme/db', version: '2.0.0', serverMode: 'http', status: 'published' },
+      ],
+    } as never)
+    render(<OwnedEntries orgScope="acme" />)
+
+    expect(await screen.findByText('@acme/redactor')).toBeInTheDocument()
+    expect(screen.queryByText('@acme/db')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /show all entries/i }))
+    expect(navigation.replace).toHaveBeenCalledWith('/marketplace/org/entries')
+  })
+
+  it('a type filter that matches nothing says so without claiming the org has published nothing', async () => {
+    mockSearchParams = new URLSearchParams('type=llm-hook')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [{ name: '@acme/db', version: '2.0.0', serverMode: 'http', status: 'published' }],
+    } as never)
+    render(<OwnedEntries orgScope="acme" />)
+
+    expect(await screen.findByText(/no guardrail hooks published yet/i)).toBeInTheDocument()
+    expect(screen.queryByText(/haven’t published/i)).toBeNull()
+  })
+
+  it('an unrecognised type filter falls back to the full list', async () => {
+    mockSearchParams = new URLSearchParams('type=not-a-type')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [{ name: '@acme/db', version: '2.0.0', serverMode: 'http', status: 'published' }],
+    } as never)
+    render(<OwnedEntries orgScope="acme" />)
+
+    expect(await screen.findByText('@acme/db')).toBeInTheDocument()
+    expect(screen.queryByText(/showing .* only/i)).toBeNull()
   })
 
   it('error + Retry re-fetches', async () => {
