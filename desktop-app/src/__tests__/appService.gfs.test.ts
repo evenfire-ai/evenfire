@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
 import { config, getActiveEnvKey } from '../config.js'
-import { DesktopUploadCapabilityError } from '../gfs/upload.js'
+import { DesktopUploadCapabilityError, normalizeUploadProductMaxBytes } from '../gfs/upload.js'
 
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
@@ -312,7 +312,9 @@ describe('AppService GFS upload security scope', () => {
       await writeFile(filePath, Buffer.from('legacy payload'))
       const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
-        new DesktopUploadCapabilityError('resumable uploads are disabled')
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
       )
       service.gfsClient = {
         createResource: vi.fn().mockResolvedValue({
@@ -354,6 +356,34 @@ describe('AppService GFS upload security scope', () => {
     }
   })
 
+  it('fails loudly without legacy fallback for malformed v2 capabilities', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-malformed-capability-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.from('payload'))
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      let malformed: unknown
+      try {
+        normalizeUploadProductMaxBytes(0)
+      } catch (error) {
+        malformed = error
+      }
+      expect(malformed).toBeInstanceOf(DesktopUploadCapabilityError)
+      service.startDesktopGfsUpload.mockRejectedValue(malformed)
+      service.gfsClient = {
+        createResource: vi.fn(),
+        replaceFile: vi.fn(),
+      }
+
+      await expect(
+        service.startGfsFileUpload('parent-rid', 'payload.bin', filePath, 'main')
+      ).rejects.toBe(malformed)
+      expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects above the legacy limit before invoking the fallback request', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-limit-fallback-'))
     try {
@@ -362,7 +392,9 @@ describe('AppService GFS upload security scope', () => {
       await truncate(filePath, 16 * 1024 * 1024 + 1)
       const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
-        new DesktopUploadCapabilityError('resumable uploads are disabled')
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
       )
       service.gfsClient = {
         createResource: vi.fn(),
@@ -386,7 +418,9 @@ describe('AppService GFS upload security scope', () => {
       await writeFile(filePath, Buffer.from('resume payload'))
       const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
-        new DesktopUploadCapabilityError('resumable uploads are disabled')
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
       )
       service.gfsClient = {
         createResource: vi.fn(),
@@ -410,7 +444,9 @@ describe('AppService GFS upload security scope', () => {
       await writeFile(filePath, Buffer.from('replace payload'))
       const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
-        new DesktopUploadCapabilityError('resumable uploads are disabled')
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
       )
       service.gfsClient = {
         createResource: vi.fn(),

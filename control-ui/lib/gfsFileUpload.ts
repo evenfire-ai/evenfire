@@ -151,10 +151,33 @@ interface UploadCapabilities {
 }
 
 export class GfsUploadCapabilityError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  readonly allowLegacyFallback: boolean
+
+  constructor(message: string, options?: { cause?: unknown; allowLegacyFallback?: boolean }) {
     super(message, options)
     this.name = 'GfsUploadCapabilityError'
+    this.allowLegacyFallback = options?.allowLegacyFallback === true
   }
+}
+
+const LEGACY_FALLBACK_CAPABILITY_STATUSES = new Set([408, 404, 501, 502, 503, 504])
+
+export function allowsLegacyCapabilityFallback(error: unknown): boolean {
+  const status = statusOf(error)
+  if (status !== undefined) return LEGACY_FALLBACK_CAPABILITY_STATUSES.has(status)
+  if (!(error instanceof Error) || error.name === 'AbortError' || error instanceof SyntaxError)
+    return false
+  if (error.name === 'TimeoutError' || error instanceof TypeError) return true
+  const code = String(
+    (error as Error & { code?: unknown; cause?: { code?: unknown } }).cause?.code ||
+      (error as Error & { code?: unknown }).code ||
+      ''
+  )
+  return (
+    ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'].includes(
+      code
+    ) || /socket hang up|fetch failed|network error/i.test(error.message)
+  )
 }
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -236,15 +259,16 @@ function endpoint(path: string): string {
   return `${API_BASE}${path}`
 }
 
-function signalWithTimeout(
+export function signalWithTimeout(
   signal: AbortSignal | undefined,
   timeoutMs: number
 ): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController()
-  const timer = window.setTimeout(
-    () => controller.abort(new Error('GFS upload request timed out')),
-    timeoutMs
-  )
+  const timer = window.setTimeout(() => {
+    const timeout = new Error('GFS upload request timed out')
+    timeout.name = 'TimeoutError'
+    controller.abort(timeout)
+  }, timeoutMs)
   const abort = () => controller.abort(signal?.reason)
   signal?.addEventListener('abort', abort, { once: true })
   return {
@@ -1155,13 +1179,17 @@ export class GfsUploadJob {
       )
       capabilityData = capabilities.data
     } catch (error) {
+      const allowLegacyFallback = allowsLegacyCapabilityFallback(error)
       throw new GfsUploadCapabilityError('Resumable GFS upload capabilities are unavailable.', {
         cause: error,
+        allowLegacyFallback,
       })
     }
     const upload = parseUploadCapabilities(capabilityData)
     if (!upload.resumableV2?.enabled)
-      throw new GfsUploadCapabilityError('Resumable GFS uploads are not enabled on this writer.')
+      throw new GfsUploadCapabilityError('Resumable GFS uploads are not enabled on this writer.', {
+        allowLegacyFallback: true,
+      })
     return upload
   }
 
@@ -1173,6 +1201,11 @@ export class GfsUploadJob {
     const upload = await this.loadCapabilities()
     const resumable = upload.resumableV2!
     const productMaxFileBytes = normalizeUploadProductMaxBytes(resumable.maxFileBytes)
+    if (resumable.maxFileBytes === undefined) {
+      console.warn(
+        `GFS Upload v2 writer omitted maxFileBytes; using the ${GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES}-byte compatibility limit.`
+      )
+    }
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
     if (resumeId) {
       const { session, parts } = (

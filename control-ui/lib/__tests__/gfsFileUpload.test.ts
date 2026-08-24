@@ -3,12 +3,14 @@ import {
   GFS_LEGACY_UPLOAD_MAX_BYTES,
   GfsUploadJob,
   type GfsUploadStatus,
+  allowsLegacyCapabilityFallback,
   assertGfsFileUploadSize,
   isAmbiguousUploadStatus,
   isRetryableUploadStatus,
   normalizeInstabilityFailureThreshold,
   normalizeUploadProductMaxBytes,
   parseRetryAfter,
+  signalWithTimeout,
   uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
 
@@ -22,6 +24,45 @@ describe('assertGfsFileUploadSize', () => {
     expect(() => assertGfsFileUploadSize(1024 * 1024 * 1024 + 1)).toThrow(
       'GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.'
     )
+  })
+})
+
+describe('Upload v2 capability fallback classification', () => {
+  it.each([
+    ['network failure', new TypeError('fetch failed'), true],
+    ['timeout', Object.assign(new Error('timed out'), { name: 'TimeoutError' }), true],
+    ['request timeout', Object.assign(new Error('timed out'), { status: 408 }), true],
+    ['unsupported endpoint', Object.assign(new Error('missing'), { status: 404 }), true],
+    ['not implemented', Object.assign(new Error('unsupported'), { status: 501 }), true],
+    ['gateway unavailable', Object.assign(new Error('unavailable'), { status: 503 }), true],
+    ['caller abort', Object.assign(new Error('aborted'), { name: 'AbortError' }), false],
+    ['malformed JSON', new SyntaxError('bad JSON'), false],
+    ['unauthorized', Object.assign(new Error('unauthorized'), { status: 401 }), false],
+    ['forbidden', Object.assign(new Error('forbidden'), { status: 403 }), false],
+    ['invalid request', Object.assign(new Error('invalid'), { status: 422 }), false],
+    ['writer failure', Object.assign(new Error('failed'), { status: 500 }), false],
+    ['unknown failure', new Error('unexpected'), false],
+  ])('classifies %s for bounded legacy fallback', (_label, error, expected) => {
+    expect(allowsLegacyCapabilityFallback(error)).toBe(expected)
+  })
+
+  it('classifies the real request timeout reason for bounded legacy fallback', async () => {
+    vi.useFakeTimers()
+    try {
+      const timed = signalWithTimeout(undefined, 25)
+      const aborted = new Promise<void>(resolve => {
+        timed.signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+
+      await vi.advanceTimersByTimeAsync(25)
+      await aborted
+
+      expect(timed.signal.reason).toMatchObject({ name: 'TimeoutError' })
+      expect(allowsLegacyCapabilityFallback(timed.signal.reason)).toBe(true)
+      timed.cancel()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -163,6 +204,10 @@ class FakeXhr {
 }
 
 describe('GfsUploadJob', () => {
+  it('pins the missing-field compatibility default independently of the implementation', () => {
+    expect(normalizeUploadProductMaxBytes(undefined)).toBe(209_715_200)
+  })
+
   beforeEach(() => {
     FakeXhr.requests = []
     FakeXhr.statuses = []
@@ -271,11 +316,52 @@ describe('GfsUploadJob', () => {
     expect(createCalls).toBe(0)
   })
 
+  it('marks a valid disabled-v2 response as eligible for bounded fresh legacy fallback', async () => {
+    const file = new File([new Uint8Array([1])], 'disabled-v2.bin')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ upload: { resumableV2: { enabled: false } } }), {
+            status: 200,
+          })
+      )
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-disabled-v2' },
+      }).start()
+    ).rejects.toMatchObject({
+      name: 'GfsUploadCapabilityError',
+      allowLegacyFallback: true,
+    })
+  })
+
+  it('fails closed on an authenticated capability rejection instead of selecting legacy', async () => {
+    const file = new File([new Uint8Array([1])], 'capability-auth.bin')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{"error":"unauthorized"}', { status: 401 }))
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-capability-auth' },
+      }).start()
+    ).rejects.toMatchObject({
+      name: 'GfsUploadCapabilityError',
+      allowLegacyFallback: false,
+    })
+  })
+
   it('reports the default compatibility limit when an enabled writer omits maxFileBytes', async () => {
     const file = new File([new Uint8Array([1])], 'missing-limit.bin')
     const compatibilityMaxFileBytes = normalizeUploadProductMaxBytes(undefined)
-    const compatibilityLimit = `${compatibilityMaxFileBytes / (1024 * 1024)} MiB`
-    Object.defineProperty(file, 'size', { value: compatibilityMaxFileBytes + 1 })
     let createCalls = 0
     vi.stubGlobal(
       'fetch',
@@ -285,21 +371,30 @@ describe('GfsUploadJob', () => {
           return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
             status: 200,
           })
-        if (method === 'POST') createCalls += 1
+        if (method === 'POST') {
+          createCalls += 1
+          return new Response(JSON.stringify({ error: 'session admission reached' }), {
+            status: 422,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
         return new Response(null, { status: 204 })
       })
     )
 
+    const compatibilityWarning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     await expect(
       new GfsUploadJob({
         file,
         name: file.name,
         target: { operation: 'create', parentRid: 'parent-missing-limit' },
       }).start()
-    ).rejects.toThrow(
-      `GFS uploads use the ${compatibilityLimit} compatibility limit because the writer omitted maxFileBytes.`
+    ).rejects.toThrow()
+    expect(compatibilityWarning).toHaveBeenCalledWith(
+      'GFS Upload v2 writer omitted maxFileBytes; using the 209715200-byte compatibility limit.'
     )
-    expect(createCalls).toBe(0)
+    expect(createCalls).toBe(1)
+    expect(file.size).toBeLessThanOrEqual(compatibilityMaxFileBytes)
   })
 
   it.each([0, -1, 1.5, 1024 * 1024 * 1024 + 1, Number.MAX_SAFE_INTEGER + 1, '314572800', null])(

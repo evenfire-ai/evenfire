@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, stat, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   DesktopGfsUploadJob,
+  allowsLegacyCapabilityFallback,
   isAmbiguousUploadStatus,
   isRetryableUploadStatus,
   normalizeInstabilityFailureThreshold,
@@ -25,6 +26,10 @@ function enabledCapabilities(overrides: Record<string, unknown> = {}) {
 }
 
 describe('desktop GFS indexed uploader', () => {
+  it('pins the missing-field compatibility default independently of the implementation', () => {
+    expect(normalizeUploadProductMaxBytes(undefined)).toBe(209_715_200)
+  })
+
   it('uses the writer threshold and rejects invalid capability values', () => {
     expect(normalizeInstabilityFailureThreshold(undefined)).toBe(3)
     expect(normalizeInstabilityFailureThreshold(1)).toBe(1)
@@ -42,6 +47,24 @@ describe('desktop GFS indexed uploader', () => {
     expect(isAmbiguousUploadStatus(413)).toBe(false)
     expect(isAmbiguousUploadStatus(429)).toBe(false)
     expect(isAmbiguousUploadStatus(507)).toBe(false)
+  })
+
+  it.each([
+    ['network failure', new TypeError('fetch failed'), true],
+    ['timeout', Object.assign(new Error('timed out'), { name: 'TimeoutError' }), true],
+    ['request timeout', Object.assign(new Error('timed out'), { status: 408 }), true],
+    ['unsupported endpoint', Object.assign(new Error('missing'), { status: 404 }), true],
+    ['not implemented', Object.assign(new Error('unsupported'), { status: 501 }), true],
+    ['gateway unavailable', Object.assign(new Error('unavailable'), { status: 503 }), true],
+    ['caller abort', Object.assign(new Error('aborted'), { name: 'AbortError' }), false],
+    ['malformed JSON', new SyntaxError('bad JSON'), false],
+    ['unauthorized', Object.assign(new Error('unauthorized'), { status: 401 }), false],
+    ['forbidden', Object.assign(new Error('forbidden'), { status: 403 }), false],
+    ['invalid request', Object.assign(new Error('invalid'), { status: 422 }), false],
+    ['writer failure', Object.assign(new Error('failed'), { status: 500 }), false],
+    ['unknown failure', new Error('unexpected'), false],
+  ])('classifies %s capability failures for legacy fallback', (_label, error, expected) => {
+    expect(allowsLegacyCapabilityFallback(error)).toBe(expected)
   })
 
   it('reaches writer admission for a 250 MiB file under a 300 MiB capability', async () => {
@@ -125,20 +148,14 @@ describe('desktop GFS indexed uploader', () => {
     }
   })
 
-  it('reports the default compatibility limit when an enabled writer omits maxFileBytes', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-missing-limit-'))
+  it('marks a valid disabled-v2 response as eligible for bounded fresh legacy fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-v2-disabled-'))
     try {
       const filePath = join(root, 'payload.bin')
-      const compatibilityMaxFileBytes = normalizeUploadProductMaxBytes(undefined)
-      const compatibilityLimit = `${compatibilityMaxFileBytes / (1024 * 1024)} MiB`
-      await writeFile(filePath, Buffer.alloc(0))
-      await truncate(filePath, compatibilityMaxFileBytes + 1)
-      let createCalls = 0
+      await writeFile(filePath, Buffer.from([1]))
       const transport = {
-        async requestJson<T>(method: 'GET' | 'POST') {
-          if (method === 'GET') return enabledCapabilities() as T
-          createCalls += 1
-          throw new Error('unexpected session creation')
+        async requestJson<T>() {
+          return { upload: { resumableV2: { enabled: false } } } as T
         },
         async requestPart() {
           throw new Error('part request was not expected')
@@ -153,13 +170,88 @@ describe('desktop GFS indexed uploader', () => {
           name: 'payload.bin',
           drive: 'main',
           operation: 'create',
+          parentRid: 'parent-disabled-v2',
+          transport,
+        }).start()
+      ).rejects.toMatchObject({
+        name: 'DesktopUploadCapabilityError',
+        allowLegacyFallback: true,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed on an authenticated capability rejection instead of selecting legacy', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-capability-auth-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.from([1]))
+      const transport = {
+        async requestJson() {
+          throw Object.assign(new Error('unauthorized'), { status: 401 })
+        },
+        async requestPart() {
+          throw new Error('part request was not expected')
+        },
+      }
+
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
+          parentRid: 'parent-capability-auth',
+          transport,
+        }).start()
+      ).rejects.toMatchObject({
+        name: 'DesktopUploadCapabilityError',
+        allowLegacyFallback: false,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports the default compatibility limit when an enabled writer omits maxFileBytes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-missing-limit-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      const compatibilityMaxFileBytes = normalizeUploadProductMaxBytes(undefined)
+      await writeFile(filePath, Buffer.from([1]))
+      let createCalls = 0
+      const transport = {
+        async requestJson<T>(method: 'GET' | 'POST') {
+          if (method === 'GET') return enabledCapabilities() as T
+          createCalls += 1
+          throw Object.assign(new Error('session admission reached'), { status: 422 })
+        },
+        async requestPart() {
+          throw new Error('part request was not expected')
+        },
+      }
+
+      const compatibilityWarning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      await expect(
+        new DesktopGfsUploadJob({
+          baseUrl: 'https://api.example',
+          token: 'token',
+          filePath,
+          name: 'payload.bin',
+          drive: 'main',
+          operation: 'create',
           parentRid: 'parent-missing-limit',
           transport,
         }).start()
-      ).rejects.toThrow(
-        `GFS files are limited to the ${compatibilityLimit} compatibility limit because the writer omitted maxFileBytes`
+      ).rejects.toThrow('session admission reached')
+      expect(compatibilityWarning).toHaveBeenCalledWith(
+        'GFS Upload v2 writer omitted maxFileBytes; using the 209715200-byte compatibility limit'
       )
-      expect(createCalls).toBe(0)
+      expect(createCalls).toBe(1)
+      expect((await stat(filePath)).size).toBeLessThanOrEqual(compatibilityMaxFileBytes)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -412,8 +504,8 @@ describe('desktop GFS indexed uploader', () => {
           }).start()
         ).rejects.toMatchObject({
           name: 'DesktopUploadCapabilityError',
-          message: 'GFS resumable upload capabilities are unavailable',
-          cause: expect.objectContaining({ message: expect.stringContaining(drift.cause) }),
+          message: expect.stringContaining(drift.cause),
+          allowLegacyFallback: false,
         })
         expect(sessionRequests).toBe(0)
       }
