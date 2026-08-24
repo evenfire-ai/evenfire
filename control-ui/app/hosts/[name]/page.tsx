@@ -630,7 +630,9 @@ export default function HostDetailsPage() {
         // Reload guardrails/server state while preserving any drafts left open
         // in the Overview or Model tabs.
         await loadData('none')
-        showToast('Guardrails saved.', { tone: 'success' })
+        // No toast here on purpose: HostGuardrailsSection names the hook it
+        // just changed once this resolves, and a generic 'saved' alongside it
+        // would stack two success toasts on a single remove.
       } catch (e) {
         const status = (e as { status?: number } | null)?.status
         const code = (e as { code?: string } | null)?.code
@@ -641,8 +643,8 @@ export default function HostDetailsPage() {
         } else {
           setError(e instanceof Error ? e.message : 'Failed to save guardrails')
         }
-        // Re-throw so HostGuardrailsSection stays in edit mode and keeps the
-        // operator's draft alongside the error/conflict banner.
+        // Re-throw so HostGuardrailsSection knows the save failed and skips
+        // its success toast, leaving the error/conflict banner to explain.
         throw e
       } finally {
         setBusy(false)

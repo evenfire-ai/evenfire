@@ -220,7 +220,10 @@ export function OwnedEntries({
     [entries, typeFilter, activeTypeLabel]
   )
 
-  const hasPrivateEntries = visibleEntries.some(e => e.visibility === 'private')
+  // Deliberately org-wide, not `visibleEntries`: the notice describes what
+  // cross-org sharing does to this org's private entries, so a `?type=` filter
+  // that happens to hide them all must not make it disappear.
+  const hasPrivateEntries = entries.some(e => e.visibility === 'private')
   // Collapse same-named entries into one row (latest leads); expanding a row
   // reveals the previous versions, each individually installable.
   const grouped = groupByName(visibleEntries)

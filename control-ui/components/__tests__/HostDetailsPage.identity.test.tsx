@@ -46,8 +46,6 @@ vi.mock('../../lib/api', () => ({
   getAgentUsers: vi.fn(),
   getHost: vi.fn(),
   getHostDetailBundle: vi.fn(),
-  // The Hooks sub-tab loads the installed LlmHooks to populate its picker.
-  getLlmHooks: vi.fn().mockResolvedValue({ items: [] }),
   updateAdminTeamAgents: vi.fn(),
   updateAdminUserAgents: vi.fn(),
   // The model picker loads the operator allowlist via useLlmAllowedModels.

@@ -117,6 +117,7 @@ describe('HostGuardrailsSection', () => {
     const saved = onSave.mock.calls[0][0] as HostGuardrails
     expect(saved.hooks).toEqual({})
     expect(saved.builtins).toEqual(GUARDRAILS.builtins)
+    expect(saved.limits).toEqual(GUARDRAILS.limits)
   })
 
   it('a declined confirm leaves the hook in place', async () => {

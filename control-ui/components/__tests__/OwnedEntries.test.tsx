@@ -209,6 +209,42 @@ describe('OwnedEntries', () => {
     expect(screen.queryByText(/showing .* only/i)).toBeNull()
   })
 
+  it('a type filter naming an inherited object key falls back to the full list', async () => {
+    // `?type=toString` used to resolve to Object.prototype.toString off the
+    // label map, which read as a real label and crashed the render.
+    mockSearchParams = new URLSearchParams('type=toString')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [{ name: '@acme/db', version: '2.0.0', serverMode: 'http', status: 'published' }],
+    } as never)
+    render(<OwnedEntries orgScope="acme" />)
+
+    expect(await screen.findByText('@acme/db')).toBeInTheDocument()
+    expect(screen.queryByText(/showing .* only/i)).toBeNull()
+  })
+
+  it('keeps the sharing notice when a type filter hides every private entry', async () => {
+    mockSearchParams = new URLSearchParams('type=llm-hook')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [
+        {
+          name: '@acme/redactor',
+          version: '1.0.0',
+          entryType: 'llm-hook',
+          visibility: 'public',
+          status: 'published',
+        },
+        { name: '@acme/db', version: '2.0.0', serverMode: 'http', visibility: 'private' },
+      ],
+    } as never)
+    render(<OwnedEntries orgScope="acme" canShare={false} sharingUnavailable />)
+
+    await screen.findByText('@acme/redactor')
+    // The private entry is filtered out of the table, but the notice describes
+    // org state, so it must still explain why sharing is unavailable.
+    expect(screen.queryByText('@acme/db')).toBeNull()
+    expect(screen.getByText(/Cross-org sharing/i)).toBeInTheDocument()
+  })
+
   it('error + Retry re-fetches', async () => {
     vi.mocked(api.getOwnedRegistryEntries)
       .mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 500 }))

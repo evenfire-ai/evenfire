@@ -87,7 +87,7 @@ export function HostGuardrailsSection({
   const disabled = busy || saving
 
   return (
-    <section className="cu-guardrails-tab" aria-label="Hooks">
+    <section aria-label="Hooks">
       <div className="cu-access-section">
         <div className="cu-access-section__header">
           <p className="cu-muted cu-access-section__description">

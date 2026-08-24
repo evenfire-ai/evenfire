@@ -5,8 +5,15 @@ export const GUARDRAIL_ENTRY_TYPE = 'llm-hook'
 
 // Human labels for the active-filter notice on the entries list. Only types
 // that something links to with `?type=` need an entry here.
-export const MARKETPLACE_ENTRY_TYPE_LABELS: Record<string, string> = {
-  'llm-hook': 'Guardrail hooks',
-  'mcp-server': 'Connectors',
-  recipe: 'Plugins',
-}
+//
+// Null-prototype on purpose: the keys are indexed with an untrusted `?type=`
+// value off the URL, so an inherited key (`toString`, `constructor`, …) would
+// otherwise resolve to a function and be treated as a real label.
+export const MARKETPLACE_ENTRY_TYPE_LABELS: Record<string, string> = Object.assign(
+  Object.create(null) as Record<string, string>,
+  {
+    'llm-hook': 'Guardrail hooks',
+    'mcp-server': 'Connectors',
+    recipe: 'Plugins',
+  }
+)
