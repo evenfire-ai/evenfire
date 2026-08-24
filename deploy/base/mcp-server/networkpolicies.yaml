@@ -167,16 +167,9 @@ spec:
       podSelector:
         matchLabels:
           app: host-context-controller-api-gateway
-  - ports:
-    - port: 3000
-      protocol: TCP
-    to:
-    - podSelector:
-        matchLabels:
-          clerum.io/managed-by: host-context-controller
-        matchExpressions:
-        - key: clerum.io/mcpserver
-          operator: Exists
+  # HCC adds one context/server-scoped egress policy per live McpServer,
+  # including the declared transport port. Keeping no static backend lane
+  # avoids admitting only port 3000 (or widening the singleton to a range).
   - ports:
     - port: 53
       protocol: UDP

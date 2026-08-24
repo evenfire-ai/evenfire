@@ -201,17 +201,15 @@ for rendered in "$@"; do
         "ports" => [{ "port" => 8083, "protocol" => "TCP" }],
       }]
     proxy_egress = require_resource.call("NetworkPolicy", "mcp-proxy-egress", "mcp-server")
-    backend_rule = Array(proxy_egress.dig("spec", "egress")).find do |rule|
-      Array(rule["ports"]).include?({ "port" => 3000, "protocol" => "TCP" })
+    static_backend_rule = Array(proxy_egress.dig("spec", "egress")).find do |rule|
+      Array(rule["to"]).any? do |peer|
+        peer.dig("podSelector", "matchLabels", "clerum.io/mcpserver") ||
+          Array(peer.dig("podSelector", "matchExpressions")).any? do |expression|
+            expression["key"] == "clerum.io/mcpserver"
+          end
+      end
     end
-    abort("mcp-proxy backend egress rule is absent") unless backend_rule
-    abort("mcp-proxy backend egress must select only managed MCP server pods") unless
-      backend_rule["to"] == [{
-        "podSelector" => {
-          "matchLabels" => { "clerum.io/managed-by" => "host-context-controller" },
-          "matchExpressions" => [{ "key" => "clerum.io/mcpserver", "operator" => "Exists" }],
-        },
-      }]
+    abort("mcp-proxy backend egress must be generated per live McpServer") if static_backend_rule
     abort("mcp-proxy egress must not contain an unbounded rule") unless
       Array(proxy_egress.dig("spec", "egress")).all? { |rule| rule["to"].is_a?(Array) && !rule["to"].empty? && rule["ports"].is_a?(Array) && !rule["ports"].empty? }
 

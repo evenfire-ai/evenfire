@@ -141,11 +141,15 @@ when 'proxy-backend-selector'
       document.dig('metadata', 'name') == 'mcp-proxy-egress'
   end
   abort('fixture source is missing mcp-proxy egress policy') unless policy
-  backend = policy.dig('spec', 'egress').find do |rule|
-    Array(rule['ports']).any? { |port| port['port'] == 3000 }
-  end
-  abort('fixture source is missing mcp-proxy backend rule') unless backend
-  backend.dig('to').first['podSelector'].delete('matchLabels')
+  policy.fetch('spec').fetch('egress') << {
+    'to' => [{
+      'podSelector' => {
+        'matchLabels' => { 'clerum.io/managed-by' => 'host-context-controller' },
+        'matchExpressions' => [{ 'key' => 'clerum.io/mcpserver', 'operator' => 'Exists' }],
+      },
+    }],
+    'ports' => [{ 'port' => 3000, 'protocol' => 'TCP' }],
+  }
 when 'proxy-host-egress-selector'
   policy = documents.find do |document|
     document['kind'] == 'NetworkPolicy' &&
@@ -314,7 +318,7 @@ proxy_backend_selector="${tmpdir}/proxy-backend-selector.yaml"
 mutate_render proxy-backend-selector "${proxy_backend_selector}"
 assert_rejected \
   "${proxy_backend_selector}" \
-  'mcp-proxy backend egress must select only managed MCP server pods' \
+  'mcp-proxy backend egress must be generated per live McpServer' \
   'mcp-proxy backend selector'
 
 proxy_host_egress_selector="${tmpdir}/proxy-host-egress-selector.yaml"

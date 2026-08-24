@@ -112,12 +112,14 @@ const PLURAL_CONTEXTS = 'contexts'
 const CONTEXT_LABEL = 'clerum.io/context'
 const EGRESS_CLASS_LABEL = 'clerum.io/egress-class'
 const RPC_PROXY_EGRESS_POLICY_TYPE = 'rpc-proxy-egress'
+const MCP_PROXY_EGRESS_POLICY_TYPE = 'mcp-proxy-egress'
 const RPC_PROXY_APP_LABEL = 'rpc-proxy'
 
 type SafetyInventoryLane =
   | 'context-ingress'
   | 'context-host-egress'
   | 'context-rpc-egress'
+  | 'context-mcp-proxy-egress'
   | 'external-egress'
 
 type SafetyInventoryClassification = 'owned' | 'repairable' | 'ambiguous' | 'unrelated'
@@ -138,6 +140,8 @@ function policyHasReservedName(policy: k8s.V1NetworkPolicy, lane: SafetyInventor
       return name.startsWith('ctx-') && name.endsWith('-egress')
     case 'context-rpc-egress':
       return name.startsWith('rpc-egress-')
+    case 'context-mcp-proxy-egress':
+      return name.startsWith('mcp-proxy-egress-')
     case 'external-egress':
       return name.startsWith('ext-egress-')
   }
@@ -148,17 +152,26 @@ function policyNameBelongsToDifferentLane(
   lane: SafetyInventoryLane
 ): boolean {
   const name = policy.metadata?.name ?? ''
-  if (lane === 'context-ingress') return name.startsWith('ext-egress-')
-  if (lane === 'external-egress') return name.startsWith('ctx-')
+  if (lane === 'context-ingress') {
+    return name.startsWith('rpc-egress-') || name.startsWith('mcp-proxy-egress-') || name.startsWith('ext-egress-')
+  }
+  if (lane === 'context-host-egress') {
+    return name.startsWith('rpc-egress-') || name.startsWith('mcp-proxy-egress-') || name.startsWith('ext-egress-')
+  }
+  if (lane === 'context-rpc-egress') {
+    return name.startsWith('ctx-') || name.startsWith('mcp-proxy-egress-') || name.startsWith('ext-egress-')
+  }
+  if (lane === 'context-mcp-proxy-egress') {
+    return name.startsWith('ctx-') || name.startsWith('rpc-egress-') || name.startsWith('ext-egress-')
+  }
+  if (lane === 'external-egress') return name.startsWith('ctx-') || name.startsWith('rpc-egress-') || name.startsWith('mcp-proxy-egress-')
   return false
 }
 
 function expectedPolicyType(lane: SafetyInventoryLane): string {
-  return lane === 'context-rpc-egress'
-    ? RPC_PROXY_EGRESS_POLICY_TYPE
-    : lane === 'external-egress'
-      ? EXTERNAL_EGRESS_POLICY_TYPE
-      : 'context-allow'
+  if (lane === 'context-rpc-egress') return RPC_PROXY_EGRESS_POLICY_TYPE
+  if (lane === 'context-mcp-proxy-egress') return MCP_PROXY_EGRESS_POLICY_TYPE
+  return lane === 'external-egress' ? EXTERNAL_EGRESS_POLICY_TYPE : 'context-allow'
 }
 
 /**
@@ -196,9 +209,12 @@ function classifySafetyInventoryPolicy(
 
   const knownOtherHccType =
     policyType !== undefined &&
-    ['context-allow', RPC_PROXY_EGRESS_POLICY_TYPE, EXTERNAL_EGRESS_POLICY_TYPE].includes(
-      policyType
-    ) &&
+    [
+      'context-allow',
+      RPC_PROXY_EGRESS_POLICY_TYPE,
+      MCP_PROXY_EGRESS_POLICY_TYPE,
+      EXTERNAL_EGRESS_POLICY_TYPE,
+    ].includes(policyType) &&
     !typeMatches
   const hasRawConflictingMarker =
     (managedBy !== undefined && !managedMatches) || (policyType !== undefined && !typeMatches)
@@ -737,6 +753,7 @@ export class NetworkPolicyReconciler {
     ingress: k8s.V1NetworkPolicy
     hostEgress: k8s.V1NetworkPolicy
     rpcProxyEgress: k8s.V1NetworkPolicy
+    mcpProxyEgress: k8s.V1NetworkPolicy
   } {
     const contextId = context.spec.contextId
     const serverName = server.name
@@ -870,6 +887,7 @@ export class NetworkPolicyReconciler {
         },
       },
       rpcProxyEgress: this.buildRpcProxyEgressPolicy(contextId, serverName, port),
+      mcpProxyEgress: this.buildMcpProxyEgressPolicy(contextId, serverName, port),
     }
   }
 
@@ -941,6 +959,16 @@ export class NetworkPolicyReconciler {
         'context-rpc-egress',
         isCurrent
       )
+      if (!isCurrent()) return false
+
+      const mcpProxyEgressName = desired.mcpProxyEgress.metadata!.name!
+      await this.applyOwnedPolicy(
+        mcpProxyEgressName,
+        config.namespace,
+        desired.mcpProxyEgress,
+        'context-mcp-proxy-egress',
+        isCurrent
+      )
     }
 
     // Re-LIST every lane after writes so a same-name policy that was just
@@ -973,6 +1001,7 @@ export class NetworkPolicyReconciler {
       context?: k8s.V1NetworkPolicy[]
       hostEgress?: k8s.V1NetworkPolicy[]
       rpcProxyEgress?: k8s.V1NetworkPolicy[]
+      mcpProxyEgress?: k8s.V1NetworkPolicy[]
     },
     onRevoked?: () => void,
     callerHonorsLostFence = false
@@ -1025,6 +1054,7 @@ export class NetworkPolicyReconciler {
     const desiredIngress = new Map<string, k8s.V1NetworkPolicy>()
     const desiredHostEgress = new Map<string, k8s.V1NetworkPolicy>()
     const desiredRpcProxyEgress = new Map<string, k8s.V1NetworkPolicy>()
+    const desiredMcpProxyEgress = new Map<string, k8s.V1NetworkPolicy>()
     for (const serverName of allowedServers) {
       const server = this.serverCache.get(serverName)
       if (!server) continue
@@ -1032,6 +1062,7 @@ export class NetworkPolicyReconciler {
       desiredIngress.set(desired.ingress.metadata!.name!, desired.ingress)
       desiredHostEgress.set(desired.hostEgress.metadata!.name!, desired.hostEgress)
       desiredRpcProxyEgress.set(desired.rpcProxyEgress.metadata!.name!, desired.rpcProxyEgress)
+      desiredMcpProxyEgress.set(desired.mcpProxyEgress.metadata!.name!, desired.mcpProxyEgress)
     }
 
     const existingPolicies =
@@ -1157,6 +1188,47 @@ export class NetworkPolicyReconciler {
       }
     }
 
+    const existingMcpProxyPolicies =
+      listedPolicies?.mcpProxyEgress ?? (await this.listMcpProxyEgressPoliciesForContext(contextId))
+    if (!isCurrent()) return false
+    for (const existing of existingMcpProxyPolicies) {
+      if (!isCurrent()) return false
+      const existingName = existing.metadata?.name || ''
+      const desired = desiredMcpProxyEgress.get(existingName)
+      if (!desired) {
+        console.log(`[NetPol] Deleting orphaned mcp-proxy egress policy "${existingName}"`)
+        if (!(await revokeOrphanedPolicy(config.namespace, existing))) return false
+        onRevoked?.()
+      } else if (
+        !sameNetworkPolicySpec(existing, desired) ||
+        !hasExpectedPolicyOwnership(existing, MCP_PROXY_EGRESS_POLICY_TYPE)
+      ) {
+        console.log(`[NetPol] Replacing stale same-name mcp-proxy egress policy "${existingName}"`)
+        if (safetySnapshotProvided) {
+          if (
+            !(await this.replaceSafetyPolicySnapshot(
+              config.namespace,
+              existing,
+              desired,
+              'context-mcp-proxy-egress',
+              isCurrent
+            ))
+          ) {
+            return false
+          }
+        } else {
+          await this.replaceSafetyPolicySnapshot(
+            config.namespace,
+            existing,
+            desired,
+            'context-mcp-proxy-egress',
+            isCurrent
+          )
+        }
+        onRevoked?.()
+      }
+    }
+
     return isCurrent() && !lostDeleteFence
   }
 
@@ -1184,6 +1256,7 @@ export class NetworkPolicyReconciler {
 
     // Also delete L2 rpc-proxy egress policies
     await this.deleteRpcProxyPoliciesForContext(contextId, deleteAllowed)
+    await this.deleteMcpProxyPoliciesForContext(contextId, deleteAllowed)
   }
 
   /**
@@ -1370,6 +1443,9 @@ export class NetworkPolicyReconciler {
     let allRpcProxyEgressPolicies = contextCleanupAuthoritative()
       ? await this.listAllRpcProxyEgressPolicies()
       : []
+    let allMcpProxyEgressPolicies = contextCleanupAuthoritative()
+      ? await this.listAllMcpProxyEgressPolicies()
+      : []
     let allExternalPolicies: k8s.V1NetworkPolicy[] = []
     if (options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
       allExternalPolicies = await this.listAllExternalEgressPolicies()
@@ -1408,6 +1484,11 @@ export class NetworkPolicyReconciler {
         broadRpcProxyPolicies,
         'context-rpc-egress'
       )
+      allMcpProxyEgressPolicies = this.mergeSafetyLaneInventory(
+        allMcpProxyEgressPolicies,
+        broadMcpServerPolicies,
+        'context-mcp-proxy-egress'
+      )
     }
     if (options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
       allExternalPolicies = this.mergeSafetyLaneInventory(
@@ -1420,6 +1501,7 @@ export class NetworkPolicyReconciler {
       allContextPolicies.length +
       allContextEgressPolicies.length +
       allRpcProxyEgressPolicies.length +
+      allMcpProxyEgressPolicies.length +
       allExternalPolicies.length
 
     // Delete orphaned Context policies across every L2 lane. Each lane uses
@@ -1448,6 +1530,16 @@ export class NetworkPolicyReconciler {
         ),
       name => `[NetPol] Deleting orphaned rpc-proxy egress policy "${name}"`
     )
+    await cleanupOrphanedContextPolicies(
+      allMcpProxyEgressPolicies,
+      policy =>
+        this.deleteSafetyPolicySnapshot(
+          config.namespace,
+          policy,
+          contextCleanupAuthoritative
+        ),
+      name => `[NetPol] Deleting orphaned mcp-proxy egress policy "${name}"`
+    )
 
     let liveDesiredRevisionChanged = false
     for (const context of contexts) {
@@ -1475,6 +1567,7 @@ export class NetworkPolicyReconciler {
             context: allContextPolicies.filter(forContext),
             hostEgress: allContextEgressPolicies.filter(forContext),
             rpcProxyEgress: allRpcProxyEgressPolicies.filter(forContext),
+            mcpProxyEgress: allMcpProxyEgressPolicies.filter(forContext),
           },
           recordSafetyPassRevocation
         )
@@ -2919,6 +3012,55 @@ export class NetworkPolicyReconciler {
     }
   }
 
+  /**
+   * Build the per-(Context, McpServer) egress lane for the singleton mcp-proxy.
+   * The proxy remains a TCB; this policy only removes the stale static port
+   * assumption and keeps the destination selector and transport port exact.
+   */
+  private buildMcpProxyEgressPolicy(
+    contextId: string,
+    serverName: string,
+    port: number
+  ): k8s.V1NetworkPolicy {
+    const name = `mcp-proxy-egress-${contextId}-${serverName}`
+    return {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name,
+        namespace: config.namespace,
+        labels: {
+          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          [POLICY_TYPE_LABEL]: MCP_PROXY_EGRESS_POLICY_TYPE,
+          [CONTEXT_LABEL]: contextId,
+          [MCPSERVER_LABEL]: serverName,
+        },
+      },
+      spec: {
+        podSelector: { matchLabels: { app: 'mcp-proxy' } },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [
+              {
+                namespaceSelector: {
+                  matchLabels: { 'kubernetes.io/metadata.name': config.namespace },
+                },
+                podSelector: {
+                  matchLabels: {
+                    [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+                    [MCPSERVER_LABEL]: serverName,
+                  },
+                },
+              },
+            ],
+            ports: [{ port, protocol: 'TCP' }],
+          },
+        ],
+      },
+    }
+  }
+
   /** Delete all rpc-proxy egress policies for a given context. */
   private async deleteRpcProxyPoliciesForContext(
     contextId: string,
@@ -2933,6 +3075,26 @@ export class NetworkPolicyReconciler {
     } catch (error) {
       console.error(
         `[NetPol] Failed to delete rpc-proxy egress policies for context "${contextId}":`,
+        error
+      )
+      throw error
+    }
+  }
+
+  /** Delete all mcp-proxy egress policies for a given Context. */
+  private async deleteMcpProxyPoliciesForContext(
+    contextId: string,
+    deleteAllowed?: () => Promise<boolean>
+  ): Promise<void> {
+    try {
+      const policies = await this.listMcpProxyEgressPoliciesForContext(contextId)
+      for (const policy of policies) {
+        if (deleteAllowed && !(await deleteAllowed())) return
+        await this.deleteSafetyPolicySnapshot(config.namespace, policy)
+      }
+    } catch (error) {
+      console.error(
+        `[NetPol] Failed to delete mcp-proxy egress policies for context "${contextId}":`,
         error
       )
       throw error
@@ -2968,6 +3130,39 @@ export class NetworkPolicyReconciler {
       return response.items || []
     } catch (error) {
       console.error('[NetPol] Failed to list all rpc-proxy egress policies:', error)
+      throw error
+    }
+  }
+
+  /** List all mcp-proxy egress policies across all contexts. */
+  private async listAllMcpProxyEgressPolicies(): Promise<k8s.V1NetworkPolicy[]> {
+    try {
+      const response = await this.networkingApi.listNamespacedNetworkPolicy({
+        namespace: config.namespace,
+        labelSelector: `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${POLICY_TYPE_LABEL}=${MCP_PROXY_EGRESS_POLICY_TYPE}`,
+      })
+      return response.items || []
+    } catch (error) {
+      console.error('[NetPol] Failed to list all mcp-proxy egress policies:', error)
+      throw error
+    }
+  }
+
+  /** List mcp-proxy egress policies for a given context. */
+  private async listMcpProxyEgressPoliciesForContext(
+    contextId: string
+  ): Promise<k8s.V1NetworkPolicy[]> {
+    try {
+      const response = await this.networkingApi.listNamespacedNetworkPolicy({
+        namespace: config.namespace,
+        labelSelector: `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${POLICY_TYPE_LABEL}=${MCP_PROXY_EGRESS_POLICY_TYPE},${CONTEXT_LABEL}=${contextId}`,
+      })
+      return response.items || []
+    } catch (error) {
+      console.error(
+        `[NetPol] Failed to list mcp-proxy egress policies for context "${contextId}":`,
+        error
+      )
       throw error
     }
   }
