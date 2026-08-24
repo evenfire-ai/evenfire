@@ -99,10 +99,15 @@ describe('McpClient — connect', () => {
   })
 
   it('uses StreamableHTTP + proxy URL routing when proxyUrl is provided', async () => {
+    const hostAuthorization = {
+      getAccessToken: () => 'host-token',
+      refreshOnUnauthorized: vi.fn().mockResolvedValue(undefined),
+    }
     const client = new McpClient(
       makeServerInfo({ transport: { type: 'sse', url: 'http://server/mcp' } }),
       undefined,
-      'http://mcp-proxy:8083'
+      'http://mcp-proxy:8083',
+      hostAuthorization
     )
     await client.connect()
     // StreamableHTTP used even for SSE type when proxy is set
