@@ -264,6 +264,47 @@ export async function applyUserAccessFoundationSchema(db: DbClient): Promise<voi
   await applyUserAccessRuntimePrivileges(db)
 }
 
+/** Forward migration for D26A's exact UTF-8 byte ordering and supporting indexes. */
+export async function applyCatalogUtf8OrderingSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE OR REPLACE FUNCTION catalog_utf8_bytes(value TEXT)
+    RETURNS BYTEA
+    LANGUAGE SQL
+    IMMUTABLE
+    STRICT
+    PARALLEL SAFE
+    AS $$
+      SELECT convert_to(value, 'UTF8');
+    $$;
+
+    CREATE INDEX IF NOT EXISTS user_agents_catalog_utf8_idx
+      ON user_agents (user_id, catalog_utf8_bytes(agent_name));
+    CREATE INDEX IF NOT EXISTS team_agents_catalog_utf8_idx
+      ON team_agents (catalog_utf8_bytes(agent_name), team_id);
+    CREATE INDEX IF NOT EXISTS user_contexts_catalog_utf8_idx
+      ON user_contexts (user_id, catalog_utf8_bytes(context_id));
+    CREATE INDEX IF NOT EXISTS team_contexts_catalog_utf8_idx
+      ON team_contexts (catalog_utf8_bytes(context_id), team_id);
+    CREATE INDEX IF NOT EXISTS user_workflow_triggers_catalog_utf8_idx
+      ON user_workflow_triggers (
+        user_id,
+        catalog_utf8_bytes(recipe_namespace || '/' || recipe_name)
+      );
+    CREATE INDEX IF NOT EXISTS team_workflow_triggers_catalog_utf8_idx
+      ON team_workflow_triggers (
+        catalog_utf8_bytes(recipe_namespace || '/' || recipe_name),
+        team_id
+      );
+    CREATE INDEX IF NOT EXISTS operational_relationship_catalog_utf8_target_idx
+      ON operational_resource_relationships (
+        environment_id,
+        target_type,
+        relationship_type,
+        catalog_utf8_bytes(target_id)
+      );
+  `)
+}
+
 async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> {
   await db.query(`
     CREATE OR REPLACE FUNCTION authorization_bump_user_revision(target_user_id UUID)
