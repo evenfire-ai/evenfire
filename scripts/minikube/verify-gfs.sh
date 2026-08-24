@@ -14,11 +14,16 @@ PG_DB="${PG_DB:-profiles}"
 PG_HOST="${PG_HOST:-control-postgres.control-plane.svc.cluster.local}"
 PG_PORT="${PG_PORT:-5432}"
 VERIFY_ROLLOUT_TIMEOUT="${VERIFY_ROLLOUT_TIMEOUT:-60s}"
+VERIFY_AUTH_RETRIES="${VERIFY_AUTH_RETRIES:-3}"
+VERIFY_AUTH_RETRY_DELAY_SECONDS="${VERIFY_AUTH_RETRY_DELAY_SECONDS:-2}"
 
 kc() { kubectl --context="$CONTEXT" "$@"; }
 log() { printf '[verify-gfs] %s\n' "$*"; }
 fail() { printf '[verify-gfs] FAIL: %s\n' "$*" >&2; exit 1; }
 kc_read() { local out; out="$(kc "$@" 2>&1)" || fail "kubectl $* failed: $out"; printf '%s' "$out"; }
+
+[[ "$VERIFY_AUTH_RETRIES" =~ ^[1-9][0-9]*$ ]] || fail "VERIFY_AUTH_RETRIES must be a positive integer"
+[[ "$VERIFY_AUTH_RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || fail "VERIFY_AUTH_RETRY_DELAY_SECONDS must be a non-negative integer"
 
 if crd_out="$(kc get crd globalfilesystems.clerum.io -o name 2>&1)"; then
   log "${crd_out} is installed"
@@ -41,7 +46,7 @@ kc_read -n "$GFS_NS" get configmap gfs-config -o name >/dev/null
 
 verify_role() {
   local role="$1" secret="$2" deployment="$3" selector="$4"
-  local encoded dsn lifecycle pending rotated_at rows live
+  local encoded dsn lifecycle pending rotated_at rows live auth_rc attempt
 
   lifecycle="$(kc_read -n "$GFS_NS" get secret "$secret" -o \
     'jsonpath={.metadata.annotations.clerum\.io/gfs-dsn-state}')"
@@ -53,8 +58,27 @@ verify_role() {
   encoded="$(kc_read -n "$GFS_NS" get secret "$secret" -o 'jsonpath={.data.connection-string}')"
   [ -n "$encoded" ] || fail "${GFS_NS}/${secret}.connection-string is empty"
   dsn="$(printf '%s' "$encoded" | base64 -d)" || fail "${GFS_NS}/${secret} has invalid encoding"
-  gfs_dsn_authenticates_as "$dsn" "$role" \
-    || fail "${secret} cannot authenticate through the expected PostgreSQL Service and role"
+  auth_rc=2
+  for ((attempt=1; attempt<=VERIFY_AUTH_RETRIES; attempt++)); do
+    set +e
+    gfs_dsn_authenticates_as "$dsn" "$role"
+    auth_rc=$?
+    set -e
+    if [ "$auth_rc" -eq 0 ]; then
+      break
+    fi
+    if [ "$auth_rc" -eq 1 ]; then
+      fail "${secret} was rejected by the expected PostgreSQL Service or role"
+    fi
+    if [ "$auth_rc" -ne 2 ]; then
+      fail "${secret} authentication probe returned unexpected status ${auth_rc}"
+    fi
+    if [ "$attempt" -lt "$VERIFY_AUTH_RETRIES" ]; then
+      log "${secret} authentication probe unavailable after rollout; retry ${attempt}/${VERIFY_AUTH_RETRIES}"
+      sleep "$VERIFY_AUTH_RETRY_DELAY_SECONDS"
+    fi
+  done
+  [ "$auth_rc" -eq 0 ] || fail "${secret} authentication probe remained unavailable after ${VERIFY_AUTH_RETRIES} attempts"
   unset dsn
   log "${secret} authenticates as ${role}"
 

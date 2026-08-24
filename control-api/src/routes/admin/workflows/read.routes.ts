@@ -10,17 +10,24 @@ import {
   isRecipeNamespaceAllowed,
 } from '../../../services/workflows/workflowRecipeAccessService.js'
 import { getWorkflowHealth } from '../../../services/workflows/workflowRunReadService.js'
-import { requireAdminWorkflowCaller } from '../../workflows/shared/auth.js'
+import {
+  bindAdminWorkflowAuth,
+  requireBoundAdminWorkflowCaller,
+} from '../../workflows/shared/auth.js'
+import { workflowAdminReadRateLimits } from '../../workflows/shared/rateLimit.js'
 
 const BASE = '/admin/workflows'
 
 export function createAdminWorkflowReadRoutes(gateway: K8sGateway): Router {
   const router = Router()
+  const readRateLimits = workflowAdminReadRateLimits()
 
   router.get(
     BASE,
+    ...readRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
+      const caller = requireBoundAdminWorkflowCaller(req, res)
       if (!caller) return
 
       const recipes = await getAuthorizedRecipeResources(caller, gateway)
@@ -30,8 +37,10 @@ export function createAdminWorkflowReadRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name`,
+    ...readRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
+      const caller = requireBoundAdminWorkflowCaller(req, res)
       if (!caller) return
 
       const { ns, name } = req.params
@@ -59,8 +68,10 @@ export function createAdminWorkflowReadRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/health`,
+    ...readRateLimits,
+    bindAdminWorkflowAuth,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
+      const caller = requireBoundAdminWorkflowCaller(req, res)
       if (!caller) return
 
       const { ns, name } = req.params
