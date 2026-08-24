@@ -45,15 +45,13 @@ function catalogAuthorizationRevision(principal: {
   sessionContract: 'v1' | 'v2'
   sessionRevision: string
   userRevision: string
-  catalogRevision: string
   memberships: CatalogPrincipalSnapshot['memberships']
 }): string {
-  return `car1_${revisionOfValues([
-    'catalog-authority-v1',
+  return `car2_${revisionOfValues([
+    'catalog-authority-v2',
     principal.sessionContract,
     principal.sessionRevision,
     principal.userRevision,
-    principal.catalogRevision,
     ...principal.memberships.map(membership => [
       membership.teamId,
       membership.role,
@@ -95,7 +93,6 @@ export async function loadCatalogRequestContext(input: {
      )
      SELECT users.id AS user_id,
             COALESCE(user_revision.revision, 1)::text AS user_revision,
-            COALESCE(catalog_revision.revision, 1)::text AS catalog_revision,
             CASE
               WHEN $2::text = 'v2' THEN EXISTS (
                 SELECT 1
@@ -152,10 +149,9 @@ export async function loadCatalogRequestContext(input: {
             ) AS memberships
        FROM users
   LEFT JOIN authorization_user_revisions user_revision ON user_revision.user_id = users.id
- CROSS JOIN authorization_catalog_revision catalog_revision
   LEFT JOIN active_memberships membership ON TRUE
       WHERE users.id = $1
-   GROUP BY users.id, user_revision.revision, catalog_revision.revision`,
+   GROUP BY users.id, user_revision.revision`,
     [
       input.session.userId,
       input.session.contract,
@@ -175,7 +171,6 @@ export async function loadCatalogRequestContext(input: {
     sessionContract: input.session.contract,
     sessionRevision: String(row.session_revision),
     userRevision: String(row.user_revision ?? '1'),
-    catalogRevision: String(row.catalog_revision ?? '1'),
     memberships,
   } as const
   const principal: CatalogPrincipalSnapshot = Object.freeze({
