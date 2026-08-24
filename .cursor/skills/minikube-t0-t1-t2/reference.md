@@ -25,6 +25,11 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   fixed localhost ports** — only the profile-owned random port mapping.
 - **Do not touch another worktree's Minikube profile** (e.g. an NP-08 lane
   profile) or kill its port-forwards, even if it looks idle.
+- **Do not mutate the test runner's Git checkout.** Minikube contract fixtures
+  that need a branch/HEAD must use the temporary-repository helper at
+  `scripts/tests/lib/minikube-fixture-repo.sh`, set `T2_PROJECT_DIR` to that
+  fixture, and prove the host checkout is unchanged. This is mandatory for
+  detached-head CI runs; restoring a branch in `trap cleanup` is not isolation.
 - **Do not run mutating `build-images.sh` or `pull-images.sh` directly.** Use
   the public Make target or T2 orchestrator so the exact
   worktree/profile/context lease is inherited. Only `--verify-only` is

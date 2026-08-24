@@ -3,13 +3,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
-T2_TEST_RESTORE_DETACHED=false
+source "${ROOT}/scripts/tests/lib/minikube-fixture-repo.sh"
+
+minikube_test_fixture_repo_init "${ROOT}" "${TMP_DIR}"
 cleanup() {
-  if [[ "${T2_TEST_RESTORE_DETACHED}" == true ]]; then
-    git -C "${ROOT}" switch --quiet --detach "${T2_TEST_HEAD}" || true
-    git -C "${ROOT}" branch -D "${T2_TEST_BRANCH}" >/dev/null 2>&1 || true
+  local status=$?
+  if ! minikube_test_assert_host_unchanged; then
+    status=1
   fi
   rm -rf "${TMP_DIR}"
+  return "${status}"
 }
 trap cleanup EXIT
 
@@ -27,22 +30,13 @@ T2_LOCK_ROOT="${TMP_DIR}/locks"
 T2_LOCK_TOKEN='auth-sync-test-token'
 T2_LOCK_DIR="${T2_LOCK_ROOT}/fake.lock"
 T2_PROCESS_START=unavailable
-# GitHub Actions checks out a detached commit.  The fixture still needs a
-# non-empty logical lane name because the production lease contract rejects
-# owner records without a branch identity; use the PR source ref when it is
-# available and a test-only identity otherwise.
-T2_TEST_HEAD="$(git -C "${ROOT}" rev-parse --verify HEAD)"
-T2_TEST_BRANCH="$(git -C "${ROOT}" branch --show-current)"
-if [[ -z "${T2_TEST_BRANCH}" ]]; then
-  T2_TEST_BRANCH="${GITHUB_HEAD_REF:-detached-ci-test}"
-  git -C "${ROOT}" switch --quiet --create "${T2_TEST_BRANCH}" "${T2_TEST_HEAD}"
-  T2_TEST_RESTORE_DETACHED=true
-fi
-T2_TEST_WORKTREE_ID="$(printf '%s' "${ROOT}" | shasum | awk '{print $1}')"
-T2_TEST_LOCK_KEY="$(printf '%s\0%s\0%s\0%s\0%s' "${ROOT}" "${T2_TEST_BRANCH}" "${T2_TEST_HEAD}" fake fake | shasum | awk '{print $1}')"
+T2_TEST_HEAD="${MINIKUBE_TEST_HEAD}"
+T2_TEST_BRANCH="${MINIKUBE_TEST_BRANCH}"
+T2_TEST_WORKTREE_ID="${MINIKUBE_TEST_WORKTREE_ID}"
+T2_TEST_LOCK_KEY="${MINIKUBE_TEST_LOCK_KEY}"
 mkdir -p "${T2_LOCK_DIR}"
 cat >"${T2_LOCK_DIR}/owner.env" <<EOF
-REPOSITORY=${ROOT}
+REPOSITORY=${MINIKUBE_TEST_PROJECT_DIR}
 BRANCH=${T2_TEST_BRANCH}
 HEAD=${T2_TEST_HEAD}
 PROFILE=fake
@@ -53,7 +47,7 @@ TOKEN=${T2_LOCK_TOKEN}
 PID=$$
 PROCESS_START=${T2_PROCESS_START}
 EOF
-export T2_PROJECT_DIR="${ROOT}" T2_PROFILE=fake T2_CONTEXT=fake T2_LOCK_ROOT T2_LOCK_TOKEN
+export T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" T2_PROFILE=fake T2_CONTEXT=fake T2_LOCK_ROOT T2_LOCK_TOKEN
 
 cat >"${TMP_DIR}/sleep" <<'SH'
 #!/usr/bin/env bash

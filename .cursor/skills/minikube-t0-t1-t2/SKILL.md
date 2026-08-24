@@ -44,6 +44,13 @@ Before running anything, verify ALL of these:
 - [ ] Never read `~/.cache/clerum/minikube-profiles/` directly (HARD DENY —
       it holds private profile state). The harness reads it for you.
 
+Shell contract-test rule: fixtures that exercise Git/lease state must use a
+temporary repository via `scripts/tests/lib/minikube-fixture-repo.sh`. Keep the
+real checkout as the script/Makefile source root, pass the temporary path as
+`T2_PROJECT_DIR`, and assert that the host checkout's HEAD, branch, and status
+are unchanged. Never create or restore a branch in the developer checkout to
+make a detached CI checkout testable.
+
 ## Step 1 — Plan (read-only)
 
 ```bash

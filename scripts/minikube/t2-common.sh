@@ -429,8 +429,20 @@ t2_profile_status() {
 }
 
 t2_marker_check() {
-  T2_MARKER_JSON="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get configmap "$T2_MARKER_NAME" -o json 2>/dev/null || true)"
-  if [ -z "$T2_MARKER_JSON" ]; then
+  local marker_probe marker_status=0
+  # `--ignore-not-found` makes an absent marker an explicit empty-object
+  # result. Preserve every other kubectl failure: a timeout, RBAC denial, or
+  # transport error must never be reclassified as bootstrap permission.
+  marker_probe="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get configmap "$T2_MARKER_NAME" \
+    -o json --ignore-not-found 2>&1)" || marker_status=$?
+  if [ "$marker_status" -ne 0 ]; then
+    T2_NEXT_COMMAND='verify the explicit branch-owned Kubernetes context and retry the read-only preflight'
+    t2_fail PROFILE_UNHEALTHY \
+      "unable to read pre-gate marker (kubectl status ${marker_status}): ${marker_probe}"
+    return 1
+  fi
+  T2_MARKER_JSON="$marker_probe"
+  if [ -z "$T2_MARKER_JSON" ] || [ "$T2_MARKER_JSON" = '{}' ]; then
     T2_BOOTSTRAP_REQUIRED=true
     [ -n "$T2_PLAN_STATE" ] || T2_PLAN_STATE=full-bootstrap
     [ -n "$T2_PLAN_REASON" ] || T2_PLAN_REASON='pre-gate marker is missing'

@@ -71,6 +71,10 @@ export class SecretService {
         name: s.metadata?.name,
         namespace: s.metadata?.namespace,
         labels: s.metadata?.labels || {},
+        // Listing is a metadata projection, not a write response. Preserve the
+        // existing annotation contract for catalog/recipe consumers while still
+        // excluding Secret data and stringData entirely.
+        annotations: s.metadata?.annotations || {},
       },
       type: s.type,
       keys: Object.keys(s.data || {}).sort((a, b) => a.localeCompare(b)),

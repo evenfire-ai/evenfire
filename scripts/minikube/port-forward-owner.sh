@@ -324,29 +324,73 @@ pf_owner_record_process() {
 pf_owner_cleanup_record() {
   local pidfile="$1" profile="$2" context="$3" worktree="$4"
   local namespace="$5" service="$6" local_port="$7" remote_port="$8"
-  local pid state actual_start command_line attempts delay index
+  local pid state actual_start command_line attempts delay index structured_record=false
 
   pf_owner_validate_binding "${profile}" "${context}" "${worktree}" \
     "${namespace}" "${service}" "${local_port}" "${remote_port}" || return 1
   [[ -e "${pidfile}" || -L "${pidfile}" ]] || return 0
   [[ ! -L "${pidfile}" ]] ||
     pf_owner_error "refusing to inspect or remove a symlinked pidfile: ${pidfile}" || return 1
-  IFS= read -r pid <"${pidfile}" ||
-    pf_owner_error "refusing to remove an empty pidfile: ${pidfile}" || return 1
+  # A structured profile record must be validated before its PID state is used.
+  # A dead PID is not proof that the record belongs to this lane: deleting it
+  # first would erase the only durable evidence of an ownership conflict. The
+  # legacy /tmp record is removable only when it is demonstrably dead; it has
+  # no metadata with which a live process could be adopted safely.
+  if grep -Fqx "PORT_FORWARD_OWNER_VERSION=${PF_OWNER_RECORD_VERSION}" "${pidfile}"; then
+    structured_record=true
+    pf_owner_read_record "${pidfile}" || return 1
+    pf_owner_record_matches "${profile}" "${context}" "${worktree}" \
+      "${namespace}" "${service}" "${local_port}" "${remote_port}" ||
+      pf_owner_error "pidfile belongs to a different profile, context, worktree, service, or port binding" || return 1
+    pid="${PF_OWNER_RECORD_PID}"
+  else
+    case "${pidfile}" in
+      /tmp/pf-*.pid) ;;
+      *) pf_owner_error "refusing to remove an unstructured canonical pidfile: ${pidfile}"; return 1 ;;
+    esac
+    IFS= read -r pid <"${pidfile}" ||
+      pf_owner_error "refusing to remove an empty pidfile: ${pidfile}" || return 1
+  fi
   pf_owner_validate_pid "${pid}" ||
     pf_owner_error "refusing to remove a pidfile without a numeric PID: ${pidfile}" || return 1
 
   state="$(pf_owner_process_state "${pid}")"
   case "${state}" in
     dead)
+      # Re-read the record and prove the PID is still dead immediately before
+      # removal. This closes the PID-reuse/replacement window for stale records.
+      if [[ "${structured_record}" == true ]]; then
+        pf_owner_read_record "${pidfile}" || return 1
+        pf_owner_record_matches "${profile}" "${context}" "${worktree}" \
+          "${namespace}" "${service}" "${local_port}" "${remote_port}" ||
+          pf_owner_error "dead pidfile changed ownership before cleanup" || return 1
+        [[ "${PF_OWNER_RECORD_PID}" == "${pid}" ]] ||
+          pf_owner_error "dead pidfile PID changed before cleanup" || return 1
+      else
+        local reread_pid
+        IFS= read -r reread_pid <"${pidfile}" ||
+          pf_owner_error "dead legacy pidfile disappeared before cleanup: ${pidfile}" || return 1
+        [[ "${reread_pid}" == "${pid}" ]] ||
+          pf_owner_error "dead legacy pidfile PID changed before cleanup" || return 1
+      fi
+      state="$(pf_owner_process_state "${pid}")"
+      [[ "${state}" == dead ]] ||
+        pf_owner_error "pid ${pid} became live before stale-record cleanup; leaving ${pidfile}" || return 1
       pf_owner_reap_process "${pid}"
       pf_owner_remove_dead_record "${pidfile}"
       return
       ;;
-    live) ;;
+    live)
+      [[ "${structured_record}" == true ]] || {
+        pf_owner_error "refusing to adopt or signal live legacy pidfile: ${pidfile}"
+        return 1
+      }
+      ;;
     *) pf_owner_error "cannot establish whether PID ${pid} is live; leaving ${pidfile}"; return 1 ;;
   esac
 
+  # The structured record was validated before the state probe. Re-read it for
+  # the live path so a concurrent replacement cannot be mistaken for the owner.
   pf_owner_read_record "${pidfile}" || return 1
   pf_owner_record_matches "${profile}" "${context}" "${worktree}" \
     "${namespace}" "${service}" "${local_port}" "${remote_port}" ||

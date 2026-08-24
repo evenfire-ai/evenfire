@@ -23,6 +23,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/minikube/settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/minikube/wait-gfs-reader-ready.sh" \
   "$ROOT/scripts/minikube/gfs-rollout-shim/kubectl" \
+  "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
   "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \

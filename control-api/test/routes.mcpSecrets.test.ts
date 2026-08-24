@@ -388,6 +388,44 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
     expect(ns).toBe('mcp-server')
   })
 
+  it('refuses to delete a Secret owned by a WorkflowRecipe', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'recipe-creds',
+        namespace: 'mcp-server',
+        labels: { 'clerum.io/recipe-secret': 'true' },
+      },
+    })
+    const app = makeApp(gateway)
+
+    const res = await request(app).delete('/admin/mcp-secrets/recipe-creds').expect(409)
+
+    expect(res.body.error).toContain('WorkflowRecipe')
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('binds deletion to the object observed by the ownership check', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'versioned-creds',
+        namespace: 'mcp-server',
+        labels: {},
+        uid: 'secret-uid',
+        resourceVersion: '17',
+      },
+    })
+    const app = makeApp(gateway)
+
+    await request(app).delete('/admin/mcp-secrets/versioned-creds').expect(200)
+
+    expect(gateway.deleteSecret).toHaveBeenCalledWith('versioned-creds', 'mcp-server', {
+      uid: 'secret-uid',
+      resourceVersion: '17',
+    })
+  })
+
   it('returns 500 when gateway.deleteSecret throws', async () => {
     const gateway = createGateway()
     gateway.deleteSecret.mockRejectedValueOnce(new Error('K8s API timeout'))

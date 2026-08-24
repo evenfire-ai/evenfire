@@ -677,6 +677,84 @@ ensure_control_postgres_ready() {
   return 1
 }
 
+# A previous full-setup may have been interrupted after it fenced one or more
+# database writers. Read and validate that durable journal before the first
+# namespace/CRD/Secret mutation. If the journal is in an active recovery phase,
+# close all four writers again before the later recovery code resumes. The
+# journal is deliberately not advanced here: if this guard is interrupted, the
+# old phase remains conservative and the next run repeats the fence.
+guard_interrupted_writer_recovery() {
+  local state_helper="${SCRIPT_DIR}/writer-recovery-state.py"
+  local state_file="${PROJECT_DIR}/.local-notes/infra/runs/writer-recovery/${PROFILE}.json"
+  local state_output state_status=0 phase hcc_replicas workflow_replicas trace_replicas control_api_replicas state_head
+  local pods
+
+  [[ -f "${state_file}" ]] || return 0
+  [[ -f "${state_helper}" ]] || {
+    err "Durable writer-recovery state exists but its validator is missing; refusing profile mutation"
+    return 1
+  }
+  state_output="$(python3 "${state_helper}" read \
+    --path "${state_file}" \
+    --profile "${PROFILE}" \
+    --context "${T2_CONTEXT}" \
+    --worktree "${PROJECT_DIR}" \
+    --branch "${T2_BRANCH}" \
+    --head "${T2_HEAD}" \
+    --include-head)" || state_status=$?
+  if [ "${state_status}" -ne 0 ]; then
+    err "Unable to validate durable writer-recovery state before cluster mutation (status ${state_status})"
+    return 1
+  fi
+  [[ "${state_output}" == NONE ]] && return 0
+
+  IFS='|' read -r phase hcc_replicas workflow_replicas trace_replicas \
+    control_api_replicas state_head <<<"${state_output}"
+  [[ "${phase}" == planned ]] && return 0
+  [[ "${phase}" =~ ^(hcc-fencing|hcc-fenced|workflow-fencing|workflow-fenced|trace-fencing|trace-fenced|api-fencing|api-fenced|policy-ready|roles-ready|api-restoring|api-restored|overlay-applying|overlay-applied)$ ]] || {
+    err "Durable writer-recovery state has an unsupported phase before cluster mutation: ${phase}"
+    return 1
+  }
+  [[ "${hcc_replicas}" =~ ^[0-9]+$ ]] &&
+    [[ "${workflow_replicas}" =~ ^[0-9]+$ ]] &&
+    [[ "${trace_replicas}" =~ ^[0-9]+$ ]] &&
+    [[ "${control_api_replicas}" =~ ^[1-9][0-9]*$ ]] || {
+      err "Durable writer-recovery state has invalid replica counts; refusing profile mutation"
+      return 1
+    }
+
+  log "Resuming interrupted writer recovery from phase ${phase} (recorded HEAD ${state_head}) — fencing all writers before setup mutations"
+  $KC -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l app=host-context-controller -o name)" || return 1
+  [ -z "${pods}" ] || $KC -n control-plane wait --for=delete pod \
+    -l app=host-context-controller --timeout=180s >/dev/null
+
+  $KC -n control-plane scale deployment/workflow-recipes --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l app=workflow-recipes -o name)" || return 1
+  [ -z "${pods}" ] || $KC -n control-plane wait --for=delete pod \
+    -l app=workflow-recipes --timeout=180s >/dev/null
+
+  $KC -n control-plane scale deployment/trace-maintenance-worker --replicas=0 >/dev/null
+  [ "$($KC -n control-plane get deployment/trace-maintenance-worker \
+    -o 'jsonpath={.spec.replicas}')" = 0 ] || {
+      err "trace-maintenance-worker did not converge to zero before setup mutation"
+      return 1
+    }
+  pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" || return 1
+  [ -z "${pods}" ] || $KC -n control-plane wait --for=delete pod \
+    -l app=trace-maintenance-worker --timeout=180s >/dev/null
+  pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" || return 1
+  [ -z "${pods}" ] || {
+    err "trace-maintenance-worker pods remain after the pre-mutation fence"
+    return 1
+  }
+
+  $KC -n control-plane scale deployment/control-api --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l 'app=control-api,!clerum.io/component' -o name)" || return 1
+  [ -z "${pods}" ] || $KC -n control-plane wait --for=delete pod \
+    -l 'app=control-api,!clerum.io/component' --timeout=180s >/dev/null
+}
+
 # ======================================================================
 # Step 1: Preconditions
 # ======================================================================
@@ -794,6 +872,11 @@ if ! $KC cluster-info &>/dev/null; then
 fi
 ok "Cluster '${PROFILE}' is reachable"
 maybe_exit_after_cluster_step
+
+# This is intentionally after the profile becomes reachable but before the
+# first setup apply. A stopped profile may be started safely; an active journal
+# must be fenced before any workload/configuration mutation.
+guard_interrupted_writer_recovery || exit 1
 
 t2_profile_status
 t2_context_check

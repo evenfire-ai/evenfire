@@ -106,6 +106,17 @@ branch-owned Minikube profile and its explicit Kubernetes context. It is not a
 production, GKE, Cloudflare, staging, shared-cluster, or customer-data
 runbook.
 
+Shell contract tests for this tooling must be hermetic. They may source the
+real harness scripts from the checkout, but any fixture that needs Git state
+must use a temporary fixture repository (the shared helper is
+`scripts/tests/lib/minikube-fixture-repo.sh`) and point `T2_PROJECT_DIR` at
+that repository. Tests must never `git switch`, create branches, or restore
+HEAD in the developer checkout, including when CI checks out a detached HEAD.
+Each such fixture must assert that the host checkout's HEAD, branch, and
+working-tree status are unchanged on exit. The source checkout remains the
+Makefile/script root; the temporary repository is only the lease identity
+under test.
+
 Use these canonical entry points:
 
 ```text

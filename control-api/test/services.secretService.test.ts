@@ -391,7 +391,7 @@ describe('SecretService — write responses are names-only', () => {
     await expect(svc.deleteSecret('credentials', 'channels')).rejects.toThrow('delete rejected')
   })
 
-  it('omits annotations from the list projection', async () => {
+  it('preserves metadata annotations while omitting Secret values from the list projection', async () => {
     coreApi.listNamespacedSecret.mockResolvedValue({
       items: [
         {
@@ -414,6 +414,7 @@ describe('SecretService — write responses are names-only', () => {
           name: 'credentials',
           namespace: 'channels',
           labels: { owner: 'platform' },
+          annotations: { 'example.invalid/private': 'do-not-return' },
         },
         type: 'Opaque',
         keys: ['caller-key'],

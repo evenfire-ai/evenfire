@@ -149,6 +149,13 @@ describe('platform-managed Secret name is reserved', () => {
 
   it('still deletes an ordinary connector Secret whose name merely resembles it', async () => {
     const gateway = createGateway()
+    gateway.getSecret = vi.fn(async () => ({
+      metadata: {
+        name: `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`,
+        namespace: 'mcp-server',
+        labels: {},
+      },
+    })) as never
 
     await request(makeApp(gateway))
       .delete(`/admin/mcp-secrets/${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`)

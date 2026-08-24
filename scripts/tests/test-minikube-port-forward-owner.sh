@@ -183,6 +183,25 @@ cleanup_record || fail 'dead legacy pidfile was not cleaned'
 pass 'dead stale pidfiles are removed without signalling'
 
 reset_process_fixture
+write_record 'profile-b'
+printf 'dead\n' >"${STATE_FILE}"
+if cleanup_record >"${TMP_ROOT}/dead-foreign.out" 2>&1; then
+  fail 'dead foreign structured pidfile was removed instead of rejected'
+fi
+[[ -f "${RECORD}" ]] || fail 'dead foreign structured pidfile lost its ownership evidence'
+pass 'dead foreign structured records fail closed and remain durable'
+
+reset_process_fixture
+printf '%s\nPROCESS_START=%s\n' "${PID}" "${RECORDED_START}" >"${RECORD}"
+chmod 600 "${RECORD}"
+printf 'dead\n' >"${STATE_FILE}"
+if cleanup_record >"${TMP_ROOT}/dead-canonical-legacy.out" 2>&1; then
+  fail 'dead unstructured canonical pidfile was removed instead of rejected'
+fi
+[[ -f "${RECORD}" ]] || fail 'dead unstructured canonical pidfile lost its evidence'
+pass 'dead unstructured canonical records fail closed'
+
+reset_process_fixture
 write_record
 pf_owner_record_process_matches "${RECORD}" "${PROFILE}" "${CONTEXT}" \
   "${WORKTREE}" "${NAMESPACE}" "${SERVICE}" "${LOCAL_PORT}" "${REMOTE_PORT}" ||

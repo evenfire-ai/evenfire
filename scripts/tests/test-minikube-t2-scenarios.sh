@@ -227,6 +227,12 @@ expect_code PROFILE_OWNERSHIP_MISMATCH marker-ownership marker-ownership \
   env "${marker_env[@]}" FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"feature","worktreeId":"worktree-b","imageSource":"local","imageTag":"test"}}' \
   bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check' bash "$COMMON"
 
+missing_marker_state="$(env "${marker_env[@]}" bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ printf "%s" "{}"; }; t2_marker_check; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
+[ "$missing_marker_state" = full-bootstrap ] || fail "empty marker selected $missing_marker_state instead of full-bootstrap"
+
+expect_code PROFILE_UNHEALTHY marker-read-timeout marker-read-timeout \
+  env "${marker_env[@]}" bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ return 124; }; t2_marker_check' bash "$COMMON"
+
 manifest="$tmp/image-manifest.json"
 printf '{"imageSource":"local","imageTag":"new"}\n' >"$manifest"
 expect_code IMAGE_MANIFEST_MISMATCH stale-image stale-image \

@@ -552,7 +552,40 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
         return
       }
-      const deleted = await gateway.deleteSecret(req.params.name, config.mcpServersNamespace)
+      const name = req.params.name.trim()
+      let existing: {
+        metadata?: { labels?: Record<string, string>; uid?: string; resourceVersion?: string }
+      } | null
+      try {
+        existing = (await gateway.getSecret(name, config.mcpServersNamespace)) as typeof existing
+      } catch (err) {
+        if (extractHttpStatus(err) === 404) {
+          res.status(404).json({ error: `Secret "${name}" not found` })
+          return
+        }
+        throw err
+      }
+      if (!existing) {
+        res.status(404).json({ error: `Secret "${name}" not found` })
+        return
+      }
+      if (existing.metadata?.labels?.[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE) {
+        res.status(409).json({
+          error: `Secret "${name}" is owned by a WorkflowRecipe; delete it through /admin/recipe-secrets`,
+        })
+        return
+      }
+      const metadata = existing.metadata
+      const precondition =
+        metadata?.uid || metadata?.resourceVersion
+          ? {
+              ...(metadata.uid ? { uid: metadata.uid } : {}),
+              ...(metadata.resourceVersion ? { resourceVersion: metadata.resourceVersion } : {}),
+            }
+          : undefined
+      const deleted = precondition
+        ? await gateway.deleteSecret(name, config.mcpServersNamespace, precondition)
+        : await gateway.deleteSecret(name, config.mcpServersNamespace)
       res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )

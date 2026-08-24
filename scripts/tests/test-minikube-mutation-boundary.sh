@@ -3,15 +3,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd -P)"
 TMP_DIR="$(mktemp -d)"
-T2_TEST_RESTORE_DETACHED=false
-T2_TEST_HEAD=""
-T2_TEST_BRANCH=""
+source "${ROOT}/scripts/tests/lib/minikube-fixture-repo.sh"
+
+MINIKUBE_TEST_PROFILE="boundary-profile"
+MINIKUBE_TEST_CONTEXT="boundary-profile"
+minikube_test_fixture_repo_init "${ROOT}" "${TMP_DIR}"
 cleanup() {
-  if [[ "${T2_TEST_RESTORE_DETACHED}" == true ]]; then
-    git -C "${ROOT}" switch --quiet --detach "${T2_TEST_HEAD}" || true
-    git -C "${ROOT}" branch -D "${T2_TEST_BRANCH}" >/dev/null 2>&1 || true
+  local status=$?
+  if ! minikube_test_assert_host_unchanged; then
+    status=1
   fi
   rm -rf "${TMP_DIR}"
+  return "${status}"
 }
 trap cleanup EXIT
 
@@ -22,19 +25,12 @@ LOCK_DIR="${LOCK_ROOT}/${PROFILE}.lock"
 LOG="${TMP_DIR}/mutations.log"
 mkdir -p "${LOCK_DIR}"
 
-BRANCH="$(git -C "${ROOT}" branch --show-current)"
-HEAD="$(git -C "${ROOT}" rev-parse --verify HEAD)"
-if [[ -z "${BRANCH}" ]]; then
-  BRANCH="${GITHUB_HEAD_REF:-detached-ci-test}"
-  git -C "${ROOT}" switch --quiet --create "${BRANCH}" "${HEAD}"
-  T2_TEST_HEAD="${HEAD}"
-  T2_TEST_BRANCH="${BRANCH}"
-  T2_TEST_RESTORE_DETACHED=true
-fi
-WORKTREE_ID="$(printf '%s' "${ROOT}" | shasum | awk '{print $1}')"
-LOCK_KEY="$(printf '%s\0%s\0%s\0%s\0%s' "${ROOT}" "${BRANCH}" "${HEAD}" "${PROFILE}" "${PROFILE}" | shasum | awk '{print $1}')"
+BRANCH="${MINIKUBE_TEST_BRANCH}"
+HEAD="${MINIKUBE_TEST_HEAD}"
+WORKTREE_ID="${MINIKUBE_TEST_WORKTREE_ID}"
+LOCK_KEY="${MINIKUBE_TEST_LOCK_KEY}"
 cat >"${LOCK_DIR}/owner.env" <<EOF
-REPOSITORY=${ROOT}
+REPOSITORY=${MINIKUBE_TEST_PROJECT_DIR}
 BRANCH=${BRANCH}
 HEAD=${HEAD}
 PROFILE=${PROFILE}
@@ -62,7 +58,7 @@ dry_run_make() {
 
 run_child() {
   local status
-  if T2_PROJECT_DIR="${ROOT}" T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
+  if T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
     T2_LOCK_ROOT="${LOCK_ROOT}" T2_LOCK_TOKEN="${TOKEN}" \
     bash "${ROOT}/scripts/minikube/require-t2-mutation-lock.sh"; then
     printf 'mutation\n' >>"${LOG}"
@@ -80,7 +76,7 @@ run_child
   exit 1
 }
 
-if T2_PROJECT_DIR="${ROOT}" T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
+if T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
   T2_LOCK_ROOT="${LOCK_ROOT}" T2_LOCK_TOKEN=wrong-token \
   bash "${ROOT}/scripts/minikube/require-t2-mutation-lock.sh" >/dev/null 2>&1; then
   echo 'FAIL: random token was accepted by the child mutation boundary' >&2
@@ -91,7 +87,7 @@ fi
   exit 1
 }
 
-if T2_PROJECT_DIR="${ROOT}" T2_PROFILE="${PROFILE}" T2_CONTEXT=wrong-context \
+if T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" T2_PROFILE="${PROFILE}" T2_CONTEXT=wrong-context \
   T2_LOCK_ROOT="${LOCK_ROOT}" T2_LOCK_TOKEN="${TOKEN}" \
   bash "${ROOT}/scripts/minikube/require-t2-mutation-lock.sh" >/dev/null 2>&1; then
   echo 'FAIL: profile/context mismatch was accepted by the child mutation boundary' >&2
