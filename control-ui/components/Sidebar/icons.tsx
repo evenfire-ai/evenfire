@@ -67,15 +67,13 @@ export function IconOutputs() {
       width="18"
       height="18"
       viewBox="0 0 24 24"
-      fill="none"
+      fill="currentColor"
       stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      strokeWidth="0"
+      aria-hidden="true"
+      data-solid="true"
     >
-      <path d="M3 16V8" />
-      <path d="M7 12h14" />
-      <path d="m17 8 4 4-4 4" />
+      <path d="m17 17 5-5-5-5-1.41 1.41L18.17 11H9v2h9.17l-2.58 2.59z" />
     </svg>
   )
 }

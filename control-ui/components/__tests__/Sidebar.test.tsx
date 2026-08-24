@@ -133,6 +133,23 @@ describe('Sidebar publisher gating', () => {
     }
   })
 
+  it('uses a borderless solid output arrow for Agent Outputs', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
+    render(<Sidebar currentTab="directories" />)
+
+    const agentOutputs = screen.getByRole('link', { name: 'Agent Outputs' })
+    const icon = agentOutputs.querySelector('.cu-sidebar__subitem-icon svg')
+    expect(icon).toHaveAttribute('data-solid', 'true')
+    expect(icon).toHaveAttribute('stroke-width', '0')
+    expect(icon?.querySelectorAll('path')).toHaveLength(1)
+    expect(icon?.querySelector('path')).toHaveAttribute(
+      'd',
+      'm17 17 5-5-5-5-1.41 1.41L18.17 11H9v2h9.17l-2.58 2.59z'
+    )
+  })
+
   it('renders an icon for the Files group', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
