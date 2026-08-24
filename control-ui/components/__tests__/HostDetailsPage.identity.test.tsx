@@ -396,7 +396,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(payload.spec.model).toEqual({
       provider: 'codex-subscription',
       name: 'gpt-5.1',
-      connectionRef: 'deployment-default',
+      connectionRef: 'unassigned',
     })
     expect(payload.spec.secretRef).toBeUndefined()
     expect(payload.spec.hostRef).toBeUndefined()
