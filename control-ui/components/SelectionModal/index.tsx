@@ -30,16 +30,7 @@ export function SelectionModal({
 }: SelectionModalProps) {
   return (
     <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'var(--cu-overlay)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-        padding: '1rem',
-      }}
+      className="cu-modal-overlay"
       role="presentation"
       onClick={e => {
         if (e.target === e.currentTarget && !busy) onClose()
