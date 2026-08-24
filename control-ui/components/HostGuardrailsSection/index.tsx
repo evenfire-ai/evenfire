@@ -1,26 +1,51 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { useConfirmDialog } from '@components/ConfirmDialog'
+import { SelectionModal } from '@components/SelectionModal'
+import { useToast } from '@components/Toast'
+import { IconX } from '@components/icons'
+import { GUARDRAIL_ENTRY_TYPE } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { IconX } from '../icons'
-import { Button, SelectInput, TextInput } from '../ui'
-import { GUARDRAIL_BUILTIN_OPTIONS, GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
+import { type LlmHookResource, getLlmHooks } from '@lib/api'
+import { GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
 import type {
-  GuardrailBuiltin,
-  GuardrailBuiltinType,
   GuardrailHookRef,
+  GuardrailHookRow,
   GuardrailPhase,
   HostGuardrails,
   HostGuardrailsSectionProps,
 } from './types'
 
-function cloneGuardrails(source: HostGuardrails | undefined): HostGuardrails {
-  return {
-    ...source,
-    hooks: source?.hooks ? { ...source.hooks } : {},
-    builtins: source?.builtins ? source.builtins.map(builtin => ({ ...builtin })) : [],
-  }
+// The picker only offers hooks already installed on the cluster, so keep the
+// route that installs new ones reachable from the section itself — it is the
+// path the old "Add hook" button used to take.
+const INSTALL_HOOK_ROUTE = CONTROL_ROUTES.marketplace.orgEntriesFiltered({
+  type: GUARDRAIL_ENTRY_TYPE,
+})
+
+// The phases an installed hook declares it runs at. A hook is attached to every
+// phase it declares, so the operator picks the hook and never the phase.
+function hookPhases(hook: LlmHookResource): GuardrailPhase[] {
+  const raw = (hook.spec as { lifecyclePoints?: unknown } | undefined)?.lifecyclePoints
+  if (!Array.isArray(raw)) return []
+  return raw.filter((point): point is GuardrailPhase =>
+    GUARDRAIL_PHASES.includes(point as GuardrailPhase)
+  )
+}
+
+function hookName(hook: LlmHookResource): string {
+  return hook.metadata?.name ?? ''
+}
+
+// Every field this section does not edit rides along untouched — dropping
+// `builtins` or `limits` here would silently wipe them from the Host spec.
+function withHooks(
+  source: HostGuardrails | undefined,
+  hooks: HostGuardrails['hooks']
+): HostGuardrails {
+  return { ...source, hooks }
 }
 
 export function HostGuardrailsSection({
@@ -28,310 +53,230 @@ export function HostGuardrailsSection({
   onSave,
   busy,
   canWrite,
-  defaultEditing = false,
 }: HostGuardrailsSectionProps) {
   const router = useRouter()
-  const [editing, setEditing] = useState(defaultEditing)
-  const [draft, setDraft] = useState<HostGuardrails>(() => cloneGuardrails(initialGuardrails))
+  const { confirm, confirmDialog } = useConfirmDialog()
+  const { showToast } = useToast()
+  const mountedRef = useRef(true)
 
-  // Re-seed the draft whenever the saved guardrails change (reload after save).
-  const initialKey = JSON.stringify(initialGuardrails ?? {})
-  React.useEffect(() => {
-    setDraft(cloneGuardrails(initialGuardrails))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialKey])
+  const [installedHooks, setInstalledHooks] = useState<LlmHookResource[]>([])
+  const [showAddHook, setShowAddHook] = useState(false)
+  const [selectedHookNames, setSelectedHookNames] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
 
-  const isDirty = useMemo(
-    () => JSON.stringify(draft) !== JSON.stringify(cloneGuardrails(initialGuardrails)),
-    [draft, initialGuardrails]
-  )
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
-  const hookPhases = useMemo(
+  // The installed LlmHooks are the pool this agent can reference. A load
+  // failure only empties the picker — the rows below come from the Host spec
+  // and stay readable either way.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const result = await getLlmHooks()
+        if (!mountedRef.current) return
+        setInstalledHooks(Array.isArray(result.items) ? result.items : [])
+      } catch {
+        if (mountedRef.current) setInstalledHooks([])
+      }
+    })()
+  }, [])
+
+  const rows = useMemo<GuardrailHookRow[]>(() => {
+    const hooks = initialGuardrails?.hooks ?? {}
+    return GUARDRAIL_PHASES.flatMap(phase => (hooks[phase] ?? []).map(ref => ({ phase, ref })))
+  }, [initialGuardrails])
+
+  const referencedIds = useMemo(() => new Set(rows.map(row => row.ref.id)), [rows])
+
+  const addOptions = useMemo(
     () =>
-      GUARDRAIL_PHASES.map(phase => ({
-        phase,
-        refs: draft.hooks?.[phase] ?? [],
-      })).filter(entry => entry.refs.length > 0),
-    [draft.hooks]
+      installedHooks
+        .filter(hook => hookName(hook) && !referencedIds.has(hookName(hook)))
+        .map(hook => {
+          const phases = hookPhases(hook)
+          return {
+            value: hookName(hook),
+            label: hookName(hook),
+            description: phases.length
+              ? phases.map(phase => GUARDRAIL_PHASE_LABELS[phase]).join(' · ')
+              : 'No lifecycle points declared',
+          }
+        }),
+    [installedHooks, referencedIds]
   )
-  const builtins = draft.builtins ?? []
-  const hasAny = hookPhases.length > 0 || builtins.length > 0
 
-  function removeHookRef(phase: GuardrailPhase, id: string) {
-    setDraft(current => {
-      const currentRefs = current.hooks?.[phase] ?? []
-      const nextRefs = currentRefs.filter(ref => ref.id !== id)
-      const nextHooks: HostGuardrails['hooks'] = { ...current.hooks }
-      if (nextRefs.length > 0) nextHooks[phase] = nextRefs
-      else delete nextHooks[phase]
-      return { ...current, hooks: nextHooks }
-    })
-  }
+  const persist = useCallback(
+    async (nextHooks: HostGuardrails['hooks'], successMessage: string) => {
+      setSaving(true)
+      try {
+        await onSave(withHooks(initialGuardrails, nextHooks))
+        if (mountedRef.current) showToast(successMessage, { tone: 'success' })
+        return true
+      } catch {
+        // The parent already surfaced the error/conflict banner.
+        return false
+      } finally {
+        if (mountedRef.current) setSaving(false)
+      }
+    },
+    [initialGuardrails, onSave, showToast]
+  )
 
-  function addBuiltin(builtin: GuardrailBuiltin) {
-    setDraft(current => ({
-      ...current,
-      builtins: [...(current.builtins ?? []), builtin],
-    }))
-  }
+  async function addSelectedHooks() {
+    const chosen = installedHooks.filter(hook => selectedHookNames.includes(hookName(hook)))
+    const nextHooks: HostGuardrails['hooks'] = { ...(initialGuardrails?.hooks ?? {}) }
 
-  function removeBuiltin(index: number) {
-    setDraft(current => ({
-      ...current,
-      builtins: (current.builtins ?? []).filter((_, i) => i !== index),
-    }))
-  }
+    for (const hook of chosen) {
+      const id = hookName(hook)
+      // Pin the digest the cluster actually reconciled, matching how existing
+      // references are stored. An unpinned reference would float across hook
+      // image updates.
+      const ref: GuardrailHookRef = { id }
+      const digest = hook.status?.observedDigest
+      if (digest) ref.digest = digest
 
-  function handleCancel() {
-    setDraft(cloneGuardrails(initialGuardrails))
-    setEditing(defaultEditing)
-  }
+      for (const phase of hookPhases(hook)) {
+        nextHooks[phase] = [...(nextHooks[phase] ?? []), ref]
+      }
+    }
 
-  async function handleSave() {
-    try {
-      await onSave(draft)
-      setEditing(defaultEditing)
-    } catch {
-      // Parent surfaced an error/conflict banner. Stay in edit mode so the
-      // operator's draft survives the failure.
+    const added = chosen.length
+    const ok = await persist(
+      nextHooks,
+      added === 1 ? `${hookName(chosen[0])} added to this agent.` : `${added} hooks added.`
+    )
+    if (ok && mountedRef.current) {
+      setSelectedHookNames([])
+      setShowAddHook(false)
     }
   }
 
+  async function removeHook(row: GuardrailHookRow) {
+    const shouldRemove = await confirm({
+      title: 'Remove guardrail hook',
+      message: `Remove ${row.ref.id} from ${GUARDRAIL_PHASE_LABELS[row.phase]} on this agent? The hook stays installed on the cluster.`,
+      confirmLabel: 'Remove',
+      tone: 'danger',
+    })
+    if (!shouldRemove) return
+
+    const currentRefs = initialGuardrails?.hooks?.[row.phase] ?? []
+    const nextRefs = currentRefs.filter(ref => ref.id !== row.ref.id)
+    const nextHooks: HostGuardrails['hooks'] = { ...(initialGuardrails?.hooks ?? {}) }
+    if (nextRefs.length > 0) nextHooks[row.phase] = nextRefs
+    else delete nextHooks[row.phase]
+
+    await persist(nextHooks, `${row.ref.id} removed from this agent.`)
+  }
+
+  const disabled = busy || saving
+
   return (
-    <div className="cu-host-approval-section">
-      <p className="cu-muted cu-host-approval-section__description">
-        Installed guardrail hooks referenced by this agent, plus built-in guardrails. Use{' '}
-        <strong>Add hook</strong> to install a guardrail from the Marketplace onto this agent, add a
-        built-in, or remove a hook reference. Manage installed guardrails cluster-wide from the
-        Installed Guardrails section.
-      </p>
-
-      <div className="cu-host-approval-section__content">
-        {!editing ? (
-          !hasAny ? (
-            <div className="cu-empty">
-              No guardrail hooks or built-ins configured for this agent.
-            </div>
-          ) : (
-            <div>
-              {hookPhases.map(({ phase, refs }) => (
-                <div key={phase} className="cu-access-row">
-                  <span>{GUARDRAIL_PHASE_LABELS[phase]}</span>
-                  <div className="cu-expandable-tags">
-                    {refs.map(ref => (
-                      <span
-                        key={ref.id}
-                        className="cu-registry-tag"
-                        title={ref.digest ? `digest ${ref.digest}` : undefined}
-                      >
-                        {ref.id}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              ))}
-              {builtins.map((builtin, index) => (
-                <div key={`${builtin.type}-${index}`} className="cu-access-row">
-                  <span>Built-in · {builtin.type}</span>
-                  <span>
-                    order {typeof builtin.order === 'number' ? builtin.order : '—'} · fail{' '}
-                    {builtin.failMode ?? 'open'}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )
-        ) : (
-          <EditMode
-            hookPhases={hookPhases}
-            builtins={builtins}
-            busy={busy}
-            onRemoveHookRef={removeHookRef}
-            onAddBuiltin={addBuiltin}
-            onRemoveBuiltin={removeBuiltin}
-          />
-        )}
-      </div>
-
-      <div className="cu-host-approval-section__actions">
-        {editing ? (
-          <>
-            <button
-              type="button"
-              className="cu-btn cu-btn--ghost cu-btn--sm"
-              onClick={handleCancel}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary"
-              onClick={handleSave}
-              disabled={busy || !isDirty}
-            >
-              {busy ? 'Saving…' : 'Save'}
-            </button>
-          </>
-        ) : canWrite ? (
-          <>
+    <section className="cu-guardrails-tab" aria-label="Hooks">
+      <div className="cu-access-section">
+        <div className="cu-access-section__header">
+          <p className="cu-muted cu-access-section__description">
+            Guardrail hooks installed on the cluster and referenced by this agent.{' '}
+            <a className="cu-link" href={INSTALL_HOOK_ROUTE}>
+              Browse the Marketplace
+            </a>{' '}
+            to install more.
+          </p>
+          {canWrite ? (
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => router.push(CONTROL_ROUTES.marketplace.orgEntries)}
-              disabled={busy}
+              onClick={() => setShowAddHook(true)}
+              disabled={disabled}
             >
               Add hook
             </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--ghost cu-btn--sm"
-              onClick={() => setEditing(true)}
-              disabled={busy}
-            >
-              Edit
-            </button>
-          </>
-        ) : null}
-      </div>
-    </div>
-  )
-}
+          ) : null}
+        </div>
 
-interface EditModeProps {
-  hookPhases: Array<{ phase: GuardrailPhase; refs: GuardrailHookRef[] }>
-  builtins: GuardrailBuiltin[]
-  busy: boolean
-  onRemoveHookRef: (phase: GuardrailPhase, id: string) => void
-  onAddBuiltin: (builtin: GuardrailBuiltin) => void
-  onRemoveBuiltin: (index: number) => void
-}
-
-function EditMode({
-  hookPhases,
-  builtins,
-  busy,
-  onRemoveHookRef,
-  onAddBuiltin,
-  onRemoveBuiltin,
-}: EditModeProps) {
-  const [builtinType, setBuiltinType] = useState<GuardrailBuiltinType>('prompt-shaping')
-  const [orderValue, setOrderValue] = useState('0')
-  const [failMode, setFailMode] = useState<'open' | 'closed'>('open')
-
-  function handleAdd() {
-    const parsedOrder = Number.parseInt(orderValue, 10)
-    onAddBuiltin({
-      type: builtinType,
-      order: Number.isFinite(parsedOrder) ? parsedOrder : 0,
-      failMode,
-    })
-    setOrderValue('0')
-    setFailMode('open')
-    setBuiltinType('prompt-shaping')
-  }
-
-  return (
-    <>
-      <div className="cu-field">
-        <label>Referenced hooks</label>
-        {hookPhases.length === 0 ? (
-          <div className="cu-empty">No installed hooks are referenced by this agent.</div>
-        ) : (
-          hookPhases.map(({ phase, refs }) => (
-            <div key={phase} className="cu-access-row">
-              <span>{GUARDRAIL_PHASE_LABELS[phase]}</span>
-              <div className="cu-expandable-tags">
-                {refs.map(ref => (
-                  <span key={ref.id} className="cu-guardrails-ref-chip">
-                    <span
-                      className="cu-registry-tag"
-                      title={ref.digest ? `digest ${ref.digest}` : undefined}
-                    >
-                      {ref.id}
-                    </span>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                      aria-label={`Remove hook ${ref.id} from ${GUARDRAIL_PHASE_LABELS[phase]}`}
-                      onClick={() => onRemoveHookRef(phase, ref.id)}
-                      disabled={busy}
-                    >
-                      <IconX />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="cu-field">
-        <label>Built-in guardrails</label>
-        {builtins.length === 0 ? (
-          <div className="cu-empty">No built-in guardrails configured.</div>
-        ) : (
-          builtins.map((builtin, index) => (
-            <div key={`${builtin.type}-${index}`} className="cu-access-row">
-              <span>
-                {builtin.type} · order {typeof builtin.order === 'number' ? builtin.order : '—'} ·
-                fail {builtin.failMode ?? 'open'}
-              </span>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                aria-label={`Remove built-in ${builtin.type}`}
-                onClick={() => onRemoveBuiltin(index)}
-                disabled={busy}
-              >
-                <IconX />
-              </button>
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="cu-field">
-        <label htmlFor="guardrail-builtin-type">Add built-in</label>
-        <div className="cu-guardrails-add-row">
-          <SelectInput
-            id="guardrail-builtin-type"
-            compact
-            value={builtinType}
-            onChange={e => setBuiltinType(e.target.value as GuardrailBuiltinType)}
-            disabled={busy}
-          >
-            {GUARDRAIL_BUILTIN_OPTIONS.map(option => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </SelectInput>
-          <TextInput
-            type="number"
-            compact
-            narrow
-            value={orderValue}
-            onChange={e => setOrderValue(e.target.value)}
-            disabled={busy}
-            aria-label="Built-in order"
-          />
-          <SelectInput
-            compact
-            value={failMode}
-            onChange={e => setFailMode(e.target.value as 'open' | 'closed')}
-            disabled={busy}
-            aria-label="Built-in fail mode"
-          >
-            <option value="open">Fail open</option>
-            <option value="closed">Fail closed</option>
-          </SelectInput>
-          <Button variant="ghost" size="sm" onClick={handleAdd} disabled={busy}>
-            Add
-          </Button>
+        <div className="cu-table-wrap">
+          <table className="cu-table cu-table--header-band">
+            <thead>
+              <tr>
+                <th>Hook</th>
+                <th>Phase</th>
+                <th className="cu-table__col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={3} className="cu-empty">
+                    No guardrail hooks on this agent yet.
+                  </td>
+                </tr>
+              ) : (
+                rows.map(row => (
+                  <tr key={`${row.phase}:${row.ref.id}`}>
+                    <td>
+                      <button
+                        type="button"
+                        className="cu-link"
+                        title={row.ref.digest ? `digest ${row.ref.digest}` : undefined}
+                        onClick={() => router.push(CONTROL_ROUTES.guardrails.detail(row.ref.id))}
+                      >
+                        {row.ref.id}
+                      </button>
+                    </td>
+                    <td>{GUARDRAIL_PHASE_LABELS[row.phase]}</td>
+                    <td className="cu-table__cell-actions">
+                      <div className="cu-row-actions">
+                        {canWrite ? (
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                            onClick={() => void removeHook(row)}
+                            disabled={disabled}
+                            title="Remove"
+                            aria-label={`Remove hook ${row.ref.id} from ${GUARDRAIL_PHASE_LABELS[row.phase]}`}
+                          >
+                            <IconX width={16} height={16} />
+                          </button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
-    </>
+
+      {showAddHook ? (
+        <SelectionModal
+          busy={disabled}
+          emptyLabel="No installed guardrail hooks are available."
+          id="agent-hook-picker"
+          label="Hooks"
+          onChange={setSelectedHookNames}
+          onClose={() => {
+            setSelectedHookNames([])
+            setShowAddHook(false)
+          }}
+          onConfirm={addSelectedHooks}
+          options={addOptions}
+          placeholder="Select hooks"
+          searchPlaceholder="Search hooks..."
+          selectionLabel="Selected hooks"
+          submitLabel={selectedHookNames.length > 1 ? 'Add hooks' : 'Add hook'}
+          title="Add hook"
+          titleId="add-hook-title"
+          value={selectedHookNames}
+        />
+      ) : null}
+
+      {confirmDialog}
+    </section>
   )
 }
