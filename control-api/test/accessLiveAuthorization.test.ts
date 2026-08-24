@@ -152,6 +152,19 @@ function hostRequest(overrides: Partial<LiveAuthorizationInput> = {}): LiveAutho
   }
 }
 
+function gfsRequest(overrides: Partial<LiveAuthorizationInput> = {}): LiveAuthorizationInput {
+  return {
+    session,
+    requiredCapability: 'gfs.read',
+    resource: canonicalResourceIdentity({
+      environmentId,
+      type: 'gfs_resource',
+      logicalId: '50000000-0000-4000-8000-000000000005',
+    }),
+    ...overrides,
+  }
+}
+
 describe('access-path behavior', () => {
   it('selects direct first only when every behavior dimension is known and equal', () => {
     const direct = path({ kind: 'direct', grantId: 'direct-a', behavior: behavior() })
@@ -239,6 +252,58 @@ describe('live user-access resolution', () => {
         expect.objectContaining({ kind: 'team', teamId }),
       ])
     }
+  })
+
+  it('reports only the capabilities of the explicitly selected path', async () => {
+    const db = fakeTransaction({
+      memberships: [
+        {
+          teamId,
+          role: 'member',
+          membershipUpdatedAt: '2026-08-10T00:00:00.000Z',
+          teamRevision: '1',
+        },
+      ],
+      hostGrantRows: [
+        {
+          kind: 'direct',
+          grant_id: 'gfs_grants:direct',
+          team_id: null,
+          current_role: null,
+          permissions: ['read', 'write'],
+          drive: '3rd',
+        },
+        {
+          kind: 'team',
+          grant_id: 'gfs_grants:team',
+          team_id: teamId,
+          current_role: 'member',
+          permissions: ['read'],
+          drive: '3rd',
+        },
+      ],
+    })
+
+    const choice = await resolveLiveAuthorization(gfsRequest(), {
+      transaction: db.transaction,
+    })
+    expect(choice.status).toBe('access_path_required')
+    if (choice.status !== 'access_path_required') return
+    const selectedTeamPath = choice.safePathDescriptors.find(path => path.kind === 'team')
+    expect(selectedTeamPath).toBeDefined()
+
+    const result = await resolveLiveAuthorization(
+      gfsRequest({ requestedAccessPathId: selectedTeamPath!.id }),
+      { transaction: db.transaction }
+    )
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: 'allowed',
+        effectiveCapabilities: ['gfs.read'],
+        selectedPath: expect.objectContaining({ kind: 'team', teamId }),
+      })
+    )
   })
 
   it('revalidates the exact provider incarnation for a selected operational path', async () => {
