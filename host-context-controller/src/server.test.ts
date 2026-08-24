@@ -449,6 +449,12 @@ describe('McpHostApiRateLimiter', () => {
     expect(limiter.consume('host-uid-a', 'credential')).toEqual({ allowed: true })
     expect(limiter.consume('host-uid-a', 'inventory')).toEqual({ allowed: true })
     expect(limiter.consume('host-uid-b', 'credential')).toEqual({ allowed: true })
+    expect(limiter.consume('host-uid-a', 'proxy_authorize')).toEqual({ allowed: true })
+    expect(limiter.consume('host-uid-b', 'proxy_authorize')).toEqual({ allowed: true })
+    expect(limiter.consume('host-uid-a', 'proxy_authorize')).toEqual({
+      allowed: false,
+      retryAfterSeconds: 60,
+    })
     expect(limiter.consume('host-uid-a', 'credential')).toEqual({
       allowed: false,
       retryAfterSeconds: 60,

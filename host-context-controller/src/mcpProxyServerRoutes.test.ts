@@ -4,7 +4,7 @@ import type { McpServerProvider } from './k8sClient'
 import type { LiveForwardTarget, SystemMcpServerInfo } from './mcpAuthorization'
 import { McpAuthorizationError, type McpAuthorizationService } from './mcpAuthorization'
 import type { McpProxyAuthenticator, VerifiedMcpProxySystemPrincipal } from './mcpProxyAuthentication'
-import { ContextMapperServer } from './server'
+import { ContextMapperServer, McpHostApiRateLimiter } from './server'
 import type { McpServerInfo } from './types'
 
 class Provider implements McpServerProvider {
@@ -176,6 +176,32 @@ describe('ContextMapperServer system MCP proxy routes', () => {
       expect.objectContaining({ hostName: 'host-a' }),
       'server-a'
     )
+  })
+
+  it('limits the live authorize decision per authenticated Host before the target read', async () => {
+    const authorization = {
+      getLiveForwardTarget: vi.fn(async () => target),
+    }
+    server = makeServer(authorization)
+    ;(server as unknown as { mcpRateLimiter: McpHostApiRateLimiter }).mcpRateLimiter =
+      new McpHostApiRateLimiter(1)
+    server.setReady(true)
+    const request = {
+      method: 'POST' as const,
+      headers: {
+        authorization: 'fixture-system',
+        'x-clerum-host-authorization': 'fixture-host',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ serverName: 'server-a' }),
+    }
+
+    const first = await invoke(server, '/api/v2/system/mcpservers/authorize', request)
+    const second = await invoke(server, '/api/v2/system/mcpservers/authorize', request)
+
+    expect(first.statusCode).toBe(200)
+    expect(second.statusCode).toBe(429)
+    expect(authorization.getLiveForwardTarget).toHaveBeenCalledOnce()
   })
 
   it('maps cross-context and unavailable target results to opaque 403/503 responses', async () => {

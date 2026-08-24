@@ -73,13 +73,18 @@ for rendered in "$@"; do
     end
     system_inventory = location_block.call("location = /api/v2/system/mcpservers {")
     system_authorize = location_block.call("location = /api/v2/system/mcpservers/authorize {")
-    abort("system v2 TokenReview routes lack bounded source rate limiting") unless nginx.include?("limit_req_zone $binary_remote_addr zone=np08_system_auth:10m rate=120r/m;")
+    abort("system v2 routes lack separate bounded source rate limiting zones") unless
+      nginx.include?("limit_req_zone $binary_remote_addr zone=np08_system_inventory:10m rate=120r/m;") &&
+      nginx.include?("limit_req_zone $binary_remote_addr zone=np08_system_authorize:10m rate=120r/m;")
+    abort("system inventory route uses the wrong source rate limiting zone") unless
+      system_inventory.include?("limit_req zone=np08_system_inventory burst=20 nodelay;")
+    abort("system authorize route uses the wrong source rate limiting zone") unless
+      system_authorize.include?("limit_req zone=np08_system_authorize burst=20 nodelay;")
     [system_inventory, system_authorize].each do |block|
       abort("system v2 route forwards ambient request headers") unless block.include?("proxy_pass_request_headers off;")
       abort("system v2 route does not explicitly forward system Authorization") unless block.include?("proxy_set_header Authorization $http_authorization;")
       abort("system v2 route permits caching") unless block.include?("Cache-Control \"no-store, private\"")
       abort("system v2 route mixes the two identities") if block.include?("proxy_set_header Authorization $http_x_clerum_host_authorization;")
-      abort("system v2 route lacks TokenReview rate limiting") unless block.include?("limit_req zone=np08_system_auth burst=20 nodelay;")
       abort("system v2 route does not fail closed when rate limited") unless block.include?("limit_req_status 503;")
     end
     abort("system inventory route is not GET-only") unless system_inventory.include?("$request_method != GET")

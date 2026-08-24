@@ -34,7 +34,7 @@ const readinessLog = hccLogger.child({ module: 'readiness' })
 const MCP_SELECTOR_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/
 const MCP_REQUEST_BODY_LIMIT = 1024
 const mcpApiLog = hccLogger.child({ module: 'mcp-host-api' })
-type McpHostApiAction = 'inventory' | 'credential'
+type McpHostApiAction = 'inventory' | 'credential' | 'proxy_authorize'
 
 type RateLimitEntry = { windowStartMs: number; count: number }
 
@@ -564,6 +564,7 @@ export class ContextMapperServer {
     if (!systemPrincipal || !this.mcpAuthorization) return
     const hostPrincipal = this.authenticateMcpProxyHost(req, res)
     if (!hostPrincipal) return
+    if (!this.enforceMcpRateLimit(hostPrincipal, 'proxy_authorize', res)) return
     const contentType = String(req.headers['content-type'] ?? '')
       .split(';', 1)[0]
       .trim()
