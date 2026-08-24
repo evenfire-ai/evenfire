@@ -139,7 +139,10 @@ app.whenReady().then(async () => {
       Math.abs(wide.surfaceWidth - wide.workspaceWidth) <= 1,
       'wide surface stays full width'
     )
-    assert.ok(wide.surfaceTop <= wide.activeBottom + 1, 'active tab meets the selected surface')
+    assert.ok(
+      Math.abs(wide.surfaceTop - wide.activeBottom) <= 1,
+      'active tab and selected surface share one border row'
+    )
     assert.equal(
       wide.activeBorderTop,
       wide.surfaceBorderTop,
@@ -224,7 +227,10 @@ app.whenReady().then(async () => {
       Math.abs(narrow.surfaceWidth - narrow.workspaceWidth) <= 1,
       'narrow surface stays full width'
     )
-    assert.ok(narrow.surfaceTop <= narrow.activeBottom + 1, 'narrow active tab keeps its seam')
+    assert.ok(
+      Math.abs(narrow.surfaceTop - narrow.activeBottom) <= 1,
+      'narrow active tab and selected surface share one border row'
+    )
     assert.equal(narrow.surfaceBorderLeftStyle, 'solid', 'narrow surface keeps its left border')
     assert.equal(narrow.surfaceBorderRightStyle, 'solid', 'narrow surface keeps its right border')
 

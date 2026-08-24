@@ -14985,7 +14985,7 @@ pre {
 .chat-view-tab.is-active {
   background: var(--surface-strong);
   border: 1px solid var(--chat-view-selected-border);
-  margin-bottom: -1px;
+  margin-top: -1px;
   position: relative;
   z-index: 1;
 }
