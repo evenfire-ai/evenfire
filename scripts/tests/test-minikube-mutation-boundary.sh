@@ -46,6 +46,13 @@ PID=$$
 PROCESS_START=unavailable
 EOF
 
+# GNU Make may execute recipe lines containing $(MAKE) during a dry run. Force
+# the dry-run flag into the child environment so with-t2-mutation-lock.sh
+# exits before a plan can touch profile state on CI.
+dry_run_make() {
+  MAKEFLAGS=-n make -n -C "${ROOT}" "$@"
+}
+
 run_child() {
   T2_PROJECT_DIR="${ROOT}" T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
     T2_LOCK_ROOT="${LOCK_ROOT}" T2_LOCK_TOKEN="${TOKEN}" \
@@ -81,15 +88,15 @@ fi
   exit 1
 }
 
-full_plan="$(make -n -C "${ROOT}" minikube-build-images 2>&1)"
-full_body_plan="$(make -n -C "${ROOT}" minikube-build-images-body 2>&1)"
-targeted_plan="$(make -n -C "${ROOT}" minikube-deploy-service SVC=control-api NS=control-plane 2>&1)"
-targeted_body_plan="$(make -n -C "${ROOT}" minikube-deploy-service-body SVC=control-api NS=control-plane 2>&1)"
-restart_plan="$(make -n -C "${ROOT}" minikube-restart-deploy SVC=control-api NS=control-plane 2>&1)"
-restart_body_plan="$(make -n -C "${ROOT}" minikube-restart-deploy-body SVC=control-api NS=control-plane 2>&1)"
-e2e_fixture_plan="$(make -n -C "${ROOT}" minikube-build-e2e-fixtures 2>&1)"
-e2e_fixture_body_plan="$(make -n -C "${ROOT}" minikube-build-e2e-fixtures-body 2>&1)"
-verify_plan="$(make -n -C "${ROOT}" minikube-verify-images 2>&1)"
+full_plan="$(dry_run_make minikube-build-images 2>&1)"
+full_body_plan="$(dry_run_make minikube-build-images-body 2>&1)"
+targeted_plan="$(dry_run_make minikube-deploy-service SVC=control-api NS=control-plane 2>&1)"
+targeted_body_plan="$(dry_run_make minikube-deploy-service-body SVC=control-api NS=control-plane 2>&1)"
+restart_plan="$(dry_run_make minikube-restart-deploy SVC=control-api NS=control-plane 2>&1)"
+restart_body_plan="$(dry_run_make minikube-restart-deploy-body SVC=control-api NS=control-plane 2>&1)"
+e2e_fixture_plan="$(dry_run_make minikube-build-e2e-fixtures 2>&1)"
+e2e_fixture_body_plan="$(dry_run_make minikube-build-e2e-fixtures-body 2>&1)"
+verify_plan="$(dry_run_make minikube-verify-images 2>&1)"
 
 [[ "$full_plan" == *"with-t2-mutation-lock.sh"* \
   && "$full_body_plan" == *"require-t2-mutation-lock.sh"* ]] || {
