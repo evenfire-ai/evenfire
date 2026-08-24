@@ -13485,14 +13485,6 @@ pre {
   font-weight: 700;
 }
 
-.da-gfs-list__meta {
-  color: var(--text-muted);
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
-}
-
 .da-gfs-list__actions {
   display: flex;
   align-items: center;
@@ -14041,7 +14033,7 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-drive__type {
+.da-gfs-drive__size {
   min-width: 0;
   overflow: hidden;
   color: var(--text-muted);
@@ -14865,8 +14857,8 @@ pre {
     grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 4.5rem;
   }
 
-  .da-gfs-drive__type-column,
-  .da-gfs-drive__type {
+  .da-gfs-drive__size-column,
+  .da-gfs-drive__size {
     display: none;
   }
 

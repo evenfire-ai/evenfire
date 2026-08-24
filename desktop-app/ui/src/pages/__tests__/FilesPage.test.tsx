@@ -270,6 +270,61 @@ describe('FilesPage', () => {
     )
   })
 
+  it('uses a size column and keeps folder rows focused on the icon and name', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'parent-1',
+        gfsUri: 'gfs://main/parent-1',
+        name: 'Workspace',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'dir-1',
+          rid: 'dir-1',
+          gfsUri: 'gfs://main/dir-1',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'Moon',
+          kind: 'directory',
+          path: '/Moon',
+          version: 1,
+          bytes: 0,
+          coversDescendants: true,
+        },
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/notes.txt',
+          version: 1,
+          bytes: 2048,
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    const header = document.querySelector('.da-gfs-drive__grid .da-grid__head')
+    expect(header?.textContent).toContain('Size')
+    expect(header?.textContent).not.toContain('Type')
+
+    const folderRow = screen.getByText('Moon').closest('.da-grid__row')
+    expect(folderRow?.querySelector('.da-gfs-drive__size')?.textContent).toBe('—')
+    expect(folderRow?.querySelector('.da-gfs-list__meta')).toBeNull()
+    expect(folderRow?.textContent).not.toContain('Folder')
+    expect(folderRow?.textContent).not.toContain('Shared folder tree')
+
+    const fileRow = screen.getByText('notes.txt').closest('.da-grid__row')
+    expect(fileRow?.querySelector('.da-gfs-drive__size')?.textContent).toBe('2.0 KB')
+  })
+
   it('shows end-user folder CRUD controls only when held permissions allow them', async () => {
     const createFolder = vi.fn(async () => undefined)
     const renameResource = vi.fn(async () => undefined)

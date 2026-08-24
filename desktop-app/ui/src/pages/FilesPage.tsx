@@ -799,14 +799,14 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               className="da-grid da-gfs-drive__grid"
               style={{
                 '--da-grid-cols':
-                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, 4.5rem) 4.5rem',
+                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, auto) 4.5rem',
               }}
             >
               <div className="da-grid__head">
                 <span className="da-grid__col-header" aria-hidden="true" />
                 <span className="da-grid__col-header">Name</span>
-                <span className="da-grid__col-header da-gfs-drive__type-column da-grid__col-header--right">
-                  Type
+                <span className="da-grid__col-header da-gfs-drive__size-column da-grid__col-header--right">
+                  Size
                 </span>
                 <span className="da-grid__col-header da-grid__col-header--right">Actions</span>
               </div>
@@ -847,16 +847,9 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                           {resource.name || resource.drive}
                         </Button>
                       </span>
-                      <span className="da-gfs-list__meta">
-                        {resource.kind === 'directory'
-                          ? resource.coversDescendants
-                            ? 'Shared folder tree'
-                            : 'Folder'
-                          : formatSharedFileSize(resource.bytes)}
-                      </span>
                     </span>
-                    <span className="da-gfs-drive__type da-grid__cell">
-                      {resource.kind === 'directory' ? 'Folder' : 'File'}
+                    <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">
+                      {formatSharedFileSize(resource.bytes)}
                     </span>
                     <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
                       {resource.kind === 'file' ? (
