@@ -235,23 +235,22 @@ export function GfsBrowser(): React.JSX.Element {
     const folders = items.filter(child => child.kind === 'directory')
     if (folders.length === 0) return
     let cancelled = false
+    async function prefetchFolder(folder: GfsChild): Promise<void> {
+      try {
+        const page = (await apiGet(
+          `/api/v1/gfs/resources/${encodeURIComponent(folder.resourceId)}/children`,
+          { drive: DRIVE }
+        )) as TreePage | undefined
+        if (cancelled || !page) return
+        childCacheRef.current.set(folder.resourceId, page)
+      } catch {
+        /* ignore — openDirectory will surface the real error */
+      }
+    }
+
     folders.forEach(folder => {
       if (childCacheRef.current.has(folder.resourceId)) return
-      const response = apiGet(
-        `/api/v1/gfs/resources/${encodeURIComponent(folder.resourceId)}/children`,
-        { drive: DRIVE }
-      )
-      if (!response || typeof (response as Promise<TreePage>).then !== 'function') {
-        return
-      }
-      void (response as Promise<TreePage>)
-        .then(page => {
-          if (cancelled) return
-          childCacheRef.current.set(folder.resourceId, page)
-        })
-        .catch(() => {
-          /* ignore — openDirectory will surface the real error */
-        })
+      void prefetchFolder(folder)
     })
     return () => {
       cancelled = true
