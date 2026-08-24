@@ -52,6 +52,8 @@ done
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
 "$ROOT/scripts/tests/test-minikube-filter-gfs-resources.sh"
 "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh"
+"$ROOT/scripts/tests/test-minikube-k8s-api-egress-policy.sh"
+"$ROOT/scripts/tests/test-minikube-writer-recovery-state.sh"
 python3 - "$GFS_FILTER" "$TMP_ROOT" <<'PY'
 import os
 import py_compile

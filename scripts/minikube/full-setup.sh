@@ -749,6 +749,7 @@ ok "Cluster '${PROFILE}' is reachable"
 maybe_exit_after_cluster_step
 
 SETUP_LOCK_CLEANUP_DONE=false
+K8S_API_POLICY_TMP_DIR=""
 cleanup_setup_lock() {
   local status="${1:-$?}" cleanup_status=0
   if [ "$SETUP_LOCK_CLEANUP_DONE" = true ]; then
@@ -757,6 +758,9 @@ cleanup_setup_lock() {
   SETUP_LOCK_CLEANUP_DONE=true
   trap - EXIT
   trap '' INT TERM
+  if [ -n "${K8S_API_POLICY_TMP_DIR:-}" ] && [ -d "${K8S_API_POLICY_TMP_DIR}" ]; then
+    rm -rf -- "${K8S_API_POLICY_TMP_DIR}" || cleanup_status=1
+  fi
   t2_lock_release "$status" || cleanup_status=$?
   if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
     status="$cleanup_status"
@@ -1111,12 +1115,156 @@ ok "Minikube K8s API CIDRs refreshed"
 # runtime-role readiness has been proved.
 WRITER_RECOVERY=false
 PARTIAL_BOOTSTRAP_RECOVERY=false
-PARTIAL_CONTROL_API_REPLICAS=1
-PARTIAL_WORKFLOW_REPLICAS=1
-PARTIAL_HCC_REPLICAS=1
+PARTIAL_CONTROL_API_REPLICAS=""
+PARTIAL_WORKFLOW_REPLICAS=""
+PARTIAL_HCC_REPLICAS=""
 PARTIAL_CONTROL_API_FENCED=false
 PARTIAL_WORKFLOW_FENCED=false
 PARTIAL_HCC_FENCED=false
+WRITER_RECOVERY_STATE_HELPER="${SCRIPT_DIR}/writer-recovery-state.py"
+WRITER_RECOVERY_STATE_ROOT="${PROJECT_DIR}/.local-notes/infra/runs/writer-recovery"
+WRITER_RECOVERY_STATE_FILE="${WRITER_RECOVERY_STATE_ROOT}/${PROFILE}.json"
+WRITER_RECOVERY_STATE_LOADED=false
+WRITER_RECOVERY_STATE_PHASE=""
+WRITER_RECOVERY_FENCE_PENDING=false
+K8S_API_EGRESS_POLICY_FILE=""
+K8S_API_EGRESS_POLICY_DRIFT=false
+
+writer_recovery_state_cli() {
+  local command="$1"
+  shift
+  python3 "$WRITER_RECOVERY_STATE_HELPER" "$command" \
+    --path "$WRITER_RECOVERY_STATE_FILE" \
+    --profile "$PROFILE" \
+    --context "$T2_CONTEXT" \
+    --worktree "$PROJECT_DIR" \
+    --branch "$T2_BRANCH" \
+    --head "$T2_HEAD" "$@"
+}
+
+writer_recovery_state_write() {
+  local phase="$1"
+  writer_recovery_state_cli write \
+    --phase "$phase" \
+    --hcc "$PARTIAL_HCC_REPLICAS" \
+    --workflow "$PARTIAL_WORKFLOW_REPLICAS" \
+    --control-api "$PARTIAL_CONTROL_API_REPLICAS"
+}
+
+writer_recovery_state_phase() {
+  writer_recovery_state_write "$1"
+  WRITER_RECOVERY_STATE_LOADED=true
+  WRITER_RECOVERY_STATE_PHASE="$1"
+}
+
+writer_recovery_state_clear() {
+  writer_recovery_state_cli clear
+  WRITER_RECOVERY_STATE_LOADED=false
+  WRITER_RECOVERY_STATE_PHASE=""
+  WRITER_RECOVERY_FENCE_PENDING=false
+}
+
+writer_recovery_state_load() {
+  local state_output state_status=0
+  state_output="$(writer_recovery_state_cli read)" || state_status=$?
+  if [ "$state_status" -ne 0 ]; then
+    err "Unable to validate the durable writer-recovery state; refusing profile mutation"
+    return 1
+  fi
+  if [ "$state_output" = NONE ]; then
+    return 0
+  fi
+  IFS='|' read -r WRITER_RECOVERY_STATE_PHASE PARTIAL_HCC_REPLICAS \
+    PARTIAL_WORKFLOW_REPLICAS PARTIAL_CONTROL_API_REPLICAS <<<"$state_output"
+  [ -n "$WRITER_RECOVERY_STATE_PHASE" ] &&
+    [[ "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]] &&
+    [[ "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] &&
+    [[ "$PARTIAL_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] || {
+      err "Durable writer-recovery state is incomplete; refusing profile mutation"
+      return 1
+    }
+  WRITER_RECOVERY_STATE_LOADED=true
+  case "$WRITER_RECOVERY_STATE_PHASE" in
+    planned)
+      # No scale has been authorized yet. Re-run classification with the
+      # recorded original replica counts and either clear or resume it.
+      ;;
+    hcc-fencing|hcc-fenced)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    workflow-fencing|workflow-fenced)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    api-fencing)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    api-fenced)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    policy-ready|roles-ready)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      ;;
+    api-restored|overlay-applied)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      ;;
+    *)
+      err "Durable writer-recovery state has an unsupported phase: $WRITER_RECOVERY_STATE_PHASE"
+      return 1
+      ;;
+  esac
+  log "Resuming durable writer recovery at phase ${WRITER_RECOVERY_STATE_PHASE}"
+}
+
+writer_recovery_state_prepare() {
+  local state
+  if [ "$WRITER_RECOVERY_STATE_LOADED" = true ]; then
+    return 0
+  fi
+  state="$($KC -n control-plane get deployment/host-context-controller \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  PARTIAL_HCC_REPLICAS="$state"
+  state="$($KC -n control-plane get deployment/workflow-recipes \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  PARTIAL_WORKFLOW_REPLICAS="$state"
+  state="$($KC -n control-plane get deployment/control-api \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  PARTIAL_CONTROL_API_REPLICAS="$state"
+  [[ "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]] || return 1
+  [[ "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] || return 1
+  [[ "$PARTIAL_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] || return 1
+  writer_recovery_state_phase planned
+}
+
+writer_recovery_policy_ready() {
+  case "$WRITER_RECOVERY_STATE_PHASE" in
+    policy-ready|roles-ready|api-restored|overlay-applied) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 control_api_is_ready() {
   local state replicas ready
@@ -1142,15 +1290,13 @@ runtime_role_secret_is_missing() {
 }
 
 fence_partial_control_api() {
-  local replicas pods
-  replicas="$($KC -n control-plane get deployment/control-api -o 'jsonpath={.spec.replicas}')" \
-    || return 1
-  if [[ ! "$replicas" =~ ^[1-9][0-9]*$ ]]; then
+  local pods
+  if [[ ! "$PARTIAL_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]]; then
     err "control-api replica count is invalid; refusing partial-bootstrap recovery"
     return 1
   fi
-  PARTIAL_CONTROL_API_REPLICAS="$replicas"
   log "Fencing control-api writers at ${PARTIAL_CONTROL_API_REPLICAS} replica(s)"
+  writer_recovery_state_phase api-fencing
   $KC -n control-plane scale deployment/control-api --replicas=0 >/dev/null
   pods="$($KC -n control-plane get pods -l 'app=control-api,!clerum.io/component' -o name)" \
     || return 1
@@ -1159,18 +1305,17 @@ fence_partial_control_api() {
       -l 'app=control-api,!clerum.io/component' --timeout=180s >/dev/null
   fi
   PARTIAL_CONTROL_API_FENCED=true
+  writer_recovery_state_phase api-fenced
 }
 
 fence_partial_workflow_reconciler() {
-  local replicas pods
-  replicas="$($KC -n control-plane get deployment/workflow-recipes -o 'jsonpath={.spec.replicas}')" \
-    || return 1
-  if [[ ! "$replicas" =~ ^[0-9]+$ ]]; then
+  local pods
+  if [[ ! "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]]; then
     err "workflow-recipes replica count is invalid; refusing partial-bootstrap recovery"
     return 1
   fi
-  PARTIAL_WORKFLOW_REPLICAS="$replicas"
   log "Fencing workflow-recipes at ${PARTIAL_WORKFLOW_REPLICAS} replica(s)"
+  writer_recovery_state_phase workflow-fencing
   $KC -n control-plane scale deployment/workflow-recipes --replicas=0 >/dev/null
   pods="$($KC -n control-plane get pods -l app=workflow-recipes -o name)" \
     || return 1
@@ -1179,18 +1324,17 @@ fence_partial_workflow_reconciler() {
       -l app=workflow-recipes --timeout=180s >/dev/null
   fi
   PARTIAL_WORKFLOW_FENCED=true
+  writer_recovery_state_phase workflow-fenced
 }
 
 fence_partial_hcc() {
-  local replicas pods
-  replicas="$($KC -n control-plane get deployment/host-context-controller -o 'jsonpath={.spec.replicas}')" \
-    || return 1
-  if [[ ! "$replicas" =~ ^[0-9]+$ ]]; then
+  local pods
+  if [[ ! "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]]; then
     err "host-context-controller replica count is invalid; refusing partial-bootstrap recovery"
     return 1
   fi
-  PARTIAL_HCC_REPLICAS="$replicas"
   log "Fencing host-context-controller at ${PARTIAL_HCC_REPLICAS} replica(s)"
+  writer_recovery_state_phase hcc-fencing
   $KC -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null
   pods="$($KC -n control-plane get pods -l app=host-context-controller -o name)" \
     || return 1
@@ -1199,34 +1343,126 @@ fence_partial_hcc() {
       -l app=host-context-controller --timeout=180s >/dev/null
   fi
   PARTIAL_HCC_FENCED=true
+  writer_recovery_state_phase hcc-fenced
 }
 
 fence_partial_bootstrap_writers() {
   # HCC is fenced first so it cannot reconcile the existing GlobalFileSystem
   # while the control-plane writer window is being closed. The control-api
   # selector excludes migration Jobs, which intentionally share app=control-api.
+  writer_recovery_state_prepare
   fence_partial_hcc
   fence_partial_workflow_reconciler
   fence_partial_control_api
 }
 
 apply_refreshed_k8s_api_network_policies() {
-  local policy_file="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}/patches/k8s-api-ip.yaml"
-  if [ ! -s "$policy_file" ]; then
-    err "Refreshed Kubernetes API NetworkPolicy manifest is missing; refusing writer recovery"
+  if [ ! -s "$K8S_API_EGRESS_POLICY_FILE" ]; then
+    err "Validated Kubernetes API NetworkPolicy manifest is missing; refusing writer recovery"
     return 1
   fi
-  # full-setup refreshes this generated file before classification, but the
-  # full overlay is deliberately deferred while a writer recovery is active.
-  # Apply only the API-egress policies after every control-plane writer is
-  # fenced, so control-api can reach Kubernetes without waking HCC/workflow
-  # reconciliation or changing any GFS-owned resource.
-  log "Applying refreshed Kubernetes API egress policies while writers are fenced"
-  $KC apply -f "$policy_file" >/dev/null
+  if writer_recovery_policy_ready; then
+    log "Validated Kubernetes API egress policy already staged; resuming writer recovery"
+    return 0
+  fi
+  if [ "$K8S_API_EGRESS_POLICY_DRIFT" = true ]; then
+    # The generated k8s-api-ip.yaml is a strategic-merge patch and omits the
+    # inherited podSelector. Apply only the complete object extracted from the
+    # active kustomize render, while every control-plane writer is fenced.
+    log "Applying the complete refreshed Kubernetes API egress policy while writers are fenced"
+    $KC apply -f "$K8S_API_EGRESS_POLICY_FILE" >/dev/null
+  else
+    log "Current Kubernetes API egress policy already matches the rendered endpoint"
+  fi
+  writer_recovery_state_phase policy-ready
+}
+
+prepare_refreshed_k8s_api_network_policy() {
+  local endpoint_ip rendered_file live_file live_status=0 check_status=0
+  local octet
+  endpoint_ip="$($KC get endpoints kubernetes \
+    -o 'jsonpath={.subsets[*].addresses[*].ip}' 2>/dev/null)" || {
+      err "Unable to read the Kubernetes API endpoint; refusing writer recovery"
+      return 1
+    }
+  if [[ ! "$endpoint_ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+    err "Kubernetes API endpoint is not exactly one IPv4 address; refusing writer recovery"
+    return 1
+  fi
+  IFS=. read -r endpoint_octet_1 endpoint_octet_2 endpoint_octet_3 endpoint_octet_4 <<<"$endpoint_ip"
+  for octet in "$endpoint_octet_1" "$endpoint_octet_2" "$endpoint_octet_3" "$endpoint_octet_4"; do
+    if ! [[ "$octet" =~ ^[0-9]+$ ]] || (( 10#$octet > 255 )); then
+      err "Kubernetes API endpoint contains an invalid IPv4 octet; refusing writer recovery"
+      return 1
+    fi
+  done
+
+  [ -f "$WRITER_RECOVERY_STATE_HELPER" ] || {
+    err "Writer recovery state helper is missing"
+    return 1
+  }
+  [ -f "${SCRIPT_DIR}/validate-k8s-api-egress-policy.rb" ] || {
+    err "Kubernetes API policy validator is missing; refusing writer recovery"
+    return 1
+  }
+  K8S_API_POLICY_TMP_DIR="$(mktemp -d "${T2_TMP_ROOT:-${TMPDIR:-/tmp}}/evenfire-k8s-api-policy.XXXXXX")"
+  rendered_file="${K8S_API_POLICY_TMP_DIR}/rendered.yaml"
+  K8S_API_EGRESS_POLICY_FILE="${K8S_API_POLICY_TMP_DIR}/control-plane-policy.yaml"
+  live_file="${K8S_API_POLICY_TMP_DIR}/live.json"
+
+  # Render the active overlay first so the object applied during recovery
+  # includes every inherited field from the base NetworkPolicy.
+  if ! $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" >"$rendered_file"; then
+    err "Unable to render the active overlay; refusing writer recovery"
+    return 1
+  fi
+  if ! RUBYOPT=--disable=gems ruby \
+    "${SCRIPT_DIR}/validate-k8s-api-egress-policy.rb" --extract "${endpoint_ip}/32" \
+    <"$rendered_file" >"$K8S_API_EGRESS_POLICY_FILE"; then
+    err "Rendered Kubernetes API NetworkPolicy is incomplete or unsafe; refusing writer recovery"
+    return 1
+  fi
+
+  if $KC -n control-plane get networkpolicy/allow-k8s-api-egress-control-plane \
+    -o json --ignore-not-found >"$live_file" 2>/dev/null; then
+    :
+  else
+    live_status=$?
+    err "Unable to inspect the live Kubernetes API NetworkPolicy (status ${live_status}); refusing writer recovery"
+    return 1
+  fi
+  if [ ! -s "$live_file" ] || [ "$(tr -d '[:space:]' <"$live_file")" = "{}" ]; then
+    K8S_API_EGRESS_POLICY_DRIFT=true
+    log "Kubernetes API egress NetworkPolicy is absent; a complete rendered policy will be staged after fencing"
+    return 0
+  fi
+  if RUBYOPT=--disable=gems ruby \
+    "${SCRIPT_DIR}/validate-k8s-api-egress-policy.rb" --check-live "${endpoint_ip}/32" \
+    <"$live_file" >/dev/null; then
+    K8S_API_EGRESS_POLICY_DRIFT=false
+    log "Kubernetes API egress NetworkPolicy matches the current endpoint"
+    return 0
+  else
+    check_status=$?
+  fi
+  if [ "$check_status" -eq 1 ]; then
+    K8S_API_EGRESS_POLICY_DRIFT=true
+    log "Kubernetes API egress NetworkPolicy has a recognized endpoint/port drift; a complete policy will be staged after fencing"
+    return 0
+  fi
+  err "Live Kubernetes API NetworkPolicy has an unexpected shape; refusing writer recovery"
+  return 1
 }
 
 restore_partial_control_api() {
   if [ "$PARTIAL_CONTROL_API_FENCED" != true ]; then
+    if [[ "$WRITER_RECOVERY_STATE_PHASE" == api-restored ||
+      "$WRITER_RECOVERY_STATE_PHASE" == overlay-applied ]]; then
+      if control_api_is_ready; then
+        return 0
+      fi
+      return 1
+    fi
     return 1
   fi
   log "Restoring control-api to ${PARTIAL_CONTROL_API_REPLICAS} replica(s) after runtime-role provisioning"
@@ -1234,6 +1470,7 @@ restore_partial_control_api() {
     --replicas="$PARTIAL_CONTROL_API_REPLICAS" >/dev/null
   $KC -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null
   PARTIAL_CONTROL_API_FENCED=false
+  writer_recovery_state_phase api-restored
 }
 
 restore_partial_non_api_writers() {
@@ -1271,13 +1508,17 @@ reconcile_existing_gfs_credentials() {
   bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
 }
 
+writer_recovery_state_load || exit 1
+prepare_refreshed_k8s_api_network_policy || exit 1
 CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
 if [ "$RESET_DB" = true ]; then
   log "Database reset path — HCC cutover deferred until post-convergence verification"
 else
   writer_dsn="$($KC -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
   if [ -n "${writer_dsn}" ]; then
-    if control_api_is_ready; then
+    if [ "$WRITER_RECOVERY" = true ]; then
+      log "Existing GFS writer recovery is already in progress; preserving the durable fence state"
+    elif control_api_is_ready; then
       log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
       reconcile_existing_gfs_credentials
     else
@@ -1286,25 +1527,43 @@ else
         err "Unable to determine control-api readiness; refusing to classify the GFS upgrade path"
         exit 1
       fi
-      fence_partial_bootstrap_writers
-      apply_refreshed_k8s_api_network_policies
       if runtime_role_secret_is_missing; then
+        runtime_secret_status=0
+      else
+        runtime_secret_status=$?
+      fi
+      if [ "$runtime_secret_status" -eq 0 ]; then
         WRITER_RECOVERY=true
         PARTIAL_BOOTSTRAP_RECOVERY=true
         log "Existing GFS writer and empty control-api runtime Secret detected — fencing writers until migrations and runtime roles converge"
-      else
-        runtime_secret_status=$?
-        if [ "$runtime_secret_status" -ne 1 ]; then
-          err "Unable to inspect control-api-postgres-runtime; refusing to classify the GFS upgrade path"
-          exit 1
-        fi
+      elif [ "$runtime_secret_status" -eq 1 ] && [ "$K8S_API_EGRESS_POLICY_DRIFT" = true ]; then
         WRITER_RECOVERY=true
+        PARTIAL_BOOTSTRAP_RECOVERY=true
         log "Existing GFS writer detected with control-api not Ready — repairing the stale API-egress policy before the fail-closed readiness decision"
+      elif [ "$runtime_secret_status" -eq 1 ]; then
+        err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
+        exit 1
+      else
+        err "Unable to inspect control-api-postgres-runtime; refusing to classify the GFS upgrade path"
+        exit 1
       fi
+      fence_partial_bootstrap_writers
+      apply_refreshed_k8s_api_network_policies
     fi
   else
     log "Fresh bootstrap detected — reader staging deferred until migrations; GFSC remains fail-closed"
   fi
+fi
+
+if [ "$WRITER_RECOVERY" = true ] && [ "$WRITER_RECOVERY_FENCE_PENDING" = true ]; then
+  fence_partial_bootstrap_writers
+  apply_refreshed_k8s_api_network_policies
+  WRITER_RECOVERY_FENCE_PENDING=false
+fi
+if [ "$WRITER_RECOVERY_STATE_LOADED" = true ] &&
+  [ "$WRITER_RECOVERY_STATE_PHASE" = planned ] &&
+  [ "$WRITER_RECOVERY" = false ]; then
+  writer_recovery_state_clear
 fi
 
 log "Applying kustomize overlay (${ACTIVE_MINIKUBE_RENDER_DIR})..."
@@ -1356,6 +1615,9 @@ else
   CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
   ok "Control-api database migrations and runtime roles applied"
+  if [ "$WRITER_RECOVERY" = true ] && [ "$PARTIAL_CONTROL_API_FENCED" = true ]; then
+    writer_recovery_state_phase roles-ready
+  fi
 
   # The credential probe runs through control-api, so prove that deployment is
   # live before normal staging on bootstrap or an idempotent upgrade. On the
@@ -1387,6 +1649,7 @@ else
     log "Control-api/runtime roles are Ready — reconciling GFS before the deferred full overlay"
     reconcile_existing_gfs_credentials
     $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+    writer_recovery_state_phase overlay-applied
     restore_partial_non_api_writers
     ok "Deferred full kustomize overlay applied after fenced writer/runtime-role readiness"
   fi
@@ -1411,6 +1674,9 @@ else
   # The preceding staged sync is allowed to wait for this DSN-producing
   # reconcile; the strict pass is the durable consumer attestation.
   bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+  if [ "$WRITER_RECOVERY" = true ]; then
+    writer_recovery_state_clear
+  fi
   ok "GFS credentials reconciled and writer bootstrap verified"
 fi
 

@@ -169,6 +169,7 @@ assert_minikube_upgrade_classifier() {
   reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' <<<"$block" | head -1 | cut -d: -f1)"
   fallback="$(grep -nE '^[[:space:]]*else' <<<"$block" | tail -1 | cut -d: -f1)"
   fresh="$(grep -ni 'fresh bootstrap' <<<"$block" | tail -1 | cut -d: -f1)"
+  classifier_start="$dsn"
   for line_name in dsn classify ready abort reconcile fallback fresh; do
     line_value="${!line_name}"
     if [[ -n "$line_value" ]]; then
@@ -181,16 +182,25 @@ assert_minikube_upgrade_classifier() {
     if [[ -n "$readiness_probe" ]]; then
       readiness_probe=$((block_start + readiness_probe - 1))
     fi
-    writer_flag="$(grep -n 'WRITER_RECOVERY=true' "$path" | head -1 | cut -d: -f1)"
-    partial_flag="$(grep -n 'PARTIAL_BOOTSTRAP_RECOVERY=true' "$path" | head -1 | cut -d: -f1)"
-    fence_call="$(grep -nE '^[[:space:]]+fence_partial_bootstrap_writers$' "$path" | tail -1 | cut -d: -f1)"
-    policy_apply="$(grep -nE '^[[:space:]]+apply_refreshed_k8s_api_network_policies$' "$path" | tail -1 | cut -d: -f1)"
+    # The durable resume classifier is defined before the executable upgrade
+    # branch. Select the first recovery assignment/fence after the writer
+    # Secret read so this contract checks mutation order, not helper details.
+    writer_flag="$(grep -n 'WRITER_RECOVERY=true' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
+    partial_flag="$(grep -n 'PARTIAL_BOOTSTRAP_RECOVERY=true' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
+    fence_call="$(grep -nE '^[[:space:]]+fence_partial_bootstrap_writers$' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
+    policy_apply="$(grep -nE '^[[:space:]]+apply_refreshed_k8s_api_network_policies$' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
     migration="$(grep -n 'run-control-api-db-migration.sh' "$path" | head -1 | cut -d: -f1)"
     roles="$(grep -n 'provision-control-api-runtime-roles.sh' "$path" | head -1 | cut -d: -f1)"
     restore_api="$(grep -nE '^[[:space:]]+restore_partial_control_api$' "$path" | tail -1 | cut -d: -f1)"
     deferred_full_overlay="$(grep -n 'Deferred full kustomize overlay applied' "$path" | head -1 | cut -d: -f1)"
     post_ready="$(grep -n 'rollout status deployment/control-api.*timeout=180s' "$path" | tail -1 | cut -d: -f1)"
     post_reconcile="$(grep -nE '^[[:space:]]+reconcile_existing_gfs_credentials$' "$path" | tail -1 | cut -d: -f1)"
+    for line_name in writer_flag partial_flag fence_call policy_apply; do
+      line_value="${!line_name}"
+      if [[ -n "$line_value" ]]; then
+        printf -v "$line_name" '%d' "$((block_start + line_value - 1))"
+      fi
+    done
     [[ -n "$dsn" && -n "$classify" && -n "$readiness_probe" && -n "$writer_flag" && \
        -n "$partial_flag" && -n "$fence_call" && -n "$policy_apply" && \
        -n "$fallback" && -n "$fresh" && -n "$migration" && \
@@ -198,8 +208,8 @@ assert_minikube_upgrade_classifier() {
        -n "$post_ready" && -n "$post_reconcile" ]] \
       || fail "$path recovery classifier is incomplete"
     [[ "$dsn" -lt "$classify" && "$classify" -lt "$readiness_probe" && \
-       "$readiness_probe" -lt "$fence_call" && "$fence_call" -lt "$policy_apply" && \
-       "$policy_apply" -lt "$writer_flag" && "$writer_flag" -lt "$partial_flag" && \
+       "$readiness_probe" -lt "$writer_flag" && "$writer_flag" -lt "$partial_flag" && \
+       "$partial_flag" -lt "$fence_call" && "$fence_call" -lt "$policy_apply" && \
        "$partial_flag" -lt "$fallback" && "$fallback" -lt "$fresh" && \
        "$migration" -lt "$roles" && "$roles" -lt "$restore_api" && \
        "$restore_api" -lt "$post_reconcile" && "$post_reconcile" -lt "$deferred_full_overlay" && \

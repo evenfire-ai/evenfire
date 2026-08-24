@@ -198,6 +198,43 @@ grep -Fxq "${PID} TERM" "${KILL_LOG}" || fail 'bounded TERM timeout did not sign
 [[ ! -s "${REAP_LOG}" ]] || fail 'bounded TERM timeout called blocking reap on a live process'
 pass 'TERM-resistant cleanup is bounded and never waits on a live process'
 
+# A fast child may disappear after the post-TERM state probe but before ps(1)
+# can return its start time. The cleanup contract must accept that only after a
+# second state probe proves the PID is dead; it must never remove a live or
+# ambiguous record on a missing start-time read.
+reset_process_fixture
+write_record
+RACE_AFTER_TERM=false
+RACE_START_FAILED_FILE="${TMP_ROOT}/race-start-failed"
+rm -f -- "${RACE_START_FAILED_FILE}"
+pf_owner_signal_process() {
+  printf '%s %s\n' "$1" "$2" >>"${KILL_LOG}"
+  RACE_AFTER_TERM=true
+}
+pf_owner_process_state() {
+  if [[ "${RACE_AFTER_TERM}" == true ]]; then
+    if [[ -e "${RACE_START_FAILED_FILE}" ]]; then
+      printf 'dead\n'
+    else
+      printf 'live\n'
+    fi
+  else
+    printf 'live\n'
+  fi
+}
+pf_owner_process_start() {
+  if [[ "${RACE_AFTER_TERM}" == true ]]; then
+    : >"${RACE_START_FAILED_FILE}"
+    return 1
+  fi
+  printf '%s\n' "${ACTUAL_START}"
+}
+PF_OWNER_TERMINATE_ATTEMPTS=1 PF_OWNER_TERMINATE_DELAY=0 cleanup_record ||
+  fail 'cleanup rejected a process that exited during the post-TERM start-time race'
+[[ ! -e "${RECORD}" ]] || fail 'post-TERM race cleanup kept the dead ownership record'
+[[ -s "${REAP_LOG}" ]] || fail 'post-TERM race cleanup did not reap the dead process'
+pass 'post-TERM start-time race cleans up only after a dead-state recheck'
+
 pf_owner_signal_process() {
   printf '%s %s\n' "$1" "$2" >>"${KILL_LOG}"
   printf 'dead\n' >"${STATE_FILE}"

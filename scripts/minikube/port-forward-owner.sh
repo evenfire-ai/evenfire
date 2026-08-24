@@ -364,8 +364,21 @@ pf_owner_cleanup_record() {
         return
         ;;
       live)
-        actual_start="$(pf_owner_process_start "${pid}")" ||
-          pf_owner_error "cannot recheck live PID ${pid} after TERM; leaving ${pidfile}" || return 1
+        if ! actual_start="$(pf_owner_process_start "${pid}")"; then
+          # A port-forward can exit in the small interval between the state
+          # probe above and ps(1) re-reading its start time. It is safe to
+          # reap and remove the record only when a second state probe proves
+          # that the exact process is now dead; a live or ambiguous PID still
+          # fails closed and keeps its ownership evidence.
+          state="$(pf_owner_process_state "${pid}")"
+          if [[ "${state}" == dead ]]; then
+            pf_owner_reap_process "${pid}"
+            pf_owner_remove_dead_record "${pidfile}"
+            return
+          fi
+          pf_owner_error "cannot recheck live PID ${pid} after TERM; leaving ${pidfile}"
+          return 1
+        fi
         [[ "${actual_start}" == "${PF_OWNER_RECORD_START}" ]] ||
           pf_owner_error "PID ${pid} was reused after TERM; leaving ${pidfile}" || return 1
         ;;
