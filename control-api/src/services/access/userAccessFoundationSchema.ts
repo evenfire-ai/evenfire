@@ -1,4 +1,5 @@
 import type { DbClient } from '../../db.js'
+import { canonicalEnvironmentId } from './operationalAccessProjection.js'
 
 /**
  * Additive persistence foundation for user-session v2 and user-centric access.
@@ -311,6 +312,11 @@ export async function applyCatalogUtf8OrderingSchema(db: DbClient): Promise<void
  */
 export async function applyComposableCatalogRevisionSchema(db: DbClient): Promise<void> {
   await db.query(`
+    CREATE TABLE IF NOT EXISTS authorization_catalog_environment (
+      singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+      environment_id TEXT NOT NULL CHECK (environment_id <> '')
+    );
+
     CREATE TABLE IF NOT EXISTS authorization_catalog_writer_components (
       writer_table TEXT PRIMARY KEY,
       component_class TEXT NOT NULL,
@@ -332,9 +338,9 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       ('workflow_runs', 'user+team', 'visible workflow-run ownership'),
       ('workflow_approval_requests', 'user+team', 'approval target authority'),
       ('notification_deliveries', 'user+team', 'notification audience'),
-      ('gfs_resources', 'gfs-subjects', 'resource visibility for current subjects'),
-      ('gfs_grants', 'user+team', 'direct GFS grants'),
-      ('gfs_shares', 'user+team', 'direct GFS shares'),
+      ('gfs_resources', 'resource+gfs-subjects', 'resource and current subject visibility'),
+      ('gfs_grants', 'resource+user+team', 'GFS resource and direct-subject authority'),
+      ('gfs_shares', 'resource+user+team', 'GFS resource and shared-subject authority'),
       ('operational_resource_index', 'resource+source-state', 'promoted source resources'),
       ('operational_resource_relationships', 'resource+source-state', 'promoted source edges'),
       ('operational_catalog_source_state', 'source-state', 'atomic source generation promotion')
@@ -522,6 +528,62 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
+    CREATE OR REPLACE FUNCTION authorization_bump_gfs_resource_component(
+      target_resource_id UUID
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    DECLARE target_environment_id TEXT;
+    BEGIN
+      SELECT environment_id
+        INTO target_environment_id
+        FROM authorization_catalog_environment
+       WHERE singleton = TRUE;
+      IF target_environment_id IS NULL THEN
+        RAISE EXCEPTION 'catalog environment is not configured';
+      END IF;
+      IF target_resource_id IS NULL THEN
+        RETURN;
+      END IF;
+      INSERT INTO authorization_resource_revisions(
+        environment_id, resource_type, resource_id, revision, updated_at
+      ) VALUES (
+        target_environment_id, 'gfs_resource', target_resource_id::TEXT, 1, clock_timestamp()
+      )
+      ON CONFLICT (environment_id, resource_type, resource_id) DO UPDATE
+        SET revision = authorization_resource_revisions.revision + 1,
+            updated_at = clock_timestamp();
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_gfs_authority_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF TG_OP <> 'DELETE' THEN
+        PERFORM authorization_bump_subject_revision(NEW.subject_type, NEW.subject_id);
+        PERFORM authorization_bump_gfs_resource_component(NEW.resource_id);
+      END IF;
+      IF TG_OP = 'DELETE' OR (
+        TG_OP = 'UPDATE' AND (
+          OLD.subject_type IS DISTINCT FROM NEW.subject_type
+          OR OLD.subject_id IS DISTINCT FROM NEW.subject_id
+          OR OLD.resource_id IS DISTINCT FROM NEW.resource_id
+        )
+      ) THEN
+        PERFORM authorization_bump_subject_revision(OLD.subject_type, OLD.subject_id);
+        PERFORM authorization_bump_gfs_resource_component(OLD.resource_id);
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
     CREATE OR REPLACE FUNCTION authorization_bump_gfs_resource_subjects(target_resource_id UUID)
     RETURNS VOID
     LANGUAGE plpgsql
@@ -552,10 +614,12 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
+        PERFORM authorization_bump_gfs_resource_component(NEW.resource_id);
         PERFORM authorization_bump_gfs_resource_subjects(NEW.resource_id);
       END IF;
       IF TG_OP <> 'INSERT' AND (TG_OP = 'DELETE' OR OLD.resource_id IS DISTINCT FROM NEW.resource_id)
       THEN
+        PERFORM authorization_bump_gfs_resource_component(OLD.resource_id);
         PERFORM authorization_bump_gfs_resource_subjects(OLD.resource_id);
       END IF;
       RETURN COALESCE(NEW, OLD);
@@ -608,11 +672,11 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     DROP TRIGGER IF EXISTS gfs_grants_authorization_revision ON gfs_grants;
     CREATE TRIGGER gfs_grants_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON gfs_grants
-      FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_subject_revision();
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_authority_revision();
     DROP TRIGGER IF EXISTS gfs_shares_authorization_revision ON gfs_shares;
     CREATE TRIGGER gfs_shares_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON gfs_shares
-      FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_subject_revision();
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_authority_revision();
     DROP TRIGGER IF EXISTS gfs_resources_authorization_revision ON gfs_resources;
     CREATE TRIGGER gfs_resources_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON gfs_resources
@@ -622,7 +686,9 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     DROP TABLE IF EXISTS authorization_catalog_revision;
 
     REVOKE ALL ON TABLE authorization_catalog_writer_components FROM PUBLIC;
+    REVOKE ALL ON TABLE authorization_catalog_environment FROM PUBLIC;
     GRANT SELECT ON TABLE authorization_catalog_writer_components TO control_api_runtime;
+    GRANT SELECT ON TABLE authorization_catalog_environment TO control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_subject_revision(TEXT, TEXT) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_row_revision() FROM PUBLIC;
@@ -630,9 +696,26 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     REVOKE ALL ON FUNCTION authorization_bump_workflow_approval_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_notification_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_subject_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_component(UUID) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_gfs_authority_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_subjects(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_revision() FROM PUBLIC;
   `)
+  await db.query(
+    `INSERT INTO authorization_catalog_environment(singleton, environment_id)
+     VALUES(TRUE, $1)
+     ON CONFLICT (singleton) DO UPDATE SET environment_id = EXCLUDED.environment_id`,
+    [canonicalEnvironmentId()]
+  )
+  await db.query(
+    `INSERT INTO authorization_resource_revisions(
+       environment_id, resource_type, resource_id, revision, updated_at
+     )
+     SELECT $1, 'gfs_resource', resource_id::text, 1, clock_timestamp()
+       FROM gfs_resources
+     ON CONFLICT (environment_id, resource_type, resource_id) DO NOTHING`,
+    [canonicalEnvironmentId()]
+  )
 }
 
 async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> {
