@@ -14960,6 +14960,7 @@ pre {
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
+  transform: rotateX(180deg);
   width: 100%;
 }
 
@@ -14972,7 +14973,13 @@ pre {
   flex: 0 0 auto;
   max-width: 220px;
   min-width: 0;
+  transform: rotateX(180deg);
   transition: background var(--motion-fast);
+}
+
+.chat-view-tab:not(.is-active) {
+  border-bottom: 0;
+  border-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
 }
 
 .chat-view-tab.is-active {

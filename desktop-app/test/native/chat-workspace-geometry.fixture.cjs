@@ -22,6 +22,10 @@ async function geometry(window) {
     const surfaceStyle = getComputedStyle(document.querySelector('.chat-view-surface'))
     const activeTab = document.querySelector('.chat-view-tab.is-active')
     const activeStyle = getComputedStyle(activeTab)
+    const inactiveStyle = getComputedStyle(document.querySelector('.chat-view-tab:not(.is-active)'))
+    const inactiveBorderReferenceStyle = getComputedStyle(
+      document.querySelector('[data-inactive-tab-border-reference]')
+    )
     const activeSeamStyle = getComputedStyle(activeTab, '::after')
     const activeSelectStyle = getComputedStyle(
       document.querySelector('.chat-view-tab.is-active .chat-view-tab__select')
@@ -42,6 +46,11 @@ async function geometry(window) {
       activeSeamHeight: activeSeamStyle.height,
       activeSeamPosition: activeSeamStyle.position,
       activeSelectBackground: activeSelectStyle.backgroundColor,
+      inactiveBackground: inactiveStyle.backgroundColor,
+      inactiveBorderBottomStyle: inactiveStyle.borderBottomStyle,
+      inactiveBorderBottomWidth: inactiveStyle.borderBottomWidth,
+      inactiveBorderTop: inactiveStyle.borderTopColor,
+      inactiveBorderReferenceTop: inactiveBorderReferenceStyle.borderTopColor,
       listClientWidth: list.clientWidth,
       listOverflowX: getComputedStyle(list).overflowX,
       listScrollWidth: list.scrollWidth,
@@ -58,9 +67,39 @@ async function geometry(window) {
       surfaceTop: surface.top,
       surfaceWidth: surface.width,
       tabsBottom: tabs.bottom,
+      theme: document.documentElement.dataset.theme,
       workspaceWidth: workspace.width,
     }
   })()`)
+}
+
+function assertTabTreatment(state, theme) {
+  assert.equal(state.theme, theme, `${theme} theme is applied`)
+  assert.notEqual(
+    state.activeBackground,
+    state.inactiveBackground,
+    `${theme} active tab remains visually distinct`
+  )
+  assert.notEqual(
+    state.activeBorderTop,
+    state.inactiveBorderTop,
+    `${theme} active tab keeps its selected border treatment`
+  )
+  assert.equal(
+    state.inactiveBorderBottomStyle,
+    'none',
+    `${theme} inactive tabs have no bottom border`
+  )
+  assert.equal(
+    state.inactiveBorderBottomWidth,
+    '0px',
+    `${theme} inactive tabs have no bottom-border width`
+  )
+  assert.equal(
+    state.inactiveBorderTop,
+    state.inactiveBorderReferenceTop,
+    `${theme} inactive tabs use 25% of the normal border color`
+  )
 }
 
 async function hover(window, selector) {
@@ -77,7 +116,11 @@ app.whenReady().then(async () => {
   try {
     const tokens = readFileSync(path.join(__dirname, '../../ui/src/styles/tokens.css'), 'utf8')
     const css = readFileSync(path.join(__dirname, '../../ui/src/styles.css'), 'utf8')
-    const html = `<!doctype html><style>${tokens}\n${css}</style>
+    const html = `<!doctype html><html data-theme="dark"><style>${tokens}\n${css}</style>
+      <div
+        data-inactive-tab-border-reference
+        style="border-top: 1px solid color-mix(in srgb, var(--border-soft) 25%, transparent); position: fixed; visibility: hidden"
+      ></div>
       <main class="content-panel content-panel--agent-chat" style="width:100%;height:600px">
         <section class="chat-view-workspace">
           <div class="chat-view-tabs" role="toolbar"><div class="chat-view-tabs__list">
@@ -95,6 +138,7 @@ app.whenReady().then(async () => {
     await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
 
     const wide = await geometry(window)
+    assertTabTreatment(wide, 'dark')
     assert.ok(
       Math.abs(wide.surfaceWidth - wide.workspaceWidth) <= 1,
       'wide surface stays full width'
@@ -123,6 +167,17 @@ app.whenReady().then(async () => {
       wide.activeSeamBackground,
       wide.activeBackground,
       'conversation top border is hidden beneath the active tab'
+    )
+
+    await window.webContents.executeJavaScript(
+      "document.documentElement.setAttribute('data-theme', 'light')"
+    )
+    const light = await geometry(window)
+    assertTabTreatment(light, 'light')
+    assert.equal(
+      light.activeSeamBackground,
+      light.activeBackground,
+      'light theme conversation top border is hidden beneath the active tab'
     )
 
     await hover(window, '.chat-view-tab.is-active .chat-view-tab__close')
