@@ -98,6 +98,25 @@ describe('mcp-host proxy Host bearer transport', () => {
     )
   })
 
+  it('shares refresh state across wrappers created for one auth object', async () => {
+    const refresh = vi.fn(async () => undefined)
+    const auth = fixtureAuth('x', refresh)
+    const response = new Response('denied', {
+      status: 401,
+      headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+    })
+    const fetchMock = vi.fn(async () => response)
+    const first = createMcpProxyFetch(auth, fetchMock)
+    const second = createMcpProxyFetch(auth, fetchMock)
+
+    await Promise.all([
+      first('http://proxy.test/a', { method: 'GET' }),
+      second('http://proxy.test/b', { method: 'GET' }),
+    ])
+
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
   it('retries a 401 once and never loops on a persistent rejection', async () => {
     const auth = fixtureAuth('fixture-host', vi.fn(async () => undefined))
     const fetchMock = vi

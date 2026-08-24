@@ -25,6 +25,10 @@ export class McpProxyAuthorizationError extends Error {
   }
 }
 
+type SharedRefreshState = { refreshPromise: Promise<void> | null }
+
+const sharedRefreshStates = new WeakMap<McpProxyHostAuthorization, SharedRefreshState>()
+
 function readHostBearer(auth: McpProxyHostAuthorization): string {
   let token = ''
   try {
@@ -45,7 +49,11 @@ export function createMcpProxyFetch(
   auth: McpProxyHostAuthorization,
   baseFetch: McpProxyFetch = globalThis.fetch.bind(globalThis)
 ): McpProxyFetch {
-  let refreshPromise: Promise<void> | null = null
+  let refreshState = sharedRefreshStates.get(auth)
+  if (!refreshState) {
+    refreshState = { refreshPromise: null }
+    sharedRefreshStates.set(auth, refreshState)
+  }
 
   const refreshAfterUnauthorized = async (observedBearer: string): Promise<void> => {
     let currentBearer = ''
@@ -58,17 +66,17 @@ export function createMcpProxyFetch(
     // inspected the 401. Reuse that new value instead of refreshing twice.
     if (currentBearer && currentBearer !== observedBearer) return
 
-    if (!refreshPromise) {
-      refreshPromise = auth
+    if (!refreshState.refreshPromise) {
+      refreshState.refreshPromise = auth
         .refreshOnUnauthorized()
         .catch(() => {
           throw new McpProxyAuthorizationError('host_bearer_refresh_failed')
         })
         .finally(() => {
-          refreshPromise = null
+          refreshState!.refreshPromise = null
         })
     }
-    await refreshPromise
+    await refreshState.refreshPromise
   }
 
   return async (input, init = {}) => {
