@@ -2,6 +2,10 @@ import * as k8s from '@kubernetes/client-node'
 import { SecretPreconditions, SecretUpsertRequest } from '../types.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
 
+// A write-side summary of a Secret — NEVER carries `.data` values. Every admin
+// secret-write route echoes this, so secret values cannot leave the Secret store
+// via an HTTP response body. Reads that legitimately need values use `getSecret`,
+// which deliberately stays full-fat.
 export interface SecretSummary {
   name: string
   namespace: string
@@ -45,11 +49,12 @@ type _DeleteSecretSummaryIsNamesOnly = Assert<
   HasExactKeys<DeleteSecretSummary, 'name' | 'namespace' | 'deleted'>
 >
 
-function summarizeSecret(result: k8s.V1Secret, name: string, namespace: string): SecretSummary {
+function summarizeSecret(result: unknown, name: string, namespace: string): SecretSummary {
+  const data = (result as k8s.V1Secret | undefined)?.data
   return toPublicSecretSummary({
     name,
     namespace,
-    keys: Object.keys(result.data ?? {}).sort((a, b) => a.localeCompare(b)),
+    keys: Object.keys(data ?? {}).sort((a, b) => a.localeCompare(b)),
   })
 }
 
@@ -97,6 +102,7 @@ export class SecretService {
       stringData: req.stringData,
     }
 
+    // Names-only return: never surface the created Secret's `.data` to callers.
     const created = await this.coreApi.createNamespacedSecret({ namespace: ns, body })
     return summarizeSecret(created, req.name, ns)
   }
@@ -151,6 +157,7 @@ export class SecretService {
       stringData: req.stringData,
     }
 
+    // Names-only return: never surface the replaced Secret's `.data` to callers.
     const updated = await this.coreApi.replaceNamespacedSecret({
       namespace: ns,
       name: req.name,
@@ -192,6 +199,8 @@ export class SecretService {
     if (req.labels !== undefined) body.metadata = { labels: req.labels }
     if (req.type !== undefined) body.type = req.type
 
+    // Names-only return: the patch response is the merged WHOLE Secret (all keys,
+    // including ones the caller did not send) — return only the key NAMES.
     const merged = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
