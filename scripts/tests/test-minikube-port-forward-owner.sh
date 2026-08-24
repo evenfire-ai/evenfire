@@ -17,6 +17,8 @@ pass() {
 }
 
 [[ -f "${OWNER}" ]] || fail 'port-forward-owner.sh is missing'
+grep -Fq 'profile_owner_validate_selection' "${PF_ALL}" ||
+  fail 'branch-owned pf-all-stack does not validate worktree/profile ownership'
 # shellcheck source=scripts/minikube/port-forward-owner.sh
 source "${OWNER}"
 

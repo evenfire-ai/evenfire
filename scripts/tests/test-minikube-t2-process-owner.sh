@@ -21,6 +21,18 @@ PS_BIN="$TEST_DIR/bin"
 PS_EF="$PS_DATA/ef"
 RECORD="$PID_DIR/control-ui.pid"
 mkdir -p "$PID_DIR" "$PS_DATA" "$PS_BIN"
+PORTS_ENV="$TEST_DIR/ports.env"
+cat >"$PORTS_ENV" <<'EOF_PORTS'
+CONTROL_UI_PORT=3000
+PROFILE_UI_PORT=3001
+MCP_HOST_PORT=3080
+REGISTRY_API_PORT=3085
+CONTROL_API_PORT=3090
+EXTERNAL_REST_API_PORT=3091
+MEMBER_REGISTRATION_SERVICE_PORT=3092
+RPC_PROXY_PORT=3094
+WORKFLOW_APPROVAL_READER_PORT=3098
+EOF_PORTS
 
 cat >"$PS_BIN/ps" <<'EOF_PS'
 #!/usr/bin/env bash
@@ -62,7 +74,7 @@ run_process_check() {
   local output="$1"
   T2_PS_DATA_DIR="$PS_DATA" PATH="$PS_BIN:$PATH" \
     T2_PROFILE="$PROFILE" T2_CONTEXT="$PROFILE" MINIKUBE_PROFILE="$PROFILE" \
-    T2_PROFILE_ROOT="$PROFILE_ROOT" T2_PROJECT_DIR="$ROOT" \
+    T2_PROFILE_ROOT="$PROFILE_ROOT" T2_PORTS_ENV="$PORTS_ENV" T2_PROJECT_DIR="$ROOT" \
     bash -c 'source "$1"; t2_process_check' _ "$COMMON" >"$output" 2>&1
 }
 
@@ -78,10 +90,21 @@ set_process_fixture bash "bash -c echo kubectl --context=$PROFILE port-forward"
 run_process_check "$TEST_DIR/wrapper.out"
 
 set_process_fixture kubectl 'kubectl -n control-plane port-forward svc/control-ui 3000:3000'
-run_process_check "$TEST_DIR/contextless.out"
+if run_process_check "$TEST_DIR/contextless.out"; then
+  printf 'FAIL: contextless forward on a persisted profile port was accepted\n' >&2
+  exit 1
+fi
+grep -Fq PORT_FORWARD_CONFLICT "$TEST_DIR/contextless.out"
 
 set_process_fixture kubectl 'kubectl --context=another-profile -n control-plane port-forward svc/control-ui 3000:3000'
-run_process_check "$TEST_DIR/other-context.out"
+if run_process_check "$TEST_DIR/other-context.out"; then
+  printf 'FAIL: foreign-context forward on a persisted profile port was accepted\n' >&2
+  exit 1
+fi
+grep -Fq PORT_FORWARD_CONFLICT "$TEST_DIR/other-context.out"
+
+set_process_fixture kubectl 'kubectl -n control-plane port-forward svc/control-ui 3999:3999'
+run_process_check "$TEST_DIR/unrelated-port.out"
 
 # shellcheck source=scripts/minikube/port-forward-owner.sh
 source "$OWNER"

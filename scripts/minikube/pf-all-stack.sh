@@ -11,6 +11,8 @@ WORKTREE_ROOT="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel 2>/dev/n
 WORKTREE_ROOT="$(cd -- "${WORKTREE_ROOT}" && pwd -P)"
 # shellcheck source=scripts/minikube/port-forward-owner.sh
 source "${SCRIPT_DIR}/port-forward-owner.sh"
+# shellcheck source=scripts/minikube/profile-owner.sh
+source "${SCRIPT_DIR}/profile-owner.sh"
 
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 CONTEXT="${KUBECONTEXT:-${PROFILE}}"
@@ -120,6 +122,29 @@ fi
 is_branch_profile() {
   [[ "$PROFILE" =~ ^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$ ]]
 }
+
+validate_branch_profile_ownership() {
+  [[ "${PROFILE}" =~ ^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$ ]] || return 0
+  local branch profile_env ports_env
+  branch="$(git -C "${WORKTREE_ROOT}" branch --show-current 2>/dev/null || true)"
+  [[ -n "${branch}" ]] || {
+    echo "ERROR: branch-owned port-forwards require a named Git branch" >&2
+    return 1
+  }
+  profile_env="${T2_PROFILE_ENV:-${PROFILE_PID_ROOT}/${PROFILE}/profile.env}"
+  ports_env="${CLERUM_PROFILE_PORTS_ENV:-${PROFILE_PID_ROOT}/${PROFILE}/ports.env}"
+  [[ -f "${profile_env}" && -f "${ports_env}" ]] || {
+    echo "ERROR: branch-owned profile metadata is missing for ${PROFILE}" >&2
+    return 1
+  }
+  if ! profile_owner_validate_selection "${profile_env}" "${ports_env}" \
+    "${WORKTREE_ROOT}" "${branch}" "${PROFILE}"; then
+    profile_owner_print_error
+    return 1
+  fi
+}
+
+validate_branch_profile_ownership
 
 if [[ ! -f "${BRANCH_PROFILE_PORTS_ENV}" ]] && is_branch_profile; then
   echo "ERROR: missing branch-scoped port cache for minikube profile: ${PROFILE}" >&2

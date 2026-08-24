@@ -19,7 +19,14 @@ T2_LOCK_ROOT="${TMP_DIR}/locks"
 T2_LOCK_TOKEN='auth-sync-test-token'
 T2_LOCK_DIR="${T2_LOCK_ROOT}/fake.lock"
 T2_PROCESS_START=unavailable
+# GitHub Actions checks out a detached commit.  The fixture still needs a
+# non-empty logical lane name because the production lease contract rejects
+# owner records without a branch identity; use the PR source ref when it is
+# available and a test-only identity otherwise.
 T2_TEST_BRANCH="$(git -C "${ROOT}" branch --show-current)"
+if [[ -z "${T2_TEST_BRANCH}" ]]; then
+  T2_TEST_BRANCH="${GITHUB_HEAD_REF:-detached-ci-test}"
+fi
 T2_TEST_HEAD="$(git -C "${ROOT}" rev-parse --verify HEAD)"
 T2_TEST_WORKTREE_ID="$(printf '%s' "${ROOT}" | shasum | awk '{print $1}')"
 T2_TEST_LOCK_KEY="$(printf '%s\0%s\0%s\0%s\0%s' "${ROOT}" "${T2_TEST_BRANCH}" "${T2_TEST_HEAD}" fake fake | shasum | awk '{print $1}')"

@@ -48,6 +48,9 @@ for phase in api-restoring overlay-applying; do
 done
 python3 "$HELPER" read "${identity[@]}" --head fedcba9876543210 | grep -Fxq 'overlay-applying|1|2|1|1' ||
   fail 'state did not resume under a different HEAD on the same owned lane'
+python3 "$HELPER" read "${identity[@]}" --head fedcba9876543210 --include-head |
+  grep -Fxq 'overlay-applying|1|2|1|1|0123456789abcdef' ||
+  fail 'state did not expose its historical HEAD for migration freshness checks'
 [[ -s "$STATE" ]] || fail 'identity mismatch destroyed durable state'
 pass 'writer recovery state preserves lane identity while retaining historical HEAD'
 

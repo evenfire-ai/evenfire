@@ -1380,6 +1380,18 @@ STUB
   rm -rf "$d"
 }
 
+assert_recovery_migrations_are_head_bound() {
+  local current_head_checks
+  current_head_checks="$(grep -Fc '[ "$WRITER_RECOVERY_STATE_HEAD" = "$T2_HEAD" ]' scripts/minikube/full-setup.sh)"
+  if grep -Fq 'writer_recovery_state_cli read --include-head' scripts/minikube/full-setup.sh && \
+     grep -Fq 'PARTIAL_CONTROL_API_REPLICAS WRITER_RECOVERY_STATE_HEAD' scripts/minikube/full-setup.sh && \
+     [ "$current_head_checks" -ge 2 ]; then
+    pass "recovery resumes with writers fenced and reruns migrations after a HEAD change"
+  else
+    fail "recovery can reuse a historical migration boundary after HEAD changes"
+  fi
+}
+
 # The guard that keeps this file honest: a case defined but never added to the
 # call block below reports nothing at all, which reads as a green run.
 assert_every_defined_case_is_invoked() {
@@ -1430,6 +1442,7 @@ assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree
 assert_the_unoverridden_path_generates_the_api_ip_patch_once
 assert_trace_writer_fence_closes_and_proves_zero_replicas
 assert_trace_writer_fence_is_behaviorally_fail_closed
+assert_recovery_migrations_are_head_bound
 assert_skip_build_follows_the_recorded_image_source
 assert_skip_build_says_it_is_following_the_cluster
 assert_an_acquiring_run_still_honours_image_source

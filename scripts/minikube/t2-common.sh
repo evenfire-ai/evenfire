@@ -386,28 +386,43 @@ PY
 
 t2_profile_status() {
   local status_text status_rc=0
-  status_text="$(t2_mk status 2>/dev/null)" || status_rc=$?
-  if [ -z "$status_text" ]; then
-    T2_PROFILE_STATUS=missing
+  # Keep stderr so a missing profile remains distinguishable from a deadline,
+  # transport, or permission failure. An empty result from a failed bounded
+  # probe is not evidence that bootstrap is safe.
+  status_text="$(t2_mk status 2>&1)" || status_rc=$?
+  if [ -n "$status_text" ] && minikube_profile_status_is_missing_or_stopped "$status_text"; then
+    if [[ "$status_text" == *Nonexistent* ||
+      "$status_text" == *'does not exist'* ||
+      "$status_text" == *'not found'* ]]; then
+      T2_PROFILE_STATUS=missing
+      T2_PLAN_REASON='profile is missing or uninitialized'
+    else
+      T2_PROFILE_STATUS=stopped
+      T2_PLAN_REASON='profile is missing or stopped'
+    fi
     T2_BOOTSTRAP_REQUIRED=true
     T2_PROFILE_HEALTHY=false
     T2_PLAN_STATE=full-bootstrap
-    T2_PLAN_REASON='profile is missing or uninitialized'
     return 0
   fi
-  if minikube_profile_status_is_missing_or_stopped "$status_text"; then
-    T2_PROFILE_STATUS=stopped
-    T2_BOOTSTRAP_REQUIRED=true
-    T2_PROFILE_HEALTHY=false
-    T2_PLAN_STATE=full-bootstrap
-    T2_PLAN_REASON='profile is missing or stopped'
-    return 0
-  fi
-  if [ "$status_rc" -ne 0 ] || ! minikube_profile_status_is_healthy "$status_text"; then
+  if [ "$status_rc" -ne 0 ]; then
     T2_PROFILE_STATUS=unhealthy
     T2_PROFILE_HEALTHY=false
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-start"
-    t2_fail PROFILE_UNHEALTHY "Minikube profile is not healthy: $T2_PROFILE"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-status"
+    t2_fail PROFILE_UNHEALTHY "Minikube status probe failed with exit $status_rc: $T2_PROFILE"
+    return 1
+  fi
+  if [ -z "$status_text" ] || ! minikube_profile_status_is_healthy "$status_text"; then
+    T2_PROFILE_STATUS=unhealthy
+    T2_PROFILE_HEALTHY=false
+    if [ -z "$status_text" ]; then
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-status"
+      t2_fail PROFILE_UNHEALTHY "Minikube status probe returned no output: $T2_PROFILE"
+    else
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-start"
+      t2_fail PROFILE_UNHEALTHY "Minikube profile is not healthy: $T2_PROFILE"
+    fi
+    return 1
   fi
   T2_PROFILE_STATUS=healthy
   T2_PROFILE_HEALTHY=true
@@ -756,6 +771,31 @@ t2_port_forward_targets_context() {
   [ "$port_forward" = true ] && [ "$context_matches" = true ]
 }
 
+t2_port_forward_uses_profile_port() {
+  local command_line="$1" index arg local_port key port
+  local -a argv=()
+  read -r -a argv <<<"$command_line"
+  [ "${#argv[@]}" -gt 0 ] || return 1
+  for ((index = 1; index < ${#argv[@]}; index += 1)); do
+    [ "${argv[$index]}" = port-forward ] || continue
+    for ((index += 1; index < ${#argv[@]}; index += 1)); do
+      arg="${argv[$index]}"
+      if [[ "$arg" =~ ^([0-9]+):[0-9]+$ ]]; then
+        local_port="${BASH_REMATCH[1]}"
+      elif [[ "$arg" =~ ^[0-9]+$ ]]; then
+        local_port="$arg"
+      else
+        continue
+      fi
+      while IFS='=' read -r key port; do
+        [ "$port" = "$local_port" ] && return 0
+      done < <(awk -F= '/^(CONTROL_UI_PORT|PROFILE_UI_PORT|MCP_HOST_PORT|REGISTRY_API_PORT|CONTROL_API_PORT|EXTERNAL_REST_API_PORT|MEMBER_REGISTRATION_SERVICE_PORT|RPC_PROXY_PORT|WORKFLOW_APPROVAL_READER_PORT)=[0-9]+$/ { print $1 "=" $2 }' "$T2_PORTS_ENV" 2>/dev/null || true)
+    done
+    return 1
+  done
+  return 1
+}
+
 t2_pid_file_matches_process() {
   local pid_file="$1" pid="$2"
   pf_owner_read_record "$pid_file" || return 1
@@ -796,9 +836,16 @@ t2_process_check() {
       *) continue ;;
     esac
     # Context-less or differently pinned developer forwards are not
-    # attributable to this profile. Exact-token matching prevents a profile
-    # name that is merely a substring of another context from becoming ours.
+    # attributable to this profile. A forward on one of this profile's
+    # persisted local ports is still a conflict, even without a usable
+    # context, because it could make the user-facing health probe hit another
+    # cluster. Unrelated profile ports remain eligible for parallel lanes.
     if ! t2_port_forward_targets_context "$command_line"; then
+      if t2_port_forward_uses_profile_port "$command_line"; then
+        T2_NEXT_COMMAND='stop the contextless or foreign port-forward occupying a persisted profile port'
+        t2_fail PORT_FORWARD_CONFLICT 'a contextless or foreign port-forward occupies a port owned by this profile'
+        return 1
+      fi
       continue
     fi
     matching_records=0

@@ -140,7 +140,10 @@ def read_state(args: argparse.Namespace) -> None:
         str(data.get("traceReplicas")), "trace-maintenance-worker", allow_zero=True
     )
     control_api = validate_replica(str(data.get("controlApiReplicas")), "control-api")
-    print(f"{phase}|{hcc}|{workflow}|{trace}|{control_api}")
+    output = f"{phase}|{hcc}|{workflow}|{trace}|{control_api}"
+    if args.include_head:
+        output += f"|{stored_head}"
+    print(output)
 
 
 def clear_state(args: argparse.Namespace) -> None:
@@ -167,7 +170,8 @@ def parser() -> argparse.ArgumentParser:
     write.add_argument("--workflow", required=True)
     write.add_argument("--trace", required=True)
     write.add_argument("--control-api", required=True)
-    subparsers.add_parser("read", parents=[common])
+    read = subparsers.add_parser("read", parents=[common])
+    read.add_argument("--include-head", action="store_true")
     subparsers.add_parser("clear", parents=[common])
     return result
 

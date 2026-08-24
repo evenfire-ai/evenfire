@@ -1133,6 +1133,7 @@ WRITER_RECOVERY_STATE_ROOT="${PROJECT_DIR}/.local-notes/infra/runs/writer-recove
 WRITER_RECOVERY_STATE_FILE="${WRITER_RECOVERY_STATE_ROOT}/${PROFILE}.json"
 WRITER_RECOVERY_STATE_LOADED=false
 WRITER_RECOVERY_STATE_PHASE=""
+WRITER_RECOVERY_STATE_HEAD=""
 WRITER_RECOVERY_FENCE_PENDING=false
 WRITER_RECOVERY_MIGRATIONS_COMPLETE=false
 K8S_API_EGRESS_POLICY_FILE=""
@@ -1176,7 +1177,7 @@ writer_recovery_state_clear() {
 
 writer_recovery_state_load() {
   local state_output state_status=0
-  state_output="$(writer_recovery_state_cli read)" || state_status=$?
+  state_output="$(writer_recovery_state_cli read --include-head)" || state_status=$?
   if [ "$state_status" -ne 0 ]; then
     err "Unable to validate the durable writer-recovery state; refusing profile mutation"
     return 1
@@ -1186,7 +1187,7 @@ writer_recovery_state_load() {
   fi
   IFS='|' read -r WRITER_RECOVERY_STATE_PHASE PARTIAL_HCC_REPLICAS \
     PARTIAL_WORKFLOW_REPLICAS PARTIAL_TRACE_REPLICAS \
-    PARTIAL_CONTROL_API_REPLICAS <<<"$state_output"
+    PARTIAL_CONTROL_API_REPLICAS WRITER_RECOVERY_STATE_HEAD <<<"$state_output"
   [ -n "$WRITER_RECOVERY_STATE_PHASE" ] &&
     [[ "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]] &&
     [[ "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] &&
@@ -1259,7 +1260,11 @@ writer_recovery_state_load() {
       PARTIAL_WORKFLOW_FENCED=true
       PARTIAL_TRACE_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
-      WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
+      if [ "$WRITER_RECOVERY_STATE_HEAD" = "$T2_HEAD" ]; then
+        WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
+      else
+        log "Recovery state belongs to historical HEAD ${WRITER_RECOVERY_STATE_HEAD}; re-running migrations for ${T2_HEAD} while writers remain fenced"
+      fi
       # The phase is written before the control-api restore. An interruption
       # after scale but before the next phase must close every writer again.
       WRITER_RECOVERY_FENCE_PENDING=true
@@ -1270,7 +1275,11 @@ writer_recovery_state_load() {
       PARTIAL_HCC_FENCED=true
       PARTIAL_WORKFLOW_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
-      WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
+      if [ "$WRITER_RECOVERY_STATE_HEAD" = "$T2_HEAD" ]; then
+        WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
+      else
+        log "Recovery state belongs to historical HEAD ${WRITER_RECOVERY_STATE_HEAD}; re-running migrations for ${T2_HEAD} while writers remain fenced"
+      fi
       # The overlay is rendered with all four database-writer Deployments at zero.
       # Re-fence on every post-migration resume because an interrupted apply
       # may have recreated a writer before its durable phase was updated.

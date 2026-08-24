@@ -166,6 +166,9 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED wrong-profile-identity wrong-profile-iden
 missing_profile_state="$(env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_profile_status; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
 [ "$missing_profile_state" = full-bootstrap ] || fail "missing profile selected $missing_profile_state instead of full-bootstrap"
 
+expect_code PROFILE_UNHEALTHY status-probe-timeout status-probe-timeout \
+  env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ return 124; }; t2_profile_status' bash "$COMMON"
+
 healthy_profile_state="$(env T2_PROJECT_DIR="$repo" MINIKUBE_PROFILE="$profile" T2_CONTEXT="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" T2_PROFILE_ROOT="$tmp/profiles" T2_PROFILE_ENV="$profile_root/profile.env" T2_PORTS_ENV="$profile_root/ports.env" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader T2_BRANCH=feat/scenario T2_HEAD="$feature_sha" T2_LOCK_ROOT="$tmp/locks" T2_EVIDENCE_ROOT="$tmp/evidence" bash -c 'source "$1"; t2_mk(){ printf "%s" "host: Running\nkubelet: Running\napiserver: Running"; }; t2_profile_status; printf "%s:%s" "$T2_PROFILE_STATUS" "$T2_PROFILE_HEALTHY"' bash "$COMMON")"
 [ "$healthy_profile_state" = healthy:true ] || fail "healthy profile selected $healthy_profile_state instead of healthy:true"
 
