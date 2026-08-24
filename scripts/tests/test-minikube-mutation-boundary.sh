@@ -50,14 +50,28 @@ EOF
 # the dry-run flag into the child environment so with-t2-mutation-lock.sh
 # exits before a plan can touch profile state on CI.
 dry_run_make() {
-  MAKEFLAGS=-n make -n -C "${ROOT}" "$@"
+  local output status
+  if output="$(MAKEFLAGS=-n make -n -C "${ROOT}" "$@" 2>&1)"; then
+    printf '%s\n' "${output}"
+    return 0
+  fi
+  status=$?
+  printf 'FAIL: dry-run make %s exited %s\n%s\n' "$*" "${status}" "${output}" >&2
+  return "${status}"
 }
 
 run_child() {
-  T2_PROJECT_DIR="${ROOT}" T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
+  local status
+  if T2_PROJECT_DIR="${ROOT}" T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
     T2_LOCK_ROOT="${LOCK_ROOT}" T2_LOCK_TOKEN="${TOKEN}" \
-    bash "${ROOT}/scripts/minikube/require-t2-mutation-lock.sh" &&
+    bash "${ROOT}/scripts/minikube/require-t2-mutation-lock.sh"; then
     printf 'mutation\n' >>"${LOG}"
+    return 0
+  fi
+  status=$?
+  printf 'FAIL: valid inherited lease child exited %s (branch=%s head=%s)\n' \
+    "${status}" "${BRANCH}" "${HEAD}" >&2
+  return "${status}"
 }
 
 run_child
