@@ -173,6 +173,7 @@ HOST_DEPLOYMENT='chatllm'
 RUN_ID="${NP08_E2E_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}"
 OWNER_LABEL_KEY='np08.evenfire/owner'
 OWNER_LABEL_VALUE='hcc-authorization'
+HOST_B="np08-e2e-${RUN_ID}-host-b"
 CONTEXT_A='context1'
 CONTEXT_B="np08-e2e-${RUN_ID}-context-b"
 SERVER_A="np08-e2e-${RUN_ID}-server-a"
@@ -260,39 +261,77 @@ const proxyBoundary = await rawRequest('GET', '/api/v2/system/mcpservers', [
 ])
 if (proxyBoundary !== 200) throw new Error(`private identity boundary probe failed: ${proxyBoundary}`)
 console.log('PASS private proxy identity is not mixed into the system route')
-NODE
+  NODE
 }
 
-run_np08_deployed_manager_journey() {
-  echo 'E2E proxy leg: deployed mcp-host manager and SDK through mcp-proxy'
-  private_proxy_rollout=1
-  kctl -n "${MCP_NS}" patch mcpserver "${SERVER_A}" --type=merge \
-    -p "{\"spec\":{\"image\":\"clerum/mock-mcp-server:test\",\"imagePullPolicy\":\"IfNotPresent\",\"managed\":true,\"transport\":{\"type\":\"streamableHttp\",\"url\":\"http://${SERVER_A}.mcp-server.svc.cluster.local:3000/mcp\",\"port\":3000}}}" \
-    >/dev/null
-  kctl -n "${MCP_NS}" patch mcpserver "${SERVER_B}" --type=merge \
-    -p "{\"spec\":{\"image\":\"clerum/mock-mcp-server:test\",\"imagePullPolicy\":\"IfNotPresent\",\"managed\":true,\"transport\":{\"type\":\"streamableHttp\",\"url\":\"http://${SERVER_B}.mcp-server.svc.cluster.local:3000/mcp\",\"port\":3000}}}" \
-    >/dev/null
-  kctl -n "${MCP_NS}" set env deployment/mcp-proxy MCP_PROXY_FORWARDING_ENABLED=true >/dev/null
-  kctl -n "${HOST_NS}" patch configmap mcp-host-config --type=merge \
-    -p '{"data":{"MCP_PROXY_ENABLED":"true"}}' >/dev/null
-  kctl -n "${MCP_NS}" rollout restart deployment/mcp-proxy >/dev/null
-  kctl -n "${HOST_NS}" rollout restart deployment/${HOST_DEPLOYMENT} >/dev/null
-  kctl -n "${MCP_NS}" rollout status deployment/mcp-proxy --timeout=180s >/dev/null
-  kctl -n "${HOST_NS}" rollout status deployment/${HOST_DEPLOYMENT} --timeout=180s >/dev/null
-  kctl -n "${HOST_NS}" exec deploy/${HOST_DEPLOYMENT} -- \
-    env "NP08_PROXY_SERVER_A=${SERVER_A}" "NP08_PROXY_SERVER_B=${SERVER_B}" \
-      "NP08_PROXY_VALUE_A=np08-synthetic-${RUN_ID}-a" \
-      "NP08_PROXY_VALUE_B=np08-synthetic-${RUN_ID}-b" \
-      "NP08_PROXY_CONTEXT_B=${CONTEXT_B}" \
+read_np08_mock_stats() {
+  local server="$1"
+  kctl -n "${MCP_NS}" exec "deploy/${server}" -- node -e \
+    "fetch('http://127.0.0.1:3001/__np08/stats').then(response => response.json()).then(stats => process.stdout.write(JSON.stringify(stats))).catch(() => process.exit(1))"
+}
+
+reset_np08_mock_stats() {
+  local server="$1"
+  kctl -n "${MCP_NS}" exec "deploy/${server}" -- node -e \
+    "fetch('http://127.0.0.1:3001/__np08/stats/reset', { method: 'POST' }).then(response => { if (!response.ok) process.exit(1) }).catch(() => process.exit(1))"
+}
+
+np08_assert_positive_stats() {
+  local label="$1"
+  local stats="$2"
+  if ! jq -e '.connections > 0 and .requests > 0 and .bytes > 0' <<<"${stats}" >/dev/null; then
+    echo "FAIL: ${label} did not reach its MCP upstream" >&2
+    return 1
+  fi
+  echo "PASS ${label} reached its MCP upstream"
+}
+
+np08_assert_stats_unchanged() {
+  local label="$1"
+  local before="$2"
+  local after="$3"
+  if ! jq -e --argjson before "${before}" --argjson after "${after}" '$before == $after' \
+    >/dev/null <<<"{}"; then
+    echo "FAIL: ${label} changed upstream connections, requests, or bytes" >&2
+    return 1
+  fi
+  echo "PASS ${label} preserved zero upstream connections, requests, and bytes"
+}
+
+run_np08_manager_phase() {
+  local deployment="$1"
+  local mode="$2"
+  local allowed_server="$3"
+  local forbidden_server="$4"
+  local allowed_value="$5"
+  local forbidden_value="$6"
+  local allowed_context="$7"
+  local forbidden_context="$8"
+  local manager_mode
+  if [[ "${mode}" == 'positive' ]]; then
+    manager_mode='NP08_PROXY_MODE=positive'
+  else
+    manager_mode='NP08_PROXY_MODE=cross'
+  fi
+
+  kctl -n "${HOST_NS}" exec "deploy/${deployment}" -- \
+    env "${manager_mode}" \
+      "NP08_PROXY_SERVER_ALLOWED=${allowed_server}" \
+      "NP08_PROXY_SERVER_FORBIDDEN=${forbidden_server}" \
+      "NP08_PROXY_VALUE_ALLOWED=${allowed_value}" \
+      "NP08_PROXY_VALUE_FORBIDDEN=${forbidden_value}" \
+      "NP08_PROXY_CONTEXT_ALLOWED=${allowed_context}" \
+      "NP08_PROXY_CONTEXT_FORBIDDEN=${forbidden_context}" \
       "NP08_PROXY_URL=http://mcp-proxy.mcp-server.svc.cluster.local:8083" \
       node - <<'NODE'
-
 const { McpManager } = require('/app/mcp-host/dist/mcp/manager.js')
-const serverA = process.env.NP08_PROXY_SERVER_A
-const serverB = process.env.NP08_PROXY_SERVER_B
-const valueA = process.env.NP08_PROXY_VALUE_A
-const valueB = process.env.NP08_PROXY_VALUE_B
-const contextB = process.env.NP08_PROXY_CONTEXT_B
+const mode = process.env.NP08_PROXY_MODE
+const allowedServer = process.env.NP08_PROXY_SERVER_ALLOWED
+const forbiddenServer = process.env.NP08_PROXY_SERVER_FORBIDDEN
+const allowedValue = process.env.NP08_PROXY_VALUE_ALLOWED
+const forbiddenValue = process.env.NP08_PROXY_VALUE_FORBIDDEN
+const allowedContext = process.env.NP08_PROXY_CONTEXT_ALLOWED
+const forbiddenContext = process.env.NP08_PROXY_CONTEXT_FORBIDDEN
 const proxyUrl = process.env.NP08_PROXY_URL
 const runtimeKey = ['MCP', '_HOST_', '_RUNTIME_', '_ACCESS_', 'TOKEN'].join('')
 const refreshKey = ['MCP', '_HOST_', '_RUNTIME_', '_REFRESH_', 'TOKEN'].join('')
@@ -300,7 +339,9 @@ const gatewayKey = ['MCP', '_HOST_', '_GATEWAY_', 'URL'].join('')
 let runtimeValue = process.env[runtimeKey]
 const refreshValue = process.env[refreshKey]
 const gatewayValue = process.env[gatewayKey]
-if (!serverA || !serverB || !valueA || !valueB || !contextB || !proxyUrl || !runtimeValue) {
+
+if (!mode || !allowedServer || !forbiddenServer || !allowedValue || !forbiddenValue ||
+    !allowedContext || !forbiddenContext || !proxyUrl || !runtimeValue) {
   throw new Error('deployed manager fixture inputs are unavailable')
 }
 
@@ -322,9 +363,9 @@ const hostAuthorization = {
   getAccessToken: () => runtimeValue,
   refreshOnUnauthorized: refreshRuntimeValue,
 }
-const serverInfo = (name) => ({
+const serverInfo = (name, contextRef) => ({
   name,
-  contextRef: name === serverA ? 'context1' : contextB,
+  contextRef,
   transport: {
     type: 'streamableHttp',
     url: `http://${name}.mcp-server.svc.cluster.local:3000/mcp`,
@@ -336,25 +377,75 @@ const serverInfo = (name) => ({
 
 const manager = new McpManager(proxyUrl, undefined, hostAuthorization)
 try {
-  await manager.addServer(serverInfo(serverA), valueA)
-  const result = await manager.callTool(`${serverA}__echo`, { text: 'np08-deployed' })
-  if (!JSON.stringify(result).includes('Echo: np08-deployed')) {
-    throw new Error('same-Context manager call returned an unexpected result')
+  await manager.addServer(serverInfo(allowedServer, allowedContext), allowedValue)
+  if (mode === 'positive') {
+    const result = await manager.callTool(`${allowedServer}__echo`, { text: 'np08-deployed' })
+    if (!JSON.stringify(result).includes('Echo: np08-deployed')) {
+      throw new Error('same-Context manager call returned an unexpected result')
+    }
+    console.log(`PASS deployed manager/SDK same-Context call for ${allowedServer}`)
+  } else {
+    let crossContextDenied = false
+    try {
+      await manager.addServer(serverInfo(forbiddenServer, forbiddenContext), forbiddenValue)
+    } catch {
+      crossContextDenied = true
+    }
+    if (!crossContextDenied) throw new Error('cross-Context manager admission unexpectedly succeeded')
+    console.log(`PASS deployed manager/SDK cross-Context admission denied for ${forbiddenServer}`)
   }
-  console.log('PASS deployed manager/SDK same-Context call')
-
-  let crossContextDenied = false
-  try {
-    await manager.addServer(serverInfo(serverB), valueB)
-  } catch {
-    crossContextDenied = true
-  }
-  if (!crossContextDenied) throw new Error('cross-Context manager admission unexpectedly succeeded')
-  console.log('PASS deployed manager/SDK cross-Context admission denied')
 } finally {
   await manager.close()
 }
 NODE
+}
+run_np08_deployed_manager_journey() {
+  echo 'E2E proxy leg: deployed mcp-host manager and SDK through mcp-proxy'
+  private_proxy_rollout=1
+  kctl -n "${MCP_NS}" patch mcpserver "${SERVER_A}" --type=merge \
+    -p "{\"spec\":{\"image\":\"clerum/mock-mcp-server:test\",\"imagePullPolicy\":\"IfNotPresent\",\"managed\":true,\"transport\":{\"type\":\"streamableHttp\",\"url\":\"http://${SERVER_A}.mcp-server.svc.cluster.local:3000/mcp\",\"port\":3000}}}" \
+    >/dev/null
+  kctl -n "${MCP_NS}" patch mcpserver "${SERVER_B}" --type=merge \
+    -p "{\"spec\":{\"image\":\"clerum/mock-mcp-server:test\",\"imagePullPolicy\":\"IfNotPresent\",\"managed\":true,\"transport\":{\"type\":\"streamableHttp\",\"url\":\"http://${SERVER_B}.mcp-server.svc.cluster.local:3000/mcp\",\"port\":3000}}}" \
+    >/dev/null
+  kctl -n "${MCP_NS}" set env deployment/mcp-proxy MCP_PROXY_FORWARDING_ENABLED=true >/dev/null
+  kctl -n "${HOST_NS}" patch configmap mcp-host-config --type=merge \
+    -p '{"data":{"MCP_PROXY_ENABLED":"true"}}' >/dev/null
+  kctl -n "${MCP_NS}" rollout restart deployment/mcp-proxy >/dev/null
+  kctl -n "${HOST_NS}" rollout restart deployment/${HOST_DEPLOYMENT} >/dev/null
+  kctl -n "${HOST_NS}" rollout restart deployment/${HOST_B} >/dev/null
+  kctl -n "${MCP_NS}" rollout status deployment/mcp-proxy --timeout=180s >/dev/null
+  kctl -n "${HOST_NS}" rollout status deployment/${HOST_DEPLOYMENT} --timeout=180s >/dev/null
+  kctl -n "${HOST_NS}" rollout status deployment/${HOST_B} --timeout=180s >/dev/null
+  for server in "${SERVER_A}" "${SERVER_B}"; do
+    for attempt in {1..180}; do
+      if kctl -n "${MCP_NS}" get deployment "${server}" >/dev/null 2>&1; then break; fi
+      sleep 1
+    done
+    kctl -n "${MCP_NS}" rollout status "deployment/${server}" --timeout=180s >/dev/null
+  done
+
+  reset_np08_mock_stats "${SERVER_A}"
+  reset_np08_mock_stats "${SERVER_B}"
+  run_np08_manager_phase "${HOST_DEPLOYMENT}" positive "${SERVER_A}" "${SERVER_B}" \
+    "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-b" "${CONTEXT_A}" "${CONTEXT_B}"
+  stats_a_positive="$(read_np08_mock_stats "${SERVER_A}")"
+  np08_assert_positive_stats 'Host A same-Context manager' "${stats_a_positive}"
+  stats_b_before="$(read_np08_mock_stats "${SERVER_B}")"
+  run_np08_manager_phase "${HOST_DEPLOYMENT}" cross "${SERVER_A}" "${SERVER_B}" \
+    "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-b" "${CONTEXT_A}" "${CONTEXT_B}"
+  stats_b_after="$(read_np08_mock_stats "${SERVER_B}")"
+  np08_assert_stats_unchanged 'Host A -> Host B deny' "${stats_b_before}" "${stats_b_after}"
+
+  run_np08_manager_phase "${HOST_B}" positive "${SERVER_B}" "${SERVER_A}" \
+    "np08-synthetic-${RUN_ID}-b" "np08-synthetic-${RUN_ID}-a" "${CONTEXT_B}" "${CONTEXT_A}"
+  stats_b_positive="$(read_np08_mock_stats "${SERVER_B}")"
+  np08_assert_positive_stats 'Host B same-Context manager' "${stats_b_positive}"
+  stats_a_before="$(read_np08_mock_stats "${SERVER_A}")"
+  run_np08_manager_phase "${HOST_B}" cross "${SERVER_B}" "${SERVER_A}" \
+    "np08-synthetic-${RUN_ID}-b" "np08-synthetic-${RUN_ID}-a" "${CONTEXT_B}" "${CONTEXT_A}"
+  stats_a_after="$(read_np08_mock_stats "${SERVER_A}")"
+  np08_assert_stats_unchanged 'Host B -> Host A deny' "${stats_a_before}" "${stats_a_after}"
 }
 verify_profile_ownership
 verify_clean_and_sync_marker
@@ -370,8 +461,11 @@ cleanup() {
     kctl -n "${MCP_NS}" set env deployment/mcp-proxy MCP_PROXY_FORWARDING_ENABLED=false \
       >/dev/null 2>&1 || cleanup_status=1
     kctl -n "${HOST_NS}" rollout restart deployment/${HOST_DEPLOYMENT} >/dev/null 2>&1 || cleanup_status=1
+    kctl -n "${HOST_NS}" rollout restart deployment/${HOST_B} >/dev/null 2>&1 || cleanup_status=1
     kctl -n "${MCP_NS}" rollout restart deployment/mcp-proxy >/dev/null 2>&1 || cleanup_status=1
     kctl -n "${HOST_NS}" rollout status deployment/${HOST_DEPLOYMENT} --timeout=120s \
+      >/dev/null 2>&1 || cleanup_status=1
+    kctl -n "${HOST_NS}" rollout status deployment/${HOST_B} --timeout=120s \
       >/dev/null 2>&1 || cleanup_status=1
     kctl -n "${MCP_NS}" rollout status deployment/mcp-proxy --timeout=120s \
       >/dev/null 2>&1 || cleanup_status=1
@@ -385,6 +479,11 @@ cleanup() {
     elif [[ "${remove_patch}" != '[]' ]] && ! kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json -p "${remove_patch}" >/dev/null 2>&1; then
       cleanup_status=1
     fi
+  fi
+  if ! kctl -n "${HOST_NS}" delete host \
+    -l "${OWNER_LABEL_KEY}=${OWNER_LABEL_VALUE},np08.evenfire/run=${RUN_ID}" \
+    --ignore-not-found >/dev/null 2>&1; then
+    cleanup_status=1
   fi
   for resource in mcpserver secret context; do
     if ! kctl -n "${MCP_NS}" delete "${resource}" \
@@ -402,6 +501,18 @@ cleanup() {
   if [[ "${context_contains_fixture}" == "true" ]]; then
     cleanup_status=1
   fi
+  host_residual=''
+  for attempt in {1..60}; do
+    if ! host_residual="$(kctl -n "${HOST_NS}" get host \
+      -l "${OWNER_LABEL_KEY}=${OWNER_LABEL_VALUE},np08.evenfire/run=${RUN_ID}" \
+      -o name 2>/dev/null)"; then
+      cleanup_status=1
+      break
+    fi
+    [[ -z "${host_residual}" ]] && break
+    sleep 1
+  done
+  [[ -z "${host_residual}" ]] || cleanup_status=1
   for resource in mcpserver secret context; do
     if ! np08_cleanup_check_residual "${resource}" \
       "${OWNER_LABEL_KEY}=${OWNER_LABEL_VALUE},np08.evenfire/run=${RUN_ID}"; then
@@ -432,6 +543,10 @@ kctl -n "${HOST_NS}" get deployment "${HOST_DEPLOYMENT}" \
 
 if kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json | jq -e --arg servera "${SERVER_A}" --arg serverc "${SERVER_C}" '(.spec.mcpServers // []) | any(. == $servera or . == $serverc)' >/dev/null; then
   echo "FAIL: generated fixture server name already exists in ${CONTEXT_A}" >&2
+  exit 1
+fi
+if kctl -n "${HOST_NS}" get host "${HOST_B}" >/dev/null 2>&1; then
+  echo "FAIL: generated fixture Host name already exists: ${HOST_B}" >&2
   exit 1
 fi
 
@@ -480,6 +595,22 @@ spec:
   contextId: ${CONTEXT_B}
   mcpServers:
     - ${SERVER_B}
+---
+apiVersion: clerum.io/v1alpha1
+kind: Host
+metadata:
+  name: ${HOST_B}
+  namespace: ${HOST_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
+spec:
+  host: ${HOST_B}
+  contextRef: ${CONTEXT_B}
+  secretRef: chatllm-api-keys
+  model:
+    provider: zai
+    name: glm-5.1
 ---
 apiVersion: clerum.io/v1alpha1
 kind: McpServer
@@ -553,6 +684,18 @@ kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
   -p="[{\"op\":\"add\",\"path\":\"/spec/mcpServers/-\",\"value\":\"${SERVER_C}\"}]" >/dev/null
 
 echo 'E2E setup: waiting for HCC to observe the synthetic Context/McpServer fixtures'
+host_b_seen=0
+for attempt in {1..180}; do
+  if kctl -n "${HOST_NS}" get deployment "${HOST_B}" >/dev/null 2>&1; then
+    host_b_seen=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${host_b_seen}" -ne 1 ]]; then
+  echo 'FAIL: HCC did not create the second Host deployment' >&2
+  exit 1
+fi
 
 # Keep the runtime JWT and the returned synthetic token inside the Host pod.
 # The process emits only assertion labels and status/error classes.
