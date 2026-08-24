@@ -12109,9 +12109,10 @@ button.cu-gfs-tree__button:focus-visible,
   min-height: 2.125rem;
   flex: 1 1 8.75rem;
   padding: 0 var(--cu-space-1);
-  border: 0;
-  background: transparent;
-  box-shadow: none;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
 .cu-body .cu-gfs-subject-picker__input.cu-input:focus {
@@ -12204,6 +12205,17 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-subject-picker__avatar--team {
   background: rgba(var(--cu-warning-rgb), 0.15);
   color: var(--cu-warning);
+}
+
+.cu-gfs-subject-picker__avatar--agent,
+.cu-gfs-subject-picker__avatar--workflow {
+  background: rgba(var(--cu-success-rgb), 0.15);
+  color: var(--cu-success);
+}
+
+.cu-gfs-subject-picker__avatar svg {
+  width: 1rem;
+  height: 1rem;
 }
 
 .cu-gfs-subject-picker__type {

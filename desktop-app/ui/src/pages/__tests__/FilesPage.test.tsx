@@ -323,11 +323,7 @@ describe('FilesPage', () => {
     expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
   })
 
-  it('shortens oversized file names before uploading through Desktop GFS', async () => {
-    const createFile = vi.fn(
-      async (_parentResourceId: string, _name: string, _encodedData: string) => undefined
-    )
-    const pushToast = vi.fn()
+  it('does not render a folder upload control inside the manage dialog', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -343,32 +339,13 @@ describe('FilesPage', () => {
         grantableBits: [],
         canCreateShare: false,
       },
-      createFile,
     })
 
-    renderFilesPage(pushToast)
+    renderFilesPage()
 
     await openManageDialog('Team folder')
-    const rawName = `quarterly-${'very-long-'.repeat(32)}report.txt`
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Upload file'), {
-        target: {
-          files: [new File(['desktop upload'], rawName, { type: 'text/plain' })],
-        },
-      })
-      await Promise.resolve()
-    })
-
-    await waitFor(() => expect(createFile).toHaveBeenCalled())
-    const uploadCall = createFile.mock.calls[0]
-    expect(uploadCall).toBeTruthy()
-    const [parentResourceId, uploadedName, encodedData] = uploadCall!
-    expect(parentResourceId).toBe('folder-1')
-    expect(uploadedName).not.toBe(rawName)
-    expect(uploadedName).toHaveLength(255)
-    expect(uploadedName).toMatch(/-[0-9a-f]{12}\.txt$/)
-    expect(encodedData).toBe('ZGVza3RvcCB1cGxvYWQ=')
-    expect(pushToast).toHaveBeenCalledWith(`Uploaded ${uploadedName}`, 'success')
+    expect(screen.queryByRole('button', { name: 'Upload file' })).toBeNull()
+    expect(screen.queryByLabelText('Upload file')).toBeNull()
   })
 
   it('uploads dropped images and Markdown files into the open writable folder', async () => {
@@ -967,6 +944,86 @@ describe('FilesPage', () => {
     await waitFor(() => expect(grant).toHaveBeenCalledWith(['user:user-2'], ['read'], true))
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
+  })
+
+  it('creates a share from the manage dialog resource menu', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+                members: [
+                  {
+                    id: 'user-2',
+                    email: 'test2@clerum.io',
+                    name: 'Test Two',
+                    role: 'member',
+                    status: 'active',
+                  },
+                ],
+                contextIds: [],
+                agentNames: [],
+              },
+            ],
+          })),
+        },
+      },
+    })
+    const createShare = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'share', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'share'],
+        canCreateShare: true,
+      },
+      createShare,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Team folder')
+
+    const dialog = screen.getByRole('dialog', { name: 'Manage folder Team folder' })
+    const menuTrigger = within(dialog).getByRole('button', { name: 'Options for Team folder' })
+    await act(async () => {
+      fireEvent.click(menuTrigger)
+    })
+    expect(within(dialog).getByRole('menuitem', { name: 'Create share' })).toHaveProperty(
+      'disabled',
+      true
+    )
+    await act(async () => {
+      fireEvent.click(menuTrigger)
+    })
+
+    const picker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
+    fireEvent.focus(picker)
+    fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
+
+    await act(async () => {
+      fireEvent.click(menuTrigger)
+    })
+    const createShareItem = within(dialog).getByRole('menuitem', { name: 'Create share' })
+    expect(createShareItem).toHaveProperty('disabled', false)
+    await act(async () => {
+      fireEvent.click(createShareItem)
+    })
+
+    await waitFor(() => expect(createShare).toHaveBeenCalledWith(['user:user-2']))
+    expect(pushToast).toHaveBeenCalledWith('1 share created', 'success')
   })
 
   it('issues ONE atomic bulk grant and does not refetch or toast when it is rejected', async () => {

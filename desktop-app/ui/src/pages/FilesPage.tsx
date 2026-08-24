@@ -1,4 +1,11 @@
-import { type DragEvent as ReactDragEvent, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type DragEvent as ReactDragEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
@@ -28,6 +35,7 @@ import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import {
   type GfsAgentSubjectOption,
+  type GfsCreateShareActionChange,
   GfsDelegationPanel,
   type GfsDelegationSubjectOption,
 } from '@/gfs/delegation'
@@ -145,6 +153,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
+  const createShareActionRef = useRef<(() => void) | null>(null)
+  const [createShareDisabled, setCreateShareDisabled] = useState(true)
+  const handleCreateShareActionChange = useCallback<GfsCreateShareActionChange>(
+    (action, disabled) => {
+      createShareActionRef.current = action
+      setCreateShareDisabled(disabled)
+    },
+    []
+  )
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
@@ -1001,8 +1018,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                   <span className="da-gfs-manage-dialog__title-row">
                     <h3>{current.name}</h3>
                     <GfsResourceMenu
+                      createShareDisabled={createShareDisabled}
                       resourceName={current.name}
                       onCopyLink={() => void handleCopyLink(current.gfsUri)}
+                      onCreateShare={() => createShareActionRef.current?.()}
                       onCreateFolder={
                         currentIsFolder && canWriteCurrent
                           ? () => {
@@ -1164,6 +1183,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                       isDirectory={currentIsFolder}
                       onGrant={handleGrant}
                       onCreateShare={affordances.canCreateShare ? handleCreateShare : undefined}
+                      onCreateShareActionChange={handleCreateShareActionChange}
                     />
                   </>
                 ) : (
