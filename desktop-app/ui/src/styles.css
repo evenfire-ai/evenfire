@@ -14954,14 +14954,32 @@ pre {
   z-index: 1;
 }
 
-.chat-view-tabs__list {
-  display: flex;
-  gap: var(--space-1);
+.chat-view-tabs__scroller {
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   transform: rotateX(180deg);
   width: 100%;
+}
+
+.chat-view-tabs__list {
+  display: flex;
+  gap: var(--space-1);
+  min-width: 100%;
+  position: relative;
+  transform: rotateX(180deg);
+  width: max-content;
+}
+
+.chat-view-tabs__list::after {
+  background: var(--chat-view-selected-border);
+  bottom: 0;
+  content: '';
+  height: 1px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
 }
 
 .chat-view-tab {
@@ -14973,7 +14991,6 @@ pre {
   flex: 0 0 auto;
   max-width: 220px;
   min-width: 0;
-  transform: rotateX(180deg);
   transition: background var(--motion-fast);
 }
 
@@ -14983,27 +15000,19 @@ pre {
 }
 
 .chat-view-tab.is-active {
-  background: var(--surface-strong);
+  background: linear-gradient(var(--surface-strong), var(--surface-strong)), var(--panel);
   border-color: var(--chat-view-selected-border);
   border-bottom: 0;
-  margin-top: -1px;
   position: relative;
   z-index: 1;
 }
 
-.chat-view-tab.is-active::after {
-  background: inherit;
-  bottom: -1px;
-  content: '';
-  height: 1px;
-  left: 0;
-  pointer-events: none;
-  position: absolute;
-  right: 0;
-}
-
 .chat-view-tab:hover {
   background: var(--surface-hover);
+}
+
+.chat-view-tab.is-active:hover {
+  background: linear-gradient(var(--surface-hover), var(--surface-hover)), var(--panel);
 }
 
 .chat-view-tab .chat-view-tab__select.ui-button:hover:enabled,
@@ -15046,7 +15055,7 @@ pre {
   background: var(--surface-strong);
   border-color: var(--chat-view-selected-border);
   border-style: solid;
-  border-width: 1px;
+  border-width: 0 1px 1px;
   border-radius: 0 var(--radius-sm) 0 0;
   display: flex;
   flex: 1 1 0;
