@@ -1,14 +1,17 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import bcrypt from 'bcryptjs'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { type DbClient, initDb } from '../src/db.js'
 import type { AuthClaims } from '../src/profileTypes.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { exchangeLegacyExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
+import { validateLegacyUserSession } from '../src/services/auth/userSessionService.js'
+import { verifyUserPassword } from '../src/services/directory/login.js'
 import {
-  revokeAllUserSessions,
-  validateLegacyUserSession,
-} from '../src/services/auth/userSessionService.js'
+  setInvitationPasswordForUser,
+  updateUserPassword,
+} from '../src/services/directory/membership.js'
 import {
   signExternalSessionToken,
   verifyExternalSessionToken,
@@ -21,6 +24,30 @@ const runtimeRoles = [
   'trace_maintenance_runtime',
   'workflow_recipes_runtime',
 ] as const
+
+const producerDatabase = vi.hoisted(() => ({ pool: undefined as Pool | undefined }))
+
+vi.mock('../src/db.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/db.js')>()
+  const pool = {
+    query: (text: string, values?: unknown[]) => producerDatabase.pool!.query(text, values),
+  }
+  const withTransaction = async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => {
+    const client = await producerDatabase.pool!.connect()
+    try {
+      await client.query('BEGIN')
+      const result = await work(client as unknown as DbClient)
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+  return { ...actual, pool, withTransaction }
+})
 
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
@@ -58,6 +85,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
   } as EffectiveUserAccessPolicy
   let adminPool: Pool
   let databasePool: Pool
+  const currentPassword = 'Legacy-Password-1!'
 
   async function backendPid(client: PoolClient): Promise<number> {
     const result = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
@@ -76,6 +104,23 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     throw new Error('expected legacy exchange to block on the user security boundary')
   }
 
+  async function waitForBlockedBy(blockerPid: number): Promise<number> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const result = await databasePool.query<{ pid: number }>(
+        `SELECT activity.pid
+           FROM pg_stat_activity activity
+          WHERE activity.datname = current_database()
+            AND $1::int = ANY(pg_blocking_pids(activity.pid))
+          ORDER BY activity.pid
+          LIMIT 1`,
+        [blockerPid]
+      )
+      if (result.rows[0]?.pid) return result.rows[0].pid
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    throw new Error('expected real password producer to block on the user security boundary')
+  }
+
   async function principal(label: string): Promise<{
     userId: string
     teamId: string
@@ -86,9 +131,10 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     const userId = randomUUID()
     const teamId = randomUUID()
     const email = `${label}-${userId}@example.test`
+    const passwordHash = await bcrypt.hash(currentPassword, 12)
     await databasePool.query(
-      `INSERT INTO users(id, email, name, password_hash) VALUES ($1, $2, $3, 'old-hash')`,
-      [userId, email, label]
+      `INSERT INTO users(id, email, name, password_hash) VALUES ($1, $2, $3, $4)`,
+      [userId, email, label, passwordHash]
     )
     await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, $2)`, [teamId, label])
     await databasePool.query(
@@ -108,18 +154,60 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     return { userId, teamId, email, token, claims }
   }
 
-  async function beginSecurityMutation(
-    client: PoolClient,
-    userId: string,
-    label: string,
-    validAfter: Date
-  ): Promise<void> {
-    await client.query('BEGIN')
-    await client.query(`UPDATE users SET password_hash = $2 WHERE id = $1`, [
-      userId,
-      `${label}-new-hash`,
-    ])
-    await revokeAllUserSessions(userId, 'password_changed', client, validAfter)
+  async function passwordProducer(
+    label: 'normal password change' | 'password reset',
+    source: Awaited<ReturnType<typeof principal>>
+  ): Promise<{
+    newPassword: string
+    run: () => Promise<unknown>
+    assertSuccess: (result: unknown) => void
+  }> {
+    const newPassword = `Changed-${randomBytes(8).toString('hex')}!`
+    if (label === 'normal password change') {
+      return {
+        newPassword,
+        run: () => updateUserPassword(source.userId, source.email, currentPassword, newPassword),
+        assertSuccess: result => expect(result).toEqual({ updated: true }),
+      }
+    }
+    const invitation = await databasePool.query<{ id: string }>(
+      `INSERT INTO invitations(
+         email, role, status, purpose, accepted_user_id, invitee_name, expires_at
+       ) VALUES ($1, 'member', 'pending', 'password_reset', $2, 'Reset User', NOW() + INTERVAL '1 hour')
+       RETURNING id::text`,
+      [source.email, source.userId]
+    )
+    return {
+      newPassword,
+      run: () =>
+        setInvitationPasswordForUser(
+          source.userId,
+          source.email,
+          invitation.rows[0]!.id,
+          newPassword
+        ),
+      assertSuccess: result => expect(result).toMatchObject({ data: { passwordUpdated: true } }),
+    }
+  }
+
+  async function holdSecurityEpoch(userId: string): Promise<PoolClient> {
+    await databasePool.query(
+      `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason)
+       VALUES ($1, to_timestamp(0), 'test-baseline')
+       ON CONFLICT (user_id) DO UPDATE
+         SET valid_after = EXCLUDED.valid_after, reason = EXCLUDED.reason`,
+      [userId]
+    )
+    const gate = await databasePool.connect()
+    await gate.query('BEGIN')
+    await gate.query(
+      `SELECT user_id
+         FROM external_user_session_security_epochs
+        WHERE user_id = $1
+        FOR UPDATE`,
+      [userId]
+    )
+    return gate
   }
 
   beforeAll(async () => {
@@ -127,6 +215,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(database)}`)
     databasePool = new Pool({ connectionString })
+    producerDatabase.pool = databasePool
     await initDb({ connect: () => databasePool.connect() })
   })
 
@@ -145,16 +234,17 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     }
   })
 
-  it.each(['normal password change', 'password reset'])(
+  it.each(['normal password change', 'password reset'] as const)(
     'fails %s exchange when invalidation wins the lock order',
     async label => {
       const source = await principal(`invalidation-first-${label.replaceAll(' ', '-')}`)
-      const invalidation = await databasePool.connect()
+      const producer = await passwordProducer(label, source)
+      const epochGate = await holdSecurityEpoch(source.userId)
       const exchangeStarted = deferred<number>()
       try {
-        const validAfter = new Date((source.claims.iat! + 60) * 1000)
-        await beginSecurityMutation(invalidation, source.userId, label, validAfter)
-        const invalidationPid = await backendPid(invalidation)
+        const epochGatePid = await backendPid(epochGate)
+        const producerWork = producer.run()
+        const producerPid = await waitForBlockedBy(epochGatePid)
 
         const exchange = exchangeLegacyExternalUserSession(
           {
@@ -184,21 +274,45 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
           }
         )
         const exchangePid = await exchangeStarted.promise
-        await waitForBlock(exchangePid, invalidationPid)
-        await invalidation.query('COMMIT')
+        await waitForBlock(exchangePid, producerPid)
+        await epochGate.query('COMMIT')
 
+        producer.assertSuccess(await producerWork)
         await expect(exchange).resolves.toEqual({ status: 'invalid_session' })
+        await expect(
+          validateLegacyUserSession(source.token, source.claims, { db: databasePool })
+        ).resolves.toMatchObject({ status: 'revoked' })
+        await expect(
+          exchangeLegacyExternalUserSession(
+            {
+              token: source.token,
+              claims: source.claims,
+              userId: source.userId,
+              email: source.email,
+              teamId: source.teamId,
+            },
+            { policy }
+          )
+        ).resolves.toEqual({ status: 'invalid_session' })
+        await expect(
+          verifyUserPassword({
+            userId: source.userId,
+            email: source.email,
+            password: producer.newPassword,
+          })
+        ).resolves.toBe(true)
       } finally {
-        await invalidation.query('ROLLBACK').catch(() => undefined)
-        invalidation.release()
+        await epochGate.query('ROLLBACK').catch(() => undefined)
+        epochGate.release()
       }
     }
   )
 
-  it.each(['normal password change', 'password reset'])(
+  it.each(['normal password change', 'password reset'] as const)(
     'invalidates the replacement from %s when exchange wins the lock order',
     async label => {
       const source = await principal(`exchange-first-${label.replaceAll(' ', '-')}`)
+      const producer = await passwordProducer(label, source)
       const exchangeReady = deferred<{ result: { status: string; token?: string }; pid: number }>()
       const releaseExchange = deferred()
       const exchange = exchangeLegacyExternalUserSession(
@@ -232,24 +346,12 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
       const lockedExchange = await exchangeReady.promise
       expect(lockedExchange.result.status).toBe('issued')
 
-      const invalidation = await databasePool.connect()
       try {
-        const invalidationStarted = deferred<number>()
-        const invalidationWork = (async () => {
-          invalidationStarted.resolve(await backendPid(invalidation))
-          await beginSecurityMutation(
-            invalidation,
-            source.userId,
-            label,
-            new Date((source.claims.iat! + 60) * 1000)
-          )
-          await invalidation.query('COMMIT')
-        })()
-        const invalidationPid = await invalidationStarted.promise
-        await waitForBlock(invalidationPid, lockedExchange.pid)
+        const producerWork = producer.run()
+        await waitForBlockedBy(lockedExchange.pid)
         releaseExchange.resolve()
         const issued = await exchange
-        await invalidationWork
+        producer.assertSuccess(await producerWork)
         expect(issued.status).toBe('issued')
         if (issued.status !== 'issued') throw new Error('exchange did not issue a token')
         const replacementClaims = verifyExternalSessionToken(issued.token)
@@ -257,10 +359,30 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
         await expect(
           validateLegacyUserSession(issued.token, replacementClaims, { db: databasePool })
         ).resolves.toMatchObject({ status: 'revoked' })
+        await expect(
+          validateLegacyUserSession(source.token, source.claims, { db: databasePool })
+        ).resolves.toMatchObject({ status: 'revoked' })
+        await expect(
+          exchangeLegacyExternalUserSession(
+            {
+              token: source.token,
+              claims: source.claims,
+              userId: source.userId,
+              email: source.email,
+              teamId: source.teamId,
+            },
+            { policy }
+          )
+        ).resolves.toEqual({ status: 'invalid_session' })
+        await expect(
+          verifyUserPassword({
+            userId: source.userId,
+            email: source.email,
+            password: producer.newPassword,
+          })
+        ).resolves.toBe(true)
       } finally {
         releaseExchange.resolve()
-        await invalidation.query('ROLLBACK').catch(() => undefined)
-        invalidation.release()
       }
     }
   )
