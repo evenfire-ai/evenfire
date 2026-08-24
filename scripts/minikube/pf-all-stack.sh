@@ -7,8 +7,21 @@ PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC=(kubectl --context="${PROFILE}")
 HOLD=false
 PIDS=()
+PIDFILES=()
+PIDFILE_SERVICES=()
 SAFE_PROFILE="${PROFILE//[^A-Za-z0-9_.-]/_}"
 HAS_PROFILE_OWNED_PORTS=false
+STARTUP_COMPLETE=false
+if [[ ! "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+  echo "ERROR: invalid Minikube profile identifier: $PROFILE" >&2
+  exit 1
+fi
+set +u
+PROFILE_PID_ROOT="$CLERUM_PROFILE_CACHE_ROOT"
+set -u
+if [[ -z "$PROFILE_PID_ROOT" ]]; then
+  PROFILE_PID_ROOT="$HOME/.cache/clerum/minikube-profiles"
+fi
 
 load_branch_profile_ports_env() {
   local file="$1"
@@ -57,6 +70,16 @@ elif [[ "${PROFILE}" =~ ^clerum-(codex|detached)- ]]; then
   exit 1
 fi
 
+is_branch_profile() {
+  [[ "$PROFILE" =~ ^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$ ]]
+}
+
+if [[ ! -f "${BRANCH_PROFILE_PORTS_ENV}" ]] && is_branch_profile; then
+  echo "ERROR: missing branch-scoped port cache for minikube profile: ${PROFILE}" >&2
+  echo "Expected ${BRANCH_PROFILE_PORTS_ENV}" >&2
+  exit 1
+fi
+
 if [[ -z "${PROFILE_UI_PORT:-}" && -n "${PORT_BASE:-}" ]]; then
   PROFILE_UI_PORT=$((PORT_BASE + 1))
 fi
@@ -87,7 +110,7 @@ require_random_port_for_branch_profile() {
   local name="$1"
   local value="$2"
   local default_port="$3"
-  if [[ "${HAS_PROFILE_OWNED_PORTS}" != "true" && ! "${PROFILE}" =~ ^clerum-(codex|detached)- ]]; then
+  if [[ "${HAS_PROFILE_OWNED_PORTS}" != "true" ]] && ! is_branch_profile; then
     return 0
   fi
   if [[ "${value}" == "${default_port}" ]]; then
@@ -107,12 +130,57 @@ require_random_port_for_branch_profile WORKFLOW_APPROVAL_READER_PORT "${WORKFLOW
 require_random_port_for_branch_profile MCP_HOST_PORT "${MCP_HOST_PORT}" 8080
 
 cleanup() {
-  if [[ "${HOLD}" != "true" ]]; then
+  if [[ "${HOLD}" != "true" && "${STARTUP_COMPLETE}" == "true" ]]; then
     return 0
   fi
-  for pid in "${PIDS[@]}"; do
-    kill "${pid}" 2>/dev/null || true
+  local index
+  for index in "${!PIDFILES[@]}"; do
+    kill_owned_pidfile "${PIDFILES[$index]}" "${PIDFILE_SERVICES[$index]}" || true
   done
+}
+
+kill_owned_pidfile() {
+  local pidfile="$1"
+  local service="$2"
+  local pid command_line expected_start actual_start
+  [[ -f "$pidfile" ]] || return 0
+  pid="$(sed -n '1p' "$pidfile" 2>/dev/null || true)"
+  if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    rm -f -- "$pidfile"
+    return 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f -- "$pidfile"
+    return 0
+  fi
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  if [[ "$command_line" != *port-forward* ||
+        "$command_line" != *"svc/$service"* ||
+        "$command_line" != *"$PROFILE"* ]]; then
+    echo "ERROR: refusing to kill PID $pid from $pidfile; it is not the $PROFILE $service port-forward" >&2
+    return 1
+  fi
+  expected_start="$(sed -n 's/^PROCESS_START=//p' "$pidfile" 2>/dev/null | head -1 || true)"
+  if [[ -z "$expected_start" ]]; then
+    echo "ERROR: refusing to kill PID $pid from $pidfile; its process-start signature is missing" >&2
+    return 1
+  fi
+  if [[ "$expected_start" != unavailable ]]; then
+    actual_start="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//' || true)"
+    if [[ -z "$actual_start" || "$actual_start" != "$expected_start" ]]; then
+      echo "ERROR: refusing to kill PID $pid from $pidfile; its process-start signature changed" >&2
+      return 1
+    fi
+  fi
+  kill "$pid" 2>/dev/null || true
+  rm -f -- "$pidfile"
+}
+
+write_pidfile() {
+  local pidfile="$1" pid="$2" process_start
+  process_start="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//' || true)"
+  [ -n "$process_start" ] || process_start=unavailable
+  printf '%s\nPROCESS_START=%s\n' "$pid" "$process_start" >"$pidfile"
 }
 
 start_pf() {
@@ -123,15 +191,19 @@ start_pf() {
   local health_url="${5:-}"
   local log="/tmp/pf-${SAFE_PROFILE}-${name}.log"
   local pidfile="/tmp/pf-${SAFE_PROFILE}-${name}.pid"
+  local profile_pids_dir="$PROFILE_PID_ROOT/$SAFE_PROFILE/pids"
+  local profile_pidfile="${profile_pids_dir}/${name}.pid"
 
-  if [[ -f "${pidfile}" ]]; then
-    kill "$(cat "${pidfile}")" 2>/dev/null || true
-    rm -f "${pidfile}"
-  fi
+  mkdir -p "$profile_pids_dir"
+  kill_owned_pidfile "$pidfile" "$service"
+  kill_owned_pidfile "$profile_pidfile" "$service"
 
   nohup "${KC[@]}" -n "${namespace}" port-forward --address=127.0.0.1 "svc/${service}" "${ports}" >"${log}" 2>&1 </dev/null &
-  echo $! >"${pidfile}"
+  write_pidfile "${pidfile}" "$!"
+  write_pidfile "${profile_pidfile}" "$!"
   PIDS+=("$!")
+  PIDFILES+=("$pidfile" "$profile_pidfile")
+  PIDFILE_SERVICES+=("$service" "$service")
   echo "  ${name}: pid=$(cat "${pidfile}") ns=${namespace} svc=${service} ports=${ports}"
   sleep 0.2
   if ! kill -0 "$!" 2>/dev/null; then
@@ -196,6 +268,11 @@ start_optional_deployment_pf() {
   start_optional_pf "${name}" "${namespace}" "${service}" "${ports}" "${health_url}"
 }
 
+# Install the cleanup boundary before the first background process is started.
+# A later start_pf failure must not strand forwards that were already launched.
+trap cleanup EXIT
+trap 'cleanup; exit 0' INT TERM
+
 echo "=== Starting gate port-forwards (${PROFILE}) ==="
 start_pf control-ui control-plane control-ui "${CONTROL_UI_PORT}:3000" "http://127.0.0.1:${CONTROL_UI_PORT}"
 start_optional_pf profile-ui profiles profile-ui "${PROFILE_UI_PORT}:3001" "http://127.0.0.1:${PROFILE_UI_PORT}"
@@ -211,11 +288,10 @@ elif "${KC[@]}" get svc mcp-host -n mcp-host >/dev/null 2>&1; then
   start_pf mcp-host mcp-host mcp-host "${MCP_HOST_PORT}:8080" "http://127.0.0.1:${MCP_HOST_PORT}/v1/runtime/health"
 fi
 
+STARTUP_COMPLETE=true
 echo "=== Port-forwards refreshed ==="
 
 if [[ "${HOLD}" == "true" ]]; then
-  trap cleanup EXIT
-  trap 'cleanup; exit 0' INT TERM
   echo "=== Holding port-forwards open; press Ctrl-C to stop ==="
   while true; do
     sleep 3600 &

@@ -15,9 +15,12 @@ import { SecretInformer } from './informers/secretInformer'
 import {
   McpServerProvider,
   McpServerWatcher,
+  createMcpAuthorizationStore,
   createMcpServerProvider,
   getKubeConfig,
 } from './k8sClient'
+import { McpApiAuthenticator } from './mcpApiAuthentication'
+import { McpAuthorizationService } from './mcpAuthorization'
 import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
 import { ContextMapperServer } from './server'
 import { StatelessLifecycleTracker } from './statelessLifecycleTracker'
@@ -91,12 +94,28 @@ async function main(): Promise<void> {
     console.error('[HCC] FATAL: HCC_TARGET_NAMESPACE must not be empty')
     process.exit(1)
   }
-  if (!['mcp-host', 'sandbox-recipes'].includes(config.hccTargetNamespace)) {
-    console.warn(
-      `[HCC] WARNING: HCC_TARGET_NAMESPACE=${config.hccTargetNamespace} is outside the default issuance namespaces`
+  if (config.hccTargetNamespace !== config.hostNamespace) {
+    console.error(
+      '[HCC] FATAL: HCC_TARGET_NAMESPACE must equal CONTEXT_MAPPER_HOST_NAMESPACE for caller-bound Host credentials'
     )
+    process.exit(1)
   }
 
+  let mcpAuthenticator: McpApiAuthenticator
+  try {
+    mcpAuthenticator = new McpApiAuthenticator({
+      publicKey: config.mcpHostJwtPublicKey,
+      issuer: config.mcpHostJwtIssuer,
+      hostNamespace: config.hostNamespace,
+      maxTokenLifetimeSeconds: config.mcpHostJwtMaxTtlSeconds,
+    })
+  } catch (err) {
+    console.error(
+      `[HCC] FATAL: ${err instanceof Error ? err.message : 'MCP JWT verifier configuration failed'}`
+    )
+    process.exit(1)
+    return
+  }
   if (!config.devMode) {
     console.log(`[Main] Namespace: ${config.namespace}`)
     console.log(`[Main] Reconciler: ENABLED (will manage Deployments + Services)`)
@@ -158,13 +177,16 @@ async function main(): Promise<void> {
         `target=${config.controlApiBaseUrl})`
     )
   }
+  const mcpAuthorization = new McpAuthorizationService(createMcpAuthorizationStore(provider))
   server = new ContextMapperServer(
     provider,
     config.port,
     hostReconciler,
     hasDesktopFn,
     providerAuthoritativeFn,
-    hostAuthoritativeFn
+    hostAuthoritativeFn,
+    mcpAuthenticator,
+    mcpAuthorization
   )
   await server.start()
 

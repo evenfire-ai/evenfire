@@ -1,4 +1,7 @@
-import type { ContextMapperClient } from '../contextMapperClient'
+import {
+  type ContextMapperClient,
+  isContextMapperAuthorityRevocation,
+} from '../contextMapperClient'
 import type { McpServerInfo } from '../types'
 import type { McpAdmissionControl, McpAdmissionOutcome } from './manager'
 
@@ -6,8 +9,7 @@ import type { McpAdmissionControl, McpAdmissionOutcome } from './manager'
  * Initialize MCP servers for the host's context using skill-mapper.
  */
 export async function runAuthoritativeMcpInitialization(options: {
-  contextRef: string
-  client: Pick<ContextMapperClient, 'healthCheck' | 'listServersByContext'>
+  client: Pick<ContextMapperClient, 'healthCheck' | 'listServersForHost'>
   replaceFleet: (servers: McpServerInfo[]) => Promise<void>
   isCurrent?: () => boolean
   sleep?: (milliseconds: number) => Promise<void>
@@ -22,7 +24,7 @@ export async function runAuthoritativeMcpInitialization(options: {
     const ready = await options.client.healthCheck()
     if (options.isCurrent?.() === false) return
     if (ready) {
-      const servers = await options.client.listServersByContext(options.contextRef)
+      const servers = await options.client.listServersForHost()
       if (options.isCurrent?.() === false) return
       await options.replaceFleet(servers)
       return
@@ -461,20 +463,23 @@ async function runMcpFleetEffects<T>(
 
 async function resolveRequiredMcpAuthToken(
   server: McpServerInfo,
-  getAuthToken: (serverName: string) => Promise<string | undefined>
+  getAuthToken: (
+    serverName: string,
+    expectedCredentialRevision?: string
+  ) => Promise<string | undefined>
 ): Promise<string | undefined> {
   if (
     !server.enabled ||
     !server.status?.ready ||
     server.status.authoritative === false ||
-    !server.auth?.secretRef
+    (server.authRequired !== true && !server.auth?.secretRef)
   ) {
     return undefined
   }
 
-  const authToken = await getAuthToken(server.name)
+  const authToken = await getAuthToken(server.name, server.credentialRevision)
   if (!authToken) {
-    throw new Error(`Required auth token is unavailable for MCP server ${server.name}`)
+    throw new Error('Required MCP credential is unavailable')
   }
   return authToken
 }
@@ -493,7 +498,10 @@ export async function replaceAuthoritativeMcpFleet<
   servers: McpServerInfo[]
   previousManager: { disconnectAll(): Promise<void> } | null
   createManager: () => TManager
-  getAuthToken: (serverName: string) => Promise<string | undefined>
+  getAuthToken: (
+    serverName: string,
+    expectedCredentialRevision?: string
+  ) => Promise<string | undefined>
   installFleet: (manager: TManager, serverState: Map<string, string>) => void
   maxConcurrency?: number
   coordinator?: AuthoritativeMcpFleetCoordinator
@@ -542,7 +550,11 @@ export async function replaceAuthoritativeMcpFleet<
         // Auth discovery fails before addServer can own the status transition.
         nextManager.recordAdmissionFailure(server, error)
         admissionFailures.push(error)
-        console.error(`[Main] MCP server admission failed; will retry: ${server.name}`, error)
+        if (isContextMapperAuthorityRevocation(error)) {
+          console.error('[Main] MCP credential admission rejected (reason=authority_revoked)')
+        } else {
+          console.error(`[Main] MCP server admission failed; will retry: ${server.name}`, error)
+        }
         return
       }
 
@@ -670,7 +682,10 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
   servers: McpServerInfo[]
   manager: AuthoritativeMcpSnapshotManager
   serverState: Map<string, string>
-  getAuthToken: (serverName: string) => Promise<string | undefined>
+  getAuthToken: (
+    serverName: string,
+    expectedCredentialRevision?: string
+  ) => Promise<string | undefined>
   maxConcurrency?: number
   coordinator?: AuthoritativeMcpFleetCoordinator
 }): Promise<void> {
@@ -708,9 +723,18 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
         previousState !== undefined &&
         mcpServerDesiredRevision(JSON.parse(previousState) as McpServerInfo) !==
           mcpServerDesiredRevision(server)
+      const previousCredentialRevision =
+        previousState !== undefined
+          ? (JSON.parse(previousState) as McpServerInfo).credentialRevision
+          : undefined
+      const credentialAuthorityChanged =
+        previousState !== undefined &&
+        previousCredentialRevision !== server.credentialRevision &&
+        (previousCredentialRevision !== undefined || server.credentialRevision !== undefined)
       const revokesLiveConnection =
         connectedNames.has(server.name) &&
         (!server.enabled ||
+          credentialAuthorityChanged ||
           (server.status?.authoritative !== false && server.status?.ready === false) ||
           (server.status?.authoritative === false && desiredChanged))
       if (revokesLiveConnection && lease.isCurrent(server.name)) {
@@ -726,6 +750,14 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
     try {
       return await resolveRequiredMcpAuthToken(server, options.getAuthToken)
     } catch (error) {
+      if (isCurrent() && isContextMapperAuthorityRevocation(error)) {
+        if (options.manager.detachServer) {
+          coordinator.scheduleCleanup(options.manager.detachServer(server.name))
+        } else if (connectedNames.has(server.name)) {
+          await options.manager.removeServer(server.name)
+        }
+        options.serverState.delete(server.name)
+      }
       // Auth discovery fails before manager admission. Preserve a live
       // connection's status during replacement; otherwise publish the
       // admission failure exactly once.

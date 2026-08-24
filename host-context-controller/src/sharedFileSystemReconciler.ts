@@ -44,7 +44,12 @@ import type {
   SharedFileSystemPhase,
   SharedFileSystemStatus,
 } from './types'
-import { applyNetworkPolicy, getErrorCode, replaceWithConflictRetry } from './utils'
+import {
+  applyNetworkPolicy,
+  getErrorCode,
+  preserveDeploymentAnnotations,
+  replaceWithConflictRetry,
+} from './utils'
 
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
@@ -355,6 +360,12 @@ export class SharedFileSystemReconciler {
             namespace: this.factoryConfig.hostNamespace,
             name,
           }),
+        // The public auth-key reconciler may use `kubectl rollout restart` on
+        // this HCC-owned Deployment. Preserve the pod-template restart marker
+        // when the periodic SFS reconcile replaces the raw desired manifest;
+        // otherwise HCC would immediately create a second Recreate outage and
+        // defeat the reconciler's one-rollout contract.
+        mergeExisting: preserveDeploymentAnnotations,
         replace: body =>
           this.appsApi.replaceNamespacedDeployment({
             namespace: this.factoryConfig.hostNamespace,

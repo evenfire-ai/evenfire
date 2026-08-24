@@ -1,0 +1,84 @@
+---
+description: Keep the Minikube T2 harness, its contract tests, docs, rule, and skill in sync when editing harness code
+globs:
+  - scripts/minikube/t2*.sh
+  - scripts/minikube/pf-all-stack.sh
+  - scripts/minikube/pre-gate-sync.sh
+  - scripts/e2e/minikube-real-postgres.sh
+  - scripts/tests/test-minikube-t2-*.sh
+  - Makefile
+alwaysApply: false
+---
+
+# T2 harness change discipline
+
+When editing the T0/T1/T2 harness (these globs), the contract is duplicated in
+docs and guidance. A behavior change here MUST update, in the same change:
+
+- `scripts/tests/test-minikube-t2-contract.sh` and
+  `scripts/tests/test-minikube-t2-scenarios.sh` (they assert harness behavior)
+- `docs/testing/minikube-t2-runbook.md`
+- `.cursor/rules/minikube-t0-t1-t2.mdc` and
+  `.cursor/skills/minikube-t0-t1-t2/` (SKILL.md + reference.md)
+- the T0/T1/T2 sections of `AGENTS.md` and `CLAUDE.md`
+
+Invariants that must never regress:
+
+- Final T2 verdict = `t2.sh run_final_preflight` with `T2_PLAN_MODE=false`
+  and plan state `already-synced`; anything else is `HEAD_MARKER_MISMATCH`.
+- Planner mode `T2_PLAN_MODE=true` exists only inside the orchestrator so
+  `full-bootstrap` is reachable; standalone preflight stays fail-loud.
+- Planner mode never dies `PROFILE_UNHEALTHY` on a bootstrapped profile with
+  an unready required deployment: it records the deployment
+  (`T2_UNREADY_DEPLOYMENTS`) and classifies `full-reconcile` with a reason
+  naming it. `T2_PLAN_MODE=false` keeps failing `PROFILE_UNHEALTHY`.
+- T1 (`minikube-real-postgres.sh`) restores branch-profile GFS credentials on
+  exit via `reconcile-gfs-deploy-credentials.sh` with
+  `GFS_RESTORE_ACTIVE_NOLOGIN=true` and `GFS_RECOVER_ABANDONED_STATE=true`
+  (armed only once suites started), and `pre-gate-sync.sh`
+  `provision_gfs_serving` passes the same opt-ins only for the `minikube-t2`
+  transition; other security gates refresh MCP auth with `--skip-gfs` and do
+  not mutate GFS. It restarts an unready `gfsc-reader` after T2 restore.
+  `full-setup.sh`
+  REUSE_DB / T2 full-reconcile also passes both opt-ins on both GFS
+  reconcile calls — setup runs before pre-gate-sync and must not abort on a
+  NOLOGIN reader or a leftover `rollout-running` claim from a dead prior
+  setup. The T2 profile lock makes that abandoned-state recover safe.
+  When `gfsc-reader` is already Ready, `settle-gfs-reader-rollout.sh`
+  marks that leftover claim ready before reconcile, scales leftover
+  non-current unready reader ReplicaSets to 0, and deletes CrashLoopBackOff
+  reader pods so a second `rollout restart` is not triggered and cannot race
+  HCC's gfsReconciler. HCC strips the `restartedAt` annotation, so every
+  harness GFS reconcile runs with the `scripts/minikube/gfs-rollout-shim`
+  PATH prefix: the reader `rollout status` wait becomes the readiness poll
+  in `scripts/minikube/wait-gfs-reader-ready.sh` (desired replicas Ready and
+  no live non-terminating unready reader pod), never a generation wait.
+  `pre-gate-sync` reader convergence uses the same readiness contract.
+  `scripts/tests/test-minikube-gfs-provision-order.sh` exercises the composed
+  T2 order and proves the non-T2 scope guard.
+  Both re-run `sync-auth-key.sh` before each GFS reconcile: the overlay
+  re-applies `gfs-config.jwt-public-key` empty and a reader pod fails
+  closed without it, so the readiness wait could otherwise only time out.
+- T1 stays fail-loud (no green on unavailable DSN or zero tests); the JSON
+  reporter must be complete and green and the Vitest process must also exit
+  zero. Role-reset suites keep the throwaway Postgres 16.
+- `t2.sh` keeps `IMAGE_SOURCE=local` for bootstrap/reconcile and calls
+  `pre-gate-sync` with `--skip-port-forwards`.
+- `t2_process_check` accepts only real `kubectl` (`comm=kubectl`) port-forward
+  PIDs recorded in the profile cache or legacy `/tmp/pf-<profile>-*.pid`.
+  awk is a loose pre-filter: `kubectl` as argv0/path token and a later
+  standalone `port-forward` token (flags may sit between them).
+- T1 backgrounds its control-postgres port-forward as a direct `kubectl`
+  child (never through the `t2_kc` function): a backgrounded function forks
+  a subshell whose argv is the script, `$!` records that subshell, cleanup's
+  `*port-forward*` guard never matches, and the orphaned real kubectl fails
+  the final exact-head preflight with `PORT_FORWARD_CONFLICT`.
+- Stable failure codes (`BOOTSTRAP_REQUIRED`, `HEAD_MARKER_MISMATCH`,
+  `PORT_FORWARD_CONFLICT`, `PROFILE_BUSY`, ...) keep their meanings.
+
+Run T0 locally before proposing harness changes:
+
+```bash
+bash scripts/tests/test-minikube-t2-contract.sh
+bash scripts/tests/test-minikube-t2-scenarios.sh
+```

@@ -6,7 +6,16 @@ import { config } from '../src/config.js'
 import { findMembership } from '../src/services/directory/membership.js'
 import * as userApprovalRequestService from '../src/services/userApprovalRequestService.js'
 import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
-import { issueMcpHostAccessJwt, issueMcpHostRefreshJwt } from '../src/utils/auth/mcpHostJwtToken.js'
+import {
+  MCP_HOST_CREDENTIAL_CAPABILITY,
+  MCP_HOST_HCC_AUDIENCE,
+  MCP_HOST_WORKFLOW_AUDIENCE,
+  issueMcpHostAccessJwt,
+  issueMcpHostRefreshJwt,
+  verifyMcpHostAccessJwt,
+  verifyMcpHostControlJwt,
+  verifyMcpHostRefreshJwt,
+} from '../src/utils/auth/mcpHostJwtToken.js'
 import { MockGateway } from './mockGateway.js'
 
 // Mock userApprovalRequestService for all tests
@@ -549,6 +558,55 @@ describe('Security: Refresh token rotation', () => {
     expect(res.status).toBe(200)
     expect(res.body.accessToken).toBeDefined()
     expect(res.body.refreshToken).toBeDefined()
+    for (const encoded of [res.body.accessToken, res.body.refreshToken]) {
+      const claims = jwt.decode(encoded) as Record<string, unknown>
+      expect(claims.aud).toBe(MCP_HOST_WORKFLOW_AUDIENCE)
+      expect(claims.host_uid).toBeUndefined()
+      expect(claims.mcpCapabilities).toBeUndefined()
+    }
+  })
+
+  it('preserves signed HCC lineage across ordinary rotation and keeps the control token separate', async () => {
+    const workflowControlScopes = ['workflow:list' as const, 'workflow:read' as const]
+    const hostRef = 'chatllm'
+    const hostUid = 'signed-host-uid'
+    const { token: refreshToken } = issueMcpHostRefreshJwt(
+      config.hostsNamespace,
+      'standalone',
+      [hostRef],
+      {
+        workflowControlScopes,
+        hccCredential: { hostUid },
+      }
+    )
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ jti: 'hcc-refresh-jti' }], rowCount: 1 })
+
+    const res = await request(app)
+      .post('/api/v1/workflow-auth/refresh')
+      .set('Authorization', `Bearer ${refreshToken}`)
+      .send({ hostUid: 'body-controlled-uid', mcpCapabilities: [] })
+
+    expect(res.status).toBe(200)
+    for (const encoded of [res.body.accessToken, res.body.refreshToken]) {
+      const claims = jwt.decode(encoded) as Record<string, unknown>
+      expect(claims.aud).toEqual([MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE])
+      expect(claims.hostRefs).toEqual([hostRef])
+      expect(claims.host_uid).toBe(hostUid)
+      expect(claims.mcpCapabilities).toEqual([MCP_HOST_CREDENTIAL_CAPABILITY])
+      expect(claims.workflowControlScopes).toEqual(workflowControlScopes)
+    }
+
+    const control = jwt.decode(res.body.mcpHostControlToken) as Record<string, unknown>
+    expect(control.aud).toBe('mcp-host')
+    expect(control.hostRefs).toEqual([hostRef])
+    expect(control.scopes).toEqual(workflowControlScopes)
+    expect(control.host_uid).toBeUndefined()
+    expect(control.mcpCapabilities).toBeUndefined()
+
+    expect(verifyMcpHostAccessJwt(res.body.mcpHostControlToken)).toBeNull()
+    await expect(verifyMcpHostRefreshJwt(res.body.mcpHostControlToken)).resolves.toBeNull()
+    expect(verifyMcpHostControlJwt(res.body.accessToken)).toBeNull()
+    expect(verifyMcpHostControlJwt(res.body.refreshToken)).toBeNull()
   })
 
   it('rejects access token used as refresh token (scope mismatch)', async () => {

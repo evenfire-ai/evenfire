@@ -123,6 +123,10 @@ build-preflight: ## Run local build preflight across deployable packages
 
 # ── Minikube Cluster ─────────────────────────────────────────────────
 MINIKUBE_PROFILE ?= clerum-test
+# Startup supports the documented shared local profile before a branch-owned
+# T2 lease exists. The mode is passed only by minikube-start; standalone auth
+# sync remains lease-protected.
+MINIKUBE_STARTUP_AUTH_SYNC_MODE ?= locked
 MINIKUBE_MULTI_NODE ?= false
 MINIKUBE_NODES ?=
 MINIKUBE_MEMORY ?= 10240
@@ -145,7 +149,7 @@ minikube-start: ## Start minikube cluster (starts Docker Desktop if needed)
 		echo "Docker ready."; \
 	fi
 	MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_MULTI_NODE="$(MINIKUBE_MULTI_NODE)" MINIKUBE_NODES="$(MINIKUBE_NODES)" MINIKUBE_MEMORY="$(MINIKUBE_MEMORY)" MINIKUBE_CPUS="$(MINIKUBE_CPUS)" scripts/minikube/start.sh
-	@$(MAKE) --no-print-directory minikube-sync-auth-key-if-present
+	@$(MAKE) --no-print-directory MINIKUBE_STARTUP_AUTH_SYNC_MODE=shared-profile-mcp minikube-sync-auth-key-if-present
 
 .PHONY: minikube-stop
 minikube-stop: ## Stop minikube cluster
@@ -155,11 +159,17 @@ minikube-stop: ## Stop minikube cluster
 # pulls ~25 published images instead of building 28 from source. Build
 # everything locally with `make minikube-setup-local` (or IMAGE_SOURCE=local).
 IMAGE_SOURCE ?= ghcr
+# GFS Secret/role mutation is owned by the canonical T2 lease. Callers that
+# intentionally run the full T2 transition set this to true and pass the
+# inherited opaque T2_LOCK_TOKEN; ordinary deploys render/filter GFS resources.
+MINIKUBE_GFS_MUTATION ?= false
 
 .PHONY: minikube-setup
 minikube-setup: ## Clean install from scratch, PULLING published images (IMAGE_SOURCE=local or `make minikube-setup-local` builds instead). Rebuilds the DB; REUSE_DB=true keeps it. SKIP_UIS=true omits Control/Profile UI. Runs 'prereqs' first (SKIP_PREREQS=true to bypass). Needs ADMIN_PASSWORD in .env.
 	@if [ "$(SKIP_PREREQS)" != "true" ]; then $(MAKE) --no-print-directory prereqs; fi
-	@MINIKUBE_SKIP_UIS="$(SKIP_UIS)" MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" REUSE_DB="$(REUSE_DB)" \
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_SKIP_UIS="$(SKIP_UIS)" MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" REUSE_DB="$(REUSE_DB)" \
 		IMAGE_SOURCE="$(IMAGE_SOURCE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
 		scripts/minikube/full-setup.sh $(ARGS)
 
@@ -220,21 +230,34 @@ minikube-deploy-instances: ## Apply CRD test instances (context, host, channel)
 minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml with current node IP
 	@CONTEXT=$(MINIKUBE_PROFILE) deploy/scripts/minikube-detect-k8s-api-ip.sh
 
-.PHONY: minikube-deploy-all
+.PHONY: minikube-deploy-all minikube-deploy-all-body
 minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-deploy-all-body
+
+minikube-deploy-all-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
-	@CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-gfs-writer-secret.sh
 	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
-	@writer_dsn="$$(kubectl --context=$(MINIKUBE_PROFILE) -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')" || { \
-		echo "[minikube-deploy-all] failed to classify the existing GFS writer Secret; refusing HCC cutover" >&2; exit 1; \
-	}; \
-	if [ -n "$$writer_dsn" ]; then \
-		kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1 || { \
-			echo "[minikube-deploy-all] existing GFS writer detected but control-api is not Ready; refusing HCC cutover" >&2; exit 1; \
+	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then echo "[minikube-deploy-all] GFS mutation disabled for this non-T2 sync"; fi
+	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-gfs-writer-secret.sh; \
+		writer_dsn="$$(kubectl --context=$(MINIKUBE_PROFILE) -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')" || { \
+			echo "[minikube-deploy-all] failed to classify the existing GFS writer Secret; refusing HCC cutover" >&2; exit 1; \
 		}; \
-		CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
-	else \
-		echo "[minikube-deploy-all] fresh bootstrap: reader staging deferred until post-migration full-setup (GFSC fail-closed)"; \
+		if [[ -n "$$writer_dsn" ]]; then \
+			kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1 || { \
+				echo "[minikube-deploy-all] existing GFS writer detected but control-api is not Ready; refusing HCC cutover" >&2; exit 1; \
+			}; \
+			T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" CONTEXT=$(MINIKUBE_PROFILE) T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
+		else \
+			echo "[minikube-deploy-all] fresh bootstrap: reader staging deferred until post-migration full-setup (GFSC fail-closed)"; \
+		fi; \
 	fi
 	@# THE OVERLAY FOLLOWS THE CLUSTER, NOT THIS SHELL. Hardcoding
 	@# deploy/overlays/minikube applied clerum/*:test image refs to a cluster
@@ -245,15 +268,42 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# acquisition recorded. It runs HERE, after minikube-detect-k8s-api-ip
 	@# above, because an overridden tag renders from a copy of deploy/ that must
 	@# already contain the generated k8s-api-ip.yaml.
+	@set -o pipefail; \
 	render_dir="$$(bash scripts/minikube/image-mode.sh --render-dir)" && \
-		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
+	if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | kubectl --context=$(MINIKUBE_PROFILE) apply -f -; \
+	else \
+		filtered_manifest="$$(mktemp "$${TMPDIR:-/tmp}/evenfire-gfs-filter.XXXXXX")"; \
+		trap 'rm -f -- "$$filtered_manifest"' EXIT; \
+		if ! kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | python3 scripts/minikube/filter-gfs-resources.py >"$$filtered_manifest"; then \
+			echo "[minikube-deploy-all] failed to render or filter the non-GFS overlay" >&2; exit 1; \
+		fi; \
+		if [ -s "$$filtered_manifest" ]; then \
+			kubectl --context=$(MINIKUBE_PROFILE) apply -f "$$filtered_manifest"; \
+		else \
+			echo "[minikube-deploy-all] filtered overlay contains no non-GFS resources; skipping apply"; \
+		fi; \
+	fi
 	CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-inter-service-tokens.sh
-	$(KC) apply -f deploy/overlays/minikube/instances/
+	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		$(KC) apply -f deploy/overlays/minikube/instances/; \
+	else \
+		filtered_manifest="$$(mktemp "$${TMPDIR:-/tmp}/evenfire-gfs-instances-filter.XXXXXX")"; \
+		trap 'rm -f -- "$$filtered_manifest"' EXIT; \
+		if ! python3 scripts/minikube/filter-gfs-resources.py deploy/overlays/minikube/instances/*.yaml >"$$filtered_manifest"; then \
+			echo "[minikube-deploy-all] failed to filter the non-GFS instance resources" >&2; exit 1; \
+		fi; \
+		if [ -s "$$filtered_manifest" ]; then \
+			$(KC) apply -f "$$filtered_manifest"; \
+		else \
+			echo "[minikube-deploy-all] filtered instances contain no non-GFS resources; skipping apply"; \
+		fi; \
+	fi
 	@# Kustomize reapplies the persisted mcp-host ConfigMap, which can overwrite
 	@# CLERUM_AUTH_JWT_PUBLIC_KEY with an older repo value. Always re-sync from
 	@# rpc-proxy-secrets after each full overlay apply so Desktop/rpc-proxy/mcp-host
 	@# stay on the same JWT validation key.
-	@$(MAKE) --no-print-directory minikube-sync-auth-key
+	@MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" $(MAKE) --no-print-directory minikube-sync-auth-key
 	@# The pre-overlay helper migrates legacy last-applied ownership without
 	@# removing the provisioning-owned connection-string. When the GFS stack is
 	@# deployed AND control-api is Ready (migration 0048 applied), re-provision
@@ -262,13 +312,25 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# control-api is not Ready yet (fresh cluster mid-setup), provisioning is
 	@# deferred LOUDLY to the full-setup/pre-gate-sync flow that already orders
 	@# it after control-api migrations.
-	@if kubectl --context=$(MINIKUBE_PROFILE) get configmap gfs-config -n gfs >/dev/null 2>&1; then \
-		if kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then \
-			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/wait-gfsc-secret-references.sh; \
-			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
-		else \
-			echo "[minikube-deploy-all] control-api not Ready — gfs DSN provisioning DEFERRED to full-setup/pre-gate-sync ordering (gfsc stays fail-closed until then)"; \
+	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		gfs_config_probe="$$(kubectl --context=$(MINIKUBE_PROFILE) get configmap gfs-config -n gfs 2>&1)" || { \
+			if [[ "$$gfs_config_probe" == *NotFound* || "$$gfs_config_probe" == *"not found"* ]]; then \
+				echo "[minikube-deploy-all] GFS is not deployed; skipping post-overlay credential reconciliation"; \
+				gfs_config_probe=""; \
+			else \
+				echo "[minikube-deploy-all] unable to inspect GFS configmap; refusing to continue: $$gfs_config_probe" >&2; exit 1; \
+			fi; \
+		}; \
+		if [ -n "$$gfs_config_probe" ]; then \
+			if kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then \
+				CONTEXT=$(MINIKUBE_PROFILE) T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" bash deploy/scripts/wait-gfsc-secret-references.sh; \
+				T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" CONTEXT=$(MINIKUBE_PROFILE) T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
+			else \
+				echo "[minikube-deploy-all] control-api not Ready — gfs DSN provisioning DEFERRED to full-setup/pre-gate-sync ordering (gfsc stays fail-closed until then)"; \
+			fi; \
 		fi; \
+	else \
+		echo "[minikube-deploy-all] skipping post-overlay GFS credential reconciliation"; \
 	fi
 
 .PHONY: minikube-verify-networkpolicies
@@ -289,11 +351,30 @@ minikube-restart-all: ## Restart all Clerum deployments
 	done
 	@echo "All deployments restarted."
 
-.PHONY: minikube-deploy-crds
+.PHONY: minikube-deploy-crds minikube-deploy-crds-body
 minikube-deploy-crds: ## Install/upgrade CRDs via Helm chart + apply CRD YAML (idempotent)
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-deploy-crds-body
+
+minikube-deploy-crds-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
 	kubectl --context=$(MINIKUBE_PROFILE) apply -f deploy/base/namespaces.yaml
-	helm upgrade --install --kube-context=$(MINIKUBE_PROFILE) clerum-crds ./charts/clerum-crds
-	kubectl --context=$(MINIKUBE_PROFILE) apply -f ./charts/clerum-crds/crds/
+	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then \
+		echo "[minikube-deploy-crds] GFS CRD mutation disabled for this non-T2 gate"; \
+		helm upgrade --install --skip-crds --kube-context=$(MINIKUBE_PROFILE) clerum-crds ./charts/clerum-crds; \
+		for crd in ./charts/clerum-crds/crds/*.yaml; do \
+			case "$$crd" in *globalfilesystem.yaml) continue ;; esac; \
+			kubectl --context=$(MINIKUBE_PROFILE) apply -f "$$crd"; \
+		done; \
+	else \
+		helm upgrade --install --kube-context=$(MINIKUBE_PROFILE) clerum-crds ./charts/clerum-crds; \
+		kubectl --context=$(MINIKUBE_PROFILE) apply -f ./charts/clerum-crds/crds/; \
+	fi
 
 .PHONY: minikube-deploy-service
 minikube-deploy-service: ## Rebuild single image + rollout restart deployment (usage: make minikube-deploy-service SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm])
@@ -323,8 +404,17 @@ minikube-restart-deploy: ## Restart a single deployment without rebuilding (usag
 # Use `make minikube-sync-auth-key` to copy the public key automatically
 # from rpc-proxy-secrets into both runtime ConfigMaps after key regeneration.
 #
-.PHONY: minikube-gen-keys
+.PHONY: minikube-gen-keys minikube-gen-keys-body
 minikube-gen-keys: ## Generate JWT signing keys + auto-sync to mcp-host-config
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-gen-keys-body
+
+minikube-gen-keys-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
 	@scripts/minikube/generate-keys.sh
 	@if [ -f deploy/minikube/secrets/jwt-signing-keys.yaml ]; then \
 	  $(KC) apply -f deploy/minikube/secrets/jwt-signing-keys.yaml; \
@@ -362,16 +452,65 @@ minikube-apply-secrets: ## Apply all secrets to cluster (LLM keys read from .env
 minikube-apply-namespaces: ## Create all namespaces
 	$(KC) apply -f deploy/base/namespaces.yaml
 
-.PHONY: minikube-sync-auth-key
+.PHONY: minikube-sync-auth-key minikube-sync-auth-key-body minikube-sync-auth-key-shared-profile
 minikube-sync-auth-key: ## Sync JWT public key from rpc-proxy-secrets into runtime ConfigMaps when drift exists
-	@bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE)
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-sync-auth-key-body
+
+minikube-sync-auth-key-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+		T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE); \
+	else \
+		T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE) --skip-gfs --require-mcp; \
+	fi
+
+minikube-sync-auth-key-shared-profile: ## Sync only MCP auth on the documented shared profile during startup
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		bash scripts/minikube/sync-auth-key.sh --context=$(MINIKUBE_PROFILE) --shared-profile-bootstrap --skip-gfs --require-mcp
 
 .PHONY: minikube-sync-auth-key-if-present
 minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube auth resources already exist
-	@if ! $(KC) get secret rpc-proxy-secrets -n rpc-proxy >/dev/null 2>&1; then \
-	  echo "Skipping auth key sync (rpc-proxy-secrets not found yet)."; \
-	elif ! $(KC) get configmap mcp-host-config -n mcp-host >/dev/null 2>&1; then \
-	  echo "Skipping auth key sync (mcp-host-config not found yet)."; \
+	@kubectl_probe_is_not_found() { \
+	  probe_output="$$1"; \
+	  probe_kind="$$2"; \
+	  probe_name="$$3"; \
+	  [[ "$$probe_output" =~ ^Error[[:space:]]+from[[:space:]]+server[[:space:]]+\(NotFound\):[[:space:]] ]] || return 1; \
+	  probe_detail="$${probe_output#*): }"; \
+	  case "$$probe_kind" in \
+	    secret) case "$$probe_detail" in secret\ *|secrets\ *) ;; *) return 1 ;; esac ;; \
+	    configmap) case "$$probe_detail" in configmap\ *|configmaps\ *) ;; *) return 1 ;; esac ;; \
+	    *) return 1 ;; \
+	  esac; \
+	  [[ "$$probe_detail" == *"\"$$probe_name\""* ]] || return 1; \
+	}; \
+	rpc_probe_status=0; \
+	rpc_probe_output="$$( $(KC) get secret rpc-proxy-secrets -n rpc-proxy 2>&1 )" || rpc_probe_status=$$?; \
+	if [ "$$rpc_probe_status" -ne 0 ]; then \
+	  if kubectl_probe_is_not_found "$$rpc_probe_output" secret rpc-proxy-secrets; then \
+	    echo "Skipping auth key sync (rpc-proxy-secrets not found yet)."; exit 0; \
+	  fi; \
+	  printf '%s\n' "$$rpc_probe_output" >&2; exit "$$rpc_probe_status"; \
+	fi; \
+	mcp_probe_status=0; \
+	mcp_probe_output="$$( $(KC) get configmap mcp-host-config -n mcp-host 2>&1 )" || mcp_probe_status=$$?; \
+	if [ "$$mcp_probe_status" -ne 0 ]; then \
+	  if kubectl_probe_is_not_found "$$mcp_probe_output" configmap mcp-host-config; then \
+	    echo "Skipping auth key sync (mcp-host-config not found yet)."; exit 0; \
+	  fi; \
+	  printf '%s\n' "$$mcp_probe_output" >&2; exit "$$mcp_probe_status"; \
+	fi; \
+	if [ "$(MINIKUBE_STARTUP_AUTH_SYNC_MODE)" = "shared-profile-mcp" ]; then \
+		$(MAKE) --no-print-directory minikube-sync-auth-key-shared-profile; \
+	elif [ "$(T2_MUTATION_LOCK_WRAPPED)" = "true" ]; then \
+		$(MAKE) --no-print-directory minikube-sync-auth-key-body; \
 	else \
 	  $(MAKE) --no-print-directory minikube-sync-auth-key; \
 	fi
@@ -425,13 +564,21 @@ test-gfs-real-postgres-minikube: ## Run GFS T1 real-Postgres suites against a va
 	@CONTEXT="$(MINIKUBE_PROFILE)" bash scripts/e2e/gfs-real-pg-minikube-gate.sh
 
 .PHONY: minikube-t2-preflight
-minikube-t2-preflight: ## Read-only, fail-loud T0/T1/T2 preflight for the explicit branch-owned Minikube profile
+minikube-t2-preflight: ## Read-only readiness planner (not T0/T1/T2); fail-loud on an unbootstrapped profile
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
 		scripts/minikube/t2-preflight.sh
 
 .PHONY: minikube-t2
-minikube-t2: ## Run the local development T0, Real PostgreSQL T1, and exact-head T2 contract
+minikube-t2: ## Full orchestrator: T0, Real PostgreSQL T1, then exact-head T2
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		scripts/minikube/t2.sh
+
+.PHONY: minikube-t2-np08-hcc-authorization
+minikube-t2-np08-hcc-authorization: minikube-t2 ## Run canonical T2 including the required deployed NP-08 Host-to-HCC authorization journey
+.PHONY: minikube-t2-runtime
+minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile
+	@T2_RUN_T0=false T2_RUN_T1=false \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
 		scripts/minikube/t2.sh
 
 .PHONY: minikube-t2-real-postgres
@@ -742,8 +889,18 @@ minikube-status: ## Show status of all Clerum services in minikube
 minikube-logs: ## Show logs for a service (usage: make minikube-logs SVC=control-api NS=control-plane)
 	$(KC) logs -n $(NS) deploy/$(SVC) --tail=50
 
-.PHONY: minikube-db-reset
+.PHONY: minikube-db-reset minikube-db-reset-body
 minikube-db-reset: ## Reset control-api postgres (re-enables first-time admin setup)
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		CONTROL_DB_RESET_PVC_UID="$(CONTROL_DB_RESET_PVC_UID)" CONTROL_DB_RESET_RESUME="$(CONTROL_DB_RESET_RESUME)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-db-reset-body
+
+minikube-db-reset-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
 	@if [ -z "$(CONTROL_DB_RESET_PVC_UID)" ]; then echo "ERROR: CONTROL_DB_RESET_PVC_UID=<approved UID|none> is required"; exit 1; fi
 	@reset_args="--expected-pvc-uid $(CONTROL_DB_RESET_PVC_UID)"; \
 	 if [ "$(CONTROL_DB_RESET_PVC_UID)" = "none" ]; then reset_args="--expect-no-pvc"; fi; \
@@ -753,8 +910,10 @@ minikube-db-reset: ## Reset control-api postgres (re-enables first-time admin se
 	@echo "Scaling up postgres..."
 	@$(KC) scale deploy/control-postgres --replicas=1 -n control-plane
 	@$(KC) wait --for=condition=Available deploy/control-postgres -n control-plane --timeout=90s
-	@CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/converge-control-db-after-reset.sh \
-	  --overlay deploy/overlays/minikube --job-name control-api-db-migrate-reset
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" CONTEXT=$(MINIKUBE_PROFILE) \
+		bash deploy/scripts/converge-control-db-after-reset.sh \
+		  --overlay deploy/overlays/minikube --job-name control-api-db-migrate-reset
 	@echo "DB reset complete. First-time admin setup is available again."
 
 .PHONY: minikube-seed-test-data
@@ -954,6 +1113,15 @@ test-e2e-hcc-mcp-context-readiness: ## Prove HCC readiness during exact MCP/Cont
 	@echo "Running HCC MCP/Context/NetworkPolicy readiness gate..."
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_MCP_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-mcp-context-readiness.sh
+
+.PHONY: test-e2e-hcc-rollout-readiness
+test-e2e-hcc-rollout-readiness: ## Measure the HCC Recreate rollout window (D1/c4). EXPECT_STUCK=1 reproduces the D1b outage; EXPECT_RECOVERY=1 proves the evenfire#391 rollout-undo path. The two flags are EXCLUSIVE; default both 0 = healthy measurement.
+	@echo "Running HCC rollout readiness gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_ROLLOUT_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+	  MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) \
+	  EXPECT_STUCK=$(EXPECT_STUCK) EXPECT_RECOVERY=$(EXPECT_RECOVERY) \
+	  bash scripts/e2e/e2e-hcc-rollout-readiness.sh
 
 .PHONY: test-e2e-stateless-multinode
 test-e2e-stateless-multinode: ## Run stateless multi-node lane (opt-in: STATELESS_MULTINODE_GATE=1; needs >=2 schedulable nodes; exit 3 = cross-node UNVERIFIED)
