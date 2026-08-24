@@ -51,6 +51,14 @@ vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
 }))
 
+vi.mock('../src/routes/admin/hostSpecValidation.js', async () => {
+  const actual = await vi.importActual('../src/routes/admin/hostSpecValidation.js')
+  return {
+    ...actual,
+    validateHostSpec: vi.fn().mockResolvedValue(null),
+  }
+})
+
 const { pool } = await import('../src/db.js')
 
 const { config } = await import('../src/config.js')
@@ -62,12 +70,16 @@ const { createAdminCodexSubscriptionRouter } =
 function makeGateway(materialize: () => Promise<void> = async () => {}) {
   return {
     listResource: vi.fn().mockResolvedValue([]),
+    getResource: vi.fn(),
+    updateResource: vi.fn(),
     llmAllowedModelsConfigMap: () => ({ materialize }),
   }
 }
 
 function makeAuthedApp(gateway?: {
   listResource: ReturnType<typeof vi.fn>
+  getResource?: ReturnType<typeof vi.fn>
+  updateResource?: ReturnType<typeof vi.fn>
   llmAllowedModelsConfigMap?: () => { materialize: () => Promise<void> }
 }) {
   const app = express()
@@ -126,6 +138,7 @@ describe('admin Codex subscription routes', () => {
     for (const fn of Object.values(oauth)) fn.mockReset()
     catalog.loadSecrets.mockReset()
     catalog.sync.mockReset()
+    vi.mocked(pool.query).mockReset()
   })
 
   it('returns 404 while the feature flag is off', async () => {
@@ -422,5 +435,168 @@ describe('admin Codex subscription routes', () => {
     expect(res.status).toBe(200)
     expect(materialize).not.toHaveBeenCalled()
     assertNoLeak(res.body)
+  })
+
+  it('rejects creating a reserved unassigned connection key', async () => {
+    const res = await request(app)
+      .post('/admin/llm/providers/codex-subscription/connections')
+      .send({ displayName: 'Nope', connectionKey: 'unassigned' })
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid_connection_key' })
+    expect(vi.mocked(pool.query).mock.calls).toEqual([])
+  })
+
+  it('lists assignable Codex hosts next to connections', async () => {
+    vi.mocked(pool.query).mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    const gateway = makeGateway()
+    gateway.listResource.mockResolvedValue([
+      {
+        metadata: { name: 'chatllm' },
+        spec: {
+          model: {
+            provider: 'codex-subscription',
+            connectionRef: 'codex-aaa',
+          },
+        },
+      },
+      {
+        metadata: { name: 'other' },
+        spec: { model: { provider: 'openai', name: 'gpt-5.4' } },
+      },
+    ])
+    const res = await request(makeAuthedApp(gateway)).get(
+      '/admin/llm/providers/codex-subscription/connections'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.assignableHosts).toEqual([
+      { name: 'chatllm', connectionRef: 'codex-aaa', displayName: 'chatllm' },
+    ])
+  })
+
+  it('unbinds one host to unassigned without revoking', async () => {
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'chatllm', resourceVersion: '11' },
+      spec: {
+        model: { provider: 'codex-subscription', name: 'gpt-5.6-luna', connectionRef: 'codex-aaa' },
+      },
+    })
+    gateway.updateResource.mockResolvedValue({})
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/unbind'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ host: 'chatllm', connectionRef: 'unassigned' })
+    expect(oauth.revoke).not.toHaveBeenCalled()
+    expect(gateway.updateResource).toHaveBeenCalledWith(
+      'hosts',
+      'chatllm',
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          model: expect.objectContaining({ connectionRef: 'unassigned' }),
+        }),
+      }),
+      expect.any(String)
+    )
+  })
+
+  it('refuses unbind when the host list cannot be read', async () => {
+    const gateway = makeGateway()
+    gateway.getResource.mockRejectedValue(new Error('k8s down'))
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/unbind'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'hosts_unavailable' })
+    expect(gateway.updateResource).not.toHaveBeenCalled()
+  })
+
+  it('refuses unbind when the host is bound to another grant', async () => {
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'chatllm' },
+      spec: {
+        model: { provider: 'codex-subscription', connectionRef: 'codex-bbb' },
+      },
+    })
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/unbind'
+    )
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'connection_mismatch' })
+    expect(gateway.updateResource).not.toHaveBeenCalled()
+  })
+
+  it('binds an unassigned host and can switch from another named grant', async () => {
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValueOnce({
+      metadata: { name: 'chatllm' },
+      spec: {
+        model: { provider: 'codex-subscription', connectionRef: 'unassigned' },
+      },
+    })
+    gateway.updateResource.mockResolvedValue({})
+    const first = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
+    )
+    expect(first.status).toBe(200)
+    expect(first.body).toEqual({ host: 'chatllm', connectionRef: 'codex-aaa' })
+
+    gateway.getResource.mockResolvedValueOnce({
+      metadata: { name: 'chatllm' },
+      spec: {
+        model: { provider: 'codex-subscription', connectionRef: 'codex-bbb' },
+      },
+    })
+    const switched = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
+    )
+    expect(switched.status).toBe(200)
+    expect(switched.body).toEqual({ host: 'chatllm', connectionRef: 'codex-aaa' })
+    expect(oauth.revoke).not.toHaveBeenCalled()
+  })
+
+  it('rejects bind when the Host connectionRef is empty', async () => {
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'chatllm' },
+      spec: { model: { provider: 'codex-subscription' } },
+    })
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
+    )
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'empty_connection_ref' })
+    expect(gateway.updateResource).not.toHaveBeenCalled()
+    expect(oauth.revoke).not.toHaveBeenCalled()
+  })
+
+  it('revokes a grant without rewriting Host CRs', async () => {
+    const gateway = makeGateway()
+    oauth.revoke.mockResolvedValue({
+      connectionKey: 'codex-aaa',
+      status: 'revoked',
+      credentialRevision: 3,
+    })
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/revoke'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('revoked')
+    expect(gateway.updateResource).not.toHaveBeenCalled()
+  })
+
+  it('rejects bind on a non-Codex host', async () => {
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'api-agent' },
+      spec: { model: { provider: 'openai', name: 'gpt-5.4' } },
+    })
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/api-agent/bind'
+    )
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'not_codex_host' })
+    expect(gateway.updateResource).not.toHaveBeenCalled()
   })
 })

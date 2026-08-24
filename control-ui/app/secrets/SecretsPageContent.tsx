@@ -3,12 +3,13 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { CodexSubscriptionHub } from '@components/CodexSubscriptionHub'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SecretsTable } from '@components/SecretsTable'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, isSilentApiError } from '@lib/api'
 
-export type SecretScope = 'llm' | 'mcp' | 'recipe'
+export type SecretScope = 'llm' | 'mcp' | 'recipe' | 'subscription'
 
 type SecretItem = {
   name?: string
@@ -39,6 +40,16 @@ export function SecretsPageContent({ activeScope }: { activeScope: SecretScope }
   useEffect(() => {
     void loadAll()
   }, [])
+
+  if (activeScope === 'subscription') {
+    return (
+      <AuthGate>
+        <DashboardLayout>
+          <CodexSubscriptionHub />
+        </DashboardLayout>
+      </AuthGate>
+    )
+  }
 
   return (
     <AuthGate>

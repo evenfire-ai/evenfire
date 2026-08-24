@@ -2,10 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encryption.js'
 import {
   CodexSubscriptionFingerprintConflictError,
+  CodexSubscriptionInvalidConnectionKeyError,
   CodexSubscriptionStaleRevisionError,
+  assertCodexConnectionKey,
   generateCodexConnectionKey,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
+  normalizeCodexConnectionKey,
+  readHostCodexConnectionRef,
   rotateCodexSubscriptionCredentials,
 } from '../src/services/codexSubscriptionConnection.js'
 
@@ -163,6 +167,17 @@ describe('codex subscription connection repository', () => {
     expect(sql).toMatch(/credential_revision = \$/)
     expect(sql).toMatch(/revoked_at IS NULL/)
     expect(sql).not.toMatch(/revoked_at = NULL/)
+  })
+
+  it('rejects the reserved unassigned key and keeps it on Host reads', () => {
+    expect(() => assertCodexConnectionKey('unassigned')).toThrow(
+      CodexSubscriptionInvalidConnectionKeyError
+    )
+    expect(readHostCodexConnectionRef('unassigned')).toBe('unassigned')
+    expect(readHostCodexConnectionRef('')).toBe('deployment-default')
+    expect(readHostCodexConnectionRef('codex-aaa')).toBe('codex-aaa')
+    expect(normalizeCodexConnectionKey('unassigned')).toBe('unassigned')
+    expect(normalizeCodexConnectionKey('')).toBe('deployment-default')
   })
 
   it('generates distinct identity keys that are not derived from the display name', () => {

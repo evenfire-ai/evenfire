@@ -504,3 +504,25 @@ describe('SecretsTable — recipe pending refs', () => {
     expect(mockPush).toHaveBeenCalledWith('/secrets/recipe/ui-creds/edit?namespace=sandbox-ui')
   })
 })
+
+describe('SecretsTable — LLM empty state', () => {
+  it('links ChatGPT subscriptions to the Subscription hub', async () => {
+    rtlRender(
+      <ToastProvider>
+        <SecretsTable
+          activeScope="llm"
+          items={[]}
+          onChanged={async () => {}}
+          onCreateLlmSecret={() => {}}
+          onCreateMcpSecret={() => {}}
+          onCreateRecipeSecret={() => {}}
+          onCreateRecipeSecretFor={() => {}}
+        />
+      </ToastProvider>
+    )
+    const link = await screen.findByRole('link', {
+      name: 'ChatGPT subscriptions are managed in the Subscription tab.',
+    })
+    expect(link).toHaveAttribute('href', '/secrets/subscription')
+  })
+})

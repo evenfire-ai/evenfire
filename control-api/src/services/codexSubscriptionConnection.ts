@@ -3,17 +3,33 @@ import type { DbClient } from '../db.js'
 import { decryptOAuthSecret, encryptOAuthSecret } from '../oauth/encryption.js'
 
 export const CODEX_SUBSCRIPTION_CONNECTION_KEY = 'deployment-default' as const
+/** Fail-closed Host sentinel. Not a grant row; never maps to deployment-default. */
+export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned' as const
 
 const CONNECTION_KEY_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 
+export function isCodexUnassignedConnectionKey(value?: string | null): boolean {
+  return typeof value === 'string' && value.trim() === CODEX_UNASSIGNED_CONNECTION_KEY
+}
+
+/**
+ * Host spec reader: empty/missing becomes deployment-default; `unassigned` stays.
+ */
+export function readHostCodexConnectionRef(value?: string | null): string {
+  const trimmed = typeof value === 'string' ? value.trim() : ''
+  if (!trimmed) return CODEX_SUBSCRIPTION_CONNECTION_KEY
+  return trimmed
+}
+
 export function normalizeCodexConnectionKey(value?: string | null): string {
   const trimmed = typeof value === 'string' ? value.trim() : ''
+  if (isCodexUnassignedConnectionKey(trimmed)) return CODEX_UNASSIGNED_CONNECTION_KEY
   return trimmed || CODEX_SUBSCRIPTION_CONNECTION_KEY
 }
 
 export function assertCodexConnectionKey(value: string): string {
   const key = value.trim()
-  if (!CONNECTION_KEY_RE.test(key)) {
+  if (!CONNECTION_KEY_RE.test(key) || isCodexUnassignedConnectionKey(key)) {
     throw new CodexSubscriptionInvalidConnectionKeyError(key)
   }
   return key

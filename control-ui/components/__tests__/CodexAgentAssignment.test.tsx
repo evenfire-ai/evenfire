@@ -6,8 +6,8 @@ import {
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
   pollCodexDevice,
-  revokeCodexSubscription,
   startCodexDeviceConnect,
+  unbindCodexHost,
 } from '@lib/codexSubscription'
 import { CodexAgentAssignment } from '../CodexAgentAssignment'
 import { ToastProvider } from '../Toast'
@@ -36,7 +36,7 @@ vi.mock('@lib/codexSubscription', async importOriginal => {
     createCodexSubscriptionConnection: vi.fn(),
     startCodexDeviceConnect: vi.fn(),
     pollCodexDevice: vi.fn(),
-    revokeCodexSubscription: vi.fn(),
+    unbindCodexHost: vi.fn(),
     syncCodexSubscriptionCatalog: vi.fn(),
   }
 })
@@ -67,6 +67,7 @@ function renderAssignment(connectionRef: string, onConnectionRefChange = vi.fn()
       <ToastProvider>
         <CodexAgentAssignment
           connectionRef={connectionRef}
+          hostName="chatllm"
           onConnectionRefChange={onConnectionRefChange}
         />
       </ToastProvider>
@@ -172,20 +173,35 @@ describe('CodexAgentAssignment', () => {
     expect(screen.queryByTestId('codex-device-code')).not.toBeInTheDocument()
   })
 
-  it('surfaces a revoke API error instead of swallowing it', async () => {
+  it('does not expose grant Revoke on the agent assignment surface', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'team-plus', displayName: 'Team Plus' }),
+    ])
+    renderAssignment('team-plus')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Remove from this agent' })).toBeEnabled()
+    })
+    expect(screen.queryByRole('button', { name: 'Revoke', exact: true })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Manage subscription' })).toHaveAttribute(
+      'href',
+      '/secrets/subscription'
+    )
+  })
+
+  it('unbinds this agent without calling revoke', async () => {
     vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
       connection({ connectionKey: 'team-plus', displayName: 'Team Plus' }),
     ])
     confirmMock.mockResolvedValue(true)
-    vi.mocked(revokeCodexSubscription).mockRejectedValue(new Error('revoke exploded'))
+    vi.mocked(unbindCodexHost).mockResolvedValue({ host: 'chatllm', connectionRef: 'unassigned' })
     const { onConnectionRefChange } = renderAssignment('team-plus')
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Revoke' })).toBeEnabled()
+      expect(screen.getByRole('button', { name: 'Remove from this agent' })).toBeEnabled()
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from this agent' }))
     await waitFor(() => {
-      expect(screen.getByText('revoke exploded')).toBeInTheDocument()
+      expect(unbindCodexHost).toHaveBeenCalledWith('team-plus', 'chatllm')
     })
-    expect(onConnectionRefChange).not.toHaveBeenCalled()
+    expect(onConnectionRefChange).toHaveBeenCalledWith('unassigned')
   })
 })

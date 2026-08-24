@@ -550,7 +550,12 @@ export default function HostDetailsPage() {
           provider: providerDraft,
           name: modelNameDraft.trim(),
           ...(providerDraft === 'codex-subscription'
-            ? { connectionRef: connectionRefDraft.trim() || 'deployment-default' }
+            ? {
+                connectionRef:
+                  connectionRefDraft.trim() === 'unassigned'
+                    ? 'unassigned'
+                    : connectionRefDraft.trim() || 'deployment-default',
+              }
             : {}),
         },
       }
@@ -1069,6 +1074,7 @@ export default function HostDetailsPage() {
                     providerDraft === 'codex-subscription' ? (
                       <CodexAgentAssignment
                         connectionRef={connectionRefDraft}
+                        hostName={routeName}
                         onConnectionRefChange={setConnectionRefDraft}
                         onModelsChange={setCodexModels}
                         disabled={busy}

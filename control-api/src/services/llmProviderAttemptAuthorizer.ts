@@ -15,6 +15,7 @@ import { getCodexCatalogModelState } from './codexSubscriptionCatalog.js'
 import {
   CODEX_SUBSCRIPTION_CONNECTION_KEY,
   getSafeCodexSubscriptionConnection,
+  isCodexUnassignedConnectionKey,
   normalizeCodexConnectionKey,
 } from './codexSubscriptionConnection.js'
 import {
@@ -49,6 +50,7 @@ export type LlmProviderAttemptAuthorizeErrorCode =
   | 'model_not_allowed'
   | 'budget_denied'
   | 'connection_unavailable'
+  | 'unassigned_connection'
   | 'host_binding_mismatch'
   | 'unknown_field'
   | 'invalid_request'
@@ -246,6 +248,12 @@ export async function authorizeLlmProviderAttempt(
   const connectionKey = normalizeCodexConnectionKey(
     await resolvedDeps.resolveConnectionKey(caller.hostRef)
   )
+  if (isCodexUnassignedConnectionKey(connectionKey)) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'unassigned_connection',
+      'Host has no ChatGPT subscription assigned'
+    )
+  }
   return resolvedDeps.withTransaction(async tx => {
     const db: DbClient = tx
     const connection = await resolvedDeps.getConnection(db, connectionKey)

@@ -13,6 +13,7 @@ import {
   syncCodexSubscriptionCatalog,
 } from '../../services/codexSubscriptionCatalog.js'
 import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   CodexSubscriptionInvalidConnectionKeyError,
   assertCodexConnectionKey,
   createNamedCodexSubscriptionConnection,
@@ -20,6 +21,7 @@ import {
   listSafeCodexSubscriptionConnections,
   loadCodexSubscriptionSecrets,
   normalizeCodexConnectionKey,
+  readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
   type CodexOAuthDeps,
@@ -37,11 +39,13 @@ import {
   isPublicCodexCliClient,
   resolveCodexControlUiBaseUrl,
 } from '../../services/codexSubscriptionRedirectUri.js'
+import { getModelAllowlistState, isModelAllowed } from '../../services/llmAllowedModels.js'
 import { publishAllowedModelsConfigMapAfterGrantChange } from '../../services/llmAllowedModelsConfigMap.js'
 import {
   adminCodexReadRateLimits,
   adminCodexWriteRateLimits,
 } from '../workflows/shared/rateLimit.js'
+import { validateHostSpec } from './hostSpecValidation.js'
 
 const log = rootLogger.child({ module: 'admin-codex-subscription' })
 const BASE = '/admin/llm/providers/codex-subscription'
@@ -114,11 +118,37 @@ function sendOAuthError(
   throw err
 }
 
-function hostConnectionRef(spec: unknown): string | null {
+type HostRecord = {
+  metadata?: { name?: string; resourceVersion?: string }
+  spec?: unknown
+}
+
+function hostModel(spec: unknown): { provider?: string; connectionRef?: string } | null {
   if (!spec || typeof spec !== 'object') return null
   const model = (spec as { model?: { provider?: string; connectionRef?: string } }).model
+  if (!model || typeof model !== 'object') return null
+  return model
+}
+
+function hostConnectionRef(spec: unknown): string | null {
+  const model = hostModel(spec)
   if (!model || model.provider !== 'codex-subscription') return null
-  return normalizeCodexConnectionKey(model.connectionRef)
+  return readHostCodexConnectionRef(model.connectionRef)
+}
+
+function assignableHostFromRecord(
+  host: HostRecord
+): { name: string; connectionRef: string; displayName: string } | null {
+  const name = String(host.metadata?.name ?? '').trim()
+  const connectionRef = hostConnectionRef(host.spec)
+  if (!name || !connectionRef) return null
+  return { name, connectionRef, displayName: name }
+}
+
+function storedCodexConnectionRef(spec: unknown): string | null {
+  const model = hostModel(spec)
+  if (!model || model.provider !== 'codex-subscription') return null
+  return typeof model.connectionRef === 'string' ? model.connectionRef.trim() : ''
 }
 
 export function createAdminCodexSubscriptionRouter(
@@ -127,30 +157,118 @@ export function createAdminCodexSubscriptionRouter(
 ): Router {
   const router = Router()
 
-  async function listHostsOrUnavailable(): Promise<Array<{
-    metadata?: { name?: string }
-    spec?: unknown
-  }> | null> {
+  async function listHostsOrUnavailable(): Promise<HostRecord[] | null> {
     if (!gateway) return null
     try {
-      return (await gateway.listResource('hosts', config.hostsNamespace)) as Array<{
-        metadata?: { name?: string }
-        spec?: unknown
-      }>
+      return (await gateway.listResource('hosts', config.hostsNamespace)) as HostRecord[]
     } catch (err) {
       log.warn({ event: 'codex_assigned_hosts_list_failed', err }, 'failed to list assigned hosts')
       return null
     }
   }
 
-  function hostsForConnection(
-    hosts: Array<{ metadata?: { name?: string }; spec?: unknown }>,
-    connectionKey: string
-  ): Array<{ name: string }> {
+  function hostsForConnection(hosts: HostRecord[], connectionKey: string): Array<{ name: string }> {
     return hosts
       .filter(host => hostConnectionRef(host.spec) === connectionKey)
       .map(host => ({ name: String(host.metadata?.name ?? '') }))
       .filter(host => host.name)
+  }
+
+  function collectAssignableHosts(
+    hosts: HostRecord[]
+  ): Array<{ name: string; connectionRef: string; displayName: string }> {
+    return hosts
+      .map(assignableHostFromRecord)
+      .filter((row): row is { name: string; connectionRef: string; displayName: string } =>
+        Boolean(row)
+      )
+  }
+
+  async function loadHost(
+    hostRef: string
+  ): Promise<{ ok: true; host: HostRecord } | { ok: false; status: number; error: string }> {
+    if (!gateway) return { ok: false, status: 503, error: 'hosts_unavailable' }
+    try {
+      const host = (await gateway.getResource(
+        'hosts',
+        hostRef,
+        config.hostsNamespace
+      )) as HostRecord
+      return { ok: true, host }
+    } catch (err) {
+      const name = err instanceof Error ? err.name : ''
+      const status = (err as { httpStatus?: number; code?: number } | null)?.httpStatus
+      if (name === 'K8sNotFoundError' || status === 404) {
+        return { ok: false, status: 404, error: 'host_not_found' }
+      }
+      log.warn(
+        { event: 'codex_host_read_failed', err, hostRef },
+        'failed to read host for bind/unbind'
+      )
+      return { ok: false, status: 503, error: 'hosts_unavailable' }
+    }
+  }
+
+  async function writeHostConnectionRef(
+    hostRef: string,
+    host: HostRecord,
+    nextConnectionRef: string
+  ): Promise<{ ok: true } | { ok: false; status: number; error: string; message?: string }> {
+    if (!gateway) return { ok: false, status: 503, error: 'hosts_unavailable' }
+    const spec =
+      host.spec && typeof host.spec === 'object'
+        ? { ...(host.spec as Record<string, unknown>) }
+        : {}
+    const model =
+      spec.model && typeof spec.model === 'object'
+        ? { ...(spec.model as Record<string, unknown>) }
+        : {}
+    model.provider = 'codex-subscription'
+    model.connectionRef = nextConnectionRef
+    spec.model = model
+    const stored =
+      host.spec && typeof host.spec === 'object'
+        ? (host.spec as Record<string, unknown>)
+        : undefined
+    const issue = await validateHostSpec(
+      spec,
+      {
+        isModelAllowed: (provider, model) => isModelAllowed(provider, model),
+        getModelAllowlistState,
+      },
+      {
+        stored,
+        hostRef: { namespace: config.hostsNamespace, name: hostRef },
+      }
+    )
+    if (issue) {
+      return {
+        ok: false,
+        status: 422,
+        error: 'invalid_host_spec',
+        message: issue.errors[0]?.message,
+      }
+    }
+    try {
+      await gateway.updateResource(
+        'hosts',
+        hostRef,
+        {
+          metadata: host.metadata?.resourceVersion
+            ? { resourceVersion: host.metadata.resourceVersion }
+            : undefined,
+          spec,
+        },
+        config.hostsNamespace
+      )
+      return { ok: true }
+    } catch (err) {
+      log.warn(
+        { event: 'codex_host_write_failed', err, hostRef },
+        'failed to write host connectionRef'
+      )
+      return { ok: false, status: 503, error: 'hosts_unavailable' }
+    }
   }
 
   async function publishRuntimeAllowlist(): Promise<void> {
@@ -192,7 +310,7 @@ export function createAdminCodexSubscriptionRouter(
 
   async function withAssignedHosts<T extends { connectionKey: string }>(
     connection: T,
-    hosts?: Array<{ metadata?: { name?: string }; spec?: unknown }> | null
+    hosts?: HostRecord[] | null
   ) {
     const resolved = hosts === undefined ? await listHostsOrUnavailable() : hosts
     if (resolved === null) {
@@ -363,7 +481,14 @@ export function createAdminCodexSubscriptionRouter(
       for (const row of rows) {
         connections.push(await withAssignedHosts(row, hosts))
       }
-      res.status(200).json({ connections })
+      if (hosts === null) {
+        res.status(200).json({ connections, assignableHostsUnavailable: true })
+        return
+      }
+      res.status(200).json({
+        connections,
+        assignableHosts: collectAssignableHosts(hosts),
+      })
     })
   )
 
@@ -422,6 +547,118 @@ export function createAdminCodexSubscriptionRouter(
       const models = await listCodexCatalogModels(dbClient(), connection.id)
       res.status(200).json({ models })
     })
+  )
+
+  router.get(
+    `${BASE}/assignable-hosts`,
+    ...adminCodexReadRateLimits(),
+    asyncHandler(async (_req, res) => {
+      if (!config.codexSubscriptionEnabled) {
+        res.status(404).json({ error: 'disabled' })
+        return
+      }
+      const hosts = await listHostsOrUnavailable()
+      if (hosts === null) {
+        res.status(503).json({ error: 'hosts_unavailable' })
+        return
+      }
+      res.status(200).json({ hosts: collectAssignableHosts(hosts) })
+    })
+  )
+
+  const bindUnbindHandler = (action: 'bind' | 'unbind') =>
+    asyncHandler(async (req, res) => {
+      if (!config.codexSubscriptionEnabled) {
+        res.status(404).json({ error: 'disabled' })
+        return
+      }
+      let connectionKey: string
+      try {
+        connectionKey = assertCodexConnectionKey(
+          typeof req.params.key === 'string' ? req.params.key : ''
+        )
+      } catch (err) {
+        sendOAuthError(res, err)
+        return
+      }
+      const hostRef = typeof req.params.hostRef === 'string' ? req.params.hostRef.trim() : ''
+      if (!hostRef) {
+        res.status(400).json({ error: 'invalid_host_ref' })
+        return
+      }
+
+      const loaded = await loadHost(hostRef)
+      if (!loaded.ok) {
+        res.status(loaded.status).json({ error: loaded.error })
+        return
+      }
+      const storedRef = storedCodexConnectionRef(loaded.host.spec)
+      if (storedRef === null) {
+        res.status(409).json({ error: 'not_codex_host' })
+        return
+      }
+      // Bind must see the stored ref. Empty/missing is not deployment-default.
+      if (action === 'bind' && !storedRef) {
+        res.status(409).json({ error: 'empty_connection_ref' })
+        return
+      }
+      const currentRef = storedRef || CODEX_SUBSCRIPTION_CONNECTION_KEY
+
+      if (action === 'unbind') {
+        if (currentRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
+          res.status(200).json({
+            host: hostRef,
+            connectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+          })
+          return
+        }
+        if (currentRef !== connectionKey) {
+          res.status(409).json({ error: 'connection_mismatch' })
+          return
+        }
+        const written = await writeHostConnectionRef(
+          hostRef,
+          loaded.host,
+          CODEX_UNASSIGNED_CONNECTION_KEY
+        )
+        if (!written.ok) {
+          res.status(written.status).json({
+            error: written.error,
+            ...(written.message ? { message: written.message } : {}),
+          })
+          return
+        }
+        res.status(200).json({
+          host: hostRef,
+          connectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+        })
+        return
+      }
+
+      if (currentRef === connectionKey) {
+        res.status(200).json({ host: hostRef, connectionRef: connectionKey })
+        return
+      }
+      const written = await writeHostConnectionRef(hostRef, loaded.host, connectionKey)
+      if (!written.ok) {
+        res.status(written.status).json({
+          error: written.error,
+          ...(written.message ? { message: written.message } : {}),
+        })
+        return
+      }
+      res.status(200).json({ host: hostRef, connectionRef: connectionKey })
+    })
+
+  router.post(
+    `${BASE}/connections/:key/hosts/:hostRef/unbind`,
+    ...adminCodexWriteRateLimits(),
+    bindUnbindHandler('unbind')
+  )
+  router.post(
+    `${BASE}/connections/:key/hosts/:hostRef/bind`,
+    ...adminCodexWriteRateLimits(),
+    bindUnbindHandler('bind')
   )
 
   return router

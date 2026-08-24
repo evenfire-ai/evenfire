@@ -3,15 +3,17 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexSubscriptionConnectionView,
   createCodexSubscriptionConnection,
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
   pollCodexDevice,
-  revokeCodexSubscription,
   startCodexDeviceConnect,
   syncCodexSubscriptionCatalog,
+  unbindCodexHost,
 } from '@lib/codexSubscription'
 import {
   type CodexSubscriptionCapability,
@@ -26,17 +28,15 @@ import {
 
 export type CodexAgentAssignmentProps = {
   connectionRef: string
+  hostName?: string
   onConnectionRefChange: (connectionKey: string) => void
   onModelsChange?: (models: string[]) => void
   disabled?: boolean
 }
 
-function assignedHostNames(connection: CodexSubscriptionConnectionView): string[] {
-  return (connection.assignedHosts ?? []).map(host => host.name).filter(Boolean)
-}
-
 export function CodexAgentAssignment({
   connectionRef,
+  hostName,
   onConnectionRefChange,
   onModelsChange,
   disabled = false,
@@ -163,29 +163,21 @@ export function CodexAgentAssignment({
     }
   }
 
-  async function handleRevoke() {
-    if (!selected) return
-    const names = assignedHostNames(selected)
+  async function handleUnbind() {
+    if (!selected || !hostName) return
     const confirmed = await confirm({
-      title: 'Revoke this ChatGPT subscription?',
-      message: selected.assignedHostsUnavailable
-        ? 'The agent assignment list could not be loaded. Revoke still fail-closes every Host that points at this grant.'
-        : names.length > 0
-          ? `This subscription is used by ${names.length} agent(s): ${names.join(', ')}. Revoke disconnects all of them.${
-              selected.connectionKey === 'deployment-default'
-                ? ' Workflow recipes that use a ChatGPT subscription also fail closed on this grant.'
-                : ''
-            }`
-          : 'Revoke disconnects this ChatGPT grant. Assigned agents keep the reference and stop authorizing.',
-      confirmLabel: 'Revoke',
+      title: `Remove ${hostName} from this subscription?`,
+      message: `${hostName} will stop using "${selected.displayName ?? selected.connectionKey}" and will have no ChatGPT subscription assigned until you pick another one. The subscription stays connected and other agents are not affected.`,
+      confirmLabel: 'Remove agent',
     })
     if (!confirmed) return
     setBusy(true)
     try {
-      await revokeCodexSubscription(selected.connectionKey)
+      await unbindCodexHost(selected.connectionKey, hostName)
+      onConnectionRefChange(CODEX_UNASSIGNED_CONNECTION_KEY)
       await load()
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Revoke failed', { tone: 'error' })
+      showToast(err instanceof Error ? err.message : 'Could not remove agent', { tone: 'error' })
     } finally {
       setBusy(false)
     }
@@ -193,7 +185,12 @@ export function CodexAgentAssignment({
 
   if (!enabled) return null
 
-  const uiStatus = selected ? mapConnectionStatus(selected.status) : 'disconnected'
+  const unassigned = connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY
+  const uiStatus = selected
+    ? mapConnectionStatus(selected.status)
+    : unassigned
+      ? 'disconnected'
+      : 'unavailable'
 
   return (
     <div className="cu-form-stack" data-testid="codex-agent-assignment">
@@ -206,8 +203,10 @@ export function CodexAgentAssignment({
           disabled={disabled || busy}
           onChange={event => onConnectionRefChange(event.target.value)}
         >
-          {!selected && connectionRef ? (
-            <option value={connectionRef}>{connectionRef} (unavailable)</option>
+          {unassigned || (!selected && connectionRef) ? (
+            <option value={connectionRef || CODEX_UNASSIGNED_CONNECTION_KEY}>
+              {unassigned ? 'No subscription assigned' : `${connectionRef} (unavailable)`}
+            </option>
           ) : null}
           {assignable.map(row => (
             <option
@@ -224,7 +223,7 @@ export function CodexAgentAssignment({
       <div className="cu-field">
         <span className="cu-settings-row__label">Status</span>
         <span className={statusTagClass(uiStatus)} data-testid="codex-connection-status">
-          {statusLabel(uiStatus)}
+          {unassigned ? 'No subscription assigned' : statusLabel(uiStatus)}
         </span>
       </div>
       {creating ? (
@@ -275,11 +274,21 @@ export function CodexAgentAssignment({
         <button
           type="button"
           className="cu-btn cu-btn--ghost"
-          onClick={() => void handleRevoke()}
-          disabled={disabled || busy || !selected || selected.status === 'revoked'}
+          onClick={() => void handleUnbind()}
+          disabled={
+            disabled ||
+            busy ||
+            !selected ||
+            !hostName ||
+            selected.status === 'revoked' ||
+            unassigned
+          }
         >
-          Revoke
+          Remove from this agent
         </button>
+        <a className="cu-btn cu-btn--ghost" href={CONTROL_ROUTES.secrets.subscription}>
+          Manage subscription
+        </a>
       </div>
       {userCode ? (
         <div className="cu-banner" data-testid="codex-device-code">

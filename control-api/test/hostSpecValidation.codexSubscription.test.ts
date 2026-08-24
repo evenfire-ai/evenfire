@@ -49,6 +49,22 @@ describe('codex-subscription Host admission', () => {
     expect(res!.errors[0].field).toBe('spec.secretRef')
   })
 
+  it('persists an unassigned connectionRef without rematching deployment-default', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    const isModelAllowed = vi.fn().mockResolvedValue(false)
+    const spec = {
+      model: {
+        provider: 'codex-subscription',
+        name: 'gpt-5.1',
+        connectionRef: 'unassigned',
+      },
+    }
+    const res = await validateHostSpec(spec, { isModelAllowed })
+    expect(res).toBeNull()
+    expect(isModelAllowed).not.toHaveBeenCalled()
+    expect((spec.model as { connectionRef?: string }).connectionRef).toBe('unassigned')
+  })
+
   it('defaults a missing connectionRef to deployment-default and checks that grant', async () => {
     process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
     const isModelAllowed = vi.fn().mockResolvedValue(true)

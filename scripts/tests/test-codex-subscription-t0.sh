@@ -156,7 +156,10 @@ run_group "control-api" "control-api" \
   "test/codexSubscriptionRedirectUri.test.ts" \
   "test/routes.admin.codexSubscription.test.ts" \
   "test/routes.auth.codexSubscriptionCallback.test.ts" \
+  "test/routes.mcp-host.llmProviderAttempts.test.ts" \
+  "test/hostSpecValidation.codexSubscription.test.ts" \
   "test/llmProviders.test.ts" \
+  "test/services.codexSubscriptionConnection.test.ts" \
   "test/services.codexSubscriptionOAuth.test.ts" \
   "test/services.codexSubscriptionCatalog.test.ts" \
   "test/services.llmProviderAttemptAuthorizer.test.ts" \
@@ -189,7 +192,8 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/networkPolicyFactory.codex.test.ts"
 
 run_group "control-ui" "control-ui" \
-  "components/__tests__/CodexSubscriptionConnection.test.tsx" \
+  "components/__tests__/CodexAgentAssignment.test.tsx" \
+  "components/__tests__/CodexSubscriptionHub.test.tsx" \
   "components/__tests__/HostWizard.test.tsx" \
   "components/__tests__/RecipeEditor.test.tsx"
 

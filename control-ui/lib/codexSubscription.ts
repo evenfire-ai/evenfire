@@ -15,6 +15,14 @@ export type CodexOAuthIntent = 'connect' | 'reconnect' | 'replace'
 
 export type CodexAssignedHost = { name: string }
 
+export type CodexAssignableHost = {
+  name: string
+  connectionRef: string
+  displayName?: string
+}
+
+export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned'
+
 export type CodexSubscriptionConnectionView = {
   id?: string
   connectionKey: string
@@ -214,13 +222,73 @@ export function sanitizeCodexCatalogSync(raw: unknown): CodexCatalogSyncView {
   }
 }
 
+function sanitizeAssignableHost(raw: unknown): CodexAssignableHost | null {
+  if (!isPlainObject(raw)) return null
+  const name = pickString(raw.name)
+  const connectionRef = pickString(raw.connectionRef)
+  if (!name || !connectionRef) return null
+  return { name, connectionRef, displayName: pickString(raw.displayName) ?? name }
+}
+
 export async function listCodexSubscriptionConnections(): Promise<
   CodexSubscriptionConnectionView[]
 > {
+  const fleet = await listCodexSubscriptionFleet()
+  return fleet.connections
+}
+
+export async function listCodexSubscriptionFleet(): Promise<{
+  connections: CodexSubscriptionConnectionView[]
+  assignableHosts: CodexAssignableHost[]
+  assignableHostsUnavailable: boolean
+}> {
   const raw = (await apiGet(`${CODEX_SUBSCRIPTION_API_BASE}/connections`)) as {
     connections?: unknown
+    assignableHosts?: unknown
+    assignableHostsUnavailable?: unknown
   }
-  return Array.isArray(raw.connections) ? raw.connections.map(sanitizeCodexConnection) : []
+  const connections = Array.isArray(raw.connections)
+    ? raw.connections.map(sanitizeCodexConnection)
+    : []
+  return {
+    connections,
+    assignableHosts: Array.isArray(raw.assignableHosts)
+      ? raw.assignableHosts
+          .map(sanitizeAssignableHost)
+          .filter((row): row is CodexAssignableHost => Boolean(row))
+      : [],
+    assignableHostsUnavailable:
+      raw.assignableHostsUnavailable === true ||
+      connections.some(row => row.assignedHostsUnavailable === true),
+  }
+}
+
+export async function unbindCodexHost(
+  connectionKey: string,
+  hostRef: string
+): Promise<{ host: string; connectionRef: string }> {
+  const raw = (await apiSend(
+    'POST',
+    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/hosts/${encodeURIComponent(hostRef)}/unbind`
+  )) as { host?: unknown; connectionRef?: unknown }
+  return {
+    host: pickString(raw.host) ?? hostRef,
+    connectionRef: pickString(raw.connectionRef) ?? CODEX_UNASSIGNED_CONNECTION_KEY,
+  }
+}
+
+export async function bindCodexHost(
+  connectionKey: string,
+  hostRef: string
+): Promise<{ host: string; connectionRef: string }> {
+  const raw = (await apiSend(
+    'POST',
+    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/hosts/${encodeURIComponent(hostRef)}/bind`
+  )) as { host?: unknown; connectionRef?: unknown }
+  return {
+    host: pickString(raw.host) ?? hostRef,
+    connectionRef: pickString(raw.connectionRef) ?? connectionKey,
+  }
 }
 
 export async function createCodexSubscriptionConnection(input: {

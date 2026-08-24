@@ -228,6 +228,17 @@ describe('authorizeLlmProviderAttempt', () => {
     ).rejects.toMatchObject({ code: 'invalid_request' })
   })
 
+  it('rejects an unassigned Host connectionRef as unassigned_connection', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(claims(), body(), {
+        ...current,
+        resolveConnectionKey: async () => 'unassigned',
+      })
+    ).rejects.toMatchObject({ code: 'unassigned_connection' })
+    expect(current.getConnection).not.toHaveBeenCalled()
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
   it('fails closed for every Host on a revoked grant and leaves another grant usable', async () => {
     const teamPlus = connection({
       id: '22222222-2222-4222-8222-222222222222',

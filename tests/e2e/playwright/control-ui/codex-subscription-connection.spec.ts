@@ -1,10 +1,11 @@
 /**
- * Codex subscription — assign, connect, sync, reuse, and revoke from the
- * agent model page.
+ * Codex subscription — assign/unbind on the agent model tab; create, assign,
+ * and revoke from Secrets → Subscription.
  *
  * Guardian: prove the route, not the destination. ChatGPT OAuth is the only
- * mocked external boundary. Happy path starts at `/` and clicks through Agents.
- * Direct `goto` of an agent model tab is not the happy-path entry.
+ * mocked external boundary. Happy path starts at `/` and clicks through the
+ * sidebar. Direct `goto` of an agent model tab or `/secrets/subscription` is
+ * not the happy-path entry.
  */
 import { type Page, expect, test } from '@playwright/test'
 import { controlApi } from '../helpers/api-client'
@@ -90,6 +91,14 @@ async function chooseSubscriptionCredential(page: Page) {
 
 function subscriptionPicker(page: Page) {
   return page.locator('#codex-subscription')
+}
+
+async function openSecretsSubscription(page: Page) {
+  await page.getByRole('link', { name: 'Secrets', exact: true }).click()
+  await expect(page).toHaveURL(/\/secrets\/(llm)?$|\/secrets\/llm$/)
+  await page.getByRole('tab', { name: 'Subscription' }).click()
+  await expect(page).toHaveURL(/\/secrets\/subscription$/)
+  await expect(page.getByTestId('codex-subscription-hub')).toBeVisible()
 }
 
 async function listConnections(): Promise<CodexConnection[]> {
@@ -273,9 +282,7 @@ test.describe('Codex subscription connection', () => {
     await expect(page.getByRole('option', { name: displayName })).toHaveCount(1)
   })
 
-  test('revoking a shared grant from the agent page fail-closes that key only', async ({
-    page,
-  }) => {
+  test('agent models can unbind this host and never expose grant Revoke', async ({ page }) => {
     await page.goto('/')
     await loginControlUiVisible(page)
     await openAgents(page)
@@ -284,7 +291,7 @@ test.describe('Codex subscription connection', () => {
     await chooseSubscriptionCredential(page)
 
     await page.getByRole('button', { name: 'New subscription' }).click()
-    const displayName = `e2e-revoke-${Date.now().toString(36)}`
+    const displayName = `e2e-unbind-${Date.now().toString(36)}`
     await page.getByLabel('New subscription name').fill(displayName)
     const created = page.waitForResponse(
       response =>
@@ -296,35 +303,122 @@ test.describe('Codex subscription connection', () => {
     const createRes = await created
     expect(createRes.ok()).toBe(true)
     const createdBody = (await createRes.json()) as { connectionKey?: string }
-    const revokeKey = String(createdBody.connectionKey)
+    const grantKey = String(createdBody.connectionKey)
+
+    const put = page.waitForResponse(
+      response =>
+        new RegExp(`/api/v1/admin/hosts/${firstName}$`).test(new URL(response.url()).pathname) &&
+        response.request().method() === 'PUT'
+    )
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    expect((await put).ok()).toBe(true)
+
+    await expect(page.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: 'Manage subscription' })).toBeVisible()
+
+    const unbind = page.waitForResponse(
+      response =>
+        new RegExp(
+          `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/hosts/${firstName}/unbind$`
+        ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
+    )
+    await page.getByRole('button', { name: 'Remove from this agent' }).click()
+    await expect(page.getByRole('alertdialog')).toBeVisible()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Remove agent' }).click()
+    const unbindRes = await unbind
+    expect(unbindRes.ok(), `unbind must succeed, got ${unbindRes.status()}`).toBe(true)
+    await expect(page).toHaveURL(new RegExp(`/((?:hosts|agents))/${firstName}/model`))
+    await expect(page.getByTestId('codex-connection-status')).toHaveText(
+      /No subscription assigned/i
+    )
+
+    const host = (await controlApi.getHost(firstName)) as {
+      spec?: { model?: { connectionRef?: string } }
+    }
+    expect(host.spec?.model?.connectionRef).toBe('unassigned')
+    const after = await listConnections()
+    expect(after.find(row => row.connectionKey === grantKey)?.status).not.toBe('revoked')
+  })
+
+  test('Secrets Subscription hub creates, assigns, and is the only revoke path', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await loginControlUiVisible(page)
+    await openAgents(page)
+    await ensureListedAgents(page, 2)
+    await openSecretsSubscription(page)
+
+    await page.getByRole('button', { name: 'Add subscription' }).click()
+    const displayName = `e2e-hub-${Date.now().toString(36)}`
+    await page.getByLabel('New subscription name').fill(displayName)
+    const created = page.waitForResponse(
+      response =>
+        /\/api\/v1\/admin\/llm\/providers\/codex-subscription\/connections$/.test(
+          new URL(response.url()).pathname
+        ) && response.request().method() === 'POST'
+    )
+    await page.getByRole('button', { name: 'Create', exact: true }).click()
+    const createRes = await created
+    expect(createRes.ok()).toBe(true)
+    const createdBody = (await createRes.json()) as { connectionKey?: string }
+    const grantKey = String(createdBody.connectionKey)
+    await expect(page.getByText(displayName)).toBeVisible()
+
+    const grantCard = page.getByTestId(`codex-hub-grant-${grantKey}`)
+    await expect(grantCard.getByRole('heading', { name: 'Assigned' })).toBeVisible()
+    await expect(grantCard.getByRole('heading', { name: 'Available' })).toBeVisible()
+    const assignable = grantCard.getByRole('button', { name: 'Assign' }).first()
+    test.skip((await assignable.count()) === 0, 'hub assign requires a second Codex agent')
+    const bind = page.waitForResponse(
+      response =>
+        new RegExp(
+          `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/hosts/[^/]+/bind$`
+        ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
+    )
+    await assignable.click()
+    const bindRes = await bind
+    expect(bindRes.ok(), `bind must succeed, got ${bindRes.status()}`).toBe(true)
+    const bindBody = (await bindRes.json()) as { host?: string; connectionRef?: string }
+    expect(bindBody.connectionRef).toBe(grantKey)
+    const boundHost = String(bindBody.host)
+    const host = (await controlApi.getHost(boundHost)) as {
+      spec?: { model?: { connectionRef?: string } }
+    }
+    expect(host.spec?.model?.connectionRef).toBe(grantKey)
 
     const revoke = page.waitForResponse(
       response =>
         new RegExp(
-          `/api/v1/admin/llm/providers/codex-subscription/connections/${revokeKey}/revoke$`
+          `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/revoke$`
         ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
     )
-    await page.getByRole('button', { name: 'Revoke', exact: true }).click()
+    await grantCard.getByRole('button', { name: 'Revoke subscription' }).click()
     await expect(page.getByRole('alertdialog')).toBeVisible()
-    await expect(page.getByRole('alertdialog')).toContainText(/agent/i)
-    await page.getByRole('alertdialog').getByRole('button', { name: 'Revoke', exact: true }).click()
-    const response = await revoke
-    expect(response.ok(), `revoke must succeed, got ${response.status()}`).toBe(true)
-    const body = (await response.json()) as { status?: string; connectionKey?: string }
-    expect(body.status).toBe('revoked')
-    expect(body.connectionKey).toBe(revokeKey)
-    await expect(page).toHaveURL(new RegExp(`/((?:hosts|agents))/${firstName}/model`))
-    await expect(page.getByTestId('codex-connection-status')).toHaveText(/Revoked/i)
-    await expect(page.getByRole('button', { name: 'Sync catalog' })).toBeDisabled()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Revoke subscription' }).click()
+    const revokeRes = await revoke
+    expect(revokeRes.ok(), `revoke must succeed, got ${revokeRes.status()}`).toBe(true)
+    const revokeBody = (await revokeRes.json()) as { status?: string; connectionKey?: string }
+    expect(revokeBody.status).toBe('revoked')
+    expect(revokeBody.connectionKey).toBe(grantKey)
+    const afterHost = (await controlApi.getHost(boundHost)) as {
+      spec?: { model?: { connectionRef?: string } }
+    }
+    expect(afterHost.spec?.model?.connectionRef).toBe(grantKey)
+  })
 
-    const after = await listConnections()
-    const revoked = after.find(row => row.connectionKey === revokeKey)
-    expect(revoked?.status).toBe('revoked')
-    const otherLive = after.find(
-      row => row.connectionKey !== revokeKey && row.status === 'connected'
-    )
-    if (otherLive) {
-      expect(otherLive.status).toBe('connected')
+  test('LLM secrets empty state links to the Subscription hub', async ({ page }) => {
+    await page.goto('/')
+    await loginControlUiVisible(page)
+    await page.getByRole('link', { name: 'Secrets', exact: true }).click()
+    await expect(page).toHaveURL(/\/secrets\/llm$/)
+    const link = page.getByRole('link', {
+      name: 'ChatGPT subscriptions are managed in the Subscription tab.',
+    })
+    if (await link.isVisible().catch(() => false)) {
+      await link.click()
+      await expect(page).toHaveURL(/\/secrets\/subscription$/)
+      await expect(page.getByTestId('codex-subscription-hub')).toBeVisible()
     }
   })
 })

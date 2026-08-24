@@ -7,6 +7,10 @@ import {
 } from '@clerum/llm-providers'
 import { rootLogger } from '../../observability/logger.js'
 import {
+  isCodexUnassignedConnectionKey,
+  readHostCodexConnectionRef,
+} from '../../services/codexSubscriptionConnection.js'
+import {
   getModelAllowlistState as getModelAllowlistStateDefault,
   isModelAllowed as isModelAllowedDefault,
 } from '../../services/llmAllowedModels.js'
@@ -340,7 +344,11 @@ export async function validateHostSpec(
     }
     const connectionRef =
       provider === 'codex-subscription' ? resolvedCodexConnectionRef(model) : undefined
-    const allowed = await deps.isModelAllowed(provider, name, connectionRef)
+    const skipCodexAllowlist =
+      provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)
+    const allowed = skipCodexAllowlist
+      ? true
+      : await deps.isModelAllowed(provider, name, connectionRef)
     // Switching connectionRef is a new assignment even when (provider, model)
     // already lived on the Host. A revoked/unknown grant must not ride the
     // identity/channels full-replace tolerance. An unchanged revoked ref stays
@@ -543,23 +551,19 @@ async function maybeWarnStale(
  * the gate skips its rejection.
  */
 function resolvedCodexConnectionRef(model: unknown): string {
-  if (
-    isPlainObject(model) &&
-    typeof model.connectionRef === 'string' &&
-    model.connectionRef.trim()
-  ) {
-    return model.connectionRef.trim()
-  }
-  return 'deployment-default'
+  if (!isPlainObject(model)) return 'deployment-default'
+  return readHostCodexConnectionRef(
+    typeof model.connectionRef === 'string' ? model.connectionRef : null
+  )
 }
 
 function storedCodexConnectionRef(stored: Record<string, unknown> | undefined): string | undefined {
   if (!isPlainObject(stored) || !isPlainObject(stored.model)) return undefined
   const provider = typeof stored.model.provider === 'string' ? stored.model.provider.trim() : ''
   if (provider !== 'codex-subscription') return undefined
-  return typeof stored.model.connectionRef === 'string' && stored.model.connectionRef.trim()
-    ? stored.model.connectionRef.trim()
-    : 'deployment-default'
+  return readHostCodexConnectionRef(
+    typeof stored.model.connectionRef === 'string' ? stored.model.connectionRef : null
+  )
 }
 
 function toleratePair(
@@ -653,11 +657,14 @@ async function validateAllowedModels(
     // catalog can never be offered by a host — unless tolerating a pre-existing
     // incoherence this write does not worsen (Pieza D). A tolerated pair is still
     // added to `offered` so the coherence gate below sees the host as offering it.
-    const allowed = await deps.isModelAllowed(
-      provider,
-      model,
-      provider === 'codex-subscription' ? connectionRef : undefined
-    )
+    const allowed =
+      provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)
+        ? true
+        : await deps.isModelAllowed(
+            provider,
+            model,
+            provider === 'codex-subscription' ? connectionRef : undefined
+          )
     if (!allowed && !toleratePair(provider, model, 'subset', tol)) {
       return {
         errors: [
@@ -826,11 +833,14 @@ async function validateLlmPolicy(
     // Allowlist gate LAST: it is the only async (DB) check, so cheap structural
     // rejections above avoid a needless query. Tolerated (Pieza D) when the pair
     // is a pre-existing incoherence this write does not worsen.
-    const allowed = await deps.isModelAllowed(
-      provider,
-      model,
-      provider === 'codex-subscription' ? connectionRef : undefined
-    )
+    const allowed =
+      provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)
+        ? true
+        : await deps.isModelAllowed(
+            provider,
+            model,
+            provider === 'codex-subscription' ? connectionRef : undefined
+          )
     if (!allowed && !toleratePair(provider, model, 'fallback', tol)) {
       return {
         errors: [

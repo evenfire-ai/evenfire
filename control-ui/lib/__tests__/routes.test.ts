@@ -31,4 +31,8 @@ describe('CONTROL_ROUTES', () => {
   it('does not expose an LLM Models Codex subscription owner path', () => {
     expect('codexSubscription' in CONTROL_ROUTES.llmModels).toBe(false)
   })
+
+  it('exposes the Secrets Subscription hub path', () => {
+    expect(CONTROL_ROUTES.secrets.subscription).toBe('/secrets/subscription')
+  })
 })

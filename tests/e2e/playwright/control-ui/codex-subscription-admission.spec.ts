@@ -9,6 +9,15 @@ import { expect, test } from '@playwright/test'
 import { loginControlUiVisible } from '../helpers/visible-login'
 
 test.describe('Codex subscription admission', () => {
+  test('unauthenticated Secrets Subscription deep link is blocked by AuthGate', async ({
+    page,
+  }) => {
+    await page.goto('/secrets/subscription')
+    await expect(page.getByLabel('Username or email')).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByTestId('codex-subscription-hub')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Revoke subscription' })).toHaveCount(0)
+  })
+
   test('unauthenticated agent model deep link is blocked by AuthGate', async ({ page }) => {
     await page.goto('/agents/e2e-codex-authoring/model')
     await expect(page.getByLabel('Username or email')).toBeVisible({ timeout: 20_000 })

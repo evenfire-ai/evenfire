@@ -109,6 +109,16 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
       .send({ request: {} })
     expect(budget.status).toBe(403)
     expect(budget.body).toEqual({ error: 'budget_denied' })
+
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockRejectedValueOnce(
+      new LlmProviderAttemptAuthorizeError('unassigned_connection', 'no grant assigned')
+    )
+    const unassigned = await request(app)
+      .post('/api/v1/mcp-host/llm/provider-attempts/authorize')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ request: {} })
+    expect(unassigned.status).toBe(403)
+    expect(unassigned.body).toEqual({ error: 'unassigned_connection' })
   })
 
   it('returns the authorize contract without leaking tokens', async () => {
@@ -149,6 +159,11 @@ describe('resolveHostAssignedConnectionKey', () => {
     await expect(resolveHostAssignedConnectionKey(gateway, 'agent-b')).resolves.toBe(
       'deployment-default'
     )
+
+    gateway.getResource.mockResolvedValueOnce({
+      spec: { model: { provider: 'codex-subscription', connectionRef: 'unassigned' } },
+    })
+    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-c')).resolves.toBe('unassigned')
   })
 
   it('aliases a recipe caller to deployment-default without a Host GET', async () => {
