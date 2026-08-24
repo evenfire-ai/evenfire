@@ -35,6 +35,7 @@ import {
   networkPolicySafetyPassDurationSeconds,
   networkPolicySafetyPassPoliciesTotal,
 } from './metrics'
+import { hccLogger } from './logger'
 import {
   ContextCRD,
   EgressBinding,
@@ -44,6 +45,8 @@ import {
   McpServerResolvedEgressIP,
 } from './types'
 import { applyNetworkPolicy, getErrorCode, replaceWithConflictRetry } from './utils'
+
+const networkPolicyLog = hccLogger.child({ module: 'network-policy-reconciler' })
 
 type JsonPatchOperation = {
   op: 'add' | 'replace' | 'remove' | 'test'
@@ -1196,14 +1199,18 @@ export class NetworkPolicyReconciler {
       const existingName = existing.metadata?.name || ''
       const desired = desiredMcpProxyEgress.get(existingName)
       if (!desired) {
-        console.log(`[NetPol] Deleting orphaned mcp-proxy egress policy "${existingName}"`)
+        networkPolicyLog.info('Deleting orphaned mcp-proxy egress policy', {
+          policyName: existingName,
+        })
         if (!(await revokeOrphanedPolicy(config.namespace, existing))) return false
         onRevoked?.()
       } else if (
         !sameNetworkPolicySpec(existing, desired) ||
         !hasExpectedPolicyOwnership(existing, MCP_PROXY_EGRESS_POLICY_TYPE)
       ) {
-        console.log(`[NetPol] Replacing stale same-name mcp-proxy egress policy "${existingName}"`)
+        networkPolicyLog.info('Replacing stale same-name mcp-proxy egress policy', {
+          policyName: existingName,
+        })
         if (safetySnapshotProvided) {
           if (
             !(await this.replaceSafetyPolicySnapshot(
@@ -3093,10 +3100,10 @@ export class NetworkPolicyReconciler {
         await this.deleteSafetyPolicySnapshot(config.namespace, policy)
       }
     } catch (error) {
-      console.error(
-        `[NetPol] Failed to delete mcp-proxy egress policies for context "${contextId}":`,
-        error
-      )
+      networkPolicyLog.error('Failed to delete mcp-proxy egress policies for context', {
+        contextId,
+        errorCode: getErrorCode(error),
+      })
       throw error
     }
   }
@@ -3143,7 +3150,9 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error('[NetPol] Failed to list all mcp-proxy egress policies:', error)
+      networkPolicyLog.error('Failed to list all mcp-proxy egress policies', {
+        errorCode: getErrorCode(error),
+      })
       throw error
     }
   }
@@ -3159,10 +3168,10 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error(
-        `[NetPol] Failed to list mcp-proxy egress policies for context "${contextId}":`,
-        error
-      )
+      networkPolicyLog.error('Failed to list mcp-proxy egress policies for context', {
+        contextId,
+        errorCode: getErrorCode(error),
+      })
       throw error
     }
   }
