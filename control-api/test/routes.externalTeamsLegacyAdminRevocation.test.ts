@@ -1,6 +1,9 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { randomBytes } from 'node:crypto'
+import { Pool } from 'pg'
 import request from 'supertest'
+import { initDb } from '../src/db.js'
 import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
@@ -10,7 +13,9 @@ const teamId = '22222222-2222-4222-8222-222222222222'
 const targetUserId = '33333333-3333-4333-8333-333333333333'
 let staleAdminToken: string
 
-const database = vi.hoisted(() => ({ query: vi.fn() }))
+const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
+const describeRealPostgres = adminUrl ? describe : describe.skip
+const producerDatabase = vi.hoisted(() => ({ pool: undefined as Pool | undefined }))
 const rateLimit = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 const runtimePolicy = vi.hoisted(() => ({
   policyVersion: '1',
@@ -44,7 +49,15 @@ const directory = vi.hoisted(() => ({
   updateManagedMemberRoleForUser: vi.fn(),
 }))
 
-vi.mock('../src/db.js', () => ({ pool: database }))
+vi.mock('../src/db.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/db.js')>()
+  return {
+    ...actual,
+    pool: {
+      query: (text: string, values?: unknown[]) => producerDatabase.pool!.query(text, values),
+    },
+  }
+})
 vi.mock('../src/services/rateLimiterService.js', () => rateLimit)
 vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
   resolveEffectiveUserAccessPolicy: vi.fn().mockResolvedValue(runtimePolicy),
@@ -92,8 +105,32 @@ function app() {
   return server
 }
 
-describe('legacy V1 live-admin revocation on real external team routes', () => {
+function databaseUrl(baseUrl: string, database: string): string {
+  const value = new URL(baseUrl)
+  value.pathname = `/${database}`
+  return value.toString()
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+describeRealPostgres('legacy V1 live-admin revocation on real external team routes', () => {
+  const database = `control_api_legacy_admin_${randomBytes(6).toString('hex')}`
+  const connectionString = databaseUrl(
+    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
+    database
+  )
+  let adminPool: Pool
+  let databasePool: Pool
+
   beforeAll(async () => {
+    adminPool = new Pool({ connectionString: adminUrl })
+    await adminPool.query(`CREATE DATABASE ${quoteIdentifier(database)}`)
+    databasePool = new Pool({ connectionString })
+    producerDatabase.pool = databasePool
+    await initDb({ connect: () => databasePool.connect() })
+
     const issued = await issueExternalUserSession(
       {
         contract: 'v1',
@@ -116,8 +153,42 @@ describe('legacy V1 live-admin revocation on real external team routes', () => {
     })
   })
 
-  beforeEach(() => {
+  afterAll(async () => {
+    await databasePool?.end()
+    if (adminPool) {
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid)
+           FROM pg_stat_activity
+          WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+      await adminPool.end()
+    }
+  })
+
+  beforeEach(async () => {
     vi.clearAllMocks()
+    await databasePool.query(
+      `INSERT INTO users(id, email, name)
+       VALUES ($1, 'admin@example.test', 'Legacy Admin')
+       ON CONFLICT (id) DO UPDATE
+         SET lifecycle_state = 'active', lifecycle_version = 1`,
+      [userId]
+    )
+    await databasePool.query(
+      `INSERT INTO teams(id, name)
+       VALUES ($1, 'Legacy Team')
+       ON CONFLICT (id) DO NOTHING`,
+      [teamId]
+    )
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'admin', 'active')
+       ON CONFLICT (team_id, user_id) DO UPDATE
+         SET role = 'admin', status = 'active', updated_at = NOW()`,
+      [teamId, userId]
+    )
     rateLimit.checkAndIncrement.mockResolvedValue({
       allowed: true,
       count: 1,
@@ -134,72 +205,34 @@ describe('legacy V1 live-admin revocation on real external team routes', () => {
 
   for (const mutation of mutations) {
     it.each([
-      ['demoted', { rows: [{ team_id: teamId, role: 'member' }], rowCount: 1 }],
-      ['membership removed', { rows: [], rowCount: 0 }],
-    ])(`rejects ${mutation.name} with the same token after %s`, async (_state, membership) => {
-      database.query.mockImplementation(async text => {
-        if (String(text).includes('FROM users u')) {
-          return {
-            rows: [
-              {
-                id: userId,
-                lifecycle_state: 'active',
-                lifecycle_version: 1,
-                valid_after: null,
-                token_revoked: false,
-              },
-            ],
-            rowCount: 1,
-          }
-        }
-        if (String(text).includes('FROM team_members tm')) return membership
-        throw new Error(`unexpected database query: ${String(text)}`)
-      })
+      ['demoted', 'demote'],
+      ['membership removed', 'remove'],
+    ] as const)(`rejects ${mutation.name} with the same token after %s`, async (_state, action) => {
+      if (action === 'demote') {
+        await databasePool.query(
+          `UPDATE team_members SET role = 'member', updated_at = NOW()
+            WHERE team_id = $1 AND user_id = $2`,
+          [teamId, userId]
+        )
+      } else {
+        await databasePool.query(
+          `UPDATE team_members SET status = 'deleted', updated_at = NOW()
+            WHERE team_id = $1 AND user_id = $2`,
+          [teamId, userId]
+        )
+      }
 
       const response = await mutation.invoke(app()).set('x-user-session-token', staleAdminToken)
 
       expect(response.status).toBe(403)
       expect(directory[mutation.handler]).not.toHaveBeenCalled()
-      expect(database.query).toHaveBeenCalledWith(expect.stringContaining('FROM users u'), [
-        userId,
-        expect.stringMatching(/^[0-9a-f]{64}$/),
-      ])
-      expect(database.query).toHaveBeenCalledWith(expect.stringContaining("tm.status = 'active'"), [
-        userId,
-        teamId,
-      ])
     })
 
     it(`allows ${mutation.name} only when the same token resolves to a current admin`, async () => {
-      database.query.mockImplementation(async text => {
-        if (String(text).includes('FROM users u')) {
-          return {
-            rows: [
-              {
-                id: userId,
-                lifecycle_state: 'active',
-                lifecycle_version: 1,
-                valid_after: null,
-                token_revoked: false,
-              },
-            ],
-            rowCount: 1,
-          }
-        }
-        if (String(text).includes('FROM team_members tm')) {
-          return { rows: [{ team_id: teamId, role: 'admin' }], rowCount: 1 }
-        }
-        throw new Error(`unexpected database query: ${String(text)}`)
-      })
-
       const response = await mutation.invoke(app()).set('x-user-session-token', staleAdminToken)
 
       expect(response.status).toBe(200)
       expect(directory[mutation.handler]).toHaveBeenCalledOnce()
-      expect(database.query).toHaveBeenCalledWith(expect.stringContaining('FROM users u'), [
-        userId,
-        expect.stringMatching(/^[0-9a-f]{64}$/),
-      ])
     })
   }
 })
