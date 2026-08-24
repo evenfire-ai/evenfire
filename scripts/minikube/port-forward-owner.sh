@@ -268,6 +268,26 @@ pf_owner_record_matches() {
      "${PF_OWNER_RECORD_REMOTE_PORT}" == "${remote_port}" ]]
 }
 
+pf_owner_record_process_matches() {
+  local pidfile="$1" profile="$2" context="$3" worktree="$4"
+  local namespace="$5" service="$6" local_port="$7" remote_port="$8"
+  local pid state actual_start command_line
+
+  pf_owner_read_record "$pidfile" || return 1
+  pf_owner_record_matches "${profile}" "${context}" "${worktree}" \
+    "${namespace}" "${service}" "${local_port}" "${remote_port}" || return 1
+  pid="${PF_OWNER_RECORD_PID}"
+  state="$(pf_owner_process_state "${pid}")"
+  [[ "${state}" == live ]] || return 1
+  actual_start="$(pf_owner_process_start "${pid}")" || return 1
+  [[ "${actual_start}" == "${PF_OWNER_RECORD_START}" ]] || return 1
+  command_line="$(pf_owner_process_command "${pid}")" || return 1
+  pf_owner_command_matches "${command_line}" "${context}" "${namespace}" \
+    "${service}" "${local_port}" "${remote_port}" || return 1
+  actual_start="$(pf_owner_process_start "${pid}")" || return 1
+  [[ "${actual_start}" == "${PF_OWNER_RECORD_START}" ]] || return 1
+}
+
 pf_owner_remove_dead_record() {
   local pidfile="$1"
   [[ ! -L "${pidfile}" ]] || pf_owner_error "refusing to remove symlinked pidfile: ${pidfile}" || return 1

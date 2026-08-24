@@ -39,6 +39,12 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-real-postgres-local-preflight.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-port-forward-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-docker-cli-env.sh" \
+  "$ROOT/scripts/tests/test-minikube-build-images-hardening.sh" \
+  "$ROOT/scripts/tests/test-minikube-pull-images.sh" \
+  "$ROOT/scripts/tests/test-minikube-build-section-headers.sh" \
+  "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh" \
   "$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh" \
   "$ROOT/scripts/tests/test-minikube-explicit-context.sh" \
@@ -53,6 +59,7 @@ done
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
 "$ROOT/scripts/tests/test-minikube-filter-gfs-resources.sh"
 "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh"
+"$ROOT/scripts/tests/test-minikube-pull-images.sh"
 "$ROOT/scripts/tests/test-minikube-k8s-api-egress-policy.sh"
 "$ROOT/scripts/tests/test-minikube-writer-recovery-state.sh"
 "$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh"
@@ -95,7 +102,12 @@ grep -Fq 'kubectl --context=' "$COMMON"
 grep -Fq 'port-forward-owner.sh' "$COMMON"
 grep -Fq 't2_port_forward_targets_context' "$COMMON"
 grep -Fq 'matching_records' "$COMMON"
-grep -Fq 'pf_owner_command_matches' "$COMMON"
+grep -Fq 'pf_owner_record_process_matches' "$COMMON"
+grep -Fq 'pf_owner_command_matches' "$ROOT/scripts/minikube/port-forward-owner.sh"
+grep -Fq 'T2_MARKER_IMAGES_GENERATED_AT' "$COMMON"
+grep -Fq 'image acquisition changed since the pre-gate marker' "$COMMON"
+grep -Fq 'trace-maintenance-worker' "$ROOT/scripts/minikube/full-setup.sh"
+grep -Fq 'pf_owner_record_process_matches' "$ROOT/scripts/minikube/port-forward-owner.sh"
 grep -Fq 'CONTROL_API_REAL_PG_CONTEXT' "$T1"
 grep -Fq 'T2_REQUIRED_DEPLOYMENTS' "$COMMON"
 grep -Fq 'CONTROL_API_REAL_PG_ADMIN_URL=' "$T1"
@@ -135,6 +147,8 @@ grep -Fq 'run_t1_local_preflight' "$T2"
 grep -Fq 'T2_SETUP_HANDOFF_REQUIRED=true' "$T2"
 grep -Fq 't2-setup-handoff.sh" consume --' "$ROOT/scripts/minikube/pre-gate-sync.sh"
 grep -Fq 'minikube-verify-images' "$ROOT/scripts/minikube/pre-gate-sync.sh"
+grep -Fq 'with-t2-mutation-lock.sh' "$ROOT/scripts/minikube/setup.sh"
+grep -Fq 'T2_MUTATION_LOCK_WRAPPED' "$ROOT/scripts/minikube/setup.sh"
 for timed_phase in 't2_evidence_write planner PASS' 't2_evidence_write transition PASS' \
   't2_evidence_write pre-gate-sync PASS' 't2_evidence_write T1 PASS' \
   't2_evidence_write T2 PASS' 't2_evidence_write NP08_HCC_AUTHORIZATION PASS'; do
@@ -607,5 +621,10 @@ bash "$ROOT/scripts/tests/test-minikube-targeted-gfs-sync.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh"
 bash "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"
 bash "$ROOT/scripts/tests/test-real-postgres-local-preflight.sh"
+bash "$ROOT/scripts/tests/test-minikube-port-forward-owner.sh"
+bash "$ROOT/scripts/tests/test-minikube-docker-cli-env.sh"
+bash "$ROOT/scripts/tests/test-minikube-build-images-hardening.sh"
+bash "$ROOT/scripts/tests/test-minikube-build-section-headers.sh"
+bash "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
 
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'

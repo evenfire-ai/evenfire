@@ -75,6 +75,7 @@ MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}"
 PULL_PARALLELISM="${MINIKUBE_PULL_PARALLELISM:-6}"
 MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-3}"
 MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-5}"
+MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS:-30}"
 GHCR_NAMESPACE="ghcr.io/evenfire-ai"
 ONLY_SVC=""
 
@@ -121,6 +122,22 @@ err()  { echo -e "${RED}  ERROR${NC} -- $*" >&2; }
 # record says "local" must still resolve a tag instead of an empty string.
 # shellcheck source=scripts/minikube/image-mode.sh
 source "${SCRIPT_DIR}/image-mode.sh"
+# shellcheck source=scripts/minikube/docker-cli-env.sh
+source "${SCRIPT_DIR}/docker-cli-env.sh"
+
+# Pulling and loading images mutates the branch-owned Minikube profile. The
+# caller must already hold the canonical T2 mutation lease; this child only
+# validates the opaque inherited token and never acquires or releases it.
+if [[ -z "${T2_PROJECT_DIR:-}" || -z "${T2_PROFILE:-}" ||
+      -z "${T2_CONTEXT:-}" || "${T2_PROFILE}" != "${T2_CONTEXT}" ||
+      "${T2_PROFILE}" != "${PROFILE}" ]]; then
+  err "PROFILE_LOCK_REQUIRED: pull-images.sh requires an inherited branch-profile mutation lease"
+  exit 1
+fi
+T2_PROJECT_DIR="${T2_PROJECT_DIR}" T2_PROFILE="${T2_PROFILE}" \
+  T2_CONTEXT="${T2_CONTEXT}" T2_SKIP_LOCK=true \
+  MINIKUBE_PROFILE="${PROFILE}" CONTROL_API_REAL_PG_CONTEXT="${T2_CONTEXT}" \
+  bash "${SCRIPT_DIR}/require-t2-mutation-lock.sh"
 
 IMAGE_TAG="$(image_mode_ghcr_tag "$PROJECT_DIR")" || exit 1
 TAG_ORIGIN="$(image_mode_tag_origin "$PROJECT_DIR")" || exit 1
@@ -155,18 +172,41 @@ if [ "$SKIP_UIS" = true ]; then
   log "skipping control-ui and profile-ui (--skip-uis); the -no-uis overlay deletes both Deployments"
 fi
 
-# ---- Point the Docker CLI at minikube's daemon when safe -----------------
+STATUS_DIR="$(mktemp -d)"
+cleanup() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  rm -rf -- "$STATUS_DIR" || cleanup_status=$?
+  docker_cli_env_cleanup || cleanup_status=$?
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status="$cleanup_status"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Resolve an approved local endpoint into an empty task-local Docker config
+# before asking Minikube for its daemon endpoint. Every subsequent Docker and
+# image-load operation then runs through the same isolated config and deadline
+# runner, with ambient auth/context/header variables excluded.
+docker_cli_env_prepare false
 if [ "$MINIKUBE_MULTI_NODE" = false ]; then
   log "Configuring Docker CLI to use minikube's Docker daemon..."
-  eval "$(minikube -p "$PROFILE" docker-env)"
+  docker_env_status=0
+  docker_env_output="$(docker_cli_run_public minikube-docker-env \
+    "$MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS" \
+    minikube -p "$PROFILE" docker-env --shell bash)" || docker_env_status=$?
+  if [ "$docker_env_status" -ne 0 ] || [ -z "$docker_env_output" ]; then
+    err "Could not resolve Docker environment for minikube '${PROFILE}'"
+    exit "${docker_env_status:-1}"
+  fi
+  eval "$docker_env_output"
   unset DOCKER_API_VERSION 2>/dev/null || true
 else
   log "Multi-node profile: pulling on the host, then 'minikube image load' onto every node"
 fi
-
-STATUS_DIR="$(mktemp -d)"
-cleanup() { rm -rf "$STATUS_DIR"; }
-trap cleanup EXIT
 
 # ---- Bounded retry for one pull ------------------------------------------
 # A transient registry blip (one bad pull 24 images into a run) should not
@@ -180,10 +220,11 @@ trap cleanup EXIT
 # final failure it holds only the last attempt's diagnostic, not a pile-up of
 # every prior one.
 pull_with_retry() {
-  local ref="$1" out_file="$2"
+  local ref="$1" out_file="$2" image_name="$3"
   local attempt=1
   while [ "$attempt" -le "$MINIKUBE_IMAGE_PULL_RETRIES" ]; do
-    if docker pull "$ref" >"$out_file" 2>&1; then
+    if docker_cli_run_public "pull-image-${image_name}" \
+      "$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS" docker pull "$ref" >"$out_file" 2>&1; then
       return 0
     fi
     if [ "$attempt" -lt "$MINIKUBE_IMAGE_PULL_RETRIES" ]; then
@@ -201,25 +242,31 @@ pull_one() {
   local ghcr_ref="${GHCR_NAMESPACE}/${name}:${IMAGE_TAG}"
 
   # Always pull. Never skip a present tag -- see the header.
-  if ! pull_with_retry "$ghcr_ref" "${STATUS_DIR}/${slot}.out"; then
+  if ! pull_with_retry "$ghcr_ref" "${STATUS_DIR}/${slot}.out" "$name"; then
     printf '%s' "$ghcr_ref" > "${STATUS_DIR}/${slot}.failed"
     return 0
   fi
 
   if [ "$MINIKUBE_MULTI_NODE" = true ]; then
-    minikube -p "$PROFILE" image load "$ghcr_ref" >/dev/null 2>&1 || {
+    docker_cli_run_public "minikube-image-load-${name}" \
+      "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
+      minikube -p "$PROFILE" image load "$ghcr_ref" >/dev/null 2>&1 || {
       printf '%s' "$ghcr_ref" > "${STATUS_DIR}/${slot}.failed"
       return 0
     }
   fi
 
   # The local alias. See header note 2.
-  if ! docker tag "$ghcr_ref" "$local_ref" >>"${STATUS_DIR}/${slot}.out" 2>&1; then
+  if ! docker_cli_run_public "tag-image-${name}" \
+    "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" docker tag "$ghcr_ref" "$local_ref" \
+    >>"${STATUS_DIR}/${slot}.out" 2>&1; then
     printf '%s' "$ghcr_ref (alias to ${local_ref})" > "${STATUS_DIR}/${slot}.failed"
     return 0
   fi
   if [ "$MINIKUBE_MULTI_NODE" = true ]; then
-    minikube -p "$PROFILE" image load "$local_ref" >/dev/null 2>&1 || true
+    docker_cli_run_public "minikube-image-load-alias-${name}" \
+      "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
+      minikube -p "$PROFILE" image load "$local_ref" >/dev/null 2>&1 || true
   fi
 
   printf '%s\t%s' "$ghcr_ref" "$local_ref" > "${STATUS_DIR}/${slot}.done"
@@ -340,7 +387,9 @@ mkdir -p "$(dirname "$MANIFEST_FILE")"
     [ -e "$f" ] || continue
     ghcr_ref="$(cut -f1 "$f")"
     local_ref="$(cut -f2 "$f")"
-    sha="$(docker inspect --format='{{.Id}}' "$ghcr_ref" 2>/dev/null || echo "NOT_PULLED")"
+    sha="$(docker_cli_run_public "inspect-image" \
+      "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+      docker inspect --format='{{.Id}}' "$ghcr_ref" 2>/dev/null || echo "NOT_PULLED")"
     for ref in "$ghcr_ref" "$local_ref"; do
       if [ "$first" = true ]; then first=false; else echo ","; fi
       printf '    "%s": "%s"' "$ref" "$sha"

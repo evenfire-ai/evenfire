@@ -25,9 +25,10 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   fixed localhost ports** — only the profile-owned random port mapping.
 - **Do not touch another worktree's Minikube profile** (e.g. an NP-08 lane
   profile) or kill its port-forwards, even if it looks idle.
-- **Do not run a mutating `build-images.sh` directly.** Use the public Make
-  target or T2 orchestrator so the exact worktree/profile/context lease is
-  inherited. Only `--verify-only` is lease-exempt.
+- **Do not run mutating `build-images.sh` or `pull-images.sh` directly.** Use
+  the public Make target or T2 orchestrator so the exact
+  worktree/profile/context lease is inherited. Only `--verify-only` is
+  lease-exempt.
 - **Do not use a remote/ambiguous Docker endpoint or inherit ambient registry
   auth.** The harness accepts local Unix sockets and loopback TCP endpoints,
   pins the resolved endpoint before isolation, and requires an explicit
@@ -39,6 +40,9 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   pidfile trips `PORT_FORWARD_CONFLICT`. The awk pre-filter matches `kubectl`
   as an argv0 or path token plus a later standalone `port-forward` token;
   wrappers that only mention those words are rejected by `comm`.
+  Registered pidfiles are checked even when `ps` no longer lists a child,
+  and a successful user-facing health probe is followed by an exact
+  process/start-time/argv revalidation.
 - **Do not commit** `.local-notes/`, lockfiles produced by an incidental
   `npm ci`, generated ports/profile metadata, or anything secret-like. Run
   `make minikube-t2-public-boundary` first.
@@ -65,7 +69,7 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | `DOCKER_DEADLINE_INVALID` | A runtime deadline/retry value is malformed or exceeds its finite maximum. | Remove the override or set it within the documented range; do not disable the deadline. |
 | `BOOTSTRAP_REQUIRED` | Profile missing/uninitialized, or the planner produced no transition. Standalone preflight refuses to bootstrap. | Run `MINIKUBE_PROFILE=<owned> CONTROL_API_REAL_PG_CONTEXT=<owned> make minikube-t2`; its internal planner makes `full-bootstrap` reachable. |
 | `HEAD_MARKER_MISMATCH` | Pre-gate marker does not match this worktree/HEAD; the final T2 preflight selected something other than `already-synced`. | Re-run the full target on this HEAD so `pre-gate-sync` updates the marker. Never hand-edit the marker. |
-| `IMAGE_MANIFEST_MISMATCH` | Deployed image provenance does not match the exact marker/worktree state. | Re-run the full target for the same owned profile; do not relabel or hand-edit the manifest. |
+| `IMAGE_MANIFEST_MISMATCH` | Deployed image provenance or the manifest `generated` stamp does not match the exact marker/worktree state. | Re-run the full target for the same owned profile; do not relabel or hand-edit the manifest. |
 | `PORT_FORWARD_CONFLICT` | A port-forward for this profile is owned by a process not recorded for it (or not a real `kubectl`). | Identify the foreign owner; if it belongs to another lane, stop. Restart forwards via `scripts/minikube/pf-all-stack.sh` for this profile only. |
 | `PROFILE_BUSY` | Profile lock held. Live owner PID → genuinely busy. No valid owner PID → orphaned lock. | Live owner: wait or coordinate; never remove. Orphan: verify no T2 process owns the profile, then remove ONLY `$T2_LOCK_ROOT/<profile>.lock` and retry. Never remove the lock root. |
 | `DEVELOPMENT_SCOPE_REQUIRED` | Preflight/final preflight failed a precondition, or T2-only mode was attempted without `already-synced`. | Repair the first reported condition; if T2-only was refused, run full `make minikube-t2`. |

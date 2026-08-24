@@ -90,6 +90,17 @@ pf_owner_write_record_atomic "$RECORD" "$PID" "$START" "$PROFILE" \
   "$PROFILE" "$ROOT" control-plane control-ui 3000 3000
 run_process_check "$TEST_DIR/exact.out"
 
+# A registered record must remain visible to the verdict even when the live
+# process disappears from ps(1). This protects the fail-closed ownership scan
+# from treating a stale/dead pidfile as "nothing to check".
+rm -f "$PS_DATA/$PID.command"
+if run_process_check "$TEST_DIR/stale-record.out"; then
+  printf 'FAIL: stale registered port-forward record was ignored\n' >&2
+  exit 1
+fi
+grep -Fq PORT_FORWARD_CONFLICT "$TEST_DIR/stale-record.out"
+set_process_fixture kubectl "$exact_command"
+
 printf '%s\n' 'different process start' >"$PS_DATA/$PID.start"
 if run_process_check "$TEST_DIR/reused.out"; then
   printf 'FAIL: process-start mismatch was accepted\n' >&2

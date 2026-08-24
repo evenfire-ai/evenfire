@@ -179,6 +179,10 @@ pass 'dead stale pidfiles are removed without signalling'
 
 reset_process_fixture
 write_record
+pf_owner_record_process_matches "${RECORD}" "${PROFILE}" "${CONTEXT}" \
+  "${WORKTREE}" "${NAMESPACE}" "${SERVICE}" "${LOCAL_PORT}" "${REMOTE_PORT}" ||
+  fail 'exact ownership revalidation rejected the recorded live process'
+pass 'post-health ownership revalidation proves the exact live process and binding'
 cleanup_record || fail 'exact owned cleanup failed'
 [[ ! -e "${RECORD}" ]] || fail 'exact owned cleanup kept the pidfile'
 grep -Fxq "${PID} TERM" "${KILL_LOG}" || fail 'exact owned cleanup did not send TERM'

@@ -75,6 +75,8 @@ T2_MARKER_MATCHES_HEAD=false
 T2_MARKER_JSON=""
 T2_IMAGE_SOURCE=""
 T2_IMAGE_TAG=""
+T2_MARKER_IMAGES_GENERATED_AT=""
+T2_MANIFEST_GENERATED_AT=""
 T2_CLUSTER_FINGERPRINT=""
 T2_WORKTREE_ID=""
 T2_HEAD=""
@@ -387,7 +389,14 @@ if data.get("worktreeId") != sys.argv[2]:
     raise SystemExit("ownership")
 if data.get("gitHead") != sys.argv[3]:
     raise SystemExit("head")
-print("\t".join([data.get("clusterFingerprint", ""), data.get("imageSource", ""), data.get("imageTag", "")]))
+if not data.get("imagesGeneratedAt"):
+    raise SystemExit("missing:imagesGeneratedAt")
+print("\t".join([
+    data.get("clusterFingerprint", ""),
+    data.get("imageSource", ""),
+    data.get("imageTag", ""),
+    data.get("imagesGeneratedAt", ""),
+]))
 PY
   )"; then
     case "$marker_values" in
@@ -408,7 +417,8 @@ PY
     esac
   fi
   T2_MARKER_MATCHES_HEAD=true
-  IFS=$'\t' read -r T2_CLUSTER_FINGERPRINT T2_IMAGE_SOURCE T2_IMAGE_TAG <<< "$marker_values"
+  IFS=$'\t' read -r T2_CLUSTER_FINGERPRINT T2_IMAGE_SOURCE T2_IMAGE_TAG \
+    T2_MARKER_IMAGES_GENERATED_AT <<< "$marker_values"
 }
 
 t2_image_check() {
@@ -432,9 +442,12 @@ except (OSError, ValueError):
     raise SystemExit("invalid")
 source = payload.get("imageSource") or payload.get("source") or payload.get("mode") or ""
 tag = payload.get("imageTag") or payload.get("tag") or ""
+generated = payload.get("generated")
 # Local builds are identified by the per-image digests in the manifest and
 # intentionally have no registry tag. GHCR manifests still require a tag.
 images = payload.get("images")
+if not isinstance(generated, str) or not generated:
+    raise SystemExit("generated")
 if source not in {"local", "ghcr"} or (source == "ghcr" and not tag):
     raise SystemExit("missing")
 if source == "local":
@@ -444,7 +457,7 @@ if source == "local":
     digest = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
     if any(not isinstance(name, str) or not name or not isinstance(value, str) or not digest.fullmatch(value) for name, value in images.items()):
         raise SystemExit("local-digests")
-print(source + "\t" + tag)
+print(source + "\t" + tag + "\t" + generated)
 PY
   )"; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
@@ -455,8 +468,8 @@ PY
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or incomplete for its image source'
   fi
-  local manifest_source manifest_tag
-  IFS=$'\t' read -r manifest_source manifest_tag <<< "$manifest_values"
+  local manifest_source manifest_tag manifest_generated
+  IFS=$'\t' read -r manifest_source manifest_tag manifest_generated <<< "$manifest_values"
   if { [ -n "$T2_IMAGE_SOURCE" ] && [ "$manifest_source" != "$T2_IMAGE_SOURCE" ]; } ||
      { [ -n "$T2_IMAGE_TAG" ] && [ "$manifest_tag" != "$T2_IMAGE_TAG" ]; }; then
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
@@ -464,6 +477,15 @@ PY
   fi
   T2_IMAGE_SOURCE="$manifest_source"
   T2_IMAGE_TAG="$manifest_tag"
+  T2_MANIFEST_GENERATED_AT="$manifest_generated"
+  if [ "$T2_MARKER_MATCHES_HEAD" = true ] &&
+     [ "$T2_MARKER_IMAGES_GENERATED_AT" != "$T2_MANIFEST_GENERATED_AT" ]; then
+    # A new image acquisition can keep the same Git HEAD while replacing the
+    # release/shadow digest on the cluster. Refuse to call that already-synced
+    # and let the orchestrator select a fresh targeted/full transition.
+    T2_MARKER_MATCHES_HEAD=false
+    T2_PLAN_REASON='image acquisition changed since the pre-gate marker'
+  fi
 }
 
 t2_get_name() {
@@ -691,25 +713,30 @@ t2_port_forward_targets_context() {
 }
 
 t2_pid_file_matches_process() {
-  local pid_file="$1" pid="$2" actual_start command_line
+  local pid_file="$1" pid="$2"
   pf_owner_read_record "$pid_file" || return 1
   [ "$PF_OWNER_RECORD_FIRST_PID" = "$pid" ] || return 1
-  [ "$PF_OWNER_RECORD_PROFILE" = "$T2_PROFILE" ] || return 1
-  [ "$PF_OWNER_RECORD_CONTEXT" = "$T2_CONTEXT" ] || return 1
-  [ "$PF_OWNER_RECORD_WORKTREE" = "$T2_PROJECT_DIR" ] || return 1
-  actual_start="$(pf_owner_process_start "$pid")" || return 1
-  [ "$actual_start" = "$PF_OWNER_RECORD_START" ] || return 1
-  command_line="$(pf_owner_process_command "$pid")" || return 1
-  pf_owner_command_matches "$command_line" "$PF_OWNER_RECORD_CONTEXT" \
-    "$PF_OWNER_RECORD_NAMESPACE" "$PF_OWNER_RECORD_SERVICE" \
-    "$PF_OWNER_RECORD_LOCAL_PORT" "$PF_OWNER_RECORD_REMOTE_PORT" || return 1
-  actual_start="$(pf_owner_process_start "$pid")" || return 1
-  [ "$actual_start" = "$PF_OWNER_RECORD_START" ]
+  pf_owner_record_process_matches "$pid_file" "$T2_PROFILE" "$T2_CONTEXT" \
+    "$T2_PROJECT_DIR" "$PF_OWNER_RECORD_NAMESPACE" "$PF_OWNER_RECORD_SERVICE" \
+    "$PF_OWNER_RECORD_LOCAL_PORT" "$PF_OWNER_RECORD_REMOTE_PORT"
 }
 
 t2_process_check() {
   local uid pid ppid rest command_line comm pid_file recorded_pid
   local matching_records invalid_record
+  # A dead or reused registered forward is still an ownership failure even
+  # when ps(1) no longer lists a kubectl process. Scan the profile's durable
+  # records first so a stale pidfile cannot disappear from the verdict.
+  for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid; do
+    [ -f "$pid_file" ] || continue
+    recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+    if ! pf_owner_validate_pid "$recorded_pid" ||
+       ! t2_pid_file_matches_process "$pid_file" "$recorded_pid"; then
+      T2_NEXT_COMMAND='repair the exact profile-owned port-forward record before rerunning T2'
+      t2_fail PORT_FORWARD_CONFLICT "registered port-forward ownership is stale or invalid: $pid_file"
+      return 1
+    fi
+  done
   # Only real kubectl port-forward processes. A wrapper whose argv merely
   # mentions those words is not a port-forward (rejected by exact argv0/comm).
   # Default IFS so UID/PID/PPID split. `IFS=` left pid empty and skipped every line.

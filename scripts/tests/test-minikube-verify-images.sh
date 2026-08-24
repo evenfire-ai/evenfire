@@ -120,10 +120,10 @@ prepare_repo() {
   rm -rf "$d/repo/deploy/minikube"
 }
 
-# Full and --only builds are mutation paths and now require the inherited T2
-# lease. This fixture is intentionally not a Git worktree or a live profile, so
-# those two manifest-writer cases inject a no-op lease boundary below. The real
-# ownership/lock contract is exercised separately by
+# Pulls, full builds, and --only builds are mutation paths and now require the
+# inherited T2 lease. This fixture is intentionally not a Git worktree or a
+# live profile, so the manifest-writer cases inject a no-op lease boundary
+# below. The real ownership/lock contract is exercised separately by
 # test-minikube-build-images-hardening.sh.
 write_fixture_mutation_lock_stub() {
   local d=$1
@@ -292,7 +292,11 @@ assert_the_puller_records_ghcr_and_the_verifier_reads_it_back() {
   local d out rc pull_rc present
   d="$(mktemp -d)"
   prepare_repo "$d"
+  write_fixture_mutation_lock_stub "$d"
   PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    T2_PROJECT_DIR="$d/repo" T2_PROFILE=clerum-test T2_CONTEXT=clerum-test \
+    MINIKUBE_PROFILE=clerum-test CONTROL_API_REAL_PG_CONTEXT=clerum-test \
+    DOCKER_HOST=unix:///tmp/evenfire-docker.sock \
     bash "$d/repo/scripts/minikube/pull-images.sh" >"$d/pull.out" 2>&1
   pull_rc=$?
   if [ "$pull_rc" -ne 0 ]; then

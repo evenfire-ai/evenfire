@@ -215,7 +215,7 @@ bootstrap_manifest_state="$(env "${repo_env[@]}" T2_IMAGE_MANIFEST="$invalid_man
 [ "$bootstrap_manifest_state" = full-bootstrap ] || fail "invalid bootstrap manifest selected $bootstrap_manifest_state instead of full-bootstrap"
 
 local_manifest="$tmp/local-image-manifest.json"
-printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$local_manifest"
+printf '{"generated":"manifest-generated","imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$local_manifest"
 env "${repo_env[@]}" T2_IMAGE_MANIFEST="$local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
   bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
 
@@ -299,6 +299,27 @@ already_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIR
   T2_ORIGIN_DEV="$base_sha" T2_HEAD="$infra_sha" \
   bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; T2_MARKER_MATCHES_HEAD=true; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$infra_sha")"
 [ "$already_state" = already-synced ] || fail "matching marker selected $already_state instead of already-synced"
+
+# A new image acquisition can replace the digest while Git HEAD stays the
+# same. The marker must carry the manifest's generated stamp; otherwise the
+# planner would incorrectly choose already-synced/T2-runtime against the new
+# image set.
+stamp_manifest="$tmp/stamp-image-manifest.json"
+printf '{"generated":"new-generated","imageSource":"local","imageTag":"test","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$stamp_manifest"
+stamp_state="$(env T2_PROJECT_DIR="$repo" MINIKUBE_PROFILE="$profile" \
+  T2_CONTEXT="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" \
+  T2_PROFILE_ROOT="$tmp/profiles" T2_PROFILE_ENV="$profile_root/profile.env" \
+  T2_PORTS_ENV="$profile_root/ports.env" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader \
+  T2_BRANCH=feat/scenario T2_HEAD="$feature_sha" T2_ORIGIN_DEV="$base_sha" \
+  T2_LOCK_ROOT="$tmp/locks" T2_EVIDENCE_ROOT="$tmp/evidence" \
+  T2_IMAGE_MANIFEST="$stamp_manifest" \
+  FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"'"$feature_sha"'","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"old-generated"}}' \
+  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD="$3"; T2_ORIGIN_DEV="$2"; T2_PLAN_MODE=true; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; t2_image_check; t2_classify_transition; printf "%s|%s" "$T2_PLAN_STATE" "$T2_PLAN_REASON"' bash "$COMMON" "$base_sha" "$feature_sha")"
+case "$stamp_state" in
+  already-synced*) fail "a changed image acquisition was treated as already-synced: $stamp_state" ;;
+  targeted-sync*|full-reconcile*) ;;
+  *) fail "changed image acquisition selected an unexpected plan: $stamp_state" ;;
+esac
 
 # A bootstrapped profile with an unready required deployment must not stop
 # the orchestrator planner before a transition exists (PROFILE_UNHEALTHY was

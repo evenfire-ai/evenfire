@@ -57,6 +57,15 @@ make_stubs() {
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
+  context)
+    if [[ "${2:-}" == inspect ]]; then
+      if [[ "$*" == *SkipTLSVerify* ]]; then
+        printf 'unix:///tmp/evenfire-docker.sock\tfalse\t{}\n'
+      else
+        printf 'unix:///tmp/evenfire-docker.sock\n'
+      fi
+    fi
+    ;;
   inspect)
     # The only inspect the pre-gate makes is the OCI revision-label read that
     # gives it the commit a release image was built from.
@@ -122,6 +131,11 @@ prepare_repo() {
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
   rm -rf "$d/repo/deploy/minikube"
+  cat > "$d/repo/scripts/minikube/require-t2-mutation-lock.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$d/repo/scripts/minikube/require-t2-mutation-lock.sh"
   # patches/k8s-api-ip.yaml is GENERATED and gitignored (the overlay commits
   # only the .template), so whether the developer's tree has one is incidental.
   # Materialise it deterministically: by the time anything renders, `make
@@ -928,6 +942,9 @@ assert_a_targeted_build_carries_the_recorded_coordinate_forward() {
   (
     cd "$d/repo" || exit 1
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+      T2_PROJECT_DIR="$d/repo" T2_PROFILE=clerum-test T2_CONTEXT=clerum-test \
+      MINIKUBE_PROFILE=clerum-test CONTROL_API_REAL_PG_CONTEXT=clerum-test \
+      DOCKER_HOST=unix:///tmp/evenfire-docker.sock \
       bash "$d/repo/scripts/minikube/build-images.sh" --only=control-api
   ) >"$d/build.log" 2>&1
   rc=$?

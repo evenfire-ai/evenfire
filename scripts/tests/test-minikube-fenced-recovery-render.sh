@@ -31,6 +31,14 @@ metadata:
 spec:
   replicas: 1
 ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trace-maintenance-worker
+  namespace: control-plane
+spec:
+  replicas: 1
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -42,11 +50,12 @@ output="$TMP_DIR/output.yaml"
 ruby "$RENDERER" \
   --target control-plane/host-context-controller \
   --target control-plane/workflow-recipes \
+  --target control-plane/trace-maintenance-worker \
   --target control-plane/control-api <"$TMP_DIR/input.yaml" >"$output"
 
 ruby -ryaml -e '
 docs = YAML.load_stream(File.read(ARGV.fetch(0)))
-targets = %w[host-context-controller workflow-recipes control-api]
+    targets = %w[host-context-controller workflow-recipes trace-maintenance-worker control-api]
 targets.each do |name|
   deployment = docs.find { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" && doc.dig("metadata", "namespace") == "control-plane" && doc.dig("metadata", "name") == name }
   abort "missing #{name}" unless deployment

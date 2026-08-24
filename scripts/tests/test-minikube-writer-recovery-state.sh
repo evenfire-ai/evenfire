@@ -27,26 +27,25 @@ identity=(
   --head 0123456789abcdef
 )
 
-python3 "$HELPER" write "${identity[@]}" --phase planned --hcc 1 --workflow 1 --control-api 1
+python3 "$HELPER" write "${identity[@]}" --phase planned --hcc 1 --workflow 1 --trace 1 --control-api 1
 mode="$(stat -f '%Lp' "$STATE" 2>/dev/null || stat -c '%a' "$STATE")"
 [[ "$mode" == 600 ]] || fail "state mode is $mode, expected 600"
-python3 "$HELPER" read "${identity[@]}" | grep -Fxq 'planned|1|1|1' ||
+python3 "$HELPER" read "${identity[@]}" | grep -Fxq 'planned|1|1|1|1' ||
   fail 'planned state did not round-trip with exact replicas'
 pass 'writer recovery state is private and round-trips atomically'
 
-python3 "$HELPER" write "${identity[@]}" --phase api-fencing --hcc 1 --workflow 2 --control-api 1
-python3 "$HELPER" read "${identity[@]}" | grep -Fxq 'api-fencing|1|2|1' ||
+python3 "$HELPER" write "${identity[@]}" --phase api-fencing --hcc 1 --workflow 2 --trace 1 --control-api 1
+python3 "$HELPER" read "${identity[@]}" | grep -Fxq 'api-fencing|1|2|1|1' ||
   fail 'fencing phase did not preserve original replicas'
 for phase in api-restoring overlay-applying; do
-  python3 "$HELPER" write "${identity[@]}" --phase "$phase" --hcc 1 --workflow 2 --control-api 1
-  python3 "$HELPER" read "${identity[@]}" | grep -Fxq "${phase}|1|2|1" ||
+  python3 "$HELPER" write "${identity[@]}" --phase "$phase" --hcc 1 --workflow 2 --trace 1 --control-api 1
+  python3 "$HELPER" read "${identity[@]}" | grep -Fxq "${phase}|1|2|1|1" ||
     fail "${phase} phase did not round-trip"
 done
-wrong_status=0
-python3 "$HELPER" read "${identity[@]}" --head fedcba9876543210 >/dev/null 2>&1 || wrong_status=$?
-[[ "$wrong_status" -ne 0 ]] || fail 'state was readable under a different HEAD'
+python3 "$HELPER" read "${identity[@]}" --head fedcba9876543210 | grep -Fxq 'overlay-applying|1|2|1|1' ||
+  fail 'state did not resume under a different HEAD on the same owned lane'
 [[ -s "$STATE" ]] || fail 'identity mismatch destroyed durable state'
-pass 'writer recovery state fails closed on a different HEAD'
+pass 'writer recovery state preserves lane identity while retaining historical HEAD'
 
 python3 "$HELPER" clear "${identity[@]}"
 [[ ! -e "$STATE" ]] || fail 'clear left durable writer recovery state behind'

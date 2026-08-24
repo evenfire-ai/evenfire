@@ -15,13 +15,15 @@ import tempfile
 from pathlib import Path
 
 
-VERSION = 1
+VERSION = 2
 PHASES = {
     "planned",
     "hcc-fencing",
     "hcc-fenced",
     "workflow-fencing",
     "workflow-fenced",
+    "trace-fencing",
+    "trace-fenced",
     "api-fencing",
     "api-fenced",
     "policy-ready",
@@ -79,6 +81,7 @@ def write_state(args: argparse.Namespace) -> None:
         "phase": args.phase,
         "hccReplicas": validate_replica(args.hcc, "hcc", allow_zero=True),
         "workflowReplicas": validate_replica(args.workflow, "workflow", allow_zero=True),
+        "traceReplicas": validate_replica(args.trace, "trace-maintenance-worker", allow_zero=True),
         "controlApiReplicas": validate_replica(args.control_api, "control-api"),
     }
     path = state_path(args)
@@ -113,16 +116,31 @@ def read_state(args: argparse.Namespace) -> None:
         fail(f"cannot read state: {error}")
     if not isinstance(data, dict) or data.get("version") != VERSION:
         fail("state version is unsupported")
+    # The recorded head is historical evidence of the interrupted run. The
+    # durable lane identity is profile/context/worktree/branch; a new commit
+    # on the same owned lane must be able to resume and revalidate freshness
+    # through the exact-head pre-gate marker instead of losing state solely
+    # because HEAD advanced.
     for key, expected in identity.items():
+        if key == "head":
+            continue
         if data.get(key) != expected:
             fail(f"state identity mismatch for {key}; refusing to touch another lane")
+    stored_head = data.get("head")
+    if not isinstance(stored_head, str) or not stored_head or any(
+        char in stored_head for char in "\r\n\t"
+    ):
+        fail("state historical HEAD is invalid")
     phase = data.get("phase")
     if phase not in PHASES:
         fail("state phase is invalid")
     hcc = validate_replica(str(data.get("hccReplicas")), "hcc", allow_zero=True)
     workflow = validate_replica(str(data.get("workflowReplicas")), "workflow", allow_zero=True)
+    trace = validate_replica(
+        str(data.get("traceReplicas")), "trace-maintenance-worker", allow_zero=True
+    )
     control_api = validate_replica(str(data.get("controlApiReplicas")), "control-api")
-    print(f"{phase}|{hcc}|{workflow}|{control_api}")
+    print(f"{phase}|{hcc}|{workflow}|{trace}|{control_api}")
 
 
 def clear_state(args: argparse.Namespace) -> None:
@@ -147,6 +165,7 @@ def parser() -> argparse.ArgumentParser:
     write.add_argument("--phase", required=True)
     write.add_argument("--hcc", required=True)
     write.add_argument("--workflow", required=True)
+    write.add_argument("--trace", required=True)
     write.add_argument("--control-api", required=True)
     subparsers.add_parser("read", parents=[common])
     subparsers.add_parser("clear", parents=[common])

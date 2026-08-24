@@ -20,8 +20,8 @@ Before reusing a profile, record and compare all of the following:
 
 - active worktree path, branch, `HEAD`, and `origin/dev`;
 - target Minikube profile and explicit Kubernetes context;
-- the pre-gate state marker: `worktreeId`, `gitHead`, and
-  `clusterFingerprint`;
+- the pre-gate state marker: `worktreeId`, `gitHead`, `clusterFingerprint`,
+  and the exact `imagesGeneratedAt` value from the image manifest;
 - profile status and currently running profile, pre-gate-sync, and
   port-forward processes.
 
@@ -36,12 +36,17 @@ Port-forwards are owned by atomic `0600` records bound to the exact profile,
 context, canonical worktree, namespace, Service, local/remote ports, PID,
 process start time, and `kubectl` argv. Never kill or adopt a live legacy
 `/tmp/pf-*.pid` process: it lacks enough provenance and must fail closed.
+After a user-facing health probe, revalidate the same live process, start time,
+argv, and binding. A registered but dead/reused/ambiguous pidfile is itself a
+`PORT_FORWARD_CONFLICT`; it must not disappear from the T2 verdict merely
+because `ps` no longer lists a child.
 
-All image builds and targeted deploys must enter through the documented Make
-targets or the T2 orchestrator so they inherit the exact live profile mutation
-lease. Calling `scripts/minikube/build-images.sh` directly is unsupported for
-mutating work; `--verify-only` is the read-only exception. Docker and Minikube
-operations must use finite deadlines. Docker endpoint discovery must resolve
+All image acquisition, image builds, and targeted deploys must enter through
+the documented Make targets or the T2 orchestrator so they inherit the exact
+live profile mutation lease. Calling `scripts/minikube/build-images.sh` or
+`scripts/minikube/pull-images.sh` directly is unsupported for mutating work;
+`--verify-only` is the read-only exception. Docker and Minikube operations must
+use finite deadlines. Docker endpoint discovery must resolve
 to an explicit local Unix socket or loopback TCP endpoint before switching to
 an empty task-local Docker config. Ambient registry credentials are never
 copied; a private pull requires an explicit `MINIKUBE_DOCKER_AUTH_CONFIG`.
@@ -130,6 +135,10 @@ reader readiness through the `gfs-rollout-shim` PATH prefix instead of a
 generation-based `rollout status`, because HCC's gfsReconciler strips the
 `restartedAt` annotation and makes that wait time out. The standalone preflight and
 the final exact-head T2 check stay fail-loud on an unready deployment.
+When REUSE_DB recovery is needed, the fence covers all four database writers:
+HCC, workflow-recipes, trace-maintenance-worker, and control-api. The durable
+recovery identity is the owned profile/context/worktree/branch; the interrupted
+HEAD is retained as audit data while the exact-head marker controls freshness.
 Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by

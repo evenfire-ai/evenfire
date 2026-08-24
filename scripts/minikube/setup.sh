@@ -9,7 +9,7 @@
 #
 # Usage:
 #   ./scripts/minikube/setup.sh
-#   ./scripts/minikube/setup.sh --build   # Also build images (step 6)
+#   ./scripts/minikube/setup.sh --build   # Build images under the branch lease
 # ======================================================================
 
 set -euo pipefail
@@ -33,6 +33,20 @@ for arg in "$@"; do
     --build) BUILD_IMAGES=true ;;
   esac
 done
+
+# This legacy setup path mutates the profile before it reaches its optional
+# image build. Re-enter it through the canonical lease wrapper first, so a
+# failed lease check cannot leave namespaces, keys, or Secrets half-applied.
+# The wrapper marks the inherited lease; the second invocation then proceeds
+# with the exact opaque token held by the parent. Fresh/unowned profiles must
+# use the supported T2 bootstrap instead of bypassing this boundary.
+if [ "$BUILD_IMAGES" = true ] && [ "${T2_MUTATION_LOCK_WRAPPED:-false}" != true ]; then
+  exec env \
+    T2_PROJECT_DIR="$PROJECT_DIR" T2_PROFILE="$PROFILE" T2_CONTEXT="$PROFILE" \
+    MINIKUBE_PROFILE="$PROFILE" CONTROL_API_REAL_PG_CONTEXT="$PROFILE" \
+    T2_SKIP_LOCK=false T2_GATE_ID=legacy-minikube-setup \
+    "$SCRIPT_DIR/with-t2-mutation-lock.sh" -- "$SCRIPT_DIR/setup.sh" "$@"
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

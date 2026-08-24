@@ -201,9 +201,20 @@ minikube-setup-e2e: ## Full setup + E2E fixtures (test user, e2e-* recipes, demo
 minikube-teardown: ## Remove deployments (keep namespaces/CRDs)
 	@scripts/minikube/teardown.sh
 
-.PHONY: minikube-pull-images
+.PHONY: minikube-pull-images minikube-pull-images-body
 minikube-pull-images: ## Pull ALL published images into minikube at the pinned release tag (MINIKUBE_IMAGE_TAG=<tag> overrides the pin for this run only)
-	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-pull-images-body
+
+minikube-pull-images-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+		CONTROL_API_REAL_PG_CONTEXT="$(MINIKUBE_PROFILE)" \
 		scripts/minikube/pull-images.sh
 
 .PHONY: minikube-build-images minikube-build-images-body

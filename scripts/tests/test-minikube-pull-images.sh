@@ -31,6 +31,9 @@ printf '%s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
   pull)
     ref="${2:-}"
+    if [ "${TEST_HANG_PULL:-false}" = true ]; then
+      while :; do sleep 60; done
+    fi
     for missing in ${TEST_MISSING_TAGS:-}; do
       if [[ "$ref" == "$missing" ]]; then
         for i in $(seq 1 20); do
@@ -54,6 +57,16 @@ case "${1:-}" in
         exit 0
       fi
     done
+    exit 0
+    ;;
+  context)
+    if [[ "${2:-}" == inspect ]]; then
+      if [[ "$*" == *SkipTLSVerify* ]]; then
+        printf 'unix:///tmp/evenfire-docker.sock\tfalse\t{}\n'
+      else
+        printf 'unix:///tmp/evenfire-docker.sock\n'
+      fi
+    fi
     exit 0
     ;;
   tag) exit 0 ;;
@@ -91,6 +104,14 @@ copy_repo() {
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
   rm -f "$d/repo/deploy/minikube/.image-manifest.json"
+  # The real puller is a mutating child and validates the inherited lease.
+  # This fixture is intentionally a no-op child validator; the puller's
+  # explicit profile/project/context contract is still exercised below.
+  cat > "$d/repo/scripts/minikube/require-t2-mutation-lock.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$d/repo/scripts/minikube/require-t2-mutation-lock.sh"
   if [ -n "$manifest" ]; then
     mkdir -p "$d/repo/deploy/minikube"
     printf '%s' "$manifest" > "$d/repo/deploy/minikube/.image-manifest.json"
@@ -126,7 +147,57 @@ run_puller_prepared() {
   MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}" \
   MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-}" \
   MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-}" \
+  TEST_HANG_PULL="${TEST_HANG_PULL:-}" \
+  MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS:-}" \
+  MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS:-}" \
+  T2_PROJECT_DIR="$d/repo" \
+  T2_PROFILE=clerum-test T2_CONTEXT=clerum-test \
+  MINIKUBE_PROFILE=clerum-test CONTROL_API_REAL_PG_CONTEXT=clerum-test \
+  DOCKER_HOST=unix:///tmp/evenfire-docker.sock \
     bash "$d/repo/scripts/minikube/pull-images.sh" "$@" 2>&1
+}
+
+run_puller_without_lease() {
+  local d=$1; shift
+  make_stubs "$d"
+  copy_repo "$d"
+  env -u T2_PROJECT_DIR -u T2_PROFILE -u T2_CONTEXT \
+    -u CONTROL_API_REAL_PG_CONTEXT \
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    MINIKUBE_PROFILE=clerum-test DOCKER_HOST=unix:///tmp/evenfire-docker.sock \
+    bash "$d/repo/scripts/minikube/pull-images.sh" "$@" 2>&1
+}
+
+assert_puller_requires_the_inherited_profile_lease() {
+  local d out rc
+  d="$(mktemp -d)"
+  out="$(run_puller_without_lease "$d" --only=control-api)"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -Fq 'PROFILE_LOCK_REQUIRED' <<< "$out" \
+     && [ ! -s "$d/ops.log" ]; then
+    pass "puller refuses mutation without the inherited profile lease"
+  else
+    fail "puller did not fail before Docker mutation without its lease: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_hung_pull_hits_the_finite_deadline() {
+  local d out rc
+  d="$(mktemp -d)"
+  export TEST_HANG_PULL=true
+  export MINIKUBE_IMAGE_TAG=deadline-test
+  export MINIKUBE_IMAGE_PULL_RETRIES=1
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  export MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS=1
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset TEST_HANG_PULL MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES \
+    MINIKUBE_IMAGE_PULL_DELAY_SECS MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS
+  if [ "$rc" -ne 0 ] && grep -Eq 'HARNESS_DEADLINE.*pull-image-control-api.*timeout' <<< "$out"; then
+    pass "a hung image pull is terminated by its finite deadline"
+  else
+    fail "hung pull did not produce the bounded deadline failure: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
 }
 
 assert_it_pulls_every_pull_in_ghcr_mode_image() {
@@ -682,6 +753,8 @@ assert_every_defined_case_is_invoked() {
 }
 
 assert_it_pulls_every_pull_in_ghcr_mode_image
+assert_puller_requires_the_inherited_profile_lease
+assert_hung_pull_hits_the_finite_deadline
 assert_it_never_pulls_an_unpublished_image
 assert_it_never_pulls_a_registry_distributed_mcp_server
 assert_it_repulls_a_tag_already_present_in_the_daemon

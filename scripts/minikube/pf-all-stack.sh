@@ -261,6 +261,15 @@ start_pf() {
 
   for ((attempt = 0; attempt < HEALTH_ATTEMPTS; attempt += 1)); do
     if curl -sf -m 2 "${health_url}" >/dev/null 2>&1; then
+      # Health can succeed in the same small interval in which a forward
+      # exits or its PID is reused. Revalidate the exact recorded process and
+      # binding after the user-facing probe before publishing success.
+      if ! pf_owner_record_process_matches "${profile_pidfile}" "${PROFILE}" \
+        "${CONTEXT}" "${WORKTREE_ROOT}" "${namespace}" "${service}" \
+        "${local_port}" "${remote_port}"; then
+        echo "  ERROR: ${name} port-forward ownership was lost during health verification" >&2
+        return 1
+      fi
       return 0
     fi
     pf_owner_pause "${HEALTH_DELAY}"

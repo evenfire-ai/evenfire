@@ -65,7 +65,7 @@ new_case() {
   CONSUMED_PATH="${STATE_ROOT}/${WORKTREE_ID}/${RUN_ID}/setup-complete.consumed.json"
   CLAIM_PATH="${STATE_ROOT}/${WORKTREE_ID}/${RUN_ID}/setup-complete.consume.claim"
   mkdir -p "$(dirname "${MANIFEST}")"
-  printf '{"imageSource":"local","images":{"control-api":"sha256:test"}}\n' >"${MANIFEST}"
+  printf '{"generated":"handoff-generated","imageSource":"local","images":{"control-api":"sha256:test"}}\n' >"${MANIFEST}"
 }
 
 run_handoff() {

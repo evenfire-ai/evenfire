@@ -105,12 +105,14 @@ inside that exact profile lock. A concurrent loser fails closed and never
 removes either the stale directory or the winner's replacement lock.
 
 The pre-gate marker must contain the current worktree identifier, exact `HEAD`,
-cluster fingerprint, and image coordinate. A mismatch stops with a stable
-error code instead of allowing a mixed-commit run.
+cluster fingerprint, image coordinate, and the exact `imagesGeneratedAt` value
+from the image manifest. A mismatch—including a new image acquisition at the
+same HEAD—stops with a stable error code instead of allowing a mixed-commit run.
 
-Mutating image builds and targeted deploys are children of that same exact
-profile lease. Public Make targets acquire it; private body targets and
-`build-images.sh` validate the inherited token again before the first Docker,
+Mutating image acquisition/builds and targeted deploys are children of that
+same exact profile lease. Public Make targets acquire it; private body targets,
+`pull-images.sh`, and `build-images.sh` validate the inherited token again
+before the first Docker,
 Minikube, or Kubernetes operation. `build-images.sh --verify-only` is the
 read-only exception. Empty/unknown selectors fail before the lease or runtime
 is touched.
@@ -142,7 +144,9 @@ context, canonical worktree, Service, and port bindings. Each live process
 must have exactly one atomic `0600` ownership record under
 `$HOME/.cache/clerum/minikube-profiles/<profile>/pids/`. A live legacy
 `/tmp/pf-<profile>-*.pid` record cannot be adopted or killed because it lacks
-the full binding; dead legacy records may be pruned.
+the full binding; dead legacy records may be pruned. Registered pidfiles are
+also checked when `ps` no longer lists a child, and a successful user-facing
+health probe is followed by exact process/start-time/argv revalidation.
 `make minikube-t2` invokes `pre-gate-sync` with `--skip-port-forwards` so the
 orchestrator does not plant forwards that fail its own T2 check. Secret values
 are never printed.
@@ -301,6 +305,12 @@ development-only flag and the exact expected PVC UID; a mismatched UID is
 refused. An interrupted bootstrap leaves the profile intact and can be safely
 retried after the reported prerequisite is repaired. Do not reuse evidence
 from a different `HEAD` or profile.
+
+REUSE_DB recovery fences all four database writers—HCC, workflow-recipes,
+trace-maintenance-worker, and control-api—before migrations, role provisioning,
+or the recovery overlay. The interrupted `HEAD` remains historical state for
+the owned profile/context/worktree/branch; exact-head freshness is decided by
+the pre-gate marker and image stamp.
 
 Retry by phase. During a T1 failure, iterate with
 `minikube-t2-real-postgres`, then run one full `minikube-t2` certification once

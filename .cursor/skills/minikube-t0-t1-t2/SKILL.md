@@ -24,7 +24,9 @@ Before running anything, verify ALL of these:
       Do NOT create a new profile because HEAD, gate, or command changed.
       Resolve it with the primary checkout `.local-notes/minikube-profiles/branch.mk`;
       profile identity is stable for canonical worktree + branch, while the
-      pre-gate marker—not a profile-name SHA—proves exact-HEAD freshness.
+      pre-gate marker—not a profile-name SHA—proves exact-HEAD freshness. The
+      marker must also match the image manifest's exact `imagesGeneratedAt`
+      stamp; a new image acquisition on the same HEAD is not already-synced.
 - [ ] Confirm the profile is not owned by another active branch/worktree. If
       ownership is ambiguous, stop and use a dedicated profile instead.
 - [ ] Every `kubectl` you run manually uses `--context=<owned profile>`.
@@ -32,9 +34,9 @@ Before running anything, verify ALL of these:
 - [ ] Docker resolves to a local Unix socket or loopback TCP endpoint. The
       harness pins that endpoint into an empty task-local config; do not use a
       remote Docker context or copy ambient registry credentials into it.
-- [ ] Mutating image builds use the public Make target/orchestrator and inherit
-      its exact profile lease. Do not call `build-images.sh` directly;
-      `--verify-only` is the read-only exception.
+- [ ] Mutating image acquisition/builds use the public Make target/orchestrator
+      and inherit its exact profile lease. Do not call `build-images.sh` or
+      `pull-images.sh` directly; `--verify-only` is the read-only exception.
 - [ ] Never read `~/.cache/clerum/minikube-profiles/` directly (HARD DENY —
       it holds private profile state). The harness reads it for you.
 
@@ -149,6 +151,12 @@ it is optional for other transitions. `T2_PLAYWRIGHT_COMMAND` remains opt-in
 
 Evidence stays under the ignored `.local-notes/infra/runs/`. Never commit it.
 Before committing anything else, run `make minikube-t2-public-boundary`.
+
+The final exact-head check also rejects a marker whose `imagesGeneratedAt`
+does not equal the current image manifest. During REUSE_DB recovery, the
+durable fence covers HCC, workflow-recipes, trace-maintenance-worker, and
+control-api; a changed HEAD on the same owned lane is historical state, not a
+reason to discard recovery evidence.
 
 ## Step 5 — On failure
 

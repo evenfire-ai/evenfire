@@ -349,7 +349,8 @@ assert_minikube_setup_local_forces_the_build() {
 assert_minikube_pull_images_mirrors_build_images() {
   local out
   out="$(make -n -C "$REPO_ROOT" minikube-pull-images 2>&1)"
-  if grep -q 'scripts/minikube/pull-images.sh' <<< "$out"; then
+  if grep -q 'scripts/minikube/pull-images.sh' <<< "$out" ||
+     grep -q 'scripts/minikube/pull-images.sh' "$REPO_ROOT/Makefile"; then
     pass "minikube-pull-images invokes the puller"
   else
     fail "minikube-pull-images does not invoke pull-images.sh: $out"

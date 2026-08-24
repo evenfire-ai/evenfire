@@ -1118,9 +1118,11 @@ PARTIAL_BOOTSTRAP_RECOVERY=false
 PARTIAL_CONTROL_API_REPLICAS=""
 PARTIAL_WORKFLOW_REPLICAS=""
 PARTIAL_HCC_REPLICAS=""
+PARTIAL_TRACE_REPLICAS=""
 PARTIAL_CONTROL_API_FENCED=false
 PARTIAL_WORKFLOW_FENCED=false
 PARTIAL_HCC_FENCED=false
+PARTIAL_TRACE_FENCED=false
 WRITER_RECOVERY_STATE_HELPER="${SCRIPT_DIR}/writer-recovery-state.py"
 WRITER_RECOVERY_STATE_ROOT="${PROJECT_DIR}/.local-notes/infra/runs/writer-recovery"
 WRITER_RECOVERY_STATE_FILE="${WRITER_RECOVERY_STATE_ROOT}/${PROFILE}.json"
@@ -1150,6 +1152,7 @@ writer_recovery_state_write() {
     --phase "$phase" \
     --hcc "$PARTIAL_HCC_REPLICAS" \
     --workflow "$PARTIAL_WORKFLOW_REPLICAS" \
+    --trace "$PARTIAL_TRACE_REPLICAS" \
     --control-api "$PARTIAL_CONTROL_API_REPLICAS"
 }
 
@@ -1177,10 +1180,12 @@ writer_recovery_state_load() {
     return 0
   fi
   IFS='|' read -r WRITER_RECOVERY_STATE_PHASE PARTIAL_HCC_REPLICAS \
-    PARTIAL_WORKFLOW_REPLICAS PARTIAL_CONTROL_API_REPLICAS <<<"$state_output"
+    PARTIAL_WORKFLOW_REPLICAS PARTIAL_TRACE_REPLICAS \
+    PARTIAL_CONTROL_API_REPLICAS <<<"$state_output"
   [ -n "$WRITER_RECOVERY_STATE_PHASE" ] &&
     [[ "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]] &&
     [[ "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] &&
+    [[ "$PARTIAL_TRACE_REPLICAS" =~ ^[0-9]+$ ]] &&
     [[ "$PARTIAL_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] || {
       err "Durable writer-recovery state is incomplete; refusing profile mutation"
       return 1
@@ -1204,11 +1209,20 @@ writer_recovery_state_load() {
       PARTIAL_WORKFLOW_FENCED=true
       WRITER_RECOVERY_FENCE_PENDING=true
       ;;
+    trace-fencing|trace-fenced)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
     api-fencing)
       WRITER_RECOVERY=true
       PARTIAL_BOOTSTRAP_RECOVERY=true
       PARTIAL_HCC_FENCED=true
       PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
       WRITER_RECOVERY_FENCE_PENDING=true
       ;;
@@ -1217,6 +1231,7 @@ writer_recovery_state_load() {
       PARTIAL_BOOTSTRAP_RECOVERY=true
       PARTIAL_HCC_FENCED=true
       PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
       WRITER_RECOVERY_FENCE_PENDING=true
       ;;
@@ -1225,6 +1240,7 @@ writer_recovery_state_load() {
       PARTIAL_BOOTSTRAP_RECOVERY=true
       PARTIAL_HCC_FENCED=true
       PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
       # A persisted policy phase is historical evidence only. Re-fence and
       # restage the current rendered policy before any writer is restored so a
@@ -1236,6 +1252,7 @@ writer_recovery_state_load() {
       PARTIAL_BOOTSTRAP_RECOVERY=true
       PARTIAL_HCC_FENCED=true
       PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
       WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
       # The phase is written before the control-api restore. An interruption
@@ -1249,7 +1266,7 @@ writer_recovery_state_load() {
       PARTIAL_WORKFLOW_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
       WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
-      # The overlay is rendered with all three writer Deployments at zero.
+      # The overlay is rendered with all four database-writer Deployments at zero.
       # Re-fence on every post-migration resume because an interrupted apply
       # may have recreated a writer before its durable phase was updated.
       WRITER_RECOVERY_FENCE_PENDING=true
@@ -1273,11 +1290,15 @@ writer_recovery_state_prepare() {
   state="$($KC -n control-plane get deployment/workflow-recipes \
     -o 'jsonpath={.spec.replicas}')" || return 1
   PARTIAL_WORKFLOW_REPLICAS="$state"
+  state="$($KC -n control-plane get deployment/trace-maintenance-worker \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  PARTIAL_TRACE_REPLICAS="$state"
   state="$($KC -n control-plane get deployment/control-api \
     -o 'jsonpath={.spec.replicas}')" || return 1
   PARTIAL_CONTROL_API_REPLICAS="$state"
   [[ "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]] || return 1
   [[ "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] || return 1
+  [[ "$PARTIAL_TRACE_REPLICAS" =~ ^[0-9]+$ ]] || return 1
   [[ "$PARTIAL_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] || return 1
   writer_recovery_state_phase planned
 }
@@ -1350,6 +1371,25 @@ fence_partial_workflow_reconciler() {
   writer_recovery_state_phase workflow-fenced
 }
 
+fence_partial_trace_worker() {
+  local pods
+  if [[ ! "${PARTIAL_TRACE_REPLICAS}" =~ ^[0-9]+$ ]]; then
+    err "trace-maintenance-worker replica count is invalid; refusing partial-bootstrap recovery"
+    return 1
+  fi
+  log "Fencing trace-maintenance-worker at ${PARTIAL_TRACE_REPLICAS} replica(s)"
+  writer_recovery_state_phase trace-fencing
+  $KC -n control-plane scale deployment/trace-maintenance-worker --replicas="${PARTIAL_TRACE_REPLICAS}" >/dev/null
+  pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" \
+    || return 1
+  if [ -n "${pods}" ]; then
+    $KC -n control-plane wait --for=delete pod \
+      -l app=trace-maintenance-worker --timeout=180s >/dev/null
+  fi
+  PARTIAL_TRACE_FENCED=true
+  writer_recovery_state_phase trace-fenced
+}
+
 fence_partial_hcc() {
   local pods
   if [[ ! "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]]; then
@@ -1376,6 +1416,7 @@ fence_partial_bootstrap_writers() {
   writer_recovery_state_prepare
   fence_partial_hcc
   fence_partial_workflow_reconciler
+  fence_partial_trace_worker
   fence_partial_control_api
 }
 
@@ -1501,12 +1542,17 @@ restore_partial_control_api() {
 restore_partial_non_api_writers() {
   if [ "$PARTIAL_WORKFLOW_FENCED" = true ]; then
     $KC -n control-plane scale deployment/workflow-recipes \
-      --replicas="$PARTIAL_WORKFLOW_REPLICAS" >/dev/null
+      --replicas="$PARTIAL_WORKFLOW_REPLICAS" >/dev/null || return 1
     PARTIAL_WORKFLOW_FENCED=false
+  fi
+  if [ "$PARTIAL_TRACE_FENCED" = true ]; then
+    $KC -n control-plane scale deployment/trace-maintenance-worker \
+      --replicas="$PARTIAL_TRACE_REPLICAS" >/dev/null || return 1
+    PARTIAL_TRACE_FENCED=false
   fi
   if [ "$PARTIAL_HCC_FENCED" = true ]; then
     $KC -n control-plane scale deployment/host-context-controller \
-      --replicas="$PARTIAL_HCC_REPLICAS" >/dev/null
+      --replicas="$PARTIAL_HCC_REPLICAS" >/dev/null || return 1
     PARTIAL_HCC_FENCED=false
   fi
 }
@@ -1539,11 +1585,12 @@ render_fenced_recovery_overlay() {
     err "Recovery overlay workspace is unavailable; refusing writer recovery"
     return 1
   }
-  log "Rendering the recovery overlay with HCC, workflow-recipes, and control-api fenced"
+  log "Rendering the recovery overlay with HCC, workflow-recipes, trace-maintenance-worker, and control-api fenced"
   if ! $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | \
     RUBYOPT=--disable=gems ruby "${SCRIPT_DIR}/render-fenced-writer-deployments.rb" \
       --target control-plane/host-context-controller \
       --target control-plane/workflow-recipes \
+      --target control-plane/trace-maintenance-worker \
       --target control-plane/control-api >"$rendered_file"; then
     err "Unable to render a complete fenced recovery overlay; refusing writer recovery"
     return 1
@@ -1591,13 +1638,14 @@ else
         WRITER_RECOVERY=true
         PARTIAL_BOOTSTRAP_RECOVERY=true
         log "Existing GFS writer and empty control-api runtime Secret detected — fencing writers until migrations and runtime roles converge"
-      elif [ "$runtime_secret_status" -eq 1 ] && [ "$K8S_API_EGRESS_POLICY_DRIFT" = true ]; then
+      elif [ "$runtime_secret_status" -eq 1 ]; then
         WRITER_RECOVERY=true
         PARTIAL_BOOTSTRAP_RECOVERY=true
-        log "Existing GFS writer detected with control-api not Ready — repairing the stale API-egress policy before the fail-closed readiness decision"
-      elif [ "$runtime_secret_status" -eq 1 ]; then
-        err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
-        exit 1
+        if [ "$K8S_API_EGRESS_POLICY_DRIFT" = true ]; then
+          log "Existing GFS writer detected with control-api not Ready — repairing the stale API-egress policy before runtime-role convergence"
+        else
+          log "Existing GFS writer detected with control-api not Ready — fencing all database writers before runtime-role convergence"
+        fi
       else
         err "Unable to inspect control-api-postgres-runtime; refusing to classify the GFS upgrade path"
         exit 1
@@ -1679,7 +1727,7 @@ else
   fi
 
   if [ "$WRITER_RECOVERY" = true ]; then
-    # Keep every writer at zero while the full overlay is applied. The overlay
+    # Keep every database writer at zero while the full overlay is applied. The overlay
     # itself declares one replica for these Deployments, so applying it
     # directly would reopen the writer window before the explicit restore.
     apply_fenced_recovery_overlay
