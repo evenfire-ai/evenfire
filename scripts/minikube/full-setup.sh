@@ -1109,6 +1109,7 @@ ok "Minikube K8s API CIDRs refreshed"
 # condition either. Fence the control-plane writers before migrations/roles,
 # then complete the full overlay and GFS credential reconciliation only after
 # runtime-role readiness has been proved.
+WRITER_RECOVERY=false
 PARTIAL_BOOTSTRAP_RECOVERY=false
 PARTIAL_CONTROL_API_REPLICAS=1
 PARTIAL_WORKFLOW_REPLICAS=1
@@ -1209,6 +1210,21 @@ fence_partial_bootstrap_writers() {
   fence_partial_control_api
 }
 
+apply_refreshed_k8s_api_network_policies() {
+  local policy_file="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}/patches/k8s-api-ip.yaml"
+  if [ ! -s "$policy_file" ]; then
+    err "Refreshed Kubernetes API NetworkPolicy manifest is missing; refusing writer recovery"
+    return 1
+  fi
+  # full-setup refreshes this generated file before classification, but the
+  # full overlay is deliberately deferred while a writer recovery is active.
+  # Apply only the API-egress policies after every control-plane writer is
+  # fenced, so control-api can reach Kubernetes without waking HCC/workflow
+  # reconciliation or changing any GFS-owned resource.
+  log "Applying refreshed Kubernetes API egress policies while writers are fenced"
+  $KC apply -f "$policy_file" >/dev/null
+}
+
 restore_partial_control_api() {
   if [ "$PARTIAL_CONTROL_API_FENCED" != true ]; then
     return 1
@@ -1270,18 +1286,20 @@ else
         err "Unable to determine control-api readiness; refusing to classify the GFS upgrade path"
         exit 1
       fi
+      fence_partial_bootstrap_writers
+      apply_refreshed_k8s_api_network_policies
       if runtime_role_secret_is_missing; then
+        WRITER_RECOVERY=true
         PARTIAL_BOOTSTRAP_RECOVERY=true
         log "Existing GFS writer and empty control-api runtime Secret detected — fencing writers until migrations and runtime roles converge"
-        fence_partial_bootstrap_writers
       else
         runtime_secret_status=$?
         if [ "$runtime_secret_status" -ne 1 ]; then
           err "Unable to inspect control-api-postgres-runtime; refusing to classify the GFS upgrade path"
           exit 1
         fi
-        err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
-        exit 1
+        WRITER_RECOVERY=true
+        log "Existing GFS writer detected with control-api not Ready — repairing the stale API-egress policy before the fail-closed readiness decision"
       fi
     fi
   else
@@ -1294,7 +1312,7 @@ if [ "$RESET_DB" = true ]; then
   # Keep control-api scaled to zero until migrations and role restoration are
   # complete; applying the full overlay here would race it against a fresh DB.
   $KC apply -k "$ACTIVE_MINIKUBE_RENDER_DIR" -l app=control-postgres
-elif [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
+elif [ "$WRITER_RECOVERY" = true ]; then
   log "Deferring the full kustomize overlay until control-api/runtime roles converge"
 else
   $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
@@ -1343,10 +1361,21 @@ else
   # live before normal staging on bootstrap or an idempotent upgrade. On the
   # deferred recovery path this is also the point where the missing runtime
   # Secret has been provisioned, so the previously blocked deployment can start.
-  if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
-    restore_partial_control_api
+  if [ "$WRITER_RECOVERY" = true ]; then
+    if ! restore_partial_control_api; then
+      if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
+        err "Restored control-api is not Ready; refusing GFS cutover after runtime-role provisioning"
+      else
+        err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
+      fi
+      exit 1
+    fi
     if ! control_api_is_ready; then
-      err "Restored control-api is not Ready; refusing GFS cutover after runtime-role provisioning"
+      if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
+        err "Restored control-api is not Ready; refusing GFS cutover after runtime-role provisioning"
+      else
+        err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
+      fi
       exit 1
     fi
   else
@@ -1354,7 +1383,7 @@ else
     $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
   fi
 
-  if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
+  if [ "$WRITER_RECOVERY" = true ]; then
     log "Control-api/runtime roles are Ready — reconciling GFS before the deferred full overlay"
     reconcile_existing_gfs_credentials
     $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -

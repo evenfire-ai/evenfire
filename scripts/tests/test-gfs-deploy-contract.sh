@@ -176,33 +176,39 @@ assert_minikube_upgrade_classifier() {
     fi
   done
   if [[ "$path" == *"scripts/minikube/full-setup.sh" ]]; then
-    local readiness_probe partial_flag fence_call migration roles restore_api deferred_full_overlay post_ready post_reconcile
+    local readiness_probe writer_flag partial_flag fence_call policy_apply migration roles restore_api deferred_full_overlay post_ready post_reconcile
     readiness_probe="$(grep -n 'if control_api_is_ready' <<<"$block" | head -1 | cut -d: -f1)"
     if [[ -n "$readiness_probe" ]]; then
       readiness_probe=$((block_start + readiness_probe - 1))
     fi
+    writer_flag="$(grep -n 'WRITER_RECOVERY=true' "$path" | head -1 | cut -d: -f1)"
     partial_flag="$(grep -n 'PARTIAL_BOOTSTRAP_RECOVERY=true' "$path" | head -1 | cut -d: -f1)"
     fence_call="$(grep -nE '^[[:space:]]+fence_partial_bootstrap_writers$' "$path" | tail -1 | cut -d: -f1)"
+    policy_apply="$(grep -nE '^[[:space:]]+apply_refreshed_k8s_api_network_policies$' "$path" | tail -1 | cut -d: -f1)"
     migration="$(grep -n 'run-control-api-db-migration.sh' "$path" | head -1 | cut -d: -f1)"
     roles="$(grep -n 'provision-control-api-runtime-roles.sh' "$path" | head -1 | cut -d: -f1)"
     restore_api="$(grep -nE '^[[:space:]]+restore_partial_control_api$' "$path" | tail -1 | cut -d: -f1)"
     deferred_full_overlay="$(grep -n 'Deferred full kustomize overlay applied' "$path" | head -1 | cut -d: -f1)"
     post_ready="$(grep -n 'rollout status deployment/control-api.*timeout=180s' "$path" | tail -1 | cut -d: -f1)"
     post_reconcile="$(grep -nE '^[[:space:]]+reconcile_existing_gfs_credentials$' "$path" | tail -1 | cut -d: -f1)"
-    [[ -n "$dsn" && -n "$classify" && -n "$readiness_probe" && -n "$partial_flag" && \
-       -n "$fence_call" && -n "$fallback" && -n "$fresh" && -n "$migration" && \
+    [[ -n "$dsn" && -n "$classify" && -n "$readiness_probe" && -n "$writer_flag" && \
+       -n "$partial_flag" && -n "$fence_call" && -n "$policy_apply" && \
+       -n "$fallback" && -n "$fresh" && -n "$migration" && \
        -n "$roles" && -n "$restore_api" && -n "$deferred_full_overlay" && \
        -n "$post_ready" && -n "$post_reconcile" ]] \
       || fail "$path recovery classifier is incomplete"
     [[ "$dsn" -lt "$classify" && "$classify" -lt "$readiness_probe" && \
-       "$readiness_probe" -lt "$partial_flag" && "$partial_flag" -lt "$fence_call" && \
-       "$fence_call" -lt "$fallback" && "$fallback" -lt "$fresh" && \
+       "$readiness_probe" -lt "$fence_call" && "$fence_call" -lt "$policy_apply" && \
+       "$policy_apply" -lt "$writer_flag" && "$writer_flag" -lt "$partial_flag" && \
+       "$partial_flag" -lt "$fallback" && "$fallback" -lt "$fresh" && \
        "$migration" -lt "$roles" && "$roles" -lt "$restore_api" && \
        "$restore_api" -lt "$post_reconcile" && "$post_reconcile" -lt "$deferred_full_overlay" && \
        "$post_ready" -lt "$deferred_full_overlay" ]] \
       || fail "$path does not fence writers and defer the full overlay until runtime-role readiness"
     grep -Fq 'Existing GFS writer detected but control-api is not Ready; refusing HCC cutover' "$path" \
       || fail "$path no longer retains the fail-closed guard for an unrecognized unready upgrade"
+    grep -Fq 'app=control-api,!clerum.io/component' "$path" \
+      || fail "$path does not exclude migration Jobs from the control-api writer fence"
   else
     [[ -n "$dsn" && -n "$classify" && -n "$ready" && -n "$abort" && -n "$reconcile" && -n "$fallback" && -n "$fresh" ]] \
       || fail "$path upgrade classifier is incomplete"
