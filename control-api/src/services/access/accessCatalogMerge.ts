@@ -8,6 +8,7 @@ import {
   type HydratedCatalogResource,
   catalogKeyEquals,
   compareCatalogKey,
+  compareCatalogText,
 } from './catalogContracts.js'
 import { resourceIdentityKey } from './resourceIdentity.js'
 
@@ -35,7 +36,7 @@ type HeapEntry = Readonly<{
 
 function entryCompare(left: HeapEntry, right: HeapEntry): number {
   const keyOrder = compareCatalogKey(left.candidate.key, right.candidate.key)
-  return keyOrder || left.cursor.stream.streamId.localeCompare(right.cursor.stream.streamId)
+  return keyOrder || compareCatalogText(left.cursor.stream.streamId, right.cursor.stream.streamId)
 }
 
 function heapPush(heap: HeapEntry[], entry: HeapEntry): void {

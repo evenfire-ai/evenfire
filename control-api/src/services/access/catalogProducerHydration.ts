@@ -1,4 +1,8 @@
-import type { CatalogFamily, CatalogRequestContext } from './catalogContracts.js'
+import {
+  type CatalogFamily,
+  type CatalogRequestContext,
+  compareCatalogText,
+} from './catalogContracts.js'
 import { CatalogProducerContractError } from './catalogProducerErrors.js'
 
 /** Validates the ordered canonical keys passed to selected-ID hydration. */
@@ -15,7 +19,7 @@ export function validateHydrationKeys(input: {
     if (key[0] !== input.context.environmentId || key[1] !== input.family || !key[2]) {
       throw new CatalogProducerContractError('hydrate_key_mismatch')
     }
-    if (logicalIds.at(-1) !== undefined && key[2] <= logicalIds.at(-1)!) {
+    if (logicalIds.at(-1) !== undefined && compareCatalogText(key[2], logicalIds.at(-1)!) <= 0) {
       throw new CatalogProducerContractError('hydrate_keys_not_strictly_ordered')
     }
     logicalIds.push(key[2])
