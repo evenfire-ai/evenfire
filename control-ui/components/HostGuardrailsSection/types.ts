@@ -10,10 +10,6 @@ export type GuardrailPhase =
 
 export type GuardrailHookRef = { id: string; digest?: string }
 
-// Built-in guardrails supported by the minimal add UI. The stored `type` is a
-// free string on the CR; the picker offers this curated subset.
-export type GuardrailBuiltinType = 'prompt-shaping' | 'token-trim'
-
 export type GuardrailBuiltin = {
   type: string
   order?: number
@@ -23,8 +19,8 @@ export type GuardrailBuiltin = {
 }
 
 // Structured view over `Host.spec.guardrails` (typed `AnyRecord` in lib/api).
-// Fields this section does not edit (rules, trust level, ceiling, limits) are
-// carried through untouched so a save never drops them.
+// This section edits `hooks` and nothing else — `builtins`, rules, trust level,
+// ceiling and limits are carried through untouched so a save never drops them.
 export type HostGuardrails = {
   rules?: unknown[]
   hooks?: Partial<Record<GuardrailPhase, GuardrailHookRef[]>>
@@ -34,14 +30,19 @@ export type HostGuardrails = {
   limits?: Record<string, unknown>
 }
 
+// One table row: a single hook reference under a single phase. A hook that runs
+// at two phases is two rows, which is also how it is stored.
+export type GuardrailHookRow = {
+  phase: GuardrailPhase
+  ref: GuardrailHookRef
+}
+
 export interface HostGuardrailsSectionProps {
   initialGuardrails: HostGuardrails | undefined
   // Persist the full guardrails object (parent merges it into the Host spec
   // under the resourceVersion precondition). Rejects on failure so the section
-  // keeps the operator's draft.
+  // can leave the operator's view untouched.
   onSave: (next: HostGuardrails) => Promise<void>
   busy: boolean
   canWrite: boolean
-  // Render the editable list immediately instead of the read-only summary.
-  defaultEditing?: boolean
 }
