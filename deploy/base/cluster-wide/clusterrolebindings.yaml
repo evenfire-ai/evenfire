@@ -1,6 +1,19 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
+  name: host-context-controller-mcp-proxy-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: host-context-controller-mcp-proxy-tokenreview
+subjects:
+- kind: ServiceAccount
+  name: host-context-controller
+  namespace: control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
   name: clerum-channel-reader
   labels:
     app.kubernetes.io/name: channel-reader

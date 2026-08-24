@@ -1201,6 +1201,17 @@ describe('NetworkPolicyReconciler', () => {
       )
       expect(egressRule.to[0].podSelector.matchLabels['clerum.io/mcpserver']).toBe('mongo')
       expect(egressRule.ports[0].port).toBe(3000)
+      expect(egressCall.body.spec.egress).toContainEqual({
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'mcp-server' },
+            },
+            podSelector: { matchLabels: { app: 'mcp-proxy' } },
+          },
+        ],
+        ports: [{ port: 8083, protocol: 'TCP' }],
+      })
     })
 
     it('scopes L2 mcp-host egress by Context CRD name, not namespace-wide selector', async () => {

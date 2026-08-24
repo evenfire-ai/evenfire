@@ -108,6 +108,10 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
+    resourceNames: ["mcp-proxy"]
   # Read + watch secrets (auth tokens, envSecret validation, SecretInformer re-enqueue)
   - apiGroups: [""]
     resources: ["secrets"]

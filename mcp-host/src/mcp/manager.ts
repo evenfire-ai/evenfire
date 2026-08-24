@@ -3,6 +3,7 @@
  */
 import { McpServerInfo, McpTool, ToolCallResult } from '../types'
 import { McpClient, type McpToolCallOptions } from './client'
+import type { McpProxyHostAuthorization } from './proxyAuth'
 import { ServerStatusTracker } from './serverStatus'
 
 export interface McpStatusRefreshSummary {
@@ -41,10 +42,16 @@ export class McpManager {
   private lifecycleEpoch = 0
   private closed = false
   private proxyUrl?: string
+  private proxyHostAuthorization?: McpProxyHostAuthorization
   private statusTracker: ServerStatusTracker
 
-  constructor(proxyUrl?: string, statusTracker?: ServerStatusTracker) {
+  constructor(
+    proxyUrl?: string,
+    statusTracker?: ServerStatusTracker,
+    proxyHostAuthorization?: McpProxyHostAuthorization
+  ) {
     this.proxyUrl = proxyUrl
+    this.proxyHostAuthorization = proxyHostAuthorization
     this.statusTracker = statusTracker ?? new ServerStatusTracker()
     if (proxyUrl) {
       console.log(`[McpManager] Proxy mode enabled: ${proxyUrl}`)
@@ -182,7 +189,12 @@ export class McpManager {
       return this.replaceServer(serverConfig, authToken, control)
     }
 
-    const client = new McpClient(serverConfig, authToken, this.proxyUrl)
+    const client = new McpClient(
+      serverConfig,
+      authToken,
+      this.proxyUrl,
+      this.proxyHostAuthorization
+    )
     const attempt = Symbol(serverConfig.name)
     this.pendingAdmissions.set(serverConfig.name, { attempt, client })
     this.statusTracker.markConnecting(serverConfig.name)
@@ -235,7 +247,12 @@ export class McpManager {
       return this.addServer(serverConfig, authToken, control)
     }
 
-    const candidate = new McpClient(serverConfig, authToken, this.proxyUrl)
+    const candidate = new McpClient(
+      serverConfig,
+      authToken,
+      this.proxyUrl,
+      this.proxyHostAuthorization
+    )
     const attempt = Symbol(serverConfig.name)
     this.pendingAdmissions.set(serverConfig.name, { attempt, client: candidate })
     try {

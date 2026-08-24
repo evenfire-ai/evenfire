@@ -131,6 +131,16 @@ spec:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: mcp-host
+      podSelector:
+        matchExpressions:
+        - key: clerum.io/managed-by
+          operator: In
+          values:
+          - host-context-controller
+        - key: clerum.io/host
+          operator: Exists
+        - key: clerum.io/context
+          operator: Exists
     ports:
     - port: 8083
       protocol: TCP
@@ -162,6 +172,8 @@ spec:
       protocol: TCP
     to:
     - podSelector:
+        matchLabels:
+          clerum.io/managed-by: host-context-controller
         matchExpressions:
         - key: clerum.io/mcpserver
           operator: Exists

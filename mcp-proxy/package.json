@@ -1,6 +1,6 @@
 {
   "name": "clerum-mcp-proxy",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "MCP Proxy - centralized HTTP router for MCP servers",
   "main": "dist/main.js",
   "engines": {

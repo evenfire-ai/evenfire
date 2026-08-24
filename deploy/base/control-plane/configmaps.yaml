@@ -807,6 +807,8 @@ data:
 
       map $uri $hcc_route_class {
         default denied;
+        ~^/api/v2/system/mcpservers/authorize$ system_authorize;
+        ~^/api/v2/system/mcpservers$ system_inventory;
         ~^/health$ health;
         ~^/ready$ ready;
         ~^/api/v2/hosts/self/mcpservers$ host_inventory;
@@ -890,6 +892,38 @@ data:
           add_header Pragma "no-cache" always;
           add_header X-Content-Type-Options "nosniff" always;
           return 410 '{"error":"gone"}';
+        }
+
+        location = /api/v2/system/mcpservers {
+          if ($request_method != GET) { return 405; }
+          proxy_pass http://host_context_controller_upstream;
+          proxy_pass_request_headers off;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header Authorization $http_authorization;
+          proxy_set_header X-Request-ID $request_id;
+          proxy_set_header Connection "";
+          add_header Cache-Control "no-store, private" always;
+          add_header Pragma "no-cache" always;
+          add_header X-Content-Type-Options "nosniff" always;
+        }
+
+        location = /api/v2/system/mcpservers/authorize {
+          if ($request_method != POST) { return 405; }
+          client_max_body_size 1k;
+          proxy_pass http://host_context_controller_upstream;
+          proxy_pass_request_headers off;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header Authorization $http_authorization;
+          proxy_set_header X-Clerum-Host-Authorization $http_x_clerum_host_authorization;
+          proxy_set_header Content-Type $http_content_type;
+          proxy_set_header Content-Length $content_length;
+          proxy_set_header X-Request-ID $request_id;
+          proxy_set_header Connection "";
+          add_header Cache-Control "no-store, private" always;
+          add_header Pragma "no-cache" always;
+          add_header X-Content-Type-Options "nosniff" always;
         }
 
         location = /api/v2/hosts/self/mcpservers {

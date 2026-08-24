@@ -5,10 +5,15 @@ import { HttpForwarder } from "./httpForwarder";
 import { Metrics } from "./metrics";
 import { Health } from "./health";
 import { ProxyServer } from "./server";
+import { proxyLogger } from "./logger";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  console.log(`[MCP Proxy] Starting (devMode=${config.devMode}, port=${config.port})`);
+  proxyLogger.info("proxy_starting", {
+    devMode: config.devMode,
+    port: config.port,
+    forwardingEnabled: config.forwardingEnabled,
+  });
 
   const router = new Router();
   const hccClient = new HccClient(config);
@@ -16,19 +21,20 @@ async function main(): Promise<void> {
     requestTimeout: config.requestTimeout,
     maxResponseSize: config.maxResponseSize,
     maxBufferSize: 65536, // 64KB — TM-2: cap pre-commit buffer independently
+    allowLoopbackTargets: config.allowLoopbackTargets,
   });
   const metrics = new Metrics();
   const health = new Health(router, hccClient);
-  const server = new ProxyServer(router, forwarder, metrics, health, config);
+  const server = new ProxyServer(router, forwarder, metrics, health, config, hccClient);
 
   // Load initial routing table
   if (config.devMode) {
-    console.log(`[MCP Proxy] Dev mode: loading ${config.devServers.length} static servers`);
+    proxyLogger.info("dev_routes_loaded", { count: config.devServers.length });
     router.update(config.devServers);
   } else {
     const servers = await hccClient.fetchServers();
     const { added } = router.update(servers);
-    console.log(`[MCP Proxy] Initial routing table: ${added.length} servers`);
+    proxyLogger.info("initial_inventory_loaded", { count: added.length });
   }
 
   // Start HCC polling (production only)
@@ -38,14 +44,16 @@ async function main(): Promise<void> {
       try {
         const servers = await hccClient.fetchServers();
         const { added, removed } = router.update(servers);
-        if (added.length > 0) console.log(`[MCP Proxy] Servers added: ${added.join(", ")}`);
-        if (removed.length > 0) console.log(`[MCP Proxy] Servers removed: ${removed.join(", ")}`);
+        if (added.length > 0) proxyLogger.info("servers_added", { count: added.length });
+        if (removed.length > 0) proxyLogger.info("servers_removed", { count: removed.length });
 
         for (const s of servers) {
           metrics.setServerHealth(s.name, s.ready);
         }
       } catch (err) {
-        console.error(`[MCP Proxy] Poll error: ${err instanceof Error ? err.message : err}`);
+        proxyLogger.warn("inventory_poll_error", {
+          reason: err instanceof Error ? err.name : "unknown",
+        });
       }
     }, config.hccPollInterval);
   }
@@ -54,7 +62,7 @@ async function main(): Promise<void> {
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
-    console.log(`[MCP Proxy] ${signal} received, shutting down...`);
+    proxyLogger.info("shutdown_requested", { signal });
     if (pollInterval) clearInterval(pollInterval);
     await server.stop();
     process.exit(0);
@@ -65,6 +73,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[MCP Proxy] Fatal error:", err);
+  proxyLogger.error("fatal_error", { reason: err instanceof Error ? err.name : "unknown" });
   process.exit(1);
 });

@@ -5,6 +5,7 @@ import type { McpServerAuth, McpServerStatus, McpServerTransport } from './types
 export interface AuthorityMetadata {
   uid: string
   resourceVersion: string
+  generation?: number
   deletionTimestamp?: string
 }
 
@@ -26,6 +27,7 @@ export interface AuthorityMcpServer {
   name: string
   namespace: string
   metadata: AuthorityMetadata
+  contextRef?: string
   description?: string
   transport: McpServerTransport
   auth?: McpServerAuth
@@ -49,6 +51,7 @@ export interface McpAuthorizationStore {
   readMcpServer(name: string): Promise<AuthorityMcpServer | null>
   readSecretMetadata(name: string): Promise<AuthoritySecretMetadata | null>
   readSecret(name: string): Promise<AuthoritySecret | null>
+  listMcpServers?(): Promise<AuthorityMcpServer[]>
 }
 
 export interface AuthorizedMcpServerInfo {
@@ -65,6 +68,24 @@ export interface AuthorizedMcpServerInfo {
 export interface AuthorizedCredential {
   token: string | null
   credentialRevision: string
+}
+
+export interface SystemMcpServerInfo {
+  name: string
+  contextRef: string
+  description?: string
+  transport: McpServerTransport
+  enabled: boolean
+  status: Pick<McpServerStatus, 'deployed' | 'ready'> &
+    Partial<Pick<McpServerStatus, 'authoritative'>>
+  destinationRevision: string
+}
+
+export interface LiveForwardTarget {
+  serverName: string
+  contextRef: string
+  targetUrl: string
+  destinationRevision: string
 }
 
 /** Project only the transport keys that are part of the mcp-host wire contract. */
@@ -148,6 +169,54 @@ function revisionFor(server: AuthorityMcpServer, secret: AuthoritySecretMetadata
     secretDeleting: secret?.metadata.deletionTimestamp ?? null,
   })
   return createHash('sha256').update(material).digest('base64url')
+}
+
+function forwardRevision(server: AuthorityMcpServer, targetUrl: string): string {
+  const material = JSON.stringify({
+    serverUid: server.metadata.uid,
+    serverResourceVersion: server.metadata.resourceVersion,
+    serverGeneration: server.metadata.generation ?? null,
+    serverDeleting: server.metadata.deletionTimestamp ?? null,
+    targetUrl,
+    enabled: server.enabled,
+    deployed: server.status.deployed,
+    ready: server.status.ready,
+    authoritative: server.status.authoritative ?? null,
+  })
+  return createHash('sha256').update(material).digest('base64url')
+}
+
+function liveForwardUrl(server: AuthorityMcpServer): string | null {
+  if (server.transport.type !== 'sse' && server.transport.type !== 'streamableHttp') return null
+  if (
+    typeof server.transport.url !== 'string' ||
+    server.transport.url.trim() !== server.transport.url
+  ) {
+    return null
+  }
+  try {
+    const target = new URL(server.transport.url)
+    if (
+      (target.protocol !== 'http:' && target.protocol !== 'https:') ||
+      target.username ||
+      target.password ||
+      target.hash
+    ) {
+      return null
+    }
+    return target.toString()
+  } catch {
+    return null
+  }
+}
+
+function sameForwardTarget(left: LiveForwardTarget, right: LiveForwardTarget): boolean {
+  return (
+    left.serverName === right.serverName &&
+    left.contextRef === right.contextRef &&
+    left.targetUrl === right.targetUrl &&
+    left.destinationRevision === right.destinationRevision
+  )
 }
 
 function sameHostContext(left: AuthorizedHostContext, right: AuthorizedHostContext): boolean {
@@ -276,6 +345,90 @@ export class McpAuthorizationService {
       secretMetadata,
       credentialRevision: revisionFor(server, secretMetadata),
     }
+  }
+
+  private async resolveLiveForwardTarget(
+    binding: AuthorizedHostContext,
+    serverName: string
+  ): Promise<LiveForwardTarget> {
+    if (!binding.context.mcpServers.includes(serverName)) {
+      throw new McpAuthorizationError('not_found')
+    }
+
+    let server: AuthorityMcpServer | null
+    try {
+      server = await this.store.readMcpServer(serverName)
+    } catch {
+      throw new McpAuthorizationError('authorization_unavailable')
+    }
+    const targetUrl = server ? liveForwardUrl(server) : null
+    if (
+      !server ||
+      server.name !== serverName ||
+      server.namespace !== binding.context.namespace ||
+      !server.enabled ||
+      !isLive(server.metadata) ||
+      !server.status.deployed ||
+      !server.status.ready ||
+      server.status.authoritative !== true ||
+      !targetUrl
+    ) {
+      throw new McpAuthorizationError('not_found')
+    }
+    return {
+      serverName: server.name,
+      contextRef: binding.context.name,
+      targetUrl,
+      destinationRevision: forwardRevision(server, targetUrl),
+    }
+  }
+
+  async listSystemServers(): Promise<SystemMcpServerInfo[]> {
+    if (!this.store.listMcpServers) {
+      throw new McpAuthorizationError('authorization_unavailable')
+    }
+    let servers: AuthorityMcpServer[]
+    try {
+      servers = await this.store.listMcpServers()
+    } catch {
+      throw new McpAuthorizationError('authorization_unavailable')
+    }
+    return servers.map(server => {
+      const targetUrl = liveForwardUrl(server) ?? ''
+      return {
+        name: server.name,
+        contextRef: server.contextRef ?? '',
+        ...(server.description ? { description: server.description } : {}),
+        transport: toPublicMcpTransport(server.transport),
+        enabled: server.enabled,
+        status: {
+          deployed: server.status.deployed,
+          ready: server.status.ready,
+          ...(typeof server.status.authoritative === 'boolean'
+            ? { authoritative: server.status.authoritative }
+            : {}),
+        },
+        destinationRevision: forwardRevision(server, targetUrl),
+      }
+    })
+  }
+
+  async getLiveForwardTarget(
+    principal: VerifiedMcpHostPrincipal,
+    serverName: string
+  ): Promise<LiveForwardTarget> {
+    const binding = await this.resolveHostContext(principal)
+    const target = await this.resolveLiveForwardTarget(binding, serverName)
+    const revalidatedBinding = await this.resolveHostContext(principal)
+    const revalidatedTarget = await this.resolveLiveForwardTarget(revalidatedBinding, serverName)
+    if (
+      !sameHostContext(binding, revalidatedBinding) ||
+      !sameForwardTarget(target, revalidatedTarget)
+    ) {
+      throw new McpAuthorizationError('authorization_unavailable')
+    }
+    this.assertPrincipalLive(principal)
+    return target
   }
 
   async listServers(principal: VerifiedMcpHostPrincipal): Promise<AuthorizedMcpServerInfo[]> {

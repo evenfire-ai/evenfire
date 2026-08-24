@@ -16,11 +16,14 @@ import {
   McpServerProvider,
   McpServerWatcher,
   createMcpAuthorizationStore,
+  createMcpProxyServiceAccountUidReader,
+  createMcpProxyTokenReviewClient,
   createMcpServerProvider,
   getKubeConfig,
 } from './k8sClient'
 import { McpApiAuthenticator } from './mcpApiAuthentication'
 import { McpAuthorizationService } from './mcpAuthorization'
+import { McpProxyAuthenticator } from './mcpProxyAuthentication'
 import {
   resolveHostAuthoritativeFn,
   resolveProviderAuthoritativeFn,
@@ -183,6 +186,18 @@ async function main(): Promise<void> {
     )
   }
   const mcpAuthorization = new McpAuthorizationService(createMcpAuthorizationStore(provider))
+  const tokenReviewClient = createMcpProxyTokenReviewClient()
+  const serviceAccountUidReader = createMcpProxyServiceAccountUidReader()
+  const mcpProxyAuthenticator =
+    tokenReviewClient && serviceAccountUidReader
+      ? new McpProxyAuthenticator({
+          tokenReviewClient,
+          readServiceAccountUid: serviceAccountUidReader,
+          systemNamespace: config.namespace,
+          systemServiceAccountName: 'mcp-proxy',
+          hostVerifier: mcpAuthenticator,
+        })
+      : undefined
   server = new ContextMapperServer(
     provider,
     config.port,
@@ -192,6 +207,7 @@ async function main(): Promise<void> {
     hostAuthoritativeFn,
     mcpAuthenticator,
     mcpAuthorization,
+    mcpProxyAuthenticator,
     readinessDetailFn
   )
   await server.start()

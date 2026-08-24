@@ -156,7 +156,9 @@ if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   ! grep -Fq 'pre_gate_marker_cluster_fingerprint' "${E2E_SCRIPT}" ||
   ! grep -Fq 'image_mode_images_generated_at' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_verify_sync_marker' "${E2E_SCRIPT}" ||
-  ! grep -Eq '^for command_name in .* node;' "${E2E_SCRIPT}"; then
+  ! grep -Eq '^for command_name in .* node npm;' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_sdk_protocol_journey' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'src/mcp/__tests__/np08ProxyJourney.test.ts' "${E2E_SCRIPT}"; then
   fail 'the deployed E2E is not wired to every tested guard'
 fi
 pass 'the deployed E2E is wired to cleanup and provenance guards'

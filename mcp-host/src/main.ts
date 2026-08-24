@@ -87,6 +87,7 @@ import {
 import type { HandleMcpAuthorityPollFailureOptions } from './mcp/authorityLifecycle'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
+import type { McpProxyHostAuthorization } from './mcp/proxyAuth'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
@@ -811,6 +812,17 @@ function ensureAuthenticatedContextMapperClient(): ContextMapperClient {
   return contextMapperClient
 }
 
+function getMcpProxyHostAuthorization(): McpProxyHostAuthorization | undefined {
+  if (!config.mcpProxyEnabled) return undefined
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) return undefined
+  const auth = runtimeAuth
+  return {
+    getAccessToken: () => auth.accessToken,
+    refreshOnUnauthorized: () => refreshWithRecovery(auth),
+  }
+}
+
 export { createMcpAuthorityStalenessDeadline, isMcpAuthorityStale }
 
 type McpAuthorityPollFailureCallbacks = Pick<
@@ -901,7 +913,12 @@ async function initializeMcpServers(): Promise<void> {
     await replaceAuthoritativeMcpFleet({
       servers,
       previousManager,
-      createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
+      createManager: () =>
+        new McpManager(
+          config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
+          undefined,
+          getMcpProxyHostAuthorization()
+        ),
       getAuthToken: async (serverName, expectedRevision) => {
         return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
       },
@@ -2812,7 +2829,11 @@ async function startDevMode(): Promise<void> {
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
-  mcpManager = new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined)
+  mcpManager = new McpManager(
+    config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
+    undefined,
+    getMcpProxyHostAuthorization()
+  )
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
     console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)

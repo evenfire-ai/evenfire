@@ -71,6 +71,19 @@ for rendered in "$@"; do
       finish = nginx.index(/^\s*location\s/m, start + marker.length) || nginx.length
       nginx[start...finish]
     end
+    system_inventory = location_block.call("location = /api/v2/system/mcpservers {")
+    system_authorize = location_block.call("location = /api/v2/system/mcpservers/authorize {")
+    [system_inventory, system_authorize].each do |block|
+      abort("system v2 route forwards ambient request headers") unless block.include?("proxy_pass_request_headers off;")
+      abort("system v2 route does not explicitly forward system Authorization") unless block.include?("proxy_set_header Authorization $http_authorization;")
+      abort("system v2 route permits caching") unless block.include?("Cache-Control \"no-store, private\"")
+      abort("system v2 route mixes the two identities") if block.include?("proxy_set_header Authorization $http_x_clerum_host_authorization;")
+    end
+    abort("system inventory route is not GET-only") unless system_inventory.include?("$request_method != GET")
+    abort("system authorize route is not POST-only") unless system_authorize.include?("$request_method != POST")
+    abort("system authorize route does not explicitly forward the private Host identity") unless system_authorize.include?("proxy_set_header X-Clerum-Host-Authorization $http_x_clerum_host_authorization;")
+    abort("system authorize body is not bounded") unless system_authorize.include?("client_max_body_size 1k;")
+    abort("system authorize route does not preserve explicit body framing") unless system_authorize.include?("proxy_set_header Content-Length $content_length;")
     inventory = location_block.call("location = /api/v2/hosts/self/mcpservers {")
     credential = location_block.call("location = /api/v2/hosts/self/mcpservers/credential {")
     [inventory, credential].each do |block|
@@ -107,6 +120,95 @@ for rendered in "$@"; do
     proxy_deployment = require_resource.call("Deployment", "mcp-proxy", "mcp-server")
     require_resource.call("Service", "mcp-proxy", "mcp-server")
     abort("PR 1 must not disable the retained mcp-proxy") unless proxy_deployment.dig("spec", "replicas") == 1
+    proxy_service_account = require_resource.call("ServiceAccount", "mcp-proxy", "mcp-server")
+    abort("mcp-proxy ServiceAccount must not auto-mount Kubernetes identity") unless proxy_service_account["automountServiceAccountToken"] == false
+    proxy_pod_spec = proxy_deployment.dig("spec", "template", "spec")
+    abort("mcp-proxy pod must not auto-mount Kubernetes identity") unless proxy_pod_spec["automountServiceAccountToken"] == false
+    abort("mcp-proxy must use its dedicated ServiceAccount") unless proxy_pod_spec["serviceAccountName"] == "mcp-proxy"
+    proxy_container = Array(proxy_pod_spec["containers"]).find { |container| container["name"] == "mcp-proxy" }
+    abort("mcp-proxy container is missing") unless proxy_container
+    proxy_env = Array(proxy_container["env"]).to_h { |entry| [entry["name"], entry] }
+    abort("mcp-proxy forwarding must remain disabled by default") unless proxy_env.dig("MCP_PROXY_FORWARDING_ENABLED", "value") == "false"
+    abort("mcp-proxy must not receive a cluster identity from an env source") if Array(proxy_container["env"]).any? { |entry| entry.dig("valueFrom", "secretKeyRef") }
+    abort("mcp-proxy must not mount a cluster identity volume") if Array(proxy_pod_spec["volumes"]).any? { |volume| volume.key?("secret") }
+    proxy_id_volume = Array(proxy_pod_spec["volumes"]).find { |volume| volume["name"] == "mcp-proxy-token" }
+    expected_id_source = {
+      "serviceAccountToken" => {
+        "audience" => "host-context-controller",
+        "expirationSeconds" => 600,
+        "path" => "token",
+      },
+    }
+    abort("mcp-proxy identity projection is not exact") unless
+      proxy_id_volume && proxy_id_volume.dig("projected", "sources") == [expected_id_source]
+    abort("mcp-proxy identity mount is not read-only at the configured path") unless
+      Array(proxy_container["volumeMounts"]).include?({
+        "name" => "mcp-proxy-token",
+        "mountPath" => "/var/run/secrets/clerum/mcp-proxy",
+        "readOnly" => true,
+      })
+    review_role = require_resource.call("ClusterRole", "host-context-controller-mcp-proxy-tokenreview", nil)
+    abort("HCC review permission is not exact") unless review_role["rules"] == [{
+      "apiGroups" => ["authentication.k8s.io"],
+      "resources" => ["tokenreviews"],
+      "verbs" => ["create"],
+    }]
+    review_binding = require_resource.call("ClusterRoleBinding", "host-context-controller-mcp-proxy-tokenreview", nil)
+    abort("review permission must bind only HCC") unless
+      review_binding["roleRef"] == {
+        "apiGroup" => "rbac.authorization.k8s.io",
+        "kind" => "ClusterRole",
+        "name" => "host-context-controller-mcp-proxy-tokenreview",
+      } && review_binding["subjects"] == [{
+        "kind" => "ServiceAccount",
+        "name" => "host-context-controller",
+        "namespace" => "control-plane",
+      }]
+    hcc_role = require_resource.call("Role", "host-context-controller", "mcp-server")
+    abort("HCC identity read must be exact and namespace-scoped") unless
+      Array(hcc_role["rules"]).include?({
+        "apiGroups" => [""],
+        "resources" => ["serviceaccounts"],
+        "verbs" => ["get"],
+        "resourceNames" => ["mcp-proxy"],
+      })
+    proxy_rbac_binding = documents.any? do |document|
+      next false unless %w[RoleBinding ClusterRoleBinding].include?(document["kind"])
+      Array(document["subjects"]).any? do |subject|
+        subject == { "kind" => "ServiceAccount", "name" => "mcp-proxy", "namespace" => "mcp-server" }
+      end
+    end
+    abort("mcp-proxy ServiceAccount must not receive cluster permissions") if proxy_rbac_binding
+    proxy_ingress = require_resource.call("NetworkPolicy", "mcp-proxy-ingress", "mcp-server")
+    expected_host_peer = {
+      "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "mcp-host" } },
+      "podSelector" => {
+        "matchExpressions" => [
+          { "key" => "clerum.io/managed-by", "operator" => "In", "values" => ["host-context-controller"] },
+          { "key" => "clerum.io/host", "operator" => "Exists" },
+          { "key" => "clerum.io/context", "operator" => "Exists" },
+        ],
+      },
+    }
+    abort("mcp-proxy ingress must select only HCC-managed Host pods") unless
+      proxy_ingress.dig("spec", "ingress") == [{
+        "from" => [expected_host_peer],
+        "ports" => [{ "port" => 8083, "protocol" => "TCP" }],
+      }]
+    proxy_egress = require_resource.call("NetworkPolicy", "mcp-proxy-egress", "mcp-server")
+    backend_rule = Array(proxy_egress.dig("spec", "egress")).find do |rule|
+      Array(rule["ports"]).include?({ "port" => 3000, "protocol" => "TCP" })
+    end
+    abort("mcp-proxy backend egress rule is absent") unless backend_rule
+    abort("mcp-proxy backend egress must select only managed MCP server pods") unless
+      backend_rule["to"] == [{
+        "podSelector" => {
+          "matchLabels" => { "clerum.io/managed-by" => "host-context-controller" },
+          "matchExpressions" => [{ "key" => "clerum.io/mcpserver", "operator" => "Exists" }],
+        },
+      }]
+    abort("mcp-proxy egress must not contain an unbounded rule") unless
+      Array(proxy_egress.dig("spec", "egress")).all? { |rule| rule["to"].is_a?(Array) && !rule["to"].empty? && rule["ports"].is_a?(Array) && !rule["ports"].empty? }
 
     policies = documents.select do |document|
       document["kind"] == "NetworkPolicy" && document.dig("metadata", "namespace") == "mcp-host"
@@ -126,6 +228,22 @@ for rendered in "$@"; do
     abort("mcp-host allow policy must select HCC-managed Host pods and enforce Egress") unless
       managed_host_policy && exact_pod_selector.call(managed_host_policy, { "clerum.io/managed-by" => "host-context-controller" }) &&
       policy_types_include_egress.call(managed_host_policy)
+    proxy_host_policy = require_resource.call("NetworkPolicy", "mcp-host-proxy-egress", "mcp-host")
+    abort("mcp-host proxy egress selector is not exact") unless
+      proxy_host_policy.dig("spec", "podSelector") == {
+        "matchExpressions" => [
+          { "key" => "clerum.io/managed-by", "operator" => "In", "values" => ["host-context-controller"] },
+          { "key" => "clerum.io/host", "operator" => "Exists" },
+          { "key" => "clerum.io/context", "operator" => "Exists" },
+        ],
+      } && proxy_host_policy.dig("spec", "policyTypes") == ["Egress"] &&
+      proxy_host_policy.dig("spec", "egress") == [{
+        "ports" => [{ "port" => 8083, "protocol" => "TCP" }],
+        "to" => [{
+          "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "mcp-server" } },
+          "podSelector" => { "matchLabels" => { "app" => "mcp-proxy" } },
+        }],
+      }]
     context_allow_policies = policies.select do |policy|
       policy.dig("metadata", "labels", "clerum.io/policy-type") == "context-allow"
     end
@@ -189,6 +307,20 @@ for rendered in "$@"; do
       has_pod_selector = pod_labels.is_a?(Hash) && !pod_labels.empty? ||
         pod_expressions.is_a?(Array) && !pod_expressions.empty?
       if namespace_name == "mcp-server"
+        exact_proxy_peer = pod_selector.is_a?(Hash) &&
+          pod_selector.keys.sort == ["matchLabels"] &&
+          pod_selector["matchLabels"] == { "app" => "mcp-proxy" } &&
+          Array(pod_selector["matchExpressions"]).empty?
+        exact_proxy_source = policy.dig("metadata", "name") == "mcp-host-proxy-egress" &&
+          policy.dig("spec", "podSelector") == {
+            "matchExpressions" => [
+              { "key" => "clerum.io/managed-by", "operator" => "In", "values" => ["host-context-controller"] },
+              { "key" => "clerum.io/host", "operator" => "Exists" },
+              { "key" => "clerum.io/context", "operator" => "Exists" },
+            ],
+          }
+        next false if exact_proxy_peer && exact_proxy_source
+
         server_name = pod_selector.dig("matchLabels", "clerum.io/mcpserver") if pod_selector.is_a?(Hash)
         policy_labels = policy.dig("metadata", "labels")
         source_selector = policy.dig("spec", "podSelector")
@@ -305,7 +437,34 @@ for rendered in "$@"; do
     end
     host_proxy_lane = policies.any? do |policy|
       Array(policy.dig("spec", "egress")).any? do |rule|
-        allows_tcp_port.call(rule, 8083)
+        next false unless allows_tcp_port.call(rule, 8083)
+
+        Array(rule["to"]).any? do |peer|
+          next false unless
+            peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "mcp-server" &&
+            peer.dig("podSelector", "matchLabels") == { "app" => "mcp-proxy" } &&
+            Array(peer.dig("podSelector", "matchExpressions")).empty?
+
+          exact_static_source = policy.dig("metadata", "name") == "mcp-host-proxy-egress" &&
+            policy.dig("spec", "podSelector") == {
+              "matchExpressions" => [
+                { "key" => "clerum.io/managed-by", "operator" => "In", "values" => ["host-context-controller"] },
+                { "key" => "clerum.io/host", "operator" => "Exists" },
+                { "key" => "clerum.io/context", "operator" => "Exists" },
+              ],
+            }
+          exact_generated_source = policy.dig("metadata", "labels", "clerum.io/policy-type") == "context-allow" &&
+            policy.dig("spec", "podSelector", "matchLabels") == {
+              "clerum.io/managed-by" => "host-context-controller",
+              "clerum.io/context" => policy.dig("metadata", "labels", "clerum.io/context"),
+            } && Array(policy.dig("spec", "podSelector", "matchExpressions")).empty?
+          exact_rule = rule["ports"] == [{ "port" => 8083, "protocol" => "TCP" }] &&
+            rule["to"] == [{
+              "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "mcp-server" } },
+              "podSelector" => { "matchLabels" => { "app" => "mcp-proxy" } },
+            }]
+          !(exact_rule && (exact_static_source || exact_generated_source))
+        end
       end
     end
     abort("mcp-host must not gain an egress lane to mcp-proxy TCP 8083") if host_proxy_lane

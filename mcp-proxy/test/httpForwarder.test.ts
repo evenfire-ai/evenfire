@@ -9,7 +9,12 @@ describe("HttpForwarder", () => {
   let backendHandler: (req: http.IncomingMessage, res: http.ServerResponse) => void;
 
   beforeEach(async () => {
-    forwarder = new HttpForwarder({ requestTimeout: 5000, maxResponseSize: 1048576, maxBufferSize: 65536 });
+    forwarder = new HttpForwarder({
+      requestTimeout: 5000,
+      maxResponseSize: 1048576,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
 
     await new Promise<void>((resolve) => {
       backend = http.createServer((req, res) => {
@@ -38,7 +43,16 @@ describe("HttpForwarder", () => {
       // Create a temporary proxy server that uses our forwarder
       const proxy = http.createServer(async (req, res) => {
         try {
-          await forwarder.forward(req, res, `http://127.0.0.1:${backendPort}/mcp`);
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          }
+          await forwarder.forward(
+            req,
+            res,
+            `http://127.0.0.1:${backendPort}/mcp`,
+            Buffer.concat(chunks)
+          );
         } catch {
           if (!res.headersSent) {
             res.writeHead(500);
@@ -94,21 +108,29 @@ describe("HttpForwarder", () => {
 
     await forwardViaProxy("POST", {
       authorization: "Bearer test-token",
-      "x-mcp-session": "session-123",
+      "mcp-session-id": "session-123",
+      "proxy-authorization": "Bearer host-token",
+      "x-forwarded-for": "attacker-controlled",
     });
 
     expect(receivedHeaders["authorization"]).toBe("Bearer test-token");
-    expect(receivedHeaders["x-mcp-session"]).toBe("session-123");
+    expect(receivedHeaders["mcp-session-id"]).toBe("session-123");
+    expect(receivedHeaders["proxy-authorization"]).toBeUndefined();
+    expect(receivedHeaders["x-forwarded-for"]).toBeUndefined();
   });
 
   it("should preserve response headers", async () => {
     backendHandler = (_, res) => {
-      res.writeHead(200, { "X-Custom-Header": "custom-value" });
+      res.writeHead(200, {
+        "X-Custom-Header": "custom-value",
+        "Mcp-Session-Id": "session-123",
+      });
       res.end("ok");
     };
 
     const res = await forwardViaProxy("POST");
-    expect(res.headers["x-custom-header"]).toBe("custom-value");
+    expect(res.headers["x-custom-header"]).toBeUndefined();
+    expect(res.headers["mcp-session-id"]).toBe("session-123");
   });
 
   it("should pass through error status codes", async () => {
@@ -123,11 +145,25 @@ describe("HttpForwarder", () => {
   });
 
   it("should return 502 when backend is unreachable", async () => {
-    const deadForwarder = new HttpForwarder({ requestTimeout: 1000, maxResponseSize: 1048576, maxBufferSize: 65536 });
+    const deadForwarder = new HttpForwarder({
+      requestTimeout: 1000,
+      maxResponseSize: 1048576,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
 
     const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
       const proxy = http.createServer(async (req, proxyRes) => {
-        await deadForwarder.forward(req, proxyRes, "http://127.0.0.1:1/mcp");
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        await deadForwarder.forward(
+          req,
+          proxyRes,
+          "http://127.0.0.1:1/mcp",
+          Buffer.concat(chunks)
+        );
       });
 
       proxy.listen(0, () => {

@@ -40,7 +40,39 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
 ---
-# ─── L2 (existing): chatllm managed pod rules ────────────────────────────────
+# ─── L2: exact mcp-host → mcp-proxy data-plane lane ──────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-host-proxy-egress
+  namespace: mcp-host
+  labels:
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector:
+    matchExpressions:
+    - key: clerum.io/managed-by
+      operator: In
+      values:
+      - host-context-controller
+    - key: clerum.io/host
+      operator: Exists
+    - key: clerum.io/context
+      operator: Exists
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 8083
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: mcp-server
+      podSelector:
+        matchLabels:
+          app: mcp-proxy
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

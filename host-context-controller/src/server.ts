@@ -16,6 +16,11 @@ import {
   McpAuthorizationService,
   toPublicMcpTransport,
 } from './mcpAuthorization'
+import {
+  McpProxyAuthenticationError,
+  type McpProxyAuthenticator,
+  type VerifiedMcpProxySystemPrincipal,
+} from './mcpProxyAuthentication'
 import { mcpHostApiRequestsTotal, registry } from './metrics'
 import {
   type ReadinessInventoryDetail,
@@ -97,6 +102,7 @@ export class ContextMapperServer {
   private hasDesktopFn: ((hostRef: string) => boolean) | null
   private mcpAuthenticator: McpApiAuthenticator | null
   private mcpAuthorization: McpAuthorizationService | null
+  private mcpProxyAuthenticator: McpProxyAuthenticator | null
   private mcpRateLimiter: McpHostApiRateLimiter
   private providerAuthoritativeFn: () => boolean
   private hostAuthoritativeFn: () => boolean
@@ -119,6 +125,7 @@ export class ContextMapperServer {
     hostAuthoritativeFn: () => boolean = () => false,
     mcpAuthenticator?: McpApiAuthenticator,
     mcpAuthorization?: McpAuthorizationService,
+    mcpProxyAuthenticator?: McpProxyAuthenticator,
     readinessDetailFn?: () => ReadinessInventoryDetail
   ) {
     this.provider = provider
@@ -127,6 +134,7 @@ export class ContextMapperServer {
     this.hasDesktopFn = hasDesktopFn ?? null
     this.mcpAuthenticator = mcpAuthenticator ?? null
     this.mcpAuthorization = mcpAuthorization ?? null
+    this.mcpProxyAuthenticator = mcpProxyAuthenticator ?? null
     this.mcpRateLimiter = new McpHostApiRateLimiter(config.mcpHostApiRateLimitPerMinute)
     this.providerAuthoritativeFn = providerAuthoritativeFn
     this.hostAuthoritativeFn = hostAuthoritativeFn
@@ -212,7 +220,9 @@ export class ContextMapperServer {
       url.pathname.startsWith('/api/v1/mcpservers/context/') ||
       (url.pathname.startsWith('/api/v1/mcpservers/') && url.pathname.endsWith('/auth'))
     const isProtectedMcpRoute =
-      url.pathname.startsWith('/api/v2/hosts/self/mcpservers') || isLegacyHostSelectedMcpRoute
+      url.pathname.startsWith('/api/v2/hosts/self/mcpservers') ||
+      url.pathname.startsWith('/api/v2/system/mcpservers') ||
+      isLegacyHostSelectedMcpRoute
 
     // The Host credential surface is service-to-service and deliberately has
     // no browser wildcard CORS grant. Preserve the historical public CORS
@@ -322,6 +332,24 @@ export class ContextMapperServer {
     if (url.pathname === '/api/v2/hosts/self/mcpservers/credential') {
       if (req.method === 'POST') {
         await this.handleHostMcpCredential(req, res)
+      } else {
+        this.sendProtectedJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' })
+      }
+      return
+    }
+
+    if (url.pathname === '/api/v2/system/mcpservers') {
+      if (req.method === 'GET') {
+        await this.handleSystemMcpServers(req, res)
+      } else {
+        this.sendProtectedJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' })
+      }
+      return
+    }
+
+    if (url.pathname === '/api/v2/system/mcpservers/authorize') {
+      if (req.method === 'POST') {
+        await this.handleSystemMcpAuthorize(req, res)
       } else {
         this.sendProtectedJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' })
       }
@@ -458,6 +486,132 @@ export class ContextMapperServer {
       this.sendProtectedJson(res, 200, credential)
     } catch (error) {
       this.sendMcpAuthorizationError(res, error, 'credential')
+    }
+  }
+
+  private async authenticateMcpProxySystem(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<VerifiedMcpProxySystemPrincipal | null> {
+    if (!this.mcpProxyAuthenticator) {
+      this.sendProtectedJson(res, 503, { error: 'authorization_unavailable' })
+      return null
+    }
+    try {
+      return await this.mcpProxyAuthenticator.authenticateSystem(req.headers, req.rawHeaders)
+    } catch (error) {
+      if (
+        error instanceof McpProxyAuthenticationError &&
+        error.code === 'unavailable'
+      ) {
+        this.sendProtectedJson(res, 503, { error: 'authorization_unavailable' })
+      } else {
+        this.sendProtectedJson(
+          res,
+          401,
+          { error: 'unauthorized' },
+          { 'WWW-Authenticate': 'Bearer realm="host-context-controller"' }
+        )
+      }
+      return null
+    }
+  }
+
+  private authenticateMcpProxyHost(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): VerifiedMcpHostPrincipal | null {
+    if (!this.mcpProxyAuthenticator) {
+      this.sendProtectedJson(res, 503, { error: 'authorization_unavailable' })
+      return null
+    }
+    try {
+      return this.mcpProxyAuthenticator.authenticateHost(req.headers, req.rawHeaders)
+    } catch {
+      this.sendProtectedJson(
+        res,
+        401,
+        { error: 'unauthorized' },
+        { 'WWW-Authenticate': 'Bearer realm="host-context-controller"' }
+      )
+      return null
+    }
+  }
+
+  private async handleSystemMcpServers(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    const systemPrincipal = await this.authenticateMcpProxySystem(req, res)
+    if (!systemPrincipal || !this.mcpAuthorization) return
+    try {
+      const servers = await this.mcpAuthorization.listSystemServers()
+      this.sendProtectedJson(res, 200, { servers, timestamp: new Date().toISOString() })
+    } catch {
+      this.sendProtectedJson(res, 503, { error: 'authorization_unavailable' })
+    }
+  }
+
+  private async handleSystemMcpAuthorize(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    const systemPrincipal = await this.authenticateMcpProxySystem(req, res)
+    if (!systemPrincipal || !this.mcpAuthorization) return
+    const hostPrincipal = this.authenticateMcpProxyHost(req, res)
+    if (!hostPrincipal) return
+    const contentType = String(req.headers['content-type'] ?? '')
+      .split(';', 1)[0]
+      .trim()
+    if (contentType !== 'application/json') {
+      this.sendProtectedJson(res, 400, { error: 'bad_request' })
+      return
+    }
+
+    let body: unknown
+    try {
+      body = await this.readBoundedJsonBody(req)
+    } catch (error) {
+      const status = error instanceof Error && error.message === 'body_too_large' ? 413 : 400
+      this.sendProtectedJson(res, status, {
+        error: status === 413 ? 'payload_too_large' : 'bad_request',
+      })
+      return
+    }
+    const bodyKeys =
+      body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : []
+    const serverName =
+      bodyKeys.length === 1 && bodyKeys[0] === 'serverName'
+        ? (body as { serverName?: unknown }).serverName
+        : undefined
+    if (
+      typeof serverName !== 'string' ||
+      serverName.length > 253 ||
+      serverName.trim() !== serverName ||
+      !MCP_SELECTOR_RE.test(serverName)
+    ) {
+      this.sendProtectedJson(res, 400, { error: 'bad_request' })
+      return
+    }
+
+    try {
+      const target = await this.mcpAuthorization.getLiveForwardTarget(hostPrincipal, serverName)
+      this.sendProtectedJson(res, 200, target)
+    } catch (error) {
+      if (error instanceof McpAuthorizationError && error.code === 'not_found') {
+        this.sendProtectedJson(res, 403, { error: 'forbidden' })
+        return
+      }
+      if (error instanceof McpAuthorizationError && error.code === 'unauthorized') {
+        this.sendProtectedJson(
+          res,
+          401,
+          { error: 'unauthorized' },
+          { 'WWW-Authenticate': 'Bearer realm="host-context-controller"' }
+        )
+        return
+      }
+      this.sendProtectedJson(res, 503, { error: 'authorization_unavailable' })
     }
   }
 

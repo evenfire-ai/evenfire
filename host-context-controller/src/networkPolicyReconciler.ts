@@ -849,6 +849,23 @@ export class NetworkPolicyReconciler {
               ],
               ports: [{ port, protocol: 'TCP' }],
             },
+            {
+              to: [
+                {
+                  namespaceSelector: {
+                    matchLabels: {
+                      'kubernetes.io/metadata.name': config.namespace,
+                    },
+                  },
+                  podSelector: {
+                    matchLabels: {
+                      app: 'mcp-proxy',
+                    },
+                  },
+                },
+              ],
+              ports: [{ port: 8083, protocol: 'TCP' }],
+            },
           ],
         },
       },

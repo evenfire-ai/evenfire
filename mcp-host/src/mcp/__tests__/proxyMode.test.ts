@@ -44,7 +44,10 @@ describe("McpClient — proxy URL resolution", () => {
   it("should use StreamableHTTP transport when proxy is set (even for SSE servers)", () => {
     const server = makeMockServer("legacy-sse");
     server.transport.type = "sse";
-    const client = new McpClient(server, undefined, "http://proxy:8083");
+    const client = new McpClient(server, undefined, "http://proxy:8083", {
+      getAccessToken: () => "fixture-host-bearer",
+      refreshOnUnauthorized: async () => undefined,
+    });
     const transport = (client as any).createTransport();
     expect(transport.constructor.name).toBe("StreamableHTTPClientTransport");
   });
@@ -64,6 +67,43 @@ describe("McpClient — proxy URL resolution", () => {
     const url = (client as any).resolveUrl();
     expect(url).toBe("http://proxy:8083/servers/authed-server/mcp");
   });
+
+  it('should attach the Host bearer fetch boundary to both SDK transport modes', () => {
+    const hostAuthorization = {
+      getAccessToken: () => 'fixture-host-bearer',
+      refreshOnUnauthorized: vi.fn(async () => undefined),
+    }
+    const streamableClient = new McpClient(
+      makeMockServer('streamable'),
+      'fixture-mcp-credential',
+      'http://proxy:8083',
+      hostAuthorization
+    )
+    const streamable = (streamableClient as any).createTransport()
+    expect(typeof streamable._fetch).toBe('function')
+    expect(streamable._requestInit.headers.Authorization).toBe(
+      'Bearer fixture-mcp-credential'
+    )
+
+    const sseServer = makeMockServer('sse', 'http://sse-server:3000/sse')
+    sseServer.transport.type = 'sse'
+    const sseClient = new McpClient(
+      sseServer,
+      'fixture-mcp-credential',
+      'http://proxy:8083',
+      hostAuthorization
+    )
+    const sse = (sseClient as any).createTransport()
+    expect(typeof sse._fetch).toBe('function')
+    expect(sse.constructor.name).toBe('StreamableHTTPClientTransport')
+  })
+
+  it('refuses proxy transport when the Host bearer provider is absent', () => {
+    const client = new McpClient(makeMockServer('without-host-auth'), undefined, 'http://proxy:8083')
+    expect(() => (client as any).createTransport()).toThrow(
+      'MCP proxy Host authorization is unavailable'
+    )
+  })
 });
 
 describe("McpManager — proxy mode constructor", () => {
@@ -99,6 +139,25 @@ describe("McpManager — proxy mode constructor", () => {
     vi.restoreAllMocks();
     await manager.disconnectAll();
   });
+
+  it('should pass the Host bearer provider through the manager to the client', async () => {
+    const hostAuthorization = {
+      getAccessToken: () => 'fixture-host-bearer',
+      refreshOnUnauthorized: vi.fn(async () => undefined),
+    }
+    const manager = new McpManager('http://proxy:8083', undefined, hostAuthorization)
+    const server = makeMockServer('provider-wired-server')
+    const connectSpy = vi.spyOn(McpClient.prototype, 'connect').mockResolvedValue()
+    vi.spyOn(McpClient.prototype, 'availableTools', 'get').mockReturnValue([])
+
+    await manager.addServer(server)
+
+    const installed = (manager as any).clients.get('provider-wired-server')
+    expect(installed.proxyHostAuthorization).toBe(hostAuthorization)
+
+    vi.restoreAllMocks()
+    await manager.disconnectAll()
+  })
 });
 
 describe("McpManager — feature flag behavior", () => {

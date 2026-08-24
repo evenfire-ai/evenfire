@@ -8,6 +8,10 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { McpServerInfo, McpTool } from '../types'
 import {
+  createMcpProxyFetch,
+  type McpProxyHostAuthorization,
+} from './proxyAuth'
+import {
   type McpToolCallOptions,
   ensureNotAborted,
   remainingBudgetMs,
@@ -34,6 +38,7 @@ export class McpClient {
   private serverConfig: McpServerInfo
   private authToken?: string
   private proxyUrl?: string
+  private proxyHostAuthorization?: McpProxyHostAuthorization
   private tools: McpTool[] = []
   private connected: boolean = false
   private reconnectPromise: Promise<void> | null = null
@@ -43,10 +48,16 @@ export class McpClient {
   private readonly retirementController = new AbortController()
   private readonly transportCleanups = new WeakMap<SupportedMcpTransport, Promise<void>>()
 
-  constructor(serverConfig: McpServerInfo, authToken?: string, proxyUrl?: string) {
+  constructor(
+    serverConfig: McpServerInfo,
+    authToken?: string,
+    proxyUrl?: string,
+    proxyHostAuthorization?: McpProxyHostAuthorization
+  ) {
     this.serverConfig = serverConfig
     this.authToken = authToken
     this.proxyUrl = proxyUrl
+    this.proxyHostAuthorization = proxyHostAuthorization
   }
 
   get name(): string {
@@ -147,22 +158,32 @@ export class McpClient {
     }
 
     const targetUrl = this.resolveUrl()
+    if (this.proxyUrl && !this.proxyHostAuthorization) {
+      throw new Error('MCP proxy Host authorization is unavailable')
+    }
+    const proxyFetch = this.proxyHostAuthorization
+      ? createMcpProxyFetch(this.proxyHostAuthorization)
+      : undefined
+    const requestInit = { headers }
 
     if (this.proxyUrl || transport.type === 'streamableHttp') {
       console.log(`[MCP:${this.name}] Using Streamable HTTP transport`)
       return new StreamableHTTPClientTransport(new URL(targetUrl), {
-        requestInit: {
-          headers,
-        },
+        requestInit,
+        ...(proxyFetch ? { fetch: proxyFetch } : {}),
       })
     }
 
     // Default to SSE (legacy) transport
     console.log(`[MCP:${this.name}] Using SSE transport`)
     return new SSEClientTransport(new URL(targetUrl), {
-      requestInit: {
-        headers,
-      },
+      requestInit,
+      ...(proxyFetch
+        ? {
+            fetch: proxyFetch,
+            eventSourceInit: { fetch: proxyFetch },
+          }
+        : {}),
     })
   }
 

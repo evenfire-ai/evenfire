@@ -20,6 +20,10 @@ function makeConfig(port: number): ProxyConfig {
     devMode: true,
     devServers: [],
     logLevel: "info",
+    forwardingEnabled: false,
+    systemTokenFile: "/tmp/fixture-system-token",
+    requestBodyLimit: 1048576,
+    allowLoopbackTargets: true,
   };
 }
 
@@ -50,7 +54,12 @@ describe("ProxyServer", () => {
     const config = makeConfig(0);
     router = new Router();
     hccClient = new HccClient(config);
-    const forwarder = new HttpForwarder({ requestTimeout: 5000, maxResponseSize: 10485760, maxBufferSize: 65536 });
+    const forwarder = new HttpForwarder({
+      requestTimeout: 5000,
+      maxResponseSize: 10485760,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
     const metrics = new Metrics();
     const health = new Health(router, hccClient);
     server = new ProxyServer(router, forwarder, metrics, health, config);
@@ -92,10 +101,10 @@ describe("ProxyServer", () => {
     expect(res.status).toBe(404);
   });
 
-  it("should respond 404 for unknown server in route dispatch", async () => {
+  it("should not enumerate a server when forwarding is disabled", async () => {
     const res = await httpRequest(actualPort, "/servers/nonexistent/mcp", "POST");
-    expect(res.status).toBe(404);
-    expect(JSON.parse(res.body).error).toContain("nonexistent");
+    expect(res.status).toBe(503);
+    expect(res.body).not.toContain("nonexistent");
   });
 
   it("should respond 503 for unready server", async () => {
