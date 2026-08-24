@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import fc from 'fast-check'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { config } from '../src/config.js'
@@ -70,7 +71,33 @@ describeRealPostgres('catalog producer SQL on real PostgreSQL', () => {
   })
 
   it('orders and resumes arbitrary PostgreSQL text by exact UTF-8 bytes', async () => {
-    const values = ['alpha', 'Zeta', 'a_b', 'a-b', 'é', 'e\u0301', 'Ω', '😀']
+    const generated = fc.sample(
+      fc
+        .array(
+          fc.constantFrom(
+            'a',
+            'z',
+            'A',
+            'Z',
+            '0',
+            '9',
+            '-',
+            '_',
+            '.',
+            '/',
+            'é',
+            'e\u0301',
+            'Ω',
+            '😀'
+          ),
+          { minLength: 1, maxLength: 12 }
+        )
+        .map(parts => parts.join('')),
+      { seed: 106_026, numRuns: 200 }
+    )
+    const values = [
+      ...new Set(['alpha', 'Zeta', 'a_b', 'a-b', 'é', 'e\u0301', 'Ω', '😀', ...generated]),
+    ]
     const expected = [...values].sort((left, right) =>
       Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
     )
