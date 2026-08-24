@@ -683,11 +683,23 @@ ensure_control_postgres_ready() {
 # close all four writers again before the later recovery code resumes. The
 # journal is deliberately not advanced here: if this guard is interrupted, the
 # old phase remains conservative and the next run repeats the fence.
+guard_interrupted_writer_deployment() {
+  local deployment="$1" selector="$2" desired pods
+  $KC -n control-plane scale "deployment/${deployment}" --replicas=0 >/dev/null || return 1
+  desired="$($KC -n control-plane get "deployment/${deployment}" \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  [ "$desired" = 0 ] || { err "${deployment} did not converge to zero desired replicas before setup mutation"; return 1; }
+  pods="$($KC -n control-plane get pods -l "$selector" -o name)" || return 1
+  [ -z "$pods" ] || $KC -n control-plane wait --for=delete pod \
+    -l "$selector" --timeout=180s >/dev/null || return 1
+  pods="$($KC -n control-plane get pods -l "$selector" -o name)" || return 1
+  [ -z "$pods" ] || { err "${deployment} pods remain after the pre-mutation fence"; return 1; }
+}
+
 guard_interrupted_writer_recovery() {
   local state_helper="${SCRIPT_DIR}/writer-recovery-state.py"
   local state_file="${PROJECT_DIR}/.local-notes/infra/runs/writer-recovery/${PROFILE}.json"
   local state_output state_status=0 phase hcc_replicas workflow_replicas trace_replicas control_api_replicas state_head
-  local pods
 
   [[ -f "${state_file}" ]] || return 0
   [[ -f "${state_helper}" ]] || {
@@ -724,35 +736,10 @@ guard_interrupted_writer_recovery() {
     }
 
   log "Resuming interrupted writer recovery from phase ${phase} (recorded HEAD ${state_head}) — fencing all writers before setup mutations"
-  $KC -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null
-  pods="$($KC -n control-plane get pods -l app=host-context-controller -o name)" || return 1
-  [ -z "${pods}" ] || $KC -n control-plane wait --for=delete pod \
-    -l app=host-context-controller --timeout=180s >/dev/null
-
-  $KC -n control-plane scale deployment/workflow-recipes --replicas=0 >/dev/null
-  pods="$($KC -n control-plane get pods -l app=workflow-recipes -o name)" || return 1
-  [ -z "${pods}" ] || $KC -n control-plane wait --for=delete pod \
-    -l app=workflow-recipes --timeout=180s >/dev/null
-
-  $KC -n control-plane scale deployment/trace-maintenance-worker --replicas=0 >/dev/null
-  [ "$($KC -n control-plane get deployment/trace-maintenance-worker \
-    -o 'jsonpath={.spec.replicas}')" = 0 ] || {
-      err "trace-maintenance-worker did not converge to zero before setup mutation"
-      return 1
-    }
-  pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" || return 1
-  [ -z "${pods}" ] || $KC -n control-plane wait --for=delete pod \
-    -l app=trace-maintenance-worker --timeout=180s >/dev/null
-  pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" || return 1
-  [ -z "${pods}" ] || {
-    err "trace-maintenance-worker pods remain after the pre-mutation fence"
-    return 1
-  }
-
-  $KC -n control-plane scale deployment/control-api --replicas=0 >/dev/null
-  pods="$($KC -n control-plane get pods -l 'app=control-api,!clerum.io/component' -o name)" || return 1
-  [ -z "${pods}" ] || $KC -n control-plane wait --for=delete pod \
-    -l 'app=control-api,!clerum.io/component' --timeout=180s >/dev/null
+  guard_interrupted_writer_deployment host-context-controller 'app=host-context-controller' || return 1
+  guard_interrupted_writer_deployment workflow-recipes 'app=workflow-recipes' || return 1
+  guard_interrupted_writer_deployment trace-maintenance-worker 'app=trace-maintenance-worker' || return 1
+  guard_interrupted_writer_deployment control-api 'app=control-api,!clerum.io/component' || return 1
 }
 
 # ======================================================================
@@ -1360,6 +1347,7 @@ writer_recovery_state_load() {
       PARTIAL_BOOTSTRAP_RECOVERY=true
       PARTIAL_HCC_FENCED=true
       PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
       if [ "$WRITER_RECOVERY_STATE_HEAD" = "$T2_HEAD" ]; then
         WRITER_RECOVERY_MIGRATIONS_COMPLETE=true

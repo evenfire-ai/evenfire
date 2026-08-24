@@ -1400,6 +1400,88 @@ STUB
   rm -rf "$d"
 }
 
+assert_interrupted_recovery_resume_restores_all_writer_fences() {
+  local resume_block
+  resume_block="$(sed -n '/^    api-restored|overlay-applying|overlay-applied)/,/^      ;;$/p' scripts/minikube/full-setup.sh)"
+  if grep -Fq 'PARTIAL_HCC_FENCED=true' <<<"$resume_block" && \
+     grep -Fq 'PARTIAL_WORKFLOW_FENCED=true' <<<"$resume_block" && \
+     grep -Fq 'PARTIAL_TRACE_FENCED=true' <<<"$resume_block" && \
+     grep -Fq 'PARTIAL_CONTROL_API_FENCED=true' <<<"$resume_block"; then
+    pass "post-migration recovery resumes with all four writer fences active"
+  else
+    fail "post-migration recovery can omit a writer fence before restoring the journaled replicas"
+  fi
+}
+
+assert_interrupted_recovery_fence_is_behaviorally_fail_closed() {
+  local d helper run_script out rc problems=""
+  d="$(mktemp -d)"
+  helper="$(sed -n '/^guard_interrupted_writer_deployment()/,/^}/p' scripts/minikube/full-setup.sh)"
+
+  mkdir -p "$d/bin"
+  cat > "$d/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"scale deployment/"*)
+    [ "${TEST_FENCE_MODE:-}" = scale-fail ] && exit 1
+    exit 0
+    ;;
+  *"get deployment/"*)
+    printf '%s' "${TEST_FENCE_DESIRED:-0}"
+    exit 0
+    ;;
+  *"get pods -l"*)
+    printf '%s' "${TEST_FENCE_PODS:-}"
+    exit 0
+    ;;
+  *"wait --for=delete pod"*)
+    [ "${TEST_FENCE_MODE:-}" = wait-fail ] && exit 1
+    exit 0
+    ;;
+esac
+exit 0
+STUB
+  chmod +x "$d/bin/kubectl"
+
+  run_script="$d/run.sh"
+  {
+    printf 'set -u\n'
+    printf 'KC=%q\n' 'kubectl --context=test'
+    printf 'log() { :; }\n'
+    printf 'err() { printf "ERR:%%s\\n" "$*" >&2; }\n'
+    printf '%s\n' "$helper"
+    printf "guard_interrupted_writer_deployment host-context-controller 'app=host-context-controller'\n"
+  } >"$run_script"
+
+  out="$(TEST_FENCE_DESIRED=0 TEST_FENCE_PODS= PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -eq 0 ] || problems+="healthy zero-replica fence failed; "
+
+  out="$(TEST_FENCE_DESIRED=1 TEST_FENCE_PODS= PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -ne 0 ] || problems+="nonzero desired replicas were accepted; "
+  grep -Fq 'did not converge to zero desired replicas' <<<"$out" \
+    || problems+="nonzero desired replicas did not fail closed; "
+
+  out="$(TEST_FENCE_MODE=scale-fail TEST_FENCE_DESIRED=0 TEST_FENCE_PODS= \
+    PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -ne 0 ] || problems+="scale failure was swallowed; "
+
+  out="$(TEST_FENCE_MODE=wait-fail TEST_FENCE_DESIRED=0 TEST_FENCE_PODS='pod/hcc-0' \
+    PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -ne 0 ] || problems+="wait failure was swallowed; "
+
+  if [ -z "$problems" ]; then
+    pass "interrupted recovery fencing fails closed on scale, convergence, and pod-wait failures"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
 assert_recovery_migrations_are_head_bound() {
   local current_head_checks
   current_head_checks="$(grep -Fc '[ "$WRITER_RECOVERY_STATE_HEAD" = "$T2_HEAD" ]' scripts/minikube/full-setup.sh)"
@@ -1462,6 +1544,8 @@ assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree
 assert_the_unoverridden_path_generates_the_api_ip_patch_once
 assert_trace_writer_fence_closes_and_proves_zero_replicas
 assert_trace_writer_fence_is_behaviorally_fail_closed
+assert_interrupted_recovery_resume_restores_all_writer_fences
+assert_interrupted_recovery_fence_is_behaviorally_fail_closed
 assert_recovery_migrations_are_head_bound
 assert_skip_build_follows_the_recorded_image_source
 assert_skip_build_says_it_is_following_the_cluster
