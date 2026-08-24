@@ -117,6 +117,7 @@ describe('external user-session authentication boundary', () => {
       status: 'authenticated',
       contract: 'v1',
       claims: { authGeneration: 1 },
+      authorityContext: { contract: 'v1', authGeneration: 1 },
     })
     await expect(
       authenticateExternalUserSession(token, {
@@ -133,7 +134,12 @@ describe('external user-session authentication boundary', () => {
 
     await expect(
       authenticateExternalUserSession(token, { purpose: 'protected', policy: policy() })
-    ).resolves.toMatchObject({ status: 'authenticated', contract: 'v1' })
+    ).resolves.toMatchObject({
+      status: 'authenticated',
+      contract: 'v1',
+      claims: { authGeneration: 1 },
+      authorityContext: { contract: 'v1', authGeneration: 1 },
+    })
     await expect(
       authenticateExternalUserSession(token, {
         purpose: 'protected',
