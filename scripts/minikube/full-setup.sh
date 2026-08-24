@@ -873,14 +873,17 @@ fi
 ok "Cluster '${PROFILE}' is reachable"
 maybe_exit_after_cluster_step
 
+# Validate the explicit context and exact Minikube profile identity before an
+# interrupted-recovery journal is allowed to scale any writer. Reachability
+# alone is not authority: a kubeconfig can name another local cluster.
+t2_profile_status
+t2_context_check
+t2_profile_context_identity_check
+
 # This is intentionally after the profile becomes reachable but before the
 # first setup apply. A stopped profile may be started safely; an active journal
 # must be fenced before any workload/configuration mutation.
 guard_interrupted_writer_recovery || exit 1
-
-t2_profile_status
-t2_context_check
-t2_profile_context_identity_check
 
 # ======================================================================
 # Step 3: Namespaces + CRDs

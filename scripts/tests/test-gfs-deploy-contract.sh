@@ -264,6 +264,11 @@ assert_pre_gate_defers_gfs_reconcile() {
 # anchor.
 assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'image-mode.sh --render-dir'
 assert_minikube_upgrade_classifier scripts/minikube/full-setup.sh '# Upgrade path: stage the additive reader' 'Applying kustomize overlay'
+full_setup_identity_line="$(grep -nF 't2_profile_context_identity_check' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
+full_setup_recovery_guard_line="$(grep -nF 'guard_interrupted_writer_recovery || exit 1' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+[[ -n "$full_setup_identity_line" && -n "$full_setup_recovery_guard_line" && \
+   "$full_setup_identity_line" -lt "$full_setup_recovery_guard_line" ]] \
+  || fail 'full-setup can fence recovery writers before verifying exact context/profile identity'
 assert_pre_gate_defers_gfs_reconcile 'apply-gfs-writer-secret.sh' 'incremental_build_images' scripts/minikube/pre-gate-sync.sh
 full_setup_classifier="$(sed -n '/# Upgrade path: stage the additive reader/,/Applying kustomize overlay/p' scripts/minikube/full-setup.sh)"
 reset_classifier="$(grep -n 'if \[ "$RESET_DB" = true \]; then' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
