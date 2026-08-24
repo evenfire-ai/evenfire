@@ -111,6 +111,22 @@ export interface AllowedModelsConfigMapMaterializer {
 }
 
 /**
+ * Push the current Postgres allowlist + per-grant Codex snapshot to the
+ * runtime ConfigMap. Catalog sync, revoke, and a successful OAuth persist
+ * must call this — mcp-host/HCC never read Postgres, and a cluster in
+ * operation cannot wait for the next control-api boot.
+ *
+ * Missing writer is a no-op so unit tests without a K8s gateway stay local.
+ */
+export async function publishAllowedModelsConfigMapAfterGrantChange(
+  writer: AllowedModelsConfigMapMaterializer | undefined
+): Promise<'published' | 'skipped'> {
+  if (!writer) return 'skipped'
+  await writer.materialize()
+  return 'published'
+}
+
+/**
  * Build the ConfigMap `data` and its content hash from grouped enabled rows.
  * Provider keys and per-provider model arrays are already deterministically
  * ordered by the query (provider, model), so the serialized form — and thus the

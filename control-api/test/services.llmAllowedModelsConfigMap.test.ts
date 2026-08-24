@@ -12,6 +12,7 @@ import {
   buildCodexReadinessAnnotations,
   buildConfigMapData,
   mapCodexConnectionStatusForSnapshot,
+  publishAllowedModelsConfigMapAfterGrantChange,
 } from '../src/services/llmAllowedModelsConfigMap.js'
 
 function fakeDb(
@@ -300,5 +301,19 @@ describe('Codex readiness annotations', () => {
     expect(annotations[CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('disconnected')
     expect(annotations[CATALOG_REVISION_ANNOTATION]).toBeUndefined()
     expect(annotations[CONNECTION_REVISION_ANNOTATION]).toBeUndefined()
+  })
+})
+
+describe('publishAllowedModelsConfigMapAfterGrantChange', () => {
+  it('skips when no writer is wired', async () => {
+    await expect(publishAllowedModelsConfigMapAfterGrantChange(undefined)).resolves.toBe('skipped')
+  })
+
+  it('materializes when a writer is present', async () => {
+    const materialize = vi.fn(async () => {})
+    await expect(publishAllowedModelsConfigMapAfterGrantChange({ materialize })).resolves.toBe(
+      'published'
+    )
+    expect(materialize).toHaveBeenCalledTimes(1)
   })
 })

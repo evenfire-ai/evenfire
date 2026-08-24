@@ -31,15 +31,18 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
 
 vi.mock('../src/observability/metrics.js', () => ({
   rateLimitHitsTotal: { inc: vi.fn() },
+  llmAllowlistConfigMapWriteFailuresTotal: { inc: vi.fn() },
 }))
 
 const { config } = await import('../src/config.js')
 const { createAuthCodexSubscriptionRouter } =
   await import('../src/routes/auth/codexSubscription.js')
 
-function makeApp() {
+function makeApp(gateway?: {
+  llmAllowedModelsConfigMap: () => { materialize: () => Promise<void> }
+}) {
   const app = express()
-  app.use(createAuthCodexSubscriptionRouter())
+  app.use(createAuthCodexSubscriptionRouter(gateway as never))
   return app
 }
 
@@ -84,6 +87,44 @@ describe('GET /auth/codex-subscription/callback', () => {
     )
     expect(res.headers['set-cookie']).toBeUndefined()
     assertNoLeak(res.text)
+  })
+
+  it('publishes the runtime ConfigMap after a successful callback', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.callback.mockResolvedValue({
+      status: 'connected',
+      accountFingerprint: 'fp',
+      credentialRevision: 1,
+    })
+    const res = await request(makeApp({ llmAllowedModelsConfigMap: () => ({ materialize }) }))
+      .get('/auth/codex-subscription/callback')
+      .query({ code: 'code-1', state: 'state-1' })
+    expect(res.status).toBe(303)
+    expect(res.headers.location).toBe(
+      '/llm-models/providers/codex-subscription?codex_oauth=connected'
+    )
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.headers.location)
+  })
+
+  it('still redirects when ConfigMap publish fails after a successful callback', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    oauth.callback.mockResolvedValue({
+      status: 'connected',
+      accountFingerprint: 'fp',
+      credentialRevision: 1,
+    })
+    const res = await request(makeApp({ llmAllowedModelsConfigMap: () => ({ materialize }) }))
+      .get('/auth/codex-subscription/callback')
+      .query({ code: 'code-1', state: 'state-1' })
+    expect(res.status).toBe(303)
+    expect(res.headers.location).toBe(
+      '/llm-models/providers/codex-subscription?codex_oauth=connected'
+    )
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.headers.location)
   })
 
   it('redirects callback replay errors back to the Codex surface', async () => {

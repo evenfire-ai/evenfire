@@ -45,6 +45,28 @@ The profile helper that generated the profile remains the source of truth for
 the profile metadata and random localhost port mapping. Do not copy ports from
 another worktree or use shared fixed ports.
 
+First-hand entry point (gitignored helper at repo root — do not search for
+it):
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+This is the host-side hold for Control UI / Desktop. Profile-owned random
+ports only (never shared `:3000`/`:8090`). `make minikube-pf-all-bg` is a
+gate refresh only; it must not replace `branch-profile-pf`. Do not start UI
+PFs from a sandboxed agent shell (hooks/PATH; runners clean children). Run
+the make target on the host. Do not kill this lane's `branch-profile-pf`.
+Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that
+globally into `make minikube-t2`. `branch-profile-pf-health` starts PFs then
+STOPS them on EXIT — do not use it as the lasting hold.
+
 ## State transitions
 
 ### Bootstrap
@@ -117,8 +139,10 @@ rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"
 Never remove a lock with a live owner, and never remove the whole lock root.
 
 After bootstrap or reconcile, `make minikube-t2` calls `pre-gate-sync` with
-`--skip-port-forwards`. T1 opens its own `control-postgres` port-forward and
-does not inherit Control UI stack forwards. `t2_process_check` accepts only
+`--skip-port-forwards`. Never pass that flag globally into `make minikube-t2`.
+T1 opens its own `control-postgres` port-forward and
+does not inherit Control UI stack forwards. Do not kill this lane's
+`branch-profile-pf`. `t2_process_check` accepts only
 real `kubectl` port-forward PIDs recorded in the profile cache or legacy
 `/tmp/pf-<profile>-*.pid`.
 
@@ -134,7 +158,9 @@ Allowed port-forward PIDs live in
 `$HOME/.cache/clerum/minikube-profiles/<profile>/pids/*.pid` (and the
 legacy `/tmp/pf-<profile>-*.pid` files written by `pf-all-stack.sh`).
 `make minikube-t2` invokes `pre-gate-sync` with `--skip-port-forwards` so the
-orchestrator does not plant forwards that fail its own T2 check. Secret values
+orchestrator does not plant forwards that fail its own T2 check. The Control
+UI / Desktop hold stays on the host via the first-hand helper above; do not
+replace it with `make minikube-pf-all-bg`. Secret values
 are never printed. The local Real PostgreSQL lane resolves the
 `control-postgres` Secret using the explicit context, constructs its admin DSN
 only in process memory, and passes it only to the shared-server suites. Suites

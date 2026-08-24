@@ -23,6 +23,27 @@ also required when the selected profile is missing or unhealthy. Never use
 shared fixed localhost ports for branch-owned profiles; use the profile-owned
 random port mapping already recorded for that profile.
 
+## Branch-profile UI port-forwards
+
+First-hand entry point (gitignored helper at repo root — do not search for
+it). Implementation is `.local-notes/minikube-profiles/branch-profile.sh`.
+Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+This is the host-side hold for Control UI / Desktop. Run it on the host, not
+from a sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh
+only and must not replace `branch-profile-pf`. Do not kill this lane's
+forwards. `branch-profile-pf-health` starts then stops PFs on EXIT — do not
+use it as the lasting hold. Inner `pre-gate-sync` may use
+`--skip-port-forwards`; never pass that globally into `make minikube-t2`.
+
 ## Incremental local image updates
 
 For a service-only change in an already healthy profile, rebuild and restart

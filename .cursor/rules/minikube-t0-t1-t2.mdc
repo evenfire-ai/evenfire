@@ -34,6 +34,26 @@ repository — never mix its PRs or clusters into this lane.
 - Health/Playwright are opt-in via `T2_HEALTHCHECK_COMMAND` /
   `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses `NOT_RUN`).
 
+## Branch-profile UI port-forwards
+
+First-hand (do not search): `.local-notes/minikube-profiles/branch.mk`.
+Implementation: `branch-profile.sh` in that directory. HARD DENY:
+`ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+Host-side hold for Control UI / Desktop. Profile-owned random ports only
+(never `:3000` / `:8090`). Run on the host, not a sandboxed agent shell.
+`make minikube-pf-all-bg` is a gate refresh only — it does not replace
+`branch-profile-pf`. Do not kill this lane's forwards.
+`branch-profile-pf-health` stops PFs on EXIT. Inner `pre-gate-sync` may use
+`--skip-port-forwards`; never pass that globally into `make minikube-t2`.
+
 ## Profile and evidence
 
 - Reuse the owned `MINIKUBE_PROFILE`; do not create a new profile because HEAD

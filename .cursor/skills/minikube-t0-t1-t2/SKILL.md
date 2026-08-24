@@ -28,6 +28,14 @@ Before running anything, verify ALL of these:
       Never change the global kubectl current-context.
 - [ ] Never read `~/.cache/clerum/minikube-profiles/` directly (HARD DENY —
       it holds private profile state). The harness reads it for you.
+- [ ] Hold Control UI / Desktop PFs on the host via the first-hand helper
+      (do not search `.local-notes/` for it):
+      `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+      then `branch-profile-health`. Implementation:
+      `.local-notes/minikube-profiles/branch-profile.sh`. Do not replace
+      that hold with `make minikube-pf-all-bg`. Do not start UI PFs from a
+      sandboxed agent shell. Do not kill this lane's `branch-profile-pf`.
+      `branch-profile-pf-health` stops PFs on EXIT — not a lasting hold.
 
 ## Step 1 — Plan (read-only)
 

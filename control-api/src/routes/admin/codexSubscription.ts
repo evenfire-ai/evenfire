@@ -5,6 +5,7 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { rootLogger } from '../../observability/logger.js'
+import { llmAllowlistConfigMapWriteFailuresTotal } from '../../observability/metrics.js'
 import {
   type CodexCatalogTransport,
   createCodexCatalogTransportFromEnv,
@@ -36,6 +37,7 @@ import {
   isPublicCodexCliClient,
   resolveCodexControlUiBaseUrl,
 } from '../../services/codexSubscriptionRedirectUri.js'
+import { publishAllowedModelsConfigMapAfterGrantChange } from '../../services/llmAllowedModelsConfigMap.js'
 import {
   adminCodexReadRateLimits,
   adminCodexWriteRateLimits,
@@ -151,6 +153,43 @@ export function createAdminCodexSubscriptionRouter(
       .filter(host => host.name)
   }
 
+  async function publishRuntimeAllowlist(): Promise<void> {
+    await publishAllowedModelsConfigMapAfterGrantChange(gateway?.llmAllowedModelsConfigMap())
+  }
+
+  async function publishRuntimeAllowlistBestEffort(): Promise<void> {
+    try {
+      await publishRuntimeAllowlist()
+    } catch (err) {
+      llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'mutation' })
+      log.error(
+        { err, event: 'codex_allowed_models_cm_write_failed' },
+        'Codex grant change saved but the runtime ConfigMap was not updated'
+      )
+    }
+  }
+
+  async function publishRuntimeAllowlistOrFail(res: {
+    status: (n: number) => { json: (body: unknown) => void }
+  }): Promise<boolean> {
+    try {
+      await publishRuntimeAllowlist()
+      return false
+    } catch (err) {
+      llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'mutation' })
+      log.error(
+        { err, event: 'codex_allowed_models_cm_write_failed' },
+        'Codex grant change saved but the runtime ConfigMap was not updated'
+      )
+      res.status(503).json({
+        error: 'configmap_write_failed',
+        message:
+          'the grant change was saved but the ConfigMap could not be updated; runtime hosts still see the previous snapshot — retry or it will reconcile on the next change/boot',
+      })
+      return true
+    }
+  }
+
   async function withAssignedHosts<T extends { connectionKey: string }>(
     connection: T,
     hosts?: Array<{ metadata?: { name?: string }; spec?: unknown }> | null
@@ -214,6 +253,7 @@ export function createAdminCodexSubscriptionRouter(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req)),
         state
       )
+      if (result.status === 'connected') await publishRuntimeAllowlistBestEffort()
       res.status(200).json(result)
     } catch (err) {
       sendOAuthError(res, err)
@@ -253,6 +293,7 @@ export function createAdminCodexSubscriptionRouter(
       const synced = await syncCodexSubscriptionCatalog(db, catalogTransport, secrets.accessToken, {
         connectionKey,
       })
+      if (await publishRuntimeAllowlistOrFail(res)) return
       res.status(200).json({
         outcome: synced.outcome,
         added: synced.added,
@@ -270,6 +311,7 @@ export function createAdminCodexSubscriptionRouter(
       const connection = await revokeCodexSubscription(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req))
       )
+      if (await publishRuntimeAllowlistOrFail(res)) return
       res.status(200).json(await withAssignedHosts(connection))
     } catch (err) {
       sendOAuthError(res, err)

@@ -7,7 +7,7 @@ import { createAuthRecipeOauthRoutes } from './recipe-oauth/index.js'
 export function createAuthRoutes(gateway: K8sGateway): Router {
   const router = Router()
   router.use(createAuthMcpHostRoutes())
-  router.use(createAuthCodexSubscriptionRouter())
+  router.use(createAuthCodexSubscriptionRouter(gateway))
   router.use(createAuthRecipeOauthRoutes(gateway))
   return router
 }

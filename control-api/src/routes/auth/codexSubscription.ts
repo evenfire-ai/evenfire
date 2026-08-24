@@ -2,8 +2,10 @@ import { Router } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import type { K8sGateway } from '../../k8s.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { rootLogger } from '../../observability/logger.js'
+import { llmAllowlistConfigMapWriteFailuresTotal } from '../../observability/metrics.js'
 import {
   type CodexOAuthDeps,
   CodexSubscriptionOAuthError,
@@ -14,6 +16,7 @@ import {
   buildCodexBrowserReturnLocation,
   resolveCodexCallbackControlUiBaseUrl,
 } from '../../services/codexSubscriptionRedirectUri.js'
+import { publishAllowedModelsConfigMapAfterGrantChange } from '../../services/llmAllowedModelsConfigMap.js'
 import { codexOAuthCallbackRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'auth-codex-subscription' })
@@ -49,7 +52,7 @@ function redirectToCodexSurface(
   res.redirect(303, buildCodexBrowserReturnLocation(outcome))
 }
 
-export function createAuthCodexSubscriptionRouter(): Router {
+export function createAuthCodexSubscriptionRouter(gateway?: K8sGateway): Router {
   const router = Router()
 
   router.get(
@@ -60,6 +63,15 @@ export function createAuthCodexSubscriptionRouter(): Router {
       const state = typeof req.query.state === 'string' ? req.query.state : ''
       try {
         await handleCodexBrowserCallback(oauthDeps(req), { code, state })
+        try {
+          await publishAllowedModelsConfigMapAfterGrantChange(gateway?.llmAllowedModelsConfigMap())
+        } catch (err) {
+          llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'mutation' })
+          log.error(
+            { err, event: 'codex_allowed_models_cm_write_failed' },
+            'Codex callback persisted but the runtime ConfigMap was not updated'
+          )
+        }
         redirectToCodexSurface(res, 'connected')
       } catch (err) {
         if (err instanceof CodexSubscriptionOAuthError) {

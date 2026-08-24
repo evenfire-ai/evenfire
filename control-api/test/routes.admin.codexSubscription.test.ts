@@ -13,6 +13,11 @@ const oauth = vi.hoisted(() => ({
   revoke: vi.fn(),
 }))
 
+const catalog = vi.hoisted(() => ({
+  loadSecrets: vi.fn(),
+  sync: vi.fn(),
+}))
+
 vi.mock('../src/services/codexSubscriptionOAuth.js', async () => {
   const actual = await vi.importActual('../src/services/codexSubscriptionOAuth.js')
   return {
@@ -23,6 +28,22 @@ vi.mock('../src/services/codexSubscriptionOAuth.js', async () => {
     pollCodexDevice: oauth.pollDevice,
     refreshCodexSubscriptionConnection: oauth.refresh,
     revokeCodexSubscription: oauth.revoke,
+  }
+})
+
+vi.mock('../src/services/codexSubscriptionConnection.js', async () => {
+  const actual = await vi.importActual('../src/services/codexSubscriptionConnection.js')
+  return {
+    ...actual,
+    loadCodexSubscriptionSecrets: catalog.loadSecrets,
+  }
+})
+
+vi.mock('../src/services/codexSubscriptionCatalog.js', async () => {
+  const actual = await vi.importActual('../src/services/codexSubscriptionCatalog.js')
+  return {
+    ...actual,
+    syncCodexSubscriptionCatalog: catalog.sync,
   }
 })
 
@@ -38,7 +59,17 @@ const { createCodexCatalogTransportFromEnv } =
 const { createAdminCodexSubscriptionRouter } =
   await import('../src/routes/admin/codexSubscription.js')
 
-function makeAuthedApp(gateway?: { listResource: ReturnType<typeof vi.fn> }) {
+function makeGateway(materialize: () => Promise<void> = async () => {}) {
+  return {
+    listResource: vi.fn().mockResolvedValue([]),
+    llmAllowedModelsConfigMap: () => ({ materialize }),
+  }
+}
+
+function makeAuthedApp(gateway?: {
+  listResource: ReturnType<typeof vi.fn>
+  llmAllowedModelsConfigMap?: () => { materialize: () => Promise<void> }
+}) {
   const app = express()
   app.use(express.json())
   app.use((req: Request & { adminAuth?: { sub: string } }, _res: Response, next: NextFunction) => {
@@ -93,6 +124,8 @@ describe('admin Codex subscription routes', () => {
     config.codexOAuthClientId = originalClientId
     config.controlUiBaseUrl = originalControlUiBaseUrl
     for (const fn of Object.values(oauth)) fn.mockReset()
+    catalog.loadSecrets.mockReset()
+    catalog.sync.mockReset()
   })
 
   it('returns 404 while the feature flag is off', async () => {
@@ -277,6 +310,117 @@ describe('admin Codex subscription routes', () => {
     )
     expect(res.status).toBe(409)
     expect(res.body).toEqual({ error: 'connection_mismatch' })
+    assertNoLeak(res.body)
+  })
+
+  it('publishes the runtime ConfigMap after a catalog sync', async () => {
+    const materialize = vi.fn(async () => {})
+    catalog.loadSecrets.mockResolvedValue({ accessToken: 'access-secret' })
+    catalog.sync.mockResolvedValue({
+      outcome: 'ready',
+      added: 8,
+      refreshed: 0,
+      staled: 0,
+      connection: { connectionKey: 'codex-aaa', status: 'connected', catalogRevision: 1 },
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/catalog/sync'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.added).toBe(8)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('returns 503 when catalog sync cannot publish the runtime ConfigMap', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    catalog.loadSecrets.mockResolvedValue({ accessToken: 'access-secret' })
+    catalog.sync.mockResolvedValue({
+      outcome: 'ready',
+      added: 8,
+      refreshed: 0,
+      staled: 0,
+      connection: { connectionKey: 'codex-aaa', status: 'connected', catalogRevision: 1 },
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/catalog/sync'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('configmap_write_failed')
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('publishes the runtime ConfigMap after revoke', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.revoke.mockResolvedValue({
+      connectionKey: 'codex-aaa',
+      status: 'revoked',
+      credentialRevision: 3,
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/revoke'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('revoked')
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('returns 503 when revoke cannot publish the runtime ConfigMap', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    oauth.revoke.mockResolvedValue({
+      connectionKey: 'deployment-default',
+      status: 'revoked',
+      credentialRevision: 9,
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/revoke'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('configmap_write_failed')
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('publishes the runtime ConfigMap after a connected device poll', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.pollDevice.mockResolvedValue({ status: 'connected', connectionKey: 'codex-aaa' })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).get(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/device/poll'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('connected')
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('keeps a connected device poll at 200 when ConfigMap publish fails', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    oauth.pollDevice.mockResolvedValue({ status: 'connected', connectionKey: 'codex-aaa' })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).get(
+      '/admin/llm/providers/codex-subscription/device/poll'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('connected')
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('does not publish the ConfigMap while a device poll is still pending', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.pollDevice.mockResolvedValue({ status: 'pending' })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).get(
+      '/admin/llm/providers/codex-subscription/device/poll'
+    )
+    expect(res.status).toBe(200)
+    expect(materialize).not.toHaveBeenCalled()
     assertNoLeak(res.body)
   })
 })

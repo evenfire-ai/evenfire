@@ -15,6 +15,11 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   already green on the same HEAD — use `make minikube-t2-runtime`.
 - **Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.** Private profile
   state (ports, pids, markers). The harness is the only reader.
+- **Do not hunt for UI port-forwards.** First-hand hold:
+  `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+  (implementation `branch-profile.sh` beside it). Run on the host, not a
+  sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh only.
+  `branch-profile-pf-health` stops PFs on EXIT. Never shared `:3000`/`:8090`.
 - **Do not invent `ADMIN_PASSWORD`** or any credential. When a product E2E
   needs it, load it from the primary checkout `.env`; never echo it.
 - **Do not reset PVCs** outside the explicit `T2_RESET_PVC=true` +
@@ -51,7 +56,7 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | --- | --- | --- |
 | `BOOTSTRAP_REQUIRED` | Profile missing/uninitialized, or the planner produced no transition. Standalone preflight refuses to bootstrap. | Run `make minikube-t2` — its internal planner (`T2_PLAN_MODE=true`) makes `full-bootstrap` reachable and runs the supported setup with `IMAGE_SOURCE=local`. |
 | `HEAD_MARKER_MISMATCH` | Pre-gate marker does not match this worktree/HEAD; the final T2 preflight selected something other than `already-synced`. | Re-run `make minikube-t2` on this HEAD so `pre-gate-sync` updates the marker. Never hand-edit the marker. |
-| `PORT_FORWARD_CONFLICT` | A port-forward for this profile is owned by a process not recorded for it (or not a real `kubectl`). | Identify the foreign owner; if it belongs to another lane, stop. Restart forwards via `scripts/minikube/pf-all-stack.sh` for this profile only. |
+| `PORT_FORWARD_CONFLICT` | A port-forward for this profile is owned by a process not recorded for it (or not a real `kubectl`). | Identify the foreign owner; if it belongs to another lane, stop. Do not kill this lane's `branch-profile-pf`. Restore UI PFs with `make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`. |
 | `PROFILE_BUSY` | Profile lock held. Live owner PID → genuinely busy. No valid owner PID → orphaned lock. | Live owner: wait or coordinate; never remove. Orphan: verify no T2 process owns the profile, then remove ONLY `$T2_LOCK_ROOT/<profile>.lock` and retry. Never remove the lock root. |
 | `DEVELOPMENT_SCOPE_REQUIRED` | Preflight/final preflight failed a precondition, or T2-only mode was attempted without `already-synced`. | Repair the first reported condition; if T2-only was refused, run full `make minikube-t2`. |
 | `ZERO_TESTS_EXECUTED` | A lane was configured off or executed nothing (including a required-but-missing Playwright journey). | Re-run with the lane enabled, or supply the required `T2_PLAYWRIGHT_COMMAND`. |
