@@ -1,9 +1,10 @@
 /**
  * Codex subscription — Control UI admission and route guards.
  *
- * Contract:
- * - Unauthenticated deep link to an agent model tab must not expose Connect.
- * - LLM Models no longer owns ChatGPT assignment; the old URL has no Connect owner.
+ * Negative contract (direct terminal access is the behavior under test here):
+ * - Unauthenticated `/secrets/subscription` must show login, not the hub.
+ * - Unauthenticated `/agents/:name/model` must show login, not Connect.
+ * - LLM Models is no longer the ChatGPT assignment owner.
  */
 import { expect, test } from '@playwright/test'
 import { loginControlUiVisible } from '../helpers/visible-login'
@@ -29,12 +30,16 @@ test.describe('Codex subscription admission', () => {
     await page.goto('/')
     await loginControlUiVisible(page)
 
-    await page.getByRole('link', { name: 'LLM Models' }).click()
-    await expect(page).toHaveURL(/\/llm-models/)
-    await expect(page.getByRole('tab', { name: 'Codex subscription' })).toHaveCount(0)
+    await test.step('sidebar LLM Models has no Codex subscription tab', async () => {
+      await page.getByRole('link', { name: 'LLM Models' }).click()
+      await expect(page).toHaveURL(/\/llm-models/)
+      await expect(page.getByRole('tab', { name: 'Codex subscription' })).toHaveCount(0)
+    })
 
-    await page.goto('/llm-models/providers/codex-subscription')
-    await expect(page.getByRole('button', { name: 'Sign in with ChatGPT' })).toHaveCount(0)
-    await expect(page.getByTestId('codex-connection-status')).toHaveCount(0)
+    await test.step('legacy provider URL does not expose Connect', async () => {
+      await page.goto('/llm-models/providers/codex-subscription')
+      await expect(page.getByRole('button', { name: 'Sign in with ChatGPT' })).toHaveCount(0)
+      await expect(page.getByTestId('codex-connection-status')).toHaveCount(0)
+    })
   })
 })

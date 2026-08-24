@@ -537,6 +537,27 @@ export function resolveDefaultModel(provider: LlmProvider, enabledModels: string
   return enabledModels[0] ?? ''
 }
 
+export const HOST_MODEL_NAME_REQUIRED =
+  'Select a model before saving. The agent needs a non-empty model name.'
+
+export function hostModelNameError(name: string): string | null {
+  return name.trim() ? null : HOST_MODEL_NAME_REQUIRED
+}
+
+/**
+ * ChatGPT grants still need a concrete spec.model.name. Keep the draft only
+ * when it is already in the offered grant list (or the list is empty, so a
+ * named draft can save before catalog sync). Otherwise seed the first offered
+ * model — never resolveDefaultModel, which is always '' for oauth-broker.
+ */
+export function resolveCodexGrantModel(current: string, grantModels: string[]): string {
+  const trimmed = current.trim()
+  if (trimmed && (grantModels.length === 0 || grantModels.includes(trimmed))) {
+    return trimmed
+  }
+  return grantModels[0] ?? trimmed
+}
+
 // ── Per-host model allowlist subset (spec Topic 3a) ───────────────────────
 // `spec.allowedModels` on a Host: a flat, OPTIONAL list of (provider, model)
 // pairs = the SUBSET of the global operator allowlist this host offers to end

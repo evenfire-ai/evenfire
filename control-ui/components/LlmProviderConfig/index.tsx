@@ -29,6 +29,7 @@ import {
   mintFallbackSlot,
   normalizeProvider,
   providerSupportsFallbackCredentialSlot,
+  resolveCodexGrantModel,
   resolveDefaultModel,
   validateLlmSecretData,
 } from '@/lib/llm'
@@ -311,8 +312,8 @@ export function LlmProviderConfig({
                     onChange={() =>
                       onPrimaryChange({
                         provider: OPENAI_SUBSCRIPTION_PROVIDER,
-                        model: resolveDefaultModel(
-                          OPENAI_SUBSCRIPTION_PROVIDER,
+                        model: resolveCodexGrantModel(
+                          model,
                           constrainModelOptions(
                             catalog,
                             allowedModels,

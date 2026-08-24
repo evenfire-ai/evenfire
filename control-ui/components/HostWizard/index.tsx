@@ -19,6 +19,7 @@ import {
   updateAgentUsers,
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import { CODEX_UNASSIGNED_CONNECTION_KEY } from '@/lib/codexSubscription'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
 import { getAgentNameError } from '@/lib/k8sValidation'
 import {
@@ -26,6 +27,7 @@ import {
   type LlmPolicy,
   type LlmProvider,
   buildAllowedModelsSpec,
+  constrainModelOptions,
   createEmptyLlmKeyDraft,
   getActiveCredentialKeys,
   getModelOptions,
@@ -34,6 +36,7 @@ import {
   isProviderUsable,
   llmChainRequiresSecret,
   projectCredentialDraft,
+  resolveCodexGrantModel,
   resolveDefaultModel,
   validateLlmSecretData,
 } from '@/lib/llm'
@@ -342,7 +345,7 @@ export function HostWizard({
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelName, setModelName] = useState('')
-  const [connectionRef, setConnectionRef] = useState('deployment-default')
+  const [connectionRef, setConnectionRef] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
@@ -441,12 +444,18 @@ export function HostWizard({
   // switch left the model out of range.
   useEffect(() => {
     if (modelsLoading) return
+    if (provider === 'codex-subscription') {
+      const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
+      const next = resolveCodexGrantModel(modelName, offered)
+      if (next !== modelName) setModelName(next)
+      return
+    }
     if (!providerModelOptions.includes(modelName)) {
       setModelName(resolveDefaultModel(provider, providerModelOptions))
     }
     // Intentionally omit modelName: this reconciles the picker to the options.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerModelOptions, modelsLoading])
+  }, [allowedModels, catalogForEditor, modelsLoading, provider, providerModelOptions])
 
   // Auto-derive the new Secret name from the agent name ("this agent's
   // credentials") until the operator edits it, so naming a Kubernetes Secret is

@@ -16,6 +16,7 @@ import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconPencil, IconX } from '../../../components/icons'
 import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
+import { CODEX_UNASSIGNED_CONNECTION_KEY } from '../../../lib/codexSubscription'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
@@ -24,9 +25,11 @@ import {
   type LlmPolicy,
   type LlmProvider,
   buildAllowedModelsSpec,
+  constrainModelOptions,
   getActiveCredentialKeys,
   getModelOptions,
   getProviderLabel,
+  hostModelNameError,
   isOpenAiFamily,
   isProviderUsable,
   llmChainRequiresSecret,
@@ -34,6 +37,7 @@ import {
   normalizeLlmPolicy,
   normalizeProvider,
   projectCredentialDraft,
+  resolveCodexGrantModel,
   resolveDefaultModel,
   validateLlmPolicy,
   validateLlmSecretData,
@@ -125,7 +129,7 @@ export default function HostDetailsPage() {
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelNameDraft, setModelNameDraft] = useState('')
-  const [connectionRefDraft, setConnectionRefDraft] = useState('deployment-default')
+  const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const catalogForEditor = useMemo(() => {
     if (providerDraft !== 'codex-subscription' || codexModels.length === 0) return allowedCatalog
@@ -214,10 +218,20 @@ export default function HostDetailsPage() {
   // fell out of the allowlist stays selectable, spec R3.7). Cannot loop: it
   // only fires on an empty draft and always sets a non-empty value.
   useEffect(() => {
+    if (providerDraft === 'codex-subscription') {
+      const offered = constrainModelOptions(
+        catalogForEditor,
+        allowedModelsDraft,
+        'codex-subscription'
+      )
+      const next = resolveCodexGrantModel(modelNameDraft, offered)
+      if (next && next !== modelNameDraft) setModelNameDraft(next)
+      return
+    }
     if (modelNameDraft === '' && providerModelOptions.length > 0) {
       setModelNameDraft(resolveDefaultModel(providerDraft, providerModelOptions))
     }
-  }, [modelNameDraft, providerDraft, providerModelOptions])
+  }, [allowedModelsDraft, catalogForEditor, modelNameDraft, providerDraft, providerModelOptions])
 
   useEffect(() => {
     setActiveTab(parseHostTab(params.tab))
@@ -284,7 +298,7 @@ export default function HostDetailsPage() {
         setConnectionRefDraft(
           String(
             (spec.model as { connectionRef?: string } | undefined)?.connectionRef || ''
-          ).trim() || 'deployment-default'
+          ).trim() || CODEX_UNASSIGNED_CONNECTION_KEY
         )
         setSecretRefDraft(String(spec.secretRef || ''))
         setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
@@ -465,6 +479,11 @@ export default function HostDetailsPage() {
   // (identity, context, channels, lifecycle) are preserved via the
   // `...currentHost.spec` spread (full-replace semantics).
   async function saveModelAndCredentials(): Promise<boolean> {
+    const modelNameProblem = hostModelNameError(modelNameDraft)
+    if (modelNameProblem) {
+      setError(modelNameProblem)
+      return false
+    }
     // Client-side mirror of control-api's write gate (spec R5.3): block a save
     // with an out-of-allowlist fallback model before the round-trip. Skip the
     // check when the allowlist failed to load (`allowedCatalog` empty) — every
@@ -550,10 +569,7 @@ export default function HostDetailsPage() {
           name: modelNameDraft.trim(),
           ...(providerDraft === 'codex-subscription'
             ? {
-                connectionRef:
-                  connectionRefDraft.trim() === 'unassigned'
-                    ? 'unassigned'
-                    : connectionRefDraft.trim() || 'deployment-default',
+                connectionRef: connectionRefDraft.trim() || CODEX_UNASSIGNED_CONNECTION_KEY,
               }
             : {}),
         },
@@ -943,7 +959,7 @@ export default function HostDetailsPage() {
                           setEditingModel(false)
                         }
                       }}
-                      disabled={busy}
+                      disabled={busy || Boolean(hostModelNameError(modelNameDraft))}
                     >
                       {busy ? 'Saving…' : 'Save'}
                     </button>
@@ -979,7 +995,9 @@ export default function HostDetailsPage() {
                   <div className="cu-field">
                     <label htmlFor="model-subscription">Subscription</label>
                     <div className="cu-field__readonly">
-                      {connectionRefDraft || 'deployment-default'}
+                      {connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY
+                        ? 'No subscription assigned'
+                        : connectionRefDraft}
                     </div>
                   </div>
                 ) : null}
@@ -1093,7 +1111,7 @@ export default function HostDetailsPage() {
                   catalog={catalogForEditor}
                   catalogLoading={modelsLoading}
                   catalogError={modelsError}
-                  replacePrimaryModelWithAllowedModels
+                  replacePrimaryModelWithAllowedModels={providerDraft !== 'codex-subscription'}
                   credentials={
                     llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
                       ? {

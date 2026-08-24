@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { CodexSubscriptionConnectionView } from '@lib/codexSubscription'
 import {
   bindCodexHost,
@@ -67,8 +67,9 @@ describe('CodexSubscriptionHub', () => {
     vi.mocked(listCodexSubscriptionFleet).mockResolvedValue({
       connections: [connection({ connectionKey: 'codex-aaa', displayName: 'Team A' })],
       assignableHosts: [
-        { name: 'chatllm', connectionRef: 'codex-aaa' },
-        { name: 'writer', connectionRef: 'unassigned' },
+        { name: 'chatllm', connectionRef: 'codex-aaa', displayName: 'chatllm' },
+        { name: 'writer', connectionRef: 'unassigned', displayName: 'writer' },
+        { name: 'researcher', connectionRef: 'unassigned', displayName: 'researcher' },
       ],
       assignableHostsUnavailable: false,
     })
@@ -99,22 +100,26 @@ describe('CodexSubscriptionHub', () => {
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
   })
 
-  it('shows Assigned and Available fleet rows for a grant', async () => {
+  it('renders subscriptions as one Secrets table, not stacked cards', async () => {
     render(
       <ToastProvider>
         <CodexSubscriptionHub />
       </ToastProvider>
     )
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Assigned' })).toBeInTheDocument()
+      expect(screen.getByTestId('codex-hub-table')).toBeInTheDocument()
     })
+    expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Agents' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'chatllm' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Available' })).toBeInTheDocument()
-    expect(screen.getByText(/writer/)).toBeInTheDocument()
-    expect(screen.getByText(/no subscription assigned/i)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Available' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Assigned' })).not.toBeInTheDocument()
+    expect(document.querySelectorAll('.cu-llm-config__block').length).toBe(0)
+    expect(screen.getByLabelText('Add agents to this subscription')).toBeInTheDocument()
   })
 
-  it('assigns an available agent without revoking', async () => {
+  it('assigns one available agent without revoking', async () => {
     vi.mocked(bindCodexHost).mockResolvedValue({ host: 'writer', connectionRef: 'codex-aaa' })
     render(
       <ToastProvider>
@@ -122,12 +127,62 @@ describe('CodexSubscriptionHub', () => {
       </ToastProvider>
     )
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Assign' })).toBeInTheDocument()
+      expect(screen.getByLabelText('Add agents to this subscription')).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Assign' }))
+    fireEvent.click(screen.getByLabelText('Add agents to this subscription'))
+    fireEvent.click(screen.getByRole('option', { name: 'writer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add agents' }))
     await waitFor(() => {
       expect(bindCodexHost).toHaveBeenCalledWith('codex-aaa', 'writer')
     })
+    expect(bindCodexHost).toHaveBeenCalledTimes(1)
+    expect(revokeCodexSubscription).not.toHaveBeenCalled()
+  })
+
+  it('assigns multiple available agents to the same subscription in one action', async () => {
+    vi.mocked(bindCodexHost)
+      .mockResolvedValueOnce({ host: 'writer', connectionRef: 'codex-aaa' })
+      .mockResolvedValueOnce({ host: 'researcher', connectionRef: 'codex-aaa' })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    await waitFor(() => {
+      expect(screen.getByLabelText('Add agents to this subscription')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByLabelText('Add agents to this subscription'))
+    fireEvent.click(screen.getByRole('option', { name: 'writer' }))
+    fireEvent.click(screen.getByRole('option', { name: 'researcher' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add 2 agents' }))
+    await waitFor(() => {
+      expect(bindCodexHost).toHaveBeenCalledTimes(2)
+    })
+    expect(bindCodexHost).toHaveBeenNthCalledWith(1, 'codex-aaa', 'writer')
+    expect(bindCodexHost).toHaveBeenNthCalledWith(2, 'codex-aaa', 'researcher')
+    expect(revokeCodexSubscription).not.toHaveBeenCalled()
+  })
+
+  it('keeps assigning remaining agents when one bind fails', async () => {
+    vi.mocked(bindCodexHost)
+      .mockRejectedValueOnce(new Error('writer bind failed'))
+      .mockResolvedValueOnce({ host: 'researcher', connectionRef: 'codex-aaa' })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    await waitFor(() => {
+      expect(screen.getByLabelText('Add agents to this subscription')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByLabelText('Add agents to this subscription'))
+    fireEvent.click(screen.getByRole('option', { name: 'writer' }))
+    fireEvent.click(screen.getByRole('option', { name: 'researcher' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add 2 agents' }))
+    await waitFor(() => {
+      expect(bindCodexHost).toHaveBeenCalledTimes(2)
+    })
+    expect(bindCodexHost).toHaveBeenNthCalledWith(2, 'codex-aaa', 'researcher')
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
   })
 
@@ -150,10 +205,10 @@ describe('CodexSubscriptionHub', () => {
         <CodexSubscriptionHub />
       </ToastProvider>
     )
-    await waitFor(() => {
-      expect(screen.getAllByRole('button', { name: 'Assign' }).length).toBeGreaterThan(0)
-    })
-    fireEvent.click(screen.getAllByRole('button', { name: 'Assign' })[0])
+    const teamA = await screen.findByTestId('codex-hub-grant-codex-aaa')
+    fireEvent.click(within(teamA).getByLabelText('Add agents to this subscription'))
+    fireEvent.click(within(teamA).getByRole('option', { name: 'chatllm' }))
+    fireEvent.click(within(teamA).getByRole('button', { name: 'Add agents' }))
     await waitFor(() => {
       expect(confirmMock).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -177,9 +232,9 @@ describe('CodexSubscriptionHub', () => {
       </ToastProvider>
     )
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Remove agent' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Remove agent chatllm' })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Remove agent' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove agent chatllm' }))
     await waitFor(() => {
       expect(unbindCodexHost).toHaveBeenCalledWith('codex-aaa', 'chatllm')
     })

@@ -822,7 +822,7 @@ describe('HostWizard — broker-backed Codex authoring', () => {
             model: {
               provider: 'codex-subscription',
               name: 'gpt-5.1',
-              connectionRef: 'deployment-default',
+              connectionRef: 'unassigned',
             },
           }),
         })
@@ -838,6 +838,23 @@ describe('HostWizard — broker-backed Codex authoring', () => {
         .mocked(api.apiSend)
         .mock.calls.some(call => call[0] === 'POST' && call[1] === '/api/v1/admin/secrets')
     ).toBe(false)
+  }, 15_000)
+
+  it('seeds the first offered grant model when switching to a ChatGPT subscription', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-keep-model' })
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+      ).toHaveTextContent(/\S/)
+    })
+    fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+      ).toHaveTextContent('gpt-5.1')
+    })
+    expect(screen.queryByText(/Use an existing secret/i)).not.toBeInTheDocument()
   }, 15_000)
 
   it('requires exact credential slots when a static fallback joins a Codex primary', async () => {

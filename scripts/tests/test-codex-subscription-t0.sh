@@ -194,6 +194,8 @@ run_group "workflow-recipes" "workflow-recipes" \
 run_group "control-ui" "control-ui" \
   "components/__tests__/CodexAgentAssignment.test.tsx" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \
+  "components/__tests__/LlmProviderConfig.test.tsx" \
+  "lib/__tests__/llm.codexGrantModel.test.ts" \
   "components/__tests__/HostWizard.test.tsx" \
   "components/__tests__/RecipeEditor.test.tsx"
 
