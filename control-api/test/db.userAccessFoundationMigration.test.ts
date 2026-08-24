@@ -107,7 +107,7 @@ describe('user-access foundation migration', () => {
     )
 
     const expected = new Map<string, string>([
-      ['authorization_catalog_revision', 'read'],
+      ['authorization_catalog_writer_components', 'read'],
       ['authorization_resource_revisions', 'upsert'],
       ['authorization_team_revisions', 'upsert'],
       ['authorization_user_revisions', 'upsert'],
