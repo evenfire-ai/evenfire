@@ -806,11 +806,13 @@ data:
       scgi_temp_path /tmp/scgi_temp;
 
       # Bound unauthenticated attempts before they can amplify into Kubernetes
-      # TokenReview calls. Inventory and live authorization use separate
-      # source-keyed budgets so a noisy directory poller cannot starve the
-      # forwarding decision path; excess is an opaque 503 and never a grant.
+      # TokenReview calls. Inventory keeps its 120r/m source budget; authorize
+      # uses a separately dimensioned aggregate safety ceiling so that the
+      # gateway's singleton source key is not also the per-Host quota. HCC
+      # applies the authoritative 120r/m quota independently after Host JWT
+      # validation; excess at either layer is an opaque denial.
       limit_req_zone $binary_remote_addr zone=np08_system_inventory:10m rate=120r/m;
-      limit_req_zone $binary_remote_addr zone=np08_system_authorize:10m rate=120r/m;
+      limit_req_zone $binary_remote_addr zone=np08_system_authorize_aggregate:10m rate=1200r/m;
 
       map $uri $hcc_route_class {
         default denied;
@@ -920,7 +922,7 @@ data:
         location = /api/v2/system/mcpservers/authorize {
           if ($request_method != POST) { return 405; }
           client_max_body_size 1k;
-          limit_req zone=np08_system_authorize burst=20 nodelay;
+          limit_req zone=np08_system_authorize_aggregate burst=200 nodelay;
           limit_req_status 503;
           proxy_pass http://host_context_controller_upstream;
           proxy_pass_request_headers off;

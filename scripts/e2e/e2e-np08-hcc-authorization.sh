@@ -298,6 +298,45 @@ np08_assert_stats_unchanged() {
   echo "PASS ${label} preserved zero upstream connections, requests, and bytes"
 }
 
+np08_product_manager_status_probe() {
+  local deployment="$1"
+  local expected_server="$2"
+  kctl -n "${HOST_NS}" exec "deploy/${deployment}" -- \
+    env "NP08_EXPECTED_SERVER=${expected_server}" node - <<'NODE' >/dev/null 2>&1
+const expectedServer = process.env.NP08_EXPECTED_SERVER
+const runtimeScheme = ['ht', 'tp://'].join('')
+const runtimeHost = ['127', '0', '0', '1'].join('.')
+const response = await fetch([runtimeScheme, runtimeHost, ':8080', '/v1/runtime/status'].join(''), {
+  headers: {
+    'x-clerum-edge-caller': 'rpc-proxy',
+    'x-clerum-edge-host-ref': process.env.CLERUM_HOST_NAME,
+    'x-clerum-edge-user-id': 'np08-e2e-status-probe',
+  },
+})
+if (response.status !== 200) process.exit(1)
+const body = await response.json().catch(() => ({}))
+const entry = Array.isArray(body?.mcpServers)
+  ? body.mcpServers.find(server => server?.name === expectedServer)
+  : undefined
+if (!entry || entry.expected !== true || entry.state !== 'connected') process.exit(1)
+NODE
+}
+
+run_np08_product_manager_status() {
+  local deployment="$1"
+  local expected_server="$2"
+  echo "E2E product-wiring leg: ${deployment} authoritative MCP manager"
+  for attempt in {1..180}; do
+    if np08_product_manager_status_probe "${deployment}" "${expected_server}"; then
+      echo "PASS ${deployment} main.ts installed ${expected_server} as connected"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "FAIL ${deployment} main.ts did not expose ${expected_server} as connected" >&2
+  return 1
+}
+
 run_np08_manager_phase() {
   local deployment="$1"
   local mode="$2"
@@ -324,7 +363,7 @@ run_np08_manager_phase() {
       "NP08_PROXY_CONTEXT_FORBIDDEN=${forbidden_context}" \
       "NP08_PROXY_URL=http://mcp-proxy.mcp-server.svc.cluster.local:8083" \
       node - <<'NODE'
-const { McpManager } = require('/app/mcp-host/dist/mcp/manager.js')
+const { createMcpManagerForHost } = require('/app/mcp-host/dist/mcp/managerFactory.js')
 const mode = process.env.NP08_PROXY_MODE
 const allowedServer = process.env.NP08_PROXY_SERVER_ALLOWED
 const forbiddenServer = process.env.NP08_PROXY_SERVER_FORBIDDEN
@@ -336,12 +375,14 @@ const proxyUrl = process.env.NP08_PROXY_URL
 const runtimeKey = ['MCP', '_HOST_', '_RUNTIME_', '_ACCESS_', 'TOKEN'].join('')
 const refreshKey = ['MCP', '_HOST_', '_RUNTIME_', '_REFRESH_', 'TOKEN'].join('')
 const gatewayKey = ['MCP', '_HOST_', '_GATEWAY_', 'URL'].join('')
+const proxyEnabledKey = ['MCP', '_PROXY_', 'ENABLED'].join('')
 let runtimeValue = process.env[runtimeKey]
 const refreshValue = process.env[refreshKey]
 const gatewayValue = process.env[gatewayKey]
 
 if (!mode || !allowedServer || !forbiddenServer || !allowedValue || !forbiddenValue ||
-    !allowedContext || !forbiddenContext || !proxyUrl || !runtimeValue) {
+    !allowedContext || !forbiddenContext || !proxyUrl || !runtimeValue ||
+    process.env[proxyEnabledKey] !== 'true') {
   throw new Error('deployed manager fixture inputs are unavailable')
 }
 
@@ -375,7 +416,11 @@ const serverInfo = (name, contextRef) => ({
   status: { deployed: true, ready: true, authoritative: true },
 })
 
-const manager = new McpManager(proxyUrl, undefined, hostAuthorization)
+const manager = createMcpManagerForHost({
+  proxyEnabled: process.env[proxyEnabledKey] === 'true',
+  proxyUrl,
+  hostAuthorization,
+})
 try {
   await manager.addServer(serverInfo(allowedServer, allowedContext), allowedValue)
   if (mode === 'positive') {
@@ -425,6 +470,8 @@ run_np08_deployed_manager_journey() {
     kctl -n "${MCP_NS}" rollout status "deployment/${server}" --timeout=180s >/dev/null
   done
 
+  run_np08_product_manager_status "${HOST_DEPLOYMENT}" "${SERVER_A}"
+  run_np08_product_manager_status "${HOST_B}" "${SERVER_B}"
   reset_np08_mock_stats "${SERVER_A}"
   reset_np08_mock_stats "${SERVER_B}"
   run_np08_manager_phase "${HOST_DEPLOYMENT}" positive "${SERVER_A}" "${SERVER_B}" \

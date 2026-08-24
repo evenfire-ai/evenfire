@@ -31,7 +31,7 @@ const RESPONSE_HEADERS = [
   'last-event-id',
   'mcp-session-id',
   'mcp-protocol-version',
-  'retry-after',
+  'retry',
 ] as const
 
 function connectionTokens(headers: IncomingMessage['headers']): Set<string> {
@@ -106,7 +106,12 @@ export class HttpForwarder {
       }
       const fail = (status: number, error: string) => {
         if (!res.headersSent) {
-          res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.writeHead(status, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store, private',
+            Pragma: 'no-cache',
+            'X-Content-Type-Options': 'nosniff',
+          })
           res.end(JSON.stringify({ error }))
         } else {
           res.end()

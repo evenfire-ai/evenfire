@@ -75,11 +75,11 @@ for rendered in "$@"; do
     system_authorize = location_block.call("location = /api/v2/system/mcpservers/authorize {")
     abort("system v2 routes lack separate bounded source rate limiting zones") unless
       nginx.include?("limit_req_zone $binary_remote_addr zone=np08_system_inventory:10m rate=120r/m;") &&
-      nginx.include?("limit_req_zone $binary_remote_addr zone=np08_system_authorize:10m rate=120r/m;")
+      nginx.include?("limit_req_zone $binary_remote_addr zone=np08_system_authorize_aggregate:10m rate=1200r/m;")
     abort("system inventory route uses the wrong source rate limiting zone") unless
       system_inventory.include?("limit_req zone=np08_system_inventory burst=20 nodelay;")
-    abort("system authorize route uses the wrong source rate limiting zone") unless
-      system_authorize.include?("limit_req zone=np08_system_authorize burst=20 nodelay;")
+    abort("system authorize route uses the wrong aggregate rate limiting zone") unless
+      system_authorize.include?("limit_req zone=np08_system_authorize_aggregate burst=200 nodelay;")
     [system_inventory, system_authorize].each do |block|
       abort("system v2 route forwards ambient request headers") unless block.include?("proxy_pass_request_headers off;")
       abort("system v2 route does not explicitly forward system Authorization") unless block.include?("proxy_set_header Authorization $http_authorization;")

@@ -99,16 +99,19 @@ const target: LiveForwardTarget = {
 function makeServer(authorization: Partial<McpAuthorizationService> = {}): ContextMapperServer {
   const systemAuthenticator: McpProxyAuthenticator = {
     authenticateSystem: vi.fn(async () => systemPrincipal),
-    authenticateHost: vi.fn(() => ({
-      subject: 'mcp-host/standalone',
-      hostName: 'host-a',
-      hostUid: 'host-uid-a',
-      namespace: 'mcp-host',
-      jti: 'host-jti',
-      issuedAt: 1,
-      expiresAt: 4_000_000_000,
-      audiences: ['host-context-controller'],
-    })),
+    authenticateHost: vi.fn((headers: { 'x-clerum-host-authorization'?: string }) => {
+      const hostB = headers['x-clerum-host-authorization'] === 'fixture-host-b'
+      return {
+        subject: `mcp-host/${hostB ? 'host-b' : 'host-a'}`,
+        hostName: hostB ? 'host-b' : 'host-a',
+        hostUid: hostB ? 'host-uid-b' : 'host-uid-a',
+        namespace: 'mcp-host',
+        jti: hostB ? 'host-jti-b' : 'host-jti-a',
+        issuedAt: 1,
+        expiresAt: 4_000_000_000,
+        audiences: ['host-context-controller'],
+      }
+    }),
   } as unknown as McpProxyAuthenticator
   return new ContextMapperServer(
     new Provider(),
@@ -202,6 +205,31 @@ describe('ContextMapperServer system MCP proxy routes', () => {
     expect(first.statusCode).toBe(200)
     expect(second.statusCode).toBe(429)
     expect(authorization.getLiveForwardTarget).toHaveBeenCalledOnce()
+  })
+
+  it('does not let one Host exhaust another Host\'s live-authorize quota', async () => {
+    const authorization = {
+      getLiveForwardTarget: vi.fn(async () => target),
+    }
+    server = makeServer(authorization)
+    ;(server as unknown as { mcpRateLimiter: McpHostApiRateLimiter }).mcpRateLimiter =
+      new McpHostApiRateLimiter(1)
+    server.setReady(true)
+
+    const request = (hostBearer: string) => ({
+      method: 'POST' as const,
+      headers: {
+        authorization: 'fixture-system',
+        'x-clerum-host-authorization': hostBearer,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ serverName: 'server-a' }),
+    })
+
+    expect((await invoke(server, '/api/v2/system/mcpservers/authorize', request('fixture-host-a'))).statusCode).toBe(200)
+    expect((await invoke(server, '/api/v2/system/mcpservers/authorize', request('fixture-host-a'))).statusCode).toBe(429)
+    expect((await invoke(server, '/api/v2/system/mcpservers/authorize', request('fixture-host-b'))).statusCode).toBe(200)
+    expect(authorization.getLiveForwardTarget).toHaveBeenCalledTimes(2)
   })
 
   it('maps cross-context and unavailable target results to opaque 403/503 responses', async () => {

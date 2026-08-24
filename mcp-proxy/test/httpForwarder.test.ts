@@ -138,16 +138,29 @@ describe("HttpForwarder", () => {
   it("should preserve response headers", async () => {
     backendHandler = (_, res) => {
       res.writeHead(200, {
-        Connection: "mcp-session-id",
+        "Content-Type": "text/event-stream",
+        "Content-Length": "2",
+        "Cache-Control": "no-store",
+        "Mcp-Protocol-Version": "2025-06-18",
         "X-Custom-Header": "custom-value",
         "Mcp-Session-Id": "session-123",
+        "Last-Event-ID": "event-123",
+        Retry: "2",
+        "Retry-After": "10",
       });
       res.end("ok");
     };
 
     const res = await forwardViaProxy("POST");
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.headers["content-length"]).toBe("2");
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.headers["mcp-protocol-version"]).toBe("2025-06-18");
+    expect(res.headers["last-event-id"]).toBe("event-123");
+    expect(res.headers.retry).toBe("2");
+    expect(res.headers["retry-after"]).toBeUndefined();
     expect(res.headers["x-custom-header"]).toBeUndefined();
-    expect(res.headers["mcp-session-id"]).toBeUndefined();
+    expect(res.headers["mcp-session-id"]).toBe("session-123");
   });
 
   it("should pass through error status codes", async () => {
@@ -169,7 +182,11 @@ describe("HttpForwarder", () => {
       allowLoopbackTargets: true,
     });
 
-    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const res = await new Promise<{
+      status: number;
+      body: string;
+      headers: http.IncomingHttpHeaders;
+    }>((resolve, reject) => {
       const proxy = http.createServer(async (req, proxyRes) => {
         const chunks: Buffer[] = [];
         for await (const chunk of req) {
@@ -193,7 +210,7 @@ describe("HttpForwarder", () => {
             r.on("data", (c: Buffer) => (data += c.toString()));
             r.on("end", () => {
               proxy.close();
-              resolve({ status: r.statusCode || 0, body: data });
+              resolve({ status: r.statusCode || 0, body: data, headers: r.headers });
             });
           }
         );
@@ -206,6 +223,48 @@ describe("HttpForwarder", () => {
     });
 
     expect(res.status).toBe(502);
+    expect(res.headers["cache-control"]).toBe("no-store, private");
+    expect(res.headers.pragma).toBe("no-cache");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("should return a non-cacheable 413 when the upstream response is too large", async () => {
+    forwarder = new HttpForwarder({
+      requestTimeout: 5000,
+      maxResponseSize: 3,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
+    backendHandler = (_, res) => {
+      res.writeHead(200, { "Content-Length": "4" });
+      res.end("four");
+    };
+
+    const res = await forwardViaProxy("POST");
+
+    expect(res.status).toBe(413);
+    expect(res.headers["cache-control"]).toBe("no-store, private");
+    expect(res.headers.pragma).toBe("no-cache");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("should return a non-cacheable 504 when the upstream times out", async () => {
+    forwarder = new HttpForwarder({
+      requestTimeout: 20,
+      maxResponseSize: 1048576,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
+    backendHandler = (_, res) => {
+      setTimeout(() => res.end("late"), 100);
+    };
+
+    const res = await forwardViaProxy("POST");
+
+    expect(res.status).toBe(504);
+    expect(res.headers["cache-control"]).toBe("no-store, private");
+    expect(res.headers.pragma).toBe("no-cache");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
   it("should stream chunked responses", async () => {

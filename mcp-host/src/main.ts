@@ -70,6 +70,7 @@ import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
 import { McpManager } from './mcp'
+import { createMcpManagerForHost } from './mcp/managerFactory'
 import {
   AuthoritativeMcpFleetCoordinator,
   DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
@@ -914,11 +915,11 @@ async function initializeMcpServers(): Promise<void> {
       servers,
       previousManager,
       createManager: () =>
-        new McpManager(
-          config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
-          undefined,
-          getMcpProxyHostAuthorization()
-        ),
+        createMcpManagerForHost({
+          proxyEnabled: config.mcpProxyEnabled,
+          proxyUrl: config.mcpProxyUrl,
+          hostAuthorization: getMcpProxyHostAuthorization(),
+        }),
       getAuthToken: async (serverName, expectedRevision) => {
         return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
       },
@@ -2829,11 +2830,11 @@ async function startDevMode(): Promise<void> {
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
-  mcpManager = new McpManager(
-    config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
-    undefined,
-    getMcpProxyHostAuthorization()
-  )
+  mcpManager = createMcpManagerForHost({
+    proxyEnabled: config.mcpProxyEnabled,
+    proxyUrl: config.mcpProxyUrl,
+    hostAuthorization: getMcpProxyHostAuthorization(),
+  })
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
     console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)

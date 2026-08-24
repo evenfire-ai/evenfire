@@ -161,7 +161,10 @@ if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   ! grep -Fq 'net.connect' "${E2E_SCRIPT}" ||
   ! grep -Fq 'duplicate system header was not rejected' "${E2E_SCRIPT}" ||
   ! grep -Fq 'run_np08_deployed_manager_journey' "${E2E_SCRIPT}" ||
-  ! grep -Fq "require('/app/mcp-host/dist/mcp/manager.js')" "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_product_manager_status' "${E2E_SCRIPT}" ||
+  ! grep -Fq "require('/app/mcp-host/dist/mcp/managerFactory.js')" "${E2E_SCRIPT}" ||
+  ! grep -Fq 'mcpServers' "${E2E_SCRIPT}" ||
+  ! grep -Fq "state !== 'connected'" "${E2E_SCRIPT}" ||
   ! grep -Fq 'HOST_B=' "${E2E_SCRIPT}" ||
   ! grep -Fq 'kind: Host' "${E2E_SCRIPT}" ||
   ! grep -Fq 'deployment/${HOST_B}' "${E2E_SCRIPT}" ||
