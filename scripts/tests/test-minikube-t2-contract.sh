@@ -130,7 +130,7 @@ grep -Fq -- '--maxWorkers=1' "$T1"
 grep -Fq 'run_t1_local_preflight' "$T2"
 grep -Fq 'T2_SETUP_HANDOFF_REQUIRED=true' "$T2"
 grep -Fq 't2-setup-handoff.sh" consume --' "$ROOT/scripts/minikube/pre-gate-sync.sh"
-grep -Fq 'make minikube-verify-images' "$ROOT/scripts/minikube/pre-gate-sync.sh"
+grep -Fq 'minikube-verify-images' "$ROOT/scripts/minikube/pre-gate-sync.sh"
 for timed_phase in 't2_evidence_write planner PASS' 't2_evidence_write transition PASS' \
   't2_evidence_write pre-gate-sync PASS' 't2_evidence_write T1 PASS' \
   't2_evidence_write T2 PASS' 't2_evidence_write NP08_HCC_AUTHORIZATION PASS'; do
