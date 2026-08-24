@@ -4,38 +4,32 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 FAIL=0
-T2_TEST_RESTORE_DETACHED=false
-T2_TEST_HEAD=""
-T2_TEST_BRANCH=""
-
-cleanup_test_checkout() {
-  if [[ "${T2_TEST_RESTORE_DETACHED}" == true ]]; then
-    git -C "${REPO_ROOT}" switch --quiet --detach "${T2_TEST_HEAD}" || true
-    git -C "${REPO_ROOT}" branch -D "${T2_TEST_BRANCH}" >/dev/null 2>&1 || true
-  fi
-}
-
-trap cleanup_test_checkout EXIT
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
 write_test_profile_metadata() {
   local root="$1" profile="clerum-full-setup-fixture"
-  local profile_dir="$root/profiles/$profile"
+  local repo="$root/repo" profile_dir="$root/profiles/$profile"
   local branch short_sha
-  branch="$(git -C "$REPO_ROOT" branch --show-current)"
-  if [[ -z "${branch}" ]]; then
-    T2_TEST_HEAD="$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)"
-    branch="${GITHUB_HEAD_REF:-detached-ci-test}"
-    git -C "${REPO_ROOT}" switch --quiet --create "${branch}" "${T2_TEST_HEAD}"
-    T2_TEST_BRANCH="${branch}"
-    T2_TEST_RESTORE_DETACHED=true
-  fi
-  short_sha="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
+  mkdir -p "$repo"
+  (
+    cd "$repo"
+    git init -q .
+    git config user.email t2-fixture@example.invalid
+    git config user.name t2-fixture
+    printf 'fixture\n' > README.md
+    git add README.md
+    git commit -qm fixture
+    git branch -M test/minikube-fixture
+    git remote add origin https://github.com/evenfire-ai/evenfire.git
+    git update-ref refs/remotes/origin/dev HEAD
+  )
+  branch="$(git -C "$repo" branch --show-current)"
+  short_sha="$(git -C "$repo" rev-parse --short=8 HEAD)"
   mkdir -p "$profile_dir"
   printf 'PROFILE=%s\nBRANCH=%s\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
-    "$profile" "$branch" "$short_sha" "$REPO_ROOT" >"$profile_dir/profile.env"
+    "$profile" "$branch" "$short_sha" "$repo" >"$profile_dir/profile.env"
   test_loopback_url() { printf 'http://%s:%s' 127.0.0.1 "$1"; }
   cat >"$profile_dir/ports.env" <<EOF_PORTS
 PORT_BASE=28117
@@ -64,6 +58,7 @@ EOF_PORTS
   TEST_PROFILE_ENV="$profile_dir/profile.env"
   TEST_PORTS_ENV="$profile_dir/ports.env"
   TEST_LOCK_ROOT="$root/locks"
+  TEST_PROJECT_DIR="$repo"
 }
 
 assert_broken_profile_is_recreated() {
@@ -174,6 +169,7 @@ STUB
      TEST_LOG_FILE="$log_file" \
      TEST_STATE_DIR="$tmp/state" \
      MINIKUBE_PROFILE="$TEST_PROFILE" \
+     T2_PROJECT_DIR="$TEST_PROJECT_DIR" \
      T2_PROFILE_ROOT="$TEST_PROFILE_ROOT" T2_PROFILE_ENV="$TEST_PROFILE_ENV" \
      T2_PORTS_ENV="$TEST_PORTS_ENV" T2_LOCK_ROOT="$TEST_LOCK_ROOT" \
      MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true \
@@ -276,6 +272,7 @@ STUB
   if PATH="$tmp:$PATH" \
      TEST_LOG_FILE="$log_file" \
      MINIKUBE_PROFILE="$TEST_PROFILE" \
+     T2_PROJECT_DIR="$TEST_PROJECT_DIR" \
      T2_PROFILE_ROOT="$TEST_PROFILE_ROOT" T2_PROFILE_ENV="$TEST_PROFILE_ENV" \
      T2_PORTS_ENV="$TEST_PORTS_ENV" T2_LOCK_ROOT="$TEST_LOCK_ROOT" \
      MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true \
