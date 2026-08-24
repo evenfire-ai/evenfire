@@ -26,11 +26,7 @@ import {
   canonicalAccessPathSeeds,
   databaseRelationshipsRevision,
 } from './authorizationRevision.js'
-import {
-  type AccessCapability,
-  isAccessCapability,
-  normalizeAccessCapabilities,
-} from './capabilityRegistry.js'
+import { type AccessCapability, isAccessCapability } from './capabilityRegistry.js'
 import { validateExactOperationalBindings } from './exactOperationalAuthorization.js'
 import {
   OperationTargetValidationError,
@@ -329,9 +325,7 @@ async function resolveInTransaction(input: {
   }
   return Object.freeze({
     status: 'allowed',
-    effectiveCapabilities: Object.freeze(
-      normalizeAccessCapabilities(paths.flatMap(path => path.behavior.capabilities))
-    ),
+    effectiveCapabilities: Object.freeze([...selectedPath.behavior.capabilities]),
     paths,
     selectedPath,
     authorizationRevision: revision,
