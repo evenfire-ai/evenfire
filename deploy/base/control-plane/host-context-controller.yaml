@@ -23,12 +23,14 @@ spec:
   # single-writer assumption through the rollout too.
   strategy:
     type: Recreate
+  # CONTRACT: hcc-rollout-recovery=external-detection-only; owner=evenfire-infra
   # Recreate + replicas:1 means a botched rollout (new pod never Ready) leaves
-  # the control plane down until a manual `kubectl rollout undo` — the single-
-  # writer invariant forbids any overlap-based auto-recovery. This deadline is
-  # DETECTION ONLY: it flips Progressing=False (ProgressDeadlineExceeded) and
-  # fails `kubectl rollout status` for callers without their own --timeout; it
-  # does not roll back.
+  # /ready 503. Kubernetes will not self-heal that; the evenfire-infra deploy
+  # workflows own automatic `rollout undo --to-revision` for this Deployment
+  # only (evenfire#391). The deploy job still fails after a successful undo.
+  # This deadline is DETECTION ONLY: it flips Progressing=False
+  # (ProgressDeadlineExceeded) and fails `kubectl rollout status` for callers
+  # without their own --timeout; it does not roll back.
   #
   # Value (origin/dev, 2026-08-05): HCC's /ready stays 503 until its initial fleet
   # reconciliation finishes, so time-to-Ready scales with the McpServer/Context
