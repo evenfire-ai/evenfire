@@ -1,16 +1,36 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
+import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
+import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 
 const userId = '11111111-1111-4111-8111-111111111111'
 const teamId = '22222222-2222-4222-8222-222222222222'
 const targetUserId = '33333333-3333-4333-8333-333333333333'
-const staleAdminToken = 'same-valid-v1-token-minted-while-admin'
+let staleAdminToken: string
 
-const auth = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
 const database = vi.hoisted(() => ({ query: vi.fn() }))
 const rateLimit = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+const runtimePolicy = vi.hoisted(() => ({
+  policyVersion: '1',
+  policyRevision: 'legacy-admin-route-proof',
+  acceptV1: true,
+  issueV1: true,
+  acceptV2: false,
+  issueV2: false,
+  renewV2: false,
+  switchCompatibility: true,
+  computeCatalogShadow: false,
+  serveCatalog: false,
+  actionContextV2: false,
+  rpcDelegationV2: false,
+  desktopAllTeamMode: false,
+  profileV2Mode: false,
+  minimumClientVersion: null,
+  enforceMinimumClient: false,
+  advertisedCatalogFamilies: [],
+}))
 const directory = vi.hoisted(() => ({
   createManagedInvitationForUser: vi.fn(),
   createTeamForUser: vi.fn(),
@@ -24,9 +44,11 @@ const directory = vi.hoisted(() => ({
   updateManagedMemberRoleForUser: vi.fn(),
 }))
 
-vi.mock('../src/services/auth/externalSessionAuthentication.js', () => auth)
 vi.mock('../src/db.js', () => ({ pool: database }))
 vi.mock('../src/services/rateLimiterService.js', () => rateLimit)
+vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
+  resolveEffectiveUserAccessPolicy: vi.fn().mockResolvedValue(runtimePolicy),
+}))
 vi.mock('../src/services/directory/index.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/services/directory/index.js')>()),
   ...directory,
@@ -71,27 +93,31 @@ function app() {
 }
 
 describe('legacy V1 live-admin revocation on real external team routes', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    auth.authenticateExternalUserSession.mockResolvedValue({
-      status: 'authenticated',
-      contract: 'v1',
-      claims: {
+  beforeAll(async () => {
+    const issued = await issueExternalUserSession(
+      {
+        contract: 'v1',
         userId,
         email: 'admin@example.test',
         teamId,
         role: 'admin',
         authGeneration: 1,
-        iat: 1_787_596_800,
-        exp: 1_791_907_200,
+        authenticationMethods: ['pwd'],
       },
-      authorityContext: {
-        contract: 'v1',
-        userId,
-        tokenHash: 'a'.repeat(64),
-        issuedAt: 1_787_596_800,
-      },
+      { policy: runtimePolicy }
+    )
+    staleAdminToken = issued.token
+    expect(staleAdminToken).not.toBe('same-valid-v1-token-minted-while-admin')
+    expect(verifyExternalSessionToken(staleAdminToken)).toMatchObject({
+      userId,
+      teamId,
+      role: 'admin',
+      authGeneration: 1,
     })
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
     rateLimit.checkAndIncrement.mockResolvedValue({
       allowed: true,
       count: 1,
@@ -111,12 +137,33 @@ describe('legacy V1 live-admin revocation on real external team routes', () => {
       ['demoted', { rows: [{ team_id: teamId, role: 'member' }], rowCount: 1 }],
       ['membership removed', { rows: [], rowCount: 0 }],
     ])(`rejects ${mutation.name} with the same token after %s`, async (_state, membership) => {
-      database.query.mockResolvedValue(membership)
+      database.query.mockImplementation(async text => {
+        if (String(text).includes('FROM users u')) {
+          return {
+            rows: [
+              {
+                id: userId,
+                lifecycle_state: 'active',
+                lifecycle_version: 1,
+                valid_after: null,
+                token_revoked: false,
+              },
+            ],
+            rowCount: 1,
+          }
+        }
+        if (String(text).includes('FROM team_members tm')) return membership
+        throw new Error(`unexpected database query: ${String(text)}`)
+      })
 
       const response = await mutation.invoke(app()).set('x-user-session-token', staleAdminToken)
 
       expect(response.status).toBe(403)
       expect(directory[mutation.handler]).not.toHaveBeenCalled()
+      expect(database.query).toHaveBeenCalledWith(expect.stringContaining('FROM users u'), [
+        userId,
+        expect.stringMatching(/^[0-9a-f]{64}$/),
+      ])
       expect(database.query).toHaveBeenCalledWith(expect.stringContaining("tm.status = 'active'"), [
         userId,
         teamId,
@@ -124,15 +171,35 @@ describe('legacy V1 live-admin revocation on real external team routes', () => {
     })
 
     it(`allows ${mutation.name} only when the same token resolves to a current admin`, async () => {
-      database.query.mockResolvedValue({
-        rows: [{ team_id: teamId, role: 'admin' }],
-        rowCount: 1,
+      database.query.mockImplementation(async text => {
+        if (String(text).includes('FROM users u')) {
+          return {
+            rows: [
+              {
+                id: userId,
+                lifecycle_state: 'active',
+                lifecycle_version: 1,
+                valid_after: null,
+                token_revoked: false,
+              },
+            ],
+            rowCount: 1,
+          }
+        }
+        if (String(text).includes('FROM team_members tm')) {
+          return { rows: [{ team_id: teamId, role: 'admin' }], rowCount: 1 }
+        }
+        throw new Error(`unexpected database query: ${String(text)}`)
       })
 
       const response = await mutation.invoke(app()).set('x-user-session-token', staleAdminToken)
 
       expect(response.status).toBe(200)
       expect(directory[mutation.handler]).toHaveBeenCalledOnce()
+      expect(database.query).toHaveBeenCalledWith(expect.stringContaining('FROM users u'), [
+        userId,
+        expect.stringMatching(/^[0-9a-f]{64}$/),
+      ])
     })
   }
 })
