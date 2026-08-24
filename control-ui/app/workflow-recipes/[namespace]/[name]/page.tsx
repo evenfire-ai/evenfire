@@ -9,6 +9,7 @@ import { CreateFlowSkeleton } from '@components/CreateFlowSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { KebabMenu } from '@components/KebabMenu'
 import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipeIntegrationsPanel } from '@components/RecipeIntegrationsPanel'
 import { RecipeSecretsPanel } from '@components/RecipeSecretsPanel'
@@ -233,66 +234,6 @@ function chipStyle(tone: 'ok' | 'warn' | 'error' | 'info'): React.CSSProperties 
         borderColor: 'var(--cu-border-subtle)',
       }
   }
-}
-
-type KebabItem = {
-  label: string
-  onClick: () => void
-  danger?: boolean
-  disabled?: boolean
-}
-
-function KebabMenu({ items, ariaLabel }: { items: KebabItem[]; ariaLabel: string }) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    function handleDocClick(e: MouseEvent) {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false)
-    }
-    function handleEsc(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', handleDocClick)
-    document.addEventListener('keydown', handleEsc)
-    return () => {
-      document.removeEventListener('mousedown', handleDocClick)
-      document.removeEventListener('keydown', handleEsc)
-    }
-  }, [open])
-  return (
-    <div ref={ref} className="cu-kebab">
-      <button
-        type="button"
-        aria-label={ariaLabel}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className="cu-btn cu-btn--ghost cu-btn--sm cu-kebab__trigger"
-        onClick={() => setOpen(v => !v)}
-      >
-        ⋯
-      </button>
-      {open ? (
-        <div role="menu" className="cu-kebab__menu">
-          {items.map(item => (
-            <button
-              key={item.label}
-              type="button"
-              role="menuitem"
-              disabled={item.disabled}
-              className={`cu-kebab__item${item.danger ? ' cu-kebab__item--danger' : ''}`}
-              onClick={() => {
-                setOpen(false)
-                item.onClick()
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
 }
 
 export const dynamic = 'force-dynamic'

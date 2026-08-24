@@ -1,4 +1,4 @@
-import type { GuardrailBuiltinType, GuardrailPhase } from './types'
+import type { GuardrailPhase } from './types'
 
 // Render/iteration order for the hook phases.
 export const GUARDRAIL_PHASES: readonly GuardrailPhase[] = [
@@ -18,12 +18,3 @@ export const GUARDRAIL_PHASE_LABELS: Record<GuardrailPhase, string> = {
   postCallSuccess: 'Post-call success',
   onError: 'On error',
 }
-
-// Curated built-in types offered by the minimal add UI.
-export const GUARDRAIL_BUILTIN_OPTIONS: ReadonlyArray<{
-  value: GuardrailBuiltinType
-  label: string
-}> = [
-  { value: 'prompt-shaping', label: 'Prompt shaping' },
-  { value: 'token-trim', label: 'Token trim' },
-] as const
