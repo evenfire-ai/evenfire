@@ -15,9 +15,10 @@ import {
   removeDiskUploadFixture,
 } from '../../tests/e2e/gfsUploadV2Fixtures'
 import {
-  readGfsUploadProductMaxBytes,
+  beginGfsUploadProductMaxMutation,
   readGfsUploadV2Enabled,
   restartGfsWriter,
+  restoreGfsUploadProductMaxBytes,
   setGfsUploadProductMaxBytes,
   setGfsUploadV2Enabled,
 } from '../../tests/e2e/gfsUploadV2Runtime'
@@ -400,7 +401,7 @@ test.describe('GFS Upload v2 — Control UI runtime product policy', () => {
   test.setTimeout(75 * 60_000)
 
   test('uses 100 MiB then 300 MiB without rebuilding the deployed UI bundle', async ({ page }) => {
-    const previous = await readGfsUploadProductMaxBytes()
+    const mutation = await beginGfsUploadProductMaxMutation()
     const lowerMax = 100 * 1024 * 1024
     const raisedMax = 300 * 1024 * 1024
     const rejectedFixtureName = uniqueGfsFixtureName('e2e-gfs-v2-runtime-cap-ui')
@@ -415,7 +416,7 @@ test.describe('GFS Upload v2 — Control UI runtime product policy', () => {
         lowerMax
       )
       cleanupSource = rejectedSource
-      await setGfsUploadProductMaxBytes(lowerMax)
+      await setGfsUploadProductMaxBytes(mutation, lowerMax)
       await exerciseCreate(page, lowerMax)
 
       await openWritableFolder(page, rejectedFixture.name)
@@ -434,11 +435,11 @@ test.describe('GFS Upload v2 — Control UI runtime product policy', () => {
       ).toBeNull()
 
       await page.reload()
-      await setGfsUploadProductMaxBytes(raisedMax)
+      await setGfsUploadProductMaxBytes(mutation, raisedMax)
       await exerciseCreate(page, 250 * 1024 * 1024)
     } finally {
       try {
-        await setGfsUploadProductMaxBytes(previous)
+        await restoreGfsUploadProductMaxBytes(mutation)
       } finally {
         if (cleanupSource) await removeDiskUploadFixture(cleanupSource)
         if (cleanupFixture) {
