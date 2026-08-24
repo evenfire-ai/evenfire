@@ -4,6 +4,18 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 FAIL=0
+T2_TEST_RESTORE_DETACHED=false
+T2_TEST_HEAD=""
+T2_TEST_BRANCH=""
+
+cleanup_test_checkout() {
+  if [[ "${T2_TEST_RESTORE_DETACHED}" == true ]]; then
+    git -C "${REPO_ROOT}" switch --quiet --detach "${T2_TEST_HEAD}" || true
+    git -C "${REPO_ROOT}" branch -D "${T2_TEST_BRANCH}" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup_test_checkout EXIT
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -13,6 +25,13 @@ write_test_profile_metadata() {
   local profile_dir="$root/profiles/$profile"
   local branch short_sha
   branch="$(git -C "$REPO_ROOT" branch --show-current)"
+  if [[ -z "${branch}" ]]; then
+    T2_TEST_HEAD="$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)"
+    branch="${GITHUB_HEAD_REF:-detached-ci-test}"
+    git -C "${REPO_ROOT}" switch --quiet --create "${branch}" "${T2_TEST_HEAD}"
+    T2_TEST_BRANCH="${branch}"
+    T2_TEST_RESTORE_DETACHED=true
+  fi
   short_sha="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
   mkdir -p "$profile_dir"
   printf 'PROFILE=%s\nBRANCH=%s\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
