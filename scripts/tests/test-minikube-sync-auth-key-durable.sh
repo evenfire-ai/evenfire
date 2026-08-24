@@ -3,7 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
+T2_TEST_RESTORE_DETACHED=false
+T2_TEST_HEAD=""
+T2_TEST_BRANCH=""
+cleanup() {
+  if [[ "${T2_TEST_RESTORE_DETACHED}" == true ]]; then
+    git -C "${ROOT}" switch --quiet --detach "${T2_TEST_HEAD}" || true
+    git -C "${ROOT}" branch -D "${T2_TEST_BRANCH}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
 
 STATE_DIR="${TMP_DIR}/state"
 LOG_FILE="${TMP_DIR}/kubectl.log"
@@ -21,6 +31,11 @@ T2_LOCK_DIR="${T2_LOCK_ROOT}/fake.lock"
 T2_PROCESS_START=unavailable
 T2_TEST_BRANCH="$(git -C "${ROOT}" branch --show-current)"
 T2_TEST_HEAD="$(git -C "${ROOT}" rev-parse --verify HEAD)"
+if [[ -z "${T2_TEST_BRANCH}" ]]; then
+  T2_TEST_BRANCH="${GITHUB_HEAD_REF:-detached-ci-test}"
+  git -C "${ROOT}" switch --quiet --create "${T2_TEST_BRANCH}" "${T2_TEST_HEAD}"
+  T2_TEST_RESTORE_DETACHED=true
+fi
 T2_TEST_WORKTREE_ID="$(printf '%s' "${ROOT}" | shasum | awk '{print $1}')"
 T2_TEST_LOCK_KEY="$(printf '%s\0%s\0%s\0%s\0%s' "${ROOT}" "${T2_TEST_BRANCH}" "${T2_TEST_HEAD}" fake fake | shasum | awk '{print $1}')"
 mkdir -p "${T2_LOCK_DIR}"
