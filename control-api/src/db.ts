@@ -5954,6 +5954,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0104_composable_catalog_revisions',
     apply: applyComposableCatalogRevisionSchema,
   },
+  {
+    // Fix-forward for databases that recorded the first 0104 body before the
+    // GFS resource-component mapping was completed. The schema function is
+    // intentionally idempotent, so fresh databases and upgraded databases
+    // converge on the same trigger/function/backfill state.
+    version: '0105_gfs_catalog_revision_components',
+    apply: applyComposableCatalogRevisionSchema,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
