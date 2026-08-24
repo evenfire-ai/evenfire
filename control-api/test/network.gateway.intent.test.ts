@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import ts from 'typescript'
+import {
+  boundedEnvBytesFromSource,
+  staticExportedBytesFromSource,
+} from './helpers/staticSourceAuthority.js'
+import { assertUploadV2TransportBounds } from './helpers/uploadV2TransportBounds.js'
 
 /** Paths are relative to this file: control-api/test/ → repo root is ../.. */
 const BASE = '../../deploy/base'
@@ -84,100 +88,8 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function parseTypeScript(source: string, label: string): ts.SourceFile {
-  const file = ts.createSourceFile(label, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-  const diagnostics = (file as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] })
-    .parseDiagnostics
-  if (diagnostics.length > 0) throw new Error(`${label} contains malformed TypeScript`)
-  return file
-}
-
-function evaluateStaticByteExpression(
-  expression: ts.Expression,
-  sourceFile: ts.SourceFile,
-  label: string
-): number {
-  if (ts.isNumericLiteral(expression)) {
-    const literal = expression.getText(sourceFile)
-    if (!/^(?:0|[1-9][0-9]*(?:_[0-9]+)*)$/.test(literal))
-      throw new Error(`${label} must use a decimal integer literal`)
-    const value = Number(literal.replaceAll('_', ''))
-    if (!Number.isSafeInteger(value)) throw new Error(`${label} must be a safe integer`)
-    return value
-  }
-  if (
-    ts.isBinaryExpression(expression) &&
-    expression.operatorToken.kind === ts.SyntaxKind.AsteriskToken
-  ) {
-    const left = evaluateStaticByteExpression(expression.left, sourceFile, label)
-    const right = evaluateStaticByteExpression(expression.right, sourceFile, label)
-    const value = left * right
-    if (!Number.isSafeInteger(value)) throw new Error(`${label} must be a safe integer`)
-    return value
-  }
-  throw new Error(`${label} must use only decimal integers and multiplication`)
-}
-
-function staticBytesFromSource(source: string, symbol: string, label = symbol): number {
-  const sourceFile = parseTypeScript(source, label)
-  const matches: ts.VariableDeclaration[] = []
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.name.text === symbol &&
-      ts.isVariableDeclarationList(node.parent) &&
-      (node.parent.flags & ts.NodeFlags.Const) !== 0
-    ) {
-      matches.push(node)
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(sourceFile)
-  if (matches.length !== 1 || !matches[0].initializer)
-    throw new Error(`${symbol} must have exactly one active const initializer in ${label}`)
-  return evaluateStaticByteExpression(matches[0].initializer, sourceFile, `${label}:${symbol}`)
-}
-
 function staticBytes(relPath: string, symbol: string): number {
-  return staticBytesFromSource(read(relPath), symbol, relPath)
-}
-
-function boundedEnvBytesFromSource(
-  source: string,
-  property: string,
-  envName: string,
-  label = envName
-): { fallback: number; ceiling: number } {
-  const sourceFile = parseTypeScript(source, label)
-  const properties: ts.PropertyAssignment[] = []
-  const visit = (node: ts.Node): void => {
-    if (ts.isPropertyAssignment(node)) {
-      const propertyName =
-        ts.isIdentifier(node.name) || ts.isStringLiteral(node.name) ? node.name.text : null
-      if (propertyName === property) properties.push(node)
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(sourceFile)
-  if (properties.length !== 1)
-    throw new Error(`${envName} must have exactly one active bounded config in ${label}`)
-  const initializer = properties[0].initializer
-  if (
-    !ts.isCallExpression(initializer) ||
-    !ts.isIdentifier(initializer.expression) ||
-    initializer.expression.text !== 'boundedIntegerFromEnv' ||
-    initializer.arguments.length !== 3 ||
-    !ts.isStringLiteral(initializer.arguments[0]) ||
-    initializer.arguments[0].text !== envName
-  ) {
-    throw new Error(`${envName} must use the expected boundedIntegerFromEnv call in ${label}`)
-  }
-  const [, fallback, ceiling] = initializer.arguments
-  return {
-    fallback: evaluateStaticByteExpression(fallback, sourceFile, `${label}:${envName}:fallback`),
-    ceiling: evaluateStaticByteExpression(ceiling, sourceFile, `${label}:${envName}:ceiling`),
-  }
+  return staticExportedBytesFromSource(read(relPath), symbol, relPath)
 }
 
 function boundedEnvBytes(
@@ -185,35 +97,7 @@ function boundedEnvBytes(
   property: string,
   envName: string
 ): { fallback: number; ceiling: number } {
-  return boundedEnvBytesFromSource(read(relPath), property, envName, relPath)
-}
-
-function assertUploadV2TransportBounds(input: {
-  writerProtocol: number
-  writerPart: number
-  protocolMirrors: number[]
-  partMirrors: number[]
-  relayBounds: Array<{ fallback: number; ceiling: number }>
-  gatewayBytes: number
-}): void {
-  if (input.writerProtocol !== 1024 * 1024 * 1024)
-    throw new Error('writer protocol maximum must remain 1 GiB')
-  if (input.writerPart !== 16 * 1024 * 1024)
-    throw new Error('writer part maximum must remain 16 MiB')
-  if (input.writerPart >= input.writerProtocol)
-    throw new Error('writer part maximum must be below the protocol maximum')
-  if (input.protocolMirrors.some(value => value !== input.writerProtocol))
-    throw new Error('client protocol maximum diverges from the writer')
-  if (input.partMirrors.some(value => value !== input.writerPart))
-    throw new Error('client part maximum diverges from the writer')
-  if (
-    input.relayBounds.some(
-      bounds => bounds.fallback !== input.writerPart || bounds.ceiling !== input.writerPart
-    )
-  )
-    throw new Error('relay part maximum diverges from the writer')
-  if (input.writerPart >= input.gatewayBytes)
-    throw new Error('gateway request cap cannot safely carry an Upload v2 part')
+  return boundedEnvBytesFromSource(read(relPath), 'config', property, envName, relPath)
 }
 
 function expectCanonicalPublicEgressExceptions(): void {
@@ -379,123 +263,6 @@ function routeIsAllowlisted(route: RouteRef, locations: NginxLocation[]): boolea
 // invariants in deploy/base/{rpc-proxy,control-plane,mcp-host}/ keep the gateway
 // topology locked down (rpc-proxy egress only via control-api-rpc-gateway, HCC
 // ingress only via host-context-controller-api-gateway, and nginx allowlist routes).
-describe('GFS static byte contract extraction', () => {
-  const SYMBOL = 'GFS_UPLOAD_V2_MAX_PART_BYTES'
-
-  it.each([
-    ['exported multiplication', `export const ${SYMBOL} = 16 * 1024 * 1024`],
-    ['non-exported multiplication', `const ${SYMBOL} = 16 * 1024 * 1024`],
-    ['numeric separators', `export const ${SYMBOL} = 16 * 1_024 * 1_024`],
-  ])('accepts %s', (_label, source) => {
-    expect(staticBytesFromSource(source, SYMBOL)).toBe(16 * 1024 * 1024)
-  })
-
-  it.each([
-    ['addition', `export const ${SYMBOL} = 16 * 1024 * 1024 + 1`],
-    ['division', `export const ${SYMBOL} = 16 * 1024 * 1024 / 2`],
-    ['identifier', `export const ${SYMBOL} = 16 * 1024 * SOME_IDENTIFIER`],
-    ['malformed trailing expression', `export const ${SYMBOL} = 16 * 1024 * 1024 nonsense`],
-    ['line-comment only', `// export const ${SYMBOL} = 16 * 1024 * 1024`],
-    ['block-comment only', `/* export const ${SYMBOL} = 16 * 1024 * 1024 */`],
-  ])('rejects %s', (_label, source) => {
-    expect(() => staticBytesFromSource(source, SYMBOL)).toThrow()
-  })
-
-  it('ignores a commented safe declaration before a live unsafe declaration', () => {
-    const source = [
-      `// export const ${SYMBOL} = 16 * 1024 * 1024`,
-      `export const ${SYMBOL} = 17 * 1024 * 1024`,
-    ].join('\n')
-    expect(staticBytesFromSource(source, SYMBOL)).toBe(17 * 1024 * 1024)
-  })
-
-  it('rejects a commented relay bound without a live producer', () => {
-    const source = [
-      '// gfsUploadMaxPartBytes: boundedIntegerFromEnv(',
-      "//   'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES',",
-      '//   16 * 1024 * 1024,',
-      '//   16 * 1024 * 1024',
-      '// ),',
-    ].join('\n')
-    expect(() =>
-      boundedEnvBytesFromSource(
-        source,
-        'gfsUploadMaxPartBytes',
-        'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
-      )
-    ).toThrow()
-  })
-
-  it.each([
-    ['different env', `gfsUploadMaxPartBytes: boundedIntegerFromEnv('OTHER_MAX_BYTES', 1, 1),`],
-    [
-      'different bounds',
-      `gfsUploadMaxPartBytes: boundedIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES', 1, 1),`,
-    ],
-  ])('rejects duplicate active relay properties with %s', (_label, duplicate) => {
-    const source = `const config = {
-      gfsUploadMaxPartBytes: boundedIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES', 16 * 1024 * 1024, 16 * 1024 * 1024),
-      ${duplicate}
-    }`
-    expect(() =>
-      boundedEnvBytesFromSource(
-        source,
-        'gfsUploadMaxPartBytes',
-        'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
-      )
-    ).toThrow()
-  })
-
-  it('ignores commented duplicates and similarly named unrelated properties', () => {
-    const source = `const config = {
-      // gfsUploadMaxPartBytes: boundedIntegerFromEnv('OTHER_MAX_BYTES', 1, 1),
-      gfsUploadMaxPartBytesExtra: boundedIntegerFromEnv('OTHER_MAX_BYTES', 1, 1),
-      gfsUploadMaxPartBytes: boundedIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES', 16 * 1024 * 1024, 16 * 1024 * 1024),
-    }`
-    expect(
-      boundedEnvBytesFromSource(
-        source,
-        'gfsUploadMaxPartBytes',
-        'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
-      )
-    ).toEqual({ fallback: 16 * 1024 * 1024, ceiling: 16 * 1024 * 1024 })
-  })
-
-  it.each([
-    'gfsUploadMaxPartBytes: 16 * 1024 * 1024,',
-    "gfsUploadMaxPartBytes: boundedIntegerFromEnv('CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES', 16 * 1024 * 1024),",
-  ])('rejects malformed or unsupported relay property %s', propertySource => {
-    expect(() =>
-      boundedEnvBytesFromSource(
-        `const config = { ${propertySource} }`,
-        'gfsUploadMaxPartBytes',
-        'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
-      )
-    ).toThrow()
-  })
-
-  it('turns red when the effective writer part maximum exceeds a relay ceiling', () => {
-    expect(() =>
-      assertUploadV2TransportBounds(
-        (() => {
-          const unsafeWriterPart = staticBytesFromSource(
-            `export const ${SYMBOL} = 17 * 1024 * 1024`,
-            SYMBOL
-          )
-          return {
-            writerProtocol: 1024 * 1024 * 1024,
-            writerPart: unsafeWriterPart,
-            protocolMirrors: [1024 * 1024 * 1024],
-            partMirrors: [unsafeWriterPart],
-            relayBounds: [{ fallback: 16 * 1024 * 1024, ceiling: 16 * 1024 * 1024 }],
-            gatewayBytes: 24 * 1024 * 1024,
-          }
-        })()
-      )
-    ).toThrow(/writer part maximum|relay part maximum/)
-  })
-})
-
 describe('network/gateway intent (manifest-level)', () => {
   it('ships a GFS namespace default-deny policy while HCC owns gfsc allowlists', () => {
     const gfsKustomization = read(`${BASE}/gfs/kustomization.yaml`)
