@@ -67,9 +67,10 @@ EOF_PORTS
 }
 
 assert_broken_profile_is_recreated() {
-  local tmp log_file
+  local tmp log_file setup_log_file
   tmp="$(mktemp -d)"
   log_file="$tmp/ops.log"
+  setup_log_file="$tmp/full-setup.log"
   write_test_profile_metadata "$tmp"
 
   cat > "$tmp/docker" <<'STUB'
@@ -179,7 +180,7 @@ STUB
      MINIKUBE_RECREATE_PROFILE=true \
      CONFIRM_PROFILE="$TEST_PROFILE" \
      MINIKUBE_START_SCRIPT="$tmp/start.sh" \
-     bash scripts/minikube/full-setup.sh --skip-build >/dev/null 2>&1; then
+     bash scripts/minikube/full-setup.sh --skip-build >"$setup_log_file" 2>&1; then
     if grep -q "delete -p $TEST_PROFILE" "$log_file" && grep -q 'start-helper' "$log_file"; then
       pass "full-setup recreates broken minikube profiles before start"
     else
@@ -188,15 +189,17 @@ STUB
     fi
   else
     fail "full-setup failed in broken-profile recovery test"
+    cat "$setup_log_file"
   fi
 
   rm -rf "$tmp"
 }
 
 assert_healthy_profile_skips_recreate() {
-  local tmp log_file
+  local tmp log_file setup_log_file
   tmp="$(mktemp -d)"
   log_file="$tmp/ops.log"
+  setup_log_file="$tmp/full-setup.log"
   write_test_profile_metadata "$tmp"
 
   cat > "$tmp/docker" <<'STUB'
@@ -277,7 +280,7 @@ STUB
      T2_PORTS_ENV="$TEST_PORTS_ENV" T2_LOCK_ROOT="$TEST_LOCK_ROOT" \
      MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true \
      MINIKUBE_START_SCRIPT="$tmp/start.sh" \
-     bash scripts/minikube/full-setup.sh --skip-build >/dev/null 2>&1; then
+     bash scripts/minikube/full-setup.sh --skip-build >"$setup_log_file" 2>&1; then
     if ! grep -q 'delete -p clerum-test' "$log_file" && grep -q 'start-helper --validate-only' "$log_file"; then
       pass "full-setup leaves healthy minikube profiles alone"
     else
@@ -286,6 +289,7 @@ STUB
     fi
   else
     fail "full-setup failed in healthy-profile test"
+    cat "$setup_log_file"
   fi
 
   rm -rf "$tmp"
