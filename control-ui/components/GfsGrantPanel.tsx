@@ -51,7 +51,10 @@ const OPERATOR_OPTION: SelectionDropdownOption = {
   badge: 'Operator',
 }
 
-export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
+export function GfsGrantPanel({
+  resource,
+  onCreateShareActionChange,
+}: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -72,6 +75,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const [existingAccessError, setExistingAccessError] = useState('')
   const existingAccessRequest = useRef(0)
   const existingAccessController = useRef<AbortController | null>(null)
+  const submitShareRef = useRef<() => void>(() => undefined)
   const canIncludeDescendants = resource.kind === 'directory'
 
   const loadExistingAccess = useCallback(async () => {
@@ -300,6 +304,16 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     }
   }
 
+  submitShareRef.current = () => {
+    void submit('share')
+  }
+
+  useEffect(() => {
+    if (!onCreateShareActionChange) return
+    onCreateShareActionChange(() => submitShareRef.current(), !canSubmit || !canCreateShare)
+    return () => onCreateShareActionChange(null, true)
+  }, [canCreateShare, canSubmit, onCreateShareActionChange])
+
   function subjectLabel(item: GfsExistingAccessItem): string {
     if (item.subject.type === 'operator') return 'Operator'
     const option = bulkSubjectOptions.find(
@@ -391,9 +405,6 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       <div className="cu-gfs-grant__actions">
         <Button variant="primary" disabled={!canSubmit} onClick={() => submit('grant')}>
           Grant access
-        </Button>
-        <Button disabled={!canSubmit || !canCreateShare} onClick={() => submit('share')}>
-          Create share
         </Button>
       </div>
       {error ? (

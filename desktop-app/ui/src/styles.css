@@ -14398,7 +14398,7 @@ pre {
 }
 
 .da-gfs-manage-dialog__icon--folder {
-  color: var(--warning);
+  color: var(--text-muted);
 }
 
 .da-gfs-manage-dialog__icon svg {

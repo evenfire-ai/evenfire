@@ -14,6 +14,7 @@ import {
   getRecipes,
   gfsDownload,
   gfsFetchFileBlob,
+  postGfsShare,
   putGfsGrant,
 } from '@lib/api'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
@@ -33,6 +34,7 @@ vi.mock('@lib/api', () => ({
   gfsDownload: vi.fn(),
   gfsFetchFileBlob: vi.fn(),
   isSilentApiError: () => false,
+  postGfsShare: vi.fn(),
   putGfsGrant: vi.fn(),
 }))
 
@@ -47,6 +49,7 @@ const mockGetRecipes = vi.mocked(getRecipes)
 const mockPutGfsGrant = putGfsGrant as unknown as ReturnType<typeof vi.fn>
 const mockGfsDownload = gfsDownload as unknown as ReturnType<typeof vi.fn>
 const mockGfsFetchFileBlob = gfsFetchFileBlob as unknown as ReturnType<typeof vi.fn>
+const mockPostGfsShare = vi.mocked(postGfsShare)
 const mockCreateObjectUrl = vi.fn((_blob: Blob) => 'blob:gfs-image-preview')
 const mockRevokeObjectUrl = vi.fn()
 
@@ -111,6 +114,7 @@ describe('GfsBrowser', () => {
     mockPutGfsGrant.mockReset()
     mockGfsDownload.mockReset()
     mockGfsFetchFileBlob.mockReset()
+    mockPostGfsShare.mockReset()
     mockCreateObjectUrl.mockReset()
     mockCreateObjectUrl.mockReturnValue('blob:gfs-image-preview')
     mockRevokeObjectUrl.mockReset()
@@ -965,12 +969,11 @@ describe('GfsBrowser', () => {
     expect(screen.getByRole('button', { name: 'Grant access' })).not.toBeDisabled()
   })
 
-  it('includes descendants for directory grants and exposes share creation', async () => {
+  it('includes descendants for directory shares from the resource menu', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('team-folder', 'directory', 2)],
       nextCursor: null,
     })
-    mockPutGfsGrant.mockResolvedValueOnce({ ok: true })
     renderBrowser()
 
     await openManage('team-folder')
@@ -979,18 +982,31 @@ describe('GfsBrowser', () => {
     expect(
       await screen.findByRole('checkbox', { name: /Include contents of this folder/ })
     ).toBeChecked()
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
+    const manageDialog = screen.getByRole('dialog', { name: 'Manage folder team-folder' })
+    const manageMenuTrigger = within(manageDialog).getByRole('button', {
+      name: 'Actions for team-folder',
+    })
+    expect(within(manageDialog).queryByRole('button', { name: 'Upload file' })).toBeNull()
+    fireEvent.click(manageMenuTrigger)
+    expect(within(manageDialog).getByRole('menuitem', { name: 'Create share' })).toBeDisabled()
+    fireEvent.click(manageMenuTrigger)
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    await confirmGrantAccess()
+    fireEvent.click(manageMenuTrigger)
+    const createShareItem = within(manageDialog).getByRole('menuitem', { name: 'Create share' })
+    expect(createShareItem).toBeEnabled()
+    fireEvent.click(createShareItem)
+    const shareDialog = await screen.findByRole('alertdialog', { name: 'Create share?' })
+    fireEvent.click(within(shareDialog).getByRole('button', { name: 'Create share' }))
 
     await waitFor(() =>
-      expect(mockPutGfsGrant).toHaveBeenCalledWith(
+      expect(mockPostGfsShare).toHaveBeenCalledWith(
         expect.objectContaining({
           resourceId: 'id-2',
-          inherit: true,
+          subjects: [{ type: 'user', id: '11111111-1111-1111-1111-111111111111' }],
+          permissions: ['read'],
+          includeDescendants: true,
         })
       )
     )

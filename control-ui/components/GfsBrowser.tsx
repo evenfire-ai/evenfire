@@ -24,6 +24,7 @@ import { normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { GfsGrantPanel } from './GfsGrantPanel'
+import type { GfsCreateShareActionChange } from './GfsGrantPanel.types'
 import { GfsResourceMenu } from './GfsResourceMenu'
 import { NewFolderModal } from './NewFolderModal'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -127,7 +128,15 @@ export function GfsBrowser(): React.JSX.Element {
   const [renameOpen, setRenameOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
   const [deleteOpen, setDeleteOpen] = useState(false)
-  const manageUploadInputRef = useRef<HTMLInputElement | null>(null)
+  const createShareActionRef = useRef<(() => void) | null>(null)
+  const [createShareDisabled, setCreateShareDisabled] = useState(true)
+  const handleCreateShareActionChange = useCallback<GfsCreateShareActionChange>(
+    (action, disabled) => {
+      createShareActionRef.current = action
+      setCreateShareDisabled(disabled)
+    },
+    []
+  )
   // New-folder dialog (replaces the native window.prompt flow).
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -494,32 +503,6 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
-  async function uploadFileToFolder(
-    folder: GfsChild,
-    file: File | null | undefined
-  ): Promise<void> {
-    if (!file || folder.kind !== 'directory') return
-    try {
-      const name = await normalizeGfsResourceName(file.name)
-      await apiSend(
-        'POST',
-        `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(folder.rid)}/children`,
-        {
-          name,
-          kind: 'file',
-          contentBase64: await fileToEncodedData(file),
-        },
-        {},
-        {},
-        { timeoutMs: GFS_UPLOAD_TIMEOUT_MS }
-      )
-      showToast('File uploaded.', { tone: 'success' })
-      await refreshCurrent()
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not upload file.', { tone: 'error' })
-    }
-  }
-
   async function downloadFile(child: GfsChild): Promise<void> {
     if (downloadingIds.has(child.resourceId)) return
     setDownloadingIds(prev => new Set(prev).add(child.resourceId))
@@ -859,6 +842,7 @@ export function GfsBrowser(): React.JSX.Element {
                   <span className="cu-gfs-manage-dialog__title-row">
                     <h3>{selected.name}</h3>
                     <GfsResourceMenu
+                      createShareDisabled={createShareDisabled}
                       resourceName={selected.name}
                       resourceUri={selected.gfsUri}
                       downloading={downloadingIds.has(selected.resourceId)}
@@ -873,6 +857,7 @@ export function GfsBrowser(): React.JSX.Element {
                           : undefined
                       }
                       onCopyLink={() => void copyGfsUri(selected.gfsUri)}
+                      onCreateShare={() => createShareActionRef.current?.()}
                       onRename={() => {
                         setRenameName(selected.name)
                         setRenameOpen(true)
@@ -892,11 +877,6 @@ export function GfsBrowser(): React.JSX.Element {
                 )}
               </span>
               <span className="cu-gfs-manage-dialog__top-actions">
-                {selected.kind === 'directory' ? (
-                  <Button size="sm" onClick={() => manageUploadInputRef.current?.click()}>
-                    Upload file
-                  </Button>
-                ) : null}
                 <Button
                   autoFocus
                   className="cu-gfs-manage-dialog__close"
@@ -908,20 +888,6 @@ export function GfsBrowser(): React.JSX.Element {
                 </Button>
               </span>
             </header>
-
-            {selected.kind === 'directory' ? (
-              <input
-                aria-label="Upload file"
-                className="sr-only"
-                ref={manageUploadInputRef}
-                type="file"
-                onChange={event => {
-                  const file = event.currentTarget.files?.[0]
-                  event.currentTarget.value = ''
-                  void uploadFileToFolder(selected, file)
-                }}
-              />
-            ) : null}
 
             <div className="cu-gfs-manage-dialog__body">
               <section className="cu-gfs-manage-section cu-gfs-manage-section--access">
@@ -936,6 +902,7 @@ export function GfsBrowser(): React.JSX.Element {
                     gfsUri: selected.gfsUri,
                     kind: selected.kind,
                   }}
+                  onCreateShareActionChange={handleCreateShareActionChange}
                 />
               </section>
             </div>

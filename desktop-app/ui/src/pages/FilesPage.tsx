@@ -148,7 +148,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
-  const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
@@ -1047,16 +1046,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 )}
               </span>
               <span className="da-gfs-manage-dialog__top-actions">
-                {currentIsFolder && canWriteCurrent ? (
-                  <Button
-                    loading={ctrl.mutating}
-                    onClick={() => uploadInputRef.current?.click()}
-                    size="sm"
-                    variant="outline"
-                  >
-                    Upload file
-                  </Button>
-                ) : null}
                 {currentIsFile && canWriteCurrent ? (
                   <Button
                     loading={ctrl.mutating}
@@ -1079,19 +1068,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               </span>
             </header>
 
-            {currentIsFolder && canWriteCurrent ? (
-              <input
-                aria-label="Upload file"
-                className="visually-hidden"
-                ref={uploadInputRef}
-                type="file"
-                onChange={event => {
-                  const file = event.currentTarget.files?.[0]
-                  event.currentTarget.value = ''
-                  void handleUploadFile(file)
-                }}
-              />
-            ) : null}
             {currentIsFile && canWriteCurrent ? (
               <input
                 aria-label="Replace file"

@@ -58,6 +58,9 @@ const workflowHostSubject = {
 } as const
 const operatorSubject = { type: 'operator' } as const
 
+let createShareAction: (() => void) | null = null
+let createShareDisabled = true
+
 function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse {
   return { ok: true, resourceId: resource.resourceId, updated, count: updated.length }
 }
@@ -65,7 +68,13 @@ function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse 
 function renderPanel(target = resource) {
   return render(
     <ToastProvider>
-      <GfsGrantPanel resource={target} />
+      <GfsGrantPanel
+        resource={target}
+        onCreateShareActionChange={(action, disabled) => {
+          createShareAction = action
+          createShareDisabled = disabled
+        }}
+      />
     </ToastProvider>
   )
 }
@@ -102,7 +111,15 @@ function selectPermission(name: string) {
 }
 
 async function submit(action: 'Grant access' | 'Create share') {
-  fireEvent.click(screen.getByRole('button', { name: action }))
+  if (action === 'Create share') {
+    await waitFor(() => {
+      expect(createShareAction).not.toBeNull()
+      expect(createShareDisabled).toBe(false)
+    })
+    createShareAction?.()
+  } else {
+    fireEvent.click(screen.getByRole('button', { name: action }))
+  }
   const dialog = await screen.findByRole('alertdialog')
   fireEvent.click(within(dialog).getByRole('button', { name: action }))
 }
@@ -110,6 +127,8 @@ async function submit(action: 'Grant access' | 'Create share') {
 describe('GfsGrantPanel bulk access', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    createShareAction = null
+    createShareDisabled = true
     mockGetAdminUsers.mockResolvedValue({
       items: [
         {
@@ -335,7 +354,7 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(permissions).getByRole('menuitemcheckbox', { name: 'Write' })).not.toBeChecked()
     expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Delete' })).toBeNull()
     expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Share' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
+    expect(createShareDisabled).toBe(true)
 
     await submit('Grant access')
 
@@ -391,7 +410,7 @@ describe('GfsGrantPanel bulk access', () => {
     expect(dialog).toHaveTextContent('"reports"')
     expect(dialog).toHaveTextContent('Permissions: read, write')
     expect(dialog).toHaveTextContent('Scope: this resource and all descendants')
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
+    expect(createShareDisabled).toBe(true)
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
@@ -483,7 +502,7 @@ describe('GfsGrantPanel bulk access', () => {
       within(openPermissionMenu()).getByRole('menuitemcheckbox', { name: 'Delete' })
     ).not.toBeChecked()
     selectPermission('Read')
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeEnabled()
+    await waitFor(() => expect(createShareDisabled).toBe(false))
   })
 
   it('caps the UI selection at 100 subjects', async () => {

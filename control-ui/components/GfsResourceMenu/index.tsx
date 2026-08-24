@@ -6,8 +6,10 @@ import { IconMoreHorizontal } from '@components/icons'
 import type { GfsResourceMenuProps } from './types'
 
 export function GfsResourceMenu({
+  createShareDisabled = false,
   downloading = false,
   onCopyLink,
+  onCreateShare,
   onDelete,
   onDownload,
   onManage,
@@ -86,6 +88,17 @@ export function GfsResourceMenu({
               onClick={() => run(onManage)}
             >
               Manage access
+            </button>
+          ) : null}
+          {onCreateShare ? (
+            <button
+              type="button"
+              role="menuitem"
+              className="cu-kebab__item"
+              disabled={createShareDisabled}
+              onClick={() => run(onCreateShare)}
+            >
+              Create share
             </button>
           ) : null}
           {onPreview ? (
