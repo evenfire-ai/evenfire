@@ -50,6 +50,13 @@ use finite deadlines. Docker endpoint discovery must resolve
 to an explicit local Unix socket or loopback TCP endpoint before switching to
 an empty task-local Docker config. Ambient registry credentials are never
 copied; a private pull requires an explicit `MINIKUBE_DOCKER_AUTH_CONFIG`.
+The legacy `scripts/minikube/setup.sh` compatibility path follows the same
+boundary: it requires matching `MINIKUBE_PROFILE` and
+`CONTROL_API_REAL_PG_CONTEXT`, acquires the branch-owned lease before its first
+cluster operation for every invocation (with or without `--build`), and never
+falls back to the shared `clerum-test` profile. The published-image puller
+rejects invalid parallelism/retry/delay values and an empty successful
+`minikube docker-env`; neither condition may produce a green acquisition.
 
 ## Incremental local image updates
 
@@ -79,6 +86,12 @@ complete image build. A service-only update may use the targeted path when the
 profile is already healthy; record it as a *targeted sync* and prove the
 affected deployment is Ready plus its user-facing health endpoint. Do not
 report that as a full reconcile or as T2.
+
+The image acquisition stamp is part of the baseline in both GHCR and local
+image modes. If the manifest's `generated` value differs from the pre-gate
+marker, the incremental planner must invalidate the old `gitHead` baseline and
+reconcile before certifying; a matching commit alone does not prove that pods
+run the newly acquired image IDs.
 
 Expect a full reconcile when deployment manifests, CRDs, charts, network
 policy, or other infrastructure inputs changed; do not replace that safe path
@@ -139,6 +152,10 @@ When REUSE_DB recovery is needed, the fence covers all four database writers:
 HCC, workflow-recipes, trace-maintenance-worker, and control-api. The durable
 recovery identity is the owned profile/context/worktree/branch; the interrupted
 HEAD is retained as audit data while the exact-head marker controls freshness.
+The trace-maintenance-worker fence must scale its Deployment to zero and prove
+both `.spec.replicas == 0` and no remaining writer pods before persisting the
+`trace-fenced` phase; restoring its saved replica count happens only after the
+recovery window.
 Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by

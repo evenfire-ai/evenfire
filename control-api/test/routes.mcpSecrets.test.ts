@@ -690,7 +690,11 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
         'Affected connectors unavailable after MCP Secret rotation'
       )
       const [fields] = warnSpy.mock.calls[0]
-      expect(fields).not.toHaveProperty('err')
+      expect(fields).toEqual(
+        expect.objectContaining({
+          err: { name: 'Error', message: 'mcpservers list forbidden' },
+        })
+      )
       expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(sentinel)
     } finally {
       warnSpy.mockRestore()

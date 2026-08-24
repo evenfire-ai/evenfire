@@ -357,7 +357,11 @@ describe('artifact listing commands', () => {
       'find -printf failed; falling back to find -type f'
     )
     const [fields] = log.warn.mock.calls[0]
-    expect(fields).not.toHaveProperty('err')
+    expect(fields).toEqual(
+      expect.objectContaining({
+        err: { name: 'Error', message: 'find: unrecognized: -printf' },
+      })
+    )
     expect(fields).not.toHaveProperty('directory')
     expect(JSON.stringify(log.warn.mock.calls)).not.toContain(sentinel)
   })

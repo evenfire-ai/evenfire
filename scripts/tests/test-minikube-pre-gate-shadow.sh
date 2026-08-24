@@ -541,6 +541,32 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode() {
   rm -rf "$d"
 }
 
+# A local rebuild can also replace image IDs without changing gitHead. The
+# incremental planner must not treat that newer acquisition as proof that the
+# old deployment is still the image set being tested.
+assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode() {
+  local d out rc head
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  head="$(repo_head "$d")"
+  mkdir -p "$d/marker"
+  printf '%s' "$head" > "$d/marker/gitHead"
+  printf '%s' "2026-08-06T00:00:00Z" > "$d/marker/imagesGeneratedAt"
+  write_manifest "$d" '{"generated":"2026-08-06T09:99:99Z","imageSource":"local","imageTag":"","images":{}}'
+  out="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    IMAGE_SOURCE=local IMAGE_TAG="" IMAGES_GENERATED_AT="2026-08-06T09:99:99Z" \
+      run_incremental "$d" 'echo "baseline=[$(incremental_marker_git_head)]"'
+  )"
+  rc=$?
+  if [ "$rc" -eq 0 ] && grep -Fq 'baseline=[]' <<< "$out"; then
+    pass "a newer local image acquisition invalidates its gitHead baseline"
+  else
+    fail "expected an empty local baseline after a re-acquisition; rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
 # The complement, so the fix cannot be "never trust the marker": an untouched
 # image set keeps its baseline, which is what makes the incremental path fast.
 assert_an_untouched_image_set_keeps_the_marker_baseline() {
@@ -1024,6 +1050,7 @@ assert_the_release_image_revision_label_supplies_the_missing_baseline
 assert_no_marker_and_no_revision_label_fails_closed
 assert_an_unreachable_docker_daemon_cannot_become_a_baseline
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode
+assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode
 assert_an_untouched_image_set_keeps_the_marker_baseline
 assert_the_pre_gate_adopts_the_recorded_cluster_mode_over_the_environment
 assert_a_recorded_local_build_renders_the_local_overlay

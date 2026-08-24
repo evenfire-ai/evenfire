@@ -8,8 +8,13 @@
 # model provider configuration.
 #
 # Usage:
-#   ./scripts/minikube/setup.sh
-#   ./scripts/minikube/setup.sh --build   # Build images under the branch lease
+#   MINIKUBE_PROFILE=<branch-profile> \
+#   CONTROL_API_REAL_PG_CONTEXT=<branch-profile> \
+#     ./scripts/minikube/setup.sh [--build]
+#
+# This is a legacy compatibility path. The supported T0/T1/T2 entrypoint is
+# `make minikube-t2`; every legacy invocation still needs the same branch-owned
+# profile lease and never falls back to the shared `clerum-test` profile.
 # ======================================================================
 
 set -euo pipefail
@@ -25,7 +30,8 @@ if [ -f "${PROJECT_DIR}/.env" ]; then
   set +a
 fi
 
-PROFILE="clerum-test"
+PROFILE="${MINIKUBE_PROFILE:-${T2_PROFILE:-}}"
+CONTEXT="${CONTROL_API_REAL_PG_CONTEXT:-${T2_CONTEXT:-${K8S_CONTEXT:-${KUBECONTEXT:-}}}}"
 BUILD_IMAGES=false
 
 for arg in "$@"; do
@@ -34,19 +40,26 @@ for arg in "$@"; do
   esac
 done
 
-# This legacy setup path mutates the profile before it reaches its optional
-# image build. Re-enter it through the canonical lease wrapper first, so a
-# failed lease check cannot leave namespaces, keys, or Secrets half-applied.
-# The wrapper marks the inherited lease; the second invocation then proceeds
-# with the exact opaque token held by the parent. Fresh/unowned profiles must
-# use the supported T2 bootstrap instead of bypassing this boundary.
-if [ "$BUILD_IMAGES" = true ] && [ "${T2_MUTATION_LOCK_WRAPPED:-false}" != true ]; then
+if [[ -z "${PROFILE}" || -z "${CONTEXT}" || "${PROFILE}" != "${CONTEXT}" ]]; then
+  printf 'PROFILE_LOCK_REQUIRED: setup.sh requires matching MINIKUBE_PROFILE and CONTROL_API_REAL_PG_CONTEXT for a branch-owned profile\n' >&2
+  exit 1
+fi
+
+# This legacy setup path mutates namespaces, CRDs, Secrets, workloads, and
+# optionally images. Re-enter it through the canonical lease wrapper before
+# the first mutation, regardless of --build. The wrapper marks the inherited
+# lease; the second invocation validates the exact opaque token. Fresh or
+# unowned profiles must use the supported T2 bootstrap instead of bypassing it.
+if [ "${T2_MUTATION_LOCK_WRAPPED:-false}" != true ]; then
   exec env \
-    T2_PROJECT_DIR="$PROJECT_DIR" T2_PROFILE="$PROFILE" T2_CONTEXT="$PROFILE" \
-    MINIKUBE_PROFILE="$PROFILE" CONTROL_API_REAL_PG_CONTEXT="$PROFILE" \
+    T2_PROJECT_DIR="$PROJECT_DIR" T2_PROFILE="$PROFILE" T2_CONTEXT="$CONTEXT" \
+    MINIKUBE_PROFILE="$PROFILE" CONTROL_API_REAL_PG_CONTEXT="$CONTEXT" \
     T2_SKIP_LOCK=false T2_GATE_ID=legacy-minikube-setup \
     "$SCRIPT_DIR/with-t2-mutation-lock.sh" -- "$SCRIPT_DIR/setup.sh" "$@"
 fi
+
+T2_PROJECT_DIR="$PROJECT_DIR" T2_PROFILE="$PROFILE" T2_CONTEXT="$CONTEXT" \
+  T2_SKIP_LOCK=true bash "$SCRIPT_DIR/require-t2-mutation-lock.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -59,7 +72,7 @@ log() { echo -e "${CYAN}[SETUP]${NC} $*"; }
 ok()  { echo -e "${GREEN}  OK${NC} -- $*"; }
 err() { echo -e "${RED}  ERROR${NC} -- $*"; }
 
-KC="kubectl --context=${PROFILE}"
+KC="kubectl --context=${CONTEXT}"
 
 # ---- Step 1: Verify cluster -----------------------------------------
 echo -e "\n${BOLD}=== Step 1/12: Verify Cluster ===${NC}"

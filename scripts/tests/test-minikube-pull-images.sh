@@ -79,6 +79,9 @@ STUB
 #!/usr/bin/env bash
 printf 'minikube %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 if [[ "$*" == *"docker-env"* ]]; then
+  if [ "${TEST_EMPTY_DOCKER_ENV:-false}" = true ]; then
+    exit 0
+  fi
   echo 'export DOCKER_HOST="tcp://127.0.0.1:2376"'
   exit 0
 fi
@@ -144,9 +147,11 @@ run_puller_prepared() {
   TEST_FLAKY_TAGS="${TEST_FLAKY_TAGS:-}" \
   TEST_FLAKY_FAIL_COUNT="${TEST_FLAKY_FAIL_COUNT:-}" \
   TEST_FLAKY_COUNTER_DIR="${TEST_FLAKY_COUNTER_DIR:-}" \
+  TEST_EMPTY_DOCKER_ENV="${TEST_EMPTY_DOCKER_ENV:-}" \
   MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}" \
   MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-}" \
   MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-}" \
+  MINIKUBE_PULL_PARALLELISM="${MINIKUBE_PULL_PARALLELISM:-}" \
   TEST_HANG_PULL="${TEST_HANG_PULL:-}" \
   MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS:-}" \
   MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS:-}" \
@@ -196,6 +201,46 @@ assert_hung_pull_hits_the_finite_deadline() {
     pass "a hung image pull is terminated by its finite deadline"
   else
     fail "hung pull did not produce the bounded deadline failure: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_empty_docker_env_fails_closed() {
+  local d out rc
+  d="$(mktemp -d)"
+  export TEST_EMPTY_DOCKER_ENV=true
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset TEST_EMPTY_DOCKER_ENV
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<<"$out" \
+     && ! grep -q '^pull ' "$d/ops.log"; then
+    pass "empty successful minikube docker-env output fails closed"
+  else
+    fail "empty docker-env output returned success or reached Docker: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_invalid_pull_knobs_fail_closed() {
+  local d out rc
+  d="$(mktemp -d)"
+
+  export MINIKUBE_PULL_PARALLELISM=0
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset MINIKUBE_PULL_PARALLELISM
+  if [ "$rc" -ne 2 ] || ! grep -Fq 'MINIKUBE_PULL_PARALLELISM must be an integer' <<<"$out"; then
+    fail "parallelism=0 did not fail with the parameter error: rc=$rc out=$out"
+    rm -rf "$d"
+    return
+  fi
+
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=301
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset MINIKUBE_IMAGE_PULL_DELAY_SECS
+  if [ "$rc" -eq 2 ] && grep -Fq 'MINIKUBE_IMAGE_PULL_DELAY_SECS must be an integer' <<<"$out"; then
+    pass "parallelism, retry, and delay knobs fail closed outside their finite ranges"
+  else
+    fail "delay=301 did not fail with the parameter error: rc=$rc out=$out"
   fi
   rm -rf "$d"
 }
@@ -755,6 +800,8 @@ assert_every_defined_case_is_invoked() {
 assert_it_pulls_every_pull_in_ghcr_mode_image
 assert_puller_requires_the_inherited_profile_lease
 assert_hung_pull_hits_the_finite_deadline
+assert_empty_docker_env_fails_closed
+assert_invalid_pull_knobs_fail_closed
 assert_it_never_pulls_an_unpublished_image
 assert_it_never_pulls_a_registry_distributed_mcp_server
 assert_it_repulls_a_tag_already_present_in_the_daemon

@@ -37,6 +37,10 @@ Before running anything, verify ALL of these:
 - [ ] Mutating image acquisition/builds use the public Make target/orchestrator
       and inherit its exact profile lease. Do not call `build-images.sh` or
       `pull-images.sh` directly; `--verify-only` is the read-only exception.
+      The legacy `setup.sh` path is also lease-protected for every invocation,
+      requires matching explicit profile/context variables, and never uses the
+      shared `clerum-test` profile. Pull configuration values are finite and an
+      empty successful `minikube docker-env` result is a hard failure.
 - [ ] Never read `~/.cache/clerum/minikube-profiles/` directly (HARD DENY —
       it holds private profile state). The harness reads it for you.
 
@@ -155,8 +159,12 @@ Before committing anything else, run `make minikube-t2-public-boundary`.
 The final exact-head check also rejects a marker whose `imagesGeneratedAt`
 does not equal the current image manifest. During REUSE_DB recovery, the
 durable fence covers HCC, workflow-recipes, trace-maintenance-worker, and
-control-api; a changed HEAD on the same owned lane is historical state, not a
-reason to discard recovery evidence.
+control-api. The incremental baseline applies that image-stamp check in both
+GHCR and local image modes, because a matching gitHead does not prove that a
+newly acquired image ID is running. The trace worker must be at zero desired
+replicas with no remaining pods before `trace-fenced` is persisted. A changed
+HEAD on the same owned lane is historical state, not a reason to discard
+recovery evidence.
 
 ## Step 5 — On failure
 

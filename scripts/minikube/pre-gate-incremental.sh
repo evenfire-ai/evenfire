@@ -69,13 +69,13 @@ incremental_add_target() {
 
 # The commit the cluster's images were last synced to, or nothing.
 #
-# In ghcr mode the marker is only a usable baseline while the image set it was
-# stamped against is still in place. `make minikube-setup` re-pulls every
-# release image, discarding any shadow build, and does not touch this marker --
-# so a marker whose acquisition stamp predates the current one describes a
-# cluster that no longer exists, and trusting its gitHead would compute an empty
-# delta and gate on release code. Local mode has no such hazard: a full local
-# build puts every image at the tree state the marker names.
+# The marker is only a usable baseline while the image set it was stamped
+# against is still the set the profile can prove. Both a GHCR acquisition and a
+# local build can replace image IDs without changing gitHead; trusting that
+# head after a newer acquisition would compute an empty delta and gate without
+# proving that the running pods use the newly acquired images. A stamp mismatch
+# therefore invalidates the baseline in every image mode; the caller chooses
+# the established full local build or GHCR recovery path below.
 incremental_marker_git_head() {
   local git_head marker_generated
   git_head="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
@@ -83,12 +83,11 @@ incremental_marker_git_head() {
   if [[ -z "${git_head}" ]]; then
     return 0
   fi
-  if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
-    marker_generated="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
-      -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
-    if [[ "${marker_generated}" != "${IMAGES_GENERATED_AT:-}" ]]; then
-      return 0
-    fi
+  marker_generated="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
+    -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
+  if [[ -z "${marker_generated}" || -z "${IMAGES_GENERATED_AT:-}" ||
+        "${marker_generated}" != "${IMAGES_GENERATED_AT}" ]]; then
+    return 0
   fi
   printf '%s' "${git_head}"
 }

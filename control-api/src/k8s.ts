@@ -573,6 +573,10 @@ export class K8sGateway {
           podName,
           namespace,
           containerName,
+          err: {
+            name: findError instanceof Error ? findError.name : typeof findError,
+            message: findError instanceof Error ? findError.message : String(findError),
+          },
         },
         'find -printf failed; falling back to find -type f'
       )

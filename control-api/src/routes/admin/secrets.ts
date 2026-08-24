@@ -514,13 +514,17 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           .map(item => (item as { metadata?: { name?: string } }).metadata?.name)
           .filter((connector): connector is string => typeof connector === 'string')
           .sort((a, b) => a.localeCompare(b))
-      } catch {
+      } catch (err) {
         logger.warn(
           {
             module: 'admin-secrets',
             event: 'mcp-secret-rotated-affected-connectors-unavailable',
             name,
             namespace: targetNs,
+            err: {
+              name: err instanceof Error ? err.name : typeof err,
+              message: err instanceof Error ? err.message : String(err),
+            },
           },
           'Affected connectors unavailable after MCP Secret rotation'
         )

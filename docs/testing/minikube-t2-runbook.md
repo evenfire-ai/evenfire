@@ -115,7 +115,12 @@ same exact profile lease. Public Make targets acquire it; private body targets,
 before the first Docker,
 Minikube, or Kubernetes operation. `build-images.sh --verify-only` is the
 read-only exception. Empty/unknown selectors fail before the lease or runtime
-is touched.
+is touched. The legacy `scripts/minikube/setup.sh` path is protected the same
+way for both `--build` and no-build invocations and requires matching explicit
+branch-profile/context variables; it never defaults to the shared
+`clerum-test` profile. The published-image puller bounds parallelism to 1-64,
+retries to 1-10, and retry delay to 0-300 seconds; empty successful
+`minikube docker-env` output is a hard failure.
 
 ### Orphaned lock recovery
 
@@ -310,7 +315,10 @@ REUSE_DB recovery fences all four database writers—HCC, workflow-recipes,
 trace-maintenance-worker, and control-api—before migrations, role provisioning,
 or the recovery overlay. The interrupted `HEAD` remains historical state for
 the owned profile/context/worktree/branch; exact-head freshness is decided by
-the pre-gate marker and image stamp.
+the pre-gate marker and image stamp. The trace worker is not considered fenced
+until its Deployment reports zero desired replicas and no matching pods remain.
+The incremental planner treats a changed image stamp as stale in both local and
+GHCR modes, even when the recorded gitHead is unchanged.
 
 Retry by phase. During a T1 failure, iterate with
 `minikube-t2-real-postgres`, then run one full `minikube-t2` certification once

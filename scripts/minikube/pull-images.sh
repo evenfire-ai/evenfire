@@ -11,7 +11,7 @@
 # counterpart is scripts/minikube/build-images.sh.
 #
 # Usage:
-#   MINIKUBE_PROFILE=clerum-test ./scripts/minikube/pull-images.sh [--only=<svc>]
+#   MINIKUBE_PROFILE=<branch-profile> ./scripts/minikube/pull-images.sh [--only=<svc>]
 #
 # Env:
 #   MINIKUBE_IMAGE_TAG        Override the recorded/committed tag (render-time
@@ -19,18 +19,19 @@
 #                             the pull path before a release tag exists.
 #   MINIKUBE_SKIP_UIS         true -> do not pull control-ui/profile-ui, which
 #                             the -no-uis overlays delete anyway (see below).
-#   MINIKUBE_PROFILE          Target profile (default: clerum-test)
+#   MINIKUBE_PROFILE          Target branch-owned profile (provided by Make/T2)
 #   MINIKUBE_MULTI_NODE       true -> pull on the host + `minikube image load`
-#   MINIKUBE_PULL_PARALLELISM Concurrent pulls (default: 6)
+#   MINIKUBE_PULL_PARALLELISM Concurrent pulls (default: 6, range: 1-64)
 #   MINIKUBE_IMAGE_PULL_RETRIES     Attempts per image before it is reported
-#                             failed (default: 3). A transient registry blip
+#                             failed (default: 3, range: 1-10). A transient registry blip
 #                             (one bad pull 24 images into a run) should not
 #                             abort the whole setup. Mirrors the naming and
 #                             defaults of build-images.sh's
 #                             MINIKUBE_BASE_IMAGE_PULL_RETRIES, applied here to
 #                             the ghcr application-image pull instead of
 #                             Dockerfile base images.
-#   MINIKUBE_IMAGE_PULL_DELAY_SECS  Delay between failed attempts (default: 5).
+#   MINIKUBE_IMAGE_PULL_DELAY_SECS  Delay between failed attempts (default: 5,
+#                             range: 0-300 seconds).
 #
 # Two behaviours here are load-bearing; do not "optimize" them away:
 #
@@ -94,6 +95,15 @@ for arg in "$@"; do
   esac
 done
 
+validate_pull_integer() {
+  local name="$1" value="$2" minimum="$3" maximum="$4"
+  if ! [[ "${value}" =~ ^[0-9]+$ ]] ||
+     (( 10#${value} < minimum || 10#${value} > maximum )); then
+    err "MINIKUBE_PULL_CONFIG_INVALID: ${name} must be an integer from ${minimum} to ${maximum}"
+    exit 2
+  fi
+}
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -105,6 +115,10 @@ log()  { echo -e "${CYAN}[PULL]${NC} $*"; }
 ok()   { echo -e "${GREEN}  OK${NC} -- $*"; }
 warn() { echo -e "${YELLOW}  WARN${NC} -- $*"; }
 err()  { echo -e "${RED}  ERROR${NC} -- $*" >&2; }
+
+validate_pull_integer MINIKUBE_PULL_PARALLELISM "${PULL_PARALLELISM}" 1 64
+validate_pull_integer MINIKUBE_IMAGE_PULL_RETRIES "${MINIKUBE_IMAGE_PULL_RETRIES}" 1 10
+validate_pull_integer MINIKUBE_IMAGE_PULL_DELAY_SECS "${MINIKUBE_IMAGE_PULL_DELAY_SECS}" 0 300
 
 # ---- Resolve the effective tag -------------------------------------------
 # THE TAG FOLLOWS THE CLUSTER, NOT JUST THE COMMIT. Reading the committed pin
@@ -199,8 +213,11 @@ if [ "$MINIKUBE_MULTI_NODE" = false ]; then
     "$MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS" \
     minikube -p "$PROFILE" docker-env --shell bash)" || docker_env_status=$?
   if [ "$docker_env_status" -ne 0 ] || [ -z "$docker_env_output" ]; then
-    err "Could not resolve Docker environment for minikube '${PROFILE}'"
-    exit "${docker_env_status:-1}"
+    err "DOCKER_ENV_UNRESOLVED: could not resolve Docker environment for minikube '${PROFILE}'"
+    if [ "$docker_env_status" -ne 0 ]; then
+      exit "$docker_env_status"
+    fi
+    exit 1
   fi
   eval "$docker_env_output"
   unset DOCKER_API_VERSION 2>/dev/null || true

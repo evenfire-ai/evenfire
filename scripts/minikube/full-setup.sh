@@ -1372,19 +1372,31 @@ fence_partial_workflow_reconciler() {
 }
 
 fence_partial_trace_worker() {
-  local pods
+  local pods desired
   if [[ ! "${PARTIAL_TRACE_REPLICAS}" =~ ^[0-9]+$ ]]; then
     err "trace-maintenance-worker replica count is invalid; refusing partial-bootstrap recovery"
     return 1
   fi
-  log "Fencing trace-maintenance-worker at ${PARTIAL_TRACE_REPLICAS} replica(s)"
+  log "Fencing trace-maintenance-worker at zero replicas (restore ${PARTIAL_TRACE_REPLICAS} after recovery)"
   writer_recovery_state_phase trace-fencing
-  $KC -n control-plane scale deployment/trace-maintenance-worker --replicas="${PARTIAL_TRACE_REPLICAS}" >/dev/null
+  $KC -n control-plane scale deployment/trace-maintenance-worker --replicas=0 >/dev/null
+  desired="$($KC -n control-plane get deployment/trace-maintenance-worker \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  if [[ "${desired}" != 0 ]]; then
+    err "trace-maintenance-worker did not converge to zero desired replicas; refusing recovery"
+    return 1
+  fi
   pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" \
     || return 1
   if [ -n "${pods}" ]; then
     $KC -n control-plane wait --for=delete pod \
       -l app=trace-maintenance-worker --timeout=180s >/dev/null
+  fi
+  pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" \
+    || return 1
+  if [ -n "${pods}" ]; then
+    err "trace-maintenance-worker pods remain after the zero-replica fence; refusing recovery"
+    return 1
   fi
   PARTIAL_TRACE_FENCED=true
   writer_recovery_state_phase trace-fenced

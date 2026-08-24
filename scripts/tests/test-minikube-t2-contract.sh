@@ -149,6 +149,19 @@ grep -Fq 't2-setup-handoff.sh" consume --' "$ROOT/scripts/minikube/pre-gate-sync
 grep -Fq 'minikube-verify-images' "$ROOT/scripts/minikube/pre-gate-sync.sh"
 grep -Fq 'with-t2-mutation-lock.sh' "$ROOT/scripts/minikube/setup.sh"
 grep -Fq 'T2_MUTATION_LOCK_WRAPPED' "$ROOT/scripts/minikube/setup.sh"
+grep -Fq 'require-t2-mutation-lock.sh' "$ROOT/scripts/minikube/setup.sh"
+grep -Fq 'PROFILE_LOCK_REQUIRED: setup.sh requires matching' "$ROOT/scripts/minikube/setup.sh"
+grep -Fq 'PROFILE="${MINIKUBE_PROFILE:-${T2_PROFILE:-}}"' "$ROOT/scripts/minikube/setup.sh"
+if grep -Fq 'PROFILE="clerum-test"' "$ROOT/scripts/minikube/setup.sh"; then
+  echo 'FAIL: legacy setup still defaults to the shared clerum-test profile' >&2
+  exit 1
+fi
+setup_guard_line="$(grep -nF 'if [ "${T2_MUTATION_LOCK_WRAPPED:-false}" != true ]; then' "$ROOT/scripts/minikube/setup.sh" | cut -d: -f1)"
+setup_cluster_line="$(grep -nF 'cluster-info' "$ROOT/scripts/minikube/setup.sh" | head -1 | cut -d: -f1)"
+if [[ -z "$setup_guard_line" || -z "$setup_cluster_line" || "$setup_guard_line" -ge "$setup_cluster_line" ]]; then
+  echo 'FAIL: legacy setup can mutate or probe the cluster before the lease wrapper' >&2
+  exit 1
+fi
 for timed_phase in 't2_evidence_write planner PASS' 't2_evidence_write transition PASS' \
   't2_evidence_write pre-gate-sync PASS' 't2_evidence_write T1 PASS' \
   't2_evidence_write T2 PASS' 't2_evidence_write NP08_HCC_AUTHORIZATION PASS'; do

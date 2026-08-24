@@ -1245,6 +1245,94 @@ assert_the_unoverridden_path_generates_the_api_ip_patch_once() {
   rm -rf "$d"
 }
 
+assert_trace_writer_fence_closes_and_proves_zero_replicas() {
+  local fence_block
+  fence_block="$(sed -n '/^fence_partial_trace_worker()/,/^}/p' scripts/minikube/full-setup.sh)"
+  if grep -Fq -- '--replicas=0' <<<"$fence_block" && \
+     grep -Fq "jsonpath={.spec.replicas}" <<<"$fence_block" && \
+     grep -Fq 'trace-maintenance-worker did not converge to zero desired replicas' <<<"$fence_block" && \
+     grep -Fq 'trace-maintenance-worker pods remain after the zero-replica fence' <<<"$fence_block"; then
+    pass "trace-maintenance-worker recovery fence scales to zero and proves no writer pod remains"
+  else
+    fail "trace-maintenance-worker recovery can be marked fenced without proving a zero-replica state"
+  fi
+}
+
+assert_trace_writer_fence_is_behaviorally_fail_closed() {
+  local d fence_block run_script out rc problems=""
+  d="$(mktemp -d)"
+  fence_block="$(sed -n '/^fence_partial_trace_worker()/,/^}/p' scripts/minikube/full-setup.sh)"
+
+  mkdir -p "$d/bin"
+  cat > "$d/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -u
+state_dir="${TEST_TRACE_STATE_DIR:?}"
+case "$*" in
+  *"scale deployment/trace-maintenance-worker --replicas=0"*)
+    : >"$state_dir/scaled"
+    exit 0
+    ;;
+  *"get deployment/trace-maintenance-worker"*)
+    printf '%s' "${TEST_TRACE_DESIRED:-0}"
+    exit 0
+    ;;
+  *"get pods -l app=trace-maintenance-worker"*)
+    if [ -f "$state_dir/waited" ]; then
+      exit 0
+    fi
+    printf '%s' "${TEST_TRACE_PODS:-}"
+    exit 0
+    ;;
+  *"wait --for=delete pod"*)
+    : >"$state_dir/waited"
+    exit 0
+    ;;
+esac
+exit 0
+STUB
+  chmod +x "$d/bin/kubectl"
+
+  run_script="$d/run.sh"
+  {
+    printf 'set -u\n'
+    printf 'KC=%q\n' 'kubectl --context=test'
+    printf 'PARTIAL_TRACE_REPLICAS=2\n'
+    printf 'PARTIAL_TRACE_FENCED=false\n'
+    printf 'STATE_DIR=%q\n' "$d"
+    printf 'log() { :; }\n'
+    printf 'err() { printf "ERR:%%s\\n" "$*" >&2; }\n'
+    printf 'writer_recovery_state_phase() { printf "%%s\\n" "$1" >>"$STATE_DIR/phases"; }\n'
+    printf '%s\n' "$fence_block"
+    printf 'fence_partial_trace_worker\n'
+  } >"$run_script"
+
+  out="$(TEST_TRACE_STATE_DIR="$d" TEST_TRACE_DESIRED=0 TEST_TRACE_PODS='pod/trace-0' \
+    PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -eq 0 ] || problems+="zero-replica convergence exited $rc; "
+  [ -f "$d/scaled" ] || problems+="zero-replica convergence never scaled; "
+  grep -Fxq 'trace-fenced' "$d/phases" || problems+="successful fence never persisted trace-fenced; "
+
+  rm -f "$d/scaled" "$d/waited" "$d/phases"
+  out="$(TEST_TRACE_STATE_DIR="$d" TEST_TRACE_DESIRED=1 TEST_TRACE_PODS= \
+    PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -ne 0 ] || problems+="nonzero desired replicas were accepted; "
+  if [ -f "$d/phases" ] && grep -Fxq 'trace-fenced' "$d/phases"; then
+    problems+="trace-fenced was persisted after nonzero convergence; "
+  fi
+  grep -Fq 'did not converge to zero desired replicas' <<<"$out" \
+    || problems+="nonzero convergence did not report the stable failure; "
+
+  if [ -z "$problems" ]; then
+    pass "trace-maintenance-worker fence proves convergence and rejects nonzero desired replicas"
+  else
+    fail "$problems out=$out"
+  fi
+  rm -rf "$d"
+}
+
 # The guard that keeps this file honest: a case defined but never added to the
 # call block below reports nothing at all, which reads as a green run.
 assert_every_defined_case_is_invoked() {
@@ -1293,6 +1381,8 @@ assert_the_banner_prints_the_image_source_tag_and_origin
 assert_the_tag_origin_distinguishes_pin_from_override
 assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree
 assert_the_unoverridden_path_generates_the_api_ip_patch_once
+assert_trace_writer_fence_closes_and_proves_zero_replicas
+assert_trace_writer_fence_is_behaviorally_fail_closed
 assert_skip_build_follows_the_recorded_image_source
 assert_skip_build_says_it_is_following_the_cluster
 assert_an_acquiring_run_still_honours_image_source
