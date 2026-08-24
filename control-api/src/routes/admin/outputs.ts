@@ -9,7 +9,8 @@ import {
 } from '../../services/workflows/workflowRecipeAccessService.js'
 import { listWorkflowRunArtifacts } from '../../services/workflows/workflowRunArtifactService.js'
 import { listCanonicalRuns } from '../../services/workflows/workflowRunReadService.js'
-import { requireAdminWorkflowCaller } from '../workflows/shared/auth.js'
+import { bindAdminWorkflowAuth, requireBoundAdminWorkflowCaller } from '../workflows/shared/auth.js'
+import { adminOutputsReadRateLimits } from '../workflows/shared/rateLimit.js'
 import { listHostArtifactsForHost } from './hostArtifacts.js'
 
 function isVisibleRecipe(resource: Record<string, unknown>): boolean {
@@ -31,8 +32,10 @@ export function createAdminOutputsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/admin/outputs',
+    ...adminOutputsReadRateLimits(),
+    bindAdminWorkflowAuth,
     asyncHandler(async (req, res) => {
-      const caller = await requireAdminWorkflowCaller(req, res)
+      const caller = requireBoundAdminWorkflowCaller(req, res)
       if (!caller) return
 
       const [recipes, hosts] = await Promise.all([

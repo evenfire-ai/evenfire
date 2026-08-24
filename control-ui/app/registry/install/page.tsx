@@ -129,7 +129,7 @@ export function providerForModel(model: string, catalog: LlmAllowedModel[]): str
 
 // Distinct providers the operator has enabled, for the override dropdown. Keeps
 // the picker honest — only providers with configured credentials are offered,
-// instead of a static enum of all 21.
+// instead of a static enum of all 22.
 export function enabledProviders(catalog: LlmAllowedModel[]): string[] {
   const seen = new Set<string>()
   for (const row of catalog) {

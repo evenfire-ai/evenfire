@@ -78,6 +78,13 @@ import {
   replaceAuthoritativeMcpFleet,
   runAuthoritativeMcpInitialization,
 } from './mcp/authoritativeFleet'
+import {
+  createMcpAuthorityStalenessDeadline,
+  handleMcpAuthorityPollFailure,
+  isMcpAuthorityStale,
+  revokeMcpAuthorityState,
+} from './mcp/authorityLifecycle'
+import type { HandleMcpAuthorityPollFailureOptions } from './mcp/authorityLifecycle'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
@@ -182,6 +189,7 @@ let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
 let mcpManager: McpManager | null = null
 let contextMapperClient: ContextMapperClient | null = null
+let mcpAuthorityLastSuccessAt = 0
 let activityHub: HostActivityHub | null = null
 let workspaceProvider: ScopedWorkspaceProvider | null = null
 let spilloverStorage: SpilloverStorage | null = null
@@ -788,8 +796,102 @@ export async function admitDevelopmentMcpServers(
   }
 }
 
-async function initializeMcpServers(contextRef: string): Promise<void> {
-  console.log(`[Main] Initializing MCP servers for context: ${contextRef}`)
+function ensureAuthenticatedContextMapperClient(): ContextMapperClient {
+  if (contextMapperClient) return contextMapperClient
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) {
+    throw new Error('MCP Host runtime authentication is required for HCC inventory')
+  }
+  const auth = runtimeAuth
+  contextMapperClient = getContextMapperClient({
+    getAccessToken: () => auth.accessToken,
+    refreshOnUnauthorized: () => refreshWithRecovery(auth),
+    onCallerAuthorizationFailure: status => revokeMcpAuthority(`caller_${status}`, true),
+  })
+  return contextMapperClient
+}
+
+export { createMcpAuthorityStalenessDeadline, isMcpAuthorityStale }
+
+type McpAuthorityPollFailureCallbacks = Pick<
+  HandleMcpAuthorityPollFailureOptions,
+  'revoke' | 'onCallerAuthorizationRejected' | 'onInventoryAuthorityRevoked' | 'onUnavailable'
+>
+
+/**
+ * Build the fail-closed polling options from the live main-process state.
+ * Keeping this adapter explicit gives the wiring a small, deterministic test
+ * seam instead of leaving the staleness/revocation callbacks as an untested
+ * inline object inside the timer callback.
+ */
+export function createMcpAuthorityPollFailureOptions(
+  dependencies: McpAuthorityPollFailureCallbacks & {
+    getManager: () => unknown | null
+    lastSuccessAt: () => number
+    now?: () => number
+  }
+): HandleMcpAuthorityPollFailureOptions {
+  return {
+    hasPublishedManager: () => dependencies.getManager() !== null,
+    lastSuccessAt: dependencies.lastSuccessAt,
+    now: dependencies.now ?? Date.now,
+    maxStalenessMs: config.hccAuthorityMaxStalenessMs,
+    revoke: dependencies.revoke,
+    onCallerAuthorizationRejected: dependencies.onCallerAuthorizationRejected,
+    onInventoryAuthorityRevoked: dependencies.onInventoryAuthorityRevoked,
+    onUnavailable: dependencies.onUnavailable,
+  }
+}
+
+const mcpAuthorityStalenessDeadline = createMcpAuthorityStalenessDeadline(
+  config.hccAuthorityMaxStalenessMs,
+  () => {
+    if (!isShuttingDown && !config.devMode && mcpManager) {
+      revokeMcpAuthority('authority_stale_deadline', true)
+    }
+  }
+)
+
+function recordMcpAuthoritySuccess(successAt: number = Date.now()): void {
+  mcpAuthorityLastSuccessAt = successAt
+  if (!config.devMode) mcpAuthorityStalenessDeadline.recordSuccess(successAt)
+}
+
+/**
+ * Revoke the complete locally-published MCP authority before awaiting any
+ * transport cleanup. A fresh poller may recover later with a newly verified
+ * Host JWT and live Host -> Context grant snapshot.
+ */
+function revokeMcpAuthority(reason: string, restartPolling: boolean): void {
+  revokeMcpAuthorityState({
+    reason,
+    restartPolling,
+    invalidateInitialization: () => {
+      mcpInitializationGeneration += 1
+    },
+    stopPolling: stopContextMapperPolling,
+    clearStalenessDeadline: () => mcpAuthorityStalenessDeadline.clear(),
+    withdrawManager: () => {
+      const closingManager = mcpManager
+      mcpManager = null
+      return closingManager
+    },
+    clearServerState: () => {
+      lastServerState = new Map()
+    },
+    clearLastSuccess: () => {
+      mcpAuthorityLastSuccessAt = 0
+    },
+    coordinator: mcpFleetCoordinator,
+    onCleanupFailure: () => console.error(`[Main] MCP authority cleanup failed (reason=${reason})`),
+    onRevoked: () => console.warn(`[Main] MCP authority revoked (reason=${reason})`),
+    shouldRestartPolling: () => !isShuttingDown && !config.devMode,
+    startPolling: startContextMapperPolling,
+  })
+}
+
+async function initializeMcpServers(): Promise<void> {
+  console.log('[Main] Initializing authenticated MCP server inventory')
   const initializationGeneration = ++mcpInitializationGeneration
   const isInitializationCurrent = (): boolean =>
     !isShuttingDown && mcpInitializationGeneration === initializationGeneration
@@ -800,19 +902,17 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
       servers,
       previousManager,
       createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
-      getAuthToken: async serverName => {
-        if (!contextMapperClient) {
-          throw new Error('Context Mapper client is required to fetch MCP server auth')
-        }
-        return contextMapperClient.getAuthToken(serverName)
+      getAuthToken: async (serverName, expectedRevision) => {
+        return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
       },
       installFleet: (nextManager, nextServerState) => {
         mcpManager = nextManager
         lastServerState = nextServerState
+        recordMcpAuthoritySuccess()
         agent?.setMcpManager(nextManager)
       },
       coordinator: mcpFleetCoordinator,
-      onColdStartPublished: () => ensureContextMapperPolling(contextRef),
+      onColdStartPublished: () => ensureContextMapperPolling(),
       isPreviousManagerCurrent: () => mcpManager === previousManager,
       isFleetLifecycleCurrent: isInitializationCurrent,
     })
@@ -821,13 +921,10 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
   // In production mode, fetch an authoritative snapshot before replacing the
   // current fleet. An unavailable Context Mapper leaves the prior state intact.
   if (!config.devMode) {
-    if (!contextMapperClient) {
-      contextMapperClient = getContextMapperClient()
-    }
+    const client = ensureAuthenticatedContextMapperClient()
 
     await runAuthoritativeMcpInitialization({
-      contextRef,
-      client: contextMapperClient,
+      client,
       replaceFleet,
       isCurrent: isInitializationCurrent,
     })
@@ -861,7 +958,7 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
 /**
  * Poll context-mapper for McpServer changes.
  */
-async function pollContextMapper(contextRef: string): Promise<void> {
+async function pollContextMapper(): Promise<void> {
   if (!contextMapperClient) return
 
   try {
@@ -869,13 +966,13 @@ async function pollContextMapper(contextRef: string): Promise<void> {
     // Retry the authoritative initialization instead of declaring an empty
     // fleet or permanently no-oping every reconciliation tick.
     if (!mcpManager) {
-      await initializeMcpServers(contextRef)
+      await initializeMcpServers()
       return
     }
 
     const manager = mcpManager
     await pollAuthoritativeMcpSnapshotIfCurrent({
-      poll: () => contextMapperClient!.pollServers(contextRef),
+      poll: () => contextMapperClient!.pollServers(),
       // A delayed fetch may resolve after shutdown or after a manager swap.
       // Never publish that stale snapshot into a closed/retired manager.
       isCurrent: () => !isShuttingDown && mcpManager === manager,
@@ -884,12 +981,28 @@ async function pollContextMapper(contextRef: string): Promise<void> {
           servers,
           manager,
           serverState: lastServerState,
-          getAuthToken: serverName => contextMapperClient!.getAuthToken(serverName),
+          getAuthToken: (serverName, expectedRevision) =>
+            contextMapperClient!.getAuthToken(serverName, expectedRevision),
           coordinator: mcpFleetCoordinator,
         }),
     })
+    if (!isShuttingDown && mcpManager === manager) {
+      recordMcpAuthoritySuccess()
+    }
   } catch (error) {
-    console.error('[Main] Error polling skill-mapper:', error)
+    handleMcpAuthorityPollFailure(
+      error,
+      createMcpAuthorityPollFailureOptions({
+        getManager: () => mcpManager,
+        lastSuccessAt: () => mcpAuthorityLastSuccessAt,
+        revoke: revokeMcpAuthority,
+        onCallerAuthorizationRejected: () =>
+          console.warn('[Main] HCC poll rejected caller authority'),
+        onInventoryAuthorityRevoked: () =>
+          console.warn('[Main] HCC inventory no longer resolves live Host authority'),
+        onUnavailable: () => console.error('[Main] HCC authority poll failed (reason=unavailable)'),
+      })
+    )
   }
 }
 
@@ -939,7 +1052,7 @@ export function createCoalescedPollRunner(poll: () => Promise<void>): {
 /**
  * Start polling context-mapper for McpServer changes.
  */
-export function startContextMapperPolling(contextRef: string): void {
+export function startContextMapperPolling(): void {
   if (isShuttingDown) return
   // Re-entry replaces the complete producer/runner pair. Stopping only the
   // runner would leave the previous interval dispatching into the new runner.
@@ -949,15 +1062,15 @@ export function startContextMapperPolling(contextRef: string): void {
     `[Main] Starting context-mapper polling (interval: ${config.contextMapperPollInterval}ms)`
   )
 
-  contextMapperPollRunner = createCoalescedPollRunner(() => pollContextMapper(contextRef))
+  contextMapperPollRunner = createCoalescedPollRunner(() => pollContextMapper())
   contextMapperPollTimer = setInterval(() => {
     contextMapperPollRunner?.trigger()
   }, config.contextMapperPollInterval)
 }
 
-export function ensureContextMapperPolling(contextRef: string): void {
+export function ensureContextMapperPolling(): void {
   if (isShuttingDown || (contextMapperPollTimer && contextMapperPollRunner)) return
-  startContextMapperPolling(contextRef)
+  startContextMapperPolling()
 }
 
 /**
@@ -1030,9 +1143,23 @@ async function applyResolvedGuardrails(): Promise<void> {
 async function onHostChange(host: HostCRD): Promise<void> {
   console.log(`[Main] Host configuration changed: ${host.name}`)
 
+  const contextChanged =
+    currentHost !== null && currentHost.spec.contextRef !== host.spec.contextRef
   const providerChanged = currentHost?.spec.model?.provider !== host.spec.model?.provider
   const secretRefChanged = currentHost?.spec.secretRef !== host.spec.secretRef
   const modelChanged = currentHost?.spec.model?.name !== host.spec.model?.name
+
+  if (contextChanged) {
+    // The old Context's authority must disappear before any asynchronous Host
+    // reconciliation. HCC derives the new Context from the authenticated Host,
+    // so discovery can restart independently while provider state catches up.
+    revokeMcpAuthority('context_changed', false)
+    startMcpInitializationInBackground({
+      initialize: () => initializeMcpServers(),
+      afterInitialAttempt: () => ensureContextMapperPolling(),
+    })
+  }
+
   // R5 — refresh the failover policy BEFORE (re)building the ConfigStore so the
   // fallback credential slots are loaded. A policy change that alters which
   // Secret slots are needed forces a ConfigStore rebuild even if provider/
@@ -1092,6 +1219,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
  */
 function onHostDelete(): void {
   console.log('[Main] Host CRD deleted, shutting down')
+  revokeMcpAuthority('host_deleted', false)
   currentHost = null
   currentProvider = null
   process.exit(1)
@@ -2569,6 +2697,7 @@ async function shutdown(signal: string): Promise<void> {
   llmHookWatcher?.stop()
   configStore?.stop()
   stopContextMapperPolling()
+  mcpAuthorityStalenessDeadline.clear()
   stopMcpStatusHeartbeat()
   statelessHeartbeat?.stop()
   if (guardrailResolveTimer) {
@@ -2725,8 +2854,6 @@ async function startProductionMode(): Promise<void> {
   console.log(`[Main] Namespace: ${config.namespace}`)
   console.log(`[Main] Context Mapper URL: ${config.contextMapperUrl}`)
 
-  contextMapperClient = getContextMapperClient()
-
   const host = await getHost(config.hostName)
 
   if (!host) {
@@ -2784,8 +2911,8 @@ async function startProductionMode(): Promise<void> {
   // A failed initial attempt is logged loudly; the context-mapper poll then
   // reconciles the catalog (the platform tolerates the 'connecting' sweep).
   startMcpInitializationInBackground({
-    initialize: () => initializeMcpServers(host.spec.contextRef),
-    afterInitialAttempt: () => ensureContextMapperPolling(host.spec.contextRef),
+    initialize: () => initializeMcpServers(),
+    afterInitialAttempt: () => ensureContextMapperPolling(),
   })
 
   console.log(`[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'}`)

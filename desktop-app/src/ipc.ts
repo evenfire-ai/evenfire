@@ -1705,6 +1705,51 @@ export function registerIpcHandlers(service: AppService): void {
     return service.captureSandboxUiPreview()
   })
 
+  ipcMain.handle(
+    'sandboxUi:findInPage',
+    async (
+      event,
+      payload: {
+        query?: unknown
+        operation?: unknown
+        clientRequestId?: unknown
+      }
+    ) => {
+      assertTrustedSender(event)
+      const query = typeof payload?.query === 'string' ? payload.query : ''
+      if (!query.trim() || query.length > 500) {
+        throw new Error('find query must contain 1 to 500 characters')
+      }
+      if (!['start', 'next', 'previous'].includes(String(payload?.operation))) {
+        throw new Error('find operation must be start, next, or previous')
+      }
+      if (!Number.isSafeInteger(payload?.clientRequestId) || Number(payload.clientRequestId) <= 0) {
+        throw new Error('find client request ID must be a positive safe integer')
+      }
+      const clientRequestId = Number(payload.clientRequestId)
+      return service.findInActiveSandboxUi(
+        query,
+        payload.operation as 'start' | 'next' | 'previous',
+        clientRequestId,
+        result => {
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('sandboxUi:findResult', { ...result, clientRequestId })
+          }
+        }
+      )
+    }
+  )
+
+  ipcMain.handle('sandboxUi:stopFindInPage', async event => {
+    assertTrustedSender(event)
+    await service.stopActiveSandboxUiFind()
+  })
+
+  ipcMain.handle('sandboxUi:focusActive', async event => {
+    assertTrustedSender(event)
+    return service.focusActiveSandboxUi()
+  })
+
   // Embed-side refresh request. NOTE: this IPC is exposed to *untrusted*
   // recipe JS via the embed preload, so we deliberately do NOT call
   // `assertTrustedSender` (the embed loads from the rpc-proxy URL, not

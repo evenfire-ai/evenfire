@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   HostMessageRequest,
@@ -6,7 +7,67 @@ import type {
   SandboxUiDeepLinkEnvelope,
 } from './types.js'
 
+// Sandboxed Electron preloads cannot load relative runtime modules. Keep this
+// allowlist self-contained and pin it to the authoritative registry in
+// desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
+const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
+  'chat.newTab',
+  'chat.closeTab',
+  'tabs.select1',
+  'tabs.select2',
+  'tabs.select3',
+  'tabs.select4',
+  'tabs.select5',
+  'tabs.select6',
+  'tabs.select7',
+  'tabs.select8',
+  'tabs.selectLast',
+  'tabs.next',
+  'tabs.previous',
+  'search.open',
+  'search.current',
+  'composer.focus',
+  'commands.open',
+  'settings.shortcuts',
+  'settings.open',
+  'auth.logout',
+  'navigate.chat',
+  'navigate.apps',
+  'navigate.agents',
+  'notifications.open',
+  'navigate.plugins',
+  'navigate.contexts',
+  'navigate.teams',
+  'navigate.connectors',
+  'navigate.files',
+  'sidebar.toggle',
+  'app.refresh',
+  'app.backToApps',
+  'app.backToConversation',
+])
+
+function isDesktopCommandId(value: unknown): value is DesktopCommandId {
+  return typeof value === 'string' && DESKTOP_COMMAND_IDS.has(value as DesktopCommandId)
+}
+
 const clerum = Object.freeze({
+  shortcuts: {
+    onCommand: (callback: (commandId: DesktopCommandId, source: DesktopCommandSource) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: { commandId?: unknown; source?: unknown }
+      ) => {
+        if (
+          isDesktopCommandId(payload?.commandId) &&
+          (payload?.source === 'host' || payload?.source === 'sandbox')
+        ) {
+          callback(payload.commandId, payload.source)
+        }
+      }
+      ipcRenderer.on('shortcuts:command', listener)
+      return () => ipcRenderer.off('shortcuts:command', listener)
+    },
+  },
   auth: {
     getSessionState: () => ipcRenderer.invoke('auth:getSessionState'),
     getDependenciesHealth: () => ipcRenderer.invoke('auth:getDependenciesHealth'),
@@ -506,6 +567,47 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
+    findInPage: (
+      query: string,
+      options: { operation: 'start' | 'next' | 'previous'; clientRequestId: number }
+    ) =>
+      ipcRenderer.invoke('sandboxUi:findInPage', { query, ...options }) as Promise<
+        | { status: 'started'; requestId: number }
+        | { status: 'unavailable'; reason: 'no-active-view' | 'document-loading' | 'no-session' }
+      >,
+    stopFindInPage: () => ipcRenderer.invoke('sandboxUi:stopFindInPage') as Promise<void>,
+    focusActive: () => ipcRenderer.invoke('sandboxUi:focusActive') as Promise<boolean>,
+    onFindResult: (
+      callback: (result: {
+        requestId: number
+        clientRequestId: number
+        activeMatchOrdinal: number
+        matches: number
+        finalUpdate: boolean
+      }) => void
+    ) => {
+      const listener = (_event: unknown, result: unknown) => {
+        const value = result as Record<string, unknown>
+        if (
+          Number.isInteger(value?.requestId) &&
+          Number.isSafeInteger(value?.clientRequestId) &&
+          Number(value.clientRequestId) > 0 &&
+          Number.isInteger(value?.activeMatchOrdinal) &&
+          Number.isInteger(value?.matches) &&
+          typeof value?.finalUpdate === 'boolean'
+        ) {
+          callback({
+            requestId: Number(value.requestId),
+            clientRequestId: Number(value.clientRequestId),
+            activeMatchOrdinal: Number(value.activeMatchOrdinal),
+            matches: Number(value.matches),
+            finalUpdate: value.finalUpdate,
+          })
+        }
+      }
+      ipcRenderer.on('sandboxUi:findResult', listener)
+      return () => ipcRenderer.off('sandboxUi:findResult', listener)
+    },
     onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => {
       const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
       ipcRenderer.on('sandboxUi:deepLink', listener)

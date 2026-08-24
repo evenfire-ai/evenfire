@@ -72,6 +72,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     failedAgentSend,
     activeChatId,
     activeMessageCount,
+    composerFocusRequestId,
   } = useChatComposerStateContext()
   const {
     clearComposerSendError,
@@ -257,6 +258,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       composerInputRef.current?.focus()
     })
   }, [activeChatId, activeMessageCount, agentSending])
+
+  useEffect(() => {
+    if (composerFocusRequestId === 0) return
+    const textarea = composerInputRef.current
+    if (!textarea || textarea.disabled || document.activeElement === textarea) return
+    textarea.focus()
+  }, [composerFocusRequestId])
 
   const handleDraftChange = useCallback(
     (value: string) => {

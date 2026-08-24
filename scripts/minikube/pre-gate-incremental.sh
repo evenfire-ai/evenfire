@@ -141,7 +141,10 @@ incremental_classify_path() {
     rpc-proxy/*) incremental_add_target rpc-proxy rpc-proxy rpc-proxy ;;
     mcp-host/*) incremental_add_target mcp-host mcp-host chatllm ;;
     host-context-controller/*) incremental_add_target host-context-controller control-plane host-context-controller ;;
-    gfs-controller/*) incremental_add_target gfs-controller control-plane host-context-controller ;;
+    gfs-controller/*)
+      incremental_add_target gfs-controller gfs gfsc-writer
+      incremental_add_target gfs-controller gfs gfsc-reader
+      ;;
     workflow-recipes/*|packages/workflow-runtime-core/*|packages/workflow-sdk/*)
       incremental_add_target workflow control-plane workflow-recipes
       ;;
@@ -385,7 +388,7 @@ incremental_abort_unshadowable() {
 }
 
 incremental_build_images() {
-  local target selector
+  local target selector built="|"
 
   if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
     incremental_build_images_ghcr
@@ -409,6 +412,8 @@ incremental_build_images() {
 
   for target in "${INCREMENTAL_TARGETS[@]}"; do
     selector="${target%%|*}"
+    [[ "${built}" == *"|${selector}|"* ]] && continue
+    built+="${selector}|"
     log "Building only image selector ${selector}"
     MINIKUBE_PROFILE="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/build-images.sh" "--only=${selector}"
@@ -416,7 +421,7 @@ incremental_build_images() {
 }
 
 incremental_build_images_ghcr() {
-  local target selector
+  local target selector built="|"
 
   if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ]]; then
     incremental_abort_unshadowable
@@ -444,6 +449,8 @@ incremental_build_images_ghcr() {
 
   for target in "${INCREMENTAL_TARGETS[@]}"; do
     selector="${target%%|*}"
+    [[ "${built}" == *"|${selector}|"* ]] && continue
+    built+="${selector}|"
     log "Building only image selector ${selector}"
     MINIKUBE_PROFILE="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/build-images.sh" "--only=${selector}"
@@ -454,7 +461,7 @@ incremental_build_images_ghcr() {
 }
 
 incremental_restart_targets() {
-  local target selector remainder namespace deployment deployment_key
+  local target selector remainder namespace deployment deployment_key deployment_probe
   local restarted="|"
 
   for target in "${INCREMENTAL_TARGETS[@]}"; do
@@ -466,13 +473,27 @@ incremental_restart_targets() {
 
     [[ "${restarted}" == *"${deployment_key}"* ]] && continue
     restarted+="${namespace}/${deployment}|"
-    if ! ${KC} get deployment "${deployment}" -n "${namespace}" >/dev/null 2>&1; then
-      log "Skipping absent ${namespace}/${deployment} for image selector ${selector}"
-      continue
+    deployment_probe=""
+    if ! deployment_probe="$(${KC} get deployment "${deployment}" -n "${namespace}" 2>&1)"; then
+      if [[ "${deployment_probe}" == *NotFound* || "${deployment_probe}" == *"not found"* ]]; then
+        log "Skipping absent ${namespace}/${deployment} for image selector ${selector}"
+        continue
+      fi
+      log "ERROR: unable to inspect ${namespace}/${deployment} for image selector ${selector}: ${deployment_probe}"
+      return 1
     fi
     ${KC} rollout restart "deployment/${deployment}" -n "${namespace}" >/dev/null
     log "Restarted ${namespace}/${deployment} for image selector ${selector}"
-    rollout_if_present "${namespace}" "${deployment}"
+    if [[ "${namespace}/${deployment}" == "gfs/gfsc-reader" ]]; then
+      # HCC owns the reader template and strips kubectl's restartedAt
+      # annotation. The canonical shim judges Ready replicas/pods instead of
+      # waiting forever on a deployment generation HCC can rewrite.
+      PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+        CONTEXT="${PROFILE}" ${KC} rollout status "deployment/${deployment}" \
+          -n "${namespace}" --timeout=120s >/dev/null
+    else
+      rollout_if_present "${namespace}" "${deployment}"
+    fi
   done
 }
 
