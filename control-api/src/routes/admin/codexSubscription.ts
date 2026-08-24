@@ -13,6 +13,7 @@ import {
   syncCodexSubscriptionCatalog,
 } from '../../services/codexSubscriptionCatalog.js'
 import {
+  CODEX_SUBSCRIPTION_CONNECTION_KEY,
   CODEX_UNASSIGNED_CONNECTION_KEY,
   CodexSubscriptionInvalidConnectionKeyError,
   assertCodexConnectionKey,
