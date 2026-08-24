@@ -167,11 +167,32 @@ assert_minikube_upgrade_classifier() {
   reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' <<<"$block" | head -1 | cut -d: -f1)"
   fallback="$(grep -nE '^[[:space:]]*else' <<<"$block" | tail -1 | cut -d: -f1)"
   fresh="$(grep -ni 'fresh bootstrap' <<<"$block" | tail -1 | cut -d: -f1)"
-  [[ -n "$dsn" && -n "$classify" && -n "$ready" && -n "$abort" && -n "$reconcile" && -n "$fallback" && -n "$fresh" ]] \
-    || fail "$path upgrade classifier is incomplete"
-  [[ "$dsn" -lt "$classify" && "$classify" -lt "$ready" && "$ready" -lt "$abort" && \
-     "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
-    || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
+  if [[ "$path" == *"scripts/minikube/full-setup.sh" ]]; then
+    local readiness_probe deferred non_gfs_filter deferred_full_overlay post_ready post_reconcile
+    readiness_probe="$(grep -n 'if control_api_is_ready' <<<"$block" | head -1 | cut -d: -f1)"
+    deferred="$(grep -n 'GFS_OVERLAY_DEFERRED=true' <<<"$block" | head -1 | cut -d: -f1)"
+    non_gfs_filter="$(grep -n 'filter-gfs-resources.py' "$path" | head -1 | cut -d: -f1)"
+    deferred_full_overlay="$(grep -n 'Deferred full kustomize overlay applied' "$path" | head -1 | cut -d: -f1)"
+    post_ready="$(grep -n 'rollout status deployment/control-api.*timeout=180s' "$path" | tail -1 | cut -d: -f1)"
+    post_reconcile="$(grep -nE '^[[:space:]]+reconcile_existing_gfs_credentials$' "$path" | tail -1 | cut -d: -f1)"
+    [[ -n "$dsn" && -n "$classify" && -n "$readiness_probe" && -n "$deferred" && \
+       -n "$fallback" && -n "$fresh" && -n "$non_gfs_filter" && \
+       -n "$deferred_full_overlay" && -n "$post_ready" && -n "$post_reconcile" ]] \
+      || fail "$path recovery classifier is incomplete"
+    [[ "$dsn" -lt "$classify" && "$classify" -lt "$readiness_probe" && \
+       "$readiness_probe" -lt "$deferred" && "$deferred" -lt "$fallback" && \
+       "$fallback" -lt "$fresh" && "$non_gfs_filter" -lt "$deferred_full_overlay" && \
+       "$post_ready" -lt "$deferred_full_overlay" ]] \
+      || fail "$path does not defer only the GFS-owned overlay until runtime-role readiness"
+    ! grep -Fq 'Existing GFS writer detected but control-api is not Ready; refusing HCC cutover' "$path" \
+      || fail "$path still deadlocks an unready partial bootstrap before runtime-role provisioning"
+  else
+    [[ -n "$dsn" && -n "$classify" && -n "$ready" && -n "$abort" && -n "$reconcile" && -n "$fallback" && -n "$fresh" ]] \
+      || fail "$path upgrade classifier is incomplete"
+    [[ "$dsn" -lt "$classify" && "$classify" -lt "$ready" && "$ready" -lt "$abort" && \
+       "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
+      || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
+  fi
 }
 assert_pre_gate_defers_gfs_reconcile() {
   local block
@@ -201,7 +222,7 @@ assert_pre_gate_defers_gfs_reconcile 'apply-gfs-writer-secret.sh' 'incremental_b
 full_setup_classifier="$(sed -n '/# Upgrade path: stage the additive reader/,/Applying kustomize overlay/p' scripts/minikube/full-setup.sh)"
 reset_classifier="$(grep -n 'if \[ "$RESET_DB" = true \]; then' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
 reset_classifier_defer="$(grep -n 'HCC cutover deferred until post-convergence verification' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
-reset_classifier_else="$(grep -n '^else$' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
+reset_classifier_else="$(awk -v start="$reset_classifier" 'NR > start && /^else$/ { print NR; exit }' <<<"$full_setup_classifier")"
 reset_classifier_dsn="$(grep -n 'writer_dsn=.*get secret gfs-controller-db' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
 [[ -n "$reset_classifier" && -n "$reset_classifier_defer" && -n "$reset_classifier_else" && -n "$reset_classifier_dsn" ]] && \
   [[ "$reset_classifier" -lt "$reset_classifier_defer" && "$reset_classifier_defer" -lt "$reset_classifier_else" && \
@@ -211,7 +232,7 @@ full_setup_reset="$(sed -n '/# 6a. Optional DB reset/,/# 6c. Re-apply generated 
 reset_defer="$(grep -n 'HCC cutover deferred until post-convergence verification' <<<"$full_setup_reset" | head -1 | cut -d: -f1)"
 reset_postgres_only="$(grep -n 'apply -k .* -l app=control-postgres' <<<"$full_setup_reset" | head -1 | cut -d: -f1)"
 reset_converge="$(grep -n 'converge-control-db-after-reset.sh' <<<"$full_setup_reset" | head -1 | cut -d: -f1)"
-reset_full_overlay="$(grep -n 'kubectl kustomize .* | .* apply -f -' <<<"$full_setup_reset" | tail -1 | cut -d: -f1)"
+reset_full_overlay="$(grep -nE '(kubectl|\$KC) kustomize .* \| .* apply -f -' <<<"$full_setup_reset" | tail -1 | cut -d: -f1)"
 [[ -n "$reset_defer" && -n "$reset_postgres_only" && -n "$reset_converge" && -n "$reset_full_overlay" ]] && \
   [[ "$reset_defer" -lt "$reset_postgres_only" && "$reset_postgres_only" -lt "$reset_converge" && "$reset_converge" -lt "$reset_full_overlay" ]] \
   || fail 'full-setup reset can require ready control-api or cut over HCC before convergence'

@@ -1100,53 +1100,92 @@ ok "Minikube K8s API CIDRs refreshed"
 # Upgrade path: stage the additive reader credential before the full overlay
 # changes HCC. Fresh bootstrap has no ready control-api yet and remains
 # fail-closed until the post-migration branch immediately below.
+#
+# A partially bootstrapped REUSE_DB profile is a distinct state from both a
+# fresh bootstrap and a healthy upgrade: an existing GFS writer proves that the
+# profile already owns a serving plane, while an unready control-api can mean
+# that the runtime-role Secret is still waiting for the migration below. Do not
+# cut HCC over in that state, but do not deadlock recovery on the same readiness
+# condition either. Keep the GFS-owned documents untouched, apply only the
+# explicit non-GFS portion of the overlay, then complete migrations/roles before
+# the full overlay and GFS credential reconciliation.
+GFS_OVERLAY_DEFERRED=false
+
+control_api_is_ready() {
+  local state replicas ready
+  if ! state="$($KC -n control-plane get deployment/control-api \
+    -o 'jsonpath={.spec.replicas}{"|"}{.status.readyReplicas}' 2>/dev/null)"; then
+    return 2
+  fi
+  IFS='|' read -r replicas ready <<<"$state"
+  ready="${ready:-0}"
+  if [[ ! "$replicas" =~ ^[1-9][0-9]*$ || ! "$ready" =~ ^[0-9]+$ ]]; then
+    return 2
+  fi
+  [[ "$ready" == "$replicas" ]]
+}
+
+apply_non_gfs_overlay() {
+  local filtered_manifest
+  filtered_manifest="$(mktemp "${TMPDIR:-/tmp}/evenfire-gfs-recovery.XXXXXX")"
+  if ! $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" \
+    | python3 "${PROJECT_DIR}/scripts/minikube/filter-gfs-resources.py" >"$filtered_manifest"; then
+    rm -f -- "$filtered_manifest"
+    err "Failed to render or filter the non-GFS overlay during recovery"
+    return 1
+  fi
+  if [ -s "$filtered_manifest" ]; then
+    if ! $KC apply -f "$filtered_manifest"; then
+      rm -f -- "$filtered_manifest"
+      err "Failed to apply the non-GFS overlay during recovery"
+      return 1
+    fi
+  else
+    log "Filtered recovery overlay contains no non-GFS resources; skipping apply"
+  fi
+  rm -f -- "$filtered_manifest"
+}
+
+reconcile_existing_gfs_credentials() {
+  # A staged sync may have deferred active-pod proof until the reconciler
+  # created the reader DSN. Complete that proof before the overlay changes HCC.
+  GFS_AUTH_SYNC_ALLOW_STAGED=true \
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+  # If gfsc-reader is already Ready, settle the leftover claim first so
+  # reconcile does not rollout restart and race HCC's gfsReconciler. The
+  # gfs-rollout-shim makes the wait judge readiness rather than the template
+  # generation HCC rewrites.
+  GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
+    T2_SKIP_LOCK=true \
+    bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
+  PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    T2_SKIP_LOCK=true \
+    CONTEXT="${PROFILE}" \
+    bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  # The staged sync may have deferred active-pod proof until this reconcile
+  # produced the reader DSN; the strict pass is the durable consumer attestation.
+  bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+}
+
 CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
 if [ "$RESET_DB" = true ]; then
   log "Database reset path — HCC cutover deferred until post-convergence verification"
 else
   writer_dsn="$($KC -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
   if [ -n "${writer_dsn}" ]; then
-    # apply-inter-service-tokens.sh intentionally restarts control-api before
-    # this cutover check. A five-second probe races that rollout and makes an
-    # otherwise healthy REUSE_DB rerun fail closed before the new pod can be
-    # Ready. Keep the refusal, but wait for the same bounded rollout window
-    # used by the main readiness gate.
-    if ! $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null 2>&1; then
-      err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
-      exit 1
+    if control_api_is_ready; then
+      log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
+      reconcile_existing_gfs_credentials
+    else
+      control_api_ready_status=$?
+      if [ "$control_api_ready_status" -ne 1 ]; then
+        err "Unable to determine control-api readiness; refusing to classify the GFS upgrade path"
+        exit 1
+      fi
+      GFS_OVERLAY_DEFERRED=true
+      log "Existing GFS writer detected but control-api is not Ready — deferring GFS-owned overlay and credential cutover until runtime roles converge"
     fi
-    log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
-    # REUSE_DB / T2 full-reconcile reaches this before pre-gate-sync. A prior T1
-    # can leave gfs_controller_reader NOLOGIN; restore from the committed
-    # Secret DSN (same opt-in as the GFS T1 gate). Still fail-loud on auth.
-    # GFS_RECOVER_ABANDONED_STATE: a timed-out prior setup can leave the
-    # reader Secret in rollout-running. This path holds the T2 profile lock,
-    # so the prior process is dead; resume that claim instead of asking for
-    # a manual retry flag between runs.
-    # A reader pod resolves gfs-config.jwt-public-key at container start and
-    # fails closed when it is empty (a prior interrupted run can leave it
-    # wiped by the overlay re-apply). Re-sync it from the live platform
-    # Secret before reconcile so a reader pod can actually start; this is a
-    # no-op when the key already matches.
-    GFS_AUTH_SYNC_ALLOW_STAGED=true \
-      bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
-    # If gfsc-reader is already Ready, settle the leftover claim first so
-    # reconcile does not rollout restart and race HCC's gfsReconciler.
-    # The gfs-rollout-shim PATH prefix makes any reader rollout wait inside
-    # reconcile judge readiness instead of the template generation HCC keeps
-    # rewriting (it strips the restartedAt annotation, so a generation wait
-    # loops until timeout).
-    GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
-      T2_SKIP_LOCK=true \
-      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
-    PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
-      GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
-      T2_SKIP_LOCK=true \
-      CONTEXT="${PROFILE}" \
-      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
-    # A staged sync may have deferred active-pod proof until the reconciler
-    # created the reader DSN. Complete that proof before the overlay is applied.
-    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
   else
     log "Fresh bootstrap detected — reader staging deferred until migrations; GFSC remains fail-closed"
   fi
@@ -1157,10 +1196,13 @@ if [ "$RESET_DB" = true ]; then
   # Keep control-api scaled to zero until migrations and role restoration are
   # complete; applying the full overlay here would race it against a fresh DB.
   $KC apply -k "$ACTIVE_MINIKUBE_RENDER_DIR" -l app=control-postgres
+elif [ "$GFS_OVERLAY_DEFERRED" = true ]; then
+  log "Applying the non-GFS recovery overlay before database migration..."
+  apply_non_gfs_overlay
 else
-  kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+  $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
 fi
-ok "Kustomize overlay applied"
+ok "Kustomize overlay applied (full or non-GFS recovery phase)"
 
 if [ "$RESET_DB" = true ]; then
   log "Rebuilding database contracts and restoring GFS roles after reset..."
@@ -1168,7 +1210,7 @@ if [ "$RESET_DB" = true ]; then
   CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/converge-control-db-after-reset.sh" \
     --overlay "$ACTIVE_MINIKUBE_RENDER_DIR" \
     --job-name control-api-db-migrate-reset
-  kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+  $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
   # The overlay declares ordinary one-replica defaults. Reassert the exact
   # pre-reset operating counts after applying it; credentials are verified and
   # HCC is restored by convergence before this safe rollout boundary.
@@ -1198,33 +1240,43 @@ else
     --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
   CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
       bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
-    ok "Control-api database migrations and runtime roles applied"
+  ok "Control-api database migrations and runtime roles applied"
 
-    # The credential probe runs through control-api, so prove that deployment is
-    # live before normal staging on bootstrap or an idempotent upgrade.
-    $KC scale deployment/control-api -n control-plane --replicas=1 >/dev/null
-    $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
-    # On the upgrade path the overlay above may still be cutting HCC over to
-    # the split writer/reader templates; reconciling before that lands leaves
-    # the staged reader credential rollout-pending and fails the final verify.
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
-    # The overlay apply above re-declared the base gfs-config with an empty
-    # jwt-public-key; re-sync it before any reader pod may need to start,
-    # otherwise the reconcile readiness wait can only time out.
-    GFS_AUTH_SYNC_ALLOW_STAGED=true \
-      bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
-    GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
-      T2_SKIP_LOCK=true \
-      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
-    PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
-      GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
-      T2_SKIP_LOCK=true \
-      CONTEXT="${PROFILE}" \
-      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
-    # The preceding staged sync is allowed to wait for this DSN-producing
-    # reconcile; the strict pass is the durable consumer attestation.
+  # The credential probe runs through control-api, so prove that deployment is
+  # live before normal staging on bootstrap or an idempotent upgrade. On the
+  # deferred recovery path this is also the point where the missing runtime
+  # Secret has been provisioned, so the previously blocked deployment can start.
+  $KC scale deployment/control-api -n control-plane --replicas=1 >/dev/null
+  $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
+
+  if [ "$GFS_OVERLAY_DEFERRED" = true ]; then
+    log "Control-api/runtime roles are Ready — reconciling GFS before the deferred full overlay"
+    reconcile_existing_gfs_credentials
+    $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+    ok "Deferred full kustomize overlay applied after control-api/runtime role readiness"
+  fi
+
+  # On the upgrade path the full overlay may still cut HCC over to the
+  # split writer/reader templates; reconciling after that lands leaves the
+  # staged reader credential rollout-pending and fails the final verify.
+  CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
+  # The overlay apply re-declares the base gfs-config with an empty jwt-public-key;
+  # re-sync it before any reader pod may need to start, otherwise the reconcile
+  # readiness wait can only time out.
+  GFS_AUTH_SYNC_ALLOW_STAGED=true \
     bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
-    ok "GFS credentials reconciled and writer bootstrap verified"
+  GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
+    T2_SKIP_LOCK=true \
+    bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
+  PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    T2_SKIP_LOCK=true \
+    CONTEXT="${PROFILE}" \
+    bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  # The preceding staged sync is allowed to wait for this DSN-producing
+  # reconcile; the strict pass is the durable consumer attestation.
+  bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+  ok "GFS credentials reconciled and writer bootstrap verified"
 fi
 
 # 6c. Re-apply generated service tokens after kustomize.
