@@ -566,6 +566,9 @@ describe('GfsBrowser', () => {
     fireEvent.click(previewTrigger)
 
     const dialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
+    const copyButton = within(dialog).getByRole('button', { name: /Copy image to clipboard/i })
+    expect(copyButton.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 24 24')
+    expect(copyButton.querySelector('path')?.getAttribute('d')).toBe('M0 0h24v24H0z')
     expect(
       await within(dialog).findByRole('img', { name: 'Preview of avatar.PNG' })
     ).toHaveAttribute('src', 'blob:gfs-image-preview')
@@ -644,6 +647,8 @@ describe('GfsBrowser', () => {
     const copyButton = within(dialog).getByRole('button', {
       name: /Copy preview contents to clipboard/i,
     })
+    expect(copyButton.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 24 24')
+    expect(copyButton.querySelector('path')?.getAttribute('d')).toBe('M0 0h24v24H0z')
     fireEvent.click(copyButton)
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('# Hello\n\nGreetings.'))

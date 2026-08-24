@@ -1676,6 +1676,9 @@ describe('FilesPage', () => {
 
     const dialog = await screen.findByRole('dialog', { name: 'diagram.PNG' })
     await waitFor(() => expect(within(dialog).getByAltText('Preview of diagram.PNG')).toBeTruthy())
+    const copyButton = within(dialog).getByRole('button', { name: /Copy image to clipboard/i })
+    expect(copyButton.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 24 24')
+    expect(copyButton.querySelector('path')?.getAttribute('d')).toBe('M0 0h24v24H0z')
     expect(download).toHaveBeenCalledWith('gfs://main/image-1')
     expect(download).toHaveBeenCalledTimes(1)
     expect(anchorClick).not.toHaveBeenCalled()
@@ -1728,6 +1731,8 @@ describe('FilesPage', () => {
     const copyButton = within(dialog).getByRole('button', {
       name: /Copy preview contents to clipboard/i,
     })
+    expect(copyButton.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 24 24')
+    expect(copyButton.querySelector('path')?.getAttribute('d')).toBe('M0 0h24v24H0z')
     fireEvent.click(copyButton)
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))

@@ -11659,7 +11659,7 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-image-preview-dialog__copy.cu-btn:hover:not(:disabled),
 .cu-gfs-markdown-preview-dialog__copy.cu-btn:hover:not(:disabled),
 .cu-gfs-video-preview-dialog__copy.cu-btn:hover:not(:disabled) {
-  color: var(--cu-accent);
+  color: color-mix(in srgb, var(--cu-accent-hover) 62%, var(--cu-text-soft) 38%);
 }
 
 .cu-gfs-preview-button__label {
