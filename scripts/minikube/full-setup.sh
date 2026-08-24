@@ -1534,7 +1534,7 @@ apply_refreshed_k8s_api_network_policies() {
     err "Validated Kubernetes API NetworkPolicy manifest is missing; refusing writer recovery"
     return 1
   fi
-  if writer_recovery_policy_ready; then
+  if writer_recovery_policy_ready && [ "$K8S_API_EGRESS_POLICY_DRIFT" != true ]; then
     log "Validated Kubernetes API egress policy already staged; resuming writer recovery"
     return 0
   fi

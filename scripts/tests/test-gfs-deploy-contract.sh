@@ -224,6 +224,8 @@ assert_minikube_upgrade_classifier() {
       || fail "$path does not mark post-migration recovery as complete"
     grep -Fq 'WRITER_RECOVERY_FENCE_PENDING=true' "$path" \
       || fail "$path does not re-fence every durable post-migration resume"
+    grep -Fq 'if writer_recovery_policy_ready && [ "$K8S_API_EGRESS_POLICY_DRIFT" != true ]; then' "$path" \
+      || fail "$path can skip a refreshed Kubernetes API egress policy after endpoint drift"
     grep -Fq 'render-fenced-writer-deployments.rb' "$path" \
       || fail "$path does not render a fenced recovery overlay"
     grep -Fq 'writer_recovery_state_phase overlay-applying' "$path" \
