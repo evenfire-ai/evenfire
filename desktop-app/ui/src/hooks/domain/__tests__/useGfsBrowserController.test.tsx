@@ -10,6 +10,15 @@ import {
   useGfsBrowserController,
 } from '../useGfsBrowserController'
 
+// Fire-and-forget UI actions in these probes mirror the production callers,
+// which await the same promises inside try/catch (see FilesPage). Swallow
+// rejections here so a late/rejected mutation — e.g. a createFolder that runs
+// once `current` has cleared and throws "No folder selected" — never escapes as
+// an unhandled rejection and fails an unrelated test later in the full suite.
+const swallow = (promise: Promise<unknown>): void => {
+  void promise.catch(() => {})
+}
+
 const userA = {
   id: 'user-a',
   email: 'a@example.test',
@@ -107,10 +116,10 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
           crumb {crumb.name}
         </button>
       ))}
-      <button type="button" onClick={() => void ctrl.openUri('gfs://main/root')}>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open
       </button>
-      <button type="button" onClick={() => void ctrl.refreshAffordances()}>
+      <button type="button" onClick={() => swallow(ctrl.refreshAffordances())}>
         refresh permissions
       </button>
       <button type="button" onClick={() => ctrl.reset()}>
@@ -121,7 +130,7 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
       </button>
       <button
         type="button"
-        onClick={() => (ctrl.current ? void ctrl.createFolder('Root docs') : undefined)}
+        onClick={() => (ctrl.current ? swallow(ctrl.createFolder('Root docs')) : undefined)}
       >
         create folder current
       </button>
@@ -129,7 +138,7 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'notes.md')
+            ? swallow(ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'notes.md'))
             : undefined
         }
       >
@@ -139,10 +148,12 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.renameResource(
-                ctrl.current.resourceId,
-                'Renamed report.md',
-                ctrl.current.version
+            ? swallow(
+                ctrl.renameResource(
+                  ctrl.current.resourceId,
+                  'Renamed report.md',
+                  ctrl.current.version
+                )
               )
             : undefined
         }
@@ -153,7 +164,9 @@ function Probe({ grantsListEnabled = false }: { grantsListEnabled?: boolean }) {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.replaceFile(ctrl.current.resourceId, 'replacement.md', ctrl.current.version)
+            ? swallow(
+                ctrl.replaceFile(ctrl.current.resourceId, 'replacement.md', ctrl.current.version)
+              )
             : undefined
         }
       >
@@ -171,11 +184,13 @@ function UploadProbe() {
       <button
         type="button"
         onClick={() =>
-          void ctrl.startFileUpload({
-            parentResourceId: 'parent-rid',
-            name: 'legacy.bin',
-            filePath: '/tmp/legacy.bin',
-          })
+          swallow(
+            ctrl.startFileUpload({
+              parentResourceId: 'parent-rid',
+              name: 'legacy.bin',
+              filePath: '/tmp/legacy.bin',
+            })
+          )
         }
       >
         start upload
@@ -1290,7 +1305,7 @@ function ManageProbe() {
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
       <div data-testid="grants-count">{ctrl.grants.length}</div>
       <div data-testid="shares-count">{ctrl.shares.length}</div>
-      <button type="button" onClick={() => void ctrl.openUri('gfs://main/root')}>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open root
       </button>
       <button type="button" onClick={() => setManageOpen(true)}>
@@ -1299,19 +1314,19 @@ function ManageProbe() {
       <button type="button" onClick={() => setManageOpen(false)}>
         close manage
       </button>
-      <button type="button" onClick={() => void ctrl.refreshGrants()}>
+      <button type="button" onClick={() => swallow(ctrl.refreshGrants())}>
         refresh grants
       </button>
-      <button type="button" onClick={() => void ctrl.revokeGrant('grant-42')}>
+      <button type="button" onClick={() => swallow(ctrl.revokeGrant('grant-42'))}>
         revoke grant
       </button>
-      <button type="button" onClick={() => void ctrl.revokeShare('share-42')}>
+      <button type="button" onClick={() => swallow(ctrl.revokeShare('share-42'))}>
         revoke share
       </button>
-      <button type="button" onClick={() => void ctrl.grant(['user:bob'], ['read'], true)}>
+      <button type="button" onClick={() => swallow(ctrl.grant(['user:bob'], ['read'], true))}>
         grant inherit true
       </button>
-      <button type="button" onClick={() => void ctrl.grant(['team:qa'], ['read'], false)}>
+      <button type="button" onClick={() => swallow(ctrl.grant(['team:qa'], ['read'], false))}>
         grant inherit false
       </button>
     </>
