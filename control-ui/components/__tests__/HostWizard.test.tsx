@@ -124,8 +124,8 @@ async function walkToAccessStep(opts?: { agentName?: string }) {
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
   // Step 1: Model & Credentials — default model is valid; reuse the secret we provided.
-  fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
-  fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+  fireEvent.click(screen.getByLabelText(/Use an existing LLM Secret/i))
+  fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
   fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
@@ -137,10 +137,10 @@ function openTeamsAccessTab() {
 }
 
 /**
- * Walk to the Access step choosing "New credential" so a Secret is actually
+ * Walk to the Access step choosing "Create a new LLM Secret" so a Secret is actually
  * created (secretMode='new'). This is the vehicle the create-only/compensation
  * tests need: an already-POSTed secret that a later failure must roll back. The
- * new Secret name is auto-derived from the agent name as `${slug}-llm`.
+ * new LLM Secret name is auto-derived from the agent name as `${slug}-llm`.
  */
 async function walkToAccessStepNewSecret(opts?: { agentName?: string }) {
   const name = opts?.agentName ?? 'newsecretagent'
@@ -153,10 +153,10 @@ async function walkToAccessStepNewSecret(opts?: { agentName?: string }) {
   fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: name } })
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-  // Step 1: New secret → make the OpenAI primary usable; secret name auto-derives.
-  // (dev's wizard renamed the "New credential" toggle to the "New secret"
+  // Step 1: New LLM Secret → make the OpenAI primary usable; its internal name auto-derives.
+  // (dev's wizard renamed the "New credential" toggle to the "Create a new LLM Secret"
   // secretMode radio — the create-only seam it drives is unchanged.)
-  fireEvent.click(screen.getByLabelText(/New secret/i))
+  fireEvent.click(screen.getByLabelText(/Create a new LLM Secret/i))
   fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
   await waitFor(() => {
     expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
@@ -193,7 +193,7 @@ afterEach(() => {
 })
 
 describe('HostWizard — credential draft is projected onto the active provider domain', () => {
-  it('shows every provider with complete credentials for an existing Secret', async () => {
+  it('shows every provider with complete credentials for an existing LLM Secret', async () => {
     await renderWizard({
       existingSecrets: [
         buildSecretSummary({
@@ -206,8 +206,8 @@ describe('HostWizard — credential draft is projected onto the active provider 
 
     fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
-    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+    fireEvent.click(screen.getByLabelText(/Use an existing LLM Secret/i))
+    fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
 
     const option = screen.getByRole('option', { name: /shared-llm-keys/ })
     expect(option).toHaveTextContent(/Providers: OpenAI, Amazon Bedrock/)
@@ -228,7 +228,7 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
     fireEvent.click(screen.getByRole('option', { name: /zai-only/i }))
     const providerField = screen.getByText('Provider', { selector: 'label' }).parentElement
     const modelField = screen.getByText('Default model', { selector: 'label' }).parentElement
@@ -241,20 +241,20 @@ describe('HostWizard — credential draft is projected onto the active provider 
     expect(modelField).toHaveTextContent('claude-sonnet-4-6')
   })
 
-  it('leads with an existing Secret and keeps fallback providers collapsed in create', async () => {
+  it('leads with an existing LLM Secret and keeps fallback providers collapsed in create', async () => {
     await renderWizard()
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
 
     fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-    const existingCard = screen.getByLabelText(/Use an existing Secret/i).closest('label')
-    const newCard = screen.getByLabelText(/New secret/i).closest('label')
+    const existingCard = screen.getByLabelText(/Use an existing LLM Secret/i).closest('label')
+    const newCard = screen.getByLabelText(/Create a new LLM Secret/i).closest('label')
     expect(existingCard).not.toBeNull()
     expect(newCard).not.toBeNull()
-    expect(screen.getByLabelText(/Use an existing Secret/i)).toBeChecked()
-    expect(screen.getByLabelText(/New secret/i)).not.toBeChecked()
-    expect(screen.getByText('Credential', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.getByLabelText(/Use an existing LLM Secret/i)).toBeChecked()
+    expect(screen.getByLabelText(/Create a new LLM Secret/i)).not.toBeChecked()
+    expect(screen.getByText('LLM Secret', { selector: 'strong' })).toBeInTheDocument()
     expect(existingCard?.compareDocumentPosition(newCard as Node)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING
     )
@@ -276,8 +276,8 @@ describe('HostWizard — credential draft is projected onto the active provider 
     })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-    // Step 1: explicitly create a new Secret and make the OpenAI primary usable.
-    fireEvent.click(screen.getByLabelText(/New secret/i))
+    // Step 1: explicitly create a new LLM Secret and make the OpenAI primary usable.
+    fireEvent.click(screen.getByLabelText(/Create a new LLM Secret/i))
     fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
 
     // Add a fallback and switch it to Bedrock (a different provider than the

@@ -18,7 +18,6 @@ export type HostOverviewTabProps = {
   contextMcpTotal: number
   modelPrimary: string
   modelProviderLine: string
-  modelAllowlistLine: string
   accessSummary: HostOverviewAccessSummary
   onNavigate: (tab: HostTabKey) => void
   onSaveDisplayName: (displayName: string) => Promise<boolean>

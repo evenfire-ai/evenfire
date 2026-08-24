@@ -113,6 +113,9 @@ describe('SecretsTable — LLM secret update payload', () => {
 
   const save = () => fireEvent.click(screen.getByRole('button', { name: 'Update secret' }))
 
+  const replaceOpenAiKey = () =>
+    fireEvent.click(screen.getByRole('button', { name: 'Replace OpenAI API key' }))
+
   // Retirement is irreversible, so the save goes through a danger confirm. The
   // dialog is scoped by role — the LLM modal has its own "Cancel" button.
   async function resolveRemovalConfirm(action: 'Remove and save' | 'Cancel') {
@@ -168,6 +171,7 @@ describe('SecretsTable — LLM secret update payload', () => {
 
   it('sends written values and retired keys in the same merge write', async () => {
     openUpdateModal(['claude-api-key-fb1', 'openai-api-key'])
+    replaceOpenAiKey()
     fireEvent.change(screen.getByLabelText(/^OpenAI API key/i), { target: { value: 'sk-live' } })
     removeExtraSlotIn('Anthropic')
     save()
@@ -185,6 +189,7 @@ describe('SecretsTable — LLM secret update payload', () => {
 
   it('omits removeKeys — and the confirm — when nothing was retired', async () => {
     openUpdateModal(['openai-api-key'])
+    replaceOpenAiKey()
     fireEvent.change(screen.getByLabelText(/^OpenAI API key/i), { target: { value: 'sk-live' } })
     save()
 
@@ -263,6 +268,7 @@ describe('SecretsTable — LLM secret update payload', () => {
 
     fireEvent.click(screen.getByRole('button', { name: `Actions for LLM secret ${SECRET}` }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    replaceOpenAiKey()
     fireEvent.change(screen.getByLabelText(/^OpenAI API key/i), { target: { value: 'sk-live' } })
     save()
 

@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
@@ -14,6 +15,7 @@ import { HostGuardrailsSection } from '../../../components/HostGuardrailsSection
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
+import { LlmCredentialFields } from '../../../components/LlmCredentialFields'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
@@ -43,6 +45,7 @@ import {
   normalizeLlmPolicy,
   normalizeProvider,
   projectCredentialDraft,
+  providerForDataKey,
   resolveDefaultModel,
   validateLlmPolicy,
   validateLlmSecretData,
@@ -244,6 +247,7 @@ export default function HostDetailsPage() {
   // was removed (spec Topic 1b R5: offer to RETIRE via removeKeys). Applied on
   // save unless the operator opts out.
   const [retireCandidates, setRetireCandidates] = useState<string[]>([])
+  const [additionalRetireCandidates, setAdditionalRetireCandidates] = useState<string[]>([])
   // Data keys present per LLM Secret name, so the fallback credentialSlot
   // dropdown can offer extra keys (e.g. `claude-api-key-fb1`) — never free text.
   const [secretKeysByName, setSecretKeysByName] = useState<Record<string, string[]>>({})
@@ -449,6 +453,7 @@ export default function HostDetailsPage() {
         // Write-only surfaces reset only when this tab is reloaded or saved.
         setLlmKeyDraft({})
         setRetireCandidates([])
+        setAdditionalRetireCandidates([])
       }
       const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
       setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
@@ -594,6 +599,84 @@ export default function HostDetailsPage() {
   const currentSecretKeys = useMemo(
     () => secretKeysByName[secretRefDraft] ?? [],
     [secretKeysByName, secretRefDraft]
+  )
+
+  const activeCredentialProviders = useMemo(() => {
+    const providers = new Set<LlmProvider>([
+      providerDraft,
+      ...(llmPolicyDraft?.fallbacks ?? []).map(fallback => fallback.provider),
+    ])
+    return providers
+  }, [llmPolicyDraft, providerDraft])
+
+  // The host runtime still selects credentials through the primary/fallback
+  // provider domain. Other provider keys can safely live in the same Secret,
+  // but they are intentionally shown in a separate additive editor until the
+  // operator selects one as a primary or fallback provider.
+  const additionalCredentialKeys = useMemo(
+    () =>
+      currentSecretKeys.filter(key => {
+        const owner = providerForDataKey(key)
+        return owner !== null && !activeCredentialProviders.has(owner)
+      }),
+    [activeCredentialProviders, currentSecretKeys]
+  )
+  const additionalCredentialDraft = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(llmKeyDraft).filter(([key, value]) => {
+          const owner = providerForDataKey(key)
+          return owner !== null && !activeCredentialProviders.has(owner) && value.trim().length > 0
+        })
+      ),
+    [activeCredentialProviders, llmKeyDraft]
+  )
+  const credentialSetProviders = useMemo(() => {
+    const providers = new Set<LlmProvider>()
+    for (const key of currentSecretKeys) {
+      const owner = providerForDataKey(key)
+      if (owner) providers.add(owner)
+    }
+    return Array.from(providers)
+      .map(provider => ({
+        provider,
+        usable: isProviderUsable(provider, key => currentSecretKeys.includes(key)),
+      }))
+      .sort((left, right) =>
+        getProviderLabel(left.provider).localeCompare(getProviderLabel(right.provider))
+      )
+  }, [currentSecretKeys])
+  const credentialSetOptions = useMemo(() => {
+    const options = availableSecrets.map(secretName => {
+      const providers = new Set<LlmProvider>()
+      for (const key of secretKeysByName[secretName] ?? []) {
+        const owner = providerForDataKey(key)
+        if (owner) providers.add(owner)
+      }
+      const providerNames = Array.from(providers)
+        .map(getProviderLabel)
+        .sort((left, right) => left.localeCompare(right))
+      return {
+        value: secretName,
+        label: secretName,
+        description:
+          providerNames.length > 0
+            ? `${providerNames.join(', ')} available`
+            : 'No recognized provider credentials yet',
+      }
+    })
+    if (secretRefDraft && !availableSecrets.includes(secretRefDraft)) {
+      options.push({
+        value: secretRefDraft,
+        label: secretRefDraft,
+        description: 'Selected LLM Secret (details unavailable)',
+      })
+    }
+    return options
+  }, [availableSecrets, secretKeysByName, secretRefDraft])
+  const pendingCredentialRemovals = useMemo(
+    () => Array.from(new Set([...retireCandidates, ...additionalRetireCandidates])),
+    [additionalRetireCandidates, retireCandidates]
   )
 
   const connectorOptions = useMemo(
@@ -771,8 +854,16 @@ export default function HostDetailsPage() {
     // switched, or a fallback removed) is neither validated nor written — no
     // stale block, no orphan key. Then validate cross-slot shape up front.
     const activeCredentialKeys = getActiveCredentialKeys(providerDraft, llmPolicyDraft)
-    const rotatedData = projectCredentialDraft(llmKeyDraft, activeCredentialKeys)
-    const removeKeys = retireCandidates.filter(key => !(key in rotatedData))
+    // Additive provider editing intentionally extends the active routing domain:
+    // a provider added to this LLM Secret is persisted now and becomes
+    // available for primary/fallback selection without another secret flow.
+    const credentialKeysToWrite = new Set(activeCredentialKeys)
+    for (const key of Object.keys(llmKeyDraft)) {
+      const owner = providerForDataKey(key)
+      if (owner && !activeCredentialProviders.has(owner)) credentialKeysToWrite.add(key)
+    }
+    const rotatedData = projectCredentialDraft(llmKeyDraft, credentialKeysToWrite)
+    const removeKeys = pendingCredentialRemovals.filter(key => !(key in rotatedData))
     // Cross-slot shape check on the rotated keys only. Note: rotating one half of
     // the Bedrock pair fails this (both must be written together) — matching the
     // server contract; the operator re-enters both to rotate either.
@@ -993,9 +1084,6 @@ export default function HostDetailsPage() {
             modelProviderLine={
               modelNameDraft ? `${getProviderLabel(providerDraft)} · ${modelNameDraft}` : ''
             }
-            modelAllowlistLine={allowedModelsDraft
-              .map(entry => `${getProviderLabel(entry.provider)} · ${entry.model}`)
-              .join(', ')}
             accessSummary={accessSummary}
             onNavigate={tab => selectTab(tab)}
             onSaveDisplayName={nextDisplayName => saveHost(nextDisplayName)}
@@ -1006,43 +1094,12 @@ export default function HostDetailsPage() {
 
         {activeTab === 'model' && (
           <>
-            <div className={editingModel ? 'cu-agent-detail-toolbar' : 'cu-agent-detail-heading'}>
+            <div className="cu-agent-detail-heading">
               <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
                 Provider, allowed models, fallback policy, and credentials for this agent.
               </p>
-              <div
-                className={
-                  editingModel
-                    ? 'cu-agent-detail-toolbar__actions'
-                    : 'cu-agent-detail-heading__actions'
-                }
-              >
-                {editingModel ? (
-                  <>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => setEditingModel(false)}
-                      disabled={busy}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary"
-                      onClick={async () => {
-                        // AP-6: stay in edit mode on failure so the operator's
-                        // draft survives alongside the error/conflict banner.
-                        if (await saveModelAndCredentials()) {
-                          setEditingModel(false)
-                        }
-                      }}
-                      disabled={busy}
-                    >
-                      {busy ? 'Saving…' : 'Save'}
-                    </button>
-                  </>
-                ) : (
+              {!editingModel ? (
+                <div className="cu-agent-detail-heading__actions">
                   <button
                     type="button"
                     className="cu-btn cu-btn--ghost cu-btn--sm"
@@ -1051,12 +1108,16 @@ export default function HostDetailsPage() {
                   >
                     Edit
                   </button>
-                )}
-              </div>
+                </div>
+              ) : null}
             </div>
 
             {!editingModel ? (
               <div className="cu-form-stack">
+                <div className="cu-field">
+                  <label htmlFor="model-secret">LLM Secret</label>
+                  <div className="cu-field__readonly">{secretRefDraft || '-'}</div>
+                </div>
                 <div className="cu-field">
                   <label htmlFor="model-provider">Model provider</label>
                   <div className="cu-field__readonly">{getProviderLabel(providerDraft)}</div>
@@ -1078,10 +1139,6 @@ export default function HostDetailsPage() {
                   )}
                 </div>
                 <div className="cu-field">
-                  <label htmlFor="model-secret">Secret reference</label>
-                  <div className="cu-field__readonly">{secretRefDraft || '-'}</div>
-                </div>
-                <div className="cu-field">
                   <label htmlFor="model-fallback">Fallback policy</label>
                   {llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0 ? (
                     <ol className="cu-llm-policy__summary">
@@ -1099,43 +1156,87 @@ export default function HostDetailsPage() {
               </div>
             ) : (
               <>
-                {retireCandidates.length > 0 ? (
+                {pendingCredentialRemovals.length > 0 ? (
                   <div className="cu-banner cu-banner--warning" style={{ marginBottom: '0.75rem' }}>
                     <span>
-                      Removed fallback left stored key(s): {retireCandidates.join(', ')}. They will
-                      be deleted from the Secret when you save.
+                      Removed provider credential(s): {pendingCredentialRemovals.join(', ')}. They
+                      will be deleted from the LLM Secret when you save.
                     </span>
                     <button
                       type="button"
                       className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => setRetireCandidates([])}
+                      onClick={() => {
+                        setRetireCandidates([])
+                        setAdditionalRetireCandidates([])
+                      }}
                       disabled={busy}
                     >
                       Keep them
                     </button>
                   </div>
                 ) : null}
-                <div className="cu-form-stack" style={{ marginBottom: '1rem' }}>
-                  <div className="cu-field">
-                    <label htmlFor="host-secret">Secret reference</label>
-                    <select
-                      id="host-secret"
-                      value={secretRefDraft}
-                      onChange={e => setSecretRefDraft(e.target.value)}
-                      disabled={busy}
+                <section className="cu-agent-credential-set" aria-label="LLM Secret">
+                  <div className="cu-agent-credential-set__head">
+                    <div>
+                      <span className="cu-agent-credential-set__eyebrow">LLM Secret</span>
+                      <h4 className="cu-agent-credential-set__title">
+                        {secretRefDraft || 'No LLM Secret linked'}
+                      </h4>
+                      <p className="cu-field__hint">
+                        One LLM Secret can contain credentials for several providers. Changes here
+                        apply to the Secret and may affect other agents that use it.
+                      </p>
+                    </div>
+                    <Link
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      href={CONTROL_ROUTES.secrets.llm}
                     >
-                      <option value="">Select LLM secret</option>
-                      {availableSecrets.map(secretName => (
-                        <option key={secretName} value={secretName}>
-                          {secretName}
-                        </option>
-                      ))}
-                      {secretRefDraft && !availableSecrets.includes(secretRefDraft) ? (
-                        <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
-                      ) : null}
-                    </select>
+                      Manage LLM Secrets
+                    </Link>
                   </div>
-                </div>
+                  <div className="cu-field">
+                    <label htmlFor="host-credential-set">Linked LLM Secret</label>
+                    <SelectionDropdown
+                      id="host-credential-set"
+                      value={secretRefDraft ? [secretRefDraft] : []}
+                      options={credentialSetOptions}
+                      placeholder="Select an LLM Secret…"
+                      searchPlaceholder="Search LLM Secrets…"
+                      selectionLabel="LLM Secret"
+                      multiple={false}
+                      showSelectedChips={false}
+                      disabled={busy}
+                      onChange={next => {
+                        const nextSecret = next[0] ?? ''
+                        if (nextSecret === secretRefDraft) return
+                        setSecretRefDraft(nextSecret)
+                        // A write-only draft belongs to the selected set. Never
+                        // carry a replacement or retirement from set A into set B.
+                        setLlmKeyDraft({})
+                        setRetireCandidates([])
+                        setAdditionalRetireCandidates([])
+                      }}
+                    />
+                  </div>
+                  <div className="cu-agent-credential-set__providers">
+                    <span className="cu-agent-credential-set__providers-label">
+                      Providers in this set
+                    </span>
+                    {credentialSetProviders.length > 0 ? (
+                      <div className="cu-chip-row">
+                        {credentialSetProviders.map(({ provider, usable }) => (
+                          <span className="cu-chip" key={provider}>
+                            {getProviderLabel(provider)} · {usable ? 'configured' : 'incomplete'}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="cu-field__hint">
+                        No provider keys are visible yet. Credential values are never exposed here.
+                      </span>
+                    )}
+                  </div>
+                </section>
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
@@ -1160,6 +1261,56 @@ export default function HostDetailsPage() {
                   secretKeys={currentSecretKeys}
                   disabled={busy}
                 />
+                <section className="cu-llm-config__block cu-agent-additional-credentials">
+                  <div className="cu-llm-config__block-head">
+                    <span className="cu-llm-config__block-title">Additional providers</span>
+                    <span className="cu-llm-config__block-tag cu-llm-config__block-tag--muted">
+                      Optional
+                    </span>
+                  </div>
+                  <p className="cu-field__hint cu-agent-additional-credentials__intro">
+                    Add credentials for another provider to this set. They become available to the
+                    agent when you select that provider as primary or as a fallback.
+                  </p>
+                  <LlmCredentialFields
+                    draft={additionalCredentialDraft}
+                    onChange={(dataKey, value) =>
+                      setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value }))
+                    }
+                    existingKeys={additionalCredentialKeys}
+                    excludedProviders={Array.from(activeCredentialProviders)}
+                    onRemovedKeysChange={next =>
+                      setAdditionalRetireCandidates(prev =>
+                        prev.join('\n') === next.join('\n') ? prev : next
+                      )
+                    }
+                    disabled={busy}
+                  />
+                </section>
+                <div className="cu-create-actions cu-agent-model-actions">
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--ghost cu-btn--sm"
+                    onClick={() => setEditingModel(false)}
+                    disabled={busy}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--primary"
+                    onClick={async () => {
+                      // AP-6: stay in edit mode on failure so the operator's
+                      // draft survives alongside the error/conflict banner.
+                      if (await saveModelAndCredentials()) {
+                        setEditingModel(false)
+                      }
+                    }}
+                    disabled={busy}
+                  >
+                    {busy ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
               </>
             )}
           </>

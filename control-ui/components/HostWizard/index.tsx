@@ -516,9 +516,9 @@ export function HostWizard({
     }
     if (step === 1 && !modelName.trim()) return 'Model name is required.'
     if (step === 1 && secretMode === 'existing' && !existingSecret.trim())
-      return 'Select an existing secret.'
+      return 'Select an existing LLM Secret.'
     if (step === 1 && secretMode === 'new' && !toKebabCase(newSecretName)) {
-      return 'For a new secret, set a name.'
+      return 'For a new LLM Secret, set a name.'
     }
     if (step === 1 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
       return `Add the ${getProviderLabel(provider)} credential for the primary model.`
@@ -840,9 +840,9 @@ export function HostWizard({
         {step === 1 && (
           <div className="cu-form-stack cu-agent-form-stack">
             <div className="cu-agent-access-section">
-              <strong>Credentials</strong>
+              <strong>LLM credentials</strong>
               <span className="cu-muted cu-agent-access-hint">
-                Store this agent&apos;s own LLM credentials, or use a shared secret.
+                Link an existing LLM Secret or create one for this agent.
               </span>
               <div className="cu-agent-radio-group">
                 <label className="cu-agent-radio cu-agent-radio--card">
@@ -852,9 +852,9 @@ export function HostWizard({
                     onChange={() => setSecretMode('existing')}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">Use an existing secret</span>
+                    <span className="cu-agent-radio__title">Use an existing LLM Secret</span>
                     <span className="cu-agent-radio__description">
-                      Select a saved secret that already contains LLM API keys.
+                      Link a saved LLM Secret that already contains provider credentials.
                     </span>
                   </span>
                 </label>
@@ -865,27 +865,28 @@ export function HostWizard({
                     onChange={() => setSecretMode('new')}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">New secret</span>
+                    <span className="cu-agent-radio__title">Create a new LLM Secret</span>
                     <span className="cu-agent-radio__description">
-                      Create a new secret for this agent. Its name is derived from the agent name.
+                      Create a private LLM Secret for this agent. Its internal name is derived from
+                      the agent name.
                     </span>
                   </span>
                 </label>
               </div>
               {secretMode === 'existing' ? (
                 <div className="cu-agent-access-section">
-                  <strong>Credential</strong>
+                  <strong>LLM Secret</strong>
                   <WizardSelect
                     value={existingSecret}
-                    placeholder="Select secret..."
+                    placeholder="Select LLM Secret..."
                     options={secretOptions}
                     onChange={handleExistingSecretChange}
                   />
                 </div>
               ) : (
                 <Field
-                  description="Auto-named from the agent — edit if you prefer a different name."
-                  label="Secret name"
+                  description="Auto-named from the agent — edit the internal name if you prefer a different one."
+                  label="LLM Secret name"
                 >
                   <span className="cu-agent-input-shell">
                     <TextInput
@@ -894,7 +895,7 @@ export function HostWizard({
                         setSecretNameTouched(true)
                         setNewSecretName(toKebabInput(e.target.value))
                       }}
-                      placeholder="secret-name"
+                      placeholder="llm-secret-name"
                     />
                     <span
                       className={cn(
@@ -902,7 +903,9 @@ export function HostWizard({
                         !toKebabCase(newSecretName) && 'cu-agent-input-shell__status--empty'
                       )}
                       aria-label={
-                        toKebabCase(newSecretName) ? 'Valid secret name' : 'Secret name empty'
+                        toKebabCase(newSecretName)
+                          ? 'Valid LLM Secret name'
+                          : 'LLM Secret name empty'
                       }
                     >
                       {toKebabCase(newSecretName) ? <IconCheck width={16} height={16} /> : null}

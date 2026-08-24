@@ -81,7 +81,7 @@ function setupApiMocks() {
   ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
     host,
     contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
-    secrets: [{ name: 'openai-secret' }],
+    secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
     users: [],
     teams: [],
     agentUsers: [],
@@ -132,13 +132,18 @@ describe('HostDetailsPage identity integration', () => {
     )
   })
 
-  it('puts Allowed models in place of Model name and spells out Secret reference', async () => {
+  it('puts Allowed models in place of Model name and uses LLM Secret language', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     const { container } = render(<HostDetailsPage />)
 
     expect(await screen.findByText('Allowed models')).toBeInTheDocument()
     expect(screen.queryByText('Model name')).not.toBeInTheDocument()
-    expect(screen.getByText('Secret reference')).toBeInTheDocument()
+    expect(screen.getByText('LLM Secret')).toBeInTheDocument()
+    expect(
+      Array.from(container.querySelectorAll('.cu-form-stack > .cu-field label')).map(label =>
+        label.textContent?.trim()
+      )
+    ).toEqual(['LLM Secret', 'Model provider', 'Allowed models', 'Fallback policy'])
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
     expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
     expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
@@ -149,11 +154,33 @@ describe('HostDetailsPage identity integration', () => {
       screen.getByLabelText('Allowed models · OpenAI', { selector: '#llm-allowed-openai' })
     ).toBeInTheDocument()
     expect(screen.queryByLabelText('Model', { selector: '#llm-primary-model' })).toBeNull()
-    expect(screen.getByLabelText('Secret reference')).toBeInTheDocument()
+    expect(screen.getByLabelText('LLM Secret')).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: 'Save' }).closest('.cu-agent-detail-toolbar')
+      screen.getByRole('button', { name: 'Save' }).closest('.cu-create-actions')
     ).not.toBeNull()
     expect(container.querySelector('.cu-agent-detail-card .cu-agent-detail-scroll')).not.toBeNull()
+  })
+
+  it('frames one linked LLM Secret and exposes additive provider credentials', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    render(<HostDetailsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+
+    expect(screen.getByRole('link', { name: 'Manage LLM Secrets' })).toHaveAttribute(
+      'href',
+      '/secrets/llm'
+    )
+    expect(screen.getByText('OpenAI · configured')).toBeInTheDocument()
+    expect(screen.getByText('Additional providers')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText('Add provider'))
+    fireEvent.click(screen.getByRole('option', { name: 'Anthropic' }))
+
+    expect(
+      screen.getByText('Anthropic', { selector: '.cu-llm-cred-group__title' })
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText(/Claude API key/i)).toBeInTheDocument()
   })
 
   it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {

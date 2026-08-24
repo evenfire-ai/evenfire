@@ -17,17 +17,6 @@ function StatusDot({ tone }: { tone: HostOverviewTabProps['statusTone'] }) {
   )
 }
 
-function initialsFor(name: string): string {
-  const parts = String(name || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-  if (parts.length === 0) return '?'
-  const first = parts[0]?.[0] || ''
-  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] || '' : ''
-  return (first + last).toUpperCase() || '?'
-}
-
 // Clickable section header inside an Overview card. The optional `count`
 // badge sits inline with the label so the count reads as part of the
 // section title rather than a separate row.
@@ -101,7 +90,6 @@ export function HostOverviewTab({
   contextMcpTotal,
   modelPrimary,
   modelProviderLine,
-  modelAllowlistLine,
   accessSummary,
   onNavigate,
   onSaveDisplayName,
@@ -113,7 +101,6 @@ export function HostOverviewTab({
   const [nameDraft, setNameDraft] = React.useState(shownName)
   const [savingName, setSavingName] = React.useState(false)
   const hasContext = Boolean(contextRef.trim())
-  const allowlist = modelAllowlistLine.trim() || '—'
   const trimmedDescription = description.trim()
   const shownDescription = truncateDescription(trimmedDescription) || 'No description provided.'
 
@@ -267,7 +254,6 @@ export function HostOverviewTab({
             <div className="cu-host-overview-config">
               <ConfigRow setting="Primary model" value={modelPrimary} />
               <ConfigRow setting="Provider · Model" value={modelProviderLine} />
-              <ConfigRow setting="Per-host model allowlist" value={allowlist} />
             </div>
           </div>
         </section>
@@ -288,9 +274,7 @@ export function HostOverviewTab({
                   <ul className="cu-host-overview-access__people">
                     {accessSummary.memberNames.map(name => (
                       <li key={name} className="cu-host-overview-access__person">
-                        <span className="cu-host-overview-access__avatar" aria-hidden="true">
-                          {initialsFor(name)}
-                        </span>
+                        <span className="cu-host-overview-access__dot" aria-hidden="true" />
                         <span className="cu-host-overview-access__person-name">{name}</span>
                       </li>
                     ))}
@@ -311,9 +295,7 @@ export function HostOverviewTab({
                   <ul className="cu-host-overview-access__people">
                     {accessSummary.teamNames.map(name => (
                       <li key={name} className="cu-host-overview-access__person">
-                        <span className="cu-host-overview-access__avatar" aria-hidden="true">
-                          {initialsFor(name)}
-                        </span>
+                        <span className="cu-host-overview-access__dot" aria-hidden="true" />
                         <span className="cu-host-overview-access__person-name">{name}</span>
                       </li>
                     ))}
