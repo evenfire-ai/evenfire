@@ -28,7 +28,7 @@ describe('admin channel write response', () => {
     Object.values(gateway).forEach(fn => fn.mockReset())
   })
 
-  it('preserves the result envelope while returning only the names-only summary', async () => {
+  it('returns only the names of the keys written, never the Secret result', async () => {
     const fixtureValue = 'unit-fixture-value'
     const encodedFixtureValue = Buffer.from(fixtureValue).toString('base64')
 
@@ -57,11 +57,7 @@ describe('admin channel write response', () => {
       secretName: 'cc-foo-credentials',
       namespace: 'channels',
       rotated: true,
-      result: {
-        name: 'cc-foo-credentials',
-        namespace: 'channels',
-        keys: ['telegram-bot-token'],
-      },
+      rotatedKeys: ['telegram-bot-token'],
     })
     expect(JSON.stringify(response.body)).not.toContain(fixtureValue)
     expect(JSON.stringify(response.body)).not.toContain(encodedFixtureValue)
