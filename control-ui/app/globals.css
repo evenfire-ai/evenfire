@@ -544,6 +544,17 @@ body.cu-body {
   background: var(--cu-bg-elevated);
 }
 
+/* Nested inside a container that already draws a bordered card (a form
+   section), the list's own border, radius, and elevated background repaint the
+   same box in the same tokens — the inner corners then read as a stray rounded
+   edge under the header. Flush keeps the row rhythm and drops the chrome. */
+.cu-summary-list--flush {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
 .cu-summary-list__row {
   display: flex;
   justify-content: space-between;
@@ -1931,60 +1942,49 @@ textarea.cu-input {
   container-type: inline-size;
 }
 
+/* Columns: name, lifecycle, order, fail mode, status, actions, navigation.
+   Rows navigate to the guardrail detail page rather than expanding in place,
+   so the chevron trails the row (matching .cu-installed-plugins-table) and
+   there is no expandable inset to reserve. */
 .cu-guardrails-table {
   min-width: 52rem;
-  --cu-expandable-inset-left: calc(3rem + 0.85rem);
-  --cu-expandable-inset-right: 6rem;
+  table-layout: fixed;
 }
 
 .cu-guardrails-table th:nth-child(1),
 .cu-guardrails-table td:nth-child(1) {
-  width: 3rem;
-}
-
-.cu-guardrails-table th:nth-child(2),
-.cu-guardrails-table td:nth-child(2) {
   width: 30%;
   max-width: 30%;
 }
 
+.cu-guardrails-table th:nth-child(3),
+.cu-guardrails-table td:nth-child(3) {
+  width: 5rem;
+}
+
 .cu-guardrails-table th:nth-child(4),
 .cu-guardrails-table td:nth-child(4) {
-  width: 5rem;
+  width: 8rem;
 }
 
 .cu-guardrails-table th:nth-child(5),
 .cu-guardrails-table td:nth-child(5) {
-  width: 8rem;
+  width: 9rem;
 }
 
 .cu-guardrails-table th:nth-child(6),
 .cu-guardrails-table td:nth-child(6) {
-  width: 9rem;
-}
-
-.cu-guardrails-table th:nth-child(7),
-.cu-guardrails-table td:nth-child(7) {
   width: 6rem;
   text-align: right;
 }
 
-.cu-guardrails-table td:nth-child(7) .cu-table-actions {
+.cu-guardrails-table td:nth-child(6) .cu-table-actions {
   justify-content: flex-end;
 }
 
-/* Per-agent Guardrails tab: add-built-in control row + removable hook chip. */
-.cu-guardrails-add-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--cu-space-2);
-  align-items: center;
-}
-
-.cu-guardrails-ref-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--cu-space-1);
+.cu-guardrails-table th:nth-child(7),
+.cu-guardrails-table td:nth-child(7) {
+  width: 3rem;
 }
 
 .cu-expandable-row__name,
@@ -5045,7 +5045,12 @@ textarea.cu-input {
   }
 }
 
-.cu-detail-content-stack > .cu-card:first-child {
+/* The detail header panel drops its bottom border and bottom radii, so the
+   first block below it has to drop the matching top edge or the seam shows as
+   a stray rounded border. Applies to either card primitive that can lead the
+   stack. */
+.cu-detail-content-stack > .cu-card:first-child,
+.cu-detail-content-stack > .cu-form-section:first-child {
   border-top: 0;
   border-top-left-radius: 0;
   border-top-right-radius: 0;
