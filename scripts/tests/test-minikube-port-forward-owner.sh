@@ -110,7 +110,10 @@ expect_refusal() {
 
 reset_process_fixture
 write_record
-mode="$(stat -f '%Lp' "${RECORD}" 2>/dev/null || stat -c '%a' "${RECORD}")"
+mode="$(stat -f '%Lp' "${RECORD}" 2>/dev/null || true)"
+if [[ ! "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+  mode="$(stat -c '%a' "${RECORD}")"
+fi
 [[ "${mode}" == 600 ]] || fail "structured pid record mode is ${mode}, expected 600"
 grep -Fxq "${PID}" "${RECORD}" || fail 'legacy-compatible PID first line is missing'
 grep -Fxq 'PORT_FORWARD_OWNER_VERSION=1' "${RECORD}" || fail 'record version is missing'
