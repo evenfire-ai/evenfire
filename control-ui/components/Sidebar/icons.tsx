@@ -99,6 +99,8 @@ export function IconRobot() {
 export function IconFolder() {
   return (
     <svg
+      width="18"
+      height="18"
       stroke="currentColor"
       fill="currentColor"
       strokeWidth="0"
