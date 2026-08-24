@@ -71,7 +71,6 @@ describe('McpProxyAuthenticator', () => {
     expect(review).toHaveBeenCalledWith({
       token: systemValue,
       audiences: ['host-context-controller'],
-      expirationSeconds: 600,
     })
   })
 

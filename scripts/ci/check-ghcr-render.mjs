@@ -12,7 +12,7 @@
 //        [--component deploy/components/ghcr-images/kustomization.yaml]
 //        [--expect-tag v0.6.0]
 //
-// It matches FIELDS, not raw strings. Six clerum/ substrings survive a
+// It matches FIELDS, not raw strings. Seven clerum/ substrings survive a
 // CORRECT render of the committed minikube-ghcr / minikube-no-uis-ghcr
 // overlays, so a "zero clerum/ strings" guard is unsatisfiable:
 //   - three lines that are not `image:`/`value:` fields at all and are
@@ -20,7 +20,7 @@
 //     ConfigMap `data:` key-value lines (a `KEY: ...clerum/...` mapping,
 //     not a YAML `value:` key) -- the built-in image transformer never
 //     touches ConfigMap data, only container `image:`/env `value:` fields
-//   - three prefix-allowlist / opt-in-local-build env `value:` fields,
+//   - four prefix-allowlist / opt-in-local-build / projected-path env `value:` fields,
 //     enumerated below in EXCEPTIONS. Every entry here is verified against
 //     the REAL rendered minikube-ghcr overlay -- an env var that only ever
 //     appears as a ConfigMap `data:` key (never a literal `value:` field)
@@ -65,6 +65,11 @@ const EXCEPTIONS = new Map([
     'CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES',
     'ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/',
   ],
+  // This is a projected Kubernetes service-account token FILE path, not an
+  // image coordinate. The path deliberately lives below /var/run/secrets/
+  // clerum/ so mcp-proxy and HCC share the same explicit mount contract in
+  // both local and ghcr overlays; kustomize must leave it unchanged.
+  ['MCP_PROXY_IDENTITY_TOKEN_FILE', '/var/run/secrets/clerum/mcp-proxy/token'],
 ])
 
 function argValue(name) {

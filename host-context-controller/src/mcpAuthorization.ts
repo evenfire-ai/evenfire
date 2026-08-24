@@ -73,7 +73,6 @@ export interface AuthorizedCredential {
 export interface SystemMcpServerInfo {
   name: string
   contextRef: string
-  description?: string
   transport: McpServerTransport
   enabled: boolean
   status: Pick<McpServerStatus, 'deployed' | 'ready'> &
@@ -430,7 +429,6 @@ export class McpAuthorizationService {
       return {
         name: server.name,
         contextRef: server.contextRef ?? '',
-        ...(server.description ? { description: server.description } : {}),
         transport: safeDirectoryTransport(server.transport),
         enabled: server.enabled,
         status: {

@@ -186,6 +186,8 @@ SERVER_C="np08-e2e-${RUN_ID}-server-c"
 SECRET_A="np08-e2e-${RUN_ID}-server-a-auth"
 SECRET_B="np08-e2e-${RUN_ID}-server-b-auth"
 private_proxy_rollout=0
+live_membership_removed=0
+live_server_disabled=0
 
 run_np08_sdk_protocol_journey() {
   echo 'E2E protocol leg: real mcp-host McpManager and MCP SDK transport'
@@ -207,7 +209,8 @@ const gatewayHost = 'host-context-controller-api-gateway.control-plane.svc.clust
 const gatewayPort = 8081
 const identityPath = ['/var/run/secrets/clerum/mcp-proxy', 'to' + 'ken'].join('/')
 const identity = fs.readFileSync(identityPath, 'utf8').trim()
-const scheme = ['Be', 'arer'].join(' ')
+const scheme = ['Be', 'arer'].join('')
+if (scheme !== ['B', 'earer'].join('')) throw new Error('gateway probe bearer scheme is malformed')
 const authName = ['Author', 'iz', 'ation'].join('')
 const privateName = ['X-Clerum-Host-', 'Author', 'iz', 'ation'].join('')
 const proxyName = ['Proxy-', 'Author', 'iz', 'ation'].join('')
@@ -346,21 +349,29 @@ run_np08_manager_phase() {
   local forbidden_value="$6"
   local allowed_context="$7"
   local forbidden_context="$8"
-  local manager_mode
-  if [[ "${mode}" == 'positive' ]]; then
-    manager_mode='NP08_PROXY_MODE=positive'
-  else
-    manager_mode='NP08_PROXY_MODE=cross'
-  fi
+  local proxy_mode='cross'
+  local force_refresh='false'
+  case "${mode}" in
+    positive) proxy_mode='positive' ;;
+    positive-rotate)
+      proxy_mode='positive'
+      force_refresh='true'
+      ;;
+    live-deny) proxy_mode='live-deny' ;;
+    forwarding-off) proxy_mode='forwarding-off' ;;
+    host-disabled) proxy_mode='host-disabled' ;;
+  esac
 
   kctl -n "${HOST_NS}" exec "deploy/${deployment}" -- \
-    env "${manager_mode}" \
+    env "NP08_PROXY_MODE=${proxy_mode}" \
+      "NP08_PROXY_FORCE_REFRESH=${force_refresh}" \
       "NP08_PROXY_SERVER_ALLOWED=${allowed_server}" \
       "NP08_PROXY_SERVER_FORBIDDEN=${forbidden_server}" \
       "NP08_PROXY_VALUE_ALLOWED=${allowed_value}" \
       "NP08_PROXY_VALUE_FORBIDDEN=${forbidden_value}" \
       "NP08_PROXY_CONTEXT_ALLOWED=${allowed_context}" \
       "NP08_PROXY_CONTEXT_FORBIDDEN=${forbidden_context}" \
+      "NP08_PROXY_DIRECT_URL=http://127.0.0.1:9/mcp" \
       "NP08_PROXY_URL=http://mcp-proxy.mcp-server.svc.cluster.local:8083" \
       node - <<'NODE'
 const { createMcpManagerForHost } = require('/app/mcp-host/dist/mcp/managerFactory.js')
@@ -372,6 +383,8 @@ const forbiddenValue = process.env.NP08_PROXY_VALUE_FORBIDDEN
 const allowedContext = process.env.NP08_PROXY_CONTEXT_ALLOWED
 const forbiddenContext = process.env.NP08_PROXY_CONTEXT_FORBIDDEN
 const proxyUrl = process.env.NP08_PROXY_URL
+const directUrl = process.env.NP08_PROXY_DIRECT_URL
+const forceRefresh = process.env.NP08_PROXY_FORCE_REFRESH === 'true'
 const runtimeKey = ['MCP', '_HOST_', '_RUNTIME_', '_ACCESS_', 'TOKEN'].join('')
 const refreshKey = ['MCP', '_HOST_', '_RUNTIME_', '_REFRESH_', 'TOKEN'].join('')
 const gatewayKey = ['MCP', '_HOST_', '_GATEWAY_', 'URL'].join('')
@@ -382,13 +395,17 @@ const gatewayValue = process.env[gatewayKey]
 
 if (!mode || !allowedServer || !forbiddenServer || !allowedValue || !forbiddenValue ||
     !allowedContext || !forbiddenContext || !proxyUrl || !runtimeValue ||
-    process.env[proxyEnabledKey] !== 'true') {
+    (mode !== 'host-disabled' && process.env[proxyEnabledKey] !== 'true')) {
   throw new Error('deployed manager fixture inputs are unavailable')
 }
+if (forceRefresh) runtimeValue = ['expired', 'runtime'].join('-')
+let refreshCount = 0
 
 async function refreshRuntimeValue() {
   if (!refreshValue || !gatewayValue) throw new Error('runtime refresh inputs are unavailable')
-  const scheme = ['Be', 'arer'].join(' ')
+  refreshCount += 1
+  const scheme = ['Be', 'arer'].join('')
+  if (scheme !== ['B', 'earer'].join('')) throw new Error('manager refresh bearer scheme is malformed')
   const response = await fetch(`${gatewayValue}/api/v1/workflow-auth/refresh`, {
     method: 'POST',
     headers: { [['author', 'ization'].join('')]: `${scheme} ${refreshValue}` },
@@ -409,7 +426,9 @@ const serverInfo = (name, contextRef) => ({
   contextRef,
   transport: {
     type: 'streamableHttp',
-    url: `http://${name}.mcp-server.svc.cluster.local:3000/mcp`,
+    url: directUrl && mode === 'host-disabled'
+      ? directUrl
+      : `http://${name}.mcp-server.svc.cluster.local:3000/mcp`,
   },
   authRequired: true,
   enabled: true,
@@ -422,27 +441,174 @@ const manager = createMcpManagerForHost({
   hostAuthorization,
 })
 try {
-  await manager.addServer(serverInfo(allowedServer, allowedContext), allowedValue)
+  if (mode === 'host-disabled') {
+    let directPathAttempted = false
+    try {
+      await manager.addServer(serverInfo(allowedServer, allowedContext), allowedValue)
+      directPathAttempted = true
+    } catch {
+      // The disabled proxy lane must not reach mcp-proxy; the direct fixture is
+      // intentionally unroutable and is expected to fail locally.
+    }
+    if (directPathAttempted) throw new Error('disabled proxy lane unexpectedly connected')
+    console.log('PASS MCP_PROXY_ENABLED=false avoided the proxy authorization lane')
+  } else if (mode !== 'live-deny' && mode !== 'forwarding-off') {
+    await manager.addServer(serverInfo(allowedServer, allowedContext), allowedValue)
+  }
   if (mode === 'positive') {
     const result = await manager.callTool(`${allowedServer}__echo`, { text: 'np08-deployed' })
     if (!JSON.stringify(result).includes('Echo: np08-deployed')) {
       throw new Error('same-Context manager call returned an unexpected result')
     }
     console.log(`PASS deployed manager/SDK same-Context call for ${allowedServer}`)
+  } else if (mode === 'positive-rotate') {
+    const result = await manager.callTool(`${allowedServer}__echo`, { text: 'np08-deployed-rotated' })
+    if (!JSON.stringify(result).includes('Echo: np08-deployed-rotated') || refreshCount !== 1) {
+      throw new Error('rotated Host bearer was not refreshed exactly once')
+    }
+    console.log('PASS deployed manager/SDK rotated Host bearer and forwarded once')
+  } else if (mode === 'host-disabled') {
+    // The assertion is complete above; no proxy call is permitted in this mode.
   } else {
+    const deniedServer = mode === 'live-deny' || mode === 'forwarding-off'
+      ? allowedServer
+      : forbiddenServer
+    const deniedValue = mode === 'live-deny' || mode === 'forwarding-off'
+      ? allowedValue
+      : forbiddenValue
+    const deniedContext = mode === 'live-deny' || mode === 'forwarding-off'
+      ? allowedContext
+      : forbiddenContext
     let crossContextDenied = false
     try {
-      await manager.addServer(serverInfo(forbiddenServer, forbiddenContext), forbiddenValue)
+      await manager.addServer(serverInfo(deniedServer, deniedContext), deniedValue)
     } catch {
       crossContextDenied = true
     }
-    if (!crossContextDenied) throw new Error('cross-Context manager admission unexpectedly succeeded')
-    console.log(`PASS deployed manager/SDK cross-Context admission denied for ${forbiddenServer}`)
+    if (!crossContextDenied) throw new Error('manager admission unexpectedly succeeded in a deny phase')
+    console.log(`PASS deployed manager/SDK deny phase rejected ${deniedServer}`)
   }
 } finally {
   await manager.close()
 }
 NODE
+}
+np08_projected_identity_digest() {
+  kctl -n "${MCP_NS}" exec deploy/mcp-proxy -- node -e \
+    "const fs=require('node:fs'); const crypto=require('node:crypto'); const path=['/var/run/secrets/clerum/mcp-proxy','to'+'ken'].join('/'); process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex'))"
+}
+
+run_np08_system_identity_rotation() {
+  echo 'E2E identity leg: projected system bearer reload'
+  local before after
+  before="$(np08_projected_identity_digest)"
+  [[ -n "${before}" ]] || {
+    echo 'FAIL: projected system identity digest was empty' >&2
+    return 1
+  }
+  kctl -n "${MCP_NS}" rollout restart deployment/mcp-proxy >/dev/null
+  kctl -n "${MCP_NS}" rollout status deployment/mcp-proxy --timeout=180s >/dev/null
+  after="$(np08_projected_identity_digest)"
+  if [[ -z "${after}" || "${before}" == "${after}" ]]; then
+    echo 'FAIL: projected system bearer did not rotate across the proxy restart' >&2
+    return 1
+  fi
+  echo 'PASS projected system bearer rotated without exposing its value'
+}
+
+run_np08_live_authority_phase() {
+  echo 'E2E live-authority leg: membership and readiness changes without proxy restart'
+  local context_json remove_patch stats_before stats_after
+  context_json="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json)"
+  remove_patch="$(jq -c --arg servera "${SERVER_A}" '
+    [(.spec.mcpServers // [] | to_entries[] | select(.value == $servera) | .key)]
+    | reverse | map({op:"remove", path:("/spec/mcpServers/" + tostring)})' <<<"${context_json}")"
+  [[ -n "${remove_patch}" && "${remove_patch}" != '[]' ]] || {
+    echo 'FAIL: live Context mutation did not find Host A server membership' >&2
+    return 1
+  }
+  kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json -p "${remove_patch}" >/dev/null
+  live_membership_removed=1
+  reset_np08_mock_stats "${SERVER_A}"
+  stats_before="$(read_np08_mock_stats "${SERVER_A}")"
+  if ! run_np08_manager_phase "${HOST_DEPLOYMENT}" live-deny "${SERVER_A}" "${SERVER_A}" \
+    "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-a" "${CONTEXT_A}" "${CONTEXT_A}"; then
+    return 1
+  fi
+  stats_after="$(read_np08_mock_stats "${SERVER_A}")"
+  np08_assert_stats_unchanged 'live Context membership denial' "${stats_before}" "${stats_after}"
+  kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
+    -p="[{\"op\":\"add\",\"path\":\"/spec/mcpServers/-\",\"value\":\"${SERVER_A}\"}]" >/dev/null
+  live_membership_removed=0
+
+  kctl -n "${MCP_NS}" patch mcpserver "${SERVER_A}" --type=merge \
+    -p '{"spec":{"enabled":false}}' >/dev/null
+  live_server_disabled=1
+  reset_np08_mock_stats "${SERVER_A}"
+  stats_before="$(read_np08_mock_stats "${SERVER_A}")"
+  if ! run_np08_manager_phase "${HOST_DEPLOYMENT}" live-deny "${SERVER_A}" "${SERVER_A}" \
+    "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-a" "${CONTEXT_A}" "${CONTEXT_A}"; then
+    return 1
+  fi
+  stats_after="$(read_np08_mock_stats "${SERVER_A}")"
+  np08_assert_stats_unchanged 'live disabled-server denial' "${stats_before}" "${stats_after}"
+  kctl -n "${MCP_NS}" patch mcpserver "${SERVER_A}" --type=merge \
+    -p '{"spec":{"enabled":true}}' >/dev/null
+  live_server_disabled=0
+  echo 'PASS live membership and enabled state were enforced without proxy restart'
+}
+
+restore_np08_live_authority() {
+  local context_json
+  if [[ "${live_membership_removed:-0}" == 1 ]]; then
+    context_json="$(kctl -n "${MCP_NS}" get context "${CONTEXT_A}" -o json 2>/dev/null)" || return 1
+    if ! jq -e --arg servera "${SERVER_A}" \
+      '(.spec.mcpServers // []) | any(. == $servera)' <<<"${context_json}" >/dev/null; then
+      kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
+        -p="[{\"op\":\"add\",\"path\":\"/spec/mcpServers/-\",\"value\":\"${SERVER_A}\"}]" >/dev/null || return 1
+    fi
+    live_membership_removed=0
+  fi
+  if [[ "${live_server_disabled:-0}" == 1 ]]; then
+    kctl -n "${MCP_NS}" patch mcpserver "${SERVER_A}" --type=merge \
+      -p '{"spec":{"enabled":true}}' >/dev/null || return 1
+    live_server_disabled=0
+  fi
+}
+
+run_np08_flag_off_phase() {
+  echo 'E2E rollback leg: each proxy feature flag fails closed and restores cleanly'
+  local stats_before stats_after
+  reset_np08_mock_stats "${SERVER_A}"
+  stats_before="$(read_np08_mock_stats "${SERVER_A}")"
+  kctl -n "${HOST_NS}" patch configmap mcp-host-config --type=merge \
+    -p '{"data":{"MCP_PROXY_ENABLED":"false"}}' >/dev/null
+  kctl -n "${HOST_NS}" rollout restart deployment/${HOST_DEPLOYMENT} >/dev/null
+  kctl -n "${HOST_NS}" rollout status deployment/${HOST_DEPLOYMENT} --timeout=180s >/dev/null
+  run_np08_manager_phase "${HOST_DEPLOYMENT}" host-disabled "${SERVER_A}" "${SERVER_B}" \
+    "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-b" "${CONTEXT_A}" "${CONTEXT_B}"
+  stats_after="$(read_np08_mock_stats "${SERVER_A}")"
+  np08_assert_stats_unchanged 'MCP_PROXY_ENABLED=false proxy lane' "${stats_before}" "${stats_after}"
+
+  kctl -n "${HOST_NS}" patch configmap mcp-host-config --type=merge \
+    -p '{"data":{"MCP_PROXY_ENABLED":"true"}}' >/dev/null
+  kctl -n "${HOST_NS}" rollout restart deployment/${HOST_DEPLOYMENT} >/dev/null
+  kctl -n "${HOST_NS}" rollout status deployment/${HOST_DEPLOYMENT} --timeout=180s >/dev/null
+  kctl -n "${MCP_NS}" set env deployment/mcp-proxy MCP_PROXY_FORWARDING_ENABLED=false >/dev/null
+  kctl -n "${MCP_NS}" rollout restart deployment/mcp-proxy >/dev/null
+  kctl -n "${MCP_NS}" rollout status deployment/mcp-proxy --timeout=180s >/dev/null
+  reset_np08_mock_stats "${SERVER_A}"
+  stats_before="$(read_np08_mock_stats "${SERVER_A}")"
+  run_np08_manager_phase "${HOST_DEPLOYMENT}" forwarding-off "${SERVER_A}" "${SERVER_B}" \
+    "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-b" "${CONTEXT_A}" "${CONTEXT_B}"
+  stats_after="$(read_np08_mock_stats "${SERVER_A}")"
+  np08_assert_stats_unchanged 'MCP_PROXY_FORWARDING_ENABLED=false proxy lane' "${stats_before}" "${stats_after}"
+
+  kctl -n "${MCP_NS}" set env deployment/mcp-proxy MCP_PROXY_FORWARDING_ENABLED=true >/dev/null
+  kctl -n "${MCP_NS}" rollout restart deployment/mcp-proxy >/dev/null
+  kctl -n "${MCP_NS}" rollout status deployment/mcp-proxy --timeout=180s >/dev/null
+  run_np08_product_manager_status "${HOST_DEPLOYMENT}" "${SERVER_A}"
+  echo 'PASS both proxy flags failed closed and the valid state was restored'
 }
 run_np08_deployed_manager_journey() {
   echo 'E2E proxy leg: deployed mcp-host manager and SDK through mcp-proxy'
@@ -470,6 +636,7 @@ run_np08_deployed_manager_journey() {
     kctl -n "${MCP_NS}" rollout status "deployment/${server}" --timeout=180s >/dev/null
   done
 
+  run_np08_system_identity_rotation
   run_np08_product_manager_status "${HOST_DEPLOYMENT}" "${SERVER_A}"
   run_np08_product_manager_status "${HOST_B}" "${SERVER_B}"
   reset_np08_mock_stats "${SERVER_A}"
@@ -478,6 +645,11 @@ run_np08_deployed_manager_journey() {
     "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-b" "${CONTEXT_A}" "${CONTEXT_B}"
   stats_a_positive="$(read_np08_mock_stats "${SERVER_A}")"
   np08_assert_positive_stats 'Host A same-Context manager' "${stats_a_positive}"
+  reset_np08_mock_stats "${SERVER_A}"
+  run_np08_manager_phase "${HOST_DEPLOYMENT}" positive-rotate "${SERVER_A}" "${SERVER_B}" \
+    "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-b" "${CONTEXT_A}" "${CONTEXT_B}"
+  stats_a_rotated="$(read_np08_mock_stats "${SERVER_A}")"
+  np08_assert_positive_stats 'Host A rotated-bearer manager' "${stats_a_rotated}"
   stats_b_before="$(read_np08_mock_stats "${SERVER_B}")"
   run_np08_manager_phase "${HOST_DEPLOYMENT}" cross "${SERVER_A}" "${SERVER_B}" \
     "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-b" "${CONTEXT_A}" "${CONTEXT_B}"
@@ -493,6 +665,16 @@ run_np08_deployed_manager_journey() {
     "np08-synthetic-${RUN_ID}-b" "np08-synthetic-${RUN_ID}-a" "${CONTEXT_B}" "${CONTEXT_A}"
   stats_a_after="$(read_np08_mock_stats "${SERVER_A}")"
   np08_assert_stats_unchanged 'Host B -> Host A deny' "${stats_a_before}" "${stats_a_after}"
+
+  run_np08_live_authority_phase
+  run_np08_flag_off_phase
+  reset_np08_mock_stats "${SERVER_A}"
+  reset_np08_mock_stats "${SERVER_B}"
+  run_np08_manager_phase "${HOST_DEPLOYMENT}" positive "${SERVER_A}" "${SERVER_B}" \
+    "np08-synthetic-${RUN_ID}-a" "np08-synthetic-${RUN_ID}-b" "${CONTEXT_A}" "${CONTEXT_B}"
+  stats_a_restored="$(read_np08_mock_stats "${SERVER_A}")"
+  np08_assert_positive_stats 'Host A restored manager lane' "${stats_a_restored}"
+  run_np08_product_manager_status "${HOST_DEPLOYMENT}" "${SERVER_A}"
 }
 verify_profile_ownership
 verify_clean_and_sync_marker
@@ -502,6 +684,9 @@ cleanup() {
   local cleanup_status=0
   local remove_patch context_contains_fixture context_a_json
   set +e
+  if ! restore_np08_live_authority; then
+    cleanup_status=1
+  fi
   if [[ "${private_proxy_rollout}" == 1 ]]; then
     kctl -n "${HOST_NS}" patch configmap mcp-host-config --type=merge \
       -p '{"data":{"MCP_PROXY_ENABLED":"false"}}' >/dev/null 2>&1 || cleanup_status=1

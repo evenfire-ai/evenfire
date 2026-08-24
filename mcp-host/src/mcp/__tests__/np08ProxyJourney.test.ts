@@ -5,7 +5,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { McpManager } from '../manager'
 import {
-  createMcpProxyFetch,
   MCP_PROXY_HOST_AUTH_CHALLENGE,
   type McpProxyHostAuthorization,
 } from '../proxyAuth'
@@ -96,6 +95,15 @@ class InstrumentedMcpUpstream {
     const mcpHeader = request.headers.authorization
     if (typeof mcpHeader === 'string') this.stats.mcpHeaders.push(mcpHeader)
     this.stats.headerNames.push(Object.keys(request.headers).map(name => name.toLowerCase()).sort())
+
+    if (request.method === 'GET' && request.headers.accept?.includes('text/event-stream')) {
+      response.writeHead(200, {
+        'cache-control': 'no-cache',
+        'content-type': 'text/event-stream',
+      })
+      response.end('id: event-a\nevent: ready\ndata: ok\n\n')
+      return
+    }
 
     const sessionId = request.headers['mcp-session-id']
     if (typeof sessionId === 'string' && this.transports.has(sessionId)) {
@@ -405,18 +413,15 @@ describe('NP-08 real mcp-host manager/SDK proxy journey', () => {
 
       const clientA = (managerA as unknown as { clients: Map<string, unknown> }).clients.get('server-a') as {
         reconnect(): Promise<void>
+        transport: { resumeStream(lastEventId: string): Promise<void> }
       }
       await clientA.reconnect()
       expect(proxy.observations.at(-1)?.method).toBe('POST')
       expect(proxy.observations.at(-1)?.hostIdentity).toBe('host-a-rotated')
 
-      const proxyFetch = createMcpProxyFetch(hostA)
-      const sse = await proxyFetch(`${proxyUrl}/events`, {
-        method: 'GET',
-        headers: { Accept: 'text/event-stream' },
-      })
-      expect(sse.status).toBe(200)
-      expect(sse.headers.get('content-type')).toBe('text/event-stream')
+      await clientA.transport.resumeStream('event-a')
+      expect(proxy.observations.at(-1)?.method).toBe('GET')
+      expect(proxy.observations.at(-1)?.hostIdentity).toBe('host-a-rotated')
 
       const upstreamNames = new Set([
         'accept',
@@ -427,6 +432,7 @@ describe('NP-08 real mcp-host manager/SDK proxy journey', () => {
         'host',
         'mcp-protocol-version',
         'mcp-session-id',
+        'last-event-id',
         'user-agent',
       ])
       for (const names of [...upstreamA.stats.headerNames, ...upstreamB.stats.headerNames]) {

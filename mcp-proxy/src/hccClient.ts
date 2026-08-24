@@ -95,7 +95,7 @@ function parseInventoryResponse(payload: unknown): HccServersResponse {
     ]
     if (
       !isRecord(value) ||
-      !Object.keys(value).every(key => [...requiredServerKeys, 'description'].includes(key)) ||
+      !Object.keys(value).every(key => requiredServerKeys.includes(key)) ||
       requiredServerKeys.some(key => !Object.hasOwn(value, key)) ||
       typeof value.name !== 'string' ||
       value.name.length > 253 ||
@@ -111,9 +111,6 @@ function parseInventoryResponse(payload: unknown): HccServersResponse {
       throw new HccAuthorizationError('unavailable')
     }
     serverNames.add(value.name)
-    if (value.description !== undefined && typeof value.description !== 'string') {
-      throw new HccAuthorizationError('unavailable')
-    }
     if (
       !isRecord(value.transport) ||
       !Object.keys(value.transport).every(key => key === 'type' || key === 'url') ||
@@ -144,7 +141,6 @@ function parseInventoryResponse(payload: unknown): HccServersResponse {
     return {
       name: value.name,
       contextRef: value.contextRef,
-      ...(typeof value.description === 'string' ? { description: value.description } : {}),
       transport: { type: value.transport.type, url },
       enabled: value.enabled,
       status: {

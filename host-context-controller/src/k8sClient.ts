@@ -124,9 +124,8 @@ export function createMcpProxyTokenReviewClient(): TokenReviewClient | null {
           spec: {
             token: request.token,
             audiences: [...request.audiences],
-            expirationSeconds: request.expirationSeconds,
           },
-        } as unknown as k8s.V1TokenReview,
+        },
       })
       return {
         status: {

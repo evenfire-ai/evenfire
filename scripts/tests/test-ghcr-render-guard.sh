@@ -6,10 +6,11 @@ FAIL=0
 # resolved: no clerum/ image reference survives, and every resolved tag equals
 # the pin in deploy/components/ghcr-images/kustomization.yaml.
 #
-# It matches FIELDS (`image:` and `value:`), not raw strings, because five
-# clerum/ strings legitimately survive a correct render: two /etc/clerum/*
-# mount paths (not image fields at all) and three documented prefix-allowlist
-# or opt-in-local-build env values enumerated in the guard's EXCEPTIONS map.
+# It matches FIELDS (`image:` and `value:`), not raw strings, because seven
+# clerum/ strings legitimately survive a correct render: three non-field
+# metadata/path lines and four documented prefix-allowlist,
+# opt-in-local-build, or projected-path env values enumerated in the guard's
+# EXCEPTIONS map.
 # A naive "zero clerum/ strings" guard is unsatisfiable.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -36,7 +37,7 @@ EOF
 }
 
 # A minimal but REALISTIC clean render: a rewritten container image, a rewritten
-# env-var image ref, and all three documented exceptions in their real form.
+# env-var image ref, and all four documented exceptions in their real form.
 make_clean_render() {
   local f=$1 tag=$2
   cat > "$f" <<EOF
@@ -69,6 +70,8 @@ spec:
               value: 'clerum/workflow-custom-sdk-e2e:'
             - name: CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES
               value: ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/
+            - name: MCP_PROXY_IDENTITY_TOKEN_FILE
+              value: /var/run/secrets/clerum/mcp-proxy/token
         - name: sidecar
           image: postgres:16-alpine
 EOF
@@ -82,7 +85,7 @@ assert_a_clean_render_passes() {
   out="$(node "$GUARD" "$d/render.yaml" --component "$d/component/kustomization.yaml" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    pass "a clean render with all three documented exceptions passes"
+    pass "a clean render with all four documented exceptions passes"
   else
     fail "clean render rejected (rc=$rc): $out"
   fi

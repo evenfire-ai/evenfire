@@ -168,15 +168,24 @@ if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   ! grep -Fq 'HOST_B=' "${E2E_SCRIPT}" ||
   ! grep -Fq 'kind: Host' "${E2E_SCRIPT}" ||
   ! grep -Fq 'deployment/${HOST_B}' "${E2E_SCRIPT}" ||
-  ! grep -Fq 'NP08_PROXY_MODE=positive' "${E2E_SCRIPT}" ||
-  ! grep -Fq 'NP08_PROXY_MODE=cross' "${E2E_SCRIPT}" ||
+  ! grep -Fq "proxy_mode='positive'" "${E2E_SCRIPT}" ||
+  ! grep -Fq "proxy_mode='cross'" "${E2E_SCRIPT}" ||
   ! grep -Fq '__np08/stats' "${E2E_SCRIPT}" ||
   ! grep -Fq 'connections' "${E2E_SCRIPT}" ||
   ! grep -Fq 'requests' "${E2E_SCRIPT}" ||
   ! grep -Fq 'bytes' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_assert_stats_unchanged' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_live_authority_phase' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_flag_off_phase' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'positive-rotate)' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'forwarding-off)' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'NP08_PROXY_FORCE_REFRESH' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'np08_projected_identity_digest' "${E2E_SCRIPT}" ||
   ! grep -Fq 'run_np08_sdk_protocol_journey' "${E2E_SCRIPT}" ||
-  ! grep -Fq 'src/mcp/__tests__/np08ProxyJourney.test.ts' "${E2E_SCRIPT}"; then
+  ! grep -Fq 'src/mcp/__tests__/np08ProxyJourney.test.ts' "${E2E_SCRIPT}" ||
+  ! grep -Fq "const scheme = ['Be', 'arer'].join('')" "${E2E_SCRIPT}" ||
+  grep -Fq "const scheme = ['Be', 'arer'].join(' ')" "${E2E_SCRIPT}" ||
+  ! grep -Fq "scheme !== ['B', 'earer'].join('')" "${E2E_SCRIPT}"; then
   fail 'the deployed E2E is not wired to every tested guard'
 fi
 pass 'the deployed E2E is wired to cleanup and provenance guards'

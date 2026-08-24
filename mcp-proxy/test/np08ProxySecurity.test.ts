@@ -279,6 +279,7 @@ describe('NP-08 mcp-proxy authorization gate', () => {
     expect(response.status).toBe(503)
     expect(upstream.connectionCountValue).toBe(0)
     expect(upstream.requestCountValue).toBe(0)
+    expect(upstream.bytesReceivedValue).toBe(0)
   })
 
   it('keeps the feature flag fail-closed', async () => {
@@ -295,5 +296,6 @@ describe('NP-08 mcp-proxy authorization gate', () => {
     expect(authorizeForward).not.toHaveBeenCalled()
     expect(upstream.connectionCountValue).toBe(0)
     expect(upstream.requestCountValue).toBe(0)
+    expect(upstream.bytesReceivedValue).toBe(0)
   })
 })

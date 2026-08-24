@@ -2,7 +2,6 @@ import type { IncomingHttpHeaders } from 'node:http'
 import type { VerifiedMcpHostPrincipal } from './mcpApiAuthentication'
 
 export const MCP_PROXY_TOKEN_REVIEW_AUDIENCE = 'host-context-controller'
-export const MCP_PROXY_TOKEN_REVIEW_EXPIRATION_SECONDS = 600
 
 type McpProxyAuthenticationCode = 'unauthorized' | 'unavailable'
 
@@ -16,7 +15,6 @@ export class McpProxyAuthenticationError extends Error {
 export interface TokenReviewRequest {
   token: string
   audiences: readonly string[]
-  expirationSeconds: number
 }
 
 export interface TokenReviewResponse {
@@ -109,7 +107,6 @@ export class McpProxyAuthenticator {
       review = await this.tokenReviewClient.review({
         token,
         audiences: [MCP_PROXY_TOKEN_REVIEW_AUDIENCE],
-        expirationSeconds: MCP_PROXY_TOKEN_REVIEW_EXPIRATION_SECONDS,
       })
     } catch {
       throw new McpProxyAuthenticationError('unavailable')

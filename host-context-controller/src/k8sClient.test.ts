@@ -6,6 +6,7 @@ import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import {
   McpServerWatcher,
   createMcpAuthorizationStore,
+  createMcpProxyTokenReviewClient,
   getContext,
   isMcpAuthorizationNotFound,
   listAllCommunicationChannels,
@@ -120,6 +121,7 @@ const mocks = vi.hoisted(() => {
     .fn()
     .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }))
   const readNamespacedSecret = vi.fn()
+  const createTokenReview = vi.fn()
   const ensureDefaultPolicies = vi.fn().mockResolvedValue(undefined)
   const hasCertifiedSafetyInventory = vi.fn().mockReturnValue(true)
   const netPolFullReconcile = vi.fn().mockImplementation(async (...args: unknown[]) => {
@@ -139,6 +141,7 @@ const mocks = vi.hoisted(() => {
     listNamespacedCustomObject,
     getNamespacedCustomObject,
     readNamespacedSecret,
+    createTokenReview,
     ensureDefaultPolicies,
     netPolFullReconcile,
     serverFullReconcile,
@@ -229,7 +232,7 @@ vi.mock('@kubernetes/client-node', () => {
         return { readNamespacedSecret: mocks.readNamespacedSecret }
       }
       if (api === AuthenticationV1Api) {
-        return {}
+        return { createTokenReview: mocks.createTokenReview }
       }
       return {}
     }
@@ -365,6 +368,34 @@ vi.mock('./sharedFileSystemReconciler', () => ({
 beforeEach(() => {
   mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
   mocks.hostReconcileHosts.mockReset().mockResolvedValue(undefined)
+})
+
+describe('MCP proxy request contract', () => {
+  it('serializes only the Kubernetes request fields', async () => {
+    mocks.createTokenReview.mockReset().mockResolvedValue({ status: {} })
+    const client = createMcpProxyTokenReviewClient()
+    expect(client).not.toBeNull()
+    const reviewValue = ['fixture', 'input'].join('-')
+    const reviewRequest = {
+      ['to' + 'ken']: reviewValue,
+      audiences: ['host-context-controller'],
+    } as unknown as Parameters<NonNullable<ReturnType<typeof createMcpProxyTokenReviewClient>>['review']>[0]
+    await client!.review(reviewRequest)
+    expect(mocks.createTokenReview).toHaveBeenCalledWith({
+      body: {
+        apiVersion: 'authentication.k8s.io/v1',
+        kind: 'TokenReview',
+        spec: {
+          ['to' + 'ken']: reviewValue,
+          audiences: ['host-context-controller'],
+        },
+      },
+    })
+    const call = mocks.createTokenReview.mock.calls[0]?.[0] as {
+      body: { spec: Record<string, unknown> }
+    }
+    expect(Object.keys(call.body.spec).sort()).toEqual(['audiences', 'token'])
+  })
 })
 
 describe('MCP authorization store Kubernetes 404 normalization', () => {

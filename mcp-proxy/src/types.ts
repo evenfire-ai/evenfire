@@ -10,7 +10,6 @@ export interface ServerRoute {
 export interface HccServerInfo {
   name: string;
   contextRef: string;
-  description?: string;
   transport: { type: string; url?: string };
   enabled: boolean;
   status: { deployed: boolean; ready: boolean; authoritative?: boolean };

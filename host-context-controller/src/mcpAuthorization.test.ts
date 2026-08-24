@@ -89,6 +89,10 @@ class FakeStore implements McpAuthorizationStore {
   contextObject: AuthorityContext | null = context
   serverObject: AuthorityMcpServer | null = server
 
+  async listMcpServers(): Promise<AuthorityMcpServer[]> {
+    return this.serverObject ? [this.serverObject] : []
+  }
+
   async readHost(name: string) {
     this.hostReads += 1
     if (this.hostObjects) return this.hostObjects.get(name) ?? null
@@ -142,6 +146,25 @@ async function expectCredentialFailure(
 }
 
 describe('McpAuthorizationService', () => {
+  it('keeps descriptions out of the global system inventory DTO', async () => {
+    const store = new FakeStore()
+    const describedServer = { ...server, description: ['fixture', 'description'].join(' ') }
+    store.listMcpServers = async () => [describedServer]
+    const service = new McpAuthorizationService(store)
+
+    const inventory = await service.listSystemServers()
+
+    expect(inventory[0]).not.toHaveProperty('description')
+    expect(Object.keys(inventory[0]).sort()).toEqual([
+      'contextRef',
+      'destinationRevision',
+      'enabled',
+      'name',
+      'status',
+      'transport',
+    ])
+  })
+
   it('keeps two Host/Context grant sets disjoint in both directions', async () => {
     const hostB: AuthorityHost = {
       name: 'host-b',

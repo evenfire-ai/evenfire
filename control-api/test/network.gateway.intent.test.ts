@@ -70,7 +70,12 @@ function yamlDocs(content: string): string[] {
 }
 
 function docContaining(docs: string[], substring: string): string {
-  const hit = docs.find(d => d.includes(substring))
+  const exactName = substring.trim().match(/^name:\s+(.+)$/)
+  const hit = docs.find(d => {
+    if (!d.includes(substring)) return false
+    if (!exactName) return true
+    return d.split('\n').some(line => line.trim() === substring.trim())
+  })
   if (!hit) {
     throw new Error(`No YAML document containing: ${substring}`)
   }
