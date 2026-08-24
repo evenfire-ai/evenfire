@@ -12298,22 +12298,19 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-gfs-existing-access {
   display: grid;
-  gap: var(--cu-space-2);
-  padding: var(--cu-space-3) 0;
-  border-top: 1px solid var(--cu-border);
-  border-bottom: 1px solid var(--cu-border);
+  gap: var(--cu-space-3);
 }
 
-.cu-gfs-existing-access__header h3,
+.cu-gfs-existing-access__header h4,
 .cu-gfs-existing-access__header p,
 .cu-gfs-existing-access__empty,
 .cu-gfs-existing-access__error p {
   margin: 0;
 }
 
-.cu-gfs-existing-access__header h3 {
+.cu-gfs-existing-access__header h4 {
   color: var(--cu-text);
-  font-size: 0.875rem;
+  font-size: 1.05rem;
   font-weight: 600;
 }
 
@@ -12325,7 +12322,7 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-gfs-existing-access__list {
   display: grid;
-  gap: var(--cu-space-2);
+  gap: var(--cu-space-1);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -12334,34 +12331,86 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-existing-access__item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--cu-space-3);
+  gap: var(--cu-space-2);
+  min-width: 0;
   padding: var(--cu-space-2);
   border: 1px solid var(--cu-border);
   border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-elevated);
+  background: var(--cu-surface);
 }
 
-.cu-gfs-existing-access__copy {
+.cu-gfs-existing-access__identity {
   min-width: 0;
   display: grid;
-  gap: var(--cu-space-1);
-}
-
-.cu-gfs-existing-access__subject,
-.cu-gfs-existing-access__detail {
-  overflow-wrap: anywhere;
+  gap: calc(var(--cu-space-1) / 2);
+  flex: 1 1 auto;
 }
 
 .cu-gfs-existing-access__subject {
+  overflow: hidden;
   color: var(--cu-text);
   font-size: 0.8125rem;
-  font-weight: 600;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cu-gfs-existing-access__detail {
+  overflow: hidden;
   color: var(--cu-text-soft);
   font-size: 0.75rem;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.cu-gfs-existing-access__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--cu-space-1);
+}
+
+.cu-gfs-existing-access__chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-1);
+}
+
+.cu-gfs-existing-access__permission,
+.cu-gfs-existing-access__inherit {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.25rem;
+  padding: 0 var(--cu-space-1);
+  border-radius: var(--cu-radius-pill);
+  font-size: 0.68rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.cu-gfs-existing-access__permission {
+  border: 1px solid var(--cu-border);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text-muted);
+}
+
+.cu-gfs-existing-access__inherit {
+  gap: calc(var(--cu-space-1) / 2);
+  border: 1px solid rgba(var(--cu-success-rgb), 0.24);
+  background: rgba(var(--cu-success-rgb), 0.055);
+  color: var(--cu-success);
+}
+
+.cu-gfs-existing-access__inherit svg {
+  width: var(--cu-space-2);
+  height: var(--cu-space-2);
+  flex: 0 0 var(--cu-space-2);
+}
+
+.cu-gfs-existing-access__item > .cu-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .cu-gfs-existing-access__error {
@@ -12369,6 +12418,18 @@ button.cu-gfs-tree__button:focus-visible,
   align-items: center;
   justify-content: space-between;
   gap: var(--cu-space-2);
+}
+
+@media (max-width: 560px) {
+  .cu-gfs-existing-access__item {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .cu-gfs-existing-access__meta {
+    flex: 1 1 100%;
+    order: 3;
+  }
 }
 
 @media (max-width: 780px) {

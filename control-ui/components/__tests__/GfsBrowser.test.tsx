@@ -976,8 +976,9 @@ describe('GfsBrowser', () => {
     await openManage('team-folder')
     expect(screen.queryByText('Manage folder')).toBeNull()
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
-    expect(await screen.findByRole('checkbox', { name: /Include descendants/ })).toBeChecked()
-    expect(screen.getByText('Apply this grant or share to the full folder tree.')).toBeTruthy()
+    expect(
+      await screen.findByRole('checkbox', { name: /Include contents of this folder/ })
+    ).toBeChecked()
     expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))

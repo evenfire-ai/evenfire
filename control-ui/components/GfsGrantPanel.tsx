@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsPermissionDropdown } from '@components/GfsPermissionDropdown'
+import { GFS_PERMISSION_LABELS } from '@components/GfsPermissionDropdown/constants'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
+import { IconFolder } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { IconTrash } from '@components/icons'
 import { Button, CheckboxField } from '@components/ui'
 import { GFS_MAX_BULK_SUBJECTS } from '@constants/gfsGrantSubjects'
 import {
@@ -378,63 +379,10 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           removed.
         </p>
       ) : null}
-      <section className="cu-gfs-existing-access" aria-label="Existing access">
-        <div className="cu-gfs-existing-access__header">
-          <h3>Existing access</h3>
-          <p>Direct grants and shares configured on this resource.</p>
-        </div>
-        {existingAccessLoading ? (
-          <p className="cu-gfs-existing-access__empty" role="status">
-            Loading existing access…
-          </p>
-        ) : existingAccessError ? (
-          <div className="cu-gfs-existing-access__error">
-            <p role="alert" className="cu-field__error">
-              {existingAccessError}
-            </p>
-            <Button size="sm" disabled={actionPending} onClick={() => void loadExistingAccess()}>
-              Retry
-            </Button>
-          </div>
-        ) : existingAccess.length === 0 ? (
-          <p className="cu-gfs-existing-access__empty">No direct access configured.</p>
-        ) : (
-          <ul className="cu-gfs-existing-access__list">
-            {existingAccess.map(item => {
-              const label = subjectLabel(item)
-              const coversDescendants =
-                item.kind === 'grant' ? item.inherit : item.includeDescendants
-              return (
-                <li className="cu-gfs-existing-access__item" key={`${item.kind}:${item.id}`}>
-                  <div className="cu-gfs-existing-access__copy">
-                    <span className="cu-gfs-existing-access__subject">{label}</span>
-                    <span className="cu-gfs-existing-access__detail">
-                      {item.kind === 'grant' ? 'Grant' : 'Share'} · {item.permissions.join(', ')} ·{' '}
-                      {coversDescendants ? 'resource and descendants' : 'resource only'}
-                    </span>
-                  </div>
-                  <Button
-                    aria-label={`Remove ${item.kind} access for ${label}`}
-                    title={`Remove ${item.kind} access for ${label}`}
-                    variant="danger"
-                    size="sm"
-                    disabled={actionPending}
-                    onClick={() => void revokeAccess(item)}
-                  >
-                    <IconTrash width={15} height={15} />
-                    Remove
-                  </Button>
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </section>
       {canIncludeDescendants ? (
         <CheckboxField
           className="cu-gfs-grant__scope"
-          label="Include descendants"
-          description="Apply this grant or share to the full folder tree."
+          label="Include contents of this folder"
           checked={includeDescendants}
           onChange={() => setIncludeDescendants(current => !current)}
           disabled={actionPending}
@@ -453,6 +401,76 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           {error}
         </p>
       ) : null}
+      <section className="cu-gfs-existing-access" aria-label="Who has access">
+        <div className="cu-gfs-existing-access__header">
+          <h4>Who has access</h4>
+          <p>Existing grants on this resource. Revoking is immediate.</p>
+        </div>
+        {existingAccessLoading ? (
+          <p className="cu-gfs-existing-access__empty" role="status">
+            Loading access…
+          </p>
+        ) : existingAccessError ? (
+          <div className="cu-gfs-existing-access__error">
+            <p role="alert" className="cu-field__error">
+              {existingAccessError}
+            </p>
+            <Button size="sm" disabled={actionPending} onClick={() => void loadExistingAccess()}>
+              Retry
+            </Button>
+          </div>
+        ) : existingAccess.length === 0 ? (
+          <p className="cu-gfs-existing-access__empty">No direct grants or shares yet.</p>
+        ) : (
+          <ul className="cu-gfs-existing-access__list" aria-label="Resource access">
+            {existingAccess.map(item => {
+              const label = subjectLabel(item)
+              const coversDescendants =
+                item.kind === 'grant' ? item.inherit : item.includeDescendants
+              return (
+                <li
+                  className="cu-gfs-existing-access__item"
+                  data-testid={`gfs-access-row-${item.kind}-${item.id}`}
+                  key={`${item.kind}:${item.id}`}
+                >
+                  <span className="cu-gfs-existing-access__identity">
+                    <span className="cu-gfs-existing-access__subject">{label}</span>
+                    <span className="cu-gfs-existing-access__detail">
+                      {item.kind === 'grant' ? 'Direct grant' : 'Direct share'} ·{' '}
+                      {item.subject.type}
+                    </span>
+                  </span>
+                  <span className="cu-gfs-existing-access__meta">
+                    <span className="cu-gfs-existing-access__chips" aria-label="Permissions">
+                      {item.permissions.map(permission => (
+                        <span className="cu-gfs-existing-access__permission" key={permission}>
+                          {GFS_PERMISSION_LABELS[permission] ?? permission}
+                        </span>
+                      ))}
+                    </span>
+                    {coversDescendants ? (
+                      <span className="cu-gfs-existing-access__inherit">
+                        <IconFolder />
+                        Includes contents
+                      </span>
+                    ) : null}
+                  </span>
+                  <Button
+                    aria-label={`Remove ${item.kind} access for ${label}`}
+                    data-testid={`gfs-revoke-${item.kind}-${item.id}`}
+                    title={`Remove ${item.kind} access for ${label}`}
+                    size="sm"
+                    disabled={actionPending}
+                    onClick={() => void revokeAccess(item)}
+                  >
+                    Revoke
+                  </Button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </section>
       {confirmDialog}
     </div>
   )
