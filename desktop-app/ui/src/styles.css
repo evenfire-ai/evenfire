@@ -14984,22 +14984,10 @@ pre {
 
 .chat-view-tab.is-active {
   background: var(--surface-strong);
-  border-color: var(--chat-view-selected-border);
-  border-bottom: 0;
+  border: 1px solid var(--chat-view-selected-border);
   margin-bottom: -1px;
   position: relative;
   z-index: 1;
-}
-
-.chat-view-tab.is-active::after {
-  background: inherit;
-  bottom: -1px;
-  content: '';
-  height: 1px;
-  left: 0;
-  pointer-events: none;
-  position: absolute;
-  right: 0;
 }
 
 .chat-view-tab:hover {

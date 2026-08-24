@@ -26,7 +26,6 @@ async function geometry(window) {
     const inactiveBorderReferenceStyle = getComputedStyle(
       document.querySelector('[data-inactive-tab-border-reference]')
     )
-    const activeSeamStyle = getComputedStyle(activeTab, '::after')
     const activeSelectStyle = getComputedStyle(
       document.querySelector('.chat-view-tab.is-active .chat-view-tab__select')
     )
@@ -40,11 +39,8 @@ async function geometry(window) {
       activeBorderBottomStyle: activeStyle.borderBottomStyle,
       activeBorderBottomWidth: activeStyle.borderBottomWidth,
       activeBorderTop: activeStyle.borderTopColor,
+      activeBorderTopStyle: activeStyle.borderTopStyle,
       activeCloseBackground: activeCloseStyle.backgroundColor,
-      activeSeamBackground: activeSeamStyle.backgroundColor,
-      activeSeamBottom: activeSeamStyle.bottom,
-      activeSeamHeight: activeSeamStyle.height,
-      activeSeamPosition: activeSeamStyle.position,
       activeSelectBackground: activeSelectStyle.backgroundColor,
       inactiveBackground: inactiveStyle.backgroundColor,
       inactiveBorderBottomStyle: inactiveStyle.borderBottomStyle,
@@ -158,15 +154,13 @@ app.whenReady().then(async () => {
     assert.equal(wide.surfaceBorderRight, wide.surfaceBorderTop, 'right border shares the accent')
     assert.equal(wide.surfaceBorderBottomStyle, 'solid', 'surface owns its bottom border')
     assert.equal(wide.surfaceBorderBottom, wide.surfaceBorderTop, 'bottom border shares the accent')
-    assert.equal(wide.activeBorderBottomStyle, 'none', 'active tab has no bottom border')
-    assert.equal(wide.activeBorderBottomWidth, '0px', 'active tab bottom edge has no width')
-    assert.equal(wide.activeSeamPosition, 'absolute', 'active tab owns the shared seam cover')
-    assert.equal(wide.activeSeamBottom, '-1px', 'seam cover overlaps the conversation top border')
-    assert.equal(wide.activeSeamHeight, '1px', 'seam cover masks only the shared border row')
+    assert.equal(wide.activeBorderTopStyle, 'solid', 'active tab keeps its top border')
+    assert.equal(wide.activeBorderBottomStyle, 'solid', 'active tab keeps its bottom border')
+    assert.equal(wide.activeBorderBottomWidth, '1px', 'active tab bottom border is one pixel wide')
     assert.equal(
-      wide.activeSeamBackground,
-      wide.activeBackground,
-      'conversation top border is hidden beneath the active tab'
+      wide.activeBorderBottom,
+      wide.surfaceBorderTop,
+      'active tab bottom border shares the conversation border treatment'
     )
 
     await window.webContents.executeJavaScript(
@@ -175,9 +169,14 @@ app.whenReady().then(async () => {
     const light = await geometry(window)
     assertTabTreatment(light, 'light')
     assert.equal(
-      light.activeSeamBackground,
-      light.activeBackground,
-      'light theme conversation top border is hidden beneath the active tab'
+      light.activeBorderTop,
+      light.surfaceBorderTop,
+      'light active tab shares the surface border'
+    )
+    assert.equal(
+      light.activeBorderBottom,
+      light.surfaceBorderTop,
+      'light active tab bottom matches the surface border'
     )
 
     await hover(window, '.chat-view-tab.is-active .chat-view-tab__close')
@@ -198,9 +197,9 @@ app.whenReady().then(async () => {
       'the close button does not own a partial hover fill'
     )
     assert.equal(
-      closeHover.activeSeamBackground,
-      closeHover.activeBackground,
-      'the seam cover follows the complete tab hover fill'
+      closeHover.activeBorderBottom,
+      closeHover.surfaceBorderTop,
+      'hover keeps the active tab connected to the surface border'
     )
 
     await hover(window, '.chat-view-tab.is-active .chat-view-tab__select')
