@@ -24,9 +24,11 @@ import {
   CATALOG_FAMILIES,
   type CatalogFamily,
   type CatalogIdentityCandidate,
+  type CatalogKey,
   type CatalogRelationship,
   type HydratedCatalogResource,
   catalogKey,
+  catalogKeyEquals,
   compareCatalogKey,
 } from '../src/services/access/catalogContracts.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
@@ -45,6 +47,34 @@ function identifier(value: number): string {
   return `id-${String(value).padStart(5, '0')}`
 }
 
+function compareTextOracle(left: string, right: string): number {
+  const encoder = new TextEncoder()
+  const leftBytes = encoder.encode(left)
+  const rightBytes = encoder.encode(right)
+  for (let index = 0; index < Math.min(leftBytes.length, rightBytes.length); index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index]! - rightBytes[index]!
+  }
+  return leftBytes.length - rightBytes.length
+}
+
+function compareKeyOracle(left: CatalogKey, right: CatalogKey): number {
+  return (
+    compareTextOracle(left[0], right[0]) ||
+    compareTextOracle(left[1], right[1]) ||
+    compareTextOracle(left[2], right[2])
+  )
+}
+
+const catalogTextArbitrary = fc
+  .array(
+    fc.constantFrom('a', 'z', 'A', 'Z', '0', '9', '-', '_', '.', '/', 'é', 'e\u0301', 'Ω', '😀'),
+    {
+      minLength: 1,
+      maxLength: 16,
+    }
+  )
+  .map(parts => parts.join(''))
+
 function uuid(value: number): string {
   return `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`
 }
@@ -52,7 +82,7 @@ function uuid(value: number): string {
 const candidateArbitrary = fc
   .record({
     family: fc.constantFrom<CatalogFamily>(...CATALOG_FAMILIES),
-    value: fc.integer({ min: 0, max: 500 }),
+    logicalId: catalogTextArbitrary,
     validUntil: fc.option(
       fc
         .integer({ min: 1, max: 20 })
@@ -60,8 +90,7 @@ const candidateArbitrary = fc
       { nil: null }
     ),
   })
-  .map(({ family, value, validUntil }): CatalogIdentityCandidate => {
-    const logicalId = identifier(value)
+  .map(({ family, logicalId, validUntil }): CatalogIdentityCandidate => {
     return Object.freeze({
       key: catalogKey(environmentId, family, logicalId),
       canonicalId: `${family}:${logicalId}`,
@@ -80,7 +109,7 @@ const candidateStreamsArbitrary = fc
   .map(candidateLists =>
     candidateLists.map((candidates, index) => ({
       streamId: `stream-${index}`,
-      candidates: [...candidates].sort((left, right) => compareCatalogKey(left.key, right.key)),
+      candidates: [...candidates].sort((left, right) => compareKeyOracle(left.key, right.key)),
     }))
   )
 
@@ -98,7 +127,7 @@ function expectedCandidateUnion(
     byKey.set(key, { ...candidate, validUntil: validUntil ?? null })
   }
   return [...byKey.values()]
-    .sort((left, right) => compareCatalogKey(left.key, right.key))
+    .sort((left, right) => compareKeyOracle(left.key, right.key))
     .slice(0, maximumOutputs)
 }
 
@@ -175,6 +204,22 @@ function hydrated(input: {
 }
 
 describe('aggregate access catalog properties', () => {
+  it('matches an independent UTF-8 byte oracle with exact identity', () => {
+    fc.assert(
+      fc.property(candidateArbitrary, candidateArbitrary, (left, right) => {
+        expect(Math.sign(compareCatalogKey(left.key, right.key))).toBe(
+          Math.sign(compareKeyOracle(left.key, right.key))
+        )
+        expect(catalogKeyEquals(left.key, right.key)).toBe(
+          left.key[0] === right.key[0] &&
+            left.key[1] === right.key[1] &&
+            left.key[2] === right.key[2]
+        )
+      }),
+      { numRuns: 1_000 }
+    )
+  })
+
   it('k-way merge is ordered, bounded, deduplicating, and producer-order independent', () => {
     fc.assert(
       fc.property(
@@ -197,18 +242,17 @@ describe('aggregate access catalog properties', () => {
       fc
         .tuple(
           ...families.map(family =>
-            fc.uniqueArray(fc.integer({ min: 0, max: 200 }), { maxLength: 25 }).map(values => ({
+            fc.uniqueArray(catalogTextArbitrary, { maxLength: 25 }).map(values => ({
               streamId: family,
               candidates: values
-                .map(value => {
-                  const logicalId = identifier(value)
+                .map(logicalId => {
                   return {
                     key: catalogKey(environmentId, family, logicalId),
                     canonicalId: `${family}:${logicalId}`,
                     validUntil: null,
                   }
                 })
-                .sort((left, right) => compareCatalogKey(left.key, right.key)),
+                .sort((left, right) => compareKeyOracle(left.key, right.key)),
             }))
           )
         )
@@ -232,7 +276,7 @@ describe('aggregate access catalog properties', () => {
             const afterKey = emitted.at(-1)?.key
             if (afterKey) {
               stream.candidates = stream.candidates.filter(
-                candidate => compareCatalogKey(candidate.key, afterKey) > 0
+                candidate => compareKeyOracle(candidate.key, afterKey) > 0
               )
             }
           }
