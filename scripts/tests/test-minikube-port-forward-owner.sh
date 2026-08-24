@@ -5,7 +5,8 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 OWNER="${ROOT}/scripts/minikube/port-forward-owner.sh"
 PF_ALL="${ROOT}/scripts/minikube/pf-all-stack.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/evenfire-pf-owner.XXXXXX")"
-trap 'rm -rf -- "${TMP_ROOT}"' EXIT
+LEGACY_RECORD="$(mktemp /tmp/pf-evenfire-owner.XXXXXX.pid)"
+trap 'rm -rf -- "${TMP_ROOT}"; rm -f -- "${LEGACY_RECORD}"' EXIT
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -76,6 +77,7 @@ reset_process_fixture() {
   : >"${KILL_LOG}"
   : >"${REAP_LOG}"
   rm -f -- "${RECORD}"
+  rm -f -- "${LEGACY_RECORD}"
   ACTUAL_START="${RECORDED_START}"
   ACTUAL_COMMAND="kubectl --context=${CONTEXT} -n ${NAMESPACE} port-forward --address=127.0.0.1 svc/${SERVICE} ${LOCAL_PORT}:${REMOTE_PORT}"
 }
@@ -95,6 +97,11 @@ write_record() {
 
 cleanup_record() {
   pf_owner_cleanup_record "${RECORD}" "${PROFILE}" "${CONTEXT}" \
+    "${WORKTREE}" "${NAMESPACE}" "${SERVICE}" "${LOCAL_PORT}" "${REMOTE_PORT}"
+}
+
+cleanup_legacy_record() {
+  pf_owner_cleanup_record "${LEGACY_RECORD}" "${PROFILE}" "${CONTEXT}" \
     "${WORKTREE}" "${NAMESPACE}" "${SERVICE}" "${LOCAL_PORT}" "${REMOTE_PORT}"
 }
 
@@ -174,11 +181,11 @@ ACTUAL_START=''
 expect_refusal 'unavailable process-start identity'
 
 reset_process_fixture
-printf '%s\nPROCESS_START=%s\n' "${PID}" "${RECORDED_START}" >"${RECORD}"
-chmod 600 "${RECORD}"
+printf '%s\n' "${PID}" >"${LEGACY_RECORD}"
+chmod 600 "${LEGACY_RECORD}"
 printf 'dead\n' >"${STATE_FILE}"
-cleanup_record || fail 'dead legacy pidfile was not cleaned'
-[[ ! -e "${RECORD}" ]] || fail 'dead legacy pidfile remains'
+cleanup_legacy_record || fail 'dead legacy pidfile was not cleaned'
+[[ ! -e "${LEGACY_RECORD}" ]] || fail 'dead legacy pidfile remains'
 [[ ! -s "${KILL_LOG}" ]] || fail 'dead legacy cleanup sent a signal'
 pass 'dead stale pidfiles are removed without signalling'
 
