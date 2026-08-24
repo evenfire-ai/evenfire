@@ -8,7 +8,8 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 COMMON="$ROOT/scripts/minikube/t2-common.sh"
 PROFILE=clerum-feature-owner
 
-if output="$(T2_PROJECT_DIR="$ROOT" T2_PROFILE="$PROFILE" MINIKUBE_PROFILE="$PROFILE" \
+if output="$(env -u T2_CONTEXT -u CONTROL_API_REAL_PG_CONTEXT -u K8S_CONTEXT -u KUBECONTEXT \
+  T2_PROJECT_DIR="$ROOT" T2_PROFILE="$PROFILE" MINIKUBE_PROFILE="$PROFILE" \
   bash -c 'source "$1"; t2_require_explicit_context' _ "$COMMON" 2>&1)"; then
   printf 'FAIL: implicit profile-to-context fallback was accepted\n' >&2
   exit 1
@@ -19,7 +20,8 @@ case "$output" in
 esac
 
 for variable in T2_CONTEXT CONTROL_API_REAL_PG_CONTEXT K8S_CONTEXT KUBECONTEXT; do
-  result="$(env "$variable=$PROFILE" T2_PROJECT_DIR="$ROOT" T2_PROFILE="$PROFILE" \
+  result="$(env -u T2_CONTEXT -u CONTROL_API_REAL_PG_CONTEXT -u K8S_CONTEXT -u KUBECONTEXT \
+    "$variable=$PROFILE" T2_PROJECT_DIR="$ROOT" T2_PROFILE="$PROFILE" \
     MINIKUBE_PROFILE="$PROFILE" bash -c '
       source "$1"
       t2_require_explicit_context
