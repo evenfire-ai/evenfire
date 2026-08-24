@@ -24,7 +24,7 @@ import { formatTeamRole } from '../lib/teamRoles'
 import { ControlAdminsPanel } from './ControlAdminsPanel'
 import type { ProfileAdminHomeProps, ProfileAdminTab } from './ProfileAdminHome.types'
 import { SectionSearchInput } from './SectionSearchInput'
-import { IconSettings, IconUsers } from './Sidebar/icons'
+import { IconShield, IconUsers } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TabBar } from './TabBar'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -927,18 +927,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                     }}
                                     onKeyDown={event => event.stopPropagation()}
                                     disabled={busy && !loaded}
-                                    aria-label={
-                                      user.controlAdminId
-                                        ? `Open admin for member ${user.name || user.email}`
-                                        : `Create admin for member ${user.name || user.email}`
-                                    }
-                                    title={
-                                      user.controlAdminId
-                                        ? 'Open matching admin'
-                                        : 'Create admin from member'
-                                    }
+                                    aria-label={`${
+                                      user.controlAdminId ? 'View admin' : 'Create admin'
+                                    } for member ${user.name || user.email}`}
+                                    title={user.controlAdminId ? 'View admin' : 'Create admin'}
                                   >
-                                    <IconSettings />
+                                    <IconShield
+                                      createBadge={!user.controlAdminId}
+                                      relationshipRole="admin"
+                                    />
                                   </button>
                                   <button
                                     type="button"

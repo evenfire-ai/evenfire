@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Run the real-Postgres T1 suites against the control-postgres instance in an
-# explicitly validated, branch-owned Minikube profile.
+# Run the GFS real-Postgres T1 suites with an isolated PostgreSQL instance while
+# validating the target branch-owned Minikube profile and restoring its GFS
+# runtime roles on exit.
 #
 # This runner is deliberately separate from CI: CI supplies its own ephemeral
-# Postgres DSN, while this gate obtains a short-lived localhost port-forward to
-# the selected Minikube service. It never discovers or accepts a GKE context.
+# Postgres DSN, while this gate starts a disposable local PostgreSQL container.
+# It never mutates the shared control-postgres database used by the profile.
 set -euo pipefail
 set +x
 
@@ -13,10 +14,26 @@ PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 CONTEXT="${CONTEXT:-${MINIKUBE_PROFILE:-}}"
 SYNC_CONFIGMAP="${CLERUM_PRE_GATE_SYNC_CONFIGMAP:-clerum-pre-gate-sync-state}"
 CONTROL_NS="${CONTROL_NS:-control-plane}"
-PG_SERVICE="${PG_SERVICE:-control-postgres}"
-PG_SECRET="${PG_SECRET:-control-postgres}"
 TIMEOUT="${TIMEOUT:-120}"
-PORTS_ENV="${CLERUM_PROFILE_PORTS_ENV:-${HOME}/.cache/clerum/minikube-profiles/${CONTEXT}/ports.env}"
+ISOLATED_PG_IMAGE="${ISOLATED_PG_IMAGE:-postgres:16-alpine}"
+ISOLATED_HOST='127.0.0.1'
+
+# Reuse the canonical T2 ownership, context-identity, marker, and mutation
+# lock contract. This standalone GFS lane is still a T1 helper, but it mutates
+# cluster-global GFS roles and therefore must have the same branch-owned safety
+# boundary as the main T2 orchestrator.
+T2_PROJECT_DIR="${PROJECT_DIR}"
+MINIKUBE_PROFILE="${CONTEXT}"
+T2_PROFILE="${CONTEXT}"
+T2_CONTEXT="${CONTEXT}"
+T2_PROFILE_ROOT="${T2_PROFILE_ROOT:-${CLERUM_PROFILE_CACHE_ROOT:-${HOME}/.cache/clerum/minikube-profiles}}"
+T2_PROFILE_ENV="${T2_PROFILE_ENV:-${T2_PROFILE_ROOT}/${CONTEXT}/profile.env}"
+T2_PORTS_ENV="${T2_PORTS_ENV:-${CLERUM_PROFILE_PORTS_ENV:-${T2_PROFILE_ROOT}/${CONTEXT}/ports.env}}"
+T2_MARKER_NAME="${SYNC_CONFIGMAP}"
+T2_CONTROL_NAMESPACE="${CONTROL_NS}"
+export T2_PROJECT_DIR MINIKUBE_PROFILE T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT \
+  T2_PROFILE_ENV T2_PORTS_ENV T2_MARKER_NAME T2_CONTROL_NAMESPACE
+source "${PROJECT_DIR}/scripts/minikube/t2-common.sh"
 
 die() {
   printf '[gfs-real-pg-minikube] ERROR: %s\n' "$*" >&2
@@ -34,68 +51,21 @@ require_command() {
   done
 }
 
-is_branch_profile() {
-  [[ "${1}" =~ ^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$ ]]
-}
-
-reject_unsafe_context() {
-  [[ -n "${CONTEXT}" ]] || die 'CONTEXT or MINIKUBE_PROFILE is required'
-  case "${CONTEXT}" in
-    gke_*) die "refusing non-Minikube or production context: ${CONTEXT}" ;;
-    *prod*) die "refusing non-Minikube or production context: ${CONTEXT}" ;;
-  esac
-  if [[ "${CONTEXT}" != "clerum-test" ]] && ! is_branch_profile "${CONTEXT}"; then
-    die "context is not an allowed local/branch profile: ${CONTEXT}"
+verify_branch_gate() {
+  t2_require_commands
+  t2_repo_metadata
+  t2_profile_scope
+  # Profile status is checked before context identity so a missing/stopped
+  # profile produces the supported bootstrap transition instead of an opaque
+  # kube-context failure.
+  t2_profile_status
+  if [ "${T2_BOOTSTRAP_REQUIRED}" = true ]; then
+    die "branch-owned Minikube profile is not bootstrapped: ${T2_PROFILE}"
   fi
-}
-
-verify_profile_ownership() {
-  if ! is_branch_profile "${CONTEXT}"; then
-    return 0
-  fi
-  [[ -f "${PORTS_ENV}" ]] || die "branch profile ports.env is missing: ${PORTS_ENV}"
-
-  local profile_name profile_repo profile_dir
-  profile_dir="${PORTS_ENV%/ports.env}"
-  profile_name="$(awk -F= '$1 == "PROFILE" { print substr($0, index($0, "=") + 1); exit }' "${profile_dir}/profile.env" 2>/dev/null || true)"
-  profile_repo="$(awk -F= '$1 == "REPO_DIR" { print substr($0, index($0, "=") + 1); exit }' "${profile_dir}/profile.env" 2>/dev/null || true)"
-  [[ "${profile_name}" == "${CONTEXT}" ]] || die "ports.env/profile marker belongs to '${profile_name:-unknown}', not ${CONTEXT}"
-  [[ -n "${profile_repo}" ]] || die 'profile marker has no REPO_DIR'
-  [[ "$(cd -- "${profile_repo}" 2>/dev/null && pwd -P)" == "${PROJECT_DIR}" ]] || \
-    die "profile marker is owned by another worktree: ${profile_repo}"
-}
-
-verify_clean_and_sync_marker() {
-  local head worktree_id marker_json
-  [[ -z "$(git -C "${PROJECT_DIR}" status --porcelain)" ]] || \
-    die 'worktree is dirty; run pre-gate-sync after committing or cleanly restoring changes'
-  head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD)"
-  worktree_id="$(printf '%s' "${PROJECT_DIR}" | shasum | awk '{print $1}')"
-  marker_json="$(kc -n "${CONTROL_NS}" get configmap "${SYNC_CONFIGMAP}" -o json 2>/dev/null)" || \
-    die "validated pre-gate marker is missing: ${CONTROL_NS}/${SYNC_CONFIGMAP}"
-
-  python3 - "${worktree_id}" "${head}" "${marker_json}" <<'PY'
-import json
-import sys
-
-expected_worktree, expected_head, marker_json = sys.argv[1:]
-payload = json.loads(marker_json)
-data = payload.get("data") or {}
-if not data.get("clusterFingerprint"):
-    raise SystemExit("pre-gate marker has no cluster fingerprint")
-if data.get("worktreeId") != expected_worktree:
-    raise SystemExit("pre-gate marker belongs to another worktree")
-if data.get("gitHead") != expected_head:
-    raise SystemExit("pre-gate marker does not match the current HEAD")
-PY
-}
-
-secret_value() {
-  local key="$1" encoded
-  encoded="$(kc -n "${CONTROL_NS}" get secret "${PG_SECRET}" -o "jsonpath={.data.${key}}" 2>/dev/null)" || \
-    die "cannot read ${CONTROL_NS}/${PG_SECRET}.${key}"
-  [[ -n "${encoded}" ]] || die "${CONTROL_NS}/${PG_SECRET}.${key} is empty"
-  printf '%s' "${encoded}" | python3 -c 'import base64,sys; print(base64.b64decode(sys.stdin.read(), validate=True).decode(), end="")'
+  t2_context_check
+  t2_profile_context_identity_check
+  t2_mutation_lock
+  t2_marker_check
 }
 
 wait_for_tcp() {
@@ -129,6 +99,64 @@ text = path.read_text(errors="replace")
 text = re.sub(r"postgres(?:ql)?://[^\s\"'<>]+", "<minikube-postgres-dsn-redacted>", text)
 path.write_text(text)
 PY
+}
+
+PROFILE_PG_FORWARD_PID=""
+
+stop_profile_postgres_forward() {
+  [[ -n "${PROFILE_PG_FORWARD_PID}" ]] || return 0
+  if ! kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
+    PROFILE_PG_FORWARD_PID=''
+    return 0
+  fi
+  local command_line
+  command_line="$(ps -p "${PROFILE_PG_FORWARD_PID}" -o command= 2>/dev/null || true)"
+  if [[ "${command_line}" != *port-forward* || "${command_line}" != *svc/control-postgres* ]]; then
+    printf '[gfs-real-pg-minikube] ERROR: profile PostgreSQL forward PID is not the expected child; refusing cleanup success\n' >&2
+    return 1
+  fi
+  if ! kill "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1 && kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
+    return 1
+  fi
+  if kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
+    if wait "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
+      :
+    fi
+  fi
+  if kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
+    return 1
+  fi
+  PROFILE_PG_FORWARD_PID=''
+}
+
+verify_profile_postgres() {
+  kc -n "${CONTROL_NS}" rollout status deployment/control-postgres --timeout="${TIMEOUT}s" >/dev/null 2>&1 || \
+    die 'branch-profile control-postgres did not become Ready'
+
+  local key encoded profile_port
+  for key in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+    encoded="$(kc -n "${CONTROL_NS}" get secret control-postgres -o "jsonpath={.data.${key}}" 2>/dev/null || true)"
+    [[ -n "${encoded}" ]] || die "branch-profile control-postgres Secret is missing ${key}"
+    printf '%s' "${encoded}" | python3 -c 'import base64,sys; base64.b64decode(sys.stdin.buffer.read(), validate=True)' >/dev/null 2>&1 || \
+      die "branch-profile control-postgres Secret key is not valid base64: ${key}"
+  done
+
+  profile_port="$(choose_local_port)"
+  kubectl --context="${CONTEXT}" -n "${CONTROL_NS}" port-forward \
+    --address=127.0.0.1 svc/control-postgres "${profile_port}:5432" \
+    >"${TMP_DIR}/profile-postgres-port-forward.log" 2>&1 &
+  PROFILE_PG_FORWARD_PID=$!
+  if ! wait_for_tcp "${profile_port}"; then
+    sanitize_file "${TMP_DIR}/profile-postgres-port-forward.log"
+    cat "${TMP_DIR}/profile-postgres-port-forward.log" >&2 || true
+    die 'branch-profile control-postgres port-forward did not become reachable'
+  fi
+  if ! kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
+    sanitize_file "${TMP_DIR}/profile-postgres-port-forward.log"
+    cat "${TMP_DIR}/profile-postgres-port-forward.log" >&2 || true
+    die 'branch-profile control-postgres port-forward exited before the GFS lane started'
+  fi
+  stop_profile_postgres_forward || die 'could not cleanly close the branch-profile PostgreSQL precondition forward'
 }
 
 real_postgres_suite_files() {
@@ -218,58 +246,46 @@ PY
   printf '[gfs-real-pg-minikube] PASS %s (%s suites, no skips)\n' "${package}" "${suite_count}"
 }
 
-require_command git kubectl npm python3 shasum
-reject_unsafe_context
-verify_profile_ownership
-verify_clean_and_sync_marker
-kc -n "${CONTROL_NS}" get service "${PG_SERVICE}" >/dev/null || die "${CONTROL_NS}/${PG_SERVICE} service is missing"
-kc -n "${CONTROL_NS}" rollout status deployment/control-postgres --timeout="${TIMEOUT}s" >/dev/null || \
-  die 'control-postgres is not Ready in the validated profile'
-
-PG_USER="$(secret_value POSTGRES_USER)"
-PG_PASSWORD="$(secret_value POSTGRES_PASSWORD)"
-PG_DATABASE="$(secret_value POSTGRES_DB)"
-[[ -n "${PG_USER}" && -n "${PG_PASSWORD}" && -n "${PG_DATABASE}" ]] || die 'control-postgres secret is incomplete'
-
 TMP_DIR="$(mktemp -d)"
-PORT_FORWARD_PID=''
-LOCAL_PORT=''
+ISOLATED_CONTAINER=""
+ISOLATED_PORT=''
+ADMIN_DSN=''
+GFS_RESTORE_REQUIRED=false
 restore_gfs_runtime_credentials() {
   # The reader-role real-Postgres suite exercises the production role names,
   # which are cluster-global even though its fixture database is temporary.
   # Restore the branch profile before this gate exits so a failed or interrupted
   # T1 run cannot leave GFSC in NOLOGIN and poison the following T2 journey.
   if ! kc -n gfs get secret gfs-controller-db >/dev/null 2>&1; then
-    return 0
+    printf '[gfs-real-pg-minikube] ERROR: required gfs-controller-db Secret is missing or unreadable; refusing to finish with GFS credentials unreconciled\n' >&2
+    return 1
   fi
-  if ! GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${CONTEXT}" \
+  if ! T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" \
+    T2_PROJECT_DIR="${T2_PROJECT_DIR}" T2_PROFILE="${T2_PROFILE}" T2_CONTEXT="${T2_CONTEXT}" \
+    T2_PROFILE_ROOT="${T2_PROFILE_ROOT}" T2_PROFILE_ENV="${T2_PROFILE_ENV}" T2_PORTS_ENV="${T2_PORTS_ENV}" \
+    GFS_RESTORE_ACTIVE_NOLOGIN=true CONTEXT="${CONTEXT}" \
     bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
     printf '[gfs-real-pg-minikube] ERROR: failed to restore branch-profile GFS credentials\n' >&2
     return 1
   fi
 }
-stop_port_forward() {
-  if [[ -z "${PORT_FORWARD_PID}" ]] || ! kill -0 "${PORT_FORWARD_PID}" >/dev/null 2>&1; then
-    PORT_FORWARD_PID=''
+stop_isolated_postgres() {
+  [[ -n "${ISOLATED_CONTAINER}" ]] || return 0
+  if docker rm -f "${ISOLATED_CONTAINER}" >/dev/null 2>&1; then
+    ISOLATED_CONTAINER=''
     return 0
   fi
-  local command_line
-  command_line="$(ps -p "${PORT_FORWARD_PID}" -o command= 2>/dev/null || true)"
-  if [[ "${command_line}" == *'port-forward'* &&
-        "${command_line}" == *"svc/${PG_SERVICE}"* &&
-        "${command_line}" == *"${LOCAL_PORT}:5432"* ]]; then
-    kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
-    wait "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
-  fi
-  PORT_FORWARD_PID=''
+  return 1
 }
 cleanup() {
   local status=$?
-  stop_port_forward
-  if ! restore_gfs_runtime_credentials; then
-    status=1
-  fi
-  rm -rf "${TMP_DIR}"
+  trap - EXIT
+  trap '' INT TERM
+  if ! stop_profile_postgres_forward; then status=1; fi
+  if ! stop_isolated_postgres; then status=1; fi
+  if [ "${GFS_RESTORE_REQUIRED}" = true ] && ! restore_gfs_runtime_credentials; then status=1; fi
+  if ! rm -rf "${TMP_DIR}"; then status=1; fi
+  if ! t2_lock_release "${status}"; then status=1; fi
   exit "${status}"
 }
 trap cleanup EXIT
@@ -285,39 +301,32 @@ sock.close()
 PY
 }
 
-port_forward_ready=false
-for _attempt in 1 2 3 4 5; do
-  LOCAL_PORT="$(choose_local_port)"
-  kubectl --context="${CONTEXT}" -n "${CONTROL_NS}" port-forward \
-    --address=127.0.0.1 "svc/${PG_SERVICE}" "${LOCAL_PORT}:5432" \
-    >"${TMP_DIR}/port-forward.log" 2>&1 &
-  PORT_FORWARD_PID=$!
-  if wait_for_tcp "${LOCAL_PORT}"; then
-    port_forward_ready=true
+require_command docker npm
+docker info >/dev/null 2>&1 || die 'Docker is required for the isolated GFS real-Postgres lane'
+verify_branch_gate
+verify_profile_postgres
+
+ISOLATED_PORT="$(choose_local_port)"
+ISOLATED_CONTAINER="evenfire-gfs-t1-pg-$$"
+docker run -d --rm --name "${ISOLATED_CONTAINER}" \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_DB=postgres \
+  -e POSTGRES_HOST_AUTH_METHOD=trust \
+  -p "127.0.0.1:${ISOLATED_PORT}:5432" \
+  "${ISOLATED_PG_IMAGE}" >/dev/null || die 'isolated GFS PostgreSQL container failed to start'
+wait_for_tcp "${ISOLATED_PORT}" || die 'isolated GFS PostgreSQL did not become reachable'
+deadline=$((SECONDS + TIMEOUT))
+while (( SECONDS < deadline )); do
+  if docker exec "${ISOLATED_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1; then
     break
   fi
-  stop_port_forward
+  sleep 1
 done
-[[ "${port_forward_ready}" == true ]] || {
-  cat "${TMP_DIR}/port-forward.log" >&2 || true
-  die 'Minikube PostgreSQL port-forward did not become reachable'
-}
+docker exec "${ISOLATED_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1 ||
+  die 'isolated GFS PostgreSQL did not become ready'
+ADMIN_DSN="$(printf 'postgresql://postgres@%s:%s/postgres' "${ISOLATED_HOST}" "${ISOLATED_PORT}")"
 
-ADMIN_DSN="$(printf '%s\0%s\0%s' "${PG_USER}" "${PG_PASSWORD}" "${LOCAL_PORT}" | python3 -c '
-from urllib.parse import quote
-import sys
-
-user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
-user = user.decode()
-password = password.decode()
-port = port.decode()
-print("postgresql://{}:{}@127.0.0.1:{}/postgres".format(
-    quote(user, safe=""), quote(password, safe=""), port
-), end="")
-')"
-unset PG_USER PG_PASSWORD PG_DATABASE
-[[ -n "${ADMIN_DSN}" ]] || die 'constructed Minikube PostgreSQL admin DSN is empty'
-
+GFS_RESTORE_REQUIRED=true
 run_suite control-api
 run_suite gfs-controller
 printf '[gfs-real-pg-minikube] T1 PASS: real PostgreSQL executed against validated Minikube profile %s\n' "${CONTEXT}"

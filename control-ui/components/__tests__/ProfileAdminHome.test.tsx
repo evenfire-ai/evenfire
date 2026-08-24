@@ -164,13 +164,53 @@ describe('ProfileAdminHome — members invitations', () => {
 
     await screen.findByLabelText('Open member Accepted Invitee')
 
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Create admin for member Accepted Invitee' })
+    const createAdminButton = screen.getByRole('button', {
+      name: 'Create admin for member Accepted Invitee',
+    })
+    expect(createAdminButton).toHaveAttribute('title', 'Create admin')
+    expect(createAdminButton.querySelector('svg')).toHaveAttribute(
+      'data-relationship-role',
+      'admin'
     )
+    expect(createAdminButton.querySelector('svg')).toHaveAttribute('data-create-badge', 'true')
+
+    fireEvent.click(createAdminButton)
 
     expect(mockPush).toHaveBeenCalledWith(
       '/users-and-teams/admins/new?email=accepted%40example.com&name=Accepted+Invitee&step=review&source=member'
     )
+  })
+
+  it('views the matching admin from a member with the destination-role SVG', async () => {
+    vi.mocked(getProfileAdminOverview).mockResolvedValueOnce({
+      teams: [],
+      users: [
+        {
+          id: 'member-1',
+          email: 'member@example.com',
+          name: 'Member',
+          picture: null,
+          displayName: 'Member',
+          controlAdminId: 'admin-1',
+          activeTeamCount: 0,
+        },
+      ],
+      pendingInvitations: [],
+      teamAgentCounts: {},
+      teamContextCounts: {},
+    })
+    renderProfileAdminHome()
+
+    const viewAdminButton = await screen.findByRole('button', {
+      name: 'View admin for member Member',
+    })
+    expect(viewAdminButton).toHaveAttribute('title', 'View admin')
+    expect(viewAdminButton.querySelector('svg')).toHaveAttribute('data-relationship-role', 'admin')
+    expect(viewAdminButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
+
+    fireEvent.click(viewAdminButton)
+
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/admins?highlightAdminId=admin-1')
   })
 
   it('opens a team detail page from the whole team row', async () => {

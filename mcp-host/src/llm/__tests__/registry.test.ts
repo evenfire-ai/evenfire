@@ -27,8 +27,8 @@ describe('provider registry — auto-detection order (§5.9)', () => {
     ])
   })
 
-  it('registers all 21 canonical providers and every R6 addition', () => {
-    expect(ALL_PROVIDERS).toHaveLength(21)
+  it('registers all 22 canonical providers and every R6 addition', () => {
+    expect(ALL_PROVIDERS).toHaveLength(22)
     for (const p of [
       'openrouter',
       'gemini',
@@ -44,6 +44,7 @@ describe('provider registry — auto-detection order (§5.9)', () => {
       'moonshot',
       'nebius',
       'novita',
+      'minimax',
       'azure',
     ] as const) {
       expect(ALL_PROVIDERS).toContain(p)
