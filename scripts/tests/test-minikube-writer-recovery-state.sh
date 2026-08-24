@@ -28,7 +28,11 @@ identity=(
 )
 
 python3 "$HELPER" write "${identity[@]}" --phase planned --hcc 1 --workflow 1 --trace 1 --control-api 1
-mode="$(stat -f '%Lp' "$STATE" 2>/dev/null || stat -c '%a' "$STATE")"
+if stat -c '%a' "$STATE" >/dev/null 2>&1; then
+  mode="$(stat -c '%a' "$STATE")"
+else
+  mode="$(stat -f '%Lp' "$STATE")"
+fi
 [[ "$mode" == 600 ]] || fail "state mode is $mode, expected 600"
 python3 "$HELPER" read "${identity[@]}" | grep -Fxq 'planned|1|1|1|1' ||
   fail 'planned state did not round-trip with exact replicas'
