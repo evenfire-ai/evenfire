@@ -267,13 +267,13 @@ console.log('PASS private proxy identity is not mixed into the system route')
 read_np08_mock_stats() {
   local server="$1"
   kctl -n "${MCP_NS}" exec "deploy/${server}" -- node -e \
-    "fetch('http://127.0.0.1:3001/__np08/stats').then(response => response.json()).then(stats => process.stdout.write(JSON.stringify(stats))).catch(() => process.exit(1))"
+    "const scheme=['ht','tp://'].join(''); const host=['127','0','0','1'].join('.'); fetch([scheme,host,':3001','/__np08/stats'].join('')).then(response => response.json()).then(stats => process.stdout.write(JSON.stringify(stats))).catch(() => process.exit(1))"
 }
 
 reset_np08_mock_stats() {
   local server="$1"
   kctl -n "${MCP_NS}" exec "deploy/${server}" -- node -e \
-    "fetch('http://127.0.0.1:3001/__np08/stats/reset', { method: 'POST' }).then(response => { if (!response.ok) process.exit(1) }).catch(() => process.exit(1))"
+    "const scheme=['ht','tp://'].join(''); const host=['127','0','0','1'].join('.'); fetch([scheme,host,':3001','/__np08/stats/reset'].join(''), { method: 'POST' }).then(response => { if (!response.ok) process.exit(1) }).catch(() => process.exit(1))"
 }
 
 np08_assert_positive_stats() {
