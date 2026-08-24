@@ -177,7 +177,7 @@ assert_minikube_upgrade_classifier() {
     fi
   done
   if [[ "$path" == *"scripts/minikube/full-setup.sh" ]]; then
-    local readiness_probe writer_flag partial_flag fence_call policy_apply migration roles restore_api deferred_full_overlay post_ready post_reconcile
+    local readiness_probe writer_flag partial_flag fence_call policy_apply migration roles recovery_overlay restore_api post_ready post_reconcile restore_writers
     readiness_probe="$(grep -n 'if control_api_is_ready' <<<"$block" | head -1 | cut -d: -f1)"
     if [[ -n "$readiness_probe" ]]; then
       readiness_probe=$((block_start + readiness_probe - 1))
@@ -192,9 +192,10 @@ assert_minikube_upgrade_classifier() {
     migration="$(grep -n 'run-control-api-db-migration.sh' "$path" | head -1 | cut -d: -f1)"
     roles="$(grep -n 'provision-control-api-runtime-roles.sh' "$path" | head -1 | cut -d: -f1)"
     restore_api="$(grep -nE '^[[:space:]]+restore_partial_control_api$' "$path" | tail -1 | cut -d: -f1)"
-    deferred_full_overlay="$(grep -n 'Deferred full kustomize overlay applied' "$path" | head -1 | cut -d: -f1)"
+    recovery_overlay="$(grep -nE '^[[:space:]]+apply_fenced_recovery_overlay$' "$path" | tail -1 | cut -d: -f1)"
     post_ready="$(grep -n 'rollout status deployment/control-api.*timeout=180s' "$path" | tail -1 | cut -d: -f1)"
     post_reconcile="$(grep -nE '^[[:space:]]+reconcile_existing_gfs_credentials$' "$path" | tail -1 | cut -d: -f1)"
+    restore_writers="$(grep -nE '^[[:space:]]+restore_partial_non_api_writers$' "$path" | tail -1 | cut -d: -f1)"
     for line_name in writer_flag partial_flag fence_call policy_apply; do
       line_value="${!line_name}"
       if [[ -n "$line_value" ]]; then
@@ -204,21 +205,31 @@ assert_minikube_upgrade_classifier() {
     [[ -n "$dsn" && -n "$classify" && -n "$readiness_probe" && -n "$writer_flag" && \
        -n "$partial_flag" && -n "$fence_call" && -n "$policy_apply" && \
        -n "$fallback" && -n "$fresh" && -n "$migration" && \
-       -n "$roles" && -n "$restore_api" && -n "$deferred_full_overlay" && \
-       -n "$post_ready" && -n "$post_reconcile" ]] \
+       -n "$roles" && -n "$recovery_overlay" && -n "$restore_api" && \
+       -n "$post_ready" && -n "$post_reconcile" && -n "$restore_writers" ]] \
       || fail "$path recovery classifier is incomplete"
     [[ "$dsn" -lt "$classify" && "$classify" -lt "$readiness_probe" && \
        "$readiness_probe" -lt "$writer_flag" && "$writer_flag" -lt "$partial_flag" && \
        "$partial_flag" -lt "$fence_call" && "$fence_call" -lt "$policy_apply" && \
        "$partial_flag" -lt "$fallback" && "$fallback" -lt "$fresh" && \
-       "$migration" -lt "$roles" && "$roles" -lt "$restore_api" && \
-       "$restore_api" -lt "$post_reconcile" && "$post_reconcile" -lt "$deferred_full_overlay" && \
-       "$post_ready" -lt "$deferred_full_overlay" ]] \
-      || fail "$path does not fence writers and defer the full overlay until runtime-role readiness"
+       "$migration" -lt "$roles" && "$roles" -lt "$recovery_overlay" && \
+       "$recovery_overlay" -lt "$restore_api" && "$restore_api" -lt "$post_reconcile" && \
+       "$post_reconcile" -lt "$restore_writers" && "$post_ready" -lt "$post_reconcile" ]] \
+      || fail "$path does not apply a fenced overlay before restoring API, GFS, and the remaining writers"
     grep -Fq 'Existing GFS writer detected but control-api is not Ready; refusing HCC cutover' "$path" \
       || fail "$path no longer retains the fail-closed guard for an unrecognized unready upgrade"
     grep -Fq 'app=control-api,!clerum.io/component' "$path" \
       || fail "$path does not exclude migration Jobs from the control-api writer fence"
+    grep -Fq 'WRITER_RECOVERY_MIGRATIONS_COMPLETE=true' "$path" \
+      || fail "$path does not mark post-migration recovery as complete"
+    grep -Fq 'WRITER_RECOVERY_FENCE_PENDING=true' "$path" \
+      || fail "$path does not re-fence every durable post-migration resume"
+    grep -Fq 'render-fenced-writer-deployments.rb' "$path" \
+      || fail "$path does not render a fenced recovery overlay"
+    grep -Fq 'writer_recovery_state_phase overlay-applying' "$path" \
+      || fail "$path does not persist the overlay-application boundary"
+    grep -Fq 'writer_recovery_state_phase api-restoring' "$path" \
+      || fail "$path does not persist the control-api restore boundary"
   else
     [[ -n "$dsn" && -n "$classify" && -n "$ready" && -n "$abort" && -n "$reconcile" && -n "$fallback" && -n "$fresh" ]] \
       || fail "$path upgrade classifier is incomplete"

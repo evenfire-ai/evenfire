@@ -26,7 +26,9 @@ PHASES = {
     "api-fenced",
     "policy-ready",
     "roles-ready",
+    "api-restoring",
     "api-restored",
+    "overlay-applying",
     "overlay-applied",
 }
 

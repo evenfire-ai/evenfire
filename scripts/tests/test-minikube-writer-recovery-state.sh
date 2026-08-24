@@ -37,6 +37,11 @@ pass 'writer recovery state is private and round-trips atomically'
 python3 "$HELPER" write "${identity[@]}" --phase api-fencing --hcc 1 --workflow 2 --control-api 1
 python3 "$HELPER" read "${identity[@]}" | grep -Fxq 'api-fencing|1|2|1' ||
   fail 'fencing phase did not preserve original replicas'
+for phase in api-restoring overlay-applying; do
+  python3 "$HELPER" write "${identity[@]}" --phase "$phase" --hcc 1 --workflow 2 --control-api 1
+  python3 "$HELPER" read "${identity[@]}" | grep -Fxq "${phase}|1|2|1" ||
+    fail "${phase} phase did not round-trip"
+done
 wrong_status=0
 python3 "$HELPER" read "${identity[@]}" --head fedcba9876543210 >/dev/null 2>&1 || wrong_status=$?
 [[ "$wrong_status" -ne 0 ]] || fail 'state was readable under a different HEAD'

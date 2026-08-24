@@ -54,6 +54,7 @@ T1_DURATION_SECONDS=0
 T1_GFS_RESTORE_REQUIRED=false
 T1_CLEANUP_DONE=false
 T1_SIGNAL_STATUS=0
+T1_PORT_FORWARD_CLEANUP_OK=true
 
 die_t1() {
   local code="$1"
@@ -186,6 +187,7 @@ cleanup_t1() {
   trap '' INT TERM
   if ! stop_control_postgres_forward; then
     status=1
+    T1_PORT_FORWARD_CLEANUP_OK=false
   fi
   if ! stop_isolated_postgres; then
     status=1
@@ -197,7 +199,12 @@ cleanup_t1() {
     status=1
   fi
   T1_DURATION_SECONDS=$((SECONDS - T1_STARTED_SECONDS))
-  if [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then rm -rf "$T1_TMP_DIR"; fi
+  if [ "$T1_PORT_FORWARD_CLEANUP_OK" = true ] &&
+    [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then
+    rm -rf "$T1_TMP_DIR"
+  elif [ -n "$T1_TMP_DIR" ] && [ -d "$T1_TMP_DIR" ]; then
+    printf '[minikube-t1] preserving T1 temp directory because port-forward ownership cleanup was not proven: %s\n' "$T1_TMP_DIR" >&2
+  fi
   if [ "$status" -eq 0 ] && [ "$T1_STATUS" = PASS ]; then
     t2_evidence_write T1 PASS "Real PostgreSQL suites passed; files=$T1_REPORTED_FILES/$T1_EXPECTED_FILES tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS duration=${T1_DURATION_SECONDS}s; cleanup=PASS"
     t2_evidence_write complete PASS "T1=PASS files=$T1_REPORTED_FILES/$T1_EXPECTED_FILES tests=$T1_TOTAL_TESTS passed=$T1_PASSED_TESTS pending=$T1_PENDING_TESTS duration=${T1_DURATION_SECONDS}s cleanup=PASS"

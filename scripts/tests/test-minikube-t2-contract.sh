@@ -39,6 +39,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-real-postgres-local-preflight.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh" \
   "$ROOT/scripts/tests/test-minikube-explicit-context.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-evidence.sh" \
@@ -54,6 +55,7 @@ done
 "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh"
 "$ROOT/scripts/tests/test-minikube-k8s-api-egress-policy.sh"
 "$ROOT/scripts/tests/test-minikube-writer-recovery-state.sh"
+"$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh"
 python3 - "$GFS_FILTER" "$TMP_ROOT" <<'PY'
 import os
 import py_compile
@@ -156,6 +158,8 @@ fi
 grep -Fq 'kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward' "$T1"
 grep -Fq 'pf_owner_record_process "$PORT_FORWARD_RECORD" "$PORT_FORWARD_PID"' "$T1"
 grep -Fq 'pf_owner_cleanup_record "$PORT_FORWARD_RECORD"' "$T1"
+grep -Fq 'T1_PORT_FORWARD_CLEANUP_OK=false' "$T1"
+grep -Fq 'preserving T1 temp directory because port-forward ownership cleanup was not proven' "$T1"
 grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 
 # T1 must restore the branch-profile GFS credentials on the way out with the

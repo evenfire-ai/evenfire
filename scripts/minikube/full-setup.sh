@@ -1127,8 +1127,10 @@ WRITER_RECOVERY_STATE_FILE="${WRITER_RECOVERY_STATE_ROOT}/${PROFILE}.json"
 WRITER_RECOVERY_STATE_LOADED=false
 WRITER_RECOVERY_STATE_PHASE=""
 WRITER_RECOVERY_FENCE_PENDING=false
+WRITER_RECOVERY_MIGRATIONS_COMPLETE=false
 K8S_API_EGRESS_POLICY_FILE=""
 K8S_API_EGRESS_POLICY_DRIFT=false
+RECOVERY_OVERLAY_FILE=""
 
 writer_recovery_state_cli() {
   local command="$1"
@@ -1218,18 +1220,39 @@ writer_recovery_state_load() {
       PARTIAL_CONTROL_API_FENCED=true
       WRITER_RECOVERY_FENCE_PENDING=true
       ;;
-    policy-ready|roles-ready)
+    policy-ready)
       WRITER_RECOVERY=true
       PARTIAL_BOOTSTRAP_RECOVERY=true
       PARTIAL_HCC_FENCED=true
       PARTIAL_WORKFLOW_FENCED=true
       PARTIAL_CONTROL_API_FENCED=true
+      # A persisted policy phase is historical evidence only. Re-fence and
+      # restage the current rendered policy before any writer is restored so a
+      # Minikube API endpoint change cannot resurrect the original egress drift.
+      WRITER_RECOVERY_FENCE_PENDING=true
       ;;
-    api-restored|overlay-applied)
+    roles-ready|api-restoring)
       WRITER_RECOVERY=true
       PARTIAL_BOOTSTRAP_RECOVERY=true
       PARTIAL_HCC_FENCED=true
       PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
+      # The phase is written before the control-api restore. An interruption
+      # after scale but before the next phase must close every writer again.
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    api-restored|overlay-applying|overlay-applied)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
+      # The overlay is rendered with all three writer Deployments at zero.
+      # Re-fence on every post-migration resume because an interrupted apply
+      # may have recreated a writer before its durable phase was updated.
+      WRITER_RECOVERY_FENCE_PENDING=true
       ;;
     *)
       err "Durable writer-recovery state has an unsupported phase: $WRITER_RECOVERY_STATE_PHASE"
@@ -1466,11 +1489,13 @@ restore_partial_control_api() {
     return 1
   fi
   log "Restoring control-api to ${PARTIAL_CONTROL_API_REPLICAS} replica(s) after runtime-role provisioning"
+  writer_recovery_state_phase api-restoring || return 1
   $KC -n control-plane scale deployment/control-api \
-    --replicas="$PARTIAL_CONTROL_API_REPLICAS" >/dev/null
-  $KC -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null
+    --replicas="$PARTIAL_CONTROL_API_REPLICAS" >/dev/null || return 1
+  $KC -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null || return 1
+  control_api_is_ready || return 1
   PARTIAL_CONTROL_API_FENCED=false
-  writer_recovery_state_phase api-restored
+  writer_recovery_state_phase api-restored || return 1
 }
 
 restore_partial_non_api_writers() {
@@ -1506,6 +1531,36 @@ reconcile_existing_gfs_credentials() {
   # The staged sync may have deferred active-pod proof until this reconcile
   # produced the reader DSN; the strict pass is the durable consumer attestation.
   bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+}
+
+render_fenced_recovery_overlay() {
+  local rendered_file="${K8S_API_POLICY_TMP_DIR}/recovery-rendered.yaml"
+  [ -n "${K8S_API_POLICY_TMP_DIR}" ] && [ -d "${K8S_API_POLICY_TMP_DIR}" ] || {
+    err "Recovery overlay workspace is unavailable; refusing writer recovery"
+    return 1
+  }
+  log "Rendering the recovery overlay with HCC, workflow-recipes, and control-api fenced"
+  if ! $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | \
+    RUBYOPT=--disable=gems ruby "${SCRIPT_DIR}/render-fenced-writer-deployments.rb" \
+      --target control-plane/host-context-controller \
+      --target control-plane/workflow-recipes \
+      --target control-plane/control-api >"$rendered_file"; then
+    err "Unable to render a complete fenced recovery overlay; refusing writer recovery"
+    return 1
+  fi
+  [ -s "$rendered_file" ] || {
+    err "Fenced recovery overlay is empty; refusing writer recovery"
+    return 1
+  }
+  RECOVERY_OVERLAY_FILE="$rendered_file"
+}
+
+apply_fenced_recovery_overlay() {
+  render_fenced_recovery_overlay || return 1
+  writer_recovery_state_phase overlay-applying || return 1
+  log "Applying the complete recovery overlay while all control-plane writers remain fenced"
+  $KC apply -f "$RECOVERY_OVERLAY_FILE" >/dev/null || return 1
+  writer_recovery_state_phase overlay-applied || return 1
 }
 
 writer_recovery_state_load || exit 1
@@ -1607,23 +1662,28 @@ if [ "$RESET_DB" = true ]; then
   fi
   ok "Control-api database and GFS roles converged after reset"
 else
-  ensure_control_postgres_ready
-  log "Applying control-api database migrations and runtime roles..."
-  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-    bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
-    --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
-  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-      bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
-  ok "Control-api database migrations and runtime roles applied"
-  if [ "$WRITER_RECOVERY" = true ] && [ "$PARTIAL_CONTROL_API_FENCED" = true ]; then
-    writer_recovery_state_phase roles-ready
+  if [ "$WRITER_RECOVERY_MIGRATIONS_COMPLETE" != true ]; then
+    ensure_control_postgres_ready
+    log "Applying control-api database migrations and runtime roles..."
+    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
+      --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
+    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+        bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
+    ok "Control-api database migrations and runtime roles applied"
+    if [ "$WRITER_RECOVERY" = true ] && [ "$PARTIAL_CONTROL_API_FENCED" = true ]; then
+      writer_recovery_state_phase roles-ready
+    fi
+  else
+    log "Skipping migrations and runtime-role provisioning; durable recovery state already completed that boundary"
   fi
 
-  # The credential probe runs through control-api, so prove that deployment is
-  # live before normal staging on bootstrap or an idempotent upgrade. On the
-  # deferred recovery path this is also the point where the missing runtime
-  # Secret has been provisioned, so the previously blocked deployment can start.
   if [ "$WRITER_RECOVERY" = true ]; then
+    # Keep every writer at zero while the full overlay is applied. The overlay
+    # itself declares one replica for these Deployments, so applying it
+    # directly would reopen the writer window before the explicit restore.
+    apply_fenced_recovery_overlay
+    log "Recovery overlay is applied — restoring control-api before GFS reconciliation"
     if ! restore_partial_control_api; then
       if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
         err "Restored control-api is not Ready; refusing GFS cutover after runtime-role provisioning"
@@ -1640,18 +1700,13 @@ else
       fi
       exit 1
     fi
+    log "Control-api/runtime roles are Ready — reconciling GFS after the fenced overlay"
+    reconcile_existing_gfs_credentials
+    restore_partial_non_api_writers
+    ok "Fenced recovery overlay applied after runtime-role readiness; writers restored explicitly"
   else
     $KC scale deployment/control-api -n control-plane --replicas=1 >/dev/null
     $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
-  fi
-
-  if [ "$WRITER_RECOVERY" = true ]; then
-    log "Control-api/runtime roles are Ready — reconciling GFS before the deferred full overlay"
-    reconcile_existing_gfs_credentials
-    $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
-    writer_recovery_state_phase overlay-applied
-    restore_partial_non_api_writers
-    ok "Deferred full kustomize overlay applied after fenced writer/runtime-role readiness"
   fi
 
   # On the upgrade path the full overlay may still cut HCC over to the
