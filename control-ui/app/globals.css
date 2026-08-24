@@ -1968,20 +1968,6 @@ textarea.cu-input {
   justify-content: flex-end;
 }
 
-/* Per-agent Guardrails tab: add-built-in control row + removable hook chip. */
-.cu-guardrails-add-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--cu-space-2);
-  align-items: center;
-}
-
-.cu-guardrails-ref-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--cu-space-1);
-}
-
 .cu-expandable-row__name,
 .cu-installed-plugin__name {
   color: var(--cu-text);

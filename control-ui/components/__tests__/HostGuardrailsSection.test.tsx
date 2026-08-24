@@ -50,7 +50,7 @@ describe('HostGuardrailsSection', () => {
     expect(screen.queryByText(/no guardrail hooks on this agent/i)).toBeNull()
   })
 
-  it('Add hook goes to the org marketplace entries list', async () => {
+  it('Add hook goes to the org marketplace entries list, filtered to hooks', async () => {
     render(
       <HostGuardrailsSection
         busy={false}
@@ -62,7 +62,7 @@ describe('HostGuardrailsSection', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Add hook' }))
 
-    expect(navigation.push).toHaveBeenCalledWith('/marketplace/org/entries')
+    expect(navigation.push).toHaveBeenCalledWith('/marketplace/org/entries?type=llm-hook')
   })
 
   it('clicking a hook opens its guardrail detail page', async () => {

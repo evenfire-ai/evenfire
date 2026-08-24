@@ -5,9 +5,17 @@ import { useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
+import { GUARDRAIL_ENTRY_TYPE } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
 import type { GuardrailHookRow, HostGuardrails, HostGuardrailsSectionProps } from './types'
+
+// Add hook lands on the org marketplace entries list, narrowed to guardrail
+// hooks — the unfiltered list mixes in every connector and plugin the org has
+// published, which is not what someone adding a hook is looking for.
+const ADD_HOOK_ROUTE = CONTROL_ROUTES.marketplace.orgEntriesFiltered({
+  type: GUARDRAIL_ENTRY_TYPE,
+})
 
 // Every field this section does not edit rides along untouched — dropping
 // `builtins` or `limits` here would silently wipe them from the Host spec.
@@ -89,7 +97,7 @@ export function HostGuardrailsSection({
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => router.push(CONTROL_ROUTES.marketplace.orgEntries)}
+              onClick={() => router.push(ADD_HOOK_ROUTE)}
               disabled={disabled}
             >
               Add hook
