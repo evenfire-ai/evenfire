@@ -4,6 +4,8 @@ import { Pool, type PoolClient } from 'pg'
 import { type DbClient, initDb } from '../src/db.js'
 import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
 import { AccessCatalogCursorError } from '../src/services/access/accessCatalogCursor.js'
+import { GFS_HYDRATION_SQL } from '../src/services/access/catalogHydrationSql.js'
+import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { applyComposableCatalogRevisionSchema } from '../src/services/access/userAccessFoundationSchema.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 
@@ -59,6 +61,18 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
       [userId]
     )
     return Number(result.rows[0]?.revision ?? 1)
+  }
+
+  async function resourceRevision(resourceId: string): Promise<number> {
+    const result = await databasePool.query<{ revision: string }>(
+      `SELECT revision::text
+         FROM authorization_resource_revisions
+        WHERE environment_id = $1
+          AND resource_type = 'gfs_resource'
+          AND resource_id = $2`,
+      [canonicalEnvironmentId(), resourceId]
+    )
+    return Number(result.rows[0]?.revision ?? 0)
   }
 
   async function backendPid(client: PoolClient): Promise<number> {
@@ -131,6 +145,11 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
         ORDER BY catalog_utf8_bytes(writer_table)`
     )
     expect(mappings.rows).toHaveLength(18)
+    expect(mappings.rows.filter(row => row.writer_table.startsWith('gfs_'))).toEqual([
+      { writer_table: 'gfs_grants', component_class: 'resource+user+team' },
+      { writer_table: 'gfs_resources', component_class: 'resource+gfs-subjects' },
+      { writer_table: 'gfs_shares', component_class: 'resource+user+team' },
+    ])
 
     const globalTriggers = await databasePool.query<{ count: string }>(
       `SELECT count(*)::text AS count
@@ -232,6 +251,138 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     expect(await userRevision(userIds[0])).toBeGreaterThan(revision)
   })
 
+  it('moves GFS resource and subject components for the complete writer class', async () => {
+    const firstResourceId = randomUUID()
+    const secondResourceId = randomUUID()
+    const firstDrive = `r6-${randomBytes(4).toString('hex')}`
+    const secondDrive = `r6-${randomBytes(4).toString('hex')}`
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       VALUES ($1, $3, 'resource-one', 'file'),
+              ($2, $4, 'resource-two', 'file')`,
+      [firstResourceId, secondResourceId, firstDrive, secondDrive]
+    )
+    const firstInsertedRevision = await resourceRevision(firstResourceId)
+    const secondInsertedRevision = await resourceRevision(secondResourceId)
+    expect(firstInsertedRevision).toBeGreaterThan(0)
+    expect(secondInsertedRevision).toBeGreaterThan(0)
+
+    const grant = await databasePool.query<{ id: string }>(
+      `INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
+       VALUES ($3, $1, 'user', $2, ARRAY['read']::text[])
+       RETURNING id::text`,
+      [firstResourceId, userIds[0], firstDrive]
+    )
+    expect(await resourceRevision(firstResourceId)).toBeGreaterThan(firstInsertedRevision)
+    expect(await resourceRevision(secondResourceId)).toBe(secondInsertedRevision)
+
+    const beforeMoveFirst = await resourceRevision(firstResourceId)
+    const beforeMoveSecond = await resourceRevision(secondResourceId)
+    await databasePool.query(`UPDATE gfs_grants SET resource_id = $2, drive = $3 WHERE id = $1`, [
+      grant.rows[0]!.id,
+      secondResourceId,
+      secondDrive,
+    ])
+    expect(await resourceRevision(firstResourceId)).toBeGreaterThan(beforeMoveFirst)
+    expect(await resourceRevision(secondResourceId)).toBeGreaterThan(beforeMoveSecond)
+
+    const share = await databasePool.query<{ id: string }>(
+      `INSERT INTO gfs_shares(drive, resource_id, subject_type, subject_id, permissions)
+       VALUES ($3, $1, 'team', $2, ARRAY['read']::text[])
+       RETURNING id::text`,
+      [firstResourceId, teamIds[0], firstDrive]
+    )
+    const beforeShareMoveFirst = await resourceRevision(firstResourceId)
+    const beforeShareMoveSecond = await resourceRevision(secondResourceId)
+    await databasePool.query(`UPDATE gfs_shares SET resource_id = $2, drive = $3 WHERE id = $1`, [
+      share.rows[0]!.id,
+      secondResourceId,
+      secondDrive,
+    ])
+    expect(await resourceRevision(firstResourceId)).toBeGreaterThan(beforeShareMoveFirst)
+    expect(await resourceRevision(secondResourceId)).toBeGreaterThan(beforeShareMoveSecond)
+
+    const beforeGrantDelete = await resourceRevision(secondResourceId)
+    await databasePool.query(`DELETE FROM gfs_grants WHERE id = $1`, [grant.rows[0]!.id])
+    expect(await resourceRevision(secondResourceId)).toBeGreaterThan(beforeGrantDelete)
+
+    const beforeShareDelete = await resourceRevision(secondResourceId)
+    await databasePool.query(`DELETE FROM gfs_shares WHERE id = $1`, [share.rows[0]!.id])
+    expect(await resourceRevision(secondResourceId)).toBeGreaterThan(beforeShareDelete)
+
+    const beforeRollback = await resourceRevision(firstResourceId)
+    const rollback = await databasePool.connect()
+    try {
+      await rollback.query('BEGIN')
+      await rollback.query(`UPDATE gfs_resources SET name = 'rolled-back' WHERE resource_id = $1`, [
+        firstResourceId,
+      ])
+      await rollback.query('ROLLBACK')
+    } finally {
+      rollback.release()
+    }
+    expect(await resourceRevision(firstResourceId)).toBe(beforeRollback)
+
+    const userRevisionBefore = await userRevision(userIds[0])
+    await databasePool.query(
+      `INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
+       VALUES ($3, $1, 'user', $2, ARRAY['read']::text[])`,
+      [firstResourceId, userIds[0], firstDrive]
+    )
+    expect(await userRevision(userIds[0])).toBeGreaterThan(userRevisionBefore)
+
+    const hydratedBefore = await databasePool.query<{ resource_revision: string }>(
+      GFS_HYDRATION_SQL,
+      [userIds[0], [firstResourceId], canonicalEnvironmentId(), 8]
+    )
+    const beforeResourceUpdate = await resourceRevision(firstResourceId)
+    await databasePool.query(
+      `UPDATE gfs_resources SET name = name || '-changed' WHERE resource_id = $1`,
+      [firstResourceId]
+    )
+    const hydratedAfter = await databasePool.query<{ resource_revision: string }>(
+      GFS_HYDRATION_SQL,
+      [userIds[0], [firstResourceId], canonicalEnvironmentId(), 8]
+    )
+    expect(await resourceRevision(firstResourceId)).toBeGreaterThan(beforeResourceUpdate)
+    expect(Number(hydratedAfter.rows[0]?.resource_revision)).toBeGreaterThan(
+      Number(hydratedBefore.rows[0]?.resource_revision)
+    )
+  })
+
+  it('preserves concurrent GFS invalidation increments on one resource component', async () => {
+    const resourceId = randomUUID()
+    const drive = `r6-${randomBytes(4).toString('hex')}`
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       VALUES ($1, $2, 'concurrent-resource', 'file')`,
+      [resourceId, drive]
+    )
+    const before = await resourceRevision(resourceId)
+    const blocker = await databasePool.connect()
+    const blocked = await databasePool.connect()
+    try {
+      await blocker.query('BEGIN')
+      await blocked.query('BEGIN')
+      const blockerPid = await backendPid(blocker)
+      const blockedPid = await backendPid(blocked)
+      await blocker.query('SELECT authorization_bump_gfs_resource_component($1)', [resourceId])
+      const pending = blocked.query('SELECT authorization_bump_gfs_resource_component($1)', [
+        resourceId,
+      ])
+      await waitForBlock(blockedPid, blockerPid)
+      await blocker.query('COMMIT')
+      await pending
+      await blocked.query('COMMIT')
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined)
+      await blocked.query('ROLLBACK').catch(() => undefined)
+      blocker.release()
+      blocked.release()
+    }
+    expect(await resourceRevision(resourceId)).toBe(before + 2)
+  })
+
   it('does not serialize independent components and preserves same-component increments', async () => {
     const first = await databasePool.connect()
     const second = await databasePool.connect()
@@ -246,6 +397,8 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
       await second.query('COMMIT')
       await first.query('COMMIT')
     } finally {
+      await first.query('ROLLBACK').catch(() => undefined)
+      await second.query('ROLLBACK').catch(() => undefined)
       first.release()
       second.release()
     }
