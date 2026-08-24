@@ -11,6 +11,7 @@ import {
   withAccessDatabaseTransaction,
 } from '../access/accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
+import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
 
 export const USER_SESSION_IDLE_LIFETIME_SECONDS = 14 * 24 * 60 * 60
 export const USER_SESSION_ABSOLUTE_LIFETIME_SECONDS = 30 * 24 * 60 * 60
@@ -425,7 +426,8 @@ export async function validateLegacyUserSession(
 ): Promise<UserSessionValidation> {
   const issuedAt = claims.iat
   if (!issuedAt) return { status: 'invalid', reason: 'invalid_legacy_representation' }
-  if (!Number.isSafeInteger(claims.authGeneration) || Number(claims.authGeneration) < 1) {
+  const authGeneration = legacyExternalSessionAuthGeneration(claims)
+  if (authGeneration === null) {
     return { status: 'invalid', reason: 'invalid_legacy_representation' }
   }
   const work = async (db: SessionDatabase): Promise<UserSessionValidation> => {
@@ -455,11 +457,7 @@ export async function validateLegacyUserSession(
         }
       | undefined
     if (!row) return { status: 'invalid', reason: 'user_not_found' }
-    if (
-      row.lifecycle_state !== 'active' ||
-      !Number.isSafeInteger(claims.authGeneration) ||
-      Number(claims.authGeneration) !== Number(row.lifecycle_version)
-    ) {
+    if (row.lifecycle_state !== 'active' || authGeneration !== Number(row.lifecycle_version)) {
       return { status: 'revoked', reason: 'security_event' }
     }
     if (row.token_revoked) return { status: 'revoked', reason: 'logout' }

@@ -10,6 +10,7 @@ import {
   compareSemanticVersions,
 } from '../access/userAccessPolicy.js'
 import { resolveEffectiveUserAccessPolicy } from '../access/userAccessRuntimePolicy.js'
+import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
 import {
   type IssuedUserSession,
   renewUserSession,
@@ -180,7 +181,10 @@ export async function authenticateExternalUserSession(
   return {
     status: 'authenticated',
     contract: 'v1',
-    claims: v1Claims,
+    claims: Object.freeze({
+      ...v1Claims,
+      authGeneration: legacyExternalSessionAuthGeneration(v1Claims)!,
+    }),
     authorityContext: Object.freeze({
       contract: 'v1',
       userId: v1Claims.userId,

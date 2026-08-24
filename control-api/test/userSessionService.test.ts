@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import type { AuthClaims } from '../src/profileTypes.js'
 import {
   USER_SESSION_ABSOLUTE_LIFETIME_SECONDS,
   USER_SESSION_IDLE_LIFETIME_SECONDS,
@@ -203,4 +204,41 @@ describe('user session state machine', () => {
       reason: 'security_event',
     })
   })
+
+  it.each([
+    ['active generation one', 'active', 1, null, false, 'valid'],
+    ['retired generation one', 'retired', 1, null, false, 'revoked'],
+    ['reactivated generation two', 'active', 2, null, false, 'revoked'],
+    ['password/security epoch', 'active', 1, now, false, 'revoked'],
+    ['explicit token revocation', 'active', 1, null, true, 'revoked'],
+  ] as const)(
+    'maps a missing-generation legacy token against %s authority',
+    async (_label, lifecycleState, lifecycleVersion, validAfter, tokenRevoked, expectedStatus) => {
+      const claims: AuthClaims = {
+        userId: randomUUID(),
+        email: 'legacy@example.com',
+        teamId: null,
+        role: 'member',
+        exp: Math.floor(now.getTime() / 1000) + 3600,
+        iat: Math.floor(now.getTime() / 1000) - 1,
+      }
+      const db = {
+        query: vi.fn().mockResolvedValue({
+          rows: [
+            {
+              id: claims.userId,
+              lifecycle_state: lifecycleState,
+              lifecycle_version: lifecycleVersion,
+              valid_after: validAfter,
+              token_revoked: tokenRevoked,
+            },
+          ],
+          rowCount: 1,
+        }),
+      }
+
+      const result = await validateLegacyUserSession('legacy-v1-token', claims, { db })
+      expect(result.status).toBe(expectedStatus)
+    }
+  )
 })
