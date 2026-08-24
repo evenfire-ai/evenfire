@@ -1106,10 +1106,16 @@ ok "Minikube K8s API CIDRs refreshed"
 # profile already owns a serving plane, while an unready control-api can mean
 # that the runtime-role Secret is still waiting for the migration below. Do not
 # cut HCC over in that state, but do not deadlock recovery on the same readiness
-# condition either. Keep the GFS-owned documents untouched, apply only the
-# explicit non-GFS portion of the overlay, then complete migrations/roles before
-# the full overlay and GFS credential reconciliation.
-GFS_OVERLAY_DEFERRED=false
+# condition either. Fence the control-plane writers before migrations/roles,
+# then complete the full overlay and GFS credential reconciliation only after
+# runtime-role readiness has been proved.
+PARTIAL_BOOTSTRAP_RECOVERY=false
+PARTIAL_CONTROL_API_REPLICAS=1
+PARTIAL_WORKFLOW_REPLICAS=1
+PARTIAL_HCC_REPLICAS=1
+PARTIAL_CONTROL_API_FENCED=false
+PARTIAL_WORKFLOW_FENCED=false
+PARTIAL_HCC_FENCED=false
 
 control_api_is_ready() {
   local state replicas ready
@@ -1125,25 +1131,106 @@ control_api_is_ready() {
   [[ "$ready" == "$replicas" ]]
 }
 
-apply_non_gfs_overlay() {
-  local filtered_manifest
-  filtered_manifest="$(mktemp "${TMPDIR:-/tmp}/evenfire-gfs-recovery.XXXXXX")"
-  if ! $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" \
-    | python3 "${PROJECT_DIR}/scripts/minikube/filter-gfs-resources.py" >"$filtered_manifest"; then
-    rm -f -- "$filtered_manifest"
-    err "Failed to render or filter the non-GFS overlay during recovery"
+runtime_role_secret_is_missing() {
+  local dsn
+  if ! dsn="$($KC -n control-plane get secret control-api-postgres-runtime \
+    -o 'jsonpath={.data.connection-string}' --ignore-not-found 2>/dev/null)"; then
+    return 2
+  fi
+  [ -z "$dsn" ]
+}
+
+fence_partial_control_api() {
+  local replicas pods
+  replicas="$($KC -n control-plane get deployment/control-api -o 'jsonpath={.spec.replicas}')" \
+    || return 1
+  if [[ ! "$replicas" =~ ^[1-9][0-9]*$ ]]; then
+    err "control-api replica count is invalid; refusing partial-bootstrap recovery"
     return 1
   fi
-  if [ -s "$filtered_manifest" ]; then
-    if ! $KC apply -f "$filtered_manifest"; then
-      rm -f -- "$filtered_manifest"
-      err "Failed to apply the non-GFS overlay during recovery"
-      return 1
-    fi
-  else
-    log "Filtered recovery overlay contains no non-GFS resources; skipping apply"
+  PARTIAL_CONTROL_API_REPLICAS="$replicas"
+  log "Fencing control-api writers at ${PARTIAL_CONTROL_API_REPLICAS} replica(s)"
+  $KC -n control-plane scale deployment/control-api --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l 'app=control-api,!clerum.io/component' -o name)" \
+    || return 1
+  if [ -n "$pods" ]; then
+    $KC -n control-plane wait --for=delete pod \
+      -l 'app=control-api,!clerum.io/component' --timeout=180s >/dev/null
   fi
-  rm -f -- "$filtered_manifest"
+  PARTIAL_CONTROL_API_FENCED=true
+}
+
+fence_partial_workflow_reconciler() {
+  local replicas pods
+  replicas="$($KC -n control-plane get deployment/workflow-recipes -o 'jsonpath={.spec.replicas}')" \
+    || return 1
+  if [[ ! "$replicas" =~ ^[0-9]+$ ]]; then
+    err "workflow-recipes replica count is invalid; refusing partial-bootstrap recovery"
+    return 1
+  fi
+  PARTIAL_WORKFLOW_REPLICAS="$replicas"
+  log "Fencing workflow-recipes at ${PARTIAL_WORKFLOW_REPLICAS} replica(s)"
+  $KC -n control-plane scale deployment/workflow-recipes --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l app=workflow-recipes -o name)" \
+    || return 1
+  if [ -n "$pods" ]; then
+    $KC -n control-plane wait --for=delete pod \
+      -l app=workflow-recipes --timeout=180s >/dev/null
+  fi
+  PARTIAL_WORKFLOW_FENCED=true
+}
+
+fence_partial_hcc() {
+  local replicas pods
+  replicas="$($KC -n control-plane get deployment/host-context-controller -o 'jsonpath={.spec.replicas}')" \
+    || return 1
+  if [[ ! "$replicas" =~ ^[0-9]+$ ]]; then
+    err "host-context-controller replica count is invalid; refusing partial-bootstrap recovery"
+    return 1
+  fi
+  PARTIAL_HCC_REPLICAS="$replicas"
+  log "Fencing host-context-controller at ${PARTIAL_HCC_REPLICAS} replica(s)"
+  $KC -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l app=host-context-controller -o name)" \
+    || return 1
+  if [ -n "$pods" ]; then
+    $KC -n control-plane wait --for=delete pod \
+      -l app=host-context-controller --timeout=180s >/dev/null
+  fi
+  PARTIAL_HCC_FENCED=true
+}
+
+fence_partial_bootstrap_writers() {
+  # HCC is fenced first so it cannot reconcile the existing GlobalFileSystem
+  # while the control-plane writer window is being closed. The control-api
+  # selector excludes migration Jobs, which intentionally share app=control-api.
+  fence_partial_hcc
+  fence_partial_workflow_reconciler
+  fence_partial_control_api
+}
+
+restore_partial_control_api() {
+  if [ "$PARTIAL_CONTROL_API_FENCED" != true ]; then
+    return 1
+  fi
+  log "Restoring control-api to ${PARTIAL_CONTROL_API_REPLICAS} replica(s) after runtime-role provisioning"
+  $KC -n control-plane scale deployment/control-api \
+    --replicas="$PARTIAL_CONTROL_API_REPLICAS" >/dev/null
+  $KC -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null
+  PARTIAL_CONTROL_API_FENCED=false
+}
+
+restore_partial_non_api_writers() {
+  if [ "$PARTIAL_WORKFLOW_FENCED" = true ]; then
+    $KC -n control-plane scale deployment/workflow-recipes \
+      --replicas="$PARTIAL_WORKFLOW_REPLICAS" >/dev/null
+    PARTIAL_WORKFLOW_FENCED=false
+  fi
+  if [ "$PARTIAL_HCC_FENCED" = true ]; then
+    $KC -n control-plane scale deployment/host-context-controller \
+      --replicas="$PARTIAL_HCC_REPLICAS" >/dev/null
+    PARTIAL_HCC_FENCED=false
+  fi
 }
 
 reconcile_existing_gfs_credentials() {
@@ -1183,8 +1270,19 @@ else
         err "Unable to determine control-api readiness; refusing to classify the GFS upgrade path"
         exit 1
       fi
-      GFS_OVERLAY_DEFERRED=true
-      log "Existing GFS writer detected but control-api is not Ready — deferring GFS-owned overlay and credential cutover until runtime roles converge"
+      if runtime_role_secret_is_missing; then
+        PARTIAL_BOOTSTRAP_RECOVERY=true
+        log "Existing GFS writer and empty control-api runtime Secret detected — fencing writers until migrations and runtime roles converge"
+        fence_partial_bootstrap_writers
+      else
+        runtime_secret_status=$?
+        if [ "$runtime_secret_status" -ne 1 ]; then
+          err "Unable to inspect control-api-postgres-runtime; refusing to classify the GFS upgrade path"
+          exit 1
+        fi
+        err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
+        exit 1
+      fi
     fi
   else
     log "Fresh bootstrap detected — reader staging deferred until migrations; GFSC remains fail-closed"
@@ -1196,13 +1294,12 @@ if [ "$RESET_DB" = true ]; then
   # Keep control-api scaled to zero until migrations and role restoration are
   # complete; applying the full overlay here would race it against a fresh DB.
   $KC apply -k "$ACTIVE_MINIKUBE_RENDER_DIR" -l app=control-postgres
-elif [ "$GFS_OVERLAY_DEFERRED" = true ]; then
-  log "Applying the non-GFS recovery overlay before database migration..."
-  apply_non_gfs_overlay
+elif [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
+  log "Deferring the full kustomize overlay until control-api/runtime roles converge"
 else
   $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
 fi
-ok "Kustomize overlay applied (full or non-GFS recovery phase)"
+ok "Kustomize overlay applied or safely deferred"
 
 if [ "$RESET_DB" = true ]; then
   log "Rebuilding database contracts and restoring GFS roles after reset..."
@@ -1246,14 +1343,23 @@ else
   # live before normal staging on bootstrap or an idempotent upgrade. On the
   # deferred recovery path this is also the point where the missing runtime
   # Secret has been provisioned, so the previously blocked deployment can start.
-  $KC scale deployment/control-api -n control-plane --replicas=1 >/dev/null
-  $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
+  if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
+    restore_partial_control_api
+    if ! control_api_is_ready; then
+      err "Restored control-api is not Ready; refusing GFS cutover after runtime-role provisioning"
+      exit 1
+    fi
+  else
+    $KC scale deployment/control-api -n control-plane --replicas=1 >/dev/null
+    $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
+  fi
 
-  if [ "$GFS_OVERLAY_DEFERRED" = true ]; then
+  if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
     log "Control-api/runtime roles are Ready — reconciling GFS before the deferred full overlay"
     reconcile_existing_gfs_credentials
     $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
-    ok "Deferred full kustomize overlay applied after control-api/runtime role readiness"
+    restore_partial_non_api_writers
+    ok "Deferred full kustomize overlay applied after fenced writer/runtime-role readiness"
   fi
 
   # On the upgrade path the full overlay may still cut HCC over to the

@@ -154,7 +154,9 @@ for upgrade_path in Makefile scripts/minikube/pre-gate-sync.sh scripts/minikube/
   grep -q 'get secret gfs-controller-db' "$upgrade_path" || fail "$upgrade_path does not distinguish partial bootstrap"
 done
 assert_minikube_upgrade_classifier() {
-  local path="$1" start="$2" end="$3" block dsn classify ready abort reconcile fallback fresh
+  local path="$1" start="$2" end="$3" block block_start dsn classify ready abort reconcile fallback fresh
+  block_start="$(grep -nF -- "$start" "$path" | head -1 | cut -d: -f1)"
+  [[ -n "$block_start" ]] || fail "$path is missing the upgrade classifier anchor"
   block="$(awk -v start="$start" -v end="$end" '
     index($0, start) { active=1 }
     active { print }
@@ -167,25 +169,40 @@ assert_minikube_upgrade_classifier() {
   reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' <<<"$block" | head -1 | cut -d: -f1)"
   fallback="$(grep -nE '^[[:space:]]*else' <<<"$block" | tail -1 | cut -d: -f1)"
   fresh="$(grep -ni 'fresh bootstrap' <<<"$block" | tail -1 | cut -d: -f1)"
+  for line_name in dsn classify ready abort reconcile fallback fresh; do
+    line_value="${!line_name}"
+    if [[ -n "$line_value" ]]; then
+      printf -v "$line_name" '%d' "$((block_start + line_value - 1))"
+    fi
+  done
   if [[ "$path" == *"scripts/minikube/full-setup.sh" ]]; then
-    local readiness_probe deferred non_gfs_filter deferred_full_overlay post_ready post_reconcile
+    local readiness_probe partial_flag fence_call migration roles restore_api deferred_full_overlay post_ready post_reconcile
     readiness_probe="$(grep -n 'if control_api_is_ready' <<<"$block" | head -1 | cut -d: -f1)"
-    deferred="$(grep -n 'GFS_OVERLAY_DEFERRED=true' <<<"$block" | head -1 | cut -d: -f1)"
-    non_gfs_filter="$(grep -n 'filter-gfs-resources.py' "$path" | head -1 | cut -d: -f1)"
+    if [[ -n "$readiness_probe" ]]; then
+      readiness_probe=$((block_start + readiness_probe - 1))
+    fi
+    partial_flag="$(grep -n 'PARTIAL_BOOTSTRAP_RECOVERY=true' "$path" | head -1 | cut -d: -f1)"
+    fence_call="$(grep -nE '^[[:space:]]+fence_partial_bootstrap_writers$' "$path" | tail -1 | cut -d: -f1)"
+    migration="$(grep -n 'run-control-api-db-migration.sh' "$path" | head -1 | cut -d: -f1)"
+    roles="$(grep -n 'provision-control-api-runtime-roles.sh' "$path" | head -1 | cut -d: -f1)"
+    restore_api="$(grep -nE '^[[:space:]]+restore_partial_control_api$' "$path" | tail -1 | cut -d: -f1)"
     deferred_full_overlay="$(grep -n 'Deferred full kustomize overlay applied' "$path" | head -1 | cut -d: -f1)"
     post_ready="$(grep -n 'rollout status deployment/control-api.*timeout=180s' "$path" | tail -1 | cut -d: -f1)"
     post_reconcile="$(grep -nE '^[[:space:]]+reconcile_existing_gfs_credentials$' "$path" | tail -1 | cut -d: -f1)"
-    [[ -n "$dsn" && -n "$classify" && -n "$readiness_probe" && -n "$deferred" && \
-       -n "$fallback" && -n "$fresh" && -n "$non_gfs_filter" && \
-       -n "$deferred_full_overlay" && -n "$post_ready" && -n "$post_reconcile" ]] \
+    [[ -n "$dsn" && -n "$classify" && -n "$readiness_probe" && -n "$partial_flag" && \
+       -n "$fence_call" && -n "$fallback" && -n "$fresh" && -n "$migration" && \
+       -n "$roles" && -n "$restore_api" && -n "$deferred_full_overlay" && \
+       -n "$post_ready" && -n "$post_reconcile" ]] \
       || fail "$path recovery classifier is incomplete"
     [[ "$dsn" -lt "$classify" && "$classify" -lt "$readiness_probe" && \
-       "$readiness_probe" -lt "$deferred" && "$deferred" -lt "$fallback" && \
-       "$fallback" -lt "$fresh" && "$non_gfs_filter" -lt "$deferred_full_overlay" && \
+       "$readiness_probe" -lt "$partial_flag" && "$partial_flag" -lt "$fence_call" && \
+       "$fence_call" -lt "$fallback" && "$fallback" -lt "$fresh" && \
+       "$migration" -lt "$roles" && "$roles" -lt "$restore_api" && \
+       "$restore_api" -lt "$post_reconcile" && "$post_reconcile" -lt "$deferred_full_overlay" && \
        "$post_ready" -lt "$deferred_full_overlay" ]] \
-      || fail "$path does not defer only the GFS-owned overlay until runtime-role readiness"
-    ! grep -Fq 'Existing GFS writer detected but control-api is not Ready; refusing HCC cutover' "$path" \
-      || fail "$path still deadlocks an unready partial bootstrap before runtime-role provisioning"
+      || fail "$path does not fence writers and defer the full overlay until runtime-role readiness"
+    grep -Fq 'Existing GFS writer detected but control-api is not Ready; refusing HCC cutover' "$path" \
+      || fail "$path no longer retains the fail-closed guard for an unrecognized unready upgrade"
   else
     [[ -n "$dsn" && -n "$classify" && -n "$ready" && -n "$abort" && -n "$reconcile" && -n "$fallback" && -n "$fresh" ]] \
       || fail "$path upgrade classifier is incomplete"
