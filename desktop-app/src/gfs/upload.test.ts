@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -1216,6 +1216,10 @@ describe('desktop GFS indexed uploader', () => {
             /* drain */
           }
           await writeFile(filePath, Buffer.alloc(1024, 0x42))
+          // Keep this test deterministic on filesystems whose timestamp
+          // resolution is coarser than the two writes above.
+          const changedAt = new Date(Date.now() + 1_000)
+          await utimes(filePath, changedAt, changedAt)
           return { status: 204, text: '' }
         },
       }
