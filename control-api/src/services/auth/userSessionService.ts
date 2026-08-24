@@ -422,7 +422,7 @@ function legacySessionFingerprint(token: string): string {
 export async function validateLegacyUserSession(
   token: string,
   claims: AuthClaims,
-  options: { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
+  options: { db?: SessionDatabase; budget?: AccessExecutionBudget; lockUser?: boolean } = {}
 ): Promise<UserSessionValidation> {
   const issuedAt = claims.iat
   if (!issuedAt) return { status: 'invalid', reason: 'invalid_legacy_representation' }
@@ -431,6 +431,12 @@ export async function validateLegacyUserSession(
     return { status: 'invalid', reason: 'invalid_legacy_representation' }
   }
   const work = async (db: SessionDatabase): Promise<UserSessionValidation> => {
+    if (options.lockUser) {
+      const locked = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+        claims.userId,
+      ])
+      if ((locked.rowCount ?? 0) === 0) return { status: 'revoked', reason: 'user_unavailable' }
+    }
     const result = await db.query(
       `SELECT u.id, u.lifecycle_state, u.lifecycle_version,
             epoch.valid_after,
@@ -488,23 +494,30 @@ export async function revokeLegacyUserSession(
   token: string,
   claims: AuthClaims,
   reason: string,
-  db: SessionDatabase = pool,
+  db?: SessionDatabase,
   now = new Date()
 ): Promise<boolean> {
-  const result = await db.query(
-    `INSERT INTO external_v1_session_revocations(
-       token_hash, user_id, expires_at, revoked_at, reason
-     )
-     VALUES($1, $2, $3, $4, $5)
-     ON CONFLICT (token_hash) DO NOTHING
-     RETURNING token_hash`,
-    [
-      legacySessionFingerprint(token),
+  const work = async (transaction: SessionDatabase): Promise<boolean> => {
+    const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
       claims.userId,
-      new Date(claims.exp * 1000),
-      atSecond(now),
-      reason,
-    ]
-  )
-  return (result.rowCount ?? 0) > 0
+    ])
+    if ((user.rowCount ?? 0) === 0) return false
+    const result = await transaction.query(
+      `INSERT INTO external_v1_session_revocations(
+         token_hash, user_id, expires_at, revoked_at, reason
+       )
+       VALUES($1, $2, $3, $4, $5)
+       ON CONFLICT (token_hash) DO NOTHING
+       RETURNING token_hash`,
+      [
+        legacySessionFingerprint(token),
+        claims.userId,
+        new Date(claims.exp * 1000),
+        atSecond(now),
+        reason,
+      ]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+  return db ? work(db) : withTransaction(work)
 }
