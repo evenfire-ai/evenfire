@@ -14741,9 +14741,12 @@ pre {
 .da-gfs-grant-list {
   display: grid;
   gap: var(--space-1);
+  max-height: calc(((var(--space-5) + var(--space-4) + var(--space-2)) * 3) + (var(--space-1) * 2));
   margin: 0;
+  overflow-y: auto;
   padding: 0;
   list-style: none;
+  scrollbar-width: thin;
 }
 
 .da-gfs-grant-list__row {

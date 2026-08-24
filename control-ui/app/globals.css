@@ -12323,9 +12323,12 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-existing-access__list {
   display: grid;
   gap: var(--cu-space-1);
+  max-height: calc((((var(--cu-space-5) * 2) + var(--cu-space-2)) * 3) + (var(--cu-space-1) * 2));
   margin: 0;
+  overflow-y: auto;
   padding: 0;
   list-style: none;
+  scrollbar-width: thin;
 }
 
 .cu-gfs-existing-access__item {
