@@ -13958,7 +13958,7 @@ pre {
   padding-inline: calc(var(--table-cell-padding-x) + var(--grid-row-gap));
   border-radius: 0;
   border-bottom: 1px solid var(--grid-card-border);
-  background: var(--grid-card-bg-hover);
+  background: var(--table-header-bg);
 }
 
 .da-gfs-drive__grid .da-grid__row {
