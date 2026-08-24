@@ -107,7 +107,7 @@ export function GfsGrantList({
               type="button"
               variant="outline"
             >
-              Revoke
+              X
             </Button>
           </li>
         )
@@ -144,7 +144,7 @@ export function GfsGrantList({
               type="button"
               variant="outline"
             >
-              Revoke
+              X
             </Button>
           </li>
         )

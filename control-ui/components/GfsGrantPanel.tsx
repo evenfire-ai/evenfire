@@ -463,7 +463,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                     disabled={actionPending}
                     onClick={() => void revokeAccess(item)}
                   >
-                    Revoke
+                    X
                   </Button>
                 </li>
               )

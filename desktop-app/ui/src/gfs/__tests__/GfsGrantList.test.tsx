@@ -66,6 +66,7 @@ describe('GfsGrantList', () => {
     expect(within(agentRow).getByText('Read')).toBeTruthy()
     expect(within(agentRow).getByText('Write')).toBeTruthy()
     expect(within(agentRow).getByText('Includes contents')).toBeTruthy()
+    expect(within(agentRow).getByText('X')).toBeTruthy()
 
     const userRow = screen.getByText('Test Two').closest('li')!
     expect(within(userRow).getByText('Read')).toBeTruthy()

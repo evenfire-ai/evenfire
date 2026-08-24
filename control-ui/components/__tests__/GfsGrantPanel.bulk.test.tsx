@@ -165,6 +165,7 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
     expect(within(existing).getByText('Read')).toBeTruthy()
     expect(within(existing).getByText('Write')).toBeTruthy()
+    expect(within(existing).getByText('X')).toBeTruthy()
 
     fireEvent.click(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
