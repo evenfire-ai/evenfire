@@ -5,11 +5,13 @@ import {
   type CatalogRequestContext,
   type ProducerContinuation,
   catalogKey,
+  compareCatalogText,
 } from './catalogContracts.js'
 import { CATALOG_KEY_SQL } from './catalogProducerSql.js'
 import {
   CatalogProducerContractError,
   catalogQuery,
+  catalogTextOrderSql,
   listBoundedProducerKeys,
 } from './catalogProducerSupport.js'
 
@@ -72,13 +74,14 @@ const TEAM_GFS_STREAM_HEAD_SQL = `WITH requested AS (
 )
 SELECT kind, subject_id, resource_id::text AS logical_id
   FROM heads
- ORDER BY logical_id, kind, subject_id`
+ ORDER BY ${catalogTextOrderSql('logical_id')}, ${catalogTextOrderSql('kind')},
+          ${catalogTextOrderSql('subject_id')}`
 
 function compareHead(left: TeamGfsStreamHead, right: TeamGfsStreamHead): number {
   return (
-    left.logicalId.localeCompare(right.logicalId) ||
-    left.kind.localeCompare(right.kind) ||
-    left.subjectId.localeCompare(right.subjectId)
+    compareCatalogText(left.logicalId, right.logicalId) ||
+    compareCatalogText(left.kind, right.kind) ||
+    compareCatalogText(left.subjectId, right.subjectId)
   )
 }
 
@@ -255,7 +258,7 @@ function mergeCandidates(
   const byId = new Map<string, CatalogIdentityCandidate>()
   for (const candidate of [...direct, ...team]) byId.set(candidate.key[2], candidate)
   return [...byId.values()]
-    .sort((left, right) => left.key[2].localeCompare(right.key[2]))
+    .sort((left, right) => compareCatalogText(left.key[2], right.key[2]))
     .slice(0, take + 1)
 }
 

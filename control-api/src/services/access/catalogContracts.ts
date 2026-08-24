@@ -123,10 +123,19 @@ export function catalogKey(
   return Object.freeze([environmentId, family, logicalId])
 }
 
+/** Exact lexicographic ordering of the unsigned UTF-8 bytes for stored catalog text. */
+export function compareCatalogText(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+}
+
 export function compareCatalogKey(left: CatalogKey, right: CatalogKey): number {
-  return JSON.stringify(left).localeCompare(JSON.stringify(right))
+  return (
+    compareCatalogText(left[0], right[0]) ||
+    compareCatalogText(left[1], right[1]) ||
+    compareCatalogText(left[2], right[2])
+  )
 }
 
 export function catalogKeyEquals(left: CatalogKey, right: CatalogKey): boolean {
-  return compareCatalogKey(left, right) === 0
+  return left[0] === right[0] && left[1] === right[1] && left[2] === right[2]
 }

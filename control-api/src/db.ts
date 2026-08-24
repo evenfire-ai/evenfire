@@ -5,7 +5,10 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
-import { applyUserAccessFoundationSchema } from './services/access/userAccessFoundationSchema.js'
+import {
+  applyCatalogUtf8OrderingSchema,
+  applyUserAccessFoundationSchema,
+} from './services/access/userAccessFoundationSchema.js'
 import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
   applyGfsUploadCleanupSchema,
@@ -5941,6 +5944,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0102_invitation_delivery_commands',
     apply: applyInvitationDeliveryCommandFoundation,
+  },
+  {
+    version: '0103_catalog_utf8_ordering',
+    apply: applyCatalogUtf8OrderingSchema,
   },
 ]
 
