@@ -29,6 +29,10 @@ export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): s
         `CASE WHEN POSITION('/' IN ${after}.after_key) > 0
                 THEN SPLIT_PART(${after}.after_key, '/', 2) ELSE '' END`
       )
+      const orderBy = definition.orderBy ?? 'logical_id'
+      // `cursor_id` is the reserved alias for a native UUID column. PostgreSQL UUID ordering is
+      // byte-equivalent to UTF-8 ordering of canonical UUID text and keeps the bounded index scan.
+      const orderExpression = orderBy === 'cursor_id' ? orderBy : catalogTextOrderSql(orderBy)
       return `${names[index]} AS MATERIALIZED (
           SELECT '${names[index]}'::text AS source_arm, bounded_arm.logical_id,
                  ${definition.hasValidUntil ? 'bounded_arm.valid_until' : 'NULL::timestamptz'}
@@ -38,7 +42,7 @@ export function boundedKeyUnionSql(arms: readonly (string | BoundedKeyArm)[]): s
                WHERE $9::jsonb IS NULL OR $9::jsonb ? '${names[index]}'
             ) ${after}
             CROSS JOIN LATERAL (${sourceSql}) bounded_arm
-          ORDER BY ${catalogTextOrderSql(definition.orderBy ?? 'logical_id')}
+          ORDER BY ${orderExpression}
           LIMIT $4
         )`
     })

@@ -123,6 +123,27 @@ describeRealPostgres('catalog producer SQL on real PostgreSQL', () => {
     }
   })
 
+  it('proves native UUID order matches UTF-8 byte order for canonical UUID text', async () => {
+    const values = [
+      'ffffffff-ffff-4fff-bfff-ffffffffffff',
+      '00000000-0000-4000-8000-000000000000',
+      '7fffffff-ffff-4fff-bfff-ffffffffffff',
+      '80000000-0000-4000-8000-000000000000',
+      '0fffffff-ffff-4fff-bfff-ffffffffffff',
+    ]
+    const expected = [...values].sort((left, right) =>
+      Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+    )
+    const ordered = await databasePool.query<{ value: string }>(
+      `SELECT value::text AS value
+         FROM unnest($1::uuid[]) AS candidate(value)
+        ORDER BY value`,
+      [values]
+    )
+
+    expect(ordered.rows.map(row => row.value)).toEqual(expected)
+  })
+
   it('parses and executes every bounded key and selected-ID hydration query', async () => {
     const budget = AccessExecutionBudget.create('catalog')
     const sourceStates: CatalogOperationalSourceState[] = OPERATIONAL_SOURCE_FAMILIES.map(
