@@ -121,6 +121,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     userId,
     tokenHash: randomBytes(32).toString('hex'),
     issuedAt: Math.floor(Date.now() / 1_000),
+    authGeneration: 1,
   }
   const operationalFixtures: readonly OperationalFixture[] = [
     fixture({

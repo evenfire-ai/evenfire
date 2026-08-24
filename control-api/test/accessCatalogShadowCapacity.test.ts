@@ -29,6 +29,7 @@ describe('aggregate access shadow scheduling capacity', () => {
       userId: '10000000-0000-4000-8000-000000000001',
       tokenHash: 'token-hash',
       issuedAt: 1_900_000_000,
+      authGeneration: 1,
     }
 
     for (let index = 0; index < 1_000; index += 1) {

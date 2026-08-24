@@ -56,6 +56,7 @@ describe('legacy external-session replacement exchange', () => {
         userId: claims.userId,
         tokenHash: 'source-hash',
         issuedAt: claims.iat,
+        authGeneration: 1,
       },
       policy: { issueV1: true, switchCompatibility: true },
     })
