@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 
 const userA = {
@@ -21,6 +22,8 @@ const userB = {
   teamId: 'team-b',
   teamName: 'Team B',
 }
+
+let lastHarnessQueryClient: QueryClient | null = null
 
 function authValue(me: AuthContextValue['me']): AuthContextValue {
   return {
@@ -133,6 +136,7 @@ function Harness({ children }: { children: ReactNode }) {
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } })
   )
+  lastHarnessQueryClient = client
   return (
     <AuthContext.Provider value={authValue(me)}>
       <QueryClientProvider client={client}>
@@ -148,6 +152,7 @@ function Harness({ children }: { children: ReactNode }) {
 describe('useGfsBrowserController', () => {
   afterEach(() => {
     cleanup()
+    lastHarnessQueryClient = null
     vi.restoreAllMocks()
   })
 
@@ -184,11 +189,16 @@ describe('useGfsBrowserController', () => {
     })
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
 
+    const grantsKey = desktopQueryKeys.gfsGrants(':user-a:team-a', 'root', 'main')
+    lastHarnessQueryClient?.setQueryData(grantsKey, ['session-a-grant'])
+    expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toEqual(['session-a-grant'])
+
     await act(async () => {
       screen.getByRole('button', { name: 'switch team' }).click()
     })
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
+    expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toBeUndefined()
   })
 
   it('refreshes cached affordances after permissions change outside Desktop', async () => {
@@ -615,6 +625,7 @@ function ManageProbe() {
 describe('useGfsBrowserController — grants list / revoke / inherit (#826)', () => {
   afterEach(() => {
     cleanup()
+    lastHarnessQueryClient = null
     vi.restoreAllMocks()
   })
 
@@ -670,6 +681,16 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
     expect(listGrants).toHaveBeenCalledWith('root', 'main')
     await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('1'))
+    expect(
+      lastHarnessQueryClient?.getQueryData(
+        desktopQueryKeys.gfsGrants(':user-a:team-a', 'root', 'main')
+      )
+    ).toEqual([
+      expect.objectContaining({ id: 'grant-42' }),
+    ])
+    expect(
+      lastHarnessQueryClient?.getQueryData(['gfs', 'main', 'root', 'grants'])
+    ).toBeUndefined()
   })
 
   it('refetches the grants list when refreshGrants runs', async () => {

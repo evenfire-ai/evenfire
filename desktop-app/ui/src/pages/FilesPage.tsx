@@ -50,32 +50,12 @@ import type {
   MyAgentEntry,
 } from './FilesPage.types'
 
-async function fileToEncodedData(file: File): Promise<string> {
-  assertGfsFileUploadSize(file.size)
-  const bytes = new Uint8Array(await file.arrayBuffer())
-  assertGfsFileUploadSize(bytes.byteLength)
-  let binary = ''
-  const chunkSize = 0x8000
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
-  }
-  return btoa(binary)
-}
-
 function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
 }
 
 function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
-}
-
-function isDroppedPreviewFile(file: File): boolean {
-  return (
-    file.type.toLowerCase().startsWith('image/') ||
-    gfsImagePreviewMimeType(file.name) !== null ||
-    isGfsMarkdownPreviewFile(file.name)
-  )
 }
 
 function isGfsPreviewFile(fileName: string): boolean {
@@ -197,7 +177,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     if (!sessionScope) return
     const folders = items.filter(item => item.kind === 'directory')
     if (folders.length === 0) return
-    let cancelled = false
     void Promise.all(
       folders.map(folder =>
         queryClient
@@ -212,12 +191,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
             // real navigation will surface the error normally.
           })
       )
-    ).then(() => {
-      if (cancelled) return
-    })
-    return () => {
-      cancelled = true
-    }
+    )
   }, [items, queryClient, sessionScope])
 
   const teamDirectoryQuery = useQuery({
@@ -378,8 +352,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       anchor.click()
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
       pushToast?.(`Downloaded ${name}`, 'success')
-    } catch (uploadError) {
-      pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
+    } catch (downloadError) {
+      pushToast?.(
+        downloadError instanceof Error ? downloadError.message : String(downloadError),
+        'error'
+      )
     }
   }
 
@@ -434,8 +411,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   ) => {
     if (!file || !parentResourceId) return
     try {
+      assertGfsFileUploadSize(file.size)
       const name = await normalizeGfsResourceName(file.name)
-      await ctrl.createFile(parentResourceId, name, await fileToEncodedData(file))
+      const filePath = window.clerum.gfs.getPathForFile(file)
+      if (!filePath) throw new Error('Could not resolve the selected local file')
+      await ctrl.createFileFromPath(parentResourceId, name, filePath)
       pushToast?.(`Uploaded ${name}`, 'success')
     } catch (uploadError) {
       pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
@@ -476,23 +456,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     }
 
     const droppedFiles = Array.from(event.dataTransfer.files || [])
-    const previewFiles = droppedFiles.filter(isDroppedPreviewFile)
-    if (!previewFiles.length) {
-      pushToast?.('Only image and Markdown files can be dropped here.', 'error')
+    if (!droppedFiles.length) {
+      pushToast?.('No files were dropped.', 'error')
       return
     }
 
-    setDroppedUploadCount(previewFiles.length)
+    setDroppedUploadCount(droppedFiles.length)
     try {
-      for (const file of previewFiles) {
+      for (const file of droppedFiles) {
         await handleUploadFile(file, destinationResourceId)
-      }
-      const skippedCount = droppedFiles.length - previewFiles.length
-      if (skippedCount > 0) {
-        pushToast?.(
-          `${skippedCount} unsupported ${skippedCount === 1 ? 'file was' : 'files were'} skipped.`,
-          'error'
-        )
       }
     } finally {
       setDroppedUploadCount(0)
@@ -502,7 +474,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const handleReplaceCurrentFile = async (file: File | null | undefined) => {
     if (!file || !current) return
     try {
-      await ctrl.replaceFile(current.resourceId, await fileToEncodedData(file), current.version)
+      assertGfsFileUploadSize(file.size)
+      const filePath = window.clerum.gfs.getPathForFile(file)
+      if (!filePath) throw new Error('Could not resolve the selected local file')
+      await ctrl.replaceFileFromPath(current.resourceId, filePath, current.version)
       pushToast?.(`Replaced ${current.name}`, 'success')
     } catch (replaceError) {
       pushToast?.(
@@ -731,7 +706,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               {droppedUploadCount > 0
                 ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
                 : droppedUploadRestriction ||
-                  `Drop images or Markdown files to upload to ${current?.name || 'this folder'}`}
+                  `Drop files to upload to ${current?.name || 'this folder'}`}
             </div>
           ) : null}
 

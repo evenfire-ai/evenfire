@@ -73,11 +73,19 @@ export function GfsMarkdownPreview({
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
+  const onDownloadErrorRef = useRef(onDownloadError)
   const blocks = useMemo(() => (source === null ? [] : parseVanillaMarkdown(source)), [source])
   const isPlainText = isPlainTextName(fileName)
 
   useEffect(() => {
+    onDownloadErrorRef.current = onDownloadError
+  }, [onDownloadError])
+
+  useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
     }
   }, [])
@@ -103,7 +111,7 @@ export function GfsMarkdownPreview({
         if (active) setSource(markdown)
       } catch (error) {
         if (!active) return
-        onDownloadError?.(error)
+        onDownloadErrorRef.current?.(error)
         setPreviewError(
           error instanceof Error ? error.message : 'Could not load the Markdown preview'
         )
@@ -114,22 +122,31 @@ export function GfsMarkdownPreview({
     return () => {
       active = false
     }
-  }, [byteLength, gfsUri, onDownloadError])
+  }, [byteLength, gfsUri])
+
+  function markCopyState(state: 'copied' | 'error'): boolean {
+    if (!mountedRef.current) return false
+    setCopyState(state)
+    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    copyResetTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) setCopyState('idle')
+    }, 2000)
+    return true
+  }
 
   async function copySourceToClipboard(): Promise<void> {
-    if (source === null) return
+    if (source === null || !mountedRef.current) return
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(source)
-        setCopyState('copied')
+        if (!mountedRef.current) return
+        markCopyState('copied')
       } else {
-        setCopyState('error')
+        markCopyState('error')
       }
     } catch {
-      setCopyState('error')
+      markCopyState('error')
     }
-    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
-    copyResetTimeoutRef.current = setTimeout(() => setCopyState('idle'), 2000)
   }
 
   return createPortal(

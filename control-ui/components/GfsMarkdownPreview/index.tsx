@@ -77,12 +77,15 @@ export function GfsMarkdownPreview({
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
   const { showToast } = useToast()
   const blocks = useMemo(() => (source === null ? [] : parseVanillaMarkdown(source)), [source])
   const isPlainText = isPlainTextName(fileName)
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
     }
   }, [])
@@ -126,23 +129,35 @@ export function GfsMarkdownPreview({
     }
   }, [byteLength, rid])
 
+  function markCopyState(state: 'copied' | 'error'): boolean {
+    if (!mountedRef.current) return false
+    setCopyState(state)
+    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    copyResetTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) setCopyState('idle')
+    }, 2000)
+    return true
+  }
+
   async function copySourceToClipboard(): Promise<void> {
-    if (source === null) return
+    if (source === null || !mountedRef.current) return
     if (!navigator.clipboard?.writeText) {
-      showToast('Clipboard is not available in this browser.', { tone: 'error' })
-      setCopyState('error')
+      if (markCopyState('error')) {
+        showToast('Clipboard is not available in this browser.', { tone: 'error' })
+      }
       return
     }
     try {
       await navigator.clipboard.writeText(source)
-      setCopyState('copied')
-      showToast(`Copied ${fileName} to the clipboard.`, { tone: 'success' })
+      if (!mountedRef.current) return
+      if (markCopyState('copied')) {
+        showToast(`Copied ${fileName} to the clipboard.`, { tone: 'success' })
+      }
     } catch {
-      setCopyState('error')
-      showToast('Copy failed — check browser clipboard permissions.', { tone: 'error' })
+      if (markCopyState('error')) {
+        showToast('Copy failed — check browser clipboard permissions.', { tone: 'error' })
+      }
     }
-    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
-    copyResetTimeoutRef.current = setTimeout(() => setCopyState('idle'), 2000)
   }
 
   return createPortal(

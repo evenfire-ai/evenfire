@@ -20,6 +20,12 @@ export function GfsImagePreview({
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
+  const onDownloadErrorRef = useRef(onDownloadError)
+
+  useEffect(() => {
+    onDownloadErrorRef.current = onDownloadError
+  }, [onDownloadError])
 
   useEffect(() => {
     closeButtonRef.current?.focus()
@@ -46,7 +52,7 @@ export function GfsImagePreview({
         setPreviewUrl(objectUrl)
       } catch (error) {
         if (!active) return
-        onDownloadError?.(error)
+        onDownloadErrorRef.current?.(error)
         setPreviewError(error instanceof Error ? error.message : 'Could not load the image preview')
       }
     }
@@ -56,42 +62,54 @@ export function GfsImagePreview({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, gfsUri, mimeType, onDownloadError])
+  }, [byteLength, gfsUri, mimeType])
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
     }
   }, [])
 
+  function markCopyState(state: 'copied' | 'error'): boolean {
+    if (!mountedRef.current) return false
+    setCopyState(state)
+    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    copyResetTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) setCopyState('idle')
+    }, 2000)
+    return true
+  }
+
   async function copyImageToClipboard(): Promise<void> {
-    if (!sourceBlob) return
+    if (!sourceBlob || !mountedRef.current) return
     try {
       if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
         let clipboardBlob: Blob | null = sourceBlob
         if (!sourceBlob.type.includes('png')) {
           clipboardBlob = await convertBlobToPng(sourceBlob)
         }
+        if (!mountedRef.current) return
         if (clipboardBlob) {
           await navigator.clipboard.write([new ClipboardItem({ 'image/png': clipboardBlob })])
-          setCopyState('copied')
-        } else if (navigator.clipboard?.writeText && previewUrl) {
-          await navigator.clipboard.writeText(previewUrl)
-          setCopyState('copied')
-        } else {
-          setCopyState('error')
+          if (!mountedRef.current) return
+          markCopyState('copied')
+          return
         }
-      } else if (navigator.clipboard?.writeText && previewUrl) {
-        await navigator.clipboard.writeText(previewUrl)
-        setCopyState('copied')
+      }
+      if (navigator.clipboard?.writeText) {
+        const dataUrl = await blobToDataUrl(sourceBlob)
+        if (!mountedRef.current) return
+        await navigator.clipboard.writeText(dataUrl)
+        if (!mountedRef.current) return
+        markCopyState('copied')
       } else {
-        setCopyState('error')
+        markCopyState('error')
       }
     } catch {
-      setCopyState('error')
+      markCopyState('error')
     }
-    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
-    copyResetTimeoutRef.current = setTimeout(() => setCopyState('idle'), 2000)
   }
 
   return createPortal(
@@ -169,6 +187,17 @@ async function convertBlobToPng(blob: Blob): Promise<Blob | null> {
   } catch {
     return null
   }
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const result = await new Promise<string | ArrayBuffer | null>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read the image'))
+    reader.readAsDataURL(blob)
+  })
+  if (typeof result !== 'string') throw new Error('Could not read the image')
+  return result
 }
 
 export type { GfsImagePreviewProps } from './types'

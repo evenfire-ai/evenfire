@@ -17,6 +17,11 @@ export function GfsVideoPreview({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const onDownloadErrorRef = useRef(onDownloadError)
+
+  useEffect(() => {
+    onDownloadErrorRef.current = onDownloadError
+  }, [onDownloadError])
 
   useEffect(() => {
     closeButtonRef.current?.focus()
@@ -41,7 +46,7 @@ export function GfsVideoPreview({
         setPreviewUrl(objectUrl)
       } catch (error) {
         if (!active) return
-        onDownloadError?.(error)
+        onDownloadErrorRef.current?.(error)
         setPreviewError(error instanceof Error ? error.message : 'Could not load the video preview')
       }
     }
@@ -51,7 +56,7 @@ export function GfsVideoPreview({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, gfsUri, mimeType, onDownloadError])
+  }, [byteLength, gfsUri, mimeType])
 
   return createPortal(
     <div

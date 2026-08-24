@@ -190,7 +190,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // The grants listing is the revoke-id source (the grant PUT returns no ids),
   // so writes must refetch it. Enabled only while the Manage dialog is open.
   const grantsQuery = useQuery({
-    queryKey: ['gfs', DRIVE, current?.resourceId ?? '', 'grants'],
+    queryKey: desktopQueryKeys.gfsGrants(
+      sessionScope ?? 'anonymous',
+      current?.resourceId ?? '',
+      DRIVE
+    ),
     queryFn: () => window.clerum.gfs.listGrants(current!.resourceId, DRIVE),
     enabled: Boolean(sessionScope) && Boolean(current) && grantsListEnabled,
   })
@@ -199,9 +203,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (!resourceId) return
     await queryClient.invalidateQueries({
       exact: true,
-      queryKey: ['gfs', DRIVE, resourceId, 'grants'],
+      queryKey: desktopQueryKeys.gfsGrants(sessionScope ?? 'anonymous', resourceId, DRIVE),
     })
-  }, [current?.resourceId, queryClient])
+  }, [current?.resourceId, queryClient, sessionScope])
   const revokeGrantMutation = useMutation({
     mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
     onSuccess: refreshGrants,
@@ -227,6 +231,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
     onSuccess: refreshGfs,
   })
+  const createFileFromPathMutation = useMutation({
+    mutationFn: (input: { parentResourceId: string; name: string; filePath: string }) =>
+      window.clerum.gfs.createFileFromPath(
+        input.parentResourceId,
+        input.name,
+        input.filePath,
+        DRIVE
+      ),
+    onSuccess: refreshGfs,
+  })
   const replaceFileMutation = useMutation({
     mutationFn: (input: { resourceId: string; encodedData: string; ifMatch?: number }) =>
       window.clerum.gfs.replaceFile(input.resourceId, input.encodedData, DRIVE, input.ifMatch),
@@ -238,6 +252,22 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             : crumb
         )
       )
+      await refreshGfs()
+    },
+  })
+  const replaceFileFromPathMutation = useMutation({
+    mutationFn: (input: { resourceId: string; filePath: string; ifMatch?: number }) =>
+      window.clerum.gfs.replaceFileFromPath(input.resourceId, input.filePath, DRIVE, input.ifMatch),
+    onSuccess: async (receipt, input) => {
+      if (receipt.resultVersion !== undefined) {
+        setCrumbs(prev =>
+          prev.map(crumb =>
+            crumb.resourceId === input.resourceId
+              ? { ...crumb, version: receipt.resultVersion! }
+              : crumb
+          )
+        )
+      }
       await refreshGfs()
     },
   })
@@ -384,7 +414,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const reset = useCallback(() => {
     setCrumbs([])
     setOpenError(null)
-    void queryClient.removeQueries({ queryKey: ['desktop-app', 'gfs'] })
+    void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
   }, [queryClient])
 
   // Delegation actions throw on server rejection (e.g. 403 escalation_rejected);
@@ -460,8 +490,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     createFolder: (name: string) => createFolderMutation.mutateAsync(name),
     createFile: (parentResourceId: string, name: string, encodedData: string) =>
       createFileMutation.mutateAsync({ parentResourceId, name, encodedData }),
+    createFileFromPath: (parentResourceId: string, name: string, filePath: string) =>
+      createFileFromPathMutation.mutateAsync({ parentResourceId, name, filePath }),
     replaceFile: (resourceId: string, encodedData: string, ifMatch?: number) =>
       replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
+    replaceFileFromPath: (resourceId: string, filePath: string, ifMatch?: number) =>
+      replaceFileFromPathMutation.mutateAsync({ resourceId, filePath, ifMatch }),
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
     moveResource: (resourceId: string, destinationId: string, ifMatch?: number) =>
@@ -471,7 +505,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     mutating:
       createFolderMutation.isPending ||
       createFileMutation.isPending ||
+      createFileFromPathMutation.isPending ||
       replaceFileMutation.isPending ||
+      replaceFileFromPathMutation.isPending ||
       renameResourceMutation.isPending ||
       moveResourceMutation.isPending ||
       deleteResourceMutation.isPending,

@@ -24,6 +24,7 @@ export function GfsImagePreview({
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
   const { showToast } = useToast()
 
   useEffect(() => {
@@ -69,42 +70,59 @@ export function GfsImagePreview({
   }, [byteLength, mimeType, rid])
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
     }
   }, [])
 
+  function markCopyState(state: 'copied' | 'error'): boolean {
+    if (!mountedRef.current) return false
+    setCopyState(state)
+    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    copyResetTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) setCopyState('idle')
+    }, 2000)
+    return true
+  }
+
   async function copyImageToClipboard(): Promise<void> {
-    if (!sourceBlob) return
+    if (!sourceBlob || !mountedRef.current) return
     try {
       if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
         let clipboardBlob: Blob | null = sourceBlob
         if (!sourceBlob.type.includes('png')) {
           clipboardBlob = await convertBlobToPng(sourceBlob)
         }
+        if (!mountedRef.current) return
         if (clipboardBlob) {
           await navigator.clipboard.write([new ClipboardItem({ 'image/png': clipboardBlob })])
-          setCopyState('copied')
-          showToast(`Copied ${fileName} to the clipboard.`, { tone: 'success' })
-          if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
-          copyResetTimeoutRef.current = setTimeout(() => setCopyState('idle'), 2000)
+          if (!mountedRef.current) return
+          if (markCopyState('copied')) {
+            showToast(`Copied ${fileName} to the clipboard.`, { tone: 'success' })
+          }
           return
         }
       }
-      if (navigator.clipboard?.writeText && previewUrl) {
-        await navigator.clipboard.writeText(previewUrl)
-        setCopyState('copied')
-        showToast(`Copied a ${fileName} link to the clipboard.`, { tone: 'success' })
+      if (navigator.clipboard?.writeText) {
+        const dataUrl = await blobToDataUrl(sourceBlob)
+        if (!mountedRef.current) return
+        await navigator.clipboard.writeText(dataUrl)
+        if (!mountedRef.current) return
+        if (markCopyState('copied')) {
+          showToast(`Copied ${fileName} to the clipboard.`, { tone: 'success' })
+        }
       } else {
-        setCopyState('error')
-        showToast('Copy failed — check browser clipboard permissions.', { tone: 'error' })
+        if (markCopyState('error')) {
+          showToast('Copy failed — check browser clipboard permissions.', { tone: 'error' })
+        }
       }
     } catch {
-      setCopyState('error')
-      showToast('Copy failed — check browser clipboard permissions.', { tone: 'error' })
+      if (markCopyState('error')) {
+        showToast('Copy failed — check browser clipboard permissions.', { tone: 'error' })
+      }
     }
-    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
-    copyResetTimeoutRef.current = setTimeout(() => setCopyState('idle'), 2000)
   }
 
   return createPortal(
@@ -190,6 +208,17 @@ async function convertBlobToPng(blob: Blob): Promise<Blob | null> {
   } catch {
     return null
   }
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const result = await new Promise<string | ArrayBuffer | null>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read the image'))
+    reader.readAsDataURL(blob)
+  })
+  if (typeof result !== 'string') throw new Error('Could not read the image')
+  return result
 }
 
 export type { GfsImagePreviewProps } from './types'
