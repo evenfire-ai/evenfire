@@ -9,7 +9,13 @@ import {
 const environmentId = 'cluster.local/evenfire'
 
 function byteOrder(left: string, right: string): number {
-  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+  const encoder = new TextEncoder()
+  const leftBytes = encoder.encode(left)
+  const rightBytes = encoder.encode(right)
+  for (let index = 0; index < Math.min(leftBytes.length, rightBytes.length); index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index]! - rightBytes[index]!
+  }
+  return leftBytes.length - rightBytes.length
 }
 
 describe('catalog UTF-8 byte ordering contract', () => {
