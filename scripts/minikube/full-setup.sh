@@ -515,6 +515,53 @@ validate_setup_deadline MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS "${MINIKUBE_SETUP_
   exit 1
 }
 
+# Acquire the branch-owned mutation lease before the first profile status probe.
+# A standalone full setup may classify a partial profile as destructive and
+# delete it, so ownership and serialization must be established before any
+# status/start/delete operation can touch Minikube.
+SETUP_LOCK_CLEANUP_DONE=false
+K8S_API_POLICY_TMP_DIR=""
+cleanup_setup_lock() {
+  local status="${1:-$?}" cleanup_status=0
+  if [ "$SETUP_LOCK_CLEANUP_DONE" = true ]; then
+    return "$status"
+  fi
+  SETUP_LOCK_CLEANUP_DONE=true
+  trap - EXIT
+  trap '' INT TERM
+  if [ -n "${K8S_API_POLICY_TMP_DIR:-}" ] && [ -d "${K8S_API_POLICY_TMP_DIR}" ]; then
+    rm -rf -- "${K8S_API_POLICY_TMP_DIR}" || cleanup_status=1
+  fi
+  t2_lock_release "$status" || cleanup_status=$?
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status="$cleanup_status"
+  fi
+  return "$status"
+}
+handle_setup_signal() {
+  local signal="$1" status
+  case "$signal" in
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=1 ;;
+  esac
+  cleanup_setup_lock "$status" || status=$?
+  exit "$status"
+}
+handle_setup_exit() {
+  local status=$?
+  cleanup_setup_lock "$status" || status=$?
+  exit "$status"
+}
+trap handle_setup_exit EXIT
+trap 'handle_setup_signal INT' INT
+trap 'handle_setup_signal TERM' TERM
+t2_require_commands
+t2_repo_metadata
+t2_profile_scope
+t2_mutation_lock
+export T2_PROJECT_DIR T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV T2_SKIP_LOCK T2_LOCK_TOKEN
+
 run_setup_with_deadline() {
   local label="$1" timeout_seconds="$2"
   shift 2
@@ -748,51 +795,9 @@ fi
 ok "Cluster '${PROFILE}' is reachable"
 maybe_exit_after_cluster_step
 
-SETUP_LOCK_CLEANUP_DONE=false
-K8S_API_POLICY_TMP_DIR=""
-cleanup_setup_lock() {
-  local status="${1:-$?}" cleanup_status=0
-  if [ "$SETUP_LOCK_CLEANUP_DONE" = true ]; then
-    return "$status"
-  fi
-  SETUP_LOCK_CLEANUP_DONE=true
-  trap - EXIT
-  trap '' INT TERM
-  if [ -n "${K8S_API_POLICY_TMP_DIR:-}" ] && [ -d "${K8S_API_POLICY_TMP_DIR}" ]; then
-    rm -rf -- "${K8S_API_POLICY_TMP_DIR}" || cleanup_status=1
-  fi
-  t2_lock_release "$status" || cleanup_status=$?
-  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
-    status="$cleanup_status"
-  fi
-  return "$status"
-}
-handle_setup_signal() {
-  local signal="$1" status
-  case "$signal" in
-    INT) status=130 ;;
-    TERM) status=143 ;;
-    *) status=1 ;;
-  esac
-  cleanup_setup_lock "$status" || status=$?
-  exit "$status"
-}
-handle_setup_exit() {
-  local status=$?
-  cleanup_setup_lock "$status" || status=$?
-  exit "$status"
-}
-trap handle_setup_exit EXIT
-trap 'handle_setup_signal INT' INT
-trap 'handle_setup_signal TERM' TERM
-t2_require_commands
-t2_repo_metadata
-t2_profile_scope
 t2_profile_status
 t2_context_check
 t2_profile_context_identity_check
-t2_mutation_lock
-export T2_PROJECT_DIR T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV T2_SKIP_LOCK T2_LOCK_TOKEN
 
 # ======================================================================
 # Step 3: Namespaces + CRDs

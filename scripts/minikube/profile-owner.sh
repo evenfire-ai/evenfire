@@ -107,6 +107,7 @@ profile_owner_validate_profile_name() {
 
 profile_owner_validate_ports() {
   local ports_env="${1:-}"
+  local require_complete="${2:-false}"
   if [[ ! -f "${ports_env}" || ! -r "${ports_env}" || -L "${ports_env}" ]]; then
     profile_owner_error PROFILE_PORTS_MISSING "persisted ports are missing, unreadable, or a symlink: ${ports_env}"
     return 1
@@ -117,7 +118,7 @@ profile_owner_validate_ports() {
   fi
 
   local validation_error
-  validation_error="$(awk -F= '
+  validation_error="$(awk -F= -v require_complete="${require_complete}" '
     function fail(message) { print message; exit 1 }
     {
       key = $1
@@ -129,6 +130,47 @@ profile_owner_validate_ports() {
         fail("PORT_BASE is missing or non-numeric")
       if (values["PORT_BASE"] < 20000 || values["PORT_BASE"] > 38999)
         fail("PORT_BASE is outside the branch-profile allocation range")
+
+      if (require_complete == "true") {
+        port_specs = "CONTROL_UI_PORT:0 PROFILE_UI_PORT:1 MCP_HOST_PORT:80 REGISTRY_API_PORT:85 CONTROL_API_PORT:90 EXTERNAL_REST_API_PORT:91 MEMBER_REGISTRATION_SERVICE_PORT:92 RPC_PROXY_PORT:94 WORKFLOW_APPROVAL_READER_PORT:98"
+        port_count = split(port_specs, ports, " ")
+        for (port_index = 1; port_index <= port_count; port_index++) {
+          split(ports[port_index], spec, ":")
+          key = spec[1]
+          if (!(key in values))
+            fail(key " is required for schema-v2 branch-profile ports")
+          expected_port = values["PORT_BASE"] + spec[2]
+          if (values[key] != expected_port)
+            fail(key " does not match PORT_BASE + " spec[2])
+        }
+
+        url_specs = "CONTROL_UI_URL:CONTROL_UI_PORT PROFILE_UI_URL:PROFILE_UI_PORT PROFILE_UI_BASE_URL:PROFILE_UI_PORT CONTROL_API_URL:CONTROL_API_PORT EXTERNAL_REST_API_URL:EXTERNAL_REST_API_PORT MEMBER_REGISTRATION_SERVICE_URL:MEMBER_REGISTRATION_SERVICE_PORT RPC_PROXY_URL:RPC_PROXY_PORT REGISTRY_API_URL:REGISTRY_API_PORT WORKFLOW_APPROVAL_READER_URL:WORKFLOW_APPROVAL_READER_PORT MCP_HOST_URL:MCP_HOST_PORT"
+        url_count = split(url_specs, urls, " ")
+        for (url_index = 1; url_index <= url_count; url_index++) {
+          split(urls[url_index], spec, ":")
+          key = spec[1]
+          port_key = spec[2]
+          expected_url = "http://127.0.0.1:" values[port_key]
+          if (!(key in values))
+            fail(key " is required for schema-v2 branch-profile ports")
+          if (values[key] != expected_url && values[key] != expected_url "/")
+            fail(key " does not match " port_key " and the loopback host")
+        }
+
+        allowed["PORT_BASE"] = 1
+        for (port_index = 1; port_index <= port_count; port_index++) {
+          split(ports[port_index], spec, ":")
+          allowed[spec[1]] = 1
+        }
+        for (url_index = 1; url_index <= url_count; url_index++) {
+          split(urls[url_index], spec, ":")
+          allowed[spec[1]] = 1
+        }
+        for (key in values) {
+          if (!(key in allowed))
+            fail(key " is not allowed in schema-v2 branch-profile ports")
+        }
+      }
 
       for (key in values) {
         value = values[key]
@@ -258,7 +300,11 @@ profile_owner_validate_selection() {
     fi
   fi
 
-  profile_owner_validate_ports "${ports_env}" || return 1
+  if [[ "${schema}" == 2 ]]; then
+    profile_owner_validate_ports "${ports_env}" true || return 1
+  else
+    profile_owner_validate_ports "${ports_env}" false || return 1
+  fi
 
   PROFILE_OWNER_SCHEMA_VERSION="${schema}"
   PROFILE_OWNER_WORKTREE_ID="${worktree_id}"

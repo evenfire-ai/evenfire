@@ -108,13 +108,19 @@ incremental_use_minikube_docker() {
   fi
   if ! env_script="$(incremental_run_with_deadline incremental-docker-env \
     "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
-    minikube -p "${PROFILE}" docker-env --shell bash)"; then
+    minikube -p "${PROFILE}" docker-env --shell bash)" || \
+     [[ -z "${env_script}" ]] || \
+     ! grep -Eq '(^|[[:space:]])export[[:space:]]+DOCKER_HOST=' <<<"${env_script}"; then
     # >&2 because this runs inside a command substitution on the baseline
     # path, where anything on stdout would be captured AS the baseline.
-    log "ERROR: could not point Docker at minikube's daemon; a shadow build would land in the wrong daemon" >&2
+    log "ERROR: DOCKER_ENV_UNRESOLVED: could not point Docker at minikube's daemon; a shadow build would land in the wrong daemon" >&2
     exit 1
   fi
   eval "${env_script}"
+  if [[ -z "${DOCKER_HOST:-}" ]]; then
+    log "ERROR: DOCKER_ENV_UNRESOLVED: minikube docker-env did not set DOCKER_HOST" >&2
+    exit 1
+  fi
   unset DOCKER_API_VERSION 2>/dev/null || true
   INCREMENTAL_DOCKER_ENV_APPLIED=true
 }

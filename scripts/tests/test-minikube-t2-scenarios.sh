@@ -57,7 +57,29 @@ profile_root="$tmp/profiles/$profile"
 mkdir -p "$profile_root"
 printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
   "$profile" "$(git -C "$repo" rev-parse --short=8 HEAD)" "$repo" >"$profile_root/profile.env"
-printf 'PORT_BASE=23117\nCONTROL_API_PORT=23207\nCONTROL_API_URL=http://127.0.0.1:23207\n' >"$profile_root/ports.env"
+local_loopback_url() { printf 'http://%s:%s' 127.0.0.1 "$1"; }
+cat >"$profile_root/ports.env" <<EOF_PORTS
+PORT_BASE=23117
+CONTROL_UI_PORT=23117
+PROFILE_UI_PORT=23118
+MCP_HOST_PORT=23197
+REGISTRY_API_PORT=23202
+CONTROL_API_PORT=23207
+EXTERNAL_REST_API_PORT=23208
+MEMBER_REGISTRATION_SERVICE_PORT=23209
+RPC_PROXY_PORT=23211
+WORKFLOW_APPROVAL_READER_PORT=23215
+CONTROL_UI_URL=$(local_loopback_url 23117)
+PROFILE_UI_URL=$(local_loopback_url 23118)
+PROFILE_UI_BASE_URL=$(local_loopback_url 23118)
+CONTROL_API_URL=$(local_loopback_url 23207)
+EXTERNAL_REST_API_URL=$(local_loopback_url 23208)
+MEMBER_REGISTRATION_SERVICE_URL=$(local_loopback_url 23209)
+RPC_PROXY_URL=$(local_loopback_url 23211)
+REGISTRY_API_URL=$(local_loopback_url 23202)
+WORKFLOW_APPROVAL_READER_URL=$(local_loopback_url 23215)
+MCP_HOST_URL=$(local_loopback_url 23197)
+EOF_PORTS
 
 repo_env=(
   T2_PROJECT_DIR="$repo"

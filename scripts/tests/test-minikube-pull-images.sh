@@ -85,6 +85,10 @@ if [[ "$*" == *"docker-env"* ]]; then
   echo 'export DOCKER_HOST="tcp://127.0.0.1:2376"'
   exit 0
 fi
+if [[ "$*" == *"image load clerum/"* ]] &&
+   [ "${TEST_IMAGE_LOAD_ALIAS_FAIL:-false}" = true ]; then
+  exit 1
+fi
 exit 0
 STUB
   chmod +x "$d/bin/docker" "$d/bin/minikube"
@@ -148,6 +152,7 @@ run_puller_prepared() {
   TEST_FLAKY_FAIL_COUNT="${TEST_FLAKY_FAIL_COUNT:-}" \
   TEST_FLAKY_COUNTER_DIR="${TEST_FLAKY_COUNTER_DIR:-}" \
   TEST_EMPTY_DOCKER_ENV="${TEST_EMPTY_DOCKER_ENV:-}" \
+  TEST_IMAGE_LOAD_ALIAS_FAIL="${TEST_IMAGE_LOAD_ALIAS_FAIL:-}" \
   MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}" \
   MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-}" \
   MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-}" \
@@ -217,6 +222,22 @@ assert_empty_docker_env_fails_closed() {
     pass "empty successful minikube docker-env output fails closed"
   else
     fail "empty docker-env output returned success or reached Docker: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_multinode_alias_load_failure_fails_closed() {
+  local d out rc
+  d="$(mktemp -d)"
+  export MINIKUBE_MULTI_NODE=true TEST_IMAGE_LOAD_ALIAS_FAIL=true
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset MINIKUBE_MULTI_NODE TEST_IMAGE_LOAD_ALIAS_FAIL
+  if [ "$rc" -ne 0 ] &&
+     grep -Fq 'alias load to clerum/control-api:test' <<<"$out" &&
+     ! grep -Fq 'All published images pulled successfully' <<<"$out"; then
+    pass "multi-node alias-load failure prevents a false acquisition success"
+  else
+    fail "multi-node alias-load failure was hidden: rc=$rc out=$out"
   fi
   rm -rf "$d"
 }
@@ -801,6 +822,7 @@ assert_it_pulls_every_pull_in_ghcr_mode_image
 assert_puller_requires_the_inherited_profile_lease
 assert_hung_pull_hits_the_finite_deadline
 assert_empty_docker_env_fails_closed
+assert_multinode_alias_load_failure_fails_closed
 assert_invalid_pull_knobs_fail_closed
 assert_it_never_pulls_an_unpublished_image
 assert_it_never_pulls_a_registry_distributed_mcp_server

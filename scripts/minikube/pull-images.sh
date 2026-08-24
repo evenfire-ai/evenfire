@@ -281,9 +281,12 @@ pull_one() {
     return 0
   fi
   if [ "$MINIKUBE_MULTI_NODE" = true ]; then
-    docker_cli_run_public "minikube-image-load-alias-${name}" \
+    if ! docker_cli_run_public "minikube-image-load-alias-${name}" \
       "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
-      minikube -p "$PROFILE" image load "$local_ref" >/dev/null 2>&1 || true
+      minikube -p "$PROFILE" image load "$local_ref" >/dev/null 2>&1; then
+      printf '%s' "$ghcr_ref (alias load to ${local_ref})" > "${STATUS_DIR}/${slot}.failed"
+      return 0
+    fi
   fi
 
   printf '%s\t%s' "$ghcr_ref" "$local_ref" > "${STATUS_DIR}/${slot}.done"

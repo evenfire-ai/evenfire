@@ -8,10 +8,50 @@ FAIL=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
+write_test_profile_metadata() {
+  local root="$1" profile="clerum-full-setup-fixture"
+  local profile_dir="$root/profiles/$profile"
+  local branch short_sha
+  branch="$(git -C "$REPO_ROOT" branch --show-current)"
+  short_sha="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
+  mkdir -p "$profile_dir"
+  printf 'PROFILE=%s\nBRANCH=%s\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
+    "$profile" "$branch" "$short_sha" "$REPO_ROOT" >"$profile_dir/profile.env"
+  test_loopback_url() { printf 'http://%s:%s' 127.0.0.1 "$1"; }
+  cat >"$profile_dir/ports.env" <<EOF_PORTS
+PORT_BASE=28117
+CONTROL_UI_PORT=28117
+PROFILE_UI_PORT=28118
+MCP_HOST_PORT=28197
+REGISTRY_API_PORT=28202
+CONTROL_API_PORT=28207
+EXTERNAL_REST_API_PORT=28208
+MEMBER_REGISTRATION_SERVICE_PORT=28209
+RPC_PROXY_PORT=28211
+WORKFLOW_APPROVAL_READER_PORT=28215
+CONTROL_UI_URL=$(test_loopback_url 28117)
+PROFILE_UI_URL=$(test_loopback_url 28118)
+PROFILE_UI_BASE_URL=$(test_loopback_url 28118)
+CONTROL_API_URL=$(test_loopback_url 28207)
+EXTERNAL_REST_API_URL=$(test_loopback_url 28208)
+MEMBER_REGISTRATION_SERVICE_URL=$(test_loopback_url 28209)
+RPC_PROXY_URL=$(test_loopback_url 28211)
+REGISTRY_API_URL=$(test_loopback_url 28202)
+WORKFLOW_APPROVAL_READER_URL=$(test_loopback_url 28215)
+MCP_HOST_URL=$(test_loopback_url 28197)
+EOF_PORTS
+  TEST_PROFILE="$profile"
+  TEST_PROFILE_ROOT="$root/profiles"
+  TEST_PROFILE_ENV="$profile_dir/profile.env"
+  TEST_PORTS_ENV="$profile_dir/ports.env"
+  TEST_LOCK_ROOT="$root/locks"
+}
+
 assert_broken_profile_is_recreated() {
   local tmp log_file
   tmp="$(mktemp -d)"
   log_file="$tmp/ops.log"
+  write_test_profile_metadata "$tmp"
 
   cat > "$tmp/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -113,12 +153,15 @@ STUB
   if PATH="$tmp:$PATH" \
      TEST_LOG_FILE="$log_file" \
      TEST_STATE_DIR="$tmp/state" \
+     MINIKUBE_PROFILE="$TEST_PROFILE" \
+     T2_PROFILE_ROOT="$TEST_PROFILE_ROOT" T2_PROFILE_ENV="$TEST_PROFILE_ENV" \
+     T2_PORTS_ENV="$TEST_PORTS_ENV" T2_LOCK_ROOT="$TEST_LOCK_ROOT" \
      MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true \
      MINIKUBE_RECREATE_PROFILE=true \
-     CONFIRM_PROFILE=clerum-test \
+     CONFIRM_PROFILE="$TEST_PROFILE" \
      MINIKUBE_START_SCRIPT="$tmp/start.sh" \
      bash scripts/minikube/full-setup.sh --skip-build >/dev/null 2>&1; then
-    if grep -q 'delete -p clerum-test' "$log_file" && grep -q 'start-helper' "$log_file"; then
+    if grep -q "delete -p $TEST_PROFILE" "$log_file" && grep -q 'start-helper' "$log_file"; then
       pass "full-setup recreates broken minikube profiles before start"
     else
       fail "full-setup did not delete and recreate broken profile"
@@ -135,6 +178,7 @@ assert_healthy_profile_skips_recreate() {
   local tmp log_file
   tmp="$(mktemp -d)"
   log_file="$tmp/ops.log"
+  write_test_profile_metadata "$tmp"
 
   cat > "$tmp/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -209,6 +253,9 @@ STUB
 
   if PATH="$tmp:$PATH" \
      TEST_LOG_FILE="$log_file" \
+     MINIKUBE_PROFILE="$TEST_PROFILE" \
+     T2_PROFILE_ROOT="$TEST_PROFILE_ROOT" T2_PROFILE_ENV="$TEST_PROFILE_ENV" \
+     T2_PORTS_ENV="$TEST_PORTS_ENV" T2_LOCK_ROOT="$TEST_LOCK_ROOT" \
      MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true \
      MINIKUBE_START_SCRIPT="$tmp/start.sh" \
      bash scripts/minikube/full-setup.sh --skip-build >/dev/null 2>&1; then

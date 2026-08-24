@@ -91,6 +91,9 @@ case "$*" in
       trap '' TERM
       while :; do sleep 1; done
     fi
+    if [ "${TEST_EMPTY_DOCKER_ENV:-0}" = "1" ]; then
+      exit 0
+    fi
     echo 'export DOCKER_HOST="tcp://127.0.0.1:2376"'
     exit 0
     ;;
@@ -1023,6 +1026,21 @@ assert_incremental_runtime_calls_are_bounded() {
   rm -rf "$d"
 }
 
+assert_empty_incremental_docker_env_fails_closed() {
+  local d out rc=0
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  export TEST_EMPTY_DOCKER_ENV=1
+  out="$(run_incremental "$d" 'incremental_use_minikube_docker')" || rc=$?
+  unset TEST_EMPTY_DOCKER_ENV
+  if [ "$rc" -ne 0 ] && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<<"$out"; then
+    pass "empty incremental minikube docker-env output fails closed"
+  else
+    fail "incremental docker-env returned success without a Docker host: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
@@ -1069,6 +1087,7 @@ assert_an_unknown_image_source_is_rejected
 assert_a_targeted_build_carries_the_recorded_coordinate_forward
 assert_the_touched_scripts_parse
 assert_incremental_runtime_calls_are_bounded
+assert_empty_incremental_docker_env_fails_closed
 assert_every_defined_case_is_invoked
 
 exit $FAIL

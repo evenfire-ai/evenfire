@@ -99,6 +99,9 @@ for code in $required_codes; do
 done
 
 grep -Fq 'kubectl --context=' "$COMMON"
+grep -Fq 't2_bounded_command' "$COMMON"
+grep -Fq 'T2_RUNTIME_TIMEOUT_SECONDS' "$COMMON"
+grep -Fq 'T2_RUNTIME_KILL_GRACE_SECONDS' "$COMMON"
 grep -Fq 'port-forward-owner.sh' "$COMMON"
 grep -Fq 't2_port_forward_targets_context' "$COMMON"
 grep -Fq 'matching_records' "$COMMON"
@@ -160,6 +163,12 @@ setup_guard_line="$(grep -nF 'if [ "${T2_MUTATION_LOCK_WRAPPED:-false}" != true 
 setup_cluster_line="$(grep -nF 'cluster-info' "$ROOT/scripts/minikube/setup.sh" | head -1 | cut -d: -f1)"
 if [[ -z "$setup_guard_line" || -z "$setup_cluster_line" || "$setup_guard_line" -ge "$setup_cluster_line" ]]; then
   echo 'FAIL: legacy setup can mutate or probe the cluster before the lease wrapper' >&2
+  exit 1
+fi
+full_setup_lock_line="$(grep -nF 't2_mutation_lock' "$ROOT/scripts/minikube/full-setup.sh" | head -1 | cut -d: -f1)"
+full_setup_status_line="$(grep -nF 'CLUSTER_STATUS="$(minikube_status_snapshot)"' "$ROOT/scripts/minikube/full-setup.sh" | head -1 | cut -d: -f1)"
+if [[ -z "$full_setup_lock_line" || -z "$full_setup_status_line" || "$full_setup_lock_line" -ge "$full_setup_status_line" ]]; then
+  echo 'FAIL: full-setup can probe or mutate the profile before the lease wrapper' >&2
   exit 1
 fi
 for timed_phase in 't2_evidence_write planner PASS' 't2_evidence_write transition PASS' \
@@ -332,6 +341,13 @@ grep -Fq 'T2_T0_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_T1_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_HEALTHCHECK_COMMAND' "$T2"
 grep -Fq 'minikube-t2-runtime' "$ROOT/Makefile"
+post_runtime_process_check_line="$(grep -nF 'if ! t2_process_check; then' "$T2" | tail -1 | cut -d: -f1)"
+complete_pass_line="$(grep -nF 't2_evidence_write complete PASS' "$T2" | tail -1 | cut -d: -f1)"
+if [ -z "$post_runtime_process_check_line" ] || [ -z "$complete_pass_line" ] ||
+   [ "$post_runtime_process_check_line" -ge "$complete_pass_line" ]; then
+  echo 'FAIL: T2 does not revalidate port-forward ownership before complete PASS' >&2
+  exit 1
+fi
 if ! grep -Fq 'instead of already-synced' "$T2"; then
   echo 'FAIL: final T2 preflight does not require already-synced' >&2
   exit 1

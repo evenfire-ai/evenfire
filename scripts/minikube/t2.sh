@@ -212,6 +212,11 @@ run_bootstrap_or_reconcile() {
       return 1
       ;;
   esac
+  if [ "$T2_PLAN_STATE" = targeted-sync ]; then
+    # The transition is now complete; a user-facing health journey is an
+    # outstanding obligation until it passes on a later evidence write.
+    T2_HEALTHCHECK_PENDING=true
+  fi
   t2_evidence_write transition PASS \
     "$T2_PLAN_STATE duration=$((SECONDS - phase_started_seconds))s"
 }
@@ -355,12 +360,12 @@ validate_healthcheck_contract() {
     return 1
   fi
 
-  if [ "$T2_PLAN_STATE" = targeted-sync ]; then
+  if [ "$T2_PLAN_STATE" = targeted-sync ] || [ "$T2_HEALTHCHECK_PENDING" = true ]; then
     T2_HEALTHCHECK_REQUIRED=true
     if [ -z "$T2_HEALTHCHECK_COMMAND" ]; then
       T2_NEXT_COMMAND='set T2_HEALTHCHECK_COMMAND to the affected service user-facing health journey, then re-run T2'
       t2_fail PROFILE_UNHEALTHY \
-        'targeted sync requires a profile-owned user-facing health command before mutation'
+        'targeted sync requires a profile-owned user-facing health command before certification'
       return 1
     fi
   fi
@@ -388,6 +393,7 @@ run_healthcheck_if_requested() {
     bash -c "$T2_HEALTHCHECK_COMMAND" || health_status=$?
   if [ "$health_status" -eq 0 ]; then
     T2_HEALTH_STATUS=PASS
+    T2_HEALTHCHECK_PENDING=false
     t2_evidence_write Health PASS \
       "profile-owned user-facing health command passed; required=$T2_HEALTHCHECK_REQUIRED duration=$((SECONDS - phase_started_seconds))s"
   else
@@ -441,6 +447,15 @@ main() {
     t2_context_check
   fi
   t2_mutation_lock
+  local prior_health_pending
+  prior_health_pending="$(t2_prior_targeted_health_pending)" || {
+    T2_NEXT_COMMAND='repair or restore the local exact-head T2 evidence directory, then re-run T2'
+    t2_fail CERTIFICATION_REQUIRED 'could not determine whether a targeted-sync health obligation is pending'
+    return 1
+  }
+  if [ "$prior_health_pending" = true ]; then
+    T2_HEALTHCHECK_PENDING=true
+  fi
   t2_evidence_init
 
   run_t1_local_preflight
@@ -488,6 +503,13 @@ main() {
   run_np08_hcc_authorization
   run_healthcheck_if_requested
   run_playwright_if_requested
+  # Health and Playwright run after the planner's initial ownership scan. A
+  # forward can disappear, be replaced, or lose its binding during either
+  # journey, so the exact PID/start-time/argv record must be revalidated before
+  # publishing the final certification.
+  if ! t2_process_check; then
+    return 1
+  fi
 
   t2_evidence_write complete PASS "T0=$T2_T0_STATUS T1=$T2_T1_STATUS T2=$T2_T2_STATUS NP08_HCC_AUTHORIZATION=$T2_NP08_HCC_AUTHORIZATION_STATUS Health=$T2_HEALTH_STATUS Playwright=$T2_PLAYWRIGHT_STATUS"
   printf 'MINIKUBE_T2_PASS\n'

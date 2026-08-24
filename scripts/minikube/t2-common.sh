@@ -40,6 +40,12 @@ fi
 T2_TIMEOUT_SECONDS="$T2_TIMEOUT_SECONDS"
 if [ -z "$T2_TIMEOUT_SECONDS" ]; then T2_TIMEOUT_SECONDS="$T2_TIMEOUT"; fi
 if [ -z "$T2_TIMEOUT_SECONDS" ]; then T2_TIMEOUT_SECONDS=180; fi
+T2_RUNTIME_TIMEOUT_SECONDS="$T2_RUNTIME_TIMEOUT_SECONDS"
+if [ -z "$T2_RUNTIME_TIMEOUT_SECONDS" ]; then T2_RUNTIME_TIMEOUT_SECONDS=60; fi
+T2_RUNTIME_KILL_GRACE_SECONDS="$T2_RUNTIME_KILL_GRACE_SECONDS"
+if [ -z "$T2_RUNTIME_KILL_GRACE_SECONDS" ]; then T2_RUNTIME_KILL_GRACE_SECONDS=5; fi
+T2_DEADLINE_RUNNER="$T2_DEADLINE_RUNNER"
+if [ -z "$T2_DEADLINE_RUNNER" ]; then T2_DEADLINE_RUNNER="$T2_SCRIPT_DIR/run-with-deadline.mjs"; fi
 T2_PROFILE_ROOT="$T2_PROFILE_ROOT"
 if [ -z "$T2_PROFILE_ROOT" ]; then T2_PROFILE_ROOT="$CLERUM_PROFILE_CACHE_ROOT"; fi
 if [ -z "$T2_PROFILE_ROOT" ]; then T2_PROFILE_ROOT="$HOME/.cache/clerum/minikube-profiles"; fi
@@ -89,6 +95,8 @@ T2_EVIDENCE_DIR=""
 T2_EVIDENCE_FILE=""
 T2_EVIDENCE_KIND="$T2_EVIDENCE_KIND"
 if [ -z "$T2_EVIDENCE_KIND" ]; then T2_EVIDENCE_KIND=certification; fi
+T2_HEALTHCHECK_PENDING="$T2_HEALTHCHECK_PENDING"
+if [ -z "$T2_HEALTHCHECK_PENDING" ]; then T2_HEALTHCHECK_PENDING=false; fi
 T2_LOCK_HELD=false
 T2_LOCK_RELEASED=false
 T2_LOCK_TOKEN="$T2_LOCK_TOKEN"
@@ -146,22 +154,58 @@ t2_fail() {
   return 1
 }
 
+t2_validate_runtime_deadline() {
+  if ! [[ "$T2_RUNTIME_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+     [ "$T2_RUNTIME_TIMEOUT_SECONDS" -gt 300 ]; then
+    T2_NEXT_COMMAND='set T2_RUNTIME_TIMEOUT_SECONDS to an integer from 1 to 300, then re-run T2'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED \
+      'T2_RUNTIME_TIMEOUT_SECONDS must be an integer from 1 to 300'
+    return 1
+  fi
+  if ! [[ "$T2_RUNTIME_KILL_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+     [ "$T2_RUNTIME_KILL_GRACE_SECONDS" -gt 60 ]; then
+    T2_NEXT_COMMAND='set T2_RUNTIME_KILL_GRACE_SECONDS to an integer from 1 to 60, then re-run T2'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED \
+      'T2_RUNTIME_KILL_GRACE_SECONDS must be an integer from 1 to 60'
+    return 1
+  fi
+  if [ ! -f "$T2_DEADLINE_RUNNER" ]; then
+    T2_NEXT_COMMAND='restore scripts/minikube/run-with-deadline.mjs, then re-run T2'
+    t2_fail LOCAL_DEPENDENCY_MISSING \
+      "bounded Minikube/Kubernetes runtime helper is missing: $T2_DEADLINE_RUNNER"
+    return 1
+  fi
+}
+
+t2_bounded_command() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  node "$T2_DEADLINE_RUNNER" \
+    --timeout-seconds "$timeout_seconds" \
+    --heartbeat-seconds 20 \
+    --kill-grace-seconds "$T2_RUNTIME_KILL_GRACE_SECONDS" \
+    --label "$label" -- "$@"
+}
+
 t2_require_commands() {
   local command_name
-  for command_name in git kubectl minikube python3 shasum awk sed find ps; do
+  for command_name in git kubectl minikube node python3 shasum awk sed find ps; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       T2_NEXT_COMMAND="install or enable $command_name, then re-run make minikube-t2-preflight"
       t2_fail LOCAL_DEPENDENCY_MISSING "required local dependency is unavailable: $command_name"
     fi
   done
+  t2_validate_runtime_deadline
 }
 
 t2_kc() {
-  kubectl --context="$T2_CONTEXT" "$@"
+  t2_bounded_command t2-kubectl "$T2_RUNTIME_TIMEOUT_SECONDS" \
+    kubectl --context="$T2_CONTEXT" "$@"
 }
 
 t2_mk() {
-  minikube -p "$T2_PROFILE" "$@"
+  t2_bounded_command t2-minikube "$T2_RUNTIME_TIMEOUT_SECONDS" \
+    minikube -p "$T2_PROFILE" "$@"
 }
 
 t2_require_explicit_context() {
@@ -1033,6 +1077,49 @@ t2_evidence_init() {
   t2_evidence_write preflight RUNNING ''
 }
 
+t2_prior_targeted_health_pending() {
+  local pending
+  pending="$(
+    CERTIFICATION_ROOT="$T2_EVIDENCE_ROOT" \
+    EXPECTED_REPOSITORY="$T2_PROJECT_DIR" EXPECTED_BRANCH="$T2_BRANCH" \
+    EXPECTED_HEAD="$T2_HEAD" EXPECTED_WORKTREE_ID="$T2_WORKTREE_ID" \
+    EXPECTED_PROFILE="$T2_PROFILE" EXPECTED_CONTEXT="$T2_CONTEXT" \
+    EXPECTED_GATE_ID="$T2_GATE_ID" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["CERTIFICATION_ROOT"])
+expected = {
+    "repository": os.environ["EXPECTED_REPOSITORY"],
+    "branch": os.environ["EXPECTED_BRANCH"],
+    "head": os.environ["EXPECTED_HEAD"],
+    "worktreeId": os.environ["EXPECTED_WORKTREE_ID"],
+    "profile": os.environ["EXPECTED_PROFILE"],
+    "context": os.environ["EXPECTED_CONTEXT"],
+    "gateId": os.environ["EXPECTED_GATE_ID"],
+}
+candidates = []
+for candidate in root.glob("*/evidence.json"):
+    try:
+        data = json.loads(candidate.read_text())
+        stamp = candidate.stat().st_mtime_ns
+    except (OSError, ValueError):
+        continue
+    if data.get("certificationVersion") != 1 or data.get("evidenceKind") != "certification":
+        continue
+    if all(data.get(key, "") == value for key, value in expected.items()):
+        candidates.append((stamp, str(candidate), data))
+if not candidates:
+    print("false")
+else:
+    _, _, latest = max(candidates)
+    print("true" if latest.get("targetedHealthPending") is True else "false")
+PY
+  )" || return 1
+  printf '%s' "$pending"
+}
+
 t2_evidence_write() {
   local phase="$1" status="$2" detail="$3" file
   [ -n "$T2_EVIDENCE_FILE" ] || return 0
@@ -1042,6 +1129,7 @@ t2_evidence_write() {
   T2_ORIGIN_DEV="$T2_ORIGIN_DEV" T2_MERGE_BASE="$T2_MERGE_BASE" \
   T2_WORKTREE_ID="$T2_WORKTREE_ID" T2_RUN_ID="$T2_RUN_ID" T2_GATE_ID="$T2_GATE_ID" \
   T2_PROFILE="$T2_PROFILE" T2_CONTEXT="$T2_CONTEXT" T2_CLUSTER_FINGERPRINT="$T2_CLUSTER_FINGERPRINT" \
+  T2_HEALTHCHECK_PENDING="$T2_HEALTHCHECK_PENDING" \
   T2_PROFILE_STATUS="$T2_PROFILE_STATUS" T2_PROFILE_HEALTHY="$T2_PROFILE_HEALTHY" \
   T2_EVIDENCE_DIR="$T2_EVIDENCE_DIR" T2_EVIDENCE_KIND="$T2_EVIDENCE_KIND" \
   T2_IMAGE_MANIFEST="$T2_IMAGE_MANIFEST" T2_IMAGE_SOURCE="$T2_IMAGE_SOURCE" T2_IMAGE_TAG="$T2_IMAGE_TAG" \
@@ -1104,6 +1192,7 @@ prior.update({
     "localLogDirectory": os.path.join(os.environ.get("T2_EVIDENCE_DIR", ""), "logs"),
     "imageSource": os.environ.get("T2_IMAGE_SOURCE", ""),
     "imageTag": os.environ.get("T2_IMAGE_TAG", ""),
+    "targetedHealthPending": os.environ.get("T2_HEALTHCHECK_PENDING", "false") == "true",
     "phase": os.environ.get("PHASE", ""),
     "status": os.environ.get("STATUS", ""),
     "detail": detail,

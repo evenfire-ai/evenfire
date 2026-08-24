@@ -34,6 +34,20 @@ run_healthcheck_if_requested
   "$T2_EVIDENCE_STATUS" == NOT_RUN ]] || \
   fail 'an optional absent health check was not recorded as NOT_RUN'
 
+T2_PLAN_STATE=already-synced
+T2_HEALTHCHECK_PENDING=true
+T2_HEALTHCHECK_COMMAND=''
+if validate_healthcheck_contract >/dev/null 2>&1; then
+  fail 'a pending targeted-sync health obligation was not preserved on retry'
+fi
+[[ "$T2_ERROR_CODE" == PROFILE_UNHEALTHY ]] || \
+  fail "pending targeted health returned ${T2_ERROR_CODE:-<empty>}"
+T2_HEALTHCHECK_COMMAND='printf "health-retry-ok\\n" >/dev/null'
+validate_healthcheck_contract
+run_healthcheck_if_requested
+[[ "$T2_HEALTHCHECK_PENDING" == false && "$T2_HEALTH_STATUS" == PASS ]] || \
+  fail 'a successful retry did not clear the targeted-sync health obligation'
+
 T2_PLAN_STATE=targeted-sync
 T2_HEALTHCHECK_COMMAND='printf "health-ok\\n" >/dev/null'
 T2_HEALTHCHECK_TIMEOUT_SECONDS=5

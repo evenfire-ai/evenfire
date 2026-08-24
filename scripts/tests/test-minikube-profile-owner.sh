@@ -130,6 +130,20 @@ v2_resolved="$("${OWNER_SCRIPT}" resolve --repo-dir "${repo_a}" --branch "${bran
 [[ "$(value_from "${v2_resolved}" OWNER_ID)" == "${owner_a}" ]] || fail 'schema-v2 profile resolved the wrong owner'
 [[ "$(shasum "${v2_dir}/ports.env" | awk '{print $1}')" == "${ports_before}" ]] || fail 'read-only resolution rewrote ports.env'
 
+incomplete_v2_ports="${TMP_ROOT}/incomplete-v2-ports.env"
+cp "${v2_dir}/ports.env" "${incomplete_v2_ports}"
+sed -i.bak '/^MCP_HOST_URL=/d' "${incomplete_v2_ports}"
+expect_failure PROFILE_PORTS_INVALID 'schema-v2 ports with a missing canonical URL' \
+  "${OWNER_SCRIPT}" validate --repo-dir "${repo_a}" --branch "${branch}" \
+  --profile "${profile_a}" --profile-env "${v2_dir}/profile.env" --ports-env "${incomplete_v2_ports}"
+
+unknown_v2_ports="${TMP_ROOT}/unknown-v2-ports.env"
+cp "${v2_dir}/ports.env" "${unknown_v2_ports}"
+printf 'UNEXPECTED_PORT=24000\n' >>"${unknown_v2_ports}"
+expect_failure PROFILE_PORTS_INVALID 'schema-v2 ports with an unknown key' \
+  "${OWNER_SCRIPT}" validate --repo-dir "${repo_a}" --branch "${branch}" \
+  --profile "${profile_a}" --profile-env "${v2_dir}/profile.env" --ports-env "${unknown_v2_ports}"
+
 corrupt_metadata_root="${TMP_ROOT}/corrupt-metadata"
 corrupt_metadata_dir="${corrupt_metadata_root}/${profile_a}"
 mkdir -p "${corrupt_metadata_dir}"
