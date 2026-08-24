@@ -81,6 +81,12 @@ export interface SystemMcpServerInfo {
   destinationRevision: string
 }
 
+export interface SystemMcpServersResponse {
+  schemaVersion: 1
+  servers: SystemMcpServerInfo[]
+  timestamp: string
+}
+
 export interface LiveForwardTarget {
   serverName: string
   contextRef: string
@@ -207,6 +213,31 @@ function liveForwardUrl(server: AuthorityMcpServer): string | null {
     return target.toString()
   } catch {
     return null
+  }
+}
+
+function safeDirectoryTransport(transport: McpServerTransport): McpServerTransport {
+  let url: string | undefined
+  if (typeof transport.url === 'string' && transport.url.trim() === transport.url) {
+    try {
+      const parsed = new URL(transport.url)
+      if (
+        (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+        !parsed.username &&
+        !parsed.password &&
+        !parsed.hash &&
+        !parsed.search &&
+        parsed.pathname.startsWith('/')
+      ) {
+        url = parsed.toString()
+      }
+    } catch {
+      // Invalid transport metadata is omitted from the low-sensitivity directory.
+    }
+  }
+  return {
+    type: transport.type,
+    ...(url ? { url } : {}),
   }
 }
 
@@ -366,6 +397,7 @@ export class McpAuthorizationService {
       !server ||
       server.name !== serverName ||
       server.namespace !== binding.context.namespace ||
+      server.contextRef !== binding.context.name ||
       !server.enabled ||
       !isLive(server.metadata) ||
       !server.status.deployed ||
@@ -399,7 +431,7 @@ export class McpAuthorizationService {
         name: server.name,
         contextRef: server.contextRef ?? '',
         ...(server.description ? { description: server.description } : {}),
-        transport: toPublicMcpTransport(server.transport),
+        transport: safeDirectoryTransport(server.transport),
         enabled: server.enabled,
         status: {
           deployed: server.status.deployed,
@@ -420,7 +452,15 @@ export class McpAuthorizationService {
     const binding = await this.resolveHostContext(principal)
     const target = await this.resolveLiveForwardTarget(binding, serverName)
     const revalidatedBinding = await this.resolveHostContext(principal)
-    const revalidatedTarget = await this.resolveLiveForwardTarget(revalidatedBinding, serverName)
+    let revalidatedTarget: LiveForwardTarget
+    try {
+      revalidatedTarget = await this.resolveLiveForwardTarget(revalidatedBinding, serverName)
+    } catch (error) {
+      if (error instanceof McpAuthorizationError && error.code === 'not_found') {
+        throw new McpAuthorizationError('authorization_unavailable')
+      }
+      throw error
+    }
     if (
       !sameHostContext(binding, revalidatedBinding) ||
       !sameForwardTarget(target, revalidatedTarget)

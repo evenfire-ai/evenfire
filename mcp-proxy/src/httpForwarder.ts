@@ -28,12 +28,22 @@ const RESPONSE_HEADERS = [
   'content-type',
   'content-length',
   'cache-control',
-  'etag',
   'last-event-id',
   'mcp-session-id',
   'mcp-protocol-version',
   'retry-after',
 ] as const
+
+function connectionTokens(headers: IncomingMessage['headers']): Set<string> {
+  const value = headers.connection
+  const values = Array.isArray(value) ? value : value ? [value] : []
+  return new Set(
+    values
+      .flatMap(item => item.split(','))
+      .map(item => item.trim().toLowerCase())
+      .filter(Boolean)
+  )
+}
 
 export function validateInternalTarget(
   backendUrl: string,
@@ -65,7 +75,9 @@ export function validateInternalTarget(
 
 function responseHeaders(source: IncomingMessage['headers']): Record<string, string> {
   const result: Record<string, string> = {}
+  const blocked = connectionTokens(source)
   for (const name of RESPONSE_HEADERS) {
+    if (blocked.has(name)) continue
     const value = source[name]
     if (typeof value === 'string') result[name] = value
   }
@@ -183,7 +195,9 @@ export class HttpForwarder {
     body: Buffer
   ): Record<string, string> {
     const result: Record<string, string> = {}
+    const blocked = connectionTokens(req.headers)
     for (const name of REQUEST_HEADERS) {
+      if (blocked.has(name)) continue
       const value = req.headers[name]
       if (Array.isArray(value)) throw new HttpForwarderError('invalid_headers')
       if (typeof value === 'string') result[name] = value

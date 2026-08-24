@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createMcpProxyFetch } from './proxyAuth'
+import { createMcpProxyFetch, MCP_PROXY_HOST_AUTH_CHALLENGE } from './proxyAuth'
 
 function fixtureAuth(initial: string, refresh: () => Promise<void>) {
   let current = initial
@@ -44,6 +44,19 @@ describe('mcp-host proxy Host bearer transport', () => {
     )
   })
 
+  it('does not retry a forwarded 401', async () => {
+    const refresh = vi.fn(async () => undefined)
+    const auth = fixtureAuth('fixture-host', refresh)
+    const fetchMock = vi.fn(async () => new Response('denied', { status: 401 }))
+    const proxyFetch = createMcpProxyFetch(auth, fetchMock)
+
+    const response = await proxyFetch('http://proxy.test/mcp', { method: 'POST', body: 'request' })
+
+    expect(response.status).toBe(401)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
   it('serializes one refresh when concurrent requests receive 401', async () => {
     let releaseRefresh!: () => void
     let signalRefreshStarted!: () => void
@@ -62,7 +75,10 @@ describe('mcp-host proxy Host bearer transport', () => {
     const calls: RequestInit[] = []
     const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
       calls.push(init ?? {})
-      return new Response('unauthorized', { status: calls.length <= 2 ? 401 : 200 })
+      return new Response('denied', {
+        status: calls.length <= 2 ? 401 : 200,
+        headers: calls.length <= 2 ? { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE } : {},
+      })
     })
     const proxyFetch = createMcpProxyFetch(auth, fetchMock)
     const first = proxyFetch('http://proxy.test/mcp', { method: 'GET' })
@@ -86,8 +102,18 @@ describe('mcp-host proxy Host bearer transport', () => {
     const auth = fixtureAuth('fixture-host', vi.fn(async () => undefined))
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
-      .mockResolvedValueOnce(new Response('still unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(
+        new Response('denied', {
+          status: 401,
+          headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response('denied-again', {
+          status: 401,
+          headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+        })
+      )
     const proxyFetch = createMcpProxyFetch(auth, fetchMock)
 
     const response = await proxyFetch('http://proxy.test/mcp', { method: 'GET' })

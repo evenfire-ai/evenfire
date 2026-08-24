@@ -805,6 +805,11 @@ data:
       uwsgi_temp_path /tmp/uwsgi_temp;
       scgi_temp_path /tmp/scgi_temp;
 
+      # Bound unauthenticated attempts before they can amplify into Kubernetes
+      # TokenReview calls. The proxy's normal low-volume system traffic shares
+      # this source-keyed budget; excess is an opaque 503 and never a grant.
+      limit_req_zone $binary_remote_addr zone=np08_system_auth:10m rate=120r/m;
+
       map $uri $hcc_route_class {
         default denied;
         ~^/api/v2/system/mcpservers/authorize$ system_authorize;
@@ -896,6 +901,8 @@ data:
 
         location = /api/v2/system/mcpservers {
           if ($request_method != GET) { return 405; }
+          limit_req zone=np08_system_auth burst=20 nodelay;
+          limit_req_status 503;
           proxy_pass http://host_context_controller_upstream;
           proxy_pass_request_headers off;
           proxy_http_version 1.1;
@@ -911,6 +918,8 @@ data:
         location = /api/v2/system/mcpservers/authorize {
           if ($request_method != POST) { return 405; }
           client_max_body_size 1k;
+          limit_req zone=np08_system_auth burst=20 nodelay;
+          limit_req_status 503;
           proxy_pass http://host_context_controller_upstream;
           proxy_pass_request_headers off;
           proxy_http_version 1.1;

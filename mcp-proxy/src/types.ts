@@ -10,15 +10,16 @@ export interface ServerRoute {
 export interface HccServerInfo {
   name: string;
   contextRef: string;
+  description?: string;
   transport: { type: string; url?: string };
   enabled: boolean;
   status: { deployed: boolean; ready: boolean; authoritative?: boolean };
-  destinationRevision?: string;
+  destinationRevision: string;
 }
 
 export interface HccServersResponse {
+  schemaVersion: 1;
   servers: HccServerInfo[];
-  contextRef: string;
   timestamp: string;
 }
 
@@ -60,7 +61,7 @@ export function loadConfig(): ProxyConfig {
     logLevel: process.env.LOG_LEVEL || "info",
     forwardingEnabled: process.env.MCP_PROXY_FORWARDING_ENABLED === "true",
     systemTokenFile:
-      process.env.MCP_PROXY_SYSTEM_TOKEN_FILE ||
+      process.env.MCP_PROXY_IDENTITY_TOKEN_FILE ||
       "/var/run/secrets/clerum/mcp-proxy/token",
     requestBodyLimit: Math.min(
       Math.max(parseInt(process.env.MCP_PROXY_REQUEST_BODY_LIMIT || "1048576", 10), 1),

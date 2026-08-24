@@ -79,6 +79,7 @@ import {
   McpServerCRD,
   McpServerInfo,
   McpServerSpec,
+  McpServerStatus,
   SharedFileSystemCRD,
   SharedFileSystemSpec,
 } from './types'
@@ -4712,6 +4713,39 @@ function authorizationMetadata(metadata: {
   }
 }
 
+/**
+ * Project only the persisted readiness condition for a live McpServer read.
+ * A provider cache is intentionally not an authorization source: the CRD
+ * generation and observedGeneration must match before readiness is usable.
+ */
+export function liveMcpServerStatus(
+  metadata: { generation?: number },
+  status?: McpServerCRD['status']
+): McpServerStatus {
+  const readyConditions = status?.conditions?.filter(condition => condition.type === 'Ready') ?? []
+  const ready =
+    metadata.generation !== undefined &&
+    readyConditions.length === 1 &&
+    readyConditions[0].observedGeneration === metadata.generation
+      ? readyConditions[0]
+      : undefined
+  if (!ready) {
+    return {
+      deployed: false,
+      ready: false,
+      authoritative: false,
+      message: 'McpServer readiness is not current',
+    }
+  }
+  const isReady = ready.status === 'True'
+  return {
+    deployed: isReady,
+    ready: isReady,
+    authoritative: true,
+    message: ready.message,
+  }
+}
+
 export function isMcpAuthorizationNotFound(error: unknown): boolean {
   return getErrorCode(error) === 404
 }
@@ -4820,15 +4854,12 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
             deletionTimestamp?: string
           }
         }
-        const status = provider.getAllServerInfos().find(server => server.name === name)
-          ?.status ?? {
-          deployed: false,
-          ready: false,
-        }
+        const status = liveMcpServerStatus(object.metadata, object.status)
         return {
           name: object.metadata.name,
           namespace: object.metadata.namespace ?? config.namespace,
           metadata: authorizationMetadata(object.metadata),
+          contextRef: object.spec.contextRef,
           description: object.spec.description,
           transport: { ...object.spec.transport },
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
@@ -4879,8 +4910,7 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
         }
       }
       return (response.items ?? []).map(object => {
-        const status = provider.getAllServerInfos().find(server => server.name === object.metadata.name)
-          ?.status ?? { deployed: false, ready: false }
+        const status = liveMcpServerStatus(object.metadata, object.status)
         return {
           name: object.metadata.name,
           namespace: object.metadata.namespace ?? config.namespace,

@@ -113,6 +113,19 @@ describe('McpAuthorizationService live forwarding', () => {
     expect(store.readSecret).not.toHaveBeenCalled()
   })
 
+  it('denies an McpServer whose live contextRef disagrees with Context membership', async () => {
+    const store = makeStore(
+      { 'host-a': host('host-a', 'a', 'context-a') },
+      { 'context-a': context('context-a', ['server-a']) },
+      { 'server-a': server('server-a', 'context-b') }
+    )
+    const service = new McpAuthorizationService(store, () => 200)
+
+    await expect(
+      service.getLiveForwardTarget(principal('host-a', 'host-uid-a'), 'server-a')
+    ).rejects.toMatchObject({ code: 'not_found' })
+  })
+
   it('fails closed when readiness or authority is not live', async () => {
     const notReady = server('server-a', 'context-a')
     notReady.status.ready = false

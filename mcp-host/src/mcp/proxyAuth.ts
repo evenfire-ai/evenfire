@@ -15,6 +15,9 @@ export type McpProxyFetch = (
   init?: RequestInit
 ) => Promise<Response>
 
+/** Marker emitted only for a proxy-generated pre-forward Host challenge. */
+export const MCP_PROXY_HOST_AUTH_CHALLENGE = 'Bearer realm="mcp-proxy"'
+
 export class McpProxyAuthorizationError extends Error {
   constructor(readonly code: 'host_bearer_unavailable' | 'host_bearer_refresh_failed') {
     super(code)
@@ -76,7 +79,13 @@ export function createMcpProxyFetch(
       headers.set('Proxy-Authorization', 'Bearer ' + hostBearer)
       const response = await baseFetch(input, { ...init, headers })
 
-      if (response.status !== 401 || retried) return response
+      if (
+        response.status !== 401 ||
+        response.headers.get('www-authenticate') !== MCP_PROXY_HOST_AUTH_CHALLENGE ||
+        retried
+      ) {
+        return response
+      }
       retried = true
       await response.body?.cancel().catch(() => undefined)
       await refreshAfterUnauthorized(hostBearer)

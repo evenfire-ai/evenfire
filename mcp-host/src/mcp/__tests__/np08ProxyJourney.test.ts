@@ -4,7 +4,11 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { McpManager } from '../manager'
-import { createMcpProxyFetch, type McpProxyHostAuthorization } from '../proxyAuth'
+import {
+  createMcpProxyFetch,
+  MCP_PROXY_HOST_AUTH_CHALLENGE,
+  type McpProxyHostAuthorization,
+} from '../proxyAuth'
 import type { McpServerInfo } from '../../types'
 
 type Authority = {
@@ -161,7 +165,10 @@ class InstrumentedProxy {
     if (request.url === '/events' && request.method === 'GET') {
       const hostIdentity = this.readBearer(request.headers[PRIVATE_IDENTITY_HEADER])
       if (!hostIdentity || !this.authority.has(hostIdentity)) {
-        response.writeHead(401, { 'content-type': 'application/json' })
+        response.writeHead(401, {
+          'content-type': 'application/json',
+          'www-authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE,
+        })
         response.end(JSON.stringify({ error: 'unauthorized' }))
         return
       }
@@ -189,12 +196,18 @@ class InstrumentedProxy {
     })
 
     if (!hostIdentity) {
-      response.writeHead(401, { 'content-type': 'application/json' })
+      response.writeHead(401, {
+        'content-type': 'application/json',
+        'www-authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE,
+      })
       response.end(JSON.stringify({ error: 'unauthorized' }))
       return
     }
     if (this.expiredIdentities.has(hostIdentity)) {
-      response.writeHead(401, { 'content-type': 'application/json' })
+      response.writeHead(401, {
+        'content-type': 'application/json',
+        'www-authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE,
+      })
       response.end(JSON.stringify({ error: 'unauthorized' }))
       return
     }

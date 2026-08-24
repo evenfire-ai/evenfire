@@ -546,7 +546,11 @@ export class ContextMapperServer {
     if (!systemPrincipal || !this.mcpAuthorization) return
     try {
       const servers = await this.mcpAuthorization.listSystemServers()
-      this.sendProtectedJson(res, 200, { servers, timestamp: new Date().toISOString() })
+      this.sendProtectedJson(res, 200, {
+        schemaVersion: 1,
+        servers,
+        timestamp: new Date().toISOString(),
+      })
     } catch {
       this.sendProtectedJson(res, 503, { error: 'authorization_unavailable' })
     }
@@ -596,7 +600,12 @@ export class ContextMapperServer {
 
     try {
       const target = await this.mcpAuthorization.getLiveForwardTarget(hostPrincipal, serverName)
-      this.sendProtectedJson(res, 200, target)
+      this.sendProtectedJson(res, 200, {
+        schemaVersion: 1,
+        serverName: target.serverName,
+        targetUrl: target.targetUrl,
+        destinationRevision: target.destinationRevision,
+      })
     } catch (error) {
       if (error instanceof McpAuthorizationError && error.code === 'not_found') {
         this.sendProtectedJson(res, 403, { error: 'forbidden' })

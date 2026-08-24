@@ -9,6 +9,7 @@ import { Router } from '../src/router'
 import type { ProxyConfig } from '../src/types'
 import { InstrumentedUpstream } from './np08Fixtures'
 
+const HOST_AUTH_CHALLENGE = 'Bearer realm="mcp-proxy"'
 const scheme = ['Be', 'arer'].join('')
 const hostHeader = (value: string) => [scheme, value].join(' ')
 
@@ -35,7 +36,11 @@ function request(
   port: number,
   path: string,
   options: { method?: string; headers?: Record<string, string | string[]>; body?: string } = {}
-): Promise<{ status: number; body: string }> {
+): Promise<{
+  status: number
+  body: string
+  headers: Record<string, string | string[] | undefined>
+}> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -48,7 +53,7 @@ function request(
       res => {
         let body = ''
         res.on('data', chunk => (body += chunk.toString()))
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }))
       }
     )
     req.on('error', reject)
@@ -155,6 +160,21 @@ describe('NP-08 mcp-proxy authorization gate', () => {
     expect(upstream.bytesReceivedValue).toBe(0)
   })
 
+  it('marks a proxy-generated Host challenge without contacting HCC or upstream', async () => {
+    upstream = new InstrumentedUpstream()
+    await upstream.start()
+    const authorizeForward = vi.fn()
+    const port = await start({ authorizeForward })
+    const response = await request(port, '/servers/server-a/mcp', { body: 'denied-body' })
+
+    expect(response.status).toBe(401)
+    expect(response.headers['www-authenticate']).toBe(HOST_AUTH_CHALLENGE)
+    expect(authorizeForward).not.toHaveBeenCalled()
+    expect(upstream.connectionCountValue).toBe(0)
+    expect(upstream.requestCountValue).toBe(0)
+    expect(upstream.bytesReceivedValue).toBe(0)
+  })
+
   it('buffers an oversized body and denies before HCC or upstream', async () => {
     upstream = new InstrumentedUpstream()
     await upstream.start()
@@ -169,6 +189,53 @@ describe('NP-08 mcp-proxy authorization gate', () => {
     })
 
     expect(response.status).toBe(413)
+    expect(authorizeForward).not.toHaveBeenCalled()
+    expect(upstream.connectionCountValue).toBe(0)
+    expect(upstream.requestCountValue).toBe(0)
+    expect(upstream.bytesReceivedValue).toBe(0)
+  })
+
+  it.each([
+    ['Content-Length with Transfer-Encoding', { 'content-length': '4', 'transfer-encoding': 'chunked' }],
+    ['unsupported Transfer-Encoding', { 'transfer-encoding': 'gzip' }],
+  ])('rejects %s before HCC or upstream', async (_label, headers) => {
+    upstream = new InstrumentedUpstream()
+    await upstream.start()
+    const authorizeForward = vi.fn()
+    const port = await start({ authorizeForward })
+    const requestLike = {
+      headers,
+      rawHeaders: Object.entries(headers).flatMap(([name, value]) => [name, value]),
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from('body')
+      },
+    }
+
+    await expect(
+      (proxy as unknown as { readBoundedBody(request: unknown): Promise<Buffer> }).readBoundedBody(
+        requestLike
+      )
+    ).rejects.toThrow()
+    expect(authorizeForward).not.toHaveBeenCalled()
+    expect(upstream.connectionCountValue).toBe(0)
+    expect(upstream.requestCountValue).toBe(0)
+    expect(upstream.bytesReceivedValue).toBe(0)
+  })
+
+  it('rejects duplicate MCP Authorization headers before HCC and upstream', async () => {
+    upstream = new InstrumentedUpstream()
+    await upstream.start()
+    const authorizeForward = vi.fn()
+    const port = await start({ authorizeForward })
+    const response = await request(port, '/servers/server-a/mcp', {
+      headers: {
+        'proxy-authorization': hostHeader('host-a'),
+        authorization: ['mcp-a', 'mcp-b'],
+      },
+      body: 'denied-body',
+    })
+
+    expect(response.status).toBe(400)
     expect(authorizeForward).not.toHaveBeenCalled()
     expect(upstream.connectionCountValue).toBe(0)
     expect(upstream.requestCountValue).toBe(0)

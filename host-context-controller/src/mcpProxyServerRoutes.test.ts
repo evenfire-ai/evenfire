@@ -143,7 +143,7 @@ describe('ContextMapperServer system MCP proxy routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(JSON.parse(response.body)).toMatchObject({ servers: directory })
+    expect(JSON.parse(response.body)).toMatchObject({ schemaVersion: 1, servers: directory })
     expect(response.body).not.toContain('secret')
     expect(response.headers['Cache-Control']).toBe('no-store, private')
   })
@@ -166,7 +166,12 @@ describe('ContextMapperServer system MCP proxy routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(JSON.parse(response.body)).toEqual(target)
+    expect(JSON.parse(response.body)).toEqual({
+      schemaVersion: 1,
+      serverName: target.serverName,
+      targetUrl: target.targetUrl,
+      destinationRevision: target.destinationRevision,
+    })
     expect(authorization.getLiveForwardTarget).toHaveBeenCalledWith(
       expect.objectContaining({ hostName: 'host-a' }),
       'server-a'

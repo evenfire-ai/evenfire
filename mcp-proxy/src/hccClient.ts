@@ -23,8 +23,8 @@ export class HccAuthorizationError extends Error {
 }
 
 export interface HccForwardAuthorization {
+  schemaVersion: 1
   serverName: string
-  contextRef: string
   targetUrl: string
   destinationRevision: string
 }
@@ -33,6 +33,153 @@ export type SystemIdentityReader = () => Promise<string>
 
 const BEARER_SCHEME = 'Bearer'
 const MAX_HCC_RESPONSE_BYTES = 1_048_576
+const SERVER_NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const expected = [...keys].sort()
+  const actual = Object.keys(value).sort()
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index])
+}
+
+function parseSafeUrl(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() !== value) {
+    throw new HccAuthorizationError('unavailable')
+  }
+  try {
+    const parsed = new URL(value)
+    if (
+      (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+      parsed.username ||
+      parsed.password ||
+      parsed.hash ||
+      parsed.search ||
+      !parsed.pathname.startsWith('/')
+    ) {
+      throw new Error('invalid HCC URL')
+    }
+    return parsed.toString()
+  } catch {
+    throw new HccAuthorizationError('unavailable')
+  }
+}
+
+function parseOptionalSafeUrl(value: unknown): string | undefined {
+  return value === undefined ? undefined : parseSafeUrl(value)
+}
+
+function parseInventoryResponse(payload: unknown): HccServersResponse {
+  if (
+    !isRecord(payload) ||
+    !hasExactKeys(payload, ['schemaVersion', 'servers', 'timestamp']) ||
+    payload.schemaVersion !== 1 ||
+    !Array.isArray(payload.servers) ||
+    typeof payload.timestamp !== 'string' ||
+    !Number.isFinite(Date.parse(payload.timestamp))
+  ) {
+    throw new HccAuthorizationError('unavailable')
+  }
+
+  const serverNames = new Set<string>()
+  const servers = payload.servers.map(value => {
+    const requiredServerKeys = [
+      'name',
+      'contextRef',
+      'transport',
+      'enabled',
+      'status',
+      'destinationRevision',
+    ]
+    if (
+      !isRecord(value) ||
+      !Object.keys(value).every(key => [...requiredServerKeys, 'description'].includes(key)) ||
+      requiredServerKeys.some(key => !Object.hasOwn(value, key)) ||
+      typeof value.name !== 'string' ||
+      value.name.length > 253 ||
+      !SERVER_NAME_RE.test(value.name) ||
+      typeof value.contextRef !== 'string' ||
+      typeof value.enabled !== 'boolean' ||
+      typeof value.destinationRevision !== 'string' ||
+      !value.destinationRevision
+    ) {
+      throw new HccAuthorizationError('unavailable')
+    }
+    if (serverNames.has(value.name)) {
+      throw new HccAuthorizationError('unavailable')
+    }
+    serverNames.add(value.name)
+    if (value.description !== undefined && typeof value.description !== 'string') {
+      throw new HccAuthorizationError('unavailable')
+    }
+    if (
+      !isRecord(value.transport) ||
+      !Object.keys(value.transport).every(key => key === 'type' || key === 'url') ||
+      !Object.hasOwn(value.transport, 'type')
+    ) {
+      throw new HccAuthorizationError('unavailable')
+    }
+    if (
+      typeof value.transport.type !== 'string' ||
+      !value.transport.type ||
+      value.transport.type.length > 32
+    ) {
+      throw new HccAuthorizationError('unavailable')
+    }
+    const url = parseOptionalSafeUrl(value.transport.url)
+    if (!isRecord(value.status)) throw new HccAuthorizationError('unavailable')
+    const statusKeys = ['deployed', 'ready', 'authoritative']
+    const actualStatusKeys = Object.keys(value.status)
+    if (
+      actualStatusKeys.some(key => !statusKeys.includes(key)) ||
+      typeof value.status.deployed !== 'boolean' ||
+      typeof value.status.ready !== 'boolean' ||
+      (value.status.authoritative !== undefined &&
+        typeof value.status.authoritative !== 'boolean')
+    ) {
+      throw new HccAuthorizationError('unavailable')
+    }
+    return {
+      name: value.name,
+      contextRef: value.contextRef,
+      ...(typeof value.description === 'string' ? { description: value.description } : {}),
+      transport: { type: value.transport.type, url },
+      enabled: value.enabled,
+      status: {
+        deployed: value.status.deployed,
+        ready: value.status.ready,
+        ...(typeof value.status.authoritative === 'boolean'
+          ? { authoritative: value.status.authoritative }
+          : {}),
+      },
+      destinationRevision: value.destinationRevision,
+    }
+  })
+  return { schemaVersion: 1, servers, timestamp: payload.timestamp }
+}
+
+function parseForwardAuthorization(payload: unknown): HccForwardAuthorization {
+  if (
+    !isRecord(payload) ||
+    !hasExactKeys(payload, ['schemaVersion', 'serverName', 'targetUrl', 'destinationRevision']) ||
+    payload.schemaVersion !== 1 ||
+    typeof payload.serverName !== 'string' ||
+    payload.serverName.length > 253 ||
+    !SERVER_NAME_RE.test(payload.serverName) ||
+    typeof payload.destinationRevision !== 'string' ||
+    !payload.destinationRevision
+  ) {
+    throw new HccAuthorizationError('unavailable')
+  }
+  return {
+    schemaVersion: 1,
+    serverName: payload.serverName,
+    targetUrl: parseSafeUrl(payload.targetUrl),
+    destinationRevision: payload.destinationRevision,
+  }
+}
 
 export class HccClient {
   private readonly config: ProxyConfig
@@ -53,9 +200,8 @@ export class HccClient {
 
   async fetchServers(): Promise<ServerRoute[]> {
     try {
-      const response = await this.requestJson<HccServersResponse>(
-        'GET',
-        '/api/v2/system/mcpservers'
+      const response = parseInventoryResponse(
+        await this.requestJson<unknown>('GET', '/api/v2/system/mcpservers')
       )
       this.cache = response.servers.map(server => this.toServerRoute(server))
       this.lastSuccessfulPoll = Date.now()
@@ -73,15 +219,21 @@ export class HccClient {
     hostBearer: string
   ): Promise<HccForwardAuthorization> {
     if (!hostBearer.trim()) throw new HccAuthorizationError('unauthorized')
-    return this.requestJson<HccForwardAuthorization>(
-      'POST',
-      '/api/v2/system/mcpservers/authorize',
-      {
-        'X-Clerum-Host-Authorization': `${BEARER_SCHEME} ${hostBearer}`,
-        'Content-Type': 'application/json',
-      },
-      JSON.stringify({ serverName })
+    const authorization = parseForwardAuthorization(
+      await this.requestJson<unknown>(
+        'POST',
+        '/api/v2/system/mcpservers/authorize',
+        {
+          'X-Clerum-Host-Authorization': `${BEARER_SCHEME} ${hostBearer}`,
+          'Content-Type': 'application/json',
+        },
+        JSON.stringify({ serverName })
+      )
     )
+    if (authorization.serverName !== serverName) {
+      throw new HccAuthorizationError('unavailable')
+    }
+    return authorization
   }
 
   getCachedServers(): ServerRoute[] {

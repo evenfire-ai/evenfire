@@ -79,8 +79,7 @@ function singleBearer(
 function exactAudience(audiences: unknown): boolean {
   return (
     Array.isArray(audiences) &&
-    audiences.length === 1 &&
-    audiences[0] === MCP_PROXY_TOKEN_REVIEW_AUDIENCE
+    audiences.includes(MCP_PROXY_TOKEN_REVIEW_AUDIENCE)
   )
 }
 

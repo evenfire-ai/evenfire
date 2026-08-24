@@ -119,9 +119,26 @@ describe("HttpForwarder", () => {
     expect(receivedHeaders["x-forwarded-for"]).toBeUndefined();
   });
 
+  it("should strip an allowlisted request header named by Connection", async () => {
+    let receivedHeaders: http.IncomingHttpHeaders = {};
+    backendHandler = (req, res) => {
+      receivedHeaders = req.headers;
+      res.writeHead(200);
+      res.end("ok");
+    };
+
+    await forwardViaProxy("POST", {
+      authorization: "Bearer test-token",
+      connection: "authorization",
+    });
+
+    expect(receivedHeaders["authorization"]).toBeUndefined();
+  });
+
   it("should preserve response headers", async () => {
     backendHandler = (_, res) => {
       res.writeHead(200, {
+        Connection: "mcp-session-id",
         "X-Custom-Header": "custom-value",
         "Mcp-Session-Id": "session-123",
       });
@@ -130,7 +147,7 @@ describe("HttpForwarder", () => {
 
     const res = await forwardViaProxy("POST");
     expect(res.headers["x-custom-header"]).toBeUndefined();
-    expect(res.headers["mcp-session-id"]).toBe("session-123");
+    expect(res.headers["mcp-session-id"]).toBeUndefined();
   });
 
   it("should pass through error status codes", async () => {

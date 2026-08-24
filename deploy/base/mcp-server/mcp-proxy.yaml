@@ -29,6 +29,7 @@ spec:
       volumes:
       - name: mcp-proxy-token
         projected:
+          defaultMode: 0444
           sources:
           - serviceAccountToken:
               audience: host-context-controller
@@ -44,6 +45,8 @@ spec:
           value: "8083"
         - name: MCP_PROXY_FORWARDING_ENABLED
           value: "false"
+        - name: MCP_PROXY_IDENTITY_TOKEN_FILE
+          value: /var/run/secrets/clerum/mcp-proxy/token
         - name: HCC_API_URL
           value: http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081
         - name: HCC_POLL_INTERVAL

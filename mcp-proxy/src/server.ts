@@ -9,6 +9,7 @@ import { ProxyConfig } from './types'
 
 const SERVER_NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/
 const BEARER_SCHEME = 'Bearer'
+const HOST_AUTH_CHALLENGE = 'Bearer realm="mcp-proxy"'
 const HARD_BODY_LIMIT = 8 * 1024 * 1024
 
 export class ProxyServer {
@@ -119,11 +120,20 @@ export class ProxyServer {
       return
     }
 
+    try {
+      this.assertSingleMcpAuthorization(req)
+    } catch {
+      this.sendError(res, 400, 'bad_request')
+      return
+    }
+
     let hostBearer: string
     try {
       hostBearer = this.readHostBearer(req)
     } catch {
-      this.sendError(res, 401, 'unauthorized')
+      this.sendError(res, 401, 'unauthorized', {
+        'WWW-Authenticate': HOST_AUTH_CHALLENGE,
+      })
       return
     }
 
@@ -134,7 +144,9 @@ export class ProxyServer {
       if (error instanceof HccAuthorizationError && error.code === 'bad_request') {
         this.sendError(res, 400, 'bad_request')
       } else if (error instanceof HccAuthorizationError && error.code === 'unauthorized') {
-        this.sendError(res, 401, 'unauthorized')
+        this.sendError(res, 401, 'unauthorized', {
+          'WWW-Authenticate': HOST_AUTH_CHALLENGE,
+        })
       } else if (error instanceof HccAuthorizationError && error.code === 'forbidden') {
         this.sendError(res, 403, 'forbidden')
       } else {
@@ -176,8 +188,32 @@ export class ProxyServer {
   private async readBoundedBody(req: IncomingMessage): Promise<Buffer> {
     const declaredHeader = req.headers['content-length']
     if (Array.isArray(declaredHeader)) throw new Error('invalid_content_length')
+    const rawHeaders = Array.isArray(req.rawHeaders) ? req.rawHeaders : []
+    let contentLengthCount = 0
+    for (let index = 0; index < rawHeaders.length; index += 2) {
+      if (rawHeaders[index]?.toLowerCase() === 'content-length') contentLengthCount += 1
+    }
+    if (contentLengthCount > 1) throw new Error('invalid_content_length')
     const declared = declaredHeader === undefined ? 0 : Number(declaredHeader)
-    if (!Number.isSafeInteger(declared) || declared < 0) throw new Error('invalid_content_length')
+    if (
+      (declaredHeader !== undefined &&
+        (typeof declaredHeader !== 'string' || !/^\d+$/.test(declaredHeader))) ||
+      !Number.isSafeInteger(declared) ||
+      declared < 0
+    ) {
+      throw new Error('invalid_content_length')
+    }
+    const transferEncoding = req.headers['transfer-encoding']
+    if (Array.isArray(transferEncoding)) throw new Error('invalid_transfer_encoding')
+    if (transferEncoding !== undefined) {
+      const codings = transferEncoding
+        .split(',')
+        .map(value => value.trim().toLowerCase())
+        .filter(Boolean)
+      if (codings.length !== 1 || codings[0] !== 'chunked' || declaredHeader !== undefined) {
+        throw new Error('invalid_transfer_encoding')
+      }
+    }
     const limit = Math.min(Math.max(this.config.requestBodyLimit, 1), HARD_BODY_LIMIT)
     const chunks: Buffer[] = []
     let size = 0
@@ -206,7 +242,22 @@ export class ProxyServer {
     return match[1]
   }
 
-  private sendError(res: ServerResponse, status: number, error: string): void {
+  private assertSingleMcpAuthorization(req: IncomingMessage): void {
+    let count = 0
+    for (let index = 0; index < req.rawHeaders.length; index += 2) {
+      if (req.rawHeaders[index]?.toLowerCase() === 'authorization') count += 1
+    }
+    if (count > 1 || Array.isArray(req.headers.authorization)) {
+      throw new Error('invalid_mcp_authorization')
+    }
+  }
+
+  private sendError(
+    res: ServerResponse,
+    status: number,
+    error: string,
+    headers: Record<string, string> = {}
+  ): void {
     if (res.headersSent) {
       res.end()
       return
@@ -216,6 +267,7 @@ export class ProxyServer {
       'Cache-Control': 'no-store, private',
       Pragma: 'no-cache',
       'X-Content-Type-Options': 'nosniff',
+      ...headers,
     })
     res.end(JSON.stringify({ error }))
   }

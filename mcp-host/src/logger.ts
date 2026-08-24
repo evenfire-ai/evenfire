@@ -56,6 +56,33 @@ function emit(level: string, args: unknown[]): void {
   writer(JSON.stringify(entry));
 }
 
+export type McpHostLogFields = Record<string, string | number | boolean | undefined>;
+
+function emitStructured(level: string, event: string, fields: McpHostLogFields = {}): void {
+  const writer = level === "error" ? originalError : originalLog;
+  writer(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level,
+      service: "mcp-host",
+      event,
+      ...fields,
+    })
+  );
+}
+
+export const mcpHostLogger = {
+  info(event: string, fields?: McpHostLogFields): void {
+    emitStructured("info", event, fields);
+  },
+  warn(event: string, fields?: McpHostLogFields): void {
+    emitStructured("warn", event, fields);
+  },
+  error(event: string, fields?: McpHostLogFields): void {
+    emitStructured("error", event, fields);
+  },
+};
+
 console.log = (...args: unknown[]) => emit("info", args);
 console.error = (...args: unknown[]) => emit("error", args);
 console.warn = (...args: unknown[]) => emit("warn", args);

@@ -34,7 +34,7 @@ describe("HccClient", () => {
   const systemIdentity = ["fixture", "system", "identity"].join("-");
 
   beforeEach(async () => {
-    responseBody = { servers: [], contextRef: "*", timestamp: new Date().toISOString() };
+    responseBody = { schemaVersion: 1, servers: [], timestamp: new Date().toISOString() };
     responseStatus = 200;
     compatibilityBody = undefined;
     compatibilityStatus = undefined;
@@ -59,8 +59,8 @@ describe("HccClient", () => {
             ? compatibilityBody
             : req.method === "POST"
             ? {
+                schemaVersion: 1,
                 serverName: "mongo-mcp",
-                contextRef: "ctx1",
                 targetUrl: "http://mongo.mcp-server.svc.cluster.local:3000/mcp",
                 destinationRevision: "revision-1",
               }
@@ -82,15 +82,16 @@ describe("HccClient", () => {
   });
 
   it("should fetch servers from HCC API", async () => {
-    responseBody = { servers: [
+    responseBody = { schemaVersion: 1, servers: [
       {
         name: "mongo-mcp",
         contextRef: "ctx1",
         transport: { type: "streamableHttp", url: "http://mongo.mcp-server:3000/mcp" },
         enabled: true,
         status: { deployed: true, ready: true },
+        destinationRevision: "revision-1",
       },
-    ], contextRef: "*", timestamp: new Date().toISOString() };
+    ], timestamp: new Date().toISOString() };
 
     const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
     const servers = await client.fetchServers();
@@ -101,16 +102,55 @@ describe("HccClient", () => {
     expect(servers[0].managed).toBe(true);
   });
 
+  it("should reject an inventory response without schemaVersion", async () => {
+    responseBody = {
+      servers: [
+        {
+          name: "schema-missing",
+          contextRef: "ctx1",
+          transport: { type: "streamableHttp", url: "http://schema-missing.mcp-server:3000/mcp" },
+          enabled: true,
+          status: { deployed: true, ready: true, authoritative: true },
+          destinationRevision: "revision-1",
+        },
+      ],
+      timestamp: new Date().toISOString(),
+    };
+    const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
+
+    await expect(client.fetchServers()).resolves.toEqual([]);
+  });
+
+  it("should reject an inventory response with repeated server names", async () => {
+    const server = {
+      name: "repeated-server",
+      contextRef: "ctx1",
+      transport: { type: "streamableHttp", url: "http://repeated.mcp-server:3000/mcp" },
+      enabled: true,
+      status: { deployed: true, ready: true },
+      destinationRevision: "revision-1",
+    };
+    responseBody = {
+      schemaVersion: 1,
+      servers: [server, { ...server, contextRef: "ctx2", destinationRevision: "revision-2" }],
+      timestamp: new Date().toISOString(),
+    };
+    const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
+
+    await expect(client.fetchServers()).resolves.toEqual([]);
+  });
+
   it("should use cache when HCC fails", async () => {
-    responseBody = { servers: [
+    responseBody = { schemaVersion: 1, servers: [
       {
         name: "server-a",
         contextRef: "ctx1",
         transport: { type: "streamableHttp", url: "http://a:3000/mcp" },
         enabled: true,
         status: { deployed: true, ready: true },
+        destinationRevision: "revision-1",
       },
-    ], contextRef: "*", timestamp: new Date().toISOString() };
+    ], timestamp: new Date().toISOString() };
 
     const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
     await client.fetchServers();
@@ -153,18 +193,18 @@ describe("HccClient", () => {
   });
 
   it("should detect server addition", async () => {
-    responseBody = { servers: [
-      { name: "a", contextRef: "c", transport: { type: "streamableHttp", url: "http://a:3000/mcp" }, enabled: true, status: { deployed: true, ready: true } },
-    ], contextRef: "*", timestamp: new Date().toISOString() };
+    responseBody = { schemaVersion: 1, servers: [
+      { name: "a", contextRef: "c", transport: { type: "streamableHttp", url: "http://a:3000/mcp" }, enabled: true, status: { deployed: true, ready: true }, destinationRevision: "revision-1" },
+    ], timestamp: new Date().toISOString() };
 
     const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
     let servers = await client.fetchServers();
     expect(servers).toHaveLength(1);
 
-    responseBody = { servers: [
-      { name: "a", contextRef: "c", transport: { type: "streamableHttp", url: "http://a:3000/mcp" }, enabled: true, status: { deployed: true, ready: true } },
-      { name: "b", contextRef: "c", transport: { type: "streamableHttp", url: "http://b:3000/mcp" }, enabled: false, status: { deployed: true, ready: true } },
-    ], contextRef: "*", timestamp: new Date().toISOString() };
+    responseBody = { schemaVersion: 1, servers: [
+      { name: "a", contextRef: "c", transport: { type: "streamableHttp", url: "http://a:3000/mcp" }, enabled: true, status: { deployed: true, ready: true }, destinationRevision: "revision-1" },
+      { name: "b", contextRef: "c", transport: { type: "streamableHttp", url: "http://b:3000/mcp" }, enabled: false, status: { deployed: true, ready: true }, destinationRevision: "revision-2" },
+    ], timestamp: new Date().toISOString() };
 
     servers = await client.fetchServers();
     expect(servers).toHaveLength(2);
@@ -176,9 +216,9 @@ describe("HccClient", () => {
       async () => systemIdentity
     );
 
-    responseBody = { servers: [
-      { name: "a", contextRef: "c", transport: { type: "streamableHttp", url: "http://a:3000/mcp" }, enabled: true, status: { deployed: true, ready: true } },
-    ], contextRef: "*", timestamp: new Date().toISOString() };
+    responseBody = { schemaVersion: 1, servers: [
+      { name: "a", contextRef: "c", transport: { type: "streamableHttp", url: "http://a:3000/mcp" }, enabled: true, status: { deployed: true, ready: true }, destinationRevision: "revision-1" },
+    ], timestamp: new Date().toISOString() };
 
     await client.fetchServers();
 
@@ -193,9 +233,9 @@ describe("HccClient", () => {
       async () => systemIdentity
     );
 
-    responseBody = { servers: [
-      { name: "a", contextRef: "c", transport: { type: "streamableHttp", url: "http://a:3000/mcp" }, enabled: true, status: { deployed: true, ready: true } },
-    ], contextRef: "*", timestamp: new Date().toISOString() };
+    responseBody = { schemaVersion: 1, servers: [
+      { name: "a", contextRef: "c", transport: { type: "streamableHttp", url: "http://a:3000/mcp" }, enabled: true, status: { deployed: true, ready: true }, destinationRevision: "revision-1" },
+    ], timestamp: new Date().toISOString() };
 
     await client.fetchServers();
 
@@ -210,9 +250,9 @@ describe("HccClient", () => {
   });
 
   it("should extract port from URL", async () => {
-    responseBody = { servers: [
-      { name: "custom-port", contextRef: "c", transport: { type: "streamableHttp", url: "http://x:8080/mcp" }, enabled: true, status: { deployed: true, ready: true } },
-    ], contextRef: "*", timestamp: new Date().toISOString() };
+    responseBody = { schemaVersion: 1, servers: [
+      { name: "custom-port", contextRef: "c", transport: { type: "streamableHttp", url: "http://x:8080/mcp" }, enabled: true, status: { deployed: true, ready: true }, destinationRevision: "revision-1" },
+    ], timestamp: new Date().toISOString() };
 
     const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
     const servers = await client.fetchServers();
@@ -254,6 +294,7 @@ describe("HccClient", () => {
 
   it("should never use the cached inventory as authorization fallback", async () => {
     responseBody = {
+      schemaVersion: 1,
       servers: [
         {
           name: "mongo-mcp",
@@ -261,9 +302,9 @@ describe("HccClient", () => {
           transport: { type: "streamableHttp", url: "http://mongo.mcp-server:3000/mcp" },
           enabled: true,
           status: { deployed: true, ready: true },
+          destinationRevision: "revision-1",
         },
       ],
-      contextRef: "*",
       timestamp: new Date().toISOString(),
     };
     const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);

@@ -73,11 +73,14 @@ for rendered in "$@"; do
     end
     system_inventory = location_block.call("location = /api/v2/system/mcpservers {")
     system_authorize = location_block.call("location = /api/v2/system/mcpservers/authorize {")
+    abort("system v2 TokenReview routes lack bounded source rate limiting") unless nginx.include?("limit_req_zone $binary_remote_addr zone=np08_system_auth:10m rate=120r/m;")
     [system_inventory, system_authorize].each do |block|
       abort("system v2 route forwards ambient request headers") unless block.include?("proxy_pass_request_headers off;")
       abort("system v2 route does not explicitly forward system Authorization") unless block.include?("proxy_set_header Authorization $http_authorization;")
       abort("system v2 route permits caching") unless block.include?("Cache-Control \"no-store, private\"")
       abort("system v2 route mixes the two identities") if block.include?("proxy_set_header Authorization $http_x_clerum_host_authorization;")
+      abort("system v2 route lacks TokenReview rate limiting") unless block.include?("limit_req zone=np08_system_auth burst=20 nodelay;")
+      abort("system v2 route does not fail closed when rate limited") unless block.include?("limit_req_status 503;")
     end
     abort("system inventory route is not GET-only") unless system_inventory.include?("$request_method != GET")
     abort("system authorize route is not POST-only") unless system_authorize.include?("$request_method != POST")
@@ -129,6 +132,8 @@ for rendered in "$@"; do
     abort("mcp-proxy container is missing") unless proxy_container
     proxy_env = Array(proxy_container["env"]).to_h { |entry| [entry["name"], entry] }
     abort("mcp-proxy forwarding must remain disabled by default") unless proxy_env.dig("MCP_PROXY_FORWARDING_ENABLED", "value") == "false"
+    abort("mcp-proxy identity file env is not explicit") unless proxy_env.dig("MCP_PROXY_IDENTITY_TOKEN_FILE", "value") == "/var/run/secrets/clerum/mcp-proxy/token"
+    abort("mcp-proxy must not retain the legacy identity env name") if proxy_env.key?("MCP_PROXY_SYSTEM_TOKEN_FILE")
     abort("mcp-proxy must not receive a cluster identity from an env source") if Array(proxy_container["env"]).any? { |entry| entry.dig("valueFrom", "secretKeyRef") }
     abort("mcp-proxy must not mount a cluster identity volume") if Array(proxy_pod_spec["volumes"]).any? { |volume| volume.key?("secret") }
     proxy_id_volume = Array(proxy_pod_spec["volumes"]).find { |volume| volume["name"] == "mcp-proxy-token" }
@@ -140,7 +145,7 @@ for rendered in "$@"; do
       },
     }
     abort("mcp-proxy identity projection is not exact") unless
-      proxy_id_volume && proxy_id_volume.dig("projected", "sources") == [expected_id_source]
+      proxy_id_volume && proxy_id_volume.dig("projected", "defaultMode") == 292 && proxy_id_volume.dig("projected", "sources") == [expected_id_source]
     abort("mcp-proxy identity mount is not read-only at the configured path") unless
       Array(proxy_container["volumeMounts"]).include?({
         "name" => "mcp-proxy-token",

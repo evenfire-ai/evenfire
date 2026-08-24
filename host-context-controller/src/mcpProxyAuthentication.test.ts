@@ -75,6 +75,26 @@ describe('McpProxyAuthenticator', () => {
     })
   })
 
+  it('accepts a TokenReview audience list containing the HCC audience', async () => {
+    const authenticator = makeAuthenticator(async () => ({
+      status: {
+        authenticated: true,
+        user: {
+          username: ['system', 'serviceaccount', 'mcp-server', 'mcp-proxy'].join(':'),
+          uid: 'sa-uid',
+        },
+        audiences: ['other-audience', 'host-context-controller'],
+      },
+    }))
+
+    await expect(
+      authenticator.authenticateSystem(
+        { authorization: headerFor(systemValue) },
+        ['Authorization', headerFor(systemValue)]
+      )
+    ).resolves.toMatchObject({ uid: 'sa-uid' })
+  })
+
   it.each([
     ['wrong username', 'system:serviceaccount:mcp-server:other', 'sa-uid', ['host-context-controller']],
     ['wrong UID', 'system:serviceaccount:mcp-server:mcp-proxy', 'old-uid', ['host-context-controller']],

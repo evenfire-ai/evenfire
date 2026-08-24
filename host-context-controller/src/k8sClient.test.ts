@@ -434,7 +434,7 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
       getAllServerInfos: () => [
         {
           name: 'server-a',
-          status: { deployed: true, ready: true, authoritative: true },
+          status: { deployed: false, ready: false, authoritative: false },
         },
       ],
     } as unknown as Parameters<typeof createMcpAuthorizationStore>[0]
@@ -462,6 +462,7 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
           name: 'server-a',
           namespace: 'mcp-server',
           uid: 'server-uid-a',
+          generation: 2,
           resourceVersion: '13',
         },
         spec: {
@@ -469,6 +470,18 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
           transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
           auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
           enabled: true,
+        },
+        status: {
+          conditions: [
+            {
+              type: 'Ready',
+              status: 'True',
+              reason: 'ReconcileSuccess',
+              message: 'Deployment created',
+              lastTransitionTime: '2026-08-24T00:00:00.000Z',
+              observedGeneration: 2,
+            },
+          ],
         },
       },
     }
@@ -493,12 +506,17 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
     await expect(store.readMcpServer('server-a')).resolves.toEqual({
       name: 'server-a',
       namespace: 'mcp-server',
-      metadata: { uid: 'server-uid-a', resourceVersion: '13' },
+      metadata: { uid: 'server-uid-a', generation: 2, resourceVersion: '13' },
       description: 'Server A',
       transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
       auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
       enabled: true,
-      status: { deployed: true, ready: true, authoritative: true },
+      status: {
+        deployed: true,
+        ready: true,
+        authoritative: true,
+        message: 'Deployment created',
+      },
     })
   })
 })
