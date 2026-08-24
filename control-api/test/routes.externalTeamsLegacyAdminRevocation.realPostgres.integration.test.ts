@@ -130,6 +130,17 @@ describeRealPostgres('legacy V1 live-admin revocation on real external team rout
     databasePool = new Pool({ connectionString })
     producerDatabase.pool = databasePool
     await initDb({ connect: () => databasePool.connect() })
+    await databasePool.query(
+      `INSERT INTO users(id, email, name)
+       VALUES ($1, 'admin@example.test', 'Legacy Admin')`,
+      [userId]
+    )
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Legacy Team')`, [teamId])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'admin', 'active')`,
+      [teamId, userId]
+    )
 
     const issued = await issueExternalUserSession(
       {
