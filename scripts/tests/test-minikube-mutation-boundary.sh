@@ -3,7 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd -P)"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
+T2_TEST_RESTORE_DETACHED=false
+T2_TEST_HEAD=""
+T2_TEST_BRANCH=""
+cleanup() {
+  if [[ "${T2_TEST_RESTORE_DETACHED}" == true ]]; then
+    git -C "${ROOT}" switch --quiet --detach "${T2_TEST_HEAD}" || true
+    git -C "${ROOT}" branch -D "${T2_TEST_BRANCH}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
 
 PROFILE=boundary-profile
 TOKEN=boundary-test-token
@@ -14,6 +24,13 @@ mkdir -p "${LOCK_DIR}"
 
 BRANCH="$(git -C "${ROOT}" branch --show-current)"
 HEAD="$(git -C "${ROOT}" rev-parse --verify HEAD)"
+if [[ -z "${BRANCH}" ]]; then
+  BRANCH="${GITHUB_HEAD_REF:-detached-ci-test}"
+  git -C "${ROOT}" switch --quiet --create "${BRANCH}" "${HEAD}"
+  T2_TEST_HEAD="${HEAD}"
+  T2_TEST_BRANCH="${BRANCH}"
+  T2_TEST_RESTORE_DETACHED=true
+fi
 WORKTREE_ID="$(printf '%s' "${ROOT}" | shasum | awk '{print $1}')"
 LOCK_KEY="$(printf '%s\0%s\0%s\0%s\0%s' "${ROOT}" "${BRANCH}" "${HEAD}" "${PROFILE}" "${PROFILE}" | shasum | awk '{print $1}')"
 cat >"${LOCK_DIR}/owner.env" <<EOF
