@@ -305,6 +305,336 @@ export async function applyCatalogUtf8OrderingSchema(db: DbClient): Promise<void
   `)
 }
 
+/**
+ * Replace the repository-wide catalog hot row with the transactional user,
+ * team, resource, and operational-source revisions consumed by catalog reads.
+ */
+export async function applyComposableCatalogRevisionSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS authorization_catalog_writer_components (
+      writer_table TEXT PRIMARY KEY,
+      component_class TEXT NOT NULL,
+      rationale TEXT NOT NULL,
+      CHECK (writer_table <> '' AND component_class <> '' AND rationale <> '')
+    );
+
+    INSERT INTO authorization_catalog_writer_components(writer_table, component_class, rationale)
+    VALUES
+      ('users', 'user', 'user identity and lifecycle'),
+      ('teams', 'team', 'team identity'),
+      ('team_members', 'user+team', 'membership and live role'),
+      ('user_contexts', 'user', 'direct context access'),
+      ('team_contexts', 'team', 'team context access'),
+      ('user_agents', 'user', 'direct agent access'),
+      ('team_agents', 'team', 'team agent access'),
+      ('user_workflow_triggers', 'user', 'direct workflow access'),
+      ('team_workflow_triggers', 'team', 'team workflow access'),
+      ('workflow_runs', 'user+team', 'visible workflow-run ownership'),
+      ('workflow_approval_requests', 'user+team', 'approval target authority'),
+      ('notification_deliveries', 'user+team', 'notification audience'),
+      ('gfs_resources', 'gfs-subjects', 'resource visibility for current subjects'),
+      ('gfs_grants', 'user+team', 'direct GFS grants'),
+      ('gfs_shares', 'user+team', 'direct GFS shares'),
+      ('operational_resource_index', 'resource+source-state', 'promoted source resources'),
+      ('operational_resource_relationships', 'resource+source-state', 'promoted source edges'),
+      ('operational_catalog_source_state', 'source-state', 'atomic source generation promotion')
+    ON CONFLICT (writer_table) DO UPDATE
+      SET component_class = EXCLUDED.component_class,
+          rationale = EXCLUDED.rationale;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_user_revision(target_user_id UUID)
+    RETURNS VOID
+    LANGUAGE SQL
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+      INSERT INTO authorization_user_revisions(user_id, revision, updated_at)
+      SELECT users.id, 1, clock_timestamp()
+        FROM users
+       WHERE users.id = target_user_id
+      ON CONFLICT (user_id) DO UPDATE
+        SET revision = authorization_user_revisions.revision + 1,
+            updated_at = clock_timestamp();
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_team_revision(target_team_id UUID)
+    RETURNS VOID
+    LANGUAGE SQL
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+      INSERT INTO authorization_team_revisions(team_id, revision, updated_at)
+      SELECT teams.id, 1, clock_timestamp()
+        FROM teams
+       WHERE teams.id = target_team_id
+      ON CONFLICT (team_id) DO UPDATE
+        SET revision = authorization_team_revisions.revision + 1,
+            updated_at = clock_timestamp();
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_subject_revision(
+      target_subject_type TEXT,
+      target_subject_id TEXT
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF target_subject_type NOT IN ('user', 'team', 'operator', 'host', 'context') THEN
+        RAISE EXCEPTION 'unmapped catalog subject type: %', target_subject_type;
+      END IF;
+      IF target_subject_type IN ('operator', 'host', 'context') THEN
+        RETURN;
+      END IF;
+      IF target_subject_id IS NULL OR target_subject_id = '' THEN
+        RETURN;
+      END IF;
+      IF target_subject_id !~*
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      THEN
+        RAISE EXCEPTION 'invalid catalog % subject identifier', target_subject_type;
+      END IF;
+      IF target_subject_type = 'user' THEN
+        PERFORM authorization_bump_user_revision(target_subject_id::UUID);
+      ELSE
+        PERFORM authorization_bump_team_revision(target_subject_id::UUID);
+      END IF;
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_user_row_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF TG_OP <> 'DELETE' THEN
+        PERFORM authorization_bump_user_revision(NEW.id);
+      END IF;
+      IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.id IS DISTINCT FROM NEW.id) THEN
+        PERFORM authorization_bump_user_revision(OLD.id);
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_team_row_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF TG_OP <> 'DELETE' THEN
+        PERFORM authorization_bump_team_revision(NEW.id);
+      END IF;
+      IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.id IS DISTINCT FROM NEW.id) THEN
+        PERFORM authorization_bump_team_revision(OLD.id);
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_workflow_run_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    DECLARE row_value RECORD;
+    BEGIN
+      FOR row_value IN
+        SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
+          FROM (VALUES (NEW.actor_type, NEW.actor_id, NEW.team_id, NEW.usage_team_id))
+               AS current_row(actor_type, actor_id, team_id, usage_team_id)
+         WHERE TG_OP <> 'DELETE'
+        UNION ALL
+        SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
+          FROM (VALUES (OLD.actor_type, OLD.actor_id, OLD.team_id, OLD.usage_team_id))
+               AS prior_row(actor_type, actor_id, team_id, usage_team_id)
+         WHERE TG_OP <> 'INSERT'
+      LOOP
+        IF row_value.actor_type = 'user' THEN
+          PERFORM authorization_bump_subject_revision('user', row_value.actor_id);
+        END IF;
+        PERFORM authorization_bump_subject_revision('team', row_value.team_id);
+        PERFORM authorization_bump_subject_revision('team', row_value.usage_team_id);
+      END LOOP;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_workflow_approval_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF TG_OP <> 'DELETE' THEN
+        PERFORM authorization_bump_subject_revision('user', NEW.target_user_id::TEXT);
+        PERFORM authorization_bump_subject_revision('team', NEW.target_team_id::TEXT);
+      END IF;
+      IF TG_OP <> 'INSERT' THEN
+        PERFORM authorization_bump_subject_revision('user', OLD.target_user_id::TEXT);
+        PERFORM authorization_bump_subject_revision('team', OLD.target_team_id::TEXT);
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_notification_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF TG_OP <> 'DELETE' THEN
+        PERFORM authorization_bump_subject_revision('user', NEW.audience->>'userId');
+        PERFORM authorization_bump_subject_revision('team', NEW.audience->>'teamId');
+      END IF;
+      IF TG_OP <> 'INSERT' THEN
+        PERFORM authorization_bump_subject_revision('user', OLD.audience->>'userId');
+        PERFORM authorization_bump_subject_revision('team', OLD.audience->>'teamId');
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_gfs_subject_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF TG_OP <> 'DELETE' THEN
+        PERFORM authorization_bump_subject_revision(NEW.subject_type, NEW.subject_id);
+      END IF;
+      IF TG_OP <> 'INSERT' THEN
+        PERFORM authorization_bump_subject_revision(OLD.subject_type, OLD.subject_id);
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_gfs_resource_subjects(target_resource_id UUID)
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    DECLARE subject RECORD;
+    BEGIN
+      FOR subject IN
+        SELECT grant_row.subject_type, grant_row.subject_id
+          FROM gfs_grants grant_row
+         WHERE grant_row.resource_id = target_resource_id
+        UNION
+        SELECT share_row.subject_type, share_row.subject_id
+          FROM gfs_shares share_row
+         WHERE share_row.resource_id = target_resource_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(subject.subject_type, subject.subject_id);
+      END LOOP;
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION authorization_bump_gfs_resource_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF TG_OP <> 'DELETE' THEN
+        PERFORM authorization_bump_gfs_resource_subjects(NEW.resource_id);
+      END IF;
+      IF TG_OP <> 'INSERT' AND (TG_OP = 'DELETE' OR OLD.resource_id IS DISTINCT FROM NEW.resource_id)
+      THEN
+        PERFORM authorization_bump_gfs_resource_subjects(OLD.resource_id);
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
+    DROP TRIGGER IF EXISTS users_catalog_revision ON users;
+    DROP TRIGGER IF EXISTS teams_catalog_revision ON teams;
+    DROP TRIGGER IF EXISTS team_members_catalog_revision ON team_members;
+    DROP TRIGGER IF EXISTS user_contexts_catalog_revision ON user_contexts;
+    DROP TRIGGER IF EXISTS team_contexts_catalog_revision ON team_contexts;
+    DROP TRIGGER IF EXISTS user_agents_catalog_revision ON user_agents;
+    DROP TRIGGER IF EXISTS team_agents_catalog_revision ON team_agents;
+    DROP TRIGGER IF EXISTS user_workflow_triggers_catalog_revision ON user_workflow_triggers;
+    DROP TRIGGER IF EXISTS team_workflow_triggers_catalog_revision ON team_workflow_triggers;
+    DROP TRIGGER IF EXISTS workflow_runs_catalog_revision ON workflow_runs;
+    DROP TRIGGER IF EXISTS workflow_approval_requests_catalog_revision ON workflow_approval_requests;
+    DROP TRIGGER IF EXISTS notification_deliveries_catalog_revision ON notification_deliveries;
+    DROP TRIGGER IF EXISTS gfs_resources_catalog_revision ON gfs_resources;
+    DROP TRIGGER IF EXISTS gfs_grants_catalog_revision ON gfs_grants;
+    DROP TRIGGER IF EXISTS gfs_shares_catalog_revision ON gfs_shares;
+    DROP TRIGGER IF EXISTS operational_resource_index_catalog_revision ON operational_resource_index;
+    DROP TRIGGER IF EXISTS operational_resource_relationships_catalog_revision
+      ON operational_resource_relationships;
+    DROP TRIGGER IF EXISTS operational_catalog_source_state_catalog_revision
+      ON operational_catalog_source_state;
+
+    DROP TRIGGER IF EXISTS users_authorization_revision ON users;
+    CREATE TRIGGER users_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON users
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_user_row_revision();
+    DROP TRIGGER IF EXISTS teams_authorization_revision ON teams;
+    CREATE TRIGGER teams_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON teams
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_team_row_revision();
+    DROP TRIGGER IF EXISTS workflow_runs_authorization_revision ON workflow_runs;
+    CREATE TRIGGER workflow_runs_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON workflow_runs
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_workflow_run_revision();
+    DROP TRIGGER IF EXISTS workflow_approval_requests_authorization_revision
+      ON workflow_approval_requests;
+    CREATE TRIGGER workflow_approval_requests_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON workflow_approval_requests
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_workflow_approval_revision();
+    DROP TRIGGER IF EXISTS notification_deliveries_authorization_revision
+      ON notification_deliveries;
+    CREATE TRIGGER notification_deliveries_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON notification_deliveries
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_notification_revision();
+    DROP TRIGGER IF EXISTS gfs_grants_authorization_revision ON gfs_grants;
+    CREATE TRIGGER gfs_grants_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON gfs_grants
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_subject_revision();
+    DROP TRIGGER IF EXISTS gfs_shares_authorization_revision ON gfs_shares;
+    CREATE TRIGGER gfs_shares_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON gfs_shares
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_subject_revision();
+    DROP TRIGGER IF EXISTS gfs_resources_authorization_revision ON gfs_resources;
+    CREATE TRIGGER gfs_resources_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON gfs_resources
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_resource_revision();
+
+    DROP FUNCTION IF EXISTS authorization_bump_catalog_revision();
+    DROP TABLE IF EXISTS authorization_catalog_revision;
+
+    REVOKE ALL ON TABLE authorization_catalog_writer_components FROM PUBLIC;
+    GRANT SELECT ON TABLE authorization_catalog_writer_components TO control_api_runtime;
+    REVOKE ALL ON FUNCTION authorization_bump_subject_revision(TEXT, TEXT) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_team_row_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_workflow_run_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_workflow_approval_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_notification_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_gfs_subject_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_subjects(UUID) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_revision() FROM PUBLIC;
+  `)
+}
+
 async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> {
   await db.query(`
     CREATE OR REPLACE FUNCTION authorization_bump_user_revision(target_user_id UUID)

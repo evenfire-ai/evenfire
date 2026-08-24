@@ -7,6 +7,7 @@ import {
 import { config } from './config.js'
 import {
   applyCatalogUtf8OrderingSchema,
+  applyComposableCatalogRevisionSchema,
   applyUserAccessFoundationSchema,
 } from './services/access/userAccessFoundationSchema.js'
 import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
@@ -5948,6 +5949,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0103_catalog_utf8_ordering',
     apply: applyCatalogUtf8OrderingSchema,
+  },
+  {
+    version: '0104_composable_catalog_revisions',
+    apply: applyComposableCatalogRevisionSchema,
   },
 ]
 
