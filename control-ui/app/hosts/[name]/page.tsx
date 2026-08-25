@@ -64,23 +64,6 @@ function parseHostTab(value: string | undefined): HostTab {
   return HOST_TABS.find(tab => TAB_SLUGS[tab] === value) ?? HOST_DEFAULT_TAB
 }
 
-// Format an RFC3339 timestamp (or empty) to the table-style "May 21, 2024 • 10:24 AM"
-// used in the Overview identity card. Empty string falls through to the same so the
-// cell shows a dash and we don't render "Invalid Date".
-function formatTimestamp(value: string): string {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  const month = date.toLocaleString('en-US', { month: 'long' })
-  const day = date.getDate()
-  const year = date.getFullYear()
-  let hours = date.getHours()
-  const minutes = date.getMinutes().toString().padStart(2, '0')
-  const meridiem = hours >= 12 ? 'PM' : 'AM'
-  hours = hours % 12 || 12
-  return `${month} ${day}, ${year} • ${hours}:${minutes} ${meridiem}`
-}
-
 // Cron×stateless: map the machine-readable suspend-blocked reason to
 // operator-friendly text. Every other reason renders verbatim.
 function friendlyLifecycleReason(reason: string): string {
@@ -235,8 +218,6 @@ export default function HostDetailsPage() {
   const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
   const [hostStatusTone, setHostStatusTone] = useState<'active' | 'inactive' | 'unknown'>('unknown')
   const [hostCreatedAt, setHostCreatedAt] = useState('')
-  const [hostLastUpdated, setHostLastUpdated] = useState('')
-  const [hostUid, setHostUid] = useState('')
   const [accessSummary, setAccessSummary] = useState<{
     memberCount: number
     teamCount: number
@@ -248,8 +229,6 @@ export default function HostDetailsPage() {
   const [lifecycleState, setLifecycleState] = useState('')
   const [lifecycleReason, setLifecycleReason] = useState('')
   const [statelessRejectionMessage, setStatelessRejectionMessage] = useState('')
-
-  const [availableContexts, setAvailableContexts] = useState<string[]>([])
 
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, providerDraft),
@@ -389,9 +368,7 @@ export default function HostDetailsPage() {
           setHostStatusTone('active')
         }
         const createdAt = String(host.metadata?.creationTimestamp || '').trim()
-        setHostCreatedAt(formatTimestamp(createdAt))
-        setHostLastUpdated(formatTimestamp(createdAt))
-        setHostUid(String(host.metadata?.uid || '').trim())
+        setHostCreatedAt(createdAt)
       }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
@@ -436,10 +413,6 @@ export default function HostDetailsPage() {
           : ''
       )
 
-      const contextIds = (contextsList || [])
-        .map(item => String(item.spec?.contextId || item.metadata?.name || '').trim())
-        .filter(Boolean)
-      setAvailableContexts(Array.from(new Set(contextIds)).sort((a, b) => a.localeCompare(b)))
       // Map each Secret to its data-key NAMES (never values), already carried by
       // the detail bundle. Feeds the fallback credentialSlot dropdown's extra
       // keys (e.g. `claude-api-key-fb1`, spec R4.5.6) without a second fetch.
@@ -784,7 +757,6 @@ export default function HostDetailsPage() {
               return saveHost(hostDisplayDraft, nextStateless)
             }}
             createdAt={hostCreatedAt}
-            lastUpdated={hostLastUpdated}
           />
         )}
 

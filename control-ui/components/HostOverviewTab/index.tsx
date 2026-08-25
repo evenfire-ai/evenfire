@@ -99,8 +99,7 @@ export function HostOverviewTab({
   onSaveDisplayName,
   onSaveLifecycle,
   createdAt,
-  lastUpdated,
-}: HostOverviewTabProps & { createdAt: string; lastUpdated: string }) {
+}: HostOverviewTabProps) {
   const shownName = displayName.trim() || hostName
   const [editingName, setEditingName] = React.useState(false)
   const [nameDraft, setNameDraft] = React.useState(shownName)
@@ -285,8 +284,6 @@ export function HostOverviewTab({
           <dl className="cu-host-overview-identity__meta">
             <dt>Created</dt>
             <dd>{formatTimestamp(createdAt) || '—'}</dd>
-            <dt>Last updated</dt>
-            <dd>{formatTimestamp(lastUpdated) || '—'}</dd>
           </dl>
         </section>
 

@@ -27,5 +27,4 @@ export type HostOverviewTabProps = {
   onSaveDisplayName: (displayName: string) => Promise<boolean>
   onSaveLifecycle: (stateless: boolean) => Promise<boolean>
   createdAt: string
-  lastUpdated: string
 }

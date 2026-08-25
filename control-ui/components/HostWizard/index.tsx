@@ -214,6 +214,13 @@ async function compensateCreated(created: CreatedResource[]): Promise<void> {
 // Discriminate on `body.code` (the field INSIDE the JSON body), never on the
 // client's `.code` (which formatApiError sets from `body.error`, the message).
 // Any non-409 error is re-thrown verbatim.
+class ResourceNameCollisionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ResourceNameCollisionError'
+  }
+}
+
 async function createOrThrow(path: string, body: unknown, collisionMessage: string): Promise<void> {
   try {
     await apiSend('POST', path, body)
@@ -222,11 +229,44 @@ async function createOrThrow(path: string, body: unknown, collisionMessage: stri
       const errBody = (e as Error & { body?: { code?: unknown } }).body
       const hasCode = typeof errBody?.code === 'string' && errBody.code.length > 0
       // Code-less 409 from a create-only POST = unambiguous name collision.
-      if (!hasCode) throw new Error(collisionMessage)
+      if (!hasCode) throw new ResourceNameCollisionError(collisionMessage)
       // Coded 409 (CRD-outdated) keeps the server's own message (e.message).
     }
     throw e
   }
+}
+
+async function createPrivateContext(
+  agentName: string,
+  selectedMcpServers: string[],
+  collisionMessage: string
+): Promise<string> {
+  // A generated context name is an implementation detail. Hide the rare
+  // collision from the operator by trying one fresh suffix before surfacing the
+  // existing friendly error. The successful name is returned to become the
+  // Host's contextRef.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const contextName = createAgentContextName(agentName)
+    try {
+      await createOrThrow(
+        '/api/v1/admin/contexts',
+        {
+          metadata: { name: contextName },
+          spec: {
+            contextId: contextName,
+            description: `Connector context for agent ${agentName}`,
+            mcpServers: selectedMcpServers,
+          },
+        },
+        collisionMessage
+      )
+      return contextName
+    } catch (error) {
+      if (!(error instanceof ResourceNameCollisionError) || attempt === 1) throw error
+    }
+  }
+
+  throw new Error(collisionMessage)
 }
 
 function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
@@ -590,7 +630,6 @@ export function HostWizard({
     let hostCreated = false
     try {
       const normalizedHostName = toKebabCase(hostName)
-      const generatedContextName = createAgentContextName(normalizedHostName)
       const normalizedSecretName = toKebabCase(newSecretName)
 
       if (secretMode === 'new') {
@@ -630,16 +669,9 @@ export function HostWizard({
       // Every agent gets a private implementation context. The context name is
       // intentionally generated here instead of being exposed as a wizard
       // field; the agent still needs a contextRef for its runtime contract.
-      await createOrThrow(
-        '/api/v1/admin/contexts',
-        {
-          metadata: { name: generatedContextName },
-          spec: {
-            contextId: generatedContextName,
-            description: `Connector context for agent ${normalizedHostName}`,
-            mcpServers: Array.from(new Set(selectedMcp)),
-          },
-        },
+      const generatedContextName = await createPrivateContext(
+        normalizedHostName,
+        Array.from(new Set(selectedMcp)),
         'The agent connector context could not be created — please try again.'
       )
       created.push({ kind: 'context', name: generatedContextName })

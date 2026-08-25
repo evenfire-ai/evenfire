@@ -644,7 +644,7 @@ describe('HostWizard — Agent type (stateless lifecycle)', () => {
 })
 
 describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)', () => {
-  it('surfaces the friendly collision message and rolls back the created secret when the generated context POST 409s WITHOUT a body code', async () => {
+  it('surfaces the friendly collision message and rolls back the created secret when both generated context names collide', async () => {
     // Code-less 409 from a create-only POST = unambiguous AlreadyExists collision.
     const collision = await build409({
       error: 'contexts.mcp.evenfire.io "ctx1" already exists',
@@ -664,12 +664,53 @@ describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)
     await waitFor(() => {
       expect(screen.getByText(/agent connector context could not be created/i)).toBeInTheDocument()
     })
+    expect(
+      vi
+        .mocked(api.apiSend)
+        .mock.calls.filter(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    ).toHaveLength(2)
     // Observable (T4): the already-created secret is compensated with an inverse DELETE.
     expect(api.apiSend).toHaveBeenCalledWith('DELETE', '/api/v1/admin/secrets/coll-agent-llm')
     // The Host was never POSTed (the seam aborted before the boundary).
     expect(
       vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
     ).toBe(false)
+  })
+
+  it('retries a generated context name once after a collision and uses the fresh name on the Host', async () => {
+    const collision = await build409({
+      error: 'contexts.mcp.evenfire.io "ctx1" already exists',
+    })
+    let contextAttempts = 0
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/contexts') {
+        contextAttempts += 1
+        if (contextAttempts === 1) throw collision
+      }
+      return {}
+    })
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'retry-context-agent' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/hosts', expect.any(Object))
+    })
+    const contextCalls = vi
+      .mocked(api.apiSend)
+      .mock.calls.filter(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    expect(contextCalls).toHaveLength(2)
+    const firstContextName = (contextCalls[0][2] as { metadata: { name: string } }).metadata.name
+    const secondContextName = (contextCalls[1][2] as { metadata: { name: string } }).metadata.name
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect((hostCall![2] as { spec: { contextRef: string } }).spec.contextRef).toBe(
+      secondContextName
+    )
+    expect(firstContextName).not.toBe('')
   })
 
   it('rolls back the created secret AND context in inverse order when the HOST create fails', async () => {

@@ -56,7 +56,7 @@ vi.mock('../../lib/api', () => ({
 }))
 
 const host = {
-  metadata: { name: 'foo' },
+  metadata: { name: 'foo', creationTimestamp: '2026-08-25T12:34:56Z' },
   spec: {
     approval: { tools: { shell_exec: true } },
     channels: ['telegram'],
@@ -219,6 +219,8 @@ describe('HostDetailsPage identity integration', () => {
     expect(description.textContent).toHaveLength(100)
     expect(description.textContent?.endsWith('…')).toBe(true)
     expect(screen.getByRole('button', { name: 'Edit agent name' })).toBeInTheDocument()
+    expect(screen.getByText('Created').nextElementSibling).toHaveTextContent(/2026/)
+    expect(screen.queryByText('Last updated')).not.toBeInTheDocument()
     expect(container.querySelector('.cu-host-overview-identity__slug')).toBeNull()
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
