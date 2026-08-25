@@ -135,17 +135,29 @@ SKIP_UIS ?= false
 E2E_KUBECONTEXT ?= $(MINIKUBE_PROFILE)
 KC := kubectl --context=$(MINIKUBE_PROFILE)
 LOCAL_KUBE_CONTEXT ?=
-minikube_deployment = $(if $(filter mcp-host,$(1)),chatllm,$(1))
-MINIKUBE_DEPLOYMENT = $(or $(DEPLOYMENT),$(call minikube_deployment,$(SVC)))
+# Exact selectors with an established deployment route in scripts/minikube/dev.sh.
+# Keep this public Make boundary aligned with build-images.sh so typos fail
+# before a lock is acquired or any image/deployment mutation begins.
+MINIKUBE_DEPLOY_SERVICE_SELECTORS := control-api control-ui external-rest-api hcc mcp-host profile-ui rpc-proxy
+MINIKUBE_DEPLOY_SERVICE := $(strip $(SVC))
+MINIKUBE_DEPLOY_SERVICE_SUPPORTED := $(and $(filter 1,$(words $(MINIKUBE_DEPLOY_SERVICE))),$(filter $(MINIKUBE_DEPLOY_SERVICE_SELECTORS),$(MINIKUBE_DEPLOY_SERVICE)))
+MINIKUBE_DEPLOY_NAMESPACE := $(strip $(NS))
+minikube_deployment = $(if $(filter mcp-host,$(strip $(1))),chatllm,$(strip $(1)))
+DEPLOYMENT ?= $(call minikube_deployment,$(MINIKUBE_DEPLOY_SERVICE))
+MINIKUBE_EFFECTIVE_DEPLOYMENT := $(or $(strip $(DEPLOYMENT)),$(call minikube_deployment,$(MINIKUBE_DEPLOY_SERVICE)))
 
 .PHONY: minikube-start
 minikube-start: ## Start minikube cluster (starts Docker Desktop if needed)
-	@if ! docker info >/dev/null 2>&1; then \
+	@if ! scripts/minikube/docker-cli-env.sh --check-info; then \
 		echo "Starting Docker Desktop..."; \
 		open -a "Docker Desktop" 2>/dev/null || open -a Docker 2>/dev/null || true; \
 		echo "Waiting for Docker daemon..."; \
-		for i in $$(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done; \
-		docker info >/dev/null 2>&1 || { echo "ERROR: Docker not available after 60s"; exit 1; }; \
+		docker_start_timeout="$${MINIKUBE_DOCKER_START_TIMEOUT_SECONDS:-60}"; \
+		MINIKUBE_DOCKER_START_TIMEOUT_SECONDS="$$docker_start_timeout" \
+			scripts/minikube/docker-cli-env.sh --wait-for-info || { \
+				echo "ERROR: Docker not available after $${docker_start_timeout}s"; \
+				exit 1; \
+			}; \
 		echo "Docker ready."; \
 	fi
 	MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_MULTI_NODE="$(MINIKUBE_MULTI_NODE)" MINIKUBE_NODES="$(MINIKUBE_NODES)" MINIKUBE_MEMORY="$(MINIKUBE_MEMORY)" MINIKUBE_CPUS="$(MINIKUBE_CPUS)" scripts/minikube/start.sh
@@ -182,26 +194,68 @@ minikube-setup-e2e: ## Full setup + E2E fixtures (test user, e2e-* recipes, demo
 	@$(MAKE) --no-print-directory minikube-setup SEED_PROFILE=e2e
 	@if [ "$(IMAGE_SOURCE)" = "ghcr" ]; then \
 		echo "Building the two unpublished E2E coordinator fixtures..."; \
-		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e; \
-		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-plugin-sdk-e2e; \
+		$(MAKE) --no-print-directory minikube-build-e2e-fixtures; \
 	fi
 
 .PHONY: minikube-teardown
 minikube-teardown: ## Remove deployments (keep namespaces/CRDs)
 	@scripts/minikube/teardown.sh
 
-.PHONY: minikube-pull-images
+.PHONY: minikube-pull-images minikube-pull-images-body
 minikube-pull-images: ## Pull ALL published images into minikube at the pinned release tag (MINIKUBE_IMAGE_TAG=<tag> overrides the pin for this run only)
-	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-pull-images-body
+
+minikube-pull-images-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" MINIKUBE_IMAGE_TAG="$(MINIKUBE_IMAGE_TAG)" \
+		CONTROL_API_REAL_PG_CONTEXT="$(MINIKUBE_PROFILE)" \
 		scripts/minikube/pull-images.sh
 
-.PHONY: minikube-build-images
+.PHONY: minikube-build-images minikube-build-images-body
 minikube-build-images: ## Build and load ALL Docker images into minikube (with SHA verification)
-	@scripts/minikube/build-images.sh
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-images-body
 
-.PHONY: minikube-build-custom-coordinator-fixture
+minikube-build-images-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh
+
+.PHONY: minikube-build-custom-coordinator-fixture minikube-build-custom-coordinator-fixture-body
 minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator E2E fixture image in minikube
-	@scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-custom-coordinator-fixture-body
+
+minikube-build-custom-coordinator-fixture-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
+
+.PHONY: minikube-build-e2e-fixtures minikube-build-e2e-fixtures-body
+minikube-build-e2e-fixtures: ## Build the two unpublished coordinator E2E fixtures under one mutation lease
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-e2e-fixtures-body
+
+minikube-build-e2e-fixtures-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-plugin-sdk-e2e
 
 .PHONY: minikube-verify-images
 minikube-verify-images: ## Verify every image the cluster runs is present. The mode comes from deploy/minikube/.image-manifest.json (what was actually built/pulled), not from IMAGE_SOURCE; SEED_PROFILE=e2e also checks the two E2E fixtures.
@@ -376,22 +430,52 @@ minikube-deploy-crds-body:
 		kubectl --context=$(MINIKUBE_PROFILE) apply -f ./charts/clerum-crds/crds/; \
 	fi
 
-.PHONY: minikube-deploy-service
+.PHONY: minikube-deploy-service minikube-deploy-service-body
 minikube-deploy-service: ## Rebuild single image + rollout restart deployment (usage: make minikube-deploy-service SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm])
-	@if [ -z "$(SVC)" ]; then echo "ERROR: SVC required. Usage: make minikube-deploy-service SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1; fi
-	@if [ -z "$(NS)" ]; then echo "ERROR: NS required. Usage: make minikube-deploy-service SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1; fi
-	@echo "Deploying image selector $(SVC) to deployment/$(MINIKUBE_DEPLOYMENT) in namespace $(NS)"
-	@scripts/minikube/build-images.sh --only=$(SVC)
-	kubectl --context=$(MINIKUBE_PROFILE) -n $(NS) rollout restart deployment/$(MINIKUBE_DEPLOYMENT)
-	kubectl --context=$(MINIKUBE_PROFILE) -n $(NS) rollout status deployment/$(MINIKUBE_DEPLOYMENT) --timeout=180s
+	@$(if $(MINIKUBE_DEPLOY_SERVICE),:,echo "ERROR: SVC required. Usage: make minikube-deploy-service SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
+	@$(if $(MINIKUBE_DEPLOY_SERVICE_SUPPORTED),:,echo "ERROR: unsupported SVC selector. Supported: $(MINIKUBE_DEPLOY_SERVICE_SELECTORS)"; exit 1)
+	@$(if $(MINIKUBE_DEPLOY_NAMESPACE),:,echo "ERROR: NS required. Usage: make minikube-deploy-service SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
+	@$(if $(MINIKUBE_EFFECTIVE_DEPLOYMENT),:,echo "ERROR: effective DEPLOYMENT could not be resolved from SVC"; exit 1)
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-deploy-service-body
 
-.PHONY: minikube-restart-deploy
+minikube-deploy-service-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@$(if $(MINIKUBE_DEPLOY_SERVICE),:,echo "ERROR: SVC required. Usage: make minikube-deploy-service SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
+	@$(if $(MINIKUBE_DEPLOY_SERVICE_SUPPORTED),:,echo "ERROR: unsupported SVC selector. Supported: $(MINIKUBE_DEPLOY_SERVICE_SELECTORS)"; exit 1)
+	@$(if $(MINIKUBE_DEPLOY_NAMESPACE),:,echo "ERROR: NS required. Usage: make minikube-deploy-service SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
+	@$(if $(MINIKUBE_EFFECTIVE_DEPLOYMENT),:,echo "ERROR: effective DEPLOYMENT could not be resolved from SVC"; exit 1)
+	@echo "Deploying image selector $(MINIKUBE_DEPLOY_SERVICE) to deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) in namespace $(MINIKUBE_DEPLOY_NAMESPACE)"
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=$(MINIKUBE_DEPLOY_SERVICE)
+	kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout restart deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT)
+	kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout status deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) --timeout=180s
+
+.PHONY: minikube-restart-deploy minikube-restart-deploy-body
 minikube-restart-deploy: ## Restart a single deployment without rebuilding (usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm])
-	@if [ -z "$(SVC)" ]; then echo "ERROR: SVC required. Usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1; fi
-	@if [ -z "$(NS)" ]; then echo "ERROR: NS required. Usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1; fi
-	@echo "Restarting deployment/$(MINIKUBE_DEPLOYMENT) in namespace $(NS)"
-	kubectl --context=$(MINIKUBE_PROFILE) -n $(NS) rollout restart deployment/$(MINIKUBE_DEPLOYMENT)
-	kubectl --context=$(MINIKUBE_PROFILE) -n $(NS) rollout status deployment/$(MINIKUBE_DEPLOYMENT) --timeout=180s
+	@$(if $(MINIKUBE_DEPLOY_SERVICE),:,echo "ERROR: SVC required. Usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
+	@$(if $(MINIKUBE_DEPLOY_SERVICE_SUPPORTED),:,echo "ERROR: unsupported SVC selector. Supported: $(MINIKUBE_DEPLOY_SERVICE_SELECTORS)"; exit 1)
+	@$(if $(MINIKUBE_DEPLOY_NAMESPACE),:,echo "ERROR: NS required. Usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
+	@$(if $(MINIKUBE_EFFECTIVE_DEPLOYMENT),:,echo "ERROR: effective DEPLOYMENT could not be resolved from SVC"; exit 1)
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-restart-deploy-body
+
+minikube-restart-deploy-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@$(if $(MINIKUBE_DEPLOY_SERVICE),:,echo "ERROR: SVC required. Usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
+	@$(if $(MINIKUBE_DEPLOY_SERVICE_SUPPORTED),:,echo "ERROR: unsupported SVC selector. Supported: $(MINIKUBE_DEPLOY_SERVICE_SELECTORS)"; exit 1)
+	@$(if $(MINIKUBE_DEPLOY_NAMESPACE),:,echo "ERROR: NS required. Usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
+	@$(if $(MINIKUBE_EFFECTIVE_DEPLOYMENT),:,echo "ERROR: effective DEPLOYMENT could not be resolved from SVC"; exit 1)
+	@echo "Restarting deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) in namespace $(MINIKUBE_DEPLOY_NAMESPACE)"
+	kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout restart deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT)
+	kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout status deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) --timeout=180s
 
 # ── Minikube Secrets & Keys ─────────────────────────────────────────
 #

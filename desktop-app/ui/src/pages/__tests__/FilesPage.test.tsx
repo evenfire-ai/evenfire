@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GFS_FILE_UPLOAD_MAX_BYTES } from '@constants/gfsFileUpload'
+import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
@@ -519,11 +519,7 @@ describe('FilesPage', () => {
     })
 
     await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(2))
-    expect(createFileFromPath).toHaveBeenLastCalledWith(
-      'folder-1',
-      'retry.md',
-      '/tmp/retry.md'
-    )
+    expect(createFileFromPath).toHaveBeenLastCalledWith('folder-1', 'retry.md', '/tmp/retry.md')
     expect(pushToast).toHaveBeenCalledWith('Uploaded retry.md', 'success')
   })
 
@@ -549,12 +545,13 @@ describe('FilesPage', () => {
       path: '/shared',
     }
     let releaseFirstUpload: (() => void) | undefined
-    const createFileFromPath = vi.fn((_parentResourceId: string, _name: string, _filePath: string) =>
-      createFileFromPath.mock.calls.length === 1
-        ? new Promise<void>(resolve => {
-            releaseFirstUpload = resolve
-          })
-        : Promise.resolve()
+    const createFileFromPath = vi.fn(
+      (_parentResourceId: string, _name: string, _filePath: string) =>
+        createFileFromPath.mock.calls.length === 1
+          ? new Promise<void>(resolve => {
+              releaseFirstUpload = resolve
+            })
+          : Promise.resolve()
     )
 
     function useChangingFolderController() {
@@ -616,7 +613,8 @@ describe('FilesPage', () => {
       createFileFromPath,
     })
     const oversized = new File(['small fixture'], 'oversized.md', { type: 'text/markdown' })
-    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_MAX_BYTES + 1 })
+    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES + 1 })
+    const arrayBuffer = vi.spyOn(oversized, 'arrayBuffer')
 
     renderFilesPage(pushToast)
     fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
@@ -624,8 +622,12 @@ describe('FilesPage', () => {
     })
 
     await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith('GFS uploads are limited to 200 MB per file.', 'error')
+      expect(pushToast).toHaveBeenCalledWith(
+        'GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.',
+        'error'
+      )
     )
+    expect(arrayBuffer).not.toHaveBeenCalled()
     expect(createFileFromPath).not.toHaveBeenCalled()
   })
 

@@ -7,12 +7,32 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 
 LOCK_ROOT="${TMP_DIR}/locks"
 LOCK_DIR="${LOCK_ROOT}/race-profile.lock"
+RECLAIM_DIR="${LOCK_ROOT}/race-profile.reclaim"
 READY_FILE="${TMP_DIR}/ready"
 RESULT_FILE="${TMP_DIR}/result"
 RELEASE_FILE="${TMP_DIR}/release"
 mkdir -p "${LOCK_DIR}"
 : >"${READY_FILE}"
 : >"${RESULT_FILE}"
+
+for doc in \
+  "${ROOT}/AGENTS.md" \
+  "${ROOT}/.cursor/skills/minikube-t0-t1-t2/SKILL.md" \
+  "${ROOT}/.cursor/skills/minikube-t0-t1-t2/reference.md" \
+  "${ROOT}/docs/testing/minikube-t2-runbook.md"; do
+  grep -Fq '$T2_LOCK_ROOT/<profile>.lock' "${doc}" || {
+    echo "FAIL: stale-lock documentation omits the active lock path: ${doc}" >&2
+    exit 1
+  }
+  grep -Fq '$T2_LOCK_ROOT/<profile>.reclaim' "${doc}" || {
+    echo "FAIL: stale-lock documentation omits the sibling reclaim path: ${doc}" >&2
+    exit 1
+  }
+  if grep -Eq '\.lock/\.reclaim|inside that exact profile lock' "${doc}"; then
+    echo "FAIL: stale-lock documentation nests the reclaim claim under the lock: ${doc}" >&2
+    exit 1
+  fi
+done
 
 owner_token_key=TOKEN
 {
@@ -108,6 +128,10 @@ winner_pid="$(awk '{print $2}' "${RESULT_FILE}")"
 }
 [[ ! -e "${LOCK_DIR}/.reclaim" ]] || {
   echo 'FAIL: losing reclaimer left a claim inside the active replacement lock' >&2
+  exit 1
+}
+[[ ! -e "${RECLAIM_DIR}" ]] || {
+  echo 'FAIL: winning reclaimer left the sibling claim behind after acquiring the lock' >&2
   exit 1
 }
 
