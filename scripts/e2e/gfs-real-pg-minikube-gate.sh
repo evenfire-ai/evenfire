@@ -34,6 +34,14 @@ T2_CONTROL_NAMESPACE="${CONTROL_NS}"
 export T2_PROJECT_DIR MINIKUBE_PROFILE T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT \
   T2_PROFILE_ENV T2_PORTS_ENV T2_MARKER_NAME T2_CONTROL_NAMESPACE
 source "${PROJECT_DIR}/scripts/minikube/t2-common.sh"
+# shellcheck source=scripts/minikube/docker-cli-env.sh
+source "${PROJECT_DIR}/scripts/minikube/docker-cli-env.sh"
+# shellcheck source=real-postgres-local-preflight.sh
+source "${SCRIPT_DIR}/real-postgres-local-preflight.sh"
+
+GFS_DOCKER_RUN_TIMEOUT_SECONDS="${GFS_DOCKER_RUN_TIMEOUT_SECONDS:-${MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS}}"
+GFS_DOCKER_EXEC_TIMEOUT_SECONDS="${GFS_DOCKER_EXEC_TIMEOUT_SECONDS:-${MINIKUBE_DOCKER_START_PROBE_TIMEOUT_SECONDS}}"
+GFS_DOCKER_REMOVE_TIMEOUT_SECONDS="${GFS_DOCKER_REMOVE_TIMEOUT_SECONDS:-${MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS}}"
 
 die() {
   printf '[gfs-real-pg-minikube] ERROR: %s\n' "$*" >&2
@@ -102,38 +110,38 @@ PY
 }
 
 PROFILE_PG_FORWARD_PID=""
+PROFILE_PG_FORWARD_RECORD=""
 
 stop_profile_postgres_forward() {
   [[ -n "${PROFILE_PG_FORWARD_PID}" ]] || return 0
-  if ! kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
-    PROFILE_PG_FORWARD_PID=''
-    return 0
-  fi
-  local command_line
-  command_line="$(ps -p "${PROFILE_PG_FORWARD_PID}" -o command= 2>/dev/null || true)"
-  if [[ "${command_line}" != *port-forward* || "${command_line}" != *svc/control-postgres* ]]; then
-    printf '[gfs-real-pg-minikube] ERROR: profile PostgreSQL forward PID is not the expected child; refusing cleanup success\n' >&2
+  [[ -n "${PROFILE_PG_FORWARD_RECORD}" ]] || {
+    printf '[gfs-real-pg-minikube] ERROR: profile PostgreSQL forward has no structured ownership record; refusing ambiguous cleanup\n' >&2
     return 1
-  fi
-  if ! kill "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1 && kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
-    return 1
-  fi
-  if kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
-    if wait "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
-      :
+  }
+  if [[ ! -e "${PROFILE_PG_FORWARD_RECORD}" && ! -L "${PROFILE_PG_FORWARD_RECORD}" ]]; then
+    if [[ "$(pf_owner_process_state "${PROFILE_PG_FORWARD_PID}")" == dead ]]; then
+      PROFILE_PG_FORWARD_PID=''
+      PROFILE_PG_FORWARD_RECORD=''
+      return 0
     fi
+    printf '[gfs-real-pg-minikube] ERROR: profile PostgreSQL forward record disappeared while its process may still be live\n' >&2
+    return 1
   fi
-  if kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
+  if ! pf_owner_cleanup_record "${PROFILE_PG_FORWARD_RECORD}" "${T2_PROFILE}" \
+    "${T2_CONTEXT}" "${PROJECT_DIR}" "${CONTROL_NS}" control-postgres \
+    "${PROFILE_PG_FORWARD_PORT}" 5432; then
+    printf '[gfs-real-pg-minikube] ERROR: profile PostgreSQL forward ownership validation or cleanup failed\n' >&2
     return 1
   fi
   PROFILE_PG_FORWARD_PID=''
+  PROFILE_PG_FORWARD_RECORD=''
 }
 
 verify_profile_postgres() {
   kc -n "${CONTROL_NS}" rollout status deployment/control-postgres --timeout="${TIMEOUT}s" >/dev/null 2>&1 || \
     die 'branch-profile control-postgres did not become Ready'
 
-  local key encoded profile_port
+  local key encoded
   for key in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
     encoded="$(kc -n "${CONTROL_NS}" get secret control-postgres -o "jsonpath={.data.${key}}" 2>/dev/null || true)"
     [[ -n "${encoded}" ]] || die "branch-profile control-postgres Secret is missing ${key}"
@@ -141,17 +149,27 @@ verify_profile_postgres() {
       die "branch-profile control-postgres Secret key is not valid base64: ${key}"
   done
 
-  profile_port="$(choose_local_port)"
+  PROFILE_PG_FORWARD_PORT="$(choose_local_port)"
   kubectl --context="${CONTEXT}" -n "${CONTROL_NS}" port-forward \
-    --address=127.0.0.1 svc/control-postgres "${profile_port}:5432" \
+    --address=127.0.0.1 svc/control-postgres "${PROFILE_PG_FORWARD_PORT}:5432" \
     >"${TMP_DIR}/profile-postgres-port-forward.log" 2>&1 &
   PROFILE_PG_FORWARD_PID=$!
-  if ! wait_for_tcp "${profile_port}"; then
+  PROFILE_PG_FORWARD_RECORD="${TMP_DIR}/profile-postgres-forward.pid"
+  pf_owner_pause 0.2
+  if ! pf_owner_record_process "${PROFILE_PG_FORWARD_RECORD}" \
+    "${PROFILE_PG_FORWARD_PID}" "${T2_PROFILE}" "${T2_CONTEXT}" \
+    "${PROJECT_DIR}" "${CONTROL_NS}" control-postgres \
+    "${PROFILE_PG_FORWARD_PORT}" 5432; then
+    pf_owner_abort_child "${PROFILE_PG_FORWARD_PID}" "${T2_CONTEXT}" \
+      "${CONTROL_NS}" control-postgres "${PROFILE_PG_FORWARD_PORT}" 5432 || true
+    die 'branch-profile control-postgres port-forward ownership could not be proven'
+  fi
+  if ! wait_for_tcp "${PROFILE_PG_FORWARD_PORT}"; then
     sanitize_file "${TMP_DIR}/profile-postgres-port-forward.log"
     cat "${TMP_DIR}/profile-postgres-port-forward.log" >&2 || true
     die 'branch-profile control-postgres port-forward did not become reachable'
   fi
-  if ! kill -0 "${PROFILE_PG_FORWARD_PID}" >/dev/null 2>&1; then
+  if [[ "$(pf_owner_process_state "${PROFILE_PG_FORWARD_PID}")" != live ]]; then
     sanitize_file "${TMP_DIR}/profile-postgres-port-forward.log"
     cat "${TMP_DIR}/profile-postgres-port-forward.log" >&2 || true
     die 'branch-profile control-postgres port-forward exited before the GFS lane started'
@@ -179,7 +197,7 @@ real_postgres_suite_files() {
 
 run_suite() {
   local package="$1" suite_file relative_suite log_file json_file
-  local total_files failed_files pending_files total_tests passed_tests pending_tests success
+  local total_files failed_files pending_files total_tests passed_tests pending_tests success reported_files
   local suite_index=0 suite_count=0
   local suite_files=()
   while IFS= read -r suite_file; do
@@ -200,9 +218,10 @@ run_suite() {
       cd "${PROJECT_DIR}/${package}"
       env \
         CONTROL_API_REAL_PG_ADMIN_URL="${ADMIN_DSN}" \
-        CONTROL_API_REAL_PG_REQUIRED=1 \
+        CONTROL_API_REAL_PG_REQUIRED=1 VITEST_MAX_WORKERS=1 \
         FORCE_COLOR=0 NO_COLOR=1 \
-        npm test -- --run "${relative_suite}" --reporter=json --outputFile="${json_file}"
+        npm test -- --run --no-file-parallelism --maxWorkers=1 \
+          "${relative_suite}" --reporter=json --outputFile="${json_file}"
     ) >"${log_file}" 2>&1; then
       sanitize_file "${log_file}"
       sanitize_file "${json_file}"
@@ -214,12 +233,22 @@ run_suite() {
     sanitize_file "${log_file}"
     sanitize_file "${json_file}"
     [[ -s "${json_file}" ]] || die "${package}/${relative_suite} reporter produced no JSON result"
-    read -r total_files _ failed_files pending_files total_tests passed_tests pending_tests success < <(python3 - "${json_file}" <<'PY'
+    read -r total_files _ failed_files pending_files total_tests passed_tests pending_tests success reported_files < <(python3 - "${json_file}" "${PROJECT_DIR}/${package}" "${relative_suite}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 result = json.loads(Path(sys.argv[1]).read_text())
+package_root = Path(sys.argv[2]).resolve()
+expected = (package_root / sys.argv[3]).resolve()
+test_results = result.get("testResults")
+reported = []
+if isinstance(test_results, list):
+    for item in test_results:
+        name = item.get("name") if isinstance(item, dict) else None
+        if isinstance(name, str) and name:
+            candidate = Path(name)
+            reported.append((candidate if candidate.is_absolute() else package_root / candidate).resolve())
 
 print(
     result.get("numTotalTestSuites", 0),
@@ -230,12 +259,14 @@ print(
     result.get("numPassedTests", 0),
     result.get("numPendingTests", 0),
     str(bool(result.get("success"))).lower(),
+    len(reported) if reported == [expected] else -1,
 )
 PY
     )
     if [[ "${success}" != 'true' || "${total_files}" -le 0 || "${failed_files}" -ne 0 ||
           "${pending_files}" -ne 0 || "${total_tests}" -le 0 ||
-          "${passed_tests}" -ne "${total_tests}" || "${pending_tests}" -ne 0 ]]; then
+          "${passed_tests}" -ne "${total_tests}" || "${pending_tests}" -ne 0 ||
+          "${reported_files}" -ne 1 ]]; then
       cat "${log_file}" >&2 || true
       cat "${json_file}" >&2 || true
       die "${package}/${relative_suite} reporter did not pass all tests"
@@ -250,6 +281,8 @@ TMP_DIR="$(mktemp -d)"
 ISOLATED_CONTAINER=""
 ISOLATED_PORT=''
 ADMIN_DSN=''
+PROFILE_PG_FORWARD_PORT=''
+GFS_DOCKER_ENV_PREPARED=false
 GFS_RESTORE_REQUIRED=false
 restore_gfs_runtime_credentials() {
   # The reader-role real-Postgres suite exercises the production role names,
@@ -271,8 +304,29 @@ restore_gfs_runtime_credentials() {
 }
 stop_isolated_postgres() {
   [[ -n "${ISOLATED_CONTAINER}" ]] || return 0
-  if docker rm -f "${ISOLATED_CONTAINER}" >/dev/null 2>&1; then
+  [[ "${GFS_DOCKER_ENV_PREPARED}" == true ]] || return 1
+  if docker_cli_run_public gfs-t1-postgres-remove \
+    "${GFS_DOCKER_REMOVE_TIMEOUT_SECONDS}" \
+    docker rm -f "${ISOLATED_CONTAINER}" >/dev/null 2>&1; then
     ISOLATED_CONTAINER=''
+    return 0
+  fi
+  return 1
+}
+prepare_gfs_docker() {
+  docker_cli_env_validate_seconds GFS_DOCKER_RUN_TIMEOUT_SECONDS \
+    "${GFS_DOCKER_RUN_TIMEOUT_SECONDS}" 3600 || return $?
+  docker_cli_env_validate_seconds GFS_DOCKER_EXEC_TIMEOUT_SECONDS \
+    "${GFS_DOCKER_EXEC_TIMEOUT_SECONDS}" 300 || return $?
+  docker_cli_env_validate_seconds GFS_DOCKER_REMOVE_TIMEOUT_SECONDS \
+    "${GFS_DOCKER_REMOVE_TIMEOUT_SECONDS}" 300 || return $?
+  docker_cli_env_prepare false || return $?
+  GFS_DOCKER_ENV_PREPARED=true
+}
+cleanup_gfs_docker_env() {
+  [[ "${GFS_DOCKER_ENV_PREPARED}" == true ]] || return 0
+  if docker_cli_env_cleanup; then
+    GFS_DOCKER_ENV_PREPARED=false
     return 0
   fi
   return 1
@@ -283,6 +337,7 @@ cleanup() {
   trap '' INT TERM
   if ! stop_profile_postgres_forward; then status=1; fi
   if ! stop_isolated_postgres; then status=1; fi
+  if ! cleanup_gfs_docker_env; then status=1; fi
   if [ "${GFS_RESTORE_REQUIRED}" = true ] && ! restore_gfs_runtime_credentials; then status=1; fi
   if ! rm -rf "${TMP_DIR}"; then status=1; fi
   if ! t2_lock_release "${status}"; then status=1; fi
@@ -301,14 +356,17 @@ sock.close()
 PY
 }
 
-require_command docker npm
-docker info >/dev/null 2>&1 || die 'Docker is required for the isolated GFS real-Postgres lane'
+if ! real_pg_local_preflight "${PROJECT_DIR}" true; then
+  die "${REAL_PG_PREFLIGHT_ERROR_CODE}: ${REAL_PG_PREFLIGHT_ERROR_MESSAGE}"
+fi
 verify_branch_gate
 verify_profile_postgres
 
 ISOLATED_PORT="$(choose_local_port)"
 ISOLATED_CONTAINER="evenfire-gfs-t1-pg-$$"
-docker run -d --rm --name "${ISOLATED_CONTAINER}" \
+prepare_gfs_docker || die 'isolated GFS Docker runtime could not be prepared safely'
+docker_cli_run_public gfs-t1-postgres-run "${GFS_DOCKER_RUN_TIMEOUT_SECONDS}" \
+  docker run -d --rm --name "${ISOLATED_CONTAINER}" \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_DB=postgres \
   -e POSTGRES_HOST_AUTH_METHOD=trust \
@@ -317,12 +375,16 @@ docker run -d --rm --name "${ISOLATED_CONTAINER}" \
 wait_for_tcp "${ISOLATED_PORT}" || die 'isolated GFS PostgreSQL did not become reachable'
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do
-  if docker exec "${ISOLATED_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1; then
+  if docker_cli_run_public gfs-t1-postgres-ready-probe \
+    "${GFS_DOCKER_EXEC_TIMEOUT_SECONDS}" \
+    docker exec "${ISOLATED_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-docker exec "${ISOLATED_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1 ||
+docker_cli_run_public gfs-t1-postgres-ready-final \
+  "${GFS_DOCKER_EXEC_TIMEOUT_SECONDS}" \
+  docker exec "${ISOLATED_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1 ||
   die 'isolated GFS PostgreSQL did not become ready'
 ADMIN_DSN="$(printf 'postgresql://postgres@%s:%s/postgres' "${ISOLATED_HOST}" "${ISOLATED_PORT}")"
 
