@@ -177,6 +177,9 @@ embedded_node_count="$(
 if [[ "${embedded_node_count}" -ne 3 ]]; then
   fail "expected three embedded Node heredocs, found ${embedded_node_count}"
 fi
+if [[ "$(grep -Fc 'exec -i' "${E2E_SCRIPT}")" -lt "${embedded_node_count}" ]]; then
+  fail 'embedded Node heredocs do not allocate stdin through kubectl exec'
+fi
 for ordinal in $(seq 1 "${embedded_node_count}"); do
   check_embedded_node "${ordinal}"
 done

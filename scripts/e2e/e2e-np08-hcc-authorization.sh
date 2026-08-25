@@ -202,7 +202,7 @@ run_np08_gateway_raw_header_checks() {
   echo 'E2E gateway leg: raw duplicate-header checks'
   kctl -n "${MCP_NS}" get deployment mcp-proxy \
     -o jsonpath='{.status.readyReplicas}' | grep -qx '1'
-  kctl -n "${MCP_NS}" exec deploy/mcp-proxy -- node - <<'NODE'
+  kctl -n "${MCP_NS}" exec -i deploy/mcp-proxy -- node - <<'NODE'
 ;(async () => {
 const fs = require('node:fs')
 const net = require('node:net')
@@ -309,7 +309,7 @@ np08_assert_stats_unchanged() {
 np08_product_manager_status_probe() {
   local deployment="$1"
   local expected_server="$2"
-  kctl -n "${HOST_NS}" exec "deploy/${deployment}" -- \
+  kctl -n "${HOST_NS}" exec -i "deploy/${deployment}" -- \
     env "NP08_EXPECTED_SERVER=${expected_server}" node - <<'NODE' >/dev/null 2>&1
 ;(async () => {
 const expectedServer = process.env.NP08_EXPECTED_SERVER
@@ -371,7 +371,7 @@ run_np08_manager_phase() {
     host-disabled) proxy_mode='host-disabled' ;;
   esac
 
-  kctl -n "${HOST_NS}" exec "deploy/${deployment}" -- \
+  kctl -n "${HOST_NS}" exec -i "deploy/${deployment}" -- \
     env "NP08_PROXY_MODE=${proxy_mode}" \
       "NP08_PROXY_FORCE_ACCESS_REREAD=${force_access_reread}" \
       "NP08_PROXY_SERVER_ALLOWED=${allowed_server}" \
