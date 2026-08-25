@@ -134,6 +134,7 @@ import {
   createGovernedRunReporter,
 } from './usage/usageReporter'
 import { setOutputDirHostAccessor } from './workflow/internalTools'
+import { loadPersistedWorkflowControlToken } from './workflow/mcpHostJwtState'
 import { submitProviderWorkflowApprovalDecision } from './workflow/providerWorkflowApprovalDecisionClient'
 import { confirmProviderWorkflowApprovalMediumEnrollment } from './workflow/providerWorkflowApprovalMediumEnrollmentClient'
 import {
@@ -838,13 +839,25 @@ function createMcpTokenProviderFactory(): McpTokenProviderFactory {
 
 /**
  * Broker deps shared by every per-connection token provider: reads the gateway
- * URL and mcp-host control JWT from config at call time (so token rotation is
- * picked up). See mcp/brokerTokenProvider.ts for the fail-closed contract.
+ * URL and mcp-host control JWT at call time (so token rotation is picked up).
+ * See mcp/brokerTokenProvider.ts for the fail-closed contract.
+ *
+ * The control JWT has a ~10 min TTL and is rotated in-pod by the workflow-auth
+ * self-refresh, which persists the rotated value to the runtime state file. The
+ * config value (env / mounted Secret file) is only the boot seed and is NOT
+ * rotated at that cadence, so reading it alone yields a 401 from the broker once
+ * the first token expires. Read the live persisted source on every call, exactly
+ * like core/tools/workflowTokenProvider.ts does for the workflow broker tools;
+ * loadPersistedWorkflowControlToken falls back to the config seed when the state
+ * file does not exist yet (early boot, dev mode) or fails its runtime-binding /
+ * freshness checks. An empty result normalizes to undefined so the broker keeps
+ * failing closed instead of sending `Bearer `.
  */
-function brokerTokenProviderDeps(): BrokerTokenProviderDeps {
+export function brokerTokenProviderDeps(): BrokerTokenProviderDeps {
   return {
     gatewayUrl: () => config.mcpHostGatewayUrl,
-    controlToken: () => workflowControlTokenFromConfig(),
+    controlToken: () =>
+      loadPersistedWorkflowControlToken(workflowControlTokenFromConfig() ?? '') || undefined,
   }
 }
 

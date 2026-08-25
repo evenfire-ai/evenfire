@@ -1,0 +1,135 @@
+/**
+ * Regression: the mcp-oauth broker must authenticate to control-api with the
+ * LIVE control JWT, not the boot-time env/Secret seed.
+ *
+ * The mcp-host control JWT has a ~10 min TTL and is rotated in-pod by the
+ * workflow-auth self-refresh, which persists the rotated value through
+ * persistRuntimeAuthTokens(). The mounted Secret / env value is only the boot
+ * seed and is NOT re-minted at that cadence, so a broker wired to it starts
+ * sending an expired bearer ~10 min after pod start and control-api answers 401
+ * (issue 26-08-25-mcp-oauth-broker-control-token-stale-source).
+ *
+ * The fixture is derived from the real producer: the state file is written by
+ * persistRuntimeAuthTokens() into a temp state dir, never hand-authored. The
+ * assertion is on the observable output — the Authorization header the real
+ * createBrokerTokenProvider() puts on the wire — not on an intermediate call.
+ */
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { brokerTokenProviderDeps } from '../../main'
+import { persistRuntimeAuthTokens } from '../../workflow/mcpHostJwtState'
+import { createBrokerTokenProvider } from '../brokerTokenProvider'
+
+// Must run before the module graph (config.ts snapshots env at import time).
+const boot = vi.hoisted(() => {
+  const base64url = (value: object): string =>
+    Buffer.from(JSON.stringify(value)).toString('base64url')
+  const nowSecs = Math.floor(Date.now() / 1000)
+  const binding = {
+    hostRefs: ['host-alpha'],
+    recipeNamespace: 'mcp-host',
+    recipeName: 'standalone',
+  }
+  const jwt = (iat: number, exp: number, label: string): string =>
+    `${base64url({ alg: 'none', typ: 'JWT' })}.${base64url({
+      ...binding,
+      iat,
+      exp,
+      label,
+      typ: 'service',
+      scopes: ['oauth:user-token'],
+    })}.sig`
+
+  // The seed the pod booted with: already past its ~10 min TTL.
+  const bootToken = jwt(nowSecs - 1200, nowSecs - 600, 'boot-seed')
+  // What the in-pod self-refresh minted afterwards.
+  const rotatedToken = jwt(nowSecs - 60, nowSecs + 540, 'rotated')
+
+  process.env.MCP_HOST_GATEWAY_URL = 'http://gateway.test:8092'
+  process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN = bootToken
+  delete process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE
+  return { bootToken, rotatedToken }
+})
+
+const tempDirs: string[] = []
+const originalStateDir = process.env.MCP_HOST_RUNTIME_AUTH_STATE_DIR
+const originalLegacyStateDir = process.env.CLERUM_WORKFLOW_AUTH_STATE_DIR
+
+function useStateDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'broker-control-token-'))
+  tempDirs.push(dir)
+  process.env.MCP_HOST_RUNTIME_AUTH_STATE_DIR = dir
+  return dir
+}
+
+/** Captures the bearer the broker actually put on the wire. */
+function capturingFetch() {
+  return vi.fn(
+    async (_url: string, init: RequestInit) =>
+      ({
+        status: 200,
+        json: async () => ({ token: 'downstream-oauth-token', expiresAt: null }),
+        __init: init,
+      }) as unknown as Response
+  )
+}
+
+function bearerOf(fetchImpl: ReturnType<typeof capturingFetch>): string | undefined {
+  const init = fetchImpl.mock.calls[0][1] as RequestInit
+  return (init.headers as Record<string, string>).Authorization
+}
+
+beforeEach(() => {
+  delete process.env.CLERUM_WORKFLOW_AUTH_STATE_DIR
+})
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+})
+
+afterAll(() => {
+  if (originalStateDir === undefined) delete process.env.MCP_HOST_RUNTIME_AUTH_STATE_DIR
+  else process.env.MCP_HOST_RUNTIME_AUTH_STATE_DIR = originalStateDir
+  if (originalLegacyStateDir === undefined) delete process.env.CLERUM_WORKFLOW_AUTH_STATE_DIR
+  else process.env.CLERUM_WORKFLOW_AUTH_STATE_DIR = originalLegacyStateDir
+})
+
+describe('mcp-oauth broker control token source', () => {
+  it('sends the rotated control JWT from the runtime state file, not the boot env seed', async () => {
+    useStateDir()
+    // Real producer: the same call the self-refresh path makes after a rotation.
+    await persistRuntimeAuthTokens({
+      accessToken: 'rotated-access',
+      refreshToken: 'rotated-refresh',
+      mcpHostControlToken: boot.rotatedToken,
+    })
+
+    const fetchImpl = capturingFetch()
+    const provider = createBrokerTokenProvider(
+      { name: 'mcp-clickup' },
+      { userId: 'alice' },
+      { ...brokerTokenProviderDeps(), fetchImpl: fetchImpl as unknown as typeof fetch }
+    )
+
+    await expect(provider.resolve()).resolves.toBe('downstream-oauth-token')
+    expect(bearerOf(fetchImpl)).toBe(`Bearer ${boot.rotatedToken}`)
+    expect(bearerOf(fetchImpl)).not.toBe(`Bearer ${boot.bootToken}`)
+  })
+
+  it('falls back to the config seed while the state file does not exist yet (early boot)', async () => {
+    const dir = useStateDir()
+    fs.rmSync(dir, { recursive: true, force: true })
+
+    const fetchImpl = capturingFetch()
+    const provider = createBrokerTokenProvider(
+      { name: 'mcp-clickup' },
+      { userId: 'alice' },
+      { ...brokerTokenProviderDeps(), fetchImpl: fetchImpl as unknown as typeof fetch }
+    )
+
+    await expect(provider.resolve()).resolves.toBe('downstream-oauth-token')
+    expect(bearerOf(fetchImpl)).toBe(`Bearer ${boot.bootToken}`)
+  })
+})
