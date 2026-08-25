@@ -124,7 +124,7 @@ describe("ProxyServer", () => {
       authorizeForward: vi.fn().mockResolvedValue({
         serverName: "server-a",
         contextRef: "ctx1",
-        targetUrl: "http://127.0.0.1:3000/mcp",
+        targetUrl: "http://127.0.0.1:3000/mcp/fixture",
         destinationRevision: "revision-a",
       }),
     } as unknown as HccClient;
