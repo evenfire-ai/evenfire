@@ -25,6 +25,7 @@ import {
   MANAGED_BY_VALUE,
   MCPSERVER_LABEL,
   POLICY_TYPE_LABEL,
+  WRC_MANAGED_BY_VALUE,
 } from './constants'
 import { accumulateHostExactHostEgress } from './externalEgressAccumulator'
 import {
@@ -3055,9 +3056,15 @@ export class NetworkPolicyReconciler {
                 },
                 podSelector: {
                   matchLabels: {
-                    [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
                     [MCPSERVER_LABEL]: serverName,
                   },
+                  matchExpressions: [
+                    {
+                      key: MANAGED_BY_LABEL,
+                      operator: 'In',
+                      values: [MANAGED_BY_VALUE, WRC_MANAGED_BY_VALUE],
+                    },
+                  ],
                 },
               },
             ],

@@ -1374,15 +1374,79 @@ describe('NetworkPolicyReconciler', () => {
               },
               podSelector: {
                 matchLabels: {
-                  'clerum.io/managed-by': 'host-context-controller',
                   'clerum.io/mcpserver': 'playwright',
                 },
+                matchExpressions: [
+                  {
+                    key: 'clerum.io/managed-by',
+                    operator: 'In',
+                    values: ['host-context-controller', 'workflow-recipes'],
+                  },
+                ],
               },
             },
           ],
           ports: [{ port: 8931, protocol: 'TCP' }],
         },
       ])
+    })
+
+    it('admits both HCC-managed and workflow-recipes-managed MCP server pods', async () => {
+      const cache = new Map<string, McpServerCRD>()
+      cache.set('workflow-http', {
+        name: 'workflow-http',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'workflow-context',
+          image: 'workflow-http:latest',
+          managed: false,
+          transport: {
+            type: 'streamableHttp',
+            url: 'http://workflow-http:8080/mcp',
+            port: 8080,
+          },
+        },
+      })
+
+      const rec = makeReconciler(mockApi, cache)
+      await rec.reconcileContext(
+        {
+          name: 'workflow-context',
+          namespace: 'mcp-server',
+          spec: { contextId: 'workflow-context', mcpServers: ['workflow-http'] },
+        },
+        { isCurrent: () => true }
+      )
+
+      const proxyEgressCall = mockApi.createNamespacedNetworkPolicy.mock.calls.find(
+        ([call]) =>
+          call.namespace === 'mcp-server' &&
+          call.body.metadata.labels['clerum.io/policy-type'] === 'mcp-proxy-egress'
+      )?.[0] as {
+        body: {
+          spec: {
+            egress: Array<{
+              to: Array<{
+                podSelector: {
+                  matchLabels: Record<string, string>
+                  matchExpressions: unknown[]
+                }
+              }>
+            }>
+          }
+        }
+      }
+
+      expect(proxyEgressCall.body.spec.egress[0].to[0].podSelector).toEqual({
+        matchLabels: { 'clerum.io/mcpserver': 'workflow-http' },
+        matchExpressions: [
+          {
+            key: 'clerum.io/managed-by',
+            operator: 'In',
+            values: ['host-context-controller', 'workflow-recipes'],
+          },
+        ],
+      })
     })
   })
 
