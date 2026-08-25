@@ -88,7 +88,10 @@ import {
 import type { HandleMcpAuthorityPollFailureOptions } from './mcp/authorityLifecycle'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
-import type { McpProxyHostAuthorization } from './mcp/proxyAuth'
+import {
+  getSharedMcpProxyHostAuthorization,
+  type McpProxyHostAuthorization,
+} from './mcp/proxyAuth'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
@@ -188,6 +191,7 @@ const GUARDRAIL_RESOLVE_INTERVAL_MS = 300_000
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
 let lastServerState: Map<string, string> = new Map()
+let lastGrantState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
 let mcpManager: McpManager | null = null
 let contextMapperClient: ContextMapperClient | null = null
@@ -818,10 +822,10 @@ function getMcpProxyHostAuthorization(): McpProxyHostAuthorization | undefined {
   if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
   if (!runtimeAuth) return undefined
   const auth = runtimeAuth
-  return {
+  return getSharedMcpProxyHostAuthorization(auth, () => ({
     getAccessToken: () => auth.accessToken,
     refreshOnUnauthorized: () => refreshWithRecovery(auth),
-  }
+  }))
 }
 
 export { createMcpAuthorityStalenessDeadline, isMcpAuthorityStale }
@@ -891,6 +895,7 @@ function revokeMcpAuthority(reason: string, restartPolling: boolean): void {
     },
     clearServerState: () => {
       lastServerState = new Map()
+      lastGrantState = new Map()
     },
     clearLastSuccess: () => {
       mcpAuthorityLastSuccessAt = 0
@@ -920,12 +925,13 @@ async function initializeMcpServers(): Promise<void> {
           proxyUrl: config.mcpProxyUrl,
           hostAuthorization: getMcpProxyHostAuthorization(),
         }),
-      getAuthToken: async (serverName, expectedRevision) => {
-        return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
+      getAuthToken: async serverName => {
+        return ensureAuthenticatedContextMapperClient().getAuthToken(serverName)
       },
-      installFleet: (nextManager, nextServerState) => {
+      installFleet: (nextManager, nextServerState, nextGrantState) => {
         mcpManager = nextManager
         lastServerState = nextServerState
+        lastGrantState = nextGrantState
         recordMcpAuthoritySuccess()
         agent?.setMcpManager(nextManager)
       },
@@ -999,8 +1005,8 @@ async function pollContextMapper(): Promise<void> {
           servers,
           manager,
           serverState: lastServerState,
-          getAuthToken: (serverName, expectedRevision) =>
-            contextMapperClient!.getAuthToken(serverName, expectedRevision),
+          grantState: lastGrantState,
+          getAuthToken: serverName => contextMapperClient!.getAuthToken(serverName),
           coordinator: mcpFleetCoordinator,
         }),
     })

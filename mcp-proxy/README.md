@@ -1,10 +1,10 @@
 # MCP Proxy
 
-Centralized HTTP proxy for MCP servers. It discovers available servers by polling the host-context-controller (HCC) API, maintains an in-memory routing table, and forwards incoming JSON-RPC requests to the correct backend.
+Centralized HTTP proxy for MCP servers. It keeps a low-sensitivity topology view for health and observability, but every data-plane request is authorized live by the host-context-controller (HCC) before the proxy opens an upstream socket.
 
 ## Feature Flag
 
-MCP Proxy is an optional component gated by the `MCP_PROXY_ENABLED` feature flag. When enabled, mcp-host routes all MCP tool calls through the proxy instead of connecting to servers directly.
+MCP Proxy is an optional component. `MCP_PROXY_ENABLED` selects proxy mode in mcp-host; `MCP_PROXY_FORWARDING_ENABLED` is the proxy's independent forwarding gate and remains `false` by default. A disabled gate makes no HCC authorization call and performs no upstream forwarding.
 
 ## Port
 
@@ -14,20 +14,28 @@ MCP Proxy is an optional component gated by the `MCP_PROXY_ENABLED` feature flag
 
 ```
 mcp-host
-   ↓ POST /servers/{name}/mcp
-MCP Proxy (:8083)
-   ├── Router (in-memory routing table)
-   ├── HccClient (polls HCC every 30s for server list)
-   └── HttpForwarder (proxies request to backend server)
+   ↓ POST/GET /servers/{name}/mcp
+MCP Proxy (:8083) — singleton TCB
+   ├── HccClient (system-authenticated topology + live authorizeForward)
+   └── HttpForwarder (buffer, sanitize, then forward)
          ↓
-MCP Server (e.g. mongodb-mcp:3000, stdio-bridge:3000)
+MCP Server (current HCC-approved target)
 ```
 
-1. **Server discovery** -- `HccClient` polls `GET {HCC_API_URL}/api/v1/mcpservers` on a configurable interval. Each server entry includes a name, transport URL, readiness status, and context ref. Results are cached; stale/expired cache affects health probes.
-2. **Routing** -- `Router` maintains a `Map<name, ServerRoute>`. On each poll, it diffs the new list against the current map and logs additions/removals.
-3. **Forwarding** -- `HttpForwarder` pipes the incoming request body to the backend URL, buffers initial response chunks before committing headers (to avoid silent truncation on oversized responses), and enforces `maxResponseSize` and `requestTimeout`.
+1. **Topology** -- `HccClient` polls the system-authenticated v2 directory at `GET {HCC_API_URL}/api/v2/system/mcpservers`. It may cache non-secret names, Context references, transport and readiness metadata for health/observability only. The cache is never a forwarding grant and the proxy has no v1 fallback.
+2. **Live authorization** -- each request to `/servers/{name}/mcp` sends the projected system bearer and the caller's separate Host bearer to `POST {HCC_API_URL}/api/v2/system/mcpservers/authorize`. HCC resolves Host → Context → McpServer live and returns only the validated target and its destination binding.
+3. **Pre-socket forwarding** -- `HttpForwarder` buffers and bounds the complete body, rejects invalid framing, strips identity/hop-by-hop headers, and opens no upstream socket until live authorization succeeds. Caller cancellation is checked again before the socket is created.
 4. **Metrics** -- Prometheus-format counters at `GET /metrics`: `mcp_proxy_requests_total`, `mcp_proxy_active_connections`, `mcp_proxy_server_health`.
-5. **Health** -- `GET /health` (liveness) and `GET /ready` (readiness, fails when HCC cache is expired or no servers are ready).
+5. **Health** -- `GET /health` (liveness) and `GET /ready` (readiness, fails when the topology poll is expired or no servers are ready). Health state does not authorize data-plane traffic.
+
+Data-plane errors use one non-enumerable status taxonomy: `400` for malformed
+method/path/body/framing, `401` for a missing or invalid Host bearer, `403` for
+a valid Host denied by live HCC membership/readiness, and `503` for HCC,
+live-target, or forwarding availability failures. The proxy does not expose
+distinct `404`, `405`, `413`, `429`, `502`, or `504` decisions from this
+boundary, and all negative responses are bounded and non-cacheable.
+
+The proxy is an explicit singleton trusted computing base. PR2 limits its Kubernetes authority and egress, but does not claim to contain malicious code running inside the proxy. The Host bearer, projected system bearer, and MCP credential remain separate; only the MCP credential is allowed to reach the upstream MCP server.
 
 ## Environment Variables
 
@@ -36,8 +44,10 @@ MCP Server (e.g. mongodb-mcp:3000, stdio-bridge:3000)
 | `MCP_PROXY_PORT` | `8083` | HTTP listen port |
 | `HCC_API_URL` | `http://host-context-controller.control-plane:8081` | HCC API base URL |
 | `HCC_POLL_INTERVAL` | `30000` | Server discovery poll interval (ms) |
-| `HCC_CACHE_TTL` | `120000` | Cache staleness threshold (ms) -- health warns |
-| `HCC_CACHE_EXPIRY` | `300000` | Cache expiry threshold (ms) -- readiness fails |
+| `HCC_CACHE_TTL` | `180000` | Cache staleness threshold (ms) -- health warns; never authorizes forwarding |
+| `HCC_CACHE_EXPIRY` | `600000` | Cache expiry threshold (ms) -- readiness fails; never authorizes forwarding |
+| `MCP_PROXY_FORWARDING_ENABLED` | `false` | Independent data-plane forwarding gate |
+| `MCP_PROXY_ENABLED` | `false` in base mcp-host config | Selects proxy mode in mcp-host; does not grant proxy forwarding by itself |
 | `MCP_PROXY_REQUEST_TIMEOUT` | `30000` | Per-request forwarding timeout (ms) |
 | `MCP_PROXY_MAX_RESPONSE_SIZE` | `10485760` | Max response body size (10 MB) |
 | `CLERUM_DEV_MODE` | `false` | Dev mode: skip HCC polling, use static server list |
@@ -50,6 +60,7 @@ MCP Server (e.g. mongodb-mcp:3000, stdio-bridge:3000)
 cd mcp-proxy
 npm install
 CLERUM_DEV_MODE=true \
+MCP_PROXY_FORWARDING_ENABLED=true \
 MCP_PROXY_SERVERS='[{"name":"echo","url":"http://localhost:3001/mcp","contextRef":"dev","managed":true,"ready":true,"port":3001}]' \
 npm run dev
 ```
@@ -85,7 +96,7 @@ src/
 ├── main.ts          # Entrypoint: config, wire dependencies, start poll + server
 ├── server.ts        # HTTP server: route dispatch, health/metrics/forward endpoints
 ├── router.ts        # In-memory routing table with diff-based updates
-├── hccClient.ts     # HCC API client with cache + staleness tracking
+├── hccClient.ts     # HCC v2 system inventory + live forwarding authorization
 ├── httpForwarder.ts # Request proxy with buffered headers and size guard
 ├── health.ts        # Liveness + readiness probe handlers
 ├── metrics.ts       # Prometheus counter/gauge collector

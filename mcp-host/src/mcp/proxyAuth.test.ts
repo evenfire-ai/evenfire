@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createMcpProxyFetch, MCP_PROXY_HOST_AUTH_CHALLENGE } from './proxyAuth'
+import {
+  createMcpProxyFetch,
+  getSharedMcpProxyHostAuthorization,
+  MCP_PROXY_HOST_AUTH_CHALLENGE,
+} from './proxyAuth'
 
 function fixtureAuth(initial: string, refresh: () => Promise<void>) {
   let current = initial
@@ -112,6 +116,44 @@ describe('mcp-host proxy Host bearer transport', () => {
     await Promise.all([
       first('http://proxy.test/a', { method: 'GET' }),
       second('http://proxy.test/b', { method: 'GET' }),
+    ])
+
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('shares one Host authorization facade across production manager generations', async () => {
+    const refresh = vi.fn(async () => undefined)
+    const runtimeAuth = { accessToken: 'h' }
+    const first = getSharedMcpProxyHostAuthorization(runtimeAuth, () => ({
+      getAccessToken: () => runtimeAuth.accessToken,
+      refreshOnUnauthorized: refresh,
+    }))
+    const second = getSharedMcpProxyHostAuthorization(runtimeAuth, () => ({
+      getAccessToken: () => runtimeAuth.accessToken,
+      refreshOnUnauthorized: refresh,
+    }))
+
+    expect(second).toBe(first)
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response('denied', {
+          status: 401,
+          headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response('denied', {
+          status: 401,
+          headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+        })
+      )
+      .mockResolvedValue(new Response('ok', { status: 200 }))
+
+    await Promise.all([
+      createMcpProxyFetch(first, fetchMock)('http://proxy.test/a', { method: 'GET' }),
+      createMcpProxyFetch(second, fetchMock)('http://proxy.test/b', { method: 'GET' }),
     ])
 
     expect(refresh).toHaveBeenCalledTimes(1)

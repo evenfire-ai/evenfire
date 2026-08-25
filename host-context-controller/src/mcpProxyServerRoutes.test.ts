@@ -181,6 +181,38 @@ describe('ContextMapperServer system MCP proxy routes', () => {
     )
   })
 
+  it('normalizes system route method, media-type, and body failures to 400', async () => {
+    server = makeServer({ listSystemServers: vi.fn(async () => directory) })
+    server.setReady(true)
+
+    let response = await invoke(server, '/api/v2/system/mcpservers', {
+      method: 'POST',
+      headers: { authorization: 'fixture-system' },
+    })
+    expect(response.statusCode).toBe(400)
+    expect(JSON.parse(response.body)).toEqual({ error: 'bad_request' })
+
+    const commonHeaders = {
+      authorization: 'fixture-system',
+      'x-clerum-host-authorization': 'fixture-host',
+    }
+    response = await invoke(server, '/api/v2/system/mcpservers/authorize', {
+      method: 'POST',
+      headers: { ...commonHeaders, 'content-type': 'text/plain' },
+      body: '{}',
+    })
+    expect(response.statusCode).toBe(400)
+    expect(JSON.parse(response.body)).toEqual({ error: 'bad_request' })
+
+    response = await invoke(server, '/api/v2/system/mcpservers/authorize', {
+      method: 'POST',
+      headers: { ...commonHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ serverName: 'a'.repeat(1_025) }),
+    })
+    expect(response.statusCode).toBe(400)
+    expect(JSON.parse(response.body)).toEqual({ error: 'bad_request' })
+  })
+
   it('limits the live authorize decision per authenticated Host before the target read', async () => {
     const authorization = {
       getLiveForwardTarget: vi.fn(async () => target),
@@ -203,7 +235,7 @@ describe('ContextMapperServer system MCP proxy routes', () => {
     const second = await invoke(server, '/api/v2/system/mcpservers/authorize', request)
 
     expect(first.statusCode).toBe(200)
-    expect(second.statusCode).toBe(429)
+    expect(second.statusCode).toBe(503)
     expect(authorization.getLiveForwardTarget).toHaveBeenCalledOnce()
   })
 
@@ -227,7 +259,7 @@ describe('ContextMapperServer system MCP proxy routes', () => {
     })
 
     expect((await invoke(server, '/api/v2/system/mcpservers/authorize', request('fixture-host-a'))).statusCode).toBe(200)
-    expect((await invoke(server, '/api/v2/system/mcpservers/authorize', request('fixture-host-a'))).statusCode).toBe(429)
+    expect((await invoke(server, '/api/v2/system/mcpservers/authorize', request('fixture-host-a'))).statusCode).toBe(503)
     expect((await invoke(server, '/api/v2/system/mcpservers/authorize', request('fixture-host-b'))).statusCode).toBe(200)
     expect(authorization.getLiveForwardTarget).toHaveBeenCalledTimes(2)
   })

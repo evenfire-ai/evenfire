@@ -174,7 +174,7 @@ describe("HttpForwarder", () => {
     expect(JSON.parse(res.body).error.code).toBe(-32600);
   });
 
-  it("should return 502 when backend is unreachable", async () => {
+  it("should return generic 503 when backend is unreachable", async () => {
     const deadForwarder = new HttpForwarder({
       requestTimeout: 1000,
       maxResponseSize: 1048576,
@@ -222,13 +222,13 @@ describe("HttpForwarder", () => {
       });
     });
 
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(503);
     expect(res.headers["cache-control"]).toBe("no-store, private");
     expect(res.headers.pragma).toBe("no-cache");
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
-  it("should return a non-cacheable 413 when the upstream response is too large", async () => {
+  it("should return generic 503 when the upstream response is too large", async () => {
     forwarder = new HttpForwarder({
       requestTimeout: 5000,
       maxResponseSize: 3,
@@ -242,13 +242,13 @@ describe("HttpForwarder", () => {
 
     const res = await forwardViaProxy("POST");
 
-    expect(res.status).toBe(413);
+    expect(res.status).toBe(503);
     expect(res.headers["cache-control"]).toBe("no-store, private");
     expect(res.headers.pragma).toBe("no-cache");
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
-  it("should return a non-cacheable 504 when the upstream times out", async () => {
+  it("should return generic 503 when the upstream times out", async () => {
     forwarder = new HttpForwarder({
       requestTimeout: 20,
       maxResponseSize: 1048576,
@@ -261,7 +261,7 @@ describe("HttpForwarder", () => {
 
     const res = await forwardViaProxy("POST");
 
-    expect(res.status).toBe(504);
+    expect(res.status).toBe(503);
     expect(res.headers["cache-control"]).toBe("no-store, private");
     expect(res.headers.pragma).toBe("no-cache");
     expect(res.headers["x-content-type-options"]).toBe("nosniff");

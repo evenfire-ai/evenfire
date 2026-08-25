@@ -188,8 +188,8 @@ export interface McpServerInfo {
   /** Whether the scoped HCC credential route must return a bearer. */
   authRequired?: boolean
   /**
-   * Opaque HCC authority revision. It changes when the authorized server,
-   * auth selector, or referenced Secret identity/resourceVersion changes.
+   * Legacy development metadata only. HCC v2 does not return this field in
+   * the Host inventory, and mcp-host must never use it as a credential gate.
    */
   credentialRevision?: string
   enabled: boolean

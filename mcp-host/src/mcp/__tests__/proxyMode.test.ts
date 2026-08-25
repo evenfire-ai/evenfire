@@ -41,16 +41,29 @@ describe("McpClient — proxy URL resolution", () => {
     expect(url).toBe("http://proxy:8083/servers/mcp-redis-cache/mcp");
   });
 
-  it("should use StreamableHTTP transport when proxy is set (even for SSE servers)", () => {
-    const server = makeMockServer("legacy-sse");
+  it('should preserve direct SSE transport when proxy is set', () => {
+    const server = makeMockServer('legacy-sse', 'http://sse-server:3000/sse')
     server.transport.type = "sse";
     const client = new McpClient(server, undefined, "http://proxy:8083", {
       getAccessToken: () => "fixture-host-bearer",
       refreshOnUnauthorized: async () => undefined,
     });
     const transport = (client as any).createTransport();
-    expect(transport.constructor.name).toBe("StreamableHTTPClientTransport");
+    expect((client as any).resolveUrl()).toBe('http://sse-server:3000/sse')
+    expect(transport.constructor.name).toBe("SSEClientTransport");
   });
+
+  it('keeps legacy SSE on the direct HCC path when proxy mode is selected', () => {
+    const server = makeMockServer('legacy-sse', 'http://sse-server:3000/sse')
+    server.transport.type = 'sse'
+    const client = new McpClient(server, undefined, 'http://proxy:8083', {
+      getAccessToken: () => 'h',
+      refreshOnUnauthorized: async () => undefined,
+    })
+
+    expect((client as any).resolveUrl()).toBe('http://sse-server:3000/sse')
+    expect((client as any).createTransport().constructor.name).toBe('SSEClientTransport')
+  })
 
   it("should use SSE transport for SSE servers without proxy", () => {
     const server = makeMockServer("legacy-sse", "http://sse-server:3000/sse");
@@ -68,7 +81,7 @@ describe("McpClient — proxy URL resolution", () => {
     expect(url).toBe("http://proxy:8083/servers/authed-server/mcp");
   });
 
-  it('should attach the Host bearer fetch boundary to both SDK transport modes', () => {
+  it('should attach the Host bearer fetch boundary only to proxied Streamable HTTP', () => {
     const hostAuthorization = {
       getAccessToken: () => 'fixture-host-bearer',
       refreshOnUnauthorized: vi.fn(async () => undefined),
@@ -94,8 +107,7 @@ describe("McpClient — proxy URL resolution", () => {
       hostAuthorization
     )
     const sse = (sseClient as any).createTransport()
-    expect(typeof sse._fetch).toBe('function')
-    expect(sse.constructor.name).toBe('StreamableHTTPClientTransport')
+    expect(sse.constructor.name).toBe('SSEClientTransport')
   })
 
   it('refuses proxy transport when the Host bearer provider is absent', () => {

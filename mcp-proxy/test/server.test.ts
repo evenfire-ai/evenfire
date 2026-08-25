@@ -96,9 +96,9 @@ describe("ProxyServer", () => {
     expect(res.body).toContain("mcp_proxy");
   });
 
-  it("should respond 404 for unknown paths", async () => {
+  it("should respond 400 for malformed paths", async () => {
     const res = await httpRequest(actualPort, "/unknown");
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(400);
   });
 
   it("should not enumerate a server when forwarding is disabled", async () => {

@@ -845,8 +845,8 @@ data:
         # HCC-owned (`proxy_intercept_errors` is off), preserving HCC's generic
         # WWW-Authenticate and authorization-unavailable semantics.
         error_page 400 = @hcc_bad_request;
-        error_page 405 = @hcc_method_not_allowed;
-        error_page 413 = @hcc_payload_too_large;
+        error_page 405 = @hcc_bad_request;
+        error_page 413 = @hcc_bad_request;
 
         location @hcc_bad_request {
           add_header Cache-Control "no-store, private" always;
@@ -854,19 +854,6 @@ data:
           add_header X-Content-Type-Options "nosniff" always;
           return 400 '{"error":"bad_request"}';
         }
-        location @hcc_method_not_allowed {
-          add_header Cache-Control "no-store, private" always;
-          add_header Pragma "no-cache" always;
-          add_header X-Content-Type-Options "nosniff" always;
-          return 405 '{"error":"method_not_allowed"}';
-        }
-        location @hcc_payload_too_large {
-          add_header Cache-Control "no-store, private" always;
-          add_header Pragma "no-cache" always;
-          add_header X-Content-Type-Options "nosniff" always;
-          return 413 '{"error":"payload_too_large"}';
-        }
-
         location = /health {
           add_header Content-Type application/json;
           return 200 '{"status":"ok"}';
@@ -904,7 +891,7 @@ data:
         }
 
         location = /api/v2/system/mcpservers {
-          if ($request_method != GET) { return 405; }
+          if ($request_method != GET) { return 400; }
           limit_req zone=np08_system_inventory burst=20 nodelay;
           limit_req_status 503;
           proxy_pass http://host_context_controller_upstream;
@@ -920,7 +907,7 @@ data:
         }
 
         location = /api/v2/system/mcpservers/authorize {
-          if ($request_method != POST) { return 405; }
+          if ($request_method != POST) { return 400; }
           client_max_body_size 1k;
           limit_req zone=np08_system_authorize_aggregate burst=200 nodelay;
           limit_req_status 503;
@@ -940,7 +927,7 @@ data:
         }
 
         location = /api/v2/hosts/self/mcpservers {
-          if ($request_method != GET) { return 405; }
+          if ($request_method != GET) { return 400; }
           proxy_pass http://host_context_controller_upstream;
           proxy_pass_request_headers off;
           proxy_http_version 1.1;
@@ -954,7 +941,7 @@ data:
         }
 
         location = /api/v2/hosts/self/mcpservers/credential {
-          if ($request_method != POST) { return 405; }
+          if ($request_method != POST) { return 400; }
           client_max_body_size 1k;
           proxy_pass http://host_context_controller_upstream;
           proxy_pass_request_headers off;

@@ -285,9 +285,9 @@ describe('ContextMapperServer', () => {
     expect(response.headers['Cache-Control']).toBe('no-store, private')
     const body = JSON.parse(response.body)
     expect(body.servers).toEqual([
-      expect.objectContaining({ name: 'server-a', authRequired: true }),
+      expect.objectContaining({ name: 'server-a', contextRef: 'context-a', authRequired: true }),
     ])
-    expect(response.body).not.toContain('context-a')
+    expect(response.body).toContain('context-a')
     expect(response.body).not.toContain('server-a-auth')
     expect(response.body).not.toContain('credential-value')
     expect(protectedRoute.store.secretValueReads).toBe(0)
@@ -303,8 +303,8 @@ describe('ContextMapperServer', () => {
 
     server.setReady(true)
     response = await invoke(server, '/api/v2/hosts/self/mcpservers/unknown')
-    expect(response.statusCode).toBe(404)
-    expect(JSON.parse(response.body)).toEqual({ error: 'not_found' })
+    expect(response.statusCode).toBe(400)
+    expect(JSON.parse(response.body)).toEqual({ error: 'bad_request' })
     expect(response.headers['Cache-Control']).toBe('no-store, private')
   })
 
@@ -333,11 +333,11 @@ describe('ContextMapperServer', () => {
   })
 
   it.each([
-    ['authorization_unavailable' as const, 503],
-    ['credential_unavailable' as const, 503],
-    ['not_found' as const, 404],
-    ['unauthorized' as const, 401],
-  ])('maps credential %s failures to a token-free fail-closed response', async (code, status) => {
+    ['authorization_unavailable' as const, 503, { error: 'authorization_unavailable' }],
+    ['credential_unavailable' as const, 503, { error: 'credential_unavailable' }],
+    ['not_found' as const, 403, { error: 'forbidden' }],
+    ['unauthorized' as const, 401, { error: 'unauthorized' }],
+  ])('maps credential %s failures to a token-free fail-closed response', async (code, status, body) => {
     const authenticator = { authenticate: () => principal } as unknown as McpApiAuthenticator
     const authorization = {
       getCredential: async () => {
@@ -363,7 +363,7 @@ describe('ContextMapperServer', () => {
     })
 
     expect(response.statusCode).toBe(status)
-    expect(JSON.parse(response.body)).toEqual({ error: code })
+    expect(JSON.parse(response.body)).toEqual(body)
     expect(response.body).not.toContain('token')
     expect(response.headers['Cache-Control']).toBe('no-store, private')
   })
@@ -373,25 +373,25 @@ describe('ContextMapperServer', () => {
     server = protectedRoute.server
 
     let response = await invoke(server, '/api/v2/hosts/self/mcpservers', { method: 'POST' })
-    expect(response.statusCode).toBe(405)
-    expect(JSON.parse(response.body)).toEqual({ error: 'method_not_allowed' })
-    expect(response.headers.Allow).toBe('GET')
+    expect(response.statusCode).toBe(400)
+    expect(JSON.parse(response.body)).toEqual({ error: 'bad_request' })
+    expect(response.headers.Allow).toBeUndefined()
 
     response = await invoke(server, '/api/v2/hosts/self/mcpservers/credential', {
       method: 'POST',
       headers: { 'content-type': 'text/plain' },
       body: '{}',
     })
-    expect(response.statusCode).toBe(415)
-    expect(JSON.parse(response.body)).toEqual({ error: 'unsupported_media_type' })
+    expect(response.statusCode).toBe(400)
+    expect(JSON.parse(response.body)).toEqual({ error: 'bad_request' })
 
     response = await invoke(server, '/api/v2/hosts/self/mcpservers/credential', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ serverName: 'a'.repeat(1_025) }),
     })
-    expect(response.statusCode).toBe(413)
-    expect(JSON.parse(response.body)).toEqual({ error: 'payload_too_large' })
+    expect(response.statusCode).toBe(400)
+    expect(JSON.parse(response.body)).toEqual({ error: 'bad_request' })
     expect(response.headers['Cache-Control']).toBe('no-store, private')
     expect(protectedRoute.store.secretValueReads).toBe(0)
   })

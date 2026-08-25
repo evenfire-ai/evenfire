@@ -1,4 +1,4 @@
-import http, { IncomingMessage, ServerResponse } from 'node:http'
+import http, { ClientRequest, IncomingMessage, ServerResponse } from 'node:http'
 import https from 'node:https'
 
 export interface ForwarderConfig {
@@ -99,12 +99,22 @@ export class HttpForwarder {
 
     await new Promise<void>(resolve => {
       let settled = false
+      let aborted = req.aborted || Boolean(req.socket?.destroyed) || res.destroyed
+      let proxyReq: ClientRequest | undefined
+      let abortHandler: (() => void) | undefined
+      let responseCloseHandler: (() => void) | undefined
       const finish = () => {
         if (settled) return
         settled = true
+        if (abortHandler) req.off('aborted', abortHandler)
+        if (responseCloseHandler) res.off('close', responseCloseHandler)
         resolve()
       }
       const fail = (status: number, error: string) => {
+        if (aborted) {
+          finish()
+          return
+        }
         if (!res.headersSent) {
           res.writeHead(status, {
             'Content-Type': 'application/json',
@@ -119,7 +129,25 @@ export class HttpForwarder {
         finish()
       }
 
-      const proxyReq = requestModule.request(
+      abortHandler = () => {
+        aborted = true
+        proxyReq?.destroy()
+        finish()
+      }
+      responseCloseHandler = () => {
+        if (res.writableEnded) return
+        aborted = true
+        proxyReq?.destroy()
+        finish()
+      }
+      req.once('aborted', abortHandler)
+      res.once('close', responseCloseHandler)
+      if (aborted) {
+        finish()
+        return
+      }
+
+      proxyReq = requestModule.request(
         {
           hostname: parsed.hostname,
           port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
@@ -131,8 +159,8 @@ export class HttpForwarder {
         proxyRes => {
           const contentLength = Number(proxyRes.headers['content-length'] ?? 0)
           if (Number.isFinite(contentLength) && contentLength > this.config.maxResponseSize) {
-            proxyReq.destroy()
-            fail(413, 'response_too_large')
+            proxyReq?.destroy()
+            fail(503, 'authorization_unavailable')
             return
           }
 
@@ -154,7 +182,7 @@ export class HttpForwarder {
             totalSize += part.length
             if (totalSize > this.config.maxResponseSize) {
               proxyRes.destroy()
-              if (!committed) fail(413, 'response_too_large')
+              if (!committed) fail(503, 'authorization_unavailable')
               else {
                 res.end()
                 finish()
@@ -177,18 +205,19 @@ export class HttpForwarder {
             res.end()
             finish()
           })
-          proxyRes.on('error', () => fail(502, 'upstream_error'))
+          proxyRes.on('error', () => fail(503, 'authorization_unavailable'))
         }
       )
 
-      req.once('aborted', () => {
-        if (!proxyReq.destroyed) proxyReq.destroy()
+      if (aborted) {
+        proxyReq.destroy()
         finish()
-      })
-      proxyReq.on('error', () => fail(502, 'upstream_error'))
+        return
+      }
+      proxyReq.on('error', () => fail(503, 'authorization_unavailable'))
       proxyReq.on('timeout', () => {
         proxyReq.destroy()
-        fail(504, 'upstream_timeout')
+        fail(503, 'authorization_unavailable')
       })
       proxyReq.end(body)
     })

@@ -146,7 +146,7 @@ export class McpClient {
    */
   private resolveUrl(): string {
     const { transport } = this.serverConfig
-    if (this.proxyUrl) {
+    if (this.proxyUrl && transport.type !== 'sse') {
       const url = `${this.proxyUrl}/servers/${this.serverConfig.name}/mcp`
       mcpHostLogger.info('proxy_target_selected', { server: this.name })
       return url
@@ -157,21 +157,28 @@ export class McpClient {
   private createTransport(): SupportedMcpTransport {
     const { transport } = this.serverConfig
     const headers: Record<string, string> = {}
+    const proxyForTransport = Boolean(this.proxyUrl && transport.type !== 'sse')
 
     if (this.authToken) {
       headers['Authorization'] = `Bearer ${this.authToken}`
     }
 
     const targetUrl = this.resolveUrl()
-    if (this.proxyUrl && !this.proxyHostAuthorization) {
+    if (proxyForTransport && !this.proxyHostAuthorization) {
       throw new Error('MCP proxy Host authorization is unavailable')
     }
-    const proxyFetch = this.proxyHostAuthorization
+    if (this.proxyUrl && transport.type === 'sse') {
+      mcpHostLogger.info('proxy_transport_bypassed', {
+        server: this.name,
+        reason: 'legacy_sse_direct_path',
+      })
+    }
+    const proxyFetch = proxyForTransport && this.proxyHostAuthorization
       ? createMcpProxyFetch(this.proxyHostAuthorization)
       : undefined
     const requestInit = { headers }
 
-    if (this.proxyUrl || transport.type === 'streamableHttp') {
+    if (proxyForTransport || transport.type === 'streamableHttp') {
       mcpHostLogger.info('transport_selected', { server: this.name, transport: 'streamable_http' })
       return new StreamableHTTPClientTransport(new URL(targetUrl), {
         requestInit,

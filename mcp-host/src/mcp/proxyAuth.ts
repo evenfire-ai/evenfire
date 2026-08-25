@@ -29,6 +29,25 @@ type SharedRefreshState = { refreshPromise: Promise<void> | null }
 
 const sharedRefreshStates = new WeakMap<McpProxyHostAuthorization, SharedRefreshState>()
 
+const sharedHostAuthorizations = new WeakMap<object, McpProxyHostAuthorization>()
+
+/**
+ * Keep the Host authorization facade stable for the lifetime of one runtime
+ * authentication object. Manager replacement must not create a second
+ * refresh domain for the same single-use runtime bearer.
+ */
+export function getSharedMcpProxyHostAuthorization<T extends object>(
+  scope: T,
+  create: () => McpProxyHostAuthorization
+): McpProxyHostAuthorization {
+  let authorization = sharedHostAuthorizations.get(scope)
+  if (!authorization) {
+    authorization = create()
+    sharedHostAuthorizations.set(scope, authorization)
+  }
+  return authorization
+}
+
 function readHostBearer(auth: McpProxyHostAuthorization): string {
   let token = ''
   try {

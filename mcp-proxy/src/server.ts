@@ -91,7 +91,7 @@ export class ProxyServer {
       return
     }
 
-    this.sendError(res, 404, 'not_found')
+    this.sendError(res, 400, 'bad_request')
   }
 
   private async handleForward(
@@ -99,6 +99,12 @@ export class ProxyServer {
     res: ServerResponse,
     serverName: string
   ): Promise<void> {
+    let callerGone = false
+    res.once('close', () => {
+      if (!res.writableEnded) callerGone = true
+    })
+    const isCallerGone = (): boolean => req.aborted || Boolean(req.socket?.destroyed) || callerGone
+
     if (!this.config.forwardingEnabled) {
       this.sendError(res, 503, 'forwarding_disabled')
       return
@@ -107,18 +113,20 @@ export class ProxyServer {
       this.sendError(res, 400, 'bad_request')
       return
     }
+    if (isCallerGone()) return
 
     let body: Buffer
     try {
       body = await this.readBoundedBody(req)
     } catch (error) {
       if (error instanceof Error && error.message === 'body_too_large') {
-        this.sendError(res, 413, 'payload_too_large')
+        this.sendError(res, 400, 'bad_request')
       } else {
         this.sendError(res, 400, 'bad_request')
       }
       return
     }
+    if (isCallerGone()) return
 
     try {
       this.assertSingleMcpAuthorization(req)
@@ -126,6 +134,7 @@ export class ProxyServer {
       this.sendError(res, 400, 'bad_request')
       return
     }
+    if (isCallerGone()) return
 
     let hostBearer: string
     try {
@@ -136,6 +145,7 @@ export class ProxyServer {
       })
       return
     }
+    if (isCallerGone()) return
 
     let authorization: HccForwardAuthorization
     try {
@@ -154,6 +164,7 @@ export class ProxyServer {
       }
       return
     }
+    if (isCallerGone()) return
 
     try {
       validateInternalTarget(authorization.targetUrl, this.config.allowLoopbackTargets)

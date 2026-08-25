@@ -188,7 +188,7 @@ describe('NP-08 mcp-proxy authorization gate', () => {
       body: 'x'.repeat(65),
     })
 
-    expect(response.status).toBe(413)
+    expect(response.status).toBe(400)
     expect(authorizeForward).not.toHaveBeenCalled()
     expect(upstream.connectionCountValue).toBe(0)
     expect(upstream.requestCountValue).toBe(0)
@@ -277,6 +277,62 @@ describe('NP-08 mcp-proxy authorization gate', () => {
     })
 
     expect(response.status).toBe(503)
+    expect(upstream.connectionCountValue).toBe(0)
+    expect(upstream.requestCountValue).toBe(0)
+    expect(upstream.bytesReceivedValue).toBe(0)
+  })
+
+  it('does not open upstream after the caller aborts while HCC is authorizing', async () => {
+    upstream = new InstrumentedUpstream()
+    const targetUrl = await upstream.start()
+    let releaseAuthorization!: () => void
+    let signalAuthorizationStarted!: () => void
+    let signalAuthorizationFinished!: () => void
+    const authorizationStarted = new Promise<void>(resolve => {
+      signalAuthorizationStarted = resolve
+    })
+    const authorizationFinished = new Promise<void>(resolve => {
+      signalAuthorizationFinished = resolve
+    })
+    const authorizeForward = vi.fn(async () => {
+      signalAuthorizationStarted()
+      await new Promise<void>(resolve => {
+        releaseAuthorization = resolve
+      })
+      signalAuthorizationFinished()
+      return {
+        serverName: 'server-a',
+        contextRef: 'context-a',
+        targetUrl,
+        destinationRevision: 'revision-a',
+      }
+    })
+    const port = await start({ authorizeForward })
+
+    const caller = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: '/servers/server-a/mcp',
+      method: 'POST',
+      headers: {
+        'proxy-authorization': hostHeader('host-a'),
+        authorization: 'mcp',
+      },
+    })
+    const callerClosed = new Promise<void>(resolve => {
+      caller.once('error', () => resolve())
+      caller.once('close', () => resolve())
+    })
+    caller.end('aborted-body')
+
+    await authorizationStarted
+    caller.destroy()
+    await callerClosed
+    await new Promise<void>(resolve => setImmediate(resolve))
+    releaseAuthorization()
+    await authorizationFinished
+    await new Promise<void>(resolve => setImmediate(() => setImmediate(resolve)))
+
     expect(upstream.connectionCountValue).toBe(0)
     expect(upstream.requestCountValue).toBe(0)
     expect(upstream.bytesReceivedValue).toBe(0)

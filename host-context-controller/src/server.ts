@@ -324,7 +324,7 @@ export class ContextMapperServer {
       if (req.method === 'GET') {
         await this.handleHostMcpServers(req, res)
       } else {
-        this.sendProtectedJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' })
+        this.sendProtectedJson(res, 400, { error: 'bad_request' })
       }
       return
     }
@@ -333,7 +333,7 @@ export class ContextMapperServer {
       if (req.method === 'POST') {
         await this.handleHostMcpCredential(req, res)
       } else {
-        this.sendProtectedJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' })
+        this.sendProtectedJson(res, 400, { error: 'bad_request' })
       }
       return
     }
@@ -342,7 +342,7 @@ export class ContextMapperServer {
       if (req.method === 'GET') {
         await this.handleSystemMcpServers(req, res)
       } else {
-        this.sendProtectedJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' })
+        this.sendProtectedJson(res, 400, { error: 'bad_request' })
       }
       return
     }
@@ -351,7 +351,7 @@ export class ContextMapperServer {
       if (req.method === 'POST') {
         await this.handleSystemMcpAuthorize(req, res)
       } else {
-        this.sendProtectedJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' })
+        this.sendProtectedJson(res, 400, { error: 'bad_request' })
       }
       return
     }
@@ -369,7 +369,7 @@ export class ContextMapperServer {
 
     // 404
     if (isProtectedMcpRoute) {
-      this.sendProtectedJson(res, 404, { error: 'not_found' })
+      this.sendProtectedJson(res, 400, { error: 'bad_request' })
       return
     }
     this.sendJson(res, 404, { error: 'Not Found', message: 'Endpoint not found' })
@@ -450,18 +450,15 @@ export class ContextMapperServer {
       .split(';', 1)[0]
       .trim()
     if (contentType !== 'application/json') {
-      this.sendProtectedJson(res, 415, { error: 'unsupported_media_type' })
+      this.sendProtectedJson(res, 400, { error: 'bad_request' })
       return
     }
 
     let body: unknown
     try {
       body = await this.readBoundedJsonBody(req)
-    } catch (error) {
-      const status = error instanceof Error && error.message === 'body_too_large' ? 413 : 400
-      this.sendProtectedJson(res, status, {
-        error: status === 413 ? 'payload_too_large' : 'bad_request',
-      })
+    } catch {
+      this.sendProtectedJson(res, 400, { error: 'bad_request' })
       return
     }
     const bodyKeys =
@@ -576,11 +573,8 @@ export class ContextMapperServer {
     let body: unknown
     try {
       body = await this.readBoundedJsonBody(req)
-    } catch (error) {
-      const status = error instanceof Error && error.message === 'body_too_large' ? 413 : 400
-      this.sendProtectedJson(res, status, {
-        error: status === 413 ? 'payload_too_large' : 'bad_request',
-      })
+    } catch {
+      this.sendProtectedJson(res, 400, { error: 'bad_request' })
       return
     }
     const bodyKeys =
@@ -660,7 +654,7 @@ export class ContextMapperServer {
       return
     }
     if (code === 'not_found') {
-      this.sendProtectedJson(res, 404, { error: 'not_found' })
+      this.sendProtectedJson(res, 403, { error: 'forbidden' })
       return
     }
     if (code === 'credential_unavailable') {
@@ -679,12 +673,7 @@ export class ContextMapperServer {
     if (result.allowed) return true
     mcpApiLog.info('MCP request denied', { action, reason: 'rate_limited' })
     mcpHostApiRequestsTotal.inc({ action, outcome: 'denied', reason: 'rate_limited' }, 1)
-    this.sendProtectedJson(
-      res,
-      429,
-      { error: 'rate_limited' },
-      { 'Retry-After': String(result.retryAfterSeconds) }
-    )
+    this.sendProtectedJson(res, 503, { error: 'authorization_unavailable' })
     return false
   }
 

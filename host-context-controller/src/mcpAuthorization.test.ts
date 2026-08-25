@@ -236,7 +236,7 @@ describe('McpAuthorizationService', () => {
     }
   })
 
-  it('returns only the current Context inventory and an opaque Secret-aware revision', async () => {
+  it('returns only the current Context inventory without Secret metadata or credential revisions', async () => {
     const store = new FakeStore()
     const service = new McpAuthorizationService(store)
     const inventory = await service.listServers(principal)
@@ -244,25 +244,26 @@ describe('McpAuthorizationService', () => {
       expect.objectContaining({
         name: 'server-a',
         authRequired: true,
-        credentialRevision: expect.any(String),
         status: { deployed: true, ready: true, authoritative: false },
       }),
     ])
-    expect(inventory[0]).not.toHaveProperty('contextRef')
+    expect(inventory[0]).toHaveProperty('contextRef', 'context-a')
     expect(inventory[0]).not.toHaveProperty('auth')
+    expect(inventory[0]).not.toHaveProperty('credentialRevision')
     expect(JSON.stringify(inventory)).not.toContain('credential-value')
-    expect(store.secretMetadataReads).toBe(1)
+    expect(store.secretMetadataReads).toBe(0)
     expect(store.secretValueReads).toBe(0)
   })
 
-  it('authorizes before Secret read and returns the same revision for a stable credential', async () => {
+  it('authorizes before Secret read and returns the revision only from the credential route', async () => {
     const store = new FakeStore()
     const service = new McpAuthorizationService(store)
     const inventory = await service.listServers(principal)
+    expect(store.secretMetadataReads).toBe(0)
     const credential = await service.getCredential(principal, 'server-a')
     expect(credential).toEqual({
       token: 'credential-value',
-      credentialRevision: inventory[0].credentialRevision,
+      credentialRevision: expect.any(String),
     })
   })
 
@@ -461,7 +462,7 @@ describe('McpAuthorizationService', () => {
     await expect(service.listServers(principal)).rejects.toMatchObject({
       code: 'authorization_unavailable',
     })
-    expect(store.secretMetadataReads).toBe(1)
+    expect(store.secretMetadataReads).toBe(0)
     expect(store.secretValueReads).toBe(0)
   })
 
@@ -476,7 +477,7 @@ describe('McpAuthorizationService', () => {
     await expect(service.listServers(principal)).rejects.toMatchObject({
       code: 'authorization_unavailable',
     })
-    expect(store.secretMetadataReads).toBe(1)
+    expect(store.secretMetadataReads).toBe(0)
     expect(store.secretValueReads).toBe(0)
   })
 

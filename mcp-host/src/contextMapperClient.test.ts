@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   type ContextMapperAuthentication,
   ContextMapperClient,
-  ContextMapperCredentialRevisionError,
   ContextMapperRequestError,
   isContextMapperAuthorityRevocation,
   isContextMapperInventoryAuthorityRevocation,
@@ -32,7 +31,6 @@ function authorizedServer(overrides: Record<string, unknown> = {}) {
     enabled: true,
     status: { deployed: true, ready: true },
     authRequired: true,
-    credentialRevision: 'revision-1',
     ...overrides,
   }
 }
@@ -92,6 +90,24 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
         port: 3443,
       },
     })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(inventory([server])), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    await expect(client.listServersForHost()).resolves.toEqual([server])
+  })
+
+  it('accepts the authenticated Context reference as low-sensitivity directory metadata', async () => {
+    const server = { ...authorizedServer(), contextRef: 'context-a' }
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
@@ -212,7 +228,7 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
       authentication: auth,
     })
 
-    await expect(client.getAuthToken('secured-server', 'revision-1')).rejects.toMatchObject({
+    await expect(client.getAuthToken('secured-server')).rejects.toMatchObject({
       status: 401,
       kind: 'credential',
       authorizationFailure: true,
@@ -247,7 +263,7 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
     expect(isContextMapperAuthorityRevocation(error)).toBe(false)
   })
 
-  it('rejects forbidden Context or Secret metadata in a successful inventory', async () => {
+  it('rejects forbidden auth or Secret metadata in a successful inventory', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
@@ -255,7 +271,6 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
           JSON.stringify(
             inventory([
               authorizedServer({
-                contextRef: 'foreign-context',
                 auth: { type: 'bearer', secretRef: 'foreign-secret' },
               }),
             ])
@@ -270,6 +285,25 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
 
     await expect(client.pollServers()).rejects.toThrow(
       'HCC inventory response contains forbidden authority metadata'
+    )
+  })
+
+  it('rejects a credential revision in the Host directory response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify(inventory([authorizedServer({ credentialRevision: 'revision-1' })])),
+          { status: 200 }
+        )
+      )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    await expect(client.pollServers()).rejects.toThrow(
+      'HCC inventory response contains forbidden credential revision'
     )
   })
 
@@ -314,7 +348,7 @@ describe('ContextMapperClient scoped credential retrieval', () => {
     vi.unstubAllGlobals()
   })
 
-  it('posts only the server selector and validates the inventory revision', async () => {
+  it('posts only the server selector without requiring an inventory revision', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ token: 'upstream-token', credentialRevision: 'revision-1' }), {
         status: 200,
@@ -325,9 +359,9 @@ describe('ContextMapperClient scoped credential retrieval', () => {
       authentication: authentication(),
     })
 
-    await expect(client.getAuthToken('secured-server', 'revision-1')).resolves.toBe(
-      'upstream-token'
-    )
+    await expect(client.getAuthToken('secured-server')).resolves.toMatchObject({
+      credentialRevision: 'revision-1',
+    })
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('http://context-mapper.test/api/v2/hosts/self/mcpservers/credential')
@@ -336,7 +370,7 @@ describe('ContextMapperClient scoped credential retrieval', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer access-v1')
   })
 
-  it('rejects a credential read whose post-read authority revision changed', async () => {
+  it('accepts the HCC-fenced credential without comparing an inventory revision', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
@@ -349,24 +383,9 @@ describe('ContextMapperClient scoped credential retrieval', () => {
       authentication: authentication(),
     })
 
-    const result = client.getAuthToken('secured-server', 'revision-1')
-    const error = await result.catch(value => value)
-    expect(error).toBeInstanceOf(ContextMapperCredentialRevisionError)
-    expect(isContextMapperAuthorityRevocation(error)).toBe(true)
-  })
-
-  it('rejects a credential read without an inventory authority revision before transport', async () => {
-    const fetchMock = vi.fn()
-    vi.stubGlobal('fetch', fetchMock)
-    const client = new ContextMapperClient('http://context-mapper.test', {
-      authentication: authentication(),
+    await expect(client.getAuthToken('secured-server')).resolves.toMatchObject({
+      credentialRevision: 'revision-2',
     })
-
-    const error = await client.getAuthToken('secured-server').catch(cause => cause)
-
-    expect(error).toBeInstanceOf(ContextMapperCredentialRevisionError)
-    expect(isContextMapperAuthorityRevocation(error)).toBe(true)
-    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('retains token:null as the explicit allowed no-auth response', async () => {
@@ -382,7 +401,9 @@ describe('ContextMapperClient scoped credential retrieval', () => {
       authentication: authentication(),
     })
 
-    await expect(client.getAuthToken('open-server', 'revision-1')).resolves.toBeUndefined()
+    await expect(client.getAuthToken('open-server')).resolves.toMatchObject({
+      credentialRevision: 'revision-1',
+    })
   })
 
   it('classifies an opaque credential 404 as target authority revocation', async () => {
@@ -391,7 +412,7 @@ describe('ContextMapperClient scoped credential retrieval', () => {
       authentication: authentication(),
     })
 
-    const error = await client.getAuthToken('foreign-server', 'revision-1').catch(value => value)
+    const error = await client.getAuthToken('foreign-server').catch(value => value)
     expect(error).toMatchObject({ status: 404, kind: 'credential' })
     expect(isContextMapperAuthorityRevocation(error)).toBe(true)
     expect(String(error)).not.toContain('foreign-server')

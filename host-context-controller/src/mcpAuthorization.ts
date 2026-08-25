@@ -56,13 +56,13 @@ export interface McpAuthorizationStore {
 
 export interface AuthorizedMcpServerInfo {
   name: string
+  contextRef: string
   description?: string
   transport: McpServerTransport
   enabled: boolean
   status: Pick<McpServerStatus, 'deployed' | 'ready'> &
     Partial<Pick<McpServerStatus, 'authoritative'>>
   authRequired: boolean
-  credentialRevision?: string
 }
 
 export interface AuthorizedCredential {
@@ -330,7 +330,8 @@ export class McpAuthorizationService {
 
   private async resolveServerGrant(
     binding: AuthorizedHostContext,
-    serverName: string
+    serverName: string,
+    includeCredentialMetadata = false
   ): Promise<AuthorizedMcpServerGrant> {
     if (!binding.context.mcpServers.includes(serverName)) {
       throw new McpAuthorizationError('not_found')
@@ -354,7 +355,7 @@ export class McpAuthorizationService {
 
     const authRequired = Boolean(server.auth && server.auth.type !== 'none')
     let secretMetadata: AuthoritySecretMetadata | null = null
-    if (authRequired && server.auth?.secretRef) {
+    if (includeCredentialMetadata && authRequired && server.auth?.secretRef) {
       try {
         secretMetadata = await this.store.readSecretMetadata(server.auth.secretRef)
       } catch {
@@ -373,7 +374,9 @@ export class McpAuthorizationService {
       ...binding,
       server,
       secretMetadata,
-      credentialRevision: revisionFor(server, secretMetadata),
+      credentialRevision: includeCredentialMetadata
+        ? revisionFor(server, secretMetadata)
+        : revisionFor(server, null),
     }
   }
 
@@ -484,6 +487,7 @@ export class McpAuthorizationService {
       const authRequired = Boolean(grant.server.auth && grant.server.auth.type !== 'none')
       servers.push({
         name: grant.server.name,
+        contextRef: grant.context.name,
         ...(grant.server.description ? { description: grant.server.description } : {}),
         transport: toPublicMcpTransport(grant.server.transport),
         enabled: grant.server.enabled,
@@ -495,7 +499,6 @@ export class McpAuthorizationService {
             : {}),
         },
         authRequired,
-        ...(authRequired ? { credentialRevision: grant.credentialRevision } : {}),
       })
     }
     const revalidated = await this.resolveHostContext(principal)
@@ -510,12 +513,13 @@ export class McpAuthorizationService {
     serverName: string
   ): Promise<AuthorizedCredential> {
     const binding = await this.resolveHostContext(principal)
-    const grant = await this.resolveServerGrant(binding, serverName)
+    const grant = await this.resolveServerGrant(binding, serverName, true)
     const authRequired = Boolean(grant.server.auth && grant.server.auth.type !== 'none')
     if (!authRequired) {
       const revalidated = await this.resolveServerGrant(
         await this.resolveHostContext(principal),
-        serverName
+        serverName,
+        true
       )
       if (!sameGrant(grant, revalidated)) {
         throw new McpAuthorizationError('authorization_unavailable')
@@ -551,7 +555,8 @@ export class McpAuthorizationService {
 
     const revalidated = await this.resolveServerGrant(
       await this.resolveHostContext(principal),
-      serverName
+      serverName,
+      true
     )
     if (!sameGrant(grant, revalidated)) {
       throw new McpAuthorizationError('authorization_unavailable')

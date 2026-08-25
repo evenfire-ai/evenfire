@@ -87,8 +87,8 @@ for rendered in "$@"; do
       abort("system v2 route mixes the two identities") if block.include?("proxy_set_header Authorization $http_x_clerum_host_authorization;")
       abort("system v2 route does not fail closed when rate limited") unless block.include?("limit_req_status 503;")
     end
-    abort("system inventory route is not GET-only") unless system_inventory.include?("$request_method != GET")
-    abort("system authorize route is not POST-only") unless system_authorize.include?("$request_method != POST")
+    abort("system inventory route is not GET-only") unless system_inventory.include?("if ($request_method != GET) { return 400; }")
+    abort("system authorize route is not POST-only") unless system_authorize.include?("if ($request_method != POST) { return 400; }")
     abort("system authorize route does not explicitly forward the private Host identity") unless system_authorize.include?("proxy_set_header X-Clerum-Host-Authorization $http_x_clerum_host_authorization;")
     abort("system authorize body is not bounded") unless system_authorize.include?("client_max_body_size 1k;")
     abort("system authorize route does not preserve explicit body framing") unless system_authorize.include?("proxy_set_header Content-Length $content_length;")
@@ -99,10 +99,10 @@ for rendered in "$@"; do
       abort("v2 route does not explicitly forward Authorization") unless block.include?("proxy_set_header Authorization $http_authorization;")
       abort("v2 route permits caching") unless block.include?("Cache-Control \"no-store, private\"")
     end
-    abort("credential route is not POST-only") unless credential.include?("$request_method != POST")
+    abort("credential route is not POST-only") unless credential.include?("if ($request_method != POST) { return 400; }")
     abort("credential body is not bounded") unless credential.include?("client_max_body_size 1k;")
     abort("credential route does not preserve explicit body framing") unless credential.include?("proxy_set_header Content-Length $content_length;")
-    abort("inventory route is not GET-only") unless inventory.include?("$request_method != GET")
+    abort("inventory route is not GET-only") unless inventory.include?("if ($request_method != GET) { return 400; }")
     secure_local_response = lambda do |block, label|
       abort("#{label} permits caching") unless block.include?("Cache-Control \"no-store, private\"")
       abort("#{label} omits legacy no-cache protection") unless block.include?("Pragma \"no-cache\"")
@@ -114,9 +114,7 @@ for rendered in "$@"; do
       abort("legacy Host route is not tombstoned") unless block.include?("return 410")
       secure_local_response.call(block, "legacy Host tombstone")
     end
-    %w[@hcc_bad_request @hcc_method_not_allowed @hcc_payload_too_large].each do |location|
-      secure_local_response.call(location_block.call("location #{location} {"), "gateway error response")
-    end
+    secure_local_response.call(location_block.call("location @hcc_bad_request {"), "gateway error response")
     abort("temporary system inventory compatibility route is absent") unless nginx.include?("location = /api/v1/mcpservers {")
 
     access_log = nginx[/log_format hcc_gateway_json.*?;/m].to_s
