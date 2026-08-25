@@ -634,12 +634,71 @@ run_np08_flag_off_phase() {
 run_np08_deployed_manager_journey() {
   echo 'E2E proxy leg: deployed mcp-host manager and SDK through mcp-proxy'
   private_proxy_rollout=1
-  kctl -n "${MCP_NS}" patch mcpserver "${SERVER_A}" --type=merge \
-    -p "{\"spec\":{\"image\":\"clerum/mock-mcp-server:test\",\"imagePullPolicy\":\"IfNotPresent\",\"managed\":true,\"transport\":{\"type\":\"streamableHttp\",\"url\":\"http://${SERVER_A}.mcp-server.svc.cluster.local:3000/mcp\",\"port\":3000}}}" \
-    >/dev/null
-  kctl -n "${MCP_NS}" patch mcpserver "${SERVER_B}" --type=merge \
-    -p "{\"spec\":{\"image\":\"clerum/mock-mcp-server:test\",\"imagePullPolicy\":\"IfNotPresent\",\"managed\":true,\"transport\":{\"type\":\"streamableHttp\",\"url\":\"http://${SERVER_B}.mcp-server.svc.cluster.local:3000/mcp\",\"port\":3000}}}" \
-    >/dev/null
+  # McpServer.spec.managed is immutable. The discovery-only fixtures start as
+  # managed:false so HCC cannot create a runtime before the proxy lane is
+  # enabled; replace only these labeled synthetic servers before exercising
+  # the real HCC-managed runtime path.
+  kctl -n "${MCP_NS}" delete mcpserver "${SERVER_A}" "${SERVER_B}" \
+    --ignore-not-found --wait=true --timeout=180s >/dev/null
+  for server in "${SERVER_A}" "${SERVER_B}"; do
+    for attempt in {1..60}; do
+      if ! kctl -n "${MCP_NS}" get mcpserver "${server}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    if kctl -n "${MCP_NS}" get mcpserver "${server}" >/dev/null 2>&1; then
+      echo "FAIL: immutable McpServer fixture was not deleted: ${server}" >&2
+      return 1
+    fi
+  done
+  kctl create -f - >/dev/null <<YAML
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: ${SERVER_A}
+  namespace: ${MCP_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
+spec:
+  contextRef: ${CONTEXT_A}
+  image: clerum/mock-mcp-server:test
+  imagePullPolicy: IfNotPresent
+  managed: true
+  transport:
+    type: streamableHttp
+    url: http://${SERVER_A}.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000
+  auth:
+    type: bearer
+    secretRef: ${SECRET_A}
+    secretKey: token
+  enabled: true
+---
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: ${SERVER_B}
+  namespace: ${MCP_NS}
+  labels:
+    ${OWNER_LABEL_KEY}: ${OWNER_LABEL_VALUE}
+    np08.evenfire/run: ${RUN_ID}
+spec:
+  contextRef: ${CONTEXT_B}
+  image: clerum/mock-mcp-server:test
+  imagePullPolicy: IfNotPresent
+  managed: true
+  transport:
+    type: streamableHttp
+    url: http://${SERVER_B}.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000
+  auth:
+    type: bearer
+    secretRef: ${SECRET_B}
+    secretKey: token
+  enabled: true
+YAML
   kctl -n "${MCP_NS}" set env deployment/mcp-proxy MCP_PROXY_FORWARDING_ENABLED=true >/dev/null
   kctl -n "${HOST_NS}" patch configmap mcp-host-config --type=merge \
     -p '{"data":{"MCP_PROXY_ENABLED":"true"}}' >/dev/null

@@ -217,6 +217,9 @@ if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   ! grep -Fq 'run_np08_flag_off_phase' "${E2E_SCRIPT}" ||
   ! grep -Fq 'positive-rotate)' "${E2E_SCRIPT}" ||
   ! grep -Fq 'forwarding-off)' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'spec.managed is immutable' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'delete mcpserver "${SERVER_A}" "${SERVER_B}"' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'managed: true' "${E2E_SCRIPT}" ||
   ! grep -Fq 'NP08_PROXY_FORCE_ACCESS_REREAD' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_projected_identity_digest' "${E2E_SCRIPT}" ||
   ! grep -Fq 'run_np08_sdk_protocol_journey' "${E2E_SCRIPT}" ||
