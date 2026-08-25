@@ -58,6 +58,9 @@ const rateLimitMock = vi.hoisted(() => ({
 const liveTeamAuthorizationMock = vi.hoisted(() => ({
   getLiveTeamMembership: vi.fn(),
 }))
+const passwordAuthMock = vi.hoisted(() => ({
+  authenticatePasswordAndIssueSession: vi.fn(),
+}))
 const dbMock = vi.hoisted(() => ({
   query: vi.fn(),
 }))
@@ -85,6 +88,7 @@ vi.mock('../src/utils/auth/rpcAuthToken.js', async importOriginal => {
 vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
 vi.mock('../src/services/access/liveTeamAuthorization.js', () => liveTeamAuthorizationMock)
+vi.mock('../src/services/auth/passwordSessionAuthentication.js', () => passwordAuthMock)
 vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
   return {
@@ -154,6 +158,7 @@ describe('routes/profile', () => {
     Object.values(googleAuthMock).forEach(fn => fn.mockReset())
     Object.values(sandboxUiScopeMock).forEach(fn => fn.mockReset())
     Object.values(invitationFlowRegistrationMock).forEach(fn => fn.mockReset())
+    Object.values(passwordAuthMock).forEach(fn => fn.mockReset())
     liveTeamAuthorizationMock.getLiveTeamMembership.mockReset()
     liveTeamAuthorizationMock.getLiveTeamMembership.mockImplementation(
       async (_userId: string, teamId: string) =>
@@ -1100,6 +1105,54 @@ describe('routes/profile', () => {
       name: 'User',
       picture: 'https://example.com/avatar.png',
     })
+  })
+
+  it('returns one generic public denial for retired credential-provider logins', async () => {
+    googleAuthMock.verifyGoogleIdToken.mockResolvedValue({
+      email: 'retired@example.com',
+      name: 'Retired User',
+      picture: null,
+    })
+    svc.googleLoginData.mockResolvedValue({ error: 'user_retired' })
+    passwordAuthMock.authenticatePasswordAndIssueSession.mockResolvedValue({
+      error: 'user_retired',
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/auth/google-login'))
+      .send({ idToken: 'retired-google-token' })
+      .expect(403, { error: 'membership_not_found' })
+
+    await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
+      .send({ email: 'retired@example.com', password: 'correct-password' })
+      .expect(403, { error: 'membership_not_found' })
+
+    expect(svc.googleLoginData).toHaveBeenCalledWith({
+      email: 'retired@example.com',
+      name: 'Retired User',
+      picture: null,
+    })
+    expect(passwordAuthMock.authenticatePasswordAndIssueSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: 'retired@example.com',
+        password: 'correct-password',
+      })
+    )
+  })
+
+  it('preserves the existing password-login response for invalid active credentials', async () => {
+    passwordAuthMock.authenticatePasswordAndIssueSession.mockResolvedValue(null)
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
+      .send({ email: 'active@example.com', password: 'wrong-password' })
+      .expect(401, { error: 'Unauthorized' })
   })
 
   it('rate limits external credential attempts before authentication work', async () => {

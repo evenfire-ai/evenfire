@@ -82,6 +82,13 @@ function requireLegacySessionTokenPayload(req: Request, res: Response, next: Nex
   next()
 }
 
+function sendExternalLoginError(res: Response, error: string | undefined): Response {
+  if (error === 'password_not_set') {
+    return res.status(409).json({ error: 'password_not_set' })
+  }
+  return res.status(403).json({ error: 'membership_not_found' })
+}
+
 async function requireLegacyRpcSessionRateLimitContext(
   req: ExternalAuthedRequest,
   res: Response,
@@ -131,7 +138,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           name: google.name,
           picture: google.picture,
         })
-        if ('error' in login) return res.status(403).json({ error: login.error })
+        if ('error' in login) return sendExternalLoginError(res, login.error)
         const role = login.membership.role
         const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
         if (selection.status !== 'selected') {
@@ -197,10 +204,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           return res.status(401).json({ error: 'Unauthorized' })
         }
         if ('error' in login) {
-          if (login.error === 'password_not_set') {
-            return res.status(409).json({ error: 'password_not_set' })
-          }
-          return res.status(403).json({ error: 'membership_not_found' })
+          return sendExternalLoginError(res, login.error)
         }
 
         const role = login.membership.role
