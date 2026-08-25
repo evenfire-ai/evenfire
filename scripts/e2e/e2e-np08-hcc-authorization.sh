@@ -1054,8 +1054,8 @@ for (const [label, serverName] of [['cross-Context', serverB], ['unknown', 'np08
     headers: jsonHeaders(accessToken),
     body: JSON.stringify({ serverName }),
   })
-  if (denied.response.status !== 404 || JSON.stringify(denied.body) !== '{"error":"not_found"}') {
-    throw new Error(`${label} credential request was not an opaque 404`)
+  if (denied.response.status !== 403 || JSON.stringify(denied.body) !== '{"error":"forbidden"}') {
+    throw new Error(`${label} credential request was not an opaque 403`)
   }
   if (Object.hasOwn(denied.body ?? {}, 'token')) throw new Error(`${label} response contained a token`)
   console.log(`PASS ${label} credential request denied without a credential response`)

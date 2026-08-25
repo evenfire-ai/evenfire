@@ -182,6 +182,12 @@ for ordinal in $(seq 1 "${embedded_node_count}"); do
 done
 pass 'embedded Node heredocs have column-zero terminators and valid CommonJS syntax'
 
+if ! grep -Fq 'denied.response.status !== 403' "${E2E_SCRIPT}" ||
+  ! grep -Fq '{"error":"forbidden"}' "${E2E_SCRIPT}"; then
+  fail 'membership denial E2E does not assert the approved generic 403 contract'
+fi
+pass 'membership denial E2E asserts the approved generic 403 contract'
+
 if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_cleanup_final_status' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_read_sync_marker' "${E2E_SCRIPT}" ||

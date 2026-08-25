@@ -8,8 +8,17 @@ fi
 
 rendered="$1"
 helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/security/check-np08-mcp-host-networkpolicy.rb"
+verifier="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/security/verify-np08-hcc-authz.sh"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/np08-live-policy-test.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
+
+if ! grep -Fq '["proxy_8083"] ? 1 : 0' "${verifier}" ||
+  grep -Fq '["proxy_8083"] ? 0 : 1' "${verifier}" ||
+  ! grep -Fq 'check mcp_host_proxy_8083_egress' "${verifier}"; then
+  echo 'FAIL: live verifier inverts or omits the exact mcp-proxy 8083 lane' >&2
+  exit 1
+fi
+echo 'PASS: live verifier preserves the exact mcp-proxy 8083 lane'
 
 RUBYOPT=--disable=gems ruby -ryaml -rjson -e '
   documents = YAML.load_stream(File.read(ARGV.fetch(0))).select { |d| d.is_a?(Hash) }
