@@ -74,7 +74,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function decodeMcpServer(value: unknown): McpServerInfo {
   if (!isRecord(value)) throw new Error('HCC inventory response is malformed')
   if ('contextRef' in value &&
-    (typeof value.contextRef !== 'string' || !MCP_SERVER_NAME_PATTERN.test(value.contextRef))) {
+    (typeof value.contextRef !== 'string' ||
+      value.contextRef.length > 253 ||
+      !MCP_SERVER_NAME_PATTERN.test(value.contextRef))) {
     throw new Error('HCC inventory response contains an invalid Context reference')
   }
   if (

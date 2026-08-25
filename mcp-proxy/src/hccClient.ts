@@ -101,6 +101,8 @@ function parseInventoryResponse(payload: unknown): HccServersResponse {
       value.name.length > 253 ||
       !SERVER_NAME_RE.test(value.name) ||
       typeof value.contextRef !== 'string' ||
+      value.contextRef.length > 253 ||
+      !SERVER_NAME_RE.test(value.contextRef) ||
       typeof value.enabled !== 'boolean' ||
       typeof value.destinationRevision !== 'string' ||
       !value.destinationRevision

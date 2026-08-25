@@ -38,7 +38,7 @@ export class ProxyServer {
             reason: error instanceof Error ? error.name : 'unknown',
           })
           if (!res.headersSent) {
-            this.sendError(res, 500, 'internal_error')
+            this.sendError(res, 503, 'authorization_unavailable')
           } else {
             res.end()
           }

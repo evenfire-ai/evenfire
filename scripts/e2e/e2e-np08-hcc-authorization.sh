@@ -203,6 +203,7 @@ run_np08_gateway_raw_header_checks() {
   kctl -n "${MCP_NS}" get deployment mcp-proxy \
     -o jsonpath='{.status.readyReplicas}' | grep -qx '1'
   kctl -n "${MCP_NS}" exec deploy/mcp-proxy -- node - <<'NODE'
+;(async () => {
 const fs = require('node:fs')
 const net = require('node:net')
 const gatewayHost = 'host-context-controller-api-gateway.control-plane.svc.cluster.local'
@@ -264,7 +265,11 @@ const proxyBoundary = await rawRequest('GET', '/api/v2/system/mcpservers', [
 ])
 if (proxyBoundary !== 200) throw new Error(`private identity boundary probe failed: ${proxyBoundary}`)
 console.log('PASS private proxy identity is not mixed into the system route')
-  NODE
+})().catch(() => {
+  console.error('FAIL: NP-08 gateway raw header check')
+  process.exitCode = 1
+})
+NODE
 }
 
 read_np08_mock_stats() {
@@ -374,6 +379,7 @@ run_np08_manager_phase() {
       "NP08_PROXY_DIRECT_URL=http://127.0.0.1:9/mcp" \
       "NP08_PROXY_URL=http://mcp-proxy.mcp-server.svc.cluster.local:8083" \
       node - <<'NODE'
+;(async () => {
 const { createMcpManagerForHost } = require('/app/mcp-host/dist/mcp/managerFactory.js')
 const mode = process.env.NP08_PROXY_MODE
 const allowedServer = process.env.NP08_PROXY_SERVER_ALLOWED
@@ -491,6 +497,10 @@ try {
 } finally {
   await manager.close()
 }
+})().catch(() => {
+  console.error('FAIL: NP-08 deployed manager journey')
+  process.exitCode = 1
+})
 NODE
 }
 np08_projected_identity_digest() {

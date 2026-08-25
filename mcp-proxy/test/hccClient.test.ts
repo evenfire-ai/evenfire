@@ -102,6 +102,30 @@ describe("HccClient", () => {
     expect(servers[0].managed).toBe(true);
   });
 
+  it.each(["", "A", "a".repeat(254)])(
+    "should reject an inventory entry with an invalid Context reference %j",
+    async (contextRef) => {
+      responseBody = {
+        schemaVersion: 1,
+        servers: [
+          {
+            name: "bounded-context-server",
+            contextRef,
+            transport: { type: "streamableHttp", url: "http://bounded.mcp-server:3000/mcp" },
+            enabled: true,
+            status: { deployed: true, ready: true },
+            destinationRevision: "revision-1",
+          },
+        ],
+        timestamp: new Date().toISOString(),
+      };
+
+      const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
+
+      await expect(client.fetchServers()).resolves.toEqual([]);
+    }
+  );
+
   it("should reject a system inventory entry with an unapproved description field", async () => {
     responseBody = { schemaVersion: 1, servers: [
       {

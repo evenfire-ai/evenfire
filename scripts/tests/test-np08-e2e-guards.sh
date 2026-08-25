@@ -150,6 +150,31 @@ if np08_verify_sync_marker \
 fi
 pass 'provenance rejects a non-local image coordinate'
 
+check_embedded_node() {
+  local ordinal="$1"
+  if ! awk -v ordinal="${ordinal}" '
+    /node - <<'\''NODE'\''$/ {
+      block += 1
+      in_block = block == ordinal
+      next
+    }
+    in_block && /^NODE$/ {
+      in_block = 0
+      exit
+    }
+    in_block { print }
+  ' "${E2E_SCRIPT}" | node --check >/dev/null 2>&1; then
+    fail "embedded Node heredoc ${ordinal} is not valid CommonJS"
+  fi
+}
+
+if grep -Eq '^[[:space:]]+NODE$' "${E2E_SCRIPT}"; then
+  fail 'an embedded Node heredoc terminator is indented'
+fi
+check_embedded_node 1
+check_embedded_node 2
+pass 'embedded Node heredocs have column-zero terminators and valid CommonJS syntax'
+
 if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_cleanup_final_status' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_read_sync_marker' "${E2E_SCRIPT}" ||

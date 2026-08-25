@@ -124,6 +124,29 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
     await expect(client.listServersForHost()).resolves.toEqual([server])
   })
 
+  it.each(['', 'A', 'a'.repeat(254)])(
+    'rejects an invalid authenticated Context reference %j',
+    async contextRef => {
+      const server = { ...authorizedServer(), contextRef }
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify(inventory([server])), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+      const client = new ContextMapperClient('http://context-mapper.test', {
+        authentication: authentication(),
+      })
+
+      await expect(client.listServersForHost()).rejects.toThrow(
+        'HCC inventory response contains an invalid Context reference'
+      )
+    }
+  )
+
   it.each([0, -1, 1.5, 65_536, '3443', null])(
     'rejects malformed v2 transport port %j',
     async port => {

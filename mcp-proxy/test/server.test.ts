@@ -165,4 +165,20 @@ describe("ProxyServer", () => {
     expect(res.body).not.toContain("unexpected_forwarder_failure");
     expect(throwingForwarder.forward).toHaveBeenCalledTimes(1);
   });
+
+  it("should normalize an unexpected data-plane handler failure to 503", async () => {
+    const handleRequest = vi
+      .spyOn(server as any, "handleRequest")
+      .mockRejectedValue(new Error("unexpected_handler_failure"));
+
+    try {
+      const res = await httpRequest(actualPort, "/servers/server-a/mcp", "GET");
+
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toEqual({ error: "authorization_unavailable" });
+      expect(res.body).not.toContain("unexpected_handler_failure");
+    } finally {
+      handleRequest.mockRestore();
+    }
+  });
 });
