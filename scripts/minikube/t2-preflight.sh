@@ -8,6 +8,8 @@ set -euo pipefail
 set +x
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+T2_EVIDENCE_KIND=planner
+export T2_EVIDENCE_KIND
 # shellcheck source=scripts/minikube/t2-common.sh
 source "$SCRIPT_DIR/t2-common.sh"
 

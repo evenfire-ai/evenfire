@@ -11,7 +11,7 @@
 # counterpart is scripts/minikube/build-images.sh.
 #
 # Usage:
-#   MINIKUBE_PROFILE=clerum-test ./scripts/minikube/pull-images.sh [--only=<svc>]
+#   MINIKUBE_PROFILE=<branch-profile> ./scripts/minikube/pull-images.sh [--only=<svc>]
 #
 # Env:
 #   MINIKUBE_IMAGE_TAG        Override the recorded/committed tag (render-time
@@ -19,18 +19,19 @@
 #                             the pull path before a release tag exists.
 #   MINIKUBE_SKIP_UIS         true -> do not pull control-ui/profile-ui, which
 #                             the -no-uis overlays delete anyway (see below).
-#   MINIKUBE_PROFILE          Target profile (default: clerum-test)
+#   MINIKUBE_PROFILE          Target branch-owned profile (provided by Make/T2)
 #   MINIKUBE_MULTI_NODE       true -> pull on the host + `minikube image load`
-#   MINIKUBE_PULL_PARALLELISM Concurrent pulls (default: 6)
+#   MINIKUBE_PULL_PARALLELISM Concurrent pulls (default: 6, range: 1-64)
 #   MINIKUBE_IMAGE_PULL_RETRIES     Attempts per image before it is reported
-#                             failed (default: 3). A transient registry blip
+#                             failed (default: 3, range: 1-10). A transient registry blip
 #                             (one bad pull 24 images into a run) should not
 #                             abort the whole setup. Mirrors the naming and
 #                             defaults of build-images.sh's
 #                             MINIKUBE_BASE_IMAGE_PULL_RETRIES, applied here to
 #                             the ghcr application-image pull instead of
 #                             Dockerfile base images.
-#   MINIKUBE_IMAGE_PULL_DELAY_SECS  Delay between failed attempts (default: 5).
+#   MINIKUBE_IMAGE_PULL_DELAY_SECS  Delay between failed attempts (default: 5,
+#                             range: 0-300 seconds).
 #
 # Two behaviours here are load-bearing; do not "optimize" them away:
 #
@@ -75,6 +76,7 @@ MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}"
 PULL_PARALLELISM="${MINIKUBE_PULL_PARALLELISM:-6}"
 MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-3}"
 MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-5}"
+MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS:-30}"
 GHCR_NAMESPACE="ghcr.io/evenfire-ai"
 ONLY_SVC=""
 
@@ -93,6 +95,15 @@ for arg in "$@"; do
   esac
 done
 
+validate_pull_integer() {
+  local name="$1" value="$2" minimum="$3" maximum="$4"
+  if ! [[ "${value}" =~ ^[0-9]+$ ]] ||
+     (( 10#${value} < minimum || 10#${value} > maximum )); then
+    err "MINIKUBE_PULL_CONFIG_INVALID: ${name} must be an integer from ${minimum} to ${maximum}"
+    exit 2
+  fi
+}
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -104,6 +115,19 @@ log()  { echo -e "${CYAN}[PULL]${NC} $*"; }
 ok()   { echo -e "${GREEN}  OK${NC} -- $*"; }
 warn() { echo -e "${YELLOW}  WARN${NC} -- $*"; }
 err()  { echo -e "${RED}  ERROR${NC} -- $*" >&2; }
+
+validate_manifest_image_id() {
+  local image="$1" image_id="$2"
+  if [[ -z "${image_id}" || "${image_id}" == "NOT_PULLED" ||
+        ! "${image_id}" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+    err "IMAGE_MANIFEST_INVALID: docker inspect returned an invalid image ID for ${image}"
+    return 1
+  fi
+}
+
+validate_pull_integer MINIKUBE_PULL_PARALLELISM "${PULL_PARALLELISM}" 1 64
+validate_pull_integer MINIKUBE_IMAGE_PULL_RETRIES "${MINIKUBE_IMAGE_PULL_RETRIES}" 1 10
+validate_pull_integer MINIKUBE_IMAGE_PULL_DELAY_SECS "${MINIKUBE_IMAGE_PULL_DELAY_SECS}" 0 300
 
 # ---- Resolve the effective tag -------------------------------------------
 # THE TAG FOLLOWS THE CLUSTER, NOT JUST THE COMMIT. Reading the committed pin
@@ -121,6 +145,22 @@ err()  { echo -e "${RED}  ERROR${NC} -- $*" >&2; }
 # record says "local" must still resolve a tag instead of an empty string.
 # shellcheck source=scripts/minikube/image-mode.sh
 source "${SCRIPT_DIR}/image-mode.sh"
+# shellcheck source=scripts/minikube/docker-cli-env.sh
+source "${SCRIPT_DIR}/docker-cli-env.sh"
+
+# Pulling and loading images mutates the branch-owned Minikube profile. The
+# caller must already hold the canonical T2 mutation lease; this child only
+# validates the opaque inherited token and never acquires or releases it.
+if [[ -z "${T2_PROJECT_DIR:-}" || -z "${T2_PROFILE:-}" ||
+      -z "${T2_CONTEXT:-}" || "${T2_PROFILE}" != "${T2_CONTEXT}" ||
+      "${T2_PROFILE}" != "${PROFILE}" ]]; then
+  err "PROFILE_LOCK_REQUIRED: pull-images.sh requires an inherited branch-profile mutation lease"
+  exit 1
+fi
+T2_PROJECT_DIR="${T2_PROJECT_DIR}" T2_PROFILE="${T2_PROFILE}" \
+  T2_CONTEXT="${T2_CONTEXT}" T2_SKIP_LOCK=true \
+  MINIKUBE_PROFILE="${PROFILE}" CONTROL_API_REAL_PG_CONTEXT="${T2_CONTEXT}" \
+  bash "${SCRIPT_DIR}/require-t2-mutation-lock.sh"
 
 IMAGE_TAG="$(image_mode_ghcr_tag "$PROJECT_DIR")" || exit 1
 TAG_ORIGIN="$(image_mode_tag_origin "$PROJECT_DIR")" || exit 1
@@ -155,18 +195,49 @@ if [ "$SKIP_UIS" = true ]; then
   log "skipping control-ui and profile-ui (--skip-uis); the -no-uis overlay deletes both Deployments"
 fi
 
-# ---- Point the Docker CLI at minikube's daemon when safe -----------------
+STATUS_DIR="$(mktemp -d)"
+MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+MANIFEST_TMP_FILE=""
+cleanup() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  rm -rf -- "$STATUS_DIR" || cleanup_status=$?
+  if [ -n "${MANIFEST_TMP_FILE}" ]; then
+    rm -f -- "${MANIFEST_TMP_FILE}" || cleanup_status=$?
+  fi
+  docker_cli_env_cleanup || cleanup_status=$?
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status="$cleanup_status"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Resolve an approved local endpoint into an empty task-local Docker config
+# before asking Minikube for its daemon endpoint. Every subsequent Docker and
+# image-load operation then runs through the same isolated config and deadline
+# runner, with ambient auth/context/header variables excluded.
+docker_cli_env_prepare false
 if [ "$MINIKUBE_MULTI_NODE" = false ]; then
   log "Configuring Docker CLI to use minikube's Docker daemon..."
-  eval "$(minikube -p "$PROFILE" docker-env)"
+  docker_env_status=0
+  docker_env_output="$(docker_cli_run_public minikube-docker-env \
+    "$MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS" \
+    minikube -p "$PROFILE" docker-env --shell bash)" || docker_env_status=$?
+  if [ "$docker_env_status" -ne 0 ] || [ -z "$docker_env_output" ]; then
+    err "DOCKER_ENV_UNRESOLVED: could not resolve Docker environment for minikube '${PROFILE}'"
+    if [ "$docker_env_status" -ne 0 ]; then
+      exit "$docker_env_status"
+    fi
+    exit 1
+  fi
+  eval "$docker_env_output"
   unset DOCKER_API_VERSION 2>/dev/null || true
 else
   log "Multi-node profile: pulling on the host, then 'minikube image load' onto every node"
 fi
-
-STATUS_DIR="$(mktemp -d)"
-cleanup() { rm -rf "$STATUS_DIR"; }
-trap cleanup EXIT
 
 # ---- Bounded retry for one pull ------------------------------------------
 # A transient registry blip (one bad pull 24 images into a run) should not
@@ -180,10 +251,11 @@ trap cleanup EXIT
 # final failure it holds only the last attempt's diagnostic, not a pile-up of
 # every prior one.
 pull_with_retry() {
-  local ref="$1" out_file="$2"
+  local ref="$1" out_file="$2" image_name="$3"
   local attempt=1
   while [ "$attempt" -le "$MINIKUBE_IMAGE_PULL_RETRIES" ]; do
-    if docker pull "$ref" >"$out_file" 2>&1; then
+    if docker_cli_run_public "pull-image-${image_name}" \
+      "$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS" docker pull "$ref" >"$out_file" 2>&1; then
       return 0
     fi
     if [ "$attempt" -lt "$MINIKUBE_IMAGE_PULL_RETRIES" ]; then
@@ -201,25 +273,34 @@ pull_one() {
   local ghcr_ref="${GHCR_NAMESPACE}/${name}:${IMAGE_TAG}"
 
   # Always pull. Never skip a present tag -- see the header.
-  if ! pull_with_retry "$ghcr_ref" "${STATUS_DIR}/${slot}.out"; then
+  if ! pull_with_retry "$ghcr_ref" "${STATUS_DIR}/${slot}.out" "$name"; then
     printf '%s' "$ghcr_ref" > "${STATUS_DIR}/${slot}.failed"
     return 0
   fi
 
   if [ "$MINIKUBE_MULTI_NODE" = true ]; then
-    minikube -p "$PROFILE" image load "$ghcr_ref" >/dev/null 2>&1 || {
+    docker_cli_run_public "minikube-image-load-${name}" \
+      "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
+      minikube -p "$PROFILE" image load "$ghcr_ref" >/dev/null 2>&1 || {
       printf '%s' "$ghcr_ref" > "${STATUS_DIR}/${slot}.failed"
       return 0
     }
   fi
 
   # The local alias. See header note 2.
-  if ! docker tag "$ghcr_ref" "$local_ref" >>"${STATUS_DIR}/${slot}.out" 2>&1; then
+  if ! docker_cli_run_public "tag-image-${name}" \
+    "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" docker tag "$ghcr_ref" "$local_ref" \
+    >>"${STATUS_DIR}/${slot}.out" 2>&1; then
     printf '%s' "$ghcr_ref (alias to ${local_ref})" > "${STATUS_DIR}/${slot}.failed"
     return 0
   fi
   if [ "$MINIKUBE_MULTI_NODE" = true ]; then
-    minikube -p "$PROFILE" image load "$local_ref" >/dev/null 2>&1 || true
+    if ! docker_cli_run_public "minikube-image-load-alias-${name}" \
+      "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
+      minikube -p "$PROFILE" image load "$local_ref" >/dev/null 2>&1; then
+      printf '%s' "$ghcr_ref (alias load to ${local_ref})" > "${STATUS_DIR}/${slot}.failed"
+      return 0
+    fi
   fi
 
   printf '%s\t%s' "$ghcr_ref" "$local_ref" > "${STATUS_DIR}/${slot}.done"
@@ -326,8 +407,36 @@ fi
 # recorded mode it falls back to the IMAGE_SOURCE env default (ghcr), which is
 # how a locally built cluster came to be reported as "25 of 28 images missing".
 # This writer only ever pulls, so the value is always "ghcr".
-MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+# Resolve and validate every digest before opening the existing manifest. A
+# failed inspect is inventory failure, not evidence that an image was absent;
+# publishing NOT_PULLED or an empty value would create green evidence for a
+# run whose acquisition cannot be verified.
+MANIFEST_GHCR_REFS=()
+MANIFEST_LOCAL_REFS=()
+MANIFEST_SHAS=()
+for f in "${STATUS_DIR}"/*.done; do
+  [ -e "$f" ] || continue
+  ghcr_ref="$(cut -f1 "$f")"
+  local_ref="$(cut -f2 "$f")"
+  manifest_inspect_status=0
+  sha="$(docker_cli_run_public "inspect-image" \
+    "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+    docker inspect --format='{{.Id}}' "$ghcr_ref")" || manifest_inspect_status=$?
+  if [ "$manifest_inspect_status" -ne 0 ]; then
+    err "Could not inspect ${ghcr_ref} while generating the image manifest"
+    exit "$manifest_inspect_status"
+  fi
+  validate_manifest_image_id "$ghcr_ref" "$sha" || exit 1
+  MANIFEST_GHCR_REFS+=("$ghcr_ref")
+  MANIFEST_LOCAL_REFS+=("$local_ref")
+  MANIFEST_SHAS+=("$sha")
+done
+
 mkdir -p "$(dirname "$MANIFEST_FILE")"
+MANIFEST_TMP_FILE="$(mktemp "${MANIFEST_FILE}.tmp.XXXXXX")" || {
+  err "IMAGE_MANIFEST_INVALID: could not create a temporary manifest beside ${MANIFEST_FILE}"
+  exit 1
+}
 {
   echo "{"
   echo "  \"generated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
@@ -336,12 +445,9 @@ mkdir -p "$(dirname "$MANIFEST_FILE")"
   echo "  \"imageTag\": \"${IMAGE_TAG}\","
   echo "  \"images\": {"
   first=true
-  for f in "${STATUS_DIR}"/*.done; do
-    [ -e "$f" ] || continue
-    ghcr_ref="$(cut -f1 "$f")"
-    local_ref="$(cut -f2 "$f")"
-    sha="$(docker inspect --format='{{.Id}}' "$ghcr_ref" 2>/dev/null || echo "NOT_PULLED")"
-    for ref in "$ghcr_ref" "$local_ref"; do
+  for image_index in "${!MANIFEST_SHAS[@]}"; do
+    sha="${MANIFEST_SHAS[$image_index]}"
+    for ref in "${MANIFEST_GHCR_REFS[$image_index]}" "${MANIFEST_LOCAL_REFS[$image_index]}"; do
       if [ "$first" = true ]; then first=false; else echo ","; fi
       printf '    "%s": "%s"' "$ref" "$sha"
     done
@@ -349,7 +455,18 @@ mkdir -p "$(dirname "$MANIFEST_FILE")"
   echo ""
   echo "  }"
   echo "}"
-} > "$MANIFEST_FILE"
+} > "$MANIFEST_TMP_FILE"
+
+if ! node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' \
+  "$MANIFEST_TMP_FILE"; then
+  err "IMAGE_MANIFEST_INVALID: generated manifest is not valid JSON"
+  exit 1
+fi
+if ! mv -- "$MANIFEST_TMP_FILE" "$MANIFEST_FILE"; then
+  err "IMAGE_MANIFEST_INVALID: could not publish the validated manifest"
+  exit 1
+fi
+MANIFEST_TMP_FILE=""
 ok "Manifest: deploy/minikube/.image-manifest.json"
 
 echo ""
