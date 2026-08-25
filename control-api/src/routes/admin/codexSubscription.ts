@@ -327,18 +327,6 @@ export function createAdminCodexSubscriptionRouter(
     await publishAllowedModelsConfigMapAfterGrantChange(gateway?.llmAllowedModelsConfigMap())
   }
 
-  async function publishRuntimeAllowlistBestEffort(): Promise<void> {
-    try {
-      await publishRuntimeAllowlist()
-    } catch (err) {
-      llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'mutation' })
-      log.error(
-        { err, event: 'codex_allowed_models_cm_write_failed' },
-        'Codex grant change saved but the runtime ConfigMap was not updated'
-      )
-    }
-  }
-
   async function publishRuntimeAllowlistOrFail(res: {
     status: (n: number) => { json: (body: unknown) => void }
   }): Promise<boolean> {
