@@ -14988,10 +14988,10 @@ pre {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   display: flex;
-  flex: 0 0 auto;
-  max-width: 220px;
+  flex: 0 0 220px;
   min-width: 0;
   transition: background var(--motion-fast);
+  width: 220px;
 }
 
 .chat-view-tab:not(.is-active) {

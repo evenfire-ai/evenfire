@@ -61,6 +61,8 @@ describe('ChatTabs', () => {
     expect(styles).toMatch(/\.chat-view-tabs\s*\{[^}]*padding:\s*var\(--space-2\) 0 0;/s)
     expect(styles).toMatch(/\.chat-view-tabs__scroller\s*\{[^}]*width:\s*100%;/s)
     expect(styles).toMatch(/\.chat-view-tabs__list\s*\{[^}]*width:\s*max-content;/s)
+    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*flex:\s*0 0 220px;/s)
+    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*width:\s*220px;/s)
     expect(styles).toMatch(/\.chat-view-tab__select\s*\{[^}]*flex:\s*1 1 auto;/s)
     expect(styles).toMatch(/\.chat-view-tab__label\s*\{[^}]*text-overflow:\s*ellipsis;/s)
   })
