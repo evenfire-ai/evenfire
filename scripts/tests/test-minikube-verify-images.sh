@@ -100,7 +100,7 @@ case "${1:-}" in
       *) printf 'unix:///tmp/evenfire-docker.sock\n' ;;
     esac
     ;;
-  inspect) echo "sha256:deadbeef0000cafedeadbeef0000cafedeadbeef" ;;
+  inspect) echo "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ;;
   images)  echo "sha256:deadbeef0000" ;;
 esac
 exit 0
