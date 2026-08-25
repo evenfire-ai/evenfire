@@ -5,7 +5,7 @@ import {
   GFS_UPLOAD_V2_INSTABILITY_FAILURE_THRESHOLD,
   GFS_UPLOAD_V2_MAX_PART_BYTES,
   GFS_UPLOAD_V2_PREFERRED_PART_BYTES,
-  GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+  GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
   GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES,
   disabledGfsUploadV2Capability,
   isGfsUploadV2Route,
@@ -17,7 +17,7 @@ import {
 
 describe('GFS Upload v2 frozen contract', () => {
   it('uses binary product/request boundaries without advertising v2', () => {
-    expect(GFS_UPLOAD_V2_PRODUCT_MAX_BYTES).toBe(209_715_200)
+    expect(GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES).toBe(209_715_200)
     expect(GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES).toBe(1_073_741_824)
     expect(GFS_UPLOAD_V2_PREFERRED_PART_BYTES).toBe(8_388_608)
     expect(GFS_UPLOAD_V2_MAX_PART_BYTES).toBe(16_777_216)
@@ -34,7 +34,7 @@ describe('GFS Upload v2 frozen contract', () => {
 
   it('calculates exact 8 MiB geometry at the product boundary', () => {
     const geometry = {
-      expectedBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+      expectedBytes: GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
       partBytes: GFS_UPLOAD_V2_PREFERRED_PART_BYTES,
     }
     expect(partCountFor(geometry)).toBe(25)
