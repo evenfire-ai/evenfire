@@ -28,6 +28,11 @@ export type FormSectionProps = {
   children: ReactNode
   description?: ReactNode
   title: ReactNode
+  // Renders the section behind a disclosure toggle, for settings that most
+  // installs leave alone. Collapsed shows the title only, so the section costs
+  // one line until someone opens it.
+  collapsible?: boolean
+  defaultOpen?: boolean
 }
 
 export type TextInputProps = InputHTMLAttributes<HTMLInputElement> & {
