@@ -91,6 +91,9 @@ describe('readinessReasonsFromDetail', () => {
   })
 
   it('maps each false clause to a closed reason key', () => {
+    expect(readinessReasonsFromDetail(authoritativeDetail({ stopped: true }))).toEqual([
+      'controller_stopped',
+    ])
     expect(
       readinessReasonsFromDetail(authoritativeDetail({ mcpServerCacheSynced: false }))
     ).toEqual(['mcp_watch_unsynced'])

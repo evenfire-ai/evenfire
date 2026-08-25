@@ -193,7 +193,7 @@ export class ContextMapperServer {
         return ready
       }
     } catch (err) {
-      console.error('[Server] Provider authority readiness check failed:', err)
+      readinessLog.error('provider authority readiness check failed', { err })
     }
 
     const degraded: ReadinessState = {

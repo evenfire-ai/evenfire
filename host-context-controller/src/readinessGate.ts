@@ -10,6 +10,7 @@ export type ReadinessInventoryDetail = {
 }
 
 export type ReadinessReason =
+  | 'controller_stopped'
   | 'mcp_watch_unsynced'
   | 'context_watch_unsynced'
   | 'host_watch_unsynced'
@@ -18,6 +19,7 @@ export type ReadinessReason =
 
 export function readinessReasonsFromDetail(detail: ReadinessInventoryDetail): ReadinessReason[] {
   const reasons: ReadinessReason[] = []
+  if (detail.stopped) reasons.push('controller_stopped')
   if (!detail.mcpServerCacheSynced) reasons.push('mcp_watch_unsynced')
   if (!detail.contextCacheSynced) reasons.push('context_watch_unsynced')
   if (!detail.hostCacheSynced) reasons.push('host_watch_unsynced')

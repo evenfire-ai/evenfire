@@ -15,6 +15,7 @@ import {
   type ReadinessInventoryDetail,
   resolveHostAuthoritativeFn,
   resolveProviderAuthoritativeFn,
+  resolveReadinessDetailFn,
 } from './readinessGate'
 import { ContextMapperServer, McpHostApiRateLimiter } from './server'
 import type { McpServerInfo } from './types'
@@ -518,10 +519,25 @@ describe('McpHostApiRateLimiter', () => {
 
     expect(response.statusCode).toBe(503)
     expect(JSON.parse(response.body)).toEqual({ status: 'degraded', ready: false })
-    expect(errorLog).toHaveBeenCalledWith(
-      '[Server] Provider authority readiness check failed:',
-      authorityError
-    )
+    const readinessErrors = errorLog.mock.calls
+      .map(args => {
+        try {
+          return JSON.parse(String(args[0])) as {
+            msg?: string
+            err?: { name?: string; message?: string }
+          }
+        } catch {
+          return null
+        }
+      })
+      .filter((entry): entry is { msg: string; err?: { name?: string; message?: string } } =>
+        Boolean(entry && entry.msg === 'provider authority readiness check failed')
+      )
+    expect(readinessErrors).toHaveLength(1)
+    expect(readinessErrors[0].err).toEqual({
+      name: authorityError.name,
+      message: authorityError.message,
+    })
   })
 
   it('withdraws readiness as soon as shutdown begins', async () => {
@@ -668,6 +684,7 @@ describe('ContextMapperServer /ready reasons', () => {
       undefined,
       undefined,
       () =>
+        !detail.stopped &&
         detail.mcpServerCacheSynced &&
         detail.contextCacheSynced &&
         detail.hostCacheSynced &&
@@ -722,5 +739,76 @@ describe('ContextMapperServer /ready reasons', () => {
     expect(response.statusCode).toBe(503)
     expect(JSON.parse(response.body)).toEqual({ status: 'degraded', ready: false })
     expect(JSON.parse(response.body)).not.toHaveProperty('reasons')
+  })
+
+  it('names controller_stopped when stopped is the only closed clause', async () => {
+    const detail = { ...authoritativeDetail(), stopped: true }
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      () =>
+        !detail.stopped &&
+        detail.mcpServerCacheSynced &&
+        detail.contextCacheSynced &&
+        detail.hostCacheSynced &&
+        detail.safetyInventoryCertified &&
+        detail.contextRevisionAligned &&
+        detail.serverRevisionAligned,
+      () => false,
+      undefined,
+      undefined,
+      () => detail
+    )
+    server.setReady(true)
+
+    const response = await invoke(server, '/ready')
+    expect(response.statusCode).toBe(503)
+    expect(JSON.parse(response.body)).toEqual({
+      status: 'degraded',
+      ready: false,
+      reasons: ['controller_stopped'],
+    })
+  })
+
+  it('emits closed reasons through the same resolvers main.ts uses', async () => {
+    let detail = authoritativeDetail()
+    const watcher = {
+      isReadinessInventoryAuthoritative: () =>
+        !detail.stopped &&
+        detail.mcpServerCacheSynced &&
+        detail.contextCacheSynced &&
+        detail.hostCacheSynced &&
+        detail.safetyInventoryCertified &&
+        detail.contextRevisionAligned &&
+        detail.serverRevisionAligned,
+      getReadinessInventoryDetail: () => detail,
+    }
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      resolveProviderAuthoritativeFn(watcher),
+      resolveHostAuthoritativeFn(null),
+      undefined,
+      undefined,
+      resolveReadinessDetailFn(watcher)
+    )
+    server.setReady(true)
+
+    let response = await invoke(server, '/ready')
+    expect(response.statusCode).toBe(200)
+    expect(JSON.parse(response.body)).toEqual({ status: 'ready', ready: true })
+
+    detail = { ...detail, safetyInventoryCertified: false }
+    response = await invoke(server, '/ready')
+    expect(response.statusCode).toBe(503)
+    expect(JSON.parse(response.body)).toEqual({
+      status: 'degraded',
+      ready: false,
+      reasons: ['safety_pass_uncertified'],
+    })
   })
 })

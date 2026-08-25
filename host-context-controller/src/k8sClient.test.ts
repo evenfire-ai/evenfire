@@ -1460,6 +1460,11 @@ describe('McpServerWatcher startup', () => {
     }
 
     expectAligned(true)
+    ;(watcher as any).stopped = true
+    expectAligned(false)
+    expect(watcher.getReadinessInventoryDetail().stopped).toBe(true)
+    ;(watcher as any).stopped = false
+    expectAligned(true)
     ;(watcher as any).mcpServerCacheSynced = false
     expectAligned(false)
     expect(watcher.getReadinessInventoryDetail().mcpServerCacheSynced).toBe(false)
