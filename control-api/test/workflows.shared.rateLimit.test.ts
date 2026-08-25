@@ -468,6 +468,36 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(workflowTriggerRateLimitCredential(req)).not.toBe('service-token')
   })
 
+  it('workflowTriggerRateLimitCredential keys a real signed session and rejects a forged one', async () => {
+    const actual = await vi.importActual<
+      typeof import('../src/utils/auth/externalSessionAuthToken.js')
+    >('../src/utils/auth/externalSessionAuthToken.js')
+    mockVerifyExternalSessionToken.mockImplementation(token =>
+      actual.verifyExternalSessionToken(token)
+    )
+
+    const signed = actual.signExternalSessionToken({
+      userId: 'user-signed-1',
+      email: 'signed@example.com',
+      teamId: 'team-1',
+      role: 'member',
+      authGeneration: 1,
+    })
+    const reqFor = (token: string) =>
+      ({
+        ip: '203.0.113.10',
+        header(name: string) {
+          if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+          if (name.toLowerCase() === 'x-user-session-token') return token
+          return undefined
+        },
+      }) as express.Request
+
+    expect(workflowTriggerRateLimitCredential(reqFor(signed))).toBe('user:user-signed-1')
+    expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).toMatch(/^ip:/)
+    expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).not.toBe('service-token')
+  })
+
   it('workflowTriggerRateLimitCredential ignores whitespace user tokens and falls back to bearer', () => {
     const req = {
       header(name: string) {
