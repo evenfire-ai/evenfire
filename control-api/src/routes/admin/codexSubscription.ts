@@ -10,6 +10,8 @@ import {
   type CodexCatalogTransport,
   createCodexCatalogTransportFromEnv,
   listCodexCatalogModels,
+  listOfferedCodexModelsForAssignment,
+  pickCodexGrantModel,
   syncCodexSubscriptionCatalog,
 } from '../../services/codexSubscriptionCatalog.js'
 import {
@@ -127,11 +129,27 @@ type HostRecord = {
   spec?: unknown
 }
 
-function hostModel(spec: unknown): { provider?: string; connectionRef?: string } | null {
+type CodexAssignableHostRow = {
+  name: string
+  connectionRef: string
+  displayName: string
+  provider?: string
+  model?: string
+}
+
+function hostModel(
+  spec: unknown
+): { provider?: string; connectionRef?: string; name?: string } | null {
   if (!spec || typeof spec !== 'object') return null
-  const model = (spec as { model?: { provider?: string; connectionRef?: string } }).model
+  const model = (spec as { model?: { provider?: string; connectionRef?: string; name?: string } })
+    .model
   if (!model || typeof model !== 'object') return null
   return model
+}
+
+function hostModelName(spec: unknown): string {
+  const name = hostModel(spec)?.name
+  return typeof name === 'string' ? name.trim() : ''
 }
 
 function hostConnectionRef(spec: unknown): string | null {
@@ -141,13 +159,23 @@ function hostConnectionRef(spec: unknown): string | null {
   return raw || CODEX_UNASSIGNED_CONNECTION_KEY
 }
 
-function assignableHostFromRecord(
-  host: HostRecord
-): { name: string; connectionRef: string; displayName: string } | null {
+function assignableHostFromRecord(host: HostRecord): CodexAssignableHostRow | null {
   const name = String(host.metadata?.name ?? '').trim()
-  const connectionRef = hostConnectionRef(host.spec)
-  if (!name || !connectionRef) return null
-  return { name, connectionRef, displayName: name }
+  if (!name) return null
+  const model = hostModel(host.spec)
+  const provider = typeof model?.provider === 'string' ? model.provider.trim() : ''
+  const modelName = hostModelName(host.spec)
+  const connectionRef =
+    provider === 'codex-subscription'
+      ? hostConnectionRef(host.spec) || CODEX_UNASSIGNED_CONNECTION_KEY
+      : CODEX_UNASSIGNED_CONNECTION_KEY
+  return {
+    name,
+    connectionRef,
+    displayName: name,
+    ...(provider ? { provider } : {}),
+    ...(modelName ? { model: modelName } : {}),
+  }
 }
 
 function storedCodexConnectionRef(spec: unknown): string | null {
@@ -179,14 +207,10 @@ export function createAdminCodexSubscriptionRouter(
       .filter(host => host.name)
   }
 
-  function collectAssignableHosts(
-    hosts: HostRecord[]
-  ): Array<{ name: string; connectionRef: string; displayName: string }> {
+  function collectAssignableHosts(hosts: HostRecord[]): CodexAssignableHostRow[] {
     return hosts
       .map(assignableHostFromRecord)
-      .filter((row): row is { name: string; connectionRef: string; displayName: string } =>
-        Boolean(row)
-      )
+      .filter((row): row is CodexAssignableHostRow => Boolean(row))
   }
 
   async function loadHost(
@@ -219,7 +243,7 @@ export function createAdminCodexSubscriptionRouter(
     host: HostRecord,
     nextConnectionRef: string
   ): Promise<
-    | { ok: true; warnings: StaleModelWarning[] }
+    | { ok: true; warnings: StaleModelWarning[]; model: string }
     | { ok: false; status: number; error: string; message?: string; reason?: string }
   > {
     if (!gateway) return { ok: false, status: 503, error: 'hosts_unavailable' }
@@ -233,6 +257,21 @@ export function createAdminCodexSubscriptionRouter(
         : {}
     model.provider = 'codex-subscription'
     model.connectionRef = nextConnectionRef
+    let resolvedModel = typeof model.name === 'string' ? model.name.trim() : ''
+    if (nextConnectionRef !== CODEX_UNASSIGNED_CONNECTION_KEY) {
+      const offered = await listOfferedCodexModelsForAssignment(dbClient(), nextConnectionRef)
+      if (offered.length === 0) {
+        return {
+          ok: false,
+          status: 422,
+          error: 'catalog_not_ready',
+          message:
+            'This subscription has no offered models yet. Sign in and sync the catalog before assigning agents.',
+        }
+      }
+      resolvedModel = pickCodexGrantModel(resolvedModel, offered)
+      model.name = resolvedModel
+    }
     spec.model = model
     const stored =
       host.spec && typeof host.spec === 'object'
@@ -267,7 +306,7 @@ export function createAdminCodexSubscriptionRouter(
         config.hostsNamespace
       )
       for (const event of hostTolerations) emitHostSpecIncoherenceTolerated(event)
-      return { ok: true, warnings: hostWarnings }
+      return { ok: true, warnings: hostWarnings, model: resolvedModel }
     } catch (err) {
       if (err instanceof K8sConflictError) {
         return { ok: false, status: 409, error: 'conflict', reason: 'resource_changed' }
@@ -600,18 +639,22 @@ export function createAdminCodexSubscriptionRouter(
         return
       }
       const storedRef = storedCodexConnectionRef(loaded.host.spec)
-      if (storedRef === null) {
+      if (storedRef === null && action === 'unbind') {
         res.status(409).json({ error: 'not_codex_host' })
         return
       }
       // Empty/missing connectionRef is unassigned, never the reserved default grant.
+      // Non-Codex hosts bind as a conversion: the hub is the ops center that
+      // sets provider, grant, and a seeded default model in one write.
       const currentRef = storedRef || CODEX_UNASSIGNED_CONNECTION_KEY
+      const currentModel = hostModelName(loaded.host.spec)
 
       if (action === 'unbind') {
         if (currentRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
           res.status(200).json({
             host: hostRef,
             connectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+            ...(currentModel ? { model: currentModel } : {}),
           })
           return
         }
@@ -635,13 +678,18 @@ export function createAdminCodexSubscriptionRouter(
         res.status(200).json({
           host: hostRef,
           connectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+          ...(written.model ? { model: written.model } : {}),
           ...(written.warnings.length > 0 ? { warnings: written.warnings } : {}),
         })
         return
       }
 
-      if (currentRef === connectionKey) {
-        res.status(200).json({ host: hostRef, connectionRef: connectionKey })
+      if (currentRef === connectionKey && currentModel) {
+        res.status(200).json({
+          host: hostRef,
+          connectionRef: connectionKey,
+          model: currentModel,
+        })
         return
       }
       const written = await writeHostConnectionRef(hostRef, loaded.host, connectionKey)
@@ -656,6 +704,7 @@ export function createAdminCodexSubscriptionRouter(
       res.status(200).json({
         host: hostRef,
         connectionRef: connectionKey,
+        ...(written.model ? { model: written.model } : {}),
         ...(written.warnings.length > 0 ? { warnings: written.warnings } : {}),
       })
     })

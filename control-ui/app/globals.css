@@ -12509,6 +12509,12 @@ button.cu-gfs-tree__button:focus-visible,
   text-decoration: underline;
 }
 
+.cu-codex-hub__agent-model {
+  color: var(--cu-text-muted);
+  font-weight: 400;
+  font-size: 0.85em;
+}
+
 .cu-codex-hub__chip-remove {
   display: inline-grid;
   place-items: center;

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
+import { listCodexSubscriptionConnections } from '../../lib/codexSubscription'
 import { ToastProvider } from '../Toast'
 
 const replaceMock = vi.fn()
@@ -40,6 +41,14 @@ vi.mock('../HostAccessTab', () => ({
     <div data-testid="access-tab">Access editor for {hostName}</div>
   ),
 }))
+
+vi.mock('../../lib/codexSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
+  return {
+    ...actual,
+    listCodexSubscriptionConnections: vi.fn().mockResolvedValue([]),
+  }
+})
 
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
@@ -133,6 +142,8 @@ describe('HostDetailsPage identity integration', () => {
     const { container } = render(<HostDetailsPage />)
 
     expect(await screen.findByText('Allowed models')).toBeInTheDocument()
+    expect(screen.getByText('Default model')).toBeInTheDocument()
+    expect(screen.getByText('gpt-5.4')).toBeInTheDocument()
     expect(screen.queryByText('Model name')).not.toBeInTheDocument()
     expect(screen.getByText('Secret reference')).toBeInTheDocument()
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
@@ -150,6 +161,54 @@ describe('HostDetailsPage identity integration', () => {
       screen.getByRole('button', { name: 'Save' }).closest('.cu-agent-detail-toolbar')
     ).not.toBeNull()
     expect(container.querySelector('.cu-agent-detail-card .cu-agent-detail-scroll')).not.toBeNull()
+  })
+
+  it('shows a complete ChatGPT assignment without requiring Edit', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      {
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'connected',
+        credentialRevision: 1,
+        catalogRevision: 1,
+        accountFingerprint: 'fp',
+        catalogStatus: 'ready',
+        catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+        lastRefreshAt: '2026-08-20T00:00:00.000Z',
+        lastAuthAt: '2026-08-20T00:00:00.000Z',
+        refreshLockHeld: false,
+      },
+    ])
+    const codexHost = {
+      ...host,
+      spec: {
+        ...host.spec,
+        secretRef: undefined,
+        model: {
+          provider: 'codex-subscription',
+          name: 'gpt-5.1',
+          connectionRef: 'codex-aaa',
+        },
+      },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: codexHost,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    render(<HostDetailsPage />)
+
+    expect(await screen.findByText('Default model')).toBeInTheDocument()
+    expect(screen.getByText('gpt-5.1')).toBeInTheDocument()
+    expect(screen.getByText('Team A')).toBeInTheDocument()
+    expect(screen.queryByText('codex-aaa')).not.toBeInTheDocument()
+    expect(screen.getByText('Broker-backed — no LLM secret required')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
   })
 
   it('opens Advanced on the Hooks sub-tab', async () => {

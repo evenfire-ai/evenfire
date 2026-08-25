@@ -19,6 +19,7 @@ import {
   isCodexSubscriptionUiEnabled,
   loadCodexSubscriptionCapability,
 } from '@lib/codexSubscriptionFeature'
+import { getProviderLabel } from '@lib/llm'
 import {
   mapConnectionStatus,
   statusLabel,
@@ -46,12 +47,25 @@ function otherGrantLabel(
   return connections.find(row => row.connectionKey === connectionRef)?.displayName || connectionRef
 }
 
+function isNonCodexHost(host: CodexAssignableHost): boolean {
+  return Boolean(host.provider && host.provider !== 'codex-subscription')
+}
+
 function assignmentCaption(
   host: CodexAssignableHost,
   connections: CodexSubscriptionConnectionView[]
 ): string {
+  if (isNonCodexHost(host)) {
+    return [getProviderLabel(host.provider), host.model].filter(Boolean).join(' · ')
+  }
   if (host.connectionRef === 'unassigned') return 'No subscription'
-  return otherGrantLabel(connections, host.connectionRef)
+  const grant = otherGrantLabel(connections, host.connectionRef)
+  return host.model ? `${grant} · ${host.model}` : grant
+}
+
+function assignmentBadge(host: CodexAssignableHost): string {
+  if (isNonCodexHost(host)) return 'other provider'
+  return host.connectionRef === 'unassigned' ? 'unassigned' : 'other grant'
 }
 
 export function CodexSubscriptionHub() {
@@ -216,18 +230,35 @@ export function CodexSubscriptionHub() {
     hosts: CodexAssignableHost[]
   ) {
     if (hosts.length === 0) return
+    const converting = hosts.filter(isNonCodexHost)
     const switching = hosts.filter(
-      host => host.connectionRef !== 'unassigned' && host.connectionRef !== row.connectionKey
+      host =>
+        !isNonCodexHost(host) &&
+        host.connectionRef !== 'unassigned' &&
+        host.connectionRef !== row.connectionKey
     )
-    if (switching.length > 0) {
+    if (converting.length > 0 || switching.length > 0) {
+      const convertingNames = converting.map(host => hostLabel(host)).join(', ')
+      const switchingNames = switching.map(host => hostLabel(host)).join(', ')
       const confirmed = await confirm({
         title:
-          hosts.length === 1
-            ? `Switch ${hosts[0].name} to this subscription?`
-            : `Add ${hosts.length} agents to this subscription?`,
-        message: `${switching.map(host => hostLabel(host)).join(', ')} currently use another grant. Assign ${
-          hosts.length === 1 ? 'it' : 'them'
-        } to "${grantLabel(row)}"?`,
+          hosts.length === 1 && converting.length === 1
+            ? `Switch ${hosts[0].name} to ChatGPT?`
+            : hosts.length === 1
+              ? `Switch ${hosts[0].name} to this subscription?`
+              : `Add ${hosts.length} agents to this subscription?`,
+        message: [
+          converting.length > 0
+            ? `${convertingNames} will switch to ChatGPT on "${grantLabel(row)}". This sets the provider, subscription, and a default model from this grant.`
+            : '',
+          switching.length > 0
+            ? `${switchingNames} currently use another grant. Assign ${
+                switching.length === 1 ? 'it' : 'them'
+              } to "${grantLabel(row)}"?`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' '),
         confirmLabel: hosts.length === 1 ? 'Assign agent' : `Add ${hosts.length} agents`,
       })
       if (!confirmed) return
@@ -235,11 +266,13 @@ export function CodexSubscriptionHub() {
     setBusyKey(row.connectionKey)
     const assigned: string[] = []
     const failed: string[] = []
+    let lastModel = ''
     try {
       for (const host of hosts) {
         try {
-          await bindCodexHost(row.connectionKey, host.name)
+          const written = await bindCodexHost(row.connectionKey, host.name)
           assigned.push(hostLabel(host))
+          if (written.model) lastModel = written.model
         } catch (err) {
           failed.push(hostLabel(host))
           showToast(err instanceof Error ? err.message : `Could not assign ${hostLabel(host)}`, {
@@ -249,10 +282,11 @@ export function CodexSubscriptionHub() {
       }
       setPickedByGrant(prev => ({ ...prev, [row.connectionKey]: [] }))
       await load()
+      const modelSuffix = lastModel && assigned.length === 1 ? ` · ${lastModel}` : ''
       if (assigned.length > 0 && failed.length === 0) {
         showToast(
           assigned.length === 1
-            ? `Assigned ${assigned[0]} to ${grantLabel(row)}`
+            ? `Assigned ${assigned[0]} to ${grantLabel(row)}${modelSuffix}`
             : `Assigned ${assigned.length} agents to ${grantLabel(row)}`,
           { tone: 'success' }
         )
@@ -271,7 +305,7 @@ export function CodexSubscriptionHub() {
       {confirmDialog}
       <TablePanelHeader
         title="Subscriptions"
-        subtitle="ChatGPT grants in the same table as other Secrets. Assign any number of agents per row."
+        subtitle="Assign agents here to connect a grant and set a default ChatGPT model. Models & creds edits one agent at a time."
         actions={
           <button
             type="button"
@@ -410,9 +444,12 @@ export function CodexSubscriptionHub() {
                           >
                             {assigned.map(host => (
                               <span key={host.name} className="cu-chip cu-codex-hub__agent-chip">
-                                <a href={CONTROL_ROUTES.agents.detail(host.name)}>
+                                <a href={CONTROL_ROUTES.agents.tab(host.name, 'model')}>
                                   {hostLabel(host)}
                                 </a>
+                                {host.model ? (
+                                  <span className="cu-codex-hub__agent-model">{host.model}</span>
+                                ) : null}
                                 <button
                                   type="button"
                                   className="cu-codex-hub__chip-remove"
@@ -448,15 +485,12 @@ export function CodexSubscriptionHub() {
                                   value: host.name,
                                   label: hostLabel(host),
                                   description: assignmentCaption(host, connections),
-                                  badge:
-                                    host.connectionRef === 'unassigned'
-                                      ? 'unassigned'
-                                      : 'other grant',
+                                  badge: assignmentBadge(host),
                                 }))}
                                 placeholder="Add agents…"
                                 searchPlaceholder="Search agents…"
                                 selectionLabel="agents"
-                                emptyLabel="No ChatGPT-capable agents available."
+                                emptyLabel="No agents available."
                                 disabled={busy || hostsUnavailable || row.status === 'revoked'}
                                 onChange={next =>
                                   setPickedByGrant(prev => ({

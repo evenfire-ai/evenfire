@@ -176,6 +176,38 @@ export async function isCodexAssignmentAllowed(
   return Boolean(state?.enabled && !state.stale)
 }
 
+/**
+ * ChatGPT bind still needs a concrete spec.model.name. Keep the current name
+ * only when that grant already offers it. Otherwise seed the first offered
+ * model — never invent deployment-default or a global allowlist default.
+ */
+export function pickCodexGrantModel(current: string, offered: string[]): string {
+  const trimmed = current.trim()
+  if (trimmed && offered.includes(trimmed)) return trimmed
+  return offered[0] ?? trimmed
+}
+
+/** Enabled, non-stale models on a connected grant whose catalog is ready. */
+export async function listOfferedCodexModelsForAssignment(
+  db: DbClient,
+  connectionKey: string
+): Promise<string[]> {
+  const result = await db.query(
+    `SELECT m.model
+       FROM codex_catalog_models m
+       JOIN codex_subscription_connections c ON c.id = m.connection_id
+      WHERE c.connection_key = $1
+        AND c.revoked_at IS NULL
+        AND c.status = 'connected'
+        AND c.catalog_status = 'ready'
+        AND m.enabled
+        AND m.stale = false
+      ORDER BY m.model ASC`,
+    [connectionKey]
+  )
+  return (result.rows as Array<{ model: string }>).map(row => String(row.model))
+}
+
 export async function listEnabledCodexModelsGroupedByConnection(
   db: DbClient
 ): Promise<Record<string, string[]>> {

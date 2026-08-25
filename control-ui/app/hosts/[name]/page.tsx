@@ -16,7 +16,11 @@ import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconPencil, IconX } from '../../../components/icons'
 import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
-import { CODEX_UNASSIGNED_CONNECTION_KEY } from '../../../lib/codexSubscription'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  type CodexSubscriptionConnectionView,
+  listCodexSubscriptionConnections,
+} from '../../../lib/codexSubscription'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
@@ -139,6 +143,7 @@ export default function HostDetailsPage() {
   const [modelNameDraft, setModelNameDraft] = useState('')
   const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
+  const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const catalogForEditor = useMemo(() => {
     if (providerDraft !== 'codex-subscription' || codexModels.length === 0) return allowedCatalog
     const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
@@ -240,6 +245,24 @@ export default function HostDetailsPage() {
       setModelNameDraft(resolveDefaultModel(providerDraft, providerModelOptions))
     }
   }, [allowedModelsDraft, catalogForEditor, modelNameDraft, providerDraft, providerModelOptions])
+
+  useEffect(() => {
+    if (providerDraft !== 'codex-subscription') {
+      setCodexConnections([])
+      return
+    }
+    let cancelled = false
+    void listCodexSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) setCodexConnections(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setCodexConnections([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [providerDraft])
 
   useEffect(() => {
     setActiveTab(parseHostTab(params.tab))
@@ -1032,13 +1055,20 @@ export default function HostDetailsPage() {
                 {providerDraft === 'codex-subscription' ? (
                   <div className="cu-field">
                     <label htmlFor="model-subscription">Subscription</label>
-                    <div className="cu-field__readonly">
+                    <div className="cu-field__readonly" id="model-subscription">
                       {connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY
                         ? 'No subscription assigned'
-                        : connectionRefDraft}
+                        : codexConnections.find(row => row.connectionKey === connectionRefDraft)
+                            ?.displayName || connectionRefDraft}
                     </div>
                   </div>
                 ) : null}
+                <div className="cu-field">
+                  <label htmlFor="model-name">Default model</label>
+                  <div className="cu-field__readonly" id="model-name">
+                    {modelNameDraft || 'Not set'}
+                  </div>
+                </div>
                 <div className="cu-field">
                   <label htmlFor="model-allowed">Allowed models</label>
                   {allowedModelsSummary.length > 0 ? (
@@ -1126,6 +1156,7 @@ export default function HostDetailsPage() {
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
+                  modelLabel="Default model"
                   subscriptionCredentialEnabled
                   afterPrimaryProvider={
                     providerDraft === 'codex-subscription' ? (

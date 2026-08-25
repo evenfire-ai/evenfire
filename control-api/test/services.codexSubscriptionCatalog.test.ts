@@ -2,12 +2,29 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createCodexCatalogTransportFromEnv,
   createCodexProxyCatalogTransport,
+  pickCodexGrantModel,
   planCodexCatalogReconcile,
   syncCodexSubscriptionCatalog,
 } from '../src/services/codexSubscriptionCatalog.js'
 import { listEnabledGroupedByProvider } from '../src/services/llmAllowedModels.js'
 import { buildConfigMapData } from '../src/services/llmAllowedModelsConfigMap.js'
 import { makeFakeDb } from './helpers/llmCatalogSyncFakeDb.js'
+
+describe('pickCodexGrantModel', () => {
+  it('keeps the current name when the grant already offers it', () => {
+    expect(pickCodexGrantModel('gpt-5.1', ['gpt-5.1', 'gpt-5.2'])).toBe('gpt-5.1')
+  })
+
+  it('seeds the first offered model when the current name is empty or not offered', () => {
+    expect(pickCodexGrantModel('', ['gpt-5.1', 'gpt-5.2'])).toBe('gpt-5.1')
+    expect(pickCodexGrantModel('gpt-5.4-mini', ['gpt-5.6-luna'])).toBe('gpt-5.6-luna')
+  })
+
+  it('does not invent a model when the grant list is empty', () => {
+    expect(pickCodexGrantModel('gpt-5.4-mini', [])).toBe('gpt-5.4-mini')
+    expect(pickCodexGrantModel('', [])).toBe('')
+  })
+})
 
 describe('planCodexCatalogReconcile', () => {
   it('ready upserts discovered rows, inserts disabled, and stales missing discovery models', () => {

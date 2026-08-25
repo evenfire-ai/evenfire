@@ -16,6 +16,7 @@ const oauth = vi.hoisted(() => ({
 const catalog = vi.hoisted(() => ({
   loadSecrets: vi.fn(),
   sync: vi.fn(),
+  listOffered: vi.fn(),
 }))
 
 vi.mock('../src/services/codexSubscriptionOAuth.js', async () => {
@@ -44,6 +45,7 @@ vi.mock('../src/services/codexSubscriptionCatalog.js', async () => {
   return {
     ...actual,
     syncCodexSubscriptionCatalog: catalog.sync,
+    listOfferedCodexModelsForAssignment: catalog.listOffered,
   }
 })
 
@@ -138,6 +140,8 @@ describe('admin Codex subscription routes', () => {
     for (const fn of Object.values(oauth)) fn.mockReset()
     catalog.loadSecrets.mockReset()
     catalog.sync.mockReset()
+    catalog.listOffered.mockReset()
+    catalog.listOffered.mockResolvedValue(['gpt-5.1'])
     vi.mocked(pool.query).mockReset()
   })
 
@@ -473,8 +477,25 @@ describe('admin Codex subscription routes', () => {
     )
     expect(res.status).toBe(200)
     expect(res.body.assignableHosts).toEqual([
-      { name: 'chatllm', connectionRef: 'codex-aaa', displayName: 'chatllm' },
-      { name: 'legacy', connectionRef: 'unassigned', displayName: 'legacy' },
+      {
+        name: 'chatllm',
+        connectionRef: 'codex-aaa',
+        displayName: 'chatllm',
+        provider: 'codex-subscription',
+      },
+      {
+        name: 'other',
+        connectionRef: 'unassigned',
+        displayName: 'other',
+        provider: 'openai',
+        model: 'gpt-5.4',
+      },
+      {
+        name: 'legacy',
+        connectionRef: 'unassigned',
+        displayName: 'legacy',
+        provider: 'codex-subscription',
+      },
     ])
   })
 
@@ -491,7 +512,11 @@ describe('admin Codex subscription routes', () => {
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/unbind'
     )
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ host: 'chatllm', connectionRef: 'unassigned' })
+    expect(res.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'unassigned',
+      model: 'gpt-5.6-luna',
+    })
     expect(oauth.revoke).not.toHaveBeenCalled()
     expect(gateway.updateResource).toHaveBeenCalledWith(
       'hosts',
@@ -545,7 +570,11 @@ describe('admin Codex subscription routes', () => {
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
     )
     expect(first.status).toBe(200)
-    expect(first.body).toEqual({ host: 'chatllm', connectionRef: 'codex-aaa' })
+    expect(first.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
 
     gateway.getResource.mockResolvedValueOnce({
       metadata: { name: 'chatllm' },
@@ -557,7 +586,11 @@ describe('admin Codex subscription routes', () => {
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
     )
     expect(switched.status).toBe(200)
-    expect(switched.body).toEqual({ host: 'chatllm', connectionRef: 'codex-aaa' })
+    expect(switched.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
     expect(oauth.revoke).not.toHaveBeenCalled()
   })
 
@@ -572,7 +605,11 @@ describe('admin Codex subscription routes', () => {
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
     )
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ host: 'chatllm', connectionRef: 'codex-aaa' })
+    expect(res.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
     expect(oauth.revoke).not.toHaveBeenCalled()
   })
 
@@ -591,14 +628,14 @@ describe('admin Codex subscription routes', () => {
     expect(gateway.updateResource).not.toHaveBeenCalled()
   })
 
-  it('rejects bind on a non-Codex host', async () => {
+  it('rejects unbind on a non-Codex host', async () => {
     const gateway = makeGateway()
     gateway.getResource.mockResolvedValue({
       metadata: { name: 'api-agent' },
       spec: { model: { provider: 'openai', name: 'gpt-5.4' } },
     })
     const res = await request(makeAuthedApp(gateway)).post(
-      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/api-agent/bind'
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/api-agent/unbind'
     )
     expect(res.status).toBe(409)
     expect(res.body).toEqual({ error: 'not_codex_host' })

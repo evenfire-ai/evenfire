@@ -19,6 +19,8 @@ export type CodexAssignableHost = {
   name: string
   connectionRef: string
   displayName?: string
+  provider?: string
+  model?: string
 }
 
 export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned'
@@ -228,7 +230,15 @@ function sanitizeAssignableHost(raw: unknown): CodexAssignableHost | null {
   const name = pickString(raw.name)
   const connectionRef = pickString(raw.connectionRef)
   if (!name || !connectionRef) return null
-  return { name, connectionRef, displayName: pickString(raw.displayName) ?? name }
+  const provider = pickString(raw.provider)
+  const model = pickString(raw.model)
+  return {
+    name,
+    connectionRef,
+    displayName: pickString(raw.displayName) ?? name,
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+  }
 }
 
 export async function listCodexSubscriptionConnections(): Promise<
@@ -267,25 +277,28 @@ export async function listCodexSubscriptionFleet(): Promise<{
 export async function unbindCodexHost(
   connectionKey: string,
   hostRef: string
-): Promise<{ host: string; connectionRef: string }> {
+): Promise<{ host: string; connectionRef: string; model?: string }> {
   const raw = (await apiSend(
     'POST',
     `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/hosts/${encodeURIComponent(hostRef)}/unbind`
-  )) as { host?: unknown; connectionRef?: unknown }
+  )) as { host?: unknown; connectionRef?: unknown; model?: unknown }
+  const model = pickString(raw.model)
   return {
     host: pickString(raw.host) ?? hostRef,
     connectionRef: pickString(raw.connectionRef) ?? CODEX_UNASSIGNED_CONNECTION_KEY,
+    ...(model ? { model } : {}),
   }
 }
 
 export async function bindCodexHost(
   connectionKey: string,
   hostRef: string
-): Promise<{ host: string; connectionRef: string }> {
+): Promise<{ host: string; connectionRef: string; model?: string }> {
   const raw = (await apiSend(
     'POST',
     `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/hosts/${encodeURIComponent(hostRef)}/bind`
-  )) as { host?: unknown; connectionRef?: unknown }
+  )) as { host?: unknown; connectionRef?: unknown; model?: unknown }
+  const model = pickString(raw.model)
   return {
     host: pickString(raw.host) ?? hostRef,
     connectionRef: (() => {
@@ -295,6 +308,7 @@ export async function bindCodexHost(
       }
       return next
     })(),
+    ...(model ? { model } : {}),
   }
 }
 

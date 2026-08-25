@@ -5,6 +5,7 @@ import { createCodexCatalogTransportFromEnv } from '../src/services/codexSubscri
 
 const assignment = vi.hoisted(() => ({
   isCodexAssignmentAllowed: vi.fn(),
+  listOfferedCodexModelsForAssignment: vi.fn(),
 }))
 
 vi.mock('../src/services/codexSubscriptionCatalog.js', async () => {
@@ -12,6 +13,7 @@ vi.mock('../src/services/codexSubscriptionCatalog.js', async () => {
   return {
     ...actual,
     isCodexAssignmentAllowed: assignment.isCodexAssignmentAllowed,
+    listOfferedCodexModelsForAssignment: assignment.listOfferedCodexModelsForAssignment,
   }
 })
 
@@ -53,6 +55,8 @@ describe('admin Codex bind/unbind host write contract', () => {
     process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
     assignment.isCodexAssignmentAllowed.mockReset()
     assignment.isCodexAssignmentAllowed.mockResolvedValue(true)
+    assignment.listOfferedCodexModelsForAssignment.mockReset()
+    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.6-luna'])
   })
 
   afterEach(() => {
@@ -73,8 +77,13 @@ describe('admin Codex bind/unbind host write contract', () => {
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/unbind'
     )
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ host: 'chatllm', connectionRef: 'unassigned' })
+    expect(res.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'unassigned',
+      model: 'gpt-5.6-luna',
+    })
     expect(assignment.isCodexAssignmentAllowed).not.toHaveBeenCalled()
+    expect(assignment.listOfferedCodexModelsForAssignment).not.toHaveBeenCalled()
     expect(gateway.updateResource).toHaveBeenCalled()
   })
 
@@ -95,7 +104,11 @@ describe('admin Codex bind/unbind host write contract', () => {
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
     )
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ host: 'chatllm', connectionRef: 'codex-aaa' })
+    expect(res.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.6-luna',
+    })
     expect(assignment.isCodexAssignmentAllowed).toHaveBeenCalledWith(
       expect.anything(),
       'codex-aaa',
@@ -103,8 +116,78 @@ describe('admin Codex bind/unbind host write contract', () => {
     )
   })
 
-  it('returns 422 when the destination grant does not offer the model', async () => {
-    assignment.isCodexAssignmentAllowed.mockResolvedValue(false)
+  it('seeds the first offered model when the Host has no name', async () => {
+    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.1', 'gpt-5.6-luna'])
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'chatllm', resourceVersion: '12' },
+      spec: {
+        model: { provider: 'codex-subscription', connectionRef: 'unassigned' },
+      },
+    })
+    gateway.updateResource.mockResolvedValue({})
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
+    expect(gateway.updateResource).toHaveBeenCalledWith(
+      'hosts',
+      'chatllm',
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          model: expect.objectContaining({
+            provider: 'codex-subscription',
+            connectionRef: 'codex-aaa',
+            name: 'gpt-5.1',
+          }),
+        }),
+      }),
+      expect.any(String)
+    )
+    expect(assignment.isCodexAssignmentAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      'codex-aaa',
+      'gpt-5.1'
+    )
+  })
+
+  it('rematches to an offered model instead of 422 when the current name is not on the grant', async () => {
+    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.1'])
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'chatllm' },
+      spec: {
+        model: {
+          provider: 'codex-subscription',
+          name: 'gpt-5.6-luna',
+          connectionRef: 'unassigned',
+        },
+      },
+    })
+    gateway.updateResource.mockResolvedValue({})
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
+    expect(assignment.isCodexAssignmentAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      'codex-aaa',
+      'gpt-5.1'
+    )
+  })
+
+  it('returns 422 when the destination grant has no offered models', async () => {
+    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue([])
     const gateway = makeGateway()
     gateway.getResource.mockResolvedValue({
       metadata: { name: 'chatllm' },
@@ -120,7 +203,66 @@ describe('admin Codex bind/unbind host write contract', () => {
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
     )
     expect(res.status).toBe(422)
-    expect(res.body.error).toBe('invalid_host_spec')
+    expect(res.body.error).toBe('catalog_not_ready')
     expect(gateway.updateResource).not.toHaveBeenCalled()
+    expect(assignment.isCodexAssignmentAllowed).not.toHaveBeenCalled()
+  })
+
+  it('converts a non-Codex host and seeds the grant default model', async () => {
+    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.1'])
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'api-agent', resourceVersion: '4' },
+      spec: { model: { provider: 'openai', name: 'gpt-5.4' }, secretRef: 'openai-secret' },
+    })
+    gateway.updateResource.mockResolvedValue({})
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/api-agent/bind'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      host: 'api-agent',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
+    expect(gateway.updateResource).toHaveBeenCalledWith(
+      'hosts',
+      'api-agent',
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          model: expect.objectContaining({
+            provider: 'codex-subscription',
+            connectionRef: 'codex-aaa',
+            name: 'gpt-5.1',
+          }),
+        }),
+      }),
+      expect.any(String)
+    )
+  })
+
+  it('completes an already-bound Host that is missing spec.model.name', async () => {
+    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.1'])
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'chatllm' },
+      spec: {
+        model: {
+          provider: 'codex-subscription',
+          connectionRef: 'codex-aaa',
+        },
+      },
+    })
+    gateway.updateResource.mockResolvedValue({})
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      host: 'chatllm',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
+    expect(gateway.updateResource).toHaveBeenCalled()
   })
 })

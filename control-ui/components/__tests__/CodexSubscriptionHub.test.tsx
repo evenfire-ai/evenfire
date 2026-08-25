@@ -67,7 +67,13 @@ describe('CodexSubscriptionHub', () => {
     vi.mocked(listCodexSubscriptionFleet).mockResolvedValue({
       connections: [connection({ connectionKey: 'codex-aaa', displayName: 'Team A' })],
       assignableHosts: [
-        { name: 'chatllm', connectionRef: 'codex-aaa', displayName: 'chatllm' },
+        {
+          name: 'chatllm',
+          connectionRef: 'codex-aaa',
+          displayName: 'chatllm',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+        },
         { name: 'writer', connectionRef: 'unassigned', displayName: 'writer' },
         { name: 'researcher', connectionRef: 'unassigned', displayName: 'researcher' },
       ],
@@ -113,6 +119,7 @@ describe('CodexSubscriptionHub', () => {
     expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Agents' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'chatllm' })).toBeInTheDocument()
+    expect(screen.getByText('gpt-5.1')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Available' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Assigned' })).not.toBeInTheDocument()
     expect(document.querySelectorAll('.cu-llm-config__block').length).toBe(0)
@@ -120,7 +127,11 @@ describe('CodexSubscriptionHub', () => {
   })
 
   it('assigns one available agent without revoking', async () => {
-    vi.mocked(bindCodexHost).mockResolvedValue({ host: 'writer', connectionRef: 'codex-aaa' })
+    vi.mocked(bindCodexHost).mockResolvedValue({
+      host: 'writer',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
     render(
       <ToastProvider>
         <CodexSubscriptionHub />
@@ -218,6 +229,47 @@ describe('CodexSubscriptionHub', () => {
     })
     expect(bindCodexHost).toHaveBeenCalledWith('codex-aaa', 'chatllm')
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
+  })
+
+  it('confirms before switching a non-Codex agent to ChatGPT', async () => {
+    confirmMock.mockResolvedValue(true)
+    vi.mocked(listCodexSubscriptionFleet).mockResolvedValue({
+      connections: [connection({ connectionKey: 'codex-aaa', displayName: 'Team A' })],
+      assignableHosts: [
+        {
+          name: 'writer',
+          connectionRef: 'unassigned',
+          displayName: 'writer',
+          provider: 'zai',
+          model: 'glm-4.7',
+        },
+      ],
+      assignableHostsUnavailable: false,
+    })
+    vi.mocked(bindCodexHost).mockResolvedValue({
+      host: 'writer',
+      connectionRef: 'codex-aaa',
+      model: 'gpt-5.1',
+    })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    await waitFor(() => {
+      expect(screen.getByLabelText('Add agents to this subscription')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByLabelText('Add agents to this subscription'))
+    fireEvent.click(screen.getByRole('option', { name: 'writer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add agents' }))
+    await waitFor(() => {
+      expect(confirmMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Switch writer to ChatGPT?',
+        })
+      )
+    })
+    expect(bindCodexHost).toHaveBeenCalledWith('codex-aaa', 'writer')
   })
 
   it('unbinds an assigned agent without revoking', async () => {
