@@ -521,8 +521,14 @@ try {
 } finally {
   await manager.close()
 }
-})().catch(() => {
-  console.error('FAIL: NP-08 deployed manager journey')
+})().catch(error => {
+  const errorText = error instanceof Error ? error.message : String(error)
+  const safeError = errorText
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/https?:\/\/\S+/gi, '[url]')
+    .replace(/[A-Za-z0-9_-]{20,}/g, '[opaque]')
+    .slice(0, 240)
+  console.error('FAIL: NP-08 deployed manager journey: ' + safeError)
   process.exitCode = 1
 })
 NODE
