@@ -140,7 +140,9 @@ describe('registryClient — mintToken cache behavior', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('bad creds', { status: 401 }))
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(mintToken(ENV_OVERRIDE)).rejects.toThrow(/registry credential rejected: 401/)
+    const err = (await mintToken(ENV_OVERRIDE).catch(e => e)) as Error
+    expect(err.message).toMatch(/registry credential rejected: 401/)
+    expect(err.message).not.toContain('bad creds')
   })
 
   it('keeps the "credential rejected" label on 403 (forbidden creds)', async () => {
@@ -406,6 +408,19 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & { status?: number }
     expect(err.status).toBe(404)
     expect(err.message).toMatch(/Registry 404/)
+    expect(err.message).not.toContain('missing')
+  })
+
+  it('cancels a non-OK response body before propagating the upstream status', async () => {
+    const response = new Response('missing', { status: 404 })
+    const cancel = vi.spyOn(response.body!, 'cancel')
+    const fetchMock = entriesQueue([() => response])
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await searchEntries({ q: 'thing' }).catch(() => undefined)
+
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('does NOT retry a non-GET (POST publish) on 503, and surfaces registry_unavailable', async () => {

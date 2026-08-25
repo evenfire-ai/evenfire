@@ -1,4 +1,9 @@
 import { K8sNotFoundError } from '../src/services/resourceService.js'
+import {
+  type SecretResource,
+  type SecretSnapshot,
+  toSecretSnapshot,
+} from '../src/services/secretRepository.js'
 import type { SecretPreconditions } from '../src/types.js'
 
 type ResourceType =
@@ -11,6 +16,15 @@ type ResourceType =
   | 'sharedfilesystems'
   | 'llmhooks'
 
+// These are the Registry saga resources. Kubernetes assigns identity to every
+// object; this fake models it here so Registry CAS tests cannot silently fall
+// back to last-writer-wins while unrelated route fixtures remain lightweight.
+const REGISTRY_IDENTITY_RESOURCES: ReadonlySet<ResourceType> = new Set([
+  'mcpservers',
+  'workflowrecipes',
+  'llmhooks',
+])
+
 // Mirror the real K8sGateway.createResource signature in src/k8s.ts so the
 // mock cannot diverge from prod: callers must NOT pass a namespace via the
 // body — the server-side `namespace` argument is the single source of truth.
@@ -22,6 +36,8 @@ type ResourceBody = {
     labels?: Record<string, string>
     annotations?: Record<string, string>
     creationTimestamp?: string
+    resourceVersion?: string
+    uid?: string
   }
   spec: Record<string, unknown>
   status?: Record<string, unknown>
@@ -34,6 +50,8 @@ type ResourceRecord = {
     labels?: Record<string, string>
     annotations?: Record<string, string>
     creationTimestamp?: string
+    resourceVersion?: string
+    uid?: string
   }
   spec: Record<string, unknown>
   status?: Record<string, unknown>
@@ -50,11 +68,10 @@ export class MockGateway {
       type?: string
       labels?: Record<string, string>
       annotations?: Record<string, string>
-      // Server-assigned identity. Real Secrets always carry both; seeding them is optional
-      // so existing tests are unaffected, and only a test that cares about object identity
-      // (e.g. a takeover between two reads of the same name) has to set them.
-      uid?: string
-      resourceVersion?: string
+      // Server-assigned identity. The fake always models it because production Kubernetes
+      // always returns it; tests may override the values to model a specific interleaving.
+      uid: string
+      resourceVersion: string
       data?: Record<string, string>
       stringData?: Record<string, string>
     }
@@ -119,8 +136,8 @@ export class MockGateway {
       type: options?.type,
       labels: options?.labels,
       annotations: options?.annotations,
-      uid: options?.uid,
-      resourceVersion: options?.resourceVersion,
+      uid: options?.uid ?? `uid-${ns}-${name}`,
+      resourceVersion: options?.resourceVersion ?? '1',
       data: options?.data,
       stringData: options?.stringData,
     })
@@ -164,15 +181,23 @@ export class MockGateway {
   ): Promise<unknown> {
     // Server-decided namespace only — body.metadata cannot carry one (see ResourceBody type).
     const ns = namespace || this.ns
+    const hasRegistryIdentity = REGISTRY_IDENTITY_RESOURCES.has(plural)
     const row: ResourceRecord = {
       metadata: {
         name: body.metadata.name,
         namespace: ns,
+        ...(hasRegistryIdentity && {
+          uid: body.metadata.uid ?? `uid-${plural}-${ns}-${body.metadata.name}`,
+          resourceVersion: body.metadata.resourceVersion ?? '1',
+        }),
         ...(body.metadata.labels && { labels: body.metadata.labels }),
         ...(body.metadata.annotations && { annotations: body.metadata.annotations }),
         ...(body.metadata.creationTimestamp && {
           creationTimestamp: body.metadata.creationTimestamp,
         }),
+        ...(!hasRegistryIdentity && body.metadata.resourceVersion
+          ? { resourceVersion: body.metadata.resourceVersion }
+          : {}),
       },
       spec: body.spec || {},
       ...(body.status ? { status: body.status } : {}),
@@ -185,7 +210,11 @@ export class MockGateway {
     plural: ResourceType,
     name: string,
     body: {
-      metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
+      metadata?: {
+        labels?: Record<string, string>
+        annotations?: Record<string, string>
+        resourceVersion?: string
+      }
       spec: Record<string, unknown>
     },
     namespace?: string
@@ -195,6 +224,11 @@ export class MockGateway {
     if (!existing) {
       throw new K8sNotFoundError(`${plural}/${name} not found`)
     }
+    this.assertResourceVersion(
+      name,
+      existing.metadata.resourceVersion,
+      body.metadata?.resourceVersion
+    )
     // Mirror resourceService.updateResource: body.metadata.{labels,annotations}
     // REPLACES the corresponding map when provided (each map is a leaf), else
     // the existing map survives.
@@ -203,6 +237,9 @@ export class MockGateway {
         ...existing.metadata,
         ...(body.metadata?.labels && { labels: body.metadata.labels }),
         ...(body.metadata?.annotations && { annotations: body.metadata.annotations }),
+        ...(existing.metadata.resourceVersion && {
+          resourceVersion: MockGateway.nextResourceVersion(existing.metadata.resourceVersion),
+        }),
       },
       spec: body.spec || {},
       ...(existing.status ? { status: existing.status } : {}),
@@ -234,6 +271,9 @@ export class MockGateway {
       metadata: {
         ...existing.metadata,
         ...(next.metadata?.labels && { labels: next.metadata.labels }),
+        ...(existing.metadata.resourceVersion && {
+          resourceVersion: MockGateway.nextResourceVersion(existing.metadata.resourceVersion),
+        }),
       },
       spec: next.spec || {},
       ...(existing.status ? { status: existing.status } : {}),
@@ -257,7 +297,7 @@ export class MockGateway {
    * Mock Secret read. Throws a K8s-shaped 404 error when the Secret was not
    * seeded via `seedSecret()`. Matches the real K8sGateway.getSecret contract.
    */
-  async getSecret(name: string, namespace?: string): Promise<unknown> {
+  async getSecret(name: string, namespace?: string): Promise<SecretResource> {
     const ns = namespace || this.ns
     const entry = this.secretStore.get(`${ns}/${name}`)
     if (!entry) {
@@ -275,9 +315,8 @@ export class MockGateway {
         namespace: entry.namespace,
         labels: entry.labels,
         annotations: entry.annotations,
-        // Only surfaced when seeded, so no existing assertion on this object changes shape.
-        ...(entry.uid !== undefined && { uid: entry.uid }),
-        ...(entry.resourceVersion !== undefined && { resourceVersion: entry.resourceVersion }),
+        uid: entry.uid,
+        resourceVersion: entry.resourceVersion,
       },
       type: entry.type || 'Opaque',
       data: entry.data,
@@ -285,7 +324,7 @@ export class MockGateway {
     }
   }
 
-  async createSecret(req: unknown): Promise<unknown> {
+  async createSecret(req: unknown): Promise<SecretSnapshot> {
     const body = req as {
       name: string
       namespace?: string
@@ -295,16 +334,29 @@ export class MockGateway {
       data?: Record<string, string>
       stringData?: Record<string, string>
     }
-    this.secretStore.set(this.key(body.name, body.namespace), {
+    const key = this.key(body.name, body.namespace)
+    if (this.secretStore.has(key)) {
+      const err = new Error(`secrets "${body.name}" already exists`) as Error & {
+        statusCode: number
+        code: number
+      }
+      err.statusCode = 409
+      err.code = 409
+      throw err
+    }
+    const entry = {
       name: body.name,
       namespace: body.namespace || this.ns,
       type: body.type,
       labels: body.labels,
       annotations: body.annotations,
+      uid: `uid-${body.namespace || this.ns}-${body.name}`,
+      resourceVersion: '1',
       data: body.data,
       stringData: body.stringData,
-    })
-    return req
+    }
+    this.secretStore.set(key, entry)
+    return this.snapshot(entry)
   }
 
   /**
@@ -317,7 +369,7 @@ export class MockGateway {
    * A successful write bumps `resourceVersion`, so a caller replaying a stale version is
    * rejected on the second attempt just as it would be against a real cluster.
    */
-  async updateSecret(req: unknown, precondition?: SecretPreconditions): Promise<unknown> {
+  async updateSecret(req: unknown, precondition?: SecretPreconditions): Promise<SecretSnapshot> {
     const body = req as {
       name: string
       namespace?: string
@@ -329,8 +381,17 @@ export class MockGateway {
     }
     const key = this.key(body.name, body.namespace)
     const existing = this.secretStore.get(key)
+    if (!existing) {
+      const err = new Error(`secrets "${body.name}" not found`) as Error & {
+        statusCode: number
+        code: number
+      }
+      err.statusCode = 404
+      err.code = 404
+      throw err
+    }
     this.assertPrecondition(body.name, existing, precondition)
-    this.secretStore.set(key, {
+    const updated = {
       name: body.name,
       namespace: body.namespace || this.ns,
       type: body.type,
@@ -340,8 +401,39 @@ export class MockGateway {
       resourceVersion: MockGateway.nextResourceVersion(existing?.resourceVersion),
       data: body.data,
       stringData: body.stringData,
-    })
-    return req
+    }
+    this.secretStore.set(key, updated)
+    return this.snapshot(updated)
+  }
+
+  private snapshot(entry: {
+    name: string
+    namespace: string
+    type?: string
+    labels?: Record<string, string>
+    annotations?: Record<string, string>
+    uid: string
+    resourceVersion: string
+    data?: Record<string, string>
+    stringData?: Record<string, string>
+  }): SecretSnapshot {
+    return toSecretSnapshot(
+      {
+        metadata: {
+          name: entry.name,
+          namespace: entry.namespace,
+          labels: entry.labels,
+          annotations: entry.annotations,
+          uid: entry.uid,
+          resourceVersion: entry.resourceVersion,
+        },
+        type: entry.type,
+        data: entry.data,
+        stringData: entry.stringData,
+      },
+      entry.name,
+      entry.namespace
+    )
   }
 
   /**
@@ -373,6 +465,24 @@ export class MockGateway {
     if (current === undefined) return undefined
     const n = Number(current)
     return Number.isFinite(n) ? String(n + 1) : `${current}-1`
+  }
+
+  private assertResourceVersion(
+    name: string,
+    current: string | undefined,
+    expected: string | undefined
+  ): void {
+    // Some legacy route fixtures do not model the server-assigned CR
+    // resourceVersion. They cannot prove a CAS mismatch; registry regressions
+    // that exercise this contract seed an explicit version and are checked
+    // strictly below.
+    if (expected === undefined || current === undefined || current === expected) return
+    const err = new Error(
+      `Operation cannot be fulfilled on resources "${name}": the object has been modified`
+    ) as Error & { statusCode: number; code: number }
+    err.statusCode = 409
+    err.code = 409
+    throw err
   }
 
   async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {

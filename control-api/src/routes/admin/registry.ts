@@ -10,6 +10,7 @@ import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { rootLogger } from '../../observability/logger.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
 import {
   addHookRefToHost,
@@ -47,10 +48,15 @@ import {
   platformWorkloadNamespaces,
 } from '../../services/registryPullSecretService.js'
 import {
+  existingSecretAnnotationKeyReason,
+  invalidSecretTypeReason,
+} from '../../services/secretConstraints.js'
+import { SecretSnapshot, toSecretSnapshot } from '../../services/secretRepository.js'
+import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
 } from '../../services/workflowRecipeLimits.js'
-import { SecretUpsertRequest } from '../../types.js'
+import type { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
 import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   shouldAttachEvenfirePullSecret,
@@ -355,14 +361,98 @@ function hookTargetKind(target: {
   return 'unknown'
 }
 
-type SecretSnapshot = {
+const REGISTRY_SECRET_WRITE_OPTIONS = { capability: 'registryCredential' } as const
+
+/**
+ * Registry upgrades must either restore a credentials Secret exactly or refuse
+ * before mutating anything. Silently stripping metadata during rollback can
+ * remove ownership/reconciliation state from a Secret managed by another
+ * controller.
+ */
+function nonRestorableSecretSnapshotReason(snapshot: SecretSnapshot): string | null {
+  if (invalidSecretTypeReason(snapshot.type ?? 'Opaque')) {
+    return 'existing credentials Secret type is not restorable under the registry write policy'
+  }
+  if (
+    Object.keys(snapshot.annotations ?? {}).some(
+      key => existingSecretAnnotationKeyReason(key, REGISTRY_SECRET_WRITE_OPTIONS) !== null
+    )
+  ) {
+    return 'existing credentials Secret contains unauthorized platform metadata'
+  }
+  if (
+    snapshot.labels?.['clerum.io/managed-by'] !== undefined &&
+    snapshot.labels['clerum.io/managed-by'] !== 'control-api'
+  ) {
+    return 'existing credentials Secret is owned by another controller'
+  }
+  if (
+    snapshot.labels?.['clerum.io/owner-recipe'] !== undefined ||
+    snapshot.labels?.['clerum.io/recipe-secret'] !== undefined ||
+    snapshot.labels?.['clerum.io/shared'] !== undefined
+  ) {
+    return 'existing credentials Secret is owned by a workflow recipe'
+  }
+  if (snapshot.ownerReferences?.length) {
+    return 'existing credentials Secret has ownerReferences that the registry upgrade cannot restore'
+  }
+  if (snapshot.finalizers?.length) {
+    return 'existing credentials Secret has finalizers that the registry upgrade cannot restore'
+  }
+  if (snapshot.immutable === true) {
+    return 'existing credentials Secret is immutable'
+  }
+  if (!snapshot.uid || !snapshot.resourceVersion) {
+    return 'existing credentials Secret has no complete Kubernetes identity for a safe rollback'
+  }
+  return null
+}
+
+function secretPreconditions(
+  snapshot: Pick<SecretSnapshot, 'uid' | 'resourceVersion'>
+): SecretPreconditions {
+  return { uid: snapshot.uid, resourceVersion: snapshot.resourceVersion }
+}
+
+type SafeRegistryErrorLogFields = {
   name: string
-  namespace: string
-  type?: string
-  labels?: Record<string, string>
-  annotations?: Record<string, string>
-  data?: Record<string, string>
-  stringData?: Record<string, string>
+  status?: number
+  code?: string
+}
+
+/** Return only bounded error identity fields; never place upstream messages in logs. */
+export function registryErrorLogFields(err: unknown): SafeRegistryErrorLogFields {
+  const candidate =
+    err && typeof err === 'object'
+      ? (err as {
+          name?: unknown
+          status?: unknown
+          statusCode?: unknown
+          code?: unknown
+        })
+      : undefined
+  const rawName = err instanceof Error ? err.name : candidate?.name
+  const name =
+    typeof rawName === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawName)
+      ? rawName
+      : 'UnknownError'
+  const rawStatus = candidate?.status ?? candidate?.statusCode
+  const status =
+    typeof rawStatus === 'number' &&
+    Number.isInteger(rawStatus) &&
+    rawStatus >= 100 &&
+    rawStatus <= 599
+      ? rawStatus
+      : undefined
+  const code =
+    typeof candidate?.code === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(candidate.code)
+      ? candidate.code
+      : undefined
+  return {
+    name,
+    ...(status === undefined ? {} : { status }),
+    ...(code === undefined ? {} : { code }),
+  }
 }
 
 type CredentialPayloadValidation =
@@ -808,7 +898,8 @@ async function updateResourceWithConflictRetry(
 ): Promise<unknown> {
   let lastConflict: unknown
 
-  for (let attempt = 1; attempt <= UPDATE_CONFLICT_RETRY_ATTEMPTS; attempt += 1) {
+  const maxAttempts = body.metadata?.resourceVersion ? 1 : UPDATE_CONFLICT_RETRY_ATTEMPTS
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       return await gateway.updateResource(plural, name, body, namespace)
     } catch (err) {
@@ -828,41 +919,7 @@ function normalizeSecretSnapshot(
   fallbackName: string,
   fallbackNamespace: string
 ): SecretSnapshot {
-  const obj = (raw ?? {}) as {
-    metadata?: {
-      name?: string
-      namespace?: string
-      labels?: Record<string, string>
-      annotations?: Record<string, string>
-    }
-    type?: unknown
-    data?: unknown
-    stringData?: unknown
-  }
-
-  return {
-    name:
-      typeof obj.metadata?.name === 'string' && obj.metadata.name.trim()
-        ? obj.metadata.name
-        : fallbackName,
-    namespace:
-      typeof obj.metadata?.namespace === 'string' && obj.metadata.namespace.trim()
-        ? obj.metadata.namespace
-        : fallbackNamespace,
-    ...(typeof obj.type === 'string' ? { type: obj.type } : {}),
-    ...(obj.metadata?.labels && typeof obj.metadata.labels === 'object'
-      ? { labels: obj.metadata.labels }
-      : {}),
-    ...(obj.metadata?.annotations && typeof obj.metadata.annotations === 'object'
-      ? { annotations: obj.metadata.annotations }
-      : {}),
-    ...(obj.data && typeof obj.data === 'object'
-      ? { data: obj.data as Record<string, string> }
-      : {}),
-    ...(obj.stringData && typeof obj.stringData === 'object'
-      ? { stringData: obj.stringData as Record<string, string> }
-      : {}),
-  }
+  return toSecretSnapshot(raw, fallbackName, fallbackNamespace)
 }
 
 async function waitForDeletion(
@@ -969,6 +1026,8 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
     hookKeys: [...hookKeys].sort((a, b) => a.localeCompare(b)),
   }
 }
+
+const log = rootLogger.child({ module: 'admin-registry' })
 
 export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
   const router = Router()
@@ -1484,7 +1543,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               stringData: secretData,
             }
             try {
-              await gateway.createSecret(secretReq)
+              await gateway.createSecret(secretReq, { capability: 'registryCredential' })
             } catch (err) {
               const k8sErr = extractK8sError(err)
               if (k8sErr) {
@@ -2010,14 +2069,17 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
           try {
-            await gateway.createSecret({
-              name: secretName,
-              namespace: targetNs,
-              type: 'Opaque',
-              labels: registryLabels,
-              annotations: registryAnnotations,
-              stringData: credentials,
-            })
+            await gateway.createSecret(
+              {
+                name: secretName,
+                namespace: targetNs,
+                type: 'Opaque',
+                labels: registryLabels,
+                annotations: registryAnnotations,
+                stringData: credentials,
+              },
+              REGISTRY_SECRET_WRITE_OPTIONS
+            )
           } catch (err) {
             const k8sErr = extractK8sError(err)
             if (k8sErr) {
@@ -2229,12 +2291,20 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         const llmHooksNs = config.llmHooksNamespace
         let current: {
           spec?: Record<string, unknown>
-          metadata?: { annotations?: Record<string, string>; labels?: Record<string, string> }
+          metadata?: {
+            annotations?: Record<string, string>
+            labels?: Record<string, string>
+            resourceVersion?: string
+          }
         }
         try {
           current = (await gateway.getResource('llmhooks', body.hookName, llmHooksNs)) as {
             spec?: Record<string, unknown>
-            metadata?: { annotations?: Record<string, string>; labels?: Record<string, string> }
+            metadata?: {
+              annotations?: Record<string, string>
+              labels?: Record<string, string>
+              resourceVersion?: string
+            }
           }
         } catch (err) {
           res.status(404).json({
@@ -2451,10 +2521,15 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             body.hookName,
             {
               metadata: {
+                ...(current.metadata?.labels ? { labels: current.metadata.labels } : {}),
                 annotations: {
+                  ...(current.metadata?.annotations ?? {}),
                   ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
                   'clerum.io/trust-level': trustLevel,
                 },
+                ...(current.metadata?.resourceVersion
+                  ? { resourceVersion: current.metadata.resourceVersion }
+                  : {}),
               },
               spec: upgradedSpec,
             },
@@ -2480,7 +2555,10 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             config.hostsNamespace
           )
         } catch (err) {
-          console.error(`[Admin] upgrade-hook "${body.hookName}": Host ref sync failed:`, err)
+          log.error(
+            { hookName: body.hookName, error: registryErrorLogFields(err) },
+            'Registry upgrade Host reference sync failed'
+          )
           res.status(207).json({
             hookName: body.hookName,
             digest: newDigest,
@@ -2658,15 +2736,31 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         const namespace = config.mcpServersNamespace
 
         // 1. Verify existing server exists
-        let existingServer: Record<string, unknown>
+        let existingServer: {
+          metadata?: {
+            annotations?: Record<string, string>
+            labels?: Record<string, string>
+            resourceVersion?: string
+          }
+          spec?: Record<string, unknown>
+        }
         try {
           existingServer = (await gateway.getResource(
             'mcpservers',
             body.serverName,
             namespace
-          )) as Record<string, unknown>
+          )) as typeof existingServer
         } catch {
           res.status(404).json({ error: `McpServer "${body.serverName}" not found` })
+          return
+        }
+
+        const installedCatalogId = getCatalogId(existingServer.metadata)
+        if (installedCatalogId && installedCatalogId !== body.registryEntryName) {
+          res.status(409).json({
+            error: 'mcp_server_entry_identity_mismatch',
+            reason: `McpServer "${body.serverName}" was installed from "${installedCatalogId}", not "${body.registryEntryName}" — uninstall and install to change entry`,
+          })
           return
         }
 
@@ -2701,7 +2795,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         }
 
         // 3. Build updated spec (preserve contextRef from existing)
-        const existingSpec = (existingServer as { spec?: Record<string, unknown> }).spec ?? {}
+        const existingSpec = existingServer.spec ?? {}
         const transport = (entry.transport ?? 'streamableHttp') as string
         const port = (meta?.port as number) ?? 3000
         let remoteBaseUrl: string | undefined
@@ -2805,24 +2899,15 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
-        // Ensure the shared pull secret exists before the CRD update references it
-        // (self-hosted self-provision; namespace-shared, idempotent, fail-loud). Runs
-        // AFTER preflight — matching install — so a request that will 422 never mints a
-        // rotate-on-call credential.
-        if (attachEvenfirePullSecret) {
-          try {
-            await ensureRegistryPullSecret(gateway, namespace)
-          } catch (err) {
-            const mapped = pullSecretErrorResponse(err)
-            res.status(mapped.status).json(mapped.body)
-            return
-          }
-        }
-
-        // 4. Update credentials if provided
+        // Read and validate the rollback target before any shared pull-secret
+        // provisioning or credentials write. A legacy Secret with blocked
+        // infrastructure metadata cannot be safely restored through the normal
+        // constrained writer, so fail closed before creating side effects.
         let previousSecretSnapshot: SecretSnapshot | null = null
         let secretCreatedDuringUpgrade = false
-        if (Object.keys(credentialPayload.secretData).length > 0) {
+        let mutatedSecretPreconditions: SecretPreconditions | null = null
+        const hasCredentialUpdates = Object.keys(credentialPayload.secretData).length > 0
+        if (hasCredentialUpdates) {
           try {
             previousSecretSnapshot = normalizeSecretSnapshot(
               await gateway.getSecret(secretName, namespace),
@@ -2839,19 +2924,57 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             }
           }
 
+          if (previousSecretSnapshot) {
+            const reason = nonRestorableSecretSnapshotReason(previousSecretSnapshot)
+            if (reason) {
+              res.status(409).json({
+                error: 'credentials_secret_state_not_restorable',
+                reason,
+              })
+              return
+            }
+          }
+        }
+
+        // Ensure the shared pull secret exists before the CRD update references it
+        // (self-hosted self-provision; namespace-shared, idempotent, fail-loud). Runs
+        // AFTER preflight — matching install — so a request that will 422 never mints a
+        // rotate-on-call credential.
+        if (attachEvenfirePullSecret) {
+          try {
+            await ensureRegistryPullSecret(gateway, namespace)
+          } catch (err) {
+            const mapped = pullSecretErrorResponse(err)
+            res.status(mapped.status).json(mapped.body)
+            return
+          }
+        }
+
+        // 4. Update credentials if provided
+        if (hasCredentialUpdates) {
           const secretRequest: SecretUpsertRequest = {
             name: secretName,
             namespace,
             type: 'Opaque',
             labels: {
+              ...(previousSecretSnapshot?.labels ?? {}),
               'clerum.io/managed-by': 'control-api',
             },
-            annotations: catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+            annotations: {
+              ...(previousSecretSnapshot?.annotations ?? {}),
+              ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+            },
+            ...(previousSecretSnapshot?.data ? { data: previousSecretSnapshot.data } : {}),
             stringData: credentialPayload.secretData,
           }
 
           if (previousSecretSnapshot) {
-            await gateway.updateSecret(secretRequest)
+            const updatedSecret = await gateway.updateSecret(
+              secretRequest,
+              secretPreconditions(previousSecretSnapshot),
+              REGISTRY_SECRET_WRITE_OPTIONS
+            )
+            mutatedSecretPreconditions = secretPreconditions(updatedSecret)
             auditLog('secret_updated', {
               secretName,
               namespace,
@@ -2859,8 +2982,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               version: body.registryEntryVersion,
             })
           } else {
-            await gateway.createSecret(secretRequest)
+            const created = await gateway.createSecret(secretRequest, REGISTRY_SECRET_WRITE_OPTIONS)
             secretCreatedDuringUpgrade = true
+            mutatedSecretPreconditions = secretPreconditions(created)
             auditLog('secret_created', {
               secretName,
               namespace,
@@ -2874,13 +2998,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // round-trip key (resourceService.updateResource merges body.metadata
         // .annotations over current). managed-by / server-mode stay labels.
         const upgradeLabels: Record<string, string> = {
+          ...(existingServer.metadata?.labels ?? {}),
           'clerum.io/managed-by': 'control-api',
           'clerum.io/server-mode': isLocal ? 'local' : 'remote',
         }
-        const upgradeAnnotations: Record<string, string> = catalogAnnotations(
-          body.registryEntryName,
-          body.registryEntryVersion
-        )
+        const upgradeAnnotations: Record<string, string> = {
+          ...(existingServer.metadata?.annotations ?? {}),
+          ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+        }
 
         try {
           await updateResourceWithConflictRetry(
@@ -2888,41 +3013,103 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             'mcpservers',
             body.serverName,
             {
-              metadata: { labels: upgradeLabels, annotations: upgradeAnnotations },
+              metadata: {
+                labels: upgradeLabels,
+                annotations: upgradeAnnotations,
+                ...(existingServer.metadata?.resourceVersion
+                  ? { resourceVersion: existingServer.metadata.resourceVersion }
+                  : {}),
+              },
               spec: updatedSpec,
             },
             namespace
           )
         } catch (err) {
-          if (body.credentials && Object.keys(body.credentials).length > 0) {
+          const k8sErr = extractK8sError(err)
+          let upgradeCommittedByRead = false
+          const outcomeIsAmbiguous = !k8sErr || k8sErr.status >= 500
+
+          // A transport/5xx error does not prove that the apiserver rejected the
+          // replace. Read the object before compensating: blind rollback after a
+          // committed write would undo a successful upgrade and create a second
+          // lost-update race.
+          if (outcomeIsAmbiguous) {
             try {
+              const current = (await gateway.getResource(
+                'mcpservers',
+                body.serverName,
+                namespace
+              )) as {
+                metadata?: { annotations?: Record<string, string>; labels?: Record<string, string> }
+              }
+              upgradeCommittedByRead =
+                getCatalogId(current.metadata) === body.registryEntryName &&
+                getCatalogVersion(current.metadata) === body.registryEntryVersion
+            } catch (readErr) {
+              log.error(
+                {
+                  serverName: body.serverName,
+                  namespace,
+                  error: registryErrorLogFields(readErr),
+                },
+                'Registry upgrade outcome is ambiguous and could not be classified'
+              )
+              res.status(503).json({ error: 'registry_upgrade_outcome_ambiguous' })
+              return
+            }
+          }
+
+          if (!upgradeCommittedByRead && hasCredentialUpdates) {
+            try {
+              if (!mutatedSecretPreconditions) {
+                throw Object.assign(new Error('mutated Secret identity unavailable'), {
+                  code: 'secret_identity_unavailable',
+                })
+              }
               if (secretCreatedDuringUpgrade) {
-                await gateway.deleteSecret(secretName, namespace)
+                await gateway.deleteSecret(secretName, namespace, mutatedSecretPreconditions)
                 await waitForDeletion(
                   () => gateway.getSecret(secretName, namespace),
                   `Secret/${secretName}`
                 )
               } else if (previousSecretSnapshot) {
-                await gateway.updateSecret({
-                  name: previousSecretSnapshot.name,
-                  namespace: previousSecretSnapshot.namespace,
-                  type: previousSecretSnapshot.type || 'Opaque',
-                  labels: previousSecretSnapshot.labels,
-                  annotations: previousSecretSnapshot.annotations,
-                  data: previousSecretSnapshot.data,
-                  stringData: previousSecretSnapshot.stringData,
-                })
+                await gateway.updateSecret(
+                  {
+                    name: previousSecretSnapshot.name,
+                    namespace: previousSecretSnapshot.namespace,
+                    type: previousSecretSnapshot.type ?? 'Opaque',
+                    labels: previousSecretSnapshot.labels ?? {},
+                    annotations: previousSecretSnapshot.annotations ?? {},
+                    data: previousSecretSnapshot.data,
+                    stringData: previousSecretSnapshot.stringData,
+                  },
+                  mutatedSecretPreconditions,
+                  REGISTRY_SECRET_WRITE_OPTIONS
+                )
               }
-            } catch {
-              // Best-effort rollback; preserve the original upgrade error.
+            } catch (rollbackErr) {
+              log.error(
+                {
+                  serverName: body.serverName,
+                  namespace,
+                  secretName,
+                  rollback: secretCreatedDuringUpgrade ? 'delete-created-secret' : 'restore-secret',
+                  error: registryErrorLogFields(rollbackErr),
+                },
+                'Registry upgrade rollback failed'
+              )
             }
           }
-          const k8sErr = extractK8sError(err)
-          if (k8sErr) {
+
+          if (upgradeCommittedByRead) {
+            // The write was accepted despite the transport error. Continue with
+            // the normal success response; the read is the authoritative proof.
+          } else if (k8sErr) {
             res.status(k8sErr.status).json({ error: k8sErr.message })
             return
+          } else {
+            throw err
           }
-          throw err
         }
         auditLog('upgrade', {
           serverName: body.serverName,
@@ -2983,18 +3170,47 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // recreating it in sandbox-recipes, not by preserving the ambiguity.
         const recipeNamespaces = [config.sandboxNamespace] as const
         let namespace: string | null = null
+        let existingRecipe:
+          | {
+              metadata?: {
+                labels?: Record<string, string>
+                annotations?: Record<string, string>
+                resourceVersion?: string
+              }
+              spec?: Record<string, unknown>
+            }
+          | undefined
         for (const candidate of recipeNamespaces) {
           try {
-            await gateway.getResource('workflowrecipes', body.recipeName, candidate)
+            existingRecipe = (await gateway.getResource(
+              'workflowrecipes',
+              body.recipeName,
+              candidate
+            )) as {
+              metadata?: {
+                labels?: Record<string, string>
+                annotations?: Record<string, string>
+                resourceVersion?: string
+              }
+              spec?: Record<string, unknown>
+            }
             namespace = candidate
             break
           } catch {
             // try next namespace
           }
         }
-        if (!namespace) {
+        if (!namespace || !existingRecipe) {
           res.status(404).json({
             error: `WorkflowRecipe "${body.recipeName}" not found in any known recipe namespace (${recipeNamespaces.join(', ')})`,
+          })
+          return
+        }
+        const installedCatalogId = getCatalogId(existingRecipe.metadata)
+        if (installedCatalogId && installedCatalogId !== body.registryEntryName) {
+          res.status(409).json({
+            error: 'recipe_entry_identity_mismatch',
+            reason: `WorkflowRecipe "${body.recipeName}" was installed from "${installedCatalogId}", not "${body.registryEntryName}" — uninstall and install to change entry`,
           })
           return
         }
@@ -3101,12 +3317,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // stays a label. Pass metadata so a version bump refreshes the
         // round-trip annotation (resourceService merges body.metadata).
         const upgradeLabels: Record<string, string> = {
+          ...(existingRecipe.metadata?.labels ?? {}),
           'clerum.io/managed-by': 'control-api',
         }
-        const upgradeAnnotations: Record<string, string> = catalogAnnotations(
-          body.registryEntryName,
-          body.registryEntryVersion
-        )
+        const upgradeAnnotations: Record<string, string> = {
+          ...(existingRecipe.metadata?.annotations ?? {}),
+          ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
+        }
 
         // Ensure the platform pull credential before the CRD that will reference it.
         // Keyed on the INCOMING spec: an upgrade is exactly how a recipe moves from a
@@ -3127,7 +3344,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           'workflowrecipes',
           body.recipeName,
           {
-            metadata: { labels: upgradeLabels, annotations: upgradeAnnotations },
+            metadata: {
+              labels: upgradeLabels,
+              annotations: upgradeAnnotations,
+              ...(existingRecipe.metadata?.resourceVersion
+                ? { resourceVersion: existingRecipe.metadata.resourceVersion }
+                : {}),
+            },
             spec: recipeSpec,
           },
           namespace
@@ -3176,7 +3399,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     let authActive: boolean
     try {
       authActive = await isRegistryAuthActive()
-    } catch {
+    } catch (err) {
+      log.error(
+        {
+          event: 'isRegistryAuthActive_failed',
+          err: registryErrorLogFields(err),
+        },
+        'registry auth check failed'
+      )
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -3198,7 +3428,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     try {
       orgName = (await resolvePublishScope()).orgName
       if (!orgName) orgName = (await resolvePublishScope({ force: true })).orgName
-    } catch {
+    } catch (err) {
+      log.error(
+        {
+          event: 'resolvePublishScope_failed',
+          err: registryErrorLogFields(err),
+        },
+        'publish scope resolution failed'
+      )
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -3298,7 +3535,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     let authActive: boolean
     try {
       authActive = await isRegistryAuthActive()
-    } catch {
+    } catch (err) {
+      log.error(
+        {
+          event: 'isRegistryAuthActive_failed',
+          err: registryErrorLogFields(err),
+        },
+        'registry auth check failed'
+      )
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }
@@ -3324,7 +3568,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
       if (!scope.curator && !scope.orgName) {
         scope = await resolvePublishScope({ force: true })
       }
-    } catch {
+    } catch (err) {
+      log.error(
+        {
+          event: 'resolvePublishScope_failed',
+          err: registryErrorLogFields(err),
+        },
+        'publish scope resolution failed'
+      )
       res.status(502).json({ error: 'registry_integration_error' })
       return null
     }

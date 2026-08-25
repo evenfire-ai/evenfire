@@ -26,7 +26,12 @@ function createGateway() {
         name: string,
         namespace?: string
       ): Promise<{
-        metadata: { name: string; namespace?: string; labels: Record<string, string> }
+        metadata: {
+          name: string
+          namespace?: string
+          labels: Record<string, string>
+          annotations?: Record<string, string>
+        }
         data: Record<string, string>
       }> => ({
         metadata: { name, namespace, labels: {} },
@@ -409,6 +414,39 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     expect(res.body.keys).toEqual(['EXISTING_KEY', 'LINEAR_API_KEY'])
     expect(res.body.name).toBe('linear-credentials')
     expect(res.body.namespace).toBe('mcp-server')
+  })
+
+  it('preserves Registry catalog annotations while rotating managed credentials', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        labels: { 'clerum.io/managed-by': 'control-api' },
+        annotations: {
+          'clerum.io/catalog-id': 'linear',
+          'clerum.io/catalog-version': '1.0.0',
+        },
+      },
+      data: { EXISTING_KEY: 'b2xkLXZhbHVl' },
+    })
+    const app = makeApp(gateway)
+
+    await request(app)
+      .put('/admin/mcp-secrets/linear-credentials')
+      .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
+      .expect(200)
+
+    expect(gateway.mergeSecret).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        stringData: { LINEAR_API_KEY: 'rotated-value' },
+      }),
+      {
+        allowExistingPlatformAnnotationKeys: ['clerum.io/catalog-id', 'clerum.io/catalog-version'],
+      }
+    )
   })
 
   it('always targets config.mcpServersNamespace and ignores a namespace in the body', async () => {

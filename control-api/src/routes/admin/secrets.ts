@@ -6,12 +6,14 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { isValidDNSSubdomain } from '../../http/rfc1123.js'
 import { K8sGateway, extractHttpStatus } from '../../k8s.js'
+import { rootLogger } from '../../observability/logger.js'
 import {
   OWNER_RECIPE_LABEL_KEY,
   SHARED_LABEL_KEY,
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
+import { REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS } from '../../services/secretConstraints.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import { SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
@@ -48,6 +50,17 @@ function isPlatformManagedSecretName(name: unknown): boolean {
 const PLATFORM_MANAGED_SECRET_ERROR =
   `Secret "${EVENFIRE_REGISTRY_PULL_SECRET_NAME}" is platform-managed (the evenfire ` +
   'registry image-pull credential) and cannot be created, modified, or deleted here'
+
+const logger = rootLogger.child({ module: 'admin-secrets' })
+
+function isRegistryManagedCredentialSecret(
+  annotations: Record<string, string> | undefined
+): boolean {
+  return REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS.every(key => {
+    const value = annotations?.[key]
+    return typeof value === 'string' && value.length > 0
+  })
+}
 
 // The plaintext data being written, merging base64 `data` and plaintext
 // `stringData` (stringData wins, matching Kubernetes Secret semantics).
@@ -453,7 +466,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       // job. Read it first so a missing Secret is a 404 instead of a silent
       // upsert, and so the ownership guard below sees the stored labels.
       let existing: {
-        metadata?: { labels?: Record<string, string> }
+        metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
         data?: Record<string, string>
       }
       try {
@@ -480,7 +493,15 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
 
-      await gateway.mergeSecret({ name, namespace: targetNs, stringData: data })
+      const preserveRegistryAnnotations = isRegistryManagedCredentialSecret(
+        existing.metadata?.annotations
+      )
+        ? { allowExistingPlatformAnnotationKeys: REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS }
+        : undefined
+      await gateway.mergeSecret(
+        { name, namespace: targetNs, stringData: data },
+        preserveRegistryAnnotations
+      )
 
       const keys = [...new Set([...Object.keys(existing.data || {}), ...Object.keys(data)])].sort(
         (a, b) => a.localeCompare(b)
@@ -490,13 +511,13 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       // before anything that could throw — a rotation that actually happened
       // must never go unlogged just because a later, secondary step failed.
       // Key NAMES are safe to log; values never are.
-      console.log(
-        JSON.stringify({
-          event: 'mcp-secret-rotated',
+      logger.info(
+        {
           name,
           namespace: targetNs,
           rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
-        })
+        },
+        'mcp-secret-rotated'
       )
 
       // affectedConnectors is a best-effort convenience for the UI ("who
@@ -654,18 +675,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
   }
 
   async function recipeExists(recipeName: string): Promise<boolean> {
-    try {
-      const items = (await gateway.listResource(
-        'workflowrecipes',
-        config.sandboxNamespace
-      )) as Array<{ metadata?: { name?: string } }>
-      return items.some(r => r.metadata?.name === recipeName)
-    } catch {
-      // List failure: don't block Secret creation on a transient apiserver
-      // hiccup — the WRC reconciler is the second line of defense (it rejects
-      // owner-recipe Secrets that don't match the requesting recipe).
-      return true
-    }
+    const items = (await gateway.listResource(
+      'workflowrecipes',
+      config.sandboxNamespace
+    )) as Array<{ metadata?: { name?: string } }>
+    return items.some(r => r.metadata?.name === recipeName)
   }
 
   async function isRecipeSecret(

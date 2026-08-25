@@ -16,6 +16,7 @@ export interface Metadata {
   namespace?: string
   labels?: Record<string, string>
   annotations?: Record<string, string>
+  resourceVersion?: string
 }
 
 export interface ClerumResource<TSpec = Record<string, unknown>> {

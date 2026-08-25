@@ -1,8 +1,21 @@
 import * as k8s from '@kubernetes/client-node'
 import { SecretPreconditions, SecretUpsertRequest } from '../types.js'
+import {
+  type SecretConstraintOptions,
+  assertValidEffectiveSecretConstraints,
+  assertValidSecretConstraints,
+  assertValidSecretType,
+  isInfrastructureAnnotationKey,
+} from './secretConstraints.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
+import {
+  SecretRepository,
+  SecretResource,
+  SecretSnapshot,
+  toSecretSnapshot,
+} from './secretRepository.js'
 
-export class SecretService {
+export class SecretService implements SecretRepository {
   constructor(
     private readonly coreApi: k8s.CoreV1Api,
     private readonly defaultNamespace: string
@@ -26,11 +39,15 @@ export class SecretService {
    * Read a single Secret by name. Throws the underlying K8s client error
    * (including 404) so callers can branch on statusCode.
    */
-  async getSecret(name: string, namespace = this.defaultNamespace): Promise<unknown> {
+  async getSecret(name: string, namespace = this.defaultNamespace): Promise<SecretResource> {
     return this.coreApi.readNamespacedSecret({ namespace, name })
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async createSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    assertValidSecretConstraints(req, opts)
     assertValidSecretWriteKeys(req)
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
@@ -46,10 +63,11 @@ export class SecretService {
       stringData: req.stringData,
     }
 
-    return this.coreApi.createNamespacedSecret({
+    const created = await this.coreApi.createNamespacedSecret({
       namespace: req.namespace || this.defaultNamespace,
       body,
     })
+    return toSecretSnapshot(created, req.name, req.namespace || this.defaultNamespace)
   }
 
   /**
@@ -65,24 +83,45 @@ export class SecretService {
    *
    * Pass `precondition` to make the replace ownership-bound rather than
    * last-writer-wins (see `SecretPreconditions`). When it carries a
-   * `resourceVersion` the pre-read is SKIPPED and that version is sent as-is,
-   * so the API server rejects the write with 409 if anything touched the
-   * object since the caller read it. Re-reading here would defeat the entire
-   * point, by refreshing away the staleness we are trying to detect.
+   * `resourceVersion` the pre-read is skipped unless the request carries
+   * infrastructure metadata that must be proven unchanged; the precondition
+   * is still sent as-is, so the API server rejects the write with 409 if
+   * anything touched the object since the caller read it.
    *
-   * Because that read is skipped, a precondition caller must supply everything
-   * it wants persisted: the `labels`/`annotations`/`type` fallbacks to the
-   * existing object are not available on this path.
+   * On the no-read path, a precondition caller must supply everything it wants
+   * persisted: the `labels`/`annotations`/`type` fallbacks to the existing
+   * object are not available there. Internal capability writers that submit a
+   * full snapshot with infrastructure metadata are read-checked for exact
+   * preservation before the same precondition-bound replace.
    */
   async updateSecret(
     req: SecretUpsertRequest,
-    precondition?: SecretPreconditions
-  ): Promise<unknown> {
+    precondition?: SecretPreconditions,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    const hasInfrastructureAnnotations = Object.keys(req.annotations ?? {}).some(
+      isInfrastructureAnnotationKey
+    )
+    // A full snapshot may carry opaque infrastructure metadata only when an
+    // internal capability identifies the owner. The values are still compared
+    // with the live object; capability is not permission to introduce them.
+    const canPreserveExistingInfrastructure =
+      hasInfrastructureAnnotations && opts?.capability !== undefined
+    if (!canPreserveExistingInfrastructure) {
+      assertValidSecretConstraints(req, opts)
+    } else if (req.type !== undefined) {
+      assertValidSecretType(req.type)
+    }
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
-    const existing = precondition?.resourceVersion
-      ? undefined
-      : await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+    const existing =
+      precondition?.resourceVersion && !canPreserveExistingInfrastructure
+        ? undefined
+        : await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+
+    if (canPreserveExistingInfrastructure) {
+      assertValidSecretConstraints(req, opts, existing?.metadata?.annotations)
+    }
 
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
@@ -102,7 +141,25 @@ export class SecretService {
       stringData: req.stringData,
     }
 
-    return this.coreApi.replaceNamespacedSecret({ namespace: ns, name: req.name, body })
+    // Validate the complete replacement state, not only fields explicitly
+    // supplied by the caller. An existing Secret may predate these constraints;
+    // allowing an omitted type/annotation field to preserve a forbidden value
+    // would make updateSecret a write-path bypass.
+    assertValidEffectiveSecretConstraints(
+      {
+        name: req.name,
+        type: body.type,
+        annotations: body.metadata?.annotations,
+      },
+      opts
+    )
+
+    const replaced = await this.coreApi.replaceNamespacedSecret({
+      namespace: ns,
+      name: req.name,
+      body,
+    })
+    return toSecretSnapshot(replaced, req.name, ns)
   }
 
   /**
@@ -125,20 +182,57 @@ export class SecretService {
    * from a route targeting any OTHER namespace unless that namespace's Role
    * has been granted `patch`.
    */
-  async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
+  async mergeSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    const hasInfrastructureAnnotations = Object.keys(req.annotations ?? {}).some(
+      isInfrastructureAnnotationKey
+    )
+    const canPreserveExistingInfrastructure =
+      hasInfrastructureAnnotations && opts?.capability !== undefined
+    if (!canPreserveExistingInfrastructure) {
+      assertValidSecretConstraints(req, opts)
+    } else if (req.type !== undefined) {
+      assertValidSecretType(req.type)
+    }
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
+    const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+
+    if (canPreserveExistingInfrastructure) {
+      assertValidSecretConstraints(req, opts, existing.metadata?.annotations)
+    }
+
+    // Merge-patch preserves fields omitted from the patch. Validate those
+    // preserved fields as part of the effective target state before mutating.
+    assertValidEffectiveSecretConstraints(
+      {
+        name: req.name,
+        type: req.type ?? existing.type ?? 'Opaque',
+        annotations: existing.metadata?.annotations,
+      },
+      opts
+    )
 
     const body: Partial<k8s.V1Secret> = {}
     if (req.stringData !== undefined) body.stringData = req.stringData
     if (req.data !== undefined) body.data = req.data
-    // NOTE: merge-patch on metadata.labels REPLACES the whole labels map (it's
-    // a leaf merge — the map IS the leaf). Do not pass req.labels for
-    // multi-owner Secrets where another owner (e.g. HCC) writes labels.
-    if (req.labels !== undefined) body.metadata = { labels: req.labels }
+    // RFC 7396 merges object members recursively. The labels map therefore
+    // preserves omitted labels; callers that intend to replace the complete
+    // map must use updateSecret. Include the read version so this partial
+    // mutation cannot overwrite a concurrent rotation.
+    if (req.labels !== undefined || existing.metadata?.resourceVersion !== undefined) {
+      body.metadata = {
+        ...(req.labels !== undefined ? { labels: req.labels } : {}),
+        ...(existing.metadata?.resourceVersion
+          ? { resourceVersion: existing.metadata.resourceVersion }
+          : {}),
+      }
+    }
     if (req.type !== undefined) body.type = req.type
 
-    return this.coreApi.patchNamespacedSecret(
+    const patched = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
         name: req.name,
@@ -148,14 +242,35 @@ export class SecretService {
         middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
       }
     )
+    return toSecretSnapshot(patched, req.name, ns)
   }
 
-  async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
+  async removeSecretKey(req: {
+    name: string
+    namespace?: string
+    key: string
+  }): Promise<SecretSnapshot> {
     assertValidSecretDataKey(req.key)
     const ns = req.namespace || this.defaultNamespace
-    const body = { data: { [req.key]: null } } as unknown as Partial<k8s.V1Secret>
+    const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
 
-    return this.coreApi.patchNamespacedSecret(
+    // Removing one data key still mutates the Secret. Preserve unchanged
+    // infrastructure metadata while applying the same effective-state checks
+    // as the other mutation paths.
+    assertValidEffectiveSecretConstraints({
+      name: req.name,
+      type: existing.type ?? 'Opaque',
+      annotations: existing.metadata?.annotations,
+    })
+
+    const body = {
+      metadata: existing.metadata?.resourceVersion
+        ? { resourceVersion: existing.metadata.resourceVersion }
+        : undefined,
+      data: { [req.key]: null },
+    } as unknown as Partial<k8s.V1Secret>
+
+    const patched = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
         name: req.name,
@@ -165,6 +280,7 @@ export class SecretService {
         middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
       }
     )
+    return toSecretSnapshot(patched, req.name, ns)
   }
 
   /**

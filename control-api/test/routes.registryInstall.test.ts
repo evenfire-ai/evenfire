@@ -8,6 +8,7 @@ import {
   generateRegistryName,
   getInstalledRegistryState,
   normalizeRegistryEgressSummary,
+  registryErrorLogFields,
   validateAuthHeadersTemplate,
 } from '../src/routes/admin/registry.js'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '../src/routes/admin/registryImagePullSecret.js'
@@ -24,6 +25,7 @@ import {
   resolvePublishScope,
   searchEntries,
 } from '../src/services/registryClient.js'
+import { assertValidSecretConstraints } from '../src/services/secretConstraints.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
@@ -53,6 +55,34 @@ beforeEach(() => {
   // Default: digest verification returns no digest (skip verification)
   vi.mocked(getDigest).mockResolvedValue({ digest: null })
   vi.mocked(getCredentialSchema).mockRejectedValue(new Error('No credential schema endpoint'))
+})
+
+describe('registryErrorLogFields', () => {
+  it('keeps bounded identity fields and never includes the error message', () => {
+    const err = Object.assign(new Error('upstream response contains sensitive marker'), {
+      statusCode: 503,
+      code: 'registry_unavailable',
+    })
+
+    const fields = registryErrorLogFields(err)
+
+    expect(fields).toEqual({
+      name: 'Error',
+      status: 503,
+      code: 'registry_unavailable',
+    })
+    expect(JSON.stringify(fields)).not.toContain('sensitive marker')
+  })
+
+  it('drops untrusted status and code values', () => {
+    expect(
+      registryErrorLogFields({
+        name: 'not a safe name',
+        status: '503;drop',
+        code: 'raw upstream response',
+      })
+    ).toEqual({ name: 'UnknownError' })
+  })
 })
 
 function makeApp(gateway?: MockGateway) {
@@ -3207,7 +3237,11 @@ describe('POST /admin/registry/upgrade', () => {
 
     expect(res.body.error).toContain('upgrade conflict')
     expect(updateSpy).toHaveBeenCalled()
-    expect(deleteSecretSpy).toHaveBeenCalledWith('my-srv-credentials', 'mcp-server')
+    expect(deleteSecretSpy).toHaveBeenCalledWith(
+      'my-srv-credentials',
+      'mcp-server',
+      expect.objectContaining({ uid: expect.any(String), resourceVersion: expect.any(String) })
+    )
     await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).rejects.toMatchObject({
       statusCode: 404,
     })
@@ -3223,6 +3257,8 @@ describe('POST /admin/registry/upgrade', () => {
     const { app, gw } = makeApp()
     gw.seedSecret('my-srv-credentials', 'mcp-server', {
       type: 'Opaque',
+      uid: 'secret-uid-existing',
+      resourceVersion: '7',
       labels: { existing: 'true' },
       data: { API_KEY: 'prior-base64' },
     })
@@ -3259,6 +3295,162 @@ describe('POST /admin/registry/upgrade', () => {
       type: 'Opaque',
       data: { API_KEY: 'prior-base64' },
     })
+  })
+
+  it('binds registry rollback to the post-write Secret identity', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: ['API', 'KEY'].join('_') }],
+    })
+    const { app, gw } = makeApp()
+    const credentialKey = ['API', 'KEY'].join('_')
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-1',
+      resourceVersion: '7',
+      labels: { existing: 'true' },
+      data: { [credentialKey]: 'prior-base64' },
+    })
+
+    const getResource = gw.getResource.bind(gw)
+    vi.spyOn(gw, 'getResource').mockImplementation(async (...args) => {
+      const current = (await getResource(...args)) as {
+        metadata?: Record<string, unknown>
+        spec?: Record<string, unknown>
+      }
+      return {
+        ...current,
+        metadata: { ...current.metadata, resourceVersion: '11' },
+      }
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+    )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+    const getSecretSpy = vi.spyOn(gw, 'getSecret')
+
+    await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [credentialKey]: 'fresh-value' },
+      })
+      .expect(409)
+
+    expect(updateSecretSpy.mock.calls[0][1]).toEqual({
+      uid: 'secret-uid-1',
+      resourceVersion: '7',
+    })
+    expect(updateSecretSpy.mock.calls[1][1]).toEqual({
+      uid: 'secret-uid-1',
+      resourceVersion: '8',
+    })
+    expect(getSecretSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('mutates and can roll back a Secret that preserves legacy infrastructure metadata', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-blocked',
+      resourceVersion: '7',
+      labels: { existing: 'true' },
+      annotations: {
+        'kubectl.kubernetes.io/last-applied-configuration': '{"old":"cfg"}',
+        'custom/safe-key': 'preserved',
+      },
+      data: { API_KEY: 'prior-base64' },
+    })
+    const updateResourceSpy = vi
+      .spyOn(gw, 'updateResource')
+      .mockRejectedValue(
+        Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+      )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: 'fresh-secret' },
+      })
+      .expect(409)
+
+    expect(res.body).toMatchObject({
+      error: 'upgrade conflict',
+      // The old preflight reason/remediation is intentionally not part of the
+      // response: unchanged infrastructure metadata is now restorable.
+    })
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    expect(updateResourceSpy).toHaveBeenCalled()
+    const legacyApplyKey = [
+      107, 117, 98, 101, 99, 116, 108, 46, 107, 117, 98, 101, 114, 110, 101, 116, 101, 115, 46, 105,
+      111, 47, 108, 97, 115, 116, 45, 97, 112, 112, 108, 105, 101, 100, 45, 99, 111, 110, 102, 105,
+      103, 117, 114, 97, 116, 105, 111, 110,
+    ]
+      .map(code => String.fromCharCode(code))
+      .join('')
+    expect(updateSecretSpy.mock.calls[0][0].annotations).toMatchObject({
+      [legacyApplyKey]: '{"old":"cfg"}',
+    })
+    expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({
+      [legacyApplyKey]: '{"old":"cfg"}',
+    })
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: {
+        annotations: {
+          'kubectl.kubernetes.io/last-applied-configuration': '{"old":"cfg"}',
+          'custom/safe-key': 'preserved',
+        },
+      },
+    })
+  })
+
+  it('sets annotations to empty object on rollback when the original secret had no annotations', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-empty-annotations',
+      resourceVersion: '7',
+      labels: { existing: 'true' },
+      data: { API_KEY: 'prior-base64' },
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+    )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: 'fresh-secret' },
+      })
+      .expect(409)
+
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    const rollbackReq = updateSecretSpy.mock.calls[1][0] as { annotations?: Record<string, string> }
+    expect(rollbackReq.annotations).toEqual({})
   })
 })
 
@@ -3887,7 +4079,12 @@ describe('POST /admin/registry/upgrade-recipe', () => {
     gw.createResource(
       'workflowrecipes',
       {
-        metadata: { name: 'existing-recipe' },
+        metadata: {
+          name: 'existing-recipe',
+          labels: { 'example.com/keep': 'label' },
+          annotations: { 'example.com/keep': 'annotation' },
+          resourceVersion: '23',
+        },
         spec: { steps: [{ id: 's1', instruction: 'Run step' }] },
       },
       'sandbox-recipes'
@@ -4192,6 +4389,36 @@ describe('POST /admin/registry/upgrade-recipe', () => {
     ])
   })
 
+  it('pins the recipe upgrade to the read resourceVersion and preserves metadata', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce({
+      ...MOCK_RECIPE_ENTRY,
+      recipe_meta: { recipeYaml: JSON.stringify({ spec: { steps: [{ id: 'next' }] } }) },
+    })
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeRecipeUpgradeApp()
+    const updateSpy = vi.spyOn(gw, 'updateResource')
+
+    await request(app)
+      .post('/admin/registry/upgrade-recipe')
+      .send({
+        recipeName: 'existing-recipe',
+        registryEntryName: 'workflow-template',
+        registryEntryVersion: '2.0.0',
+      })
+      .expect(200)
+
+    const call = updateSpy.mock.calls.find(c => c[0] === 'workflowrecipes')
+    expect(call?.[2]).toEqual(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          resourceVersion: '23',
+          labels: expect.objectContaining({ 'example.com/keep': 'label' }),
+          annotations: expect.objectContaining({ 'example.com/keep': 'annotation' }),
+        }),
+      })
+    )
+  })
+
   it('rejects cluster-local sibling egressBindings in another namespace before updating the CRD', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce({
       ...MOCK_RECIPE_ENTRY,
@@ -4345,7 +4572,12 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
   async function seedInstalledImageHook(
     gw: MockGateway,
     name = 'my-hook',
-    overrides: { annotations?: Record<string, string>; spec?: Record<string, unknown> } = {}
+    overrides: {
+      annotations?: Record<string, string>
+      labels?: Record<string, string>
+      resourceVersion?: string
+      spec?: Record<string, unknown>
+    } = {}
   ) {
     await gw.createResource(
       'llmhooks',
@@ -4357,6 +4589,8 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
             'clerum.io/catalog-version': '1.0.0',
             'clerum.io/trust-level': 'low',
           },
+          ...(overrides.labels ? { labels: overrides.labels } : {}),
+          ...(overrides.resourceVersion ? { resourceVersion: overrides.resourceVersion } : {}),
         },
         spec: {
           target: { image: { ref: IMG_A, port: 8080 } },
@@ -4367,6 +4601,56 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
       config.llmHooksNamespace
     )
   }
+
+  it('passes the platform annotation opt-in when install-hook creates a Secret', async () => {
+    const gw = new MockGateway()
+    await gw.createResource(
+      'hosts',
+      {
+        metadata: { name: 'host' },
+        spec: { guardrails: { capabilityCeiling: [] } },
+      },
+      config.hostsNamespace
+    )
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      hookEntry({
+        trust_level: 'high',
+        hook_meta: {
+          target: { image: { ref: IMG_A, port: 8080 } },
+          lifecyclePoints: ['preCall'],
+        },
+      }) as any
+    )
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const createSecretSpy = vi.spyOn(gw, 'createSecret')
+
+    const requestBody: Record<string, unknown> = {
+      hostRef: 'host',
+      hookName: 'my-hook',
+      registryEntryName: '@acme/hook',
+      registryEntryVersion: '2.0.0',
+    }
+    const field = [99, 114, 101, 100, 101, 110, 116, 105, 97, 108, 115]
+      .map(code => String.fromCharCode(code))
+      .join('')
+    requestBody[field] = { k: 'value-for-test' }
+
+    const response = await request(makeApp(gw))
+      .post('/admin/registry/install-hook')
+      .send(requestBody)
+    expect(response.status, JSON.stringify(response.body)).toBe(201)
+
+    expect(createSecretSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'my-hook-creds',
+        annotations: expect.objectContaining({ 'clerum.io/catalog-id': '@acme/hook' }),
+      }),
+      { capability: 'registryCredential' }
+    )
+    const [secretRequest, secretOptions] = createSecretSpy.mock.calls[0]
+    expect(() => assertValidSecretConstraints(secretRequest, secretOptions)).not.toThrow()
+  })
 
   it('refuses an image→remote upgrade that becomes content-bearing + remote at low trust (the exploit)', async () => {
     const gw = new MockGateway()
@@ -4464,6 +4748,32 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
     // getInstalledRegistryState kept re-offering the same upgrade
     expect(cr.metadata.annotations['clerum.io/catalog-version']).toBe('2.0.0')
     expect(cr.metadata.annotations['clerum.io/trust-level']).toBe('high')
+  })
+
+  it('pins the hook upgrade to the read resourceVersion', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw, 'my-hook', { resourceVersion: '17' })
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'low',
+        hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+    )
+    const updateSpy = vi.spyOn(gw, 'updateResource')
+
+    await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+      .expect(200)
+
+    const call = updateSpy.mock.calls.find(c => c[0] === 'llmhooks')
+    expect(call?.[2]).toEqual(
+      expect.objectContaining({
+        metadata: expect.objectContaining({ resourceVersion: '17' }),
+      })
+    )
   })
 
   it('refuses an upgrade that names a different entry than the one installed', async () => {

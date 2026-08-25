@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { extractHttpStatus } from '../src/k8s.js'
+import {
+  ALLOWED_SECRET_TYPES,
+  DangerousAnnotationError,
+  InvalidSecretTypeError,
+  REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS,
+  dangerousAnnotationKeyReason,
+  invalidSecretTypeReason,
+} from '../src/services/secretConstraints.js'
 import {
   InvalidSecretKeyError,
   SECRET_DATA_KEY_MAX_LENGTH,
@@ -48,9 +57,15 @@ type CoreApiMock = {
 function createCoreApiMock(): CoreApiMock {
   return {
     readNamespacedSecret: vi.fn().mockResolvedValue({ metadata: {}, type: 'Opaque', data: {} }),
-    createNamespacedSecret: vi.fn().mockResolvedValue({ metadata: { name: 's' } }),
-    replaceNamespacedSecret: vi.fn().mockResolvedValue({ metadata: { name: 's' } }),
-    patchNamespacedSecret: vi.fn().mockResolvedValue({ metadata: { name: 's' } }),
+    createNamespacedSecret: vi.fn().mockResolvedValue({
+      metadata: { name: 's', namespace: 'test-ns', uid: 'uid-s', resourceVersion: '2' },
+    }),
+    replaceNamespacedSecret: vi.fn().mockResolvedValue({
+      metadata: { name: 's', namespace: 'test-ns', uid: 'uid-s', resourceVersion: '2' },
+    }),
+    patchNamespacedSecret: vi.fn().mockResolvedValue({
+      metadata: { name: 's', namespace: 'test-ns', uid: 'uid-s', resourceVersion: '2' },
+    }),
     deleteNamespacedSecret: vi.fn().mockResolvedValue({}),
   }
 }
@@ -161,6 +176,41 @@ describe('SecretService — invalid Secret keys never reach the apiserver', () =
   })
 })
 
+// ── Secret type & annotation constraints ─────────────────────────────────────
+// Types that a caller must never be able to create via the control-api.
+const FORBIDDEN_SECRET_TYPES: readonly string[] = [
+  'kubernetes.io/service-account-token',
+  'kubernetes.io/basic-auth',
+  'kubernetes.io/ssh-auth',
+  'bootstrap.kubernetes.io/token',
+  'helm.sh/release.v1',
+]
+
+// Annotation keys that must be stripped/rejected on write (infra tier — always blocked).
+const DANGEROUS_ANNOTATION_KEYS: readonly string[] = [
+  'kubectl.kubernetes.io/last-applied-configuration',
+  'kubectl.kubernetes.io/restartedAt',
+  'kubernetes.io/service-account.name',
+  'kubernetes.io/service-account.uid',
+  'meta.helm.sh/release-name',
+  'meta.helm.sh/release-namespace',
+]
+
+// Platform-prefix annotation keys — blocked by default, allowed only by an exact capability.
+const PLATFORM_ANNOTATION_KEYS: readonly string[] = [
+  'clerum.io/catalog-id',
+  'clerum.io/catalog-version',
+  'clerum.io/trust-level',
+]
+const UNAUTHORIZED_PLATFORM_ANNOTATION_KEYS: readonly string[] = ['clerum.io/owner']
+
+// Annotation keys that are safe and must pass through without any opt-out.
+const SAFE_ANNOTATION_KEYS: readonly string[] = [
+  'app.kubernetes.io/managed-by',
+  'my-custom-annotation',
+  'custom.example.com/owner',
+]
+
 /**
  * The preconditions are only worth anything if they reach the apiserver in the shape it
  * enforces. Every other test of this feature asserts that the CALLER passes a precondition;
@@ -197,6 +247,31 @@ describe('SecretService — ownership-bound mutations', () => {
     expect(body.metadata.uid).toBe('uid-1')
   })
 
+  it('returns the server-confirmed identity from replace', async () => {
+    coreApi.replaceNamespacedSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 's',
+        namespace: 'ns',
+        uid: 'uid-server',
+        resourceVersion: '43',
+      },
+      type: 'Opaque',
+      data: {},
+    })
+
+    const result = await svc.updateSecret(
+      { name: 's', namespace: 'ns', type: 'Opaque', data: { k: 'dg==' } },
+      { resourceVersion: '42', uid: 'uid-server' }
+    )
+
+    expect(result).toMatchObject({
+      name: 's',
+      namespace: 'ns',
+      uid: 'uid-server',
+      resourceVersion: '43',
+    })
+  })
+
   it('keeps last-writer-wins when no precondition is given', async () => {
     coreApi.readNamespacedSecret.mockResolvedValue({
       metadata: { resourceVersion: '999' },
@@ -227,6 +302,604 @@ describe('SecretService — ownership-bound mutations', () => {
     // An empty `preconditions: {}` is not the same as none — keep the historical request
     // shape for callers that never opted in.
     expect(coreApi.deleteNamespacedSecret.mock.calls[0][0].body).toBeUndefined()
+  })
+})
+
+describe('SecretService — preserved Secret state is constrained before mutation', () => {
+  let coreApi: CoreApiMock
+  let svc: SecretService
+
+  beforeEach(() => {
+    coreApi = createCoreApiMock()
+    svc = new SecretService(coreApi as unknown as k8s.CoreV1Api, 'test-ns')
+  })
+
+  it('preserves legacy infrastructure metadata during a data-only update', async () => {
+    const legacyApplyKey = DANGEROUS_ANNOTATION_KEYS[0]
+    const annotations = { [legacyApplyKey]: 'legacy-configuration' }
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations, uid: 'uid-existing', resourceVersion: '7' },
+      type: 'Opaque',
+    })
+
+    await svc.updateSecret({
+      name: 's',
+      namespace: 'test-ns',
+      stringData: { [VALID_KEYS[0]]: 'rotated' },
+    })
+
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
+    expect(coreApi.replaceNamespacedSecret.mock.calls[0][0].body.metadata.annotations).toEqual(
+      annotations
+    )
+  })
+
+  it('preserves legacy infrastructure metadata during a data-only merge', async () => {
+    const legacyApplyKey = DANGEROUS_ANNOTATION_KEYS[0]
+    const annotations = { [legacyApplyKey]: 'legacy-configuration' }
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations, resourceVersion: '11' },
+      type: 'Opaque',
+    })
+
+    await svc.mergeSecret({
+      name: 's',
+      namespace: 'test-ns',
+      stringData: { [VALID_KEYS[0]]: 'rotated' },
+    })
+
+    expect(coreApi.patchNamespacedSecret).toHaveBeenCalledOnce()
+    expect(coreApi.patchNamespacedSecret.mock.calls[0][0].body).not.toHaveProperty(
+      'metadata.annotations'
+    )
+  })
+
+  it('preserves legacy infrastructure metadata during key removal', async () => {
+    const legacyReleaseKey = DANGEROUS_ANNOTATION_KEYS[4]
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations: { [legacyReleaseKey]: 'evenfire' }, resourceVersion: '13' },
+      type: 'Opaque',
+    })
+
+    await svc.removeSecretKey({ name: 's', namespace: 'test-ns', key: VALID_KEYS[0] })
+
+    expect(coreApi.patchNamespacedSecret).toHaveBeenCalledOnce()
+    expect(coreApi.patchNamespacedSecret.mock.calls[0][0].body.data).toEqual({
+      [VALID_KEYS[0]]: null,
+    })
+  })
+
+  it('rejects update when an omitted type preserves a forbidden existing type', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: {},
+      type: 'kubernetes.io/service-account-token',
+    })
+
+    await expect(
+      svc.updateSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+    ).rejects.toBeInstanceOf(InvalidSecretTypeError)
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('allows update when omitted annotations preserve infrastructure metadata', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations: { 'meta.helm.sh/release-name': 'release' } },
+      type: 'Opaque',
+    })
+
+    await expect(
+      svc.updateSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+    ).resolves.toMatchObject({ name: 's', namespace: 'test-ns' })
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
+  })
+
+  it('rejects merge when the preserved existing type is forbidden', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: {},
+      type: 'kubernetes.io/ssh-auth',
+    })
+
+    await expect(
+      svc.mergeSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+    ).rejects.toBeInstanceOf(InvalidSecretTypeError)
+    expect(coreApi.patchNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when an existing Secret has partial platform metadata', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations: { 'clerum.io/catalog-id': 'legacy-only' } },
+      type: 'Opaque',
+    })
+
+    await expect(
+      svc.mergeSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+    ).rejects.toMatchObject({
+      annotationKey: 'clerum.io/catalog-id',
+      status: 400,
+    })
+    expect(coreApi.patchNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('allows key removal when the preserved existing annotations are infrastructure metadata', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations: { 'kubectl.kubernetes.io/restartedAt': 'now' } },
+      type: 'Opaque',
+    })
+
+    await expect(
+      svc.removeSecretKey({ name: 's', namespace: 'test-ns', key: 'API_KEY' })
+    ).resolves.toMatchObject({ name: 's', namespace: 'test-ns' })
+    expect(coreApi.patchNamespacedSecret).toHaveBeenCalledOnce()
+  })
+})
+
+describe('SecretService — forbidden Secret types never reach the apiserver', () => {
+  let coreApi: CoreApiMock
+  let svc: SecretService
+
+  beforeEach(() => {
+    coreApi = createCoreApiMock()
+    svc = new SecretService(coreApi as unknown as k8s.CoreV1Api, 'test-ns')
+  })
+
+  const writeOps: ReadonlyArray<{
+    name: string
+    call: (type: string) => Promise<unknown>
+    apiSurface: (keyof CoreApiMock)[]
+  }> = [
+    {
+      name: 'createSecret',
+      call: type =>
+        svc.createSecret({ name: 's', namespace: 'test-ns', type, stringData: { k: 'v' } }),
+      apiSurface: ['createNamespacedSecret'],
+    },
+    {
+      name: 'updateSecret',
+      call: type =>
+        svc.updateSecret({ name: 's', namespace: 'test-ns', type, stringData: { k: 'v' } }),
+      apiSurface: ['readNamespacedSecret', 'replaceNamespacedSecret'],
+    },
+    {
+      name: 'mergeSecret',
+      call: type =>
+        svc.mergeSecret({ name: 's', namespace: 'test-ns', type, stringData: { k: 'v' } }),
+      apiSurface: ['patchNamespacedSecret'],
+    },
+  ]
+
+  for (const op of writeOps) {
+    describe(op.name, () => {
+      for (const badType of FORBIDDEN_SECRET_TYPES) {
+        it(`rejects type "${badType}" with a 400 and never calls the apiserver`, async () => {
+          const err = await op.call(badType).then(
+            () => {
+              throw new Error('expected the write to reject')
+            },
+            (e: unknown) => e
+          )
+          expect(err).toBeInstanceOf(InvalidSecretTypeError)
+          expect((err as InvalidSecretTypeError).status).toBe(400)
+          for (const surface of op.apiSurface) {
+            expect(coreApi[surface]).not.toHaveBeenCalled()
+          }
+        })
+      }
+
+      for (const goodType of ALLOWED_SECRET_TYPES) {
+        it(`lets allowed type "${goodType}" through to the apiserver`, async () => {
+          await op.call(goodType)
+          const writeSurface = op.apiSurface[op.apiSurface.length - 1]
+          expect(coreApi[writeSurface]).toHaveBeenCalledOnce()
+        })
+      }
+    })
+  }
+
+  it('allows omitted type (defaults to Opaque)', async () => {
+    await svc.createSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+    expect(coreApi.createNamespacedSecret).toHaveBeenCalledOnce()
+  })
+})
+
+describe('SecretService — dangerous annotations never reach the apiserver', () => {
+  let coreApi: CoreApiMock
+  let svc: SecretService
+
+  beforeEach(() => {
+    coreApi = createCoreApiMock()
+    svc = new SecretService(coreApi as unknown as k8s.CoreV1Api, 'test-ns')
+  })
+
+  const writeOps: ReadonlyArray<{
+    name: string
+    call: (annotations: Record<string, string>) => Promise<unknown>
+    apiSurface: (keyof CoreApiMock)[]
+  }> = [
+    {
+      name: 'createSecret',
+      call: annotations =>
+        svc.createSecret({ name: 's', namespace: 'test-ns', annotations, stringData: { k: 'v' } }),
+      apiSurface: ['createNamespacedSecret'],
+    },
+    {
+      name: 'updateSecret',
+      call: annotations =>
+        svc.updateSecret({ name: 's', namespace: 'test-ns', annotations, stringData: { k: 'v' } }),
+      apiSurface: ['readNamespacedSecret', 'replaceNamespacedSecret'],
+    },
+  ]
+
+  for (const op of writeOps) {
+    describe(op.name, () => {
+      for (const badKey of DANGEROUS_ANNOTATION_KEYS) {
+        it(`rejects annotation "${badKey}" with a 400 and never calls the apiserver`, async () => {
+          const err = await op.call({ [badKey]: 'value' }).then(
+            () => {
+              throw new Error('expected the write to reject')
+            },
+            (e: unknown) => e
+          )
+          expect(err).toBeInstanceOf(DangerousAnnotationError)
+          expect((err as DangerousAnnotationError).status).toBe(400)
+          for (const surface of op.apiSurface) {
+            expect(coreApi[surface]).not.toHaveBeenCalled()
+          }
+        })
+      }
+
+      for (const safeKey of SAFE_ANNOTATION_KEYS) {
+        it(`lets safe annotation "${safeKey}" through to the apiserver`, async () => {
+          await op.call({ [safeKey]: 'value' })
+          const writeSurface = op.apiSurface[op.apiSurface.length - 1]
+          expect(coreApi[writeSurface]).toHaveBeenCalledOnce()
+        })
+      }
+    })
+  }
+
+  it('allows omitted annotations', async () => {
+    await svc.createSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+    expect(coreApi.createNamespacedSecret).toHaveBeenCalledOnce()
+  })
+})
+
+describe('SecretService — platform annotations (clerum.io/) blocked by default, allowed with opt-out', () => {
+  let coreApi: CoreApiMock
+  let svc: SecretService
+
+  beforeEach(() => {
+    coreApi = createCoreApiMock()
+    svc = new SecretService(coreApi as unknown as k8s.CoreV1Api, 'test-ns')
+  })
+
+  for (const platformKey of PLATFORM_ANNOTATION_KEYS) {
+    it(`rejects "${platformKey}" by default (no opts)`, async () => {
+      const err = await svc
+        .createSecret({
+          name: 's',
+          namespace: 'test-ns',
+          annotations: { [platformKey]: 'v' },
+          stringData: { k: 'v' },
+        })
+        .then(
+          () => {
+            throw new Error('expected rejection')
+          },
+          (e: unknown) => e
+        )
+      expect(err).toBeInstanceOf(DangerousAnnotationError)
+      expect((err as DangerousAnnotationError).status).toBe(400)
+      expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    })
+
+    it(`allows "${platformKey}" with the registryCredential capability`, async () => {
+      await svc.createSecret(
+        {
+          name: 's',
+          namespace: 'test-ns',
+          annotations: { [platformKey]: 'v' },
+          stringData: { k: 'v' },
+        },
+        { capability: 'registryCredential' }
+      )
+      expect(coreApi.createNamespacedSecret).toHaveBeenCalledOnce()
+    })
+  }
+
+  it('still blocks infra annotations even with the registryCredential capability', async () => {
+    const err = await svc
+      .createSecret(
+        {
+          name: 's',
+          namespace: 'test-ns',
+          annotations: { 'kubectl.kubernetes.io/last-applied-configuration': '{}' },
+          stringData: { k: 'v' },
+        },
+        { capability: 'registryCredential' }
+      )
+      .then(
+        () => {
+          throw new Error('expected rejection')
+        },
+        (e: unknown) => e
+      )
+    expect(err).toBeInstanceOf(DangerousAnnotationError)
+    expect((err as DangerousAnnotationError).status).toBe(400)
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects platform keys outside the registryCredential capability', async () => {
+    for (const key of UNAUTHORIZED_PLATFORM_ANNOTATION_KEYS) {
+      await expect(
+        svc.createSecret(
+          {
+            name: 's',
+            namespace: 'test-ns',
+            annotations: { [key]: 'v' },
+            stringData: { k: 'v' },
+          },
+          { capability: 'registryCredential' }
+        )
+      ).rejects.toBeInstanceOf(DangerousAnnotationError)
+    }
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects a mixed payload containing both safe and platform keys (without opt-out)', async () => {
+    const err = await svc
+      .createSecret({
+        name: 's',
+        namespace: 'test-ns',
+        annotations: { 'my-custom-annotation': 'ok', 'clerum.io/catalog-id': 'bad' },
+        stringData: { k: 'v' },
+      })
+      .then(
+        () => {
+          throw new Error('expected rejection')
+        },
+        (e: unknown) => e
+      )
+    expect(err).toBeInstanceOf(DangerousAnnotationError)
+    expect((err as DangerousAnnotationError).annotationKey).toBe('clerum.io/catalog-id')
+  })
+
+  it('allows a mixed payload of safe + registry-owned keys with the registryCredential capability', async () => {
+    await svc.createSecret(
+      {
+        name: 's',
+        namespace: 'test-ns',
+        annotations: {
+          'my-custom-annotation': 'ok',
+          'clerum.io/catalog-id': 'c1',
+          'clerum.io/catalog-version': 'v2',
+        },
+        stringData: { k: 'v' },
+      },
+      { capability: 'registryCredential' }
+    )
+    expect(coreApi.createNamespacedSecret).toHaveBeenCalledOnce()
+  })
+
+  it('rejects combined vector: forbidden type + platform annotation in one request', async () => {
+    const err = await svc
+      .createSecret({
+        name: 's',
+        namespace: 'test-ns',
+        type: 'kubernetes.io/service-account-token',
+        annotations: { 'clerum.io/owner': 'attacker' },
+        stringData: { k: 'v' },
+      })
+      .then(
+        () => {
+          throw new Error('expected rejection')
+        },
+        (e: unknown) => e
+      )
+    expect(err).toBeInstanceOf(InvalidSecretTypeError)
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('opt-out propagates through updateSecret', async () => {
+    await svc.updateSecret(
+      {
+        name: 's',
+        namespace: 'test-ns',
+        annotations: { 'clerum.io/catalog-id': 'c1' },
+        stringData: { k: 'v' },
+      },
+      undefined,
+      { capability: 'registryCredential' }
+    )
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
+  })
+
+  it('does not let an internal capability introduce new infrastructure metadata', async () => {
+    const legacyApplyKey = DANGEROUS_ANNOTATION_KEYS[0]
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations: {}, resourceVersion: '7' },
+      type: 'Opaque',
+    })
+
+    await expect(
+      svc.updateSecret(
+        {
+          name: 's',
+          namespace: 'test-ns',
+          annotations: { [legacyApplyKey]: 'new-value' },
+          stringData: { [VALID_KEYS[0]]: 'v' },
+        },
+        undefined,
+        { capability: 'registryCredential' }
+      )
+    ).rejects.toBeInstanceOf(DangerousAnnotationError)
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('allows MCP rotation to preserve only the Registry catalog annotation pair', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: {
+        annotations: {
+          'clerum.io/catalog-id': 'linear',
+          'clerum.io/catalog-version': '1.0.0',
+        },
+      },
+      type: 'Opaque',
+    })
+
+    await svc.mergeSecret(
+      {
+        name: 'linear-credentials',
+        namespace: 'test-ns',
+        stringData: { [VALID_KEYS[0]]: 'rotated' },
+      },
+      { allowExistingPlatformAnnotationKeys: REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS }
+    )
+
+    expect(coreApi.patchNamespacedSecret).toHaveBeenCalledOnce()
+  })
+
+  it('allows the internal Registry capability to update trust metadata', async () => {
+    await svc.updateSecret(
+      {
+        name: 'registry-credentials',
+        namespace: 'test-ns',
+        annotations: { 'clerum.io/trust-level': 'low' },
+        stringData: { [VALID_KEYS[0]]: 'rotated' },
+      },
+      undefined,
+      { capability: 'registryCredential' }
+    )
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
+  })
+
+  it('does not let public rotation preserve Registry trust metadata', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: {
+        annotations: {
+          'clerum.io/catalog-id': 'linear',
+          'clerum.io/catalog-version': '1.0.0',
+          'clerum.io/trust-level': 'low',
+        },
+      },
+      type: 'Opaque',
+    })
+
+    await expect(
+      svc.mergeSecret(
+        {
+          name: 'linear-credentials',
+          namespace: 'test-ns',
+          stringData: { [VALID_KEYS[0]]: 'rotated' },
+        },
+        { allowExistingPlatformAnnotationKeys: REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS }
+      )
+    ).rejects.toMatchObject({ annotationKey: 'clerum.io/trust-level' })
+    expect(coreApi.patchNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects extra platform metadata and request-side annotation injection', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: {
+        annotations: {
+          'clerum.io/catalog-id': 'linear',
+          'clerum.io/catalog-version': '1.0.0',
+          'clerum.io/untrusted': 'must-reject',
+        },
+      },
+      type: 'Opaque',
+    })
+
+    await expect(
+      svc.mergeSecret(
+        {
+          name: 'linear-credentials',
+          namespace: 'test-ns',
+          stringData: { [VALID_KEYS[0]]: 'rotated' },
+        },
+        { allowExistingPlatformAnnotationKeys: REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS }
+      )
+    ).rejects.toMatchObject({ annotationKey: 'clerum.io/untrusted' })
+    expect(coreApi.patchNamespacedSecret).not.toHaveBeenCalled()
+
+    await expect(
+      svc.createSecret(
+        {
+          name: 'forged',
+          namespace: 'test-ns',
+          annotations: { 'clerum.io/catalog-id': 'caller-controlled' },
+          stringData: { [VALID_KEYS[0]]: 'value' },
+        },
+        { allowExistingPlatformAnnotationKeys: REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS }
+      )
+    ).rejects.toBeInstanceOf(DangerousAnnotationError)
+  })
+})
+
+describe('invalidSecretTypeReason — the shared rule', () => {
+  it('accepts every allowed type', () => {
+    for (const type of ALLOWED_SECRET_TYPES) {
+      expect(invalidSecretTypeReason(type)).toBeNull()
+    }
+  })
+
+  it('rejects every forbidden type with an actionable message', () => {
+    for (const type of FORBIDDEN_SECRET_TYPES) {
+      const reason = invalidSecretTypeReason(type)
+      expect(reason).not.toBeNull()
+      expect(reason).toContain('is not allowed')
+    }
+  })
+})
+
+describe('dangerousAnnotationKeyReason — the shared rule', () => {
+  it('accepts safe annotation keys', () => {
+    for (const key of SAFE_ANNOTATION_KEYS) {
+      expect(dangerousAnnotationKeyReason(key)).toBeNull()
+    }
+  })
+
+  it('rejects dangerous annotation keys with an actionable message', () => {
+    for (const key of DANGEROUS_ANNOTATION_KEYS) {
+      const reason = dangerousAnnotationKeyReason(key)
+      expect(reason).not.toBeNull()
+      expect(reason).toContain('is not allowed')
+    }
+  })
+
+  it('rejects platform annotation keys by default (no opts)', () => {
+    for (const key of PLATFORM_ANNOTATION_KEYS) {
+      const reason = dangerousAnnotationKeyReason(key)
+      expect(reason).not.toBeNull()
+      expect(reason).toContain('is not allowed')
+    }
+  })
+
+  it('accepts registry-owned annotation keys with the registryCredential capability', () => {
+    for (const key of PLATFORM_ANNOTATION_KEYS) {
+      expect(dangerousAnnotationKeyReason(key, { capability: 'registryCredential' })).toBeNull()
+    }
+  })
+
+  it('still rejects infra keys even with the registryCredential capability', () => {
+    for (const key of DANGEROUS_ANNOTATION_KEYS) {
+      const reason = dangerousAnnotationKeyReason(key, { capability: 'registryCredential' })
+      expect(reason).not.toBeNull()
+      expect(reason).toContain('is not allowed')
+    }
+  })
+})
+
+describe('extractHttpStatus — .status property', () => {
+  it('reads a top-level .status number', () => {
+    expect(extractHttpStatus({ status: 409 })).toBe(409)
+  })
+
+  it('prefers .statusCode over .status', () => {
+    expect(extractHttpStatus({ statusCode: 404, status: 500 })).toBe(404)
+  })
+
+  it('returns null for non-numeric .status', () => {
+    expect(extractHttpStatus({ status: 'Failure' })).toBeNull()
   })
 })
 

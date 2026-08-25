@@ -162,16 +162,15 @@ async function mintTokenForGeneration(
     signal: AbortSignal.timeout(READ_TIMEOUT_MS),
   })
   if (!res.ok) {
-    const body = await res.text()
     // Distinguish a rejected credential (rotate the secret) from an origin /
     // tunnel outage (page on-call about reachability, do NOT rotate). A 5xx at
     // the token endpoint is the registry origin or its tunnel being down, not a
     // bad client secret — the previous identical label sent on-call to rotate
     // secrets during an outage.
     if (res.status >= 500) {
-      throw new Error(`registry token endpoint unavailable (origin/tunnel): ${res.status} ${body}`)
+      throw new Error(`registry token endpoint unavailable (origin/tunnel): ${res.status}`)
     }
-    throw new Error(`registry credential rejected: ${res.status} ${body}`)
+    throw new Error(`registry credential rejected: ${res.status}`)
   }
   const json = (await res.json()) as { access_token: string; expires_in: number }
   const next = {
@@ -236,6 +235,15 @@ interface PaginatedResponse<T> {
 /** Retriable upstream statuses for an idempotent GET (gateway/tunnel hiccups). */
 const RETRIABLE_GET_STATUSES = new Set([502, 503, 504])
 
+async function discardResponseBody(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel()
+  } catch {
+    // Releasing a failed upstream response is best-effort; preserve the original
+    // auth/status error when an undici stream is already closed.
+  }
+}
+
 function jitterSleep(baseMs: number): Promise<void> {
   // ~baseMs ± up to baseMs jitter so concurrent callers don't retry in lockstep.
   const ms = baseMs + Math.floor(Math.random() * baseMs)
@@ -285,10 +293,12 @@ async function authedFetch(
       // Existing behavior: a 401 means the cached token is stale (e.g. registry
       // key rotation) — evict and retry once with a fresh mint. Orthogonal to
       // the transient-status retry below.
+      await discardResponseBody(res)
       cached = null
       res = await send()
     }
     if (isGet && allowTransientRetry && RETRIABLE_GET_STATUSES.has(res.status)) {
+      await discardResponseBody(res)
       await jitterSleep(250)
       return attempt(false)
     }
@@ -315,7 +325,7 @@ async function registryFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw err
   }
   if (!res.ok) {
-    const body = await res.text()
+    await discardResponseBody(res)
     // A persistent 401 (authedFetch already evict-retried once) is a registry
     // machine-token / integration fault — NOT the admin's control-ui session.
     // Remap to 502 (so control-ui's global 401 handler never force-logs-out the
@@ -336,7 +346,7 @@ async function registryFetch<T>(path: string, init?: RequestInit): Promise<T> {
     // Attach the upstream status so the global error handler (app.ts) forwards
     // 4xx verbatim to the API client (a registry 404 stays a 404 — the
     // e2e-registry-publish-update-remove failure class).
-    throw Object.assign(new Error(`Registry ${res.status}: ${body}`), {
+    throw Object.assign(new Error(`Registry ${res.status}`), {
       status: res.status,
     })
   }
@@ -525,8 +535,7 @@ export async function downloadBundle(name: string, version: string): Promise<Buf
     { timeoutMs: BUNDLE_TIMEOUT_MS }
   )
   if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Registry ${res.status}: ${body}`)
+    throw new Error(`Registry ${res.status}`)
   }
   const arrayBuffer = await res.arrayBuffer()
   return Buffer.from(arrayBuffer)

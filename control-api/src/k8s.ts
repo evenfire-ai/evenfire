@@ -7,6 +7,12 @@ import {
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
+import type { SecretConstraintOptions } from './services/secretConstraints.js'
+import type {
+  SecretRepository,
+  SecretResource,
+  SecretSnapshot,
+} from './services/secretRepository.js'
 import { SecretService } from './services/secretService.js'
 import {
   ClerumResourceType,
@@ -160,7 +166,7 @@ export function validateExecParams(namespace: string, pathOrDir: string): void {
 export class K8sGateway {
   private readonly namespace: string
   private readonly resources: ResourceService
-  private readonly secrets: SecretService
+  private readonly secrets: SecretRepository
   private readonly hostOverviews: HostOverviewService
   private readonly hostEnvSvc: HostEnvService
   private readonly llmAllowedModelsCmWriter: LlmAllowedModelsConfigMapWriter
@@ -397,27 +403,38 @@ export class K8sGateway {
    * client so callers can branch on statusCode. Used by admin POST handlers
    * to validate envSecret references before creating broken CRDs.
    */
-  async getSecret(name: string, namespace?: string): Promise<unknown> {
+  async getSecret(name: string, namespace?: string): Promise<SecretResource> {
     return this.secrets.getSecret(name, namespace)
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<unknown> {
-    return this.secrets.createSecret(req)
+  async createSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    return this.secrets.createSecret(req, opts)
   }
 
   /** `precondition` makes the replace ownership-bound; see `SecretPreconditions`. */
   async updateSecret(
     req: SecretUpsertRequest,
-    precondition?: SecretPreconditions
-  ): Promise<unknown> {
-    return this.secrets.updateSecret(req, precondition)
+    precondition?: SecretPreconditions,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    return this.secrets.updateSecret(req, precondition, opts)
   }
 
-  async mergeSecret(req: SecretUpsertRequest): Promise<unknown> {
-    return this.secrets.mergeSecret(req)
+  async mergeSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    return this.secrets.mergeSecret(req, opts)
   }
 
-  async removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<unknown> {
+  async removeSecretKey(req: {
+    name: string
+    namespace?: string
+    key: string
+  }): Promise<SecretSnapshot> {
     return this.secrets.removeSecretKey(req)
   }
 
@@ -684,6 +701,7 @@ export function extractHttpStatus(err: unknown): number | null {
   const maybe = err as {
     statusCode?: number
     code?: number | string
+    status?: number
     httpStatus?: number
     response?: { statusCode?: number; status?: number }
   }
@@ -697,6 +715,7 @@ export function extractHttpStatus(err: unknown): number | null {
   if (maybe.response && typeof maybe.response.statusCode === 'number')
     return maybe.response.statusCode
   if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status
+  if (typeof maybe.status === 'number') return maybe.status
   return null
 }
 

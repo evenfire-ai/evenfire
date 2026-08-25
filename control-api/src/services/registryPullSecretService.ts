@@ -109,6 +109,17 @@ const DOCKERCONFIG_KEY = '.dockerconfigjson'
 const DOCKERCONFIG_TYPE = 'kubernetes.io/dockerconfigjson'
 const FINGERPRINT_ANNOTATION = 'clerum.io/pull-key-fingerprint'
 
+/**
+ * This service is a PLATFORM writer, not a user-facing route: it stamps
+ * `clerum.io/`-prefixed metadata (the ownership label and the key fingerprint) that
+ * `secretConstraints` deliberately blocks by default, so a caller cannot forge platform
+ * ownership through `/admin/secrets` or the recipe-secret routes. Every write here declares
+ * the exact pull-secret capability — dropping it makes the real writer reject the fingerprint,
+ * and `MockGateway` (which bypasses `SecretService`) will NOT catch it; see
+ * test/services.pullSecretConstraints.test.ts.
+ */
+const PLATFORM_WRITE = { capability: 'registryPullSecret' } as const
+
 export type EnsurePullSecretResult =
   | 'created'
   | 'repaired'
@@ -1049,12 +1060,12 @@ async function writeCredential(
   // Wrong-typed Secrets were deleted before the mint (see ensureInner), so they are now
   // absent and must be created, not updated.
   if (alreadyDeleted) {
-    await gateway.createSecret(buildSecretReq(ns, cred))
+    await gateway.createSecret(buildSecretReq(ns, cred), PLATFORM_WRITE)
     return 'repaired'
   }
   if (state.kind === 'absent') {
     try {
-      await gateway.createSecret(buildSecretReq(ns, cred))
+      await gateway.createSecret(buildSecretReq(ns, cred), PLATFORM_WRITE)
       return 'created'
     } catch (err) {
       if (k8sStatus(err) !== 409) throw err
@@ -1069,7 +1080,7 @@ async function writeCredential(
       if (!winner) {
         // Created and deleted again before this read. The Secret is absent, and an update
         // against an absent Secret 404s — so create, do not fall through.
-        await gateway.createSecret(buildSecretReq(ns, cred))
+        await gateway.createSecret(buildSecretReq(ns, cred), PLATFORM_WRITE)
         return 'created'
       }
       if (winner.labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) {
@@ -1095,7 +1106,7 @@ async function writeCredential(
       // create race is precisely when a third writer is known to be active on this name, so
       // this is the LAST place to assume the gap is safe.
       const adopted = await mutateOwned(gateway, ns, winner, precondition =>
-        gateway.updateSecret(buildSecretReq(ns, cred), precondition)
+        gateway.updateSecret(buildSecretReq(ns, cred), precondition, PLATFORM_WRITE)
       )
       if (adopted.verdict === 'taken') {
         recordTakeover(ctx.pass, ns, adopted.why)
@@ -1104,7 +1115,7 @@ async function writeCredential(
       if (adopted.verdict === 'gone') {
         // Deleted again in the gap. Nobody holds the name and the namespace still needs a
         // credential, so create rather than leaving it empty.
-        await gateway.createSecret(buildSecretReq(ns, cred))
+        await gateway.createSecret(buildSecretReq(ns, cred), PLATFORM_WRITE)
       }
       return 'created'
     }
@@ -1120,7 +1131,7 @@ async function writeCredential(
   // current, never that it is still ours. `mutateOwned` binds the replace to the identity we
   // classified instead, so the apiserver refuses it if the object moved.
   const outcome = await mutateOwned(gateway, ns, state.observed, precondition =>
-    gateway.updateSecret(buildSecretReq(ns, cred), precondition)
+    gateway.updateSecret(buildSecretReq(ns, cred), precondition, PLATFORM_WRITE)
   )
   if (outcome.verdict === 'taken') {
     recordTakeover(ctx.pass, ns, outcome.why)
@@ -1131,7 +1142,7 @@ async function writeCredential(
     // already revoked whatever key that copy carried, so leaving the namespace empty is the
     // one outcome guaranteed to ImagePullBackOff. Create, because an update against an
     // absent Secret 404s.
-    await gateway.createSecret(buildSecretReq(ns, cred))
+    await gateway.createSecret(buildSecretReq(ns, cred), PLATFORM_WRITE)
     return 'created'
   }
   return state.kind === 'valid' ? 'exists-ours' : 'repaired'
