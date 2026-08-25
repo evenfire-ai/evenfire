@@ -463,6 +463,10 @@ describe('admin Codex subscription routes', () => {
         metadata: { name: 'other' },
         spec: { model: { provider: 'openai', name: 'gpt-5.4' } },
       },
+      {
+        metadata: { name: 'legacy' },
+        spec: { model: { provider: 'codex-subscription' } },
+      },
     ])
     const res = await request(makeAuthedApp(gateway)).get(
       '/admin/llm/providers/codex-subscription/connections'
@@ -470,6 +474,7 @@ describe('admin Codex subscription routes', () => {
     expect(res.status).toBe(200)
     expect(res.body.assignableHosts).toEqual([
       { name: 'chatllm', connectionRef: 'codex-aaa', displayName: 'chatllm' },
+      { name: 'legacy', connectionRef: 'unassigned', displayName: 'legacy' },
     ])
   })
 
@@ -556,18 +561,18 @@ describe('admin Codex subscription routes', () => {
     expect(oauth.revoke).not.toHaveBeenCalled()
   })
 
-  it('rejects bind when the Host connectionRef is empty', async () => {
+  it('binds a Codex host whose connectionRef is missing as unassigned', async () => {
     const gateway = makeGateway()
     gateway.getResource.mockResolvedValue({
       metadata: { name: 'chatllm' },
       spec: { model: { provider: 'codex-subscription' } },
     })
+    gateway.updateResource.mockResolvedValue({})
     const res = await request(makeAuthedApp(gateway)).post(
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/chatllm/bind'
     )
-    expect(res.status).toBe(409)
-    expect(res.body).toEqual({ error: 'empty_connection_ref' })
-    expect(gateway.updateResource).not.toHaveBeenCalled()
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ host: 'chatllm', connectionRef: 'codex-aaa' })
     expect(oauth.revoke).not.toHaveBeenCalled()
   })
 

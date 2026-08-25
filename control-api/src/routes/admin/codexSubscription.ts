@@ -13,7 +13,6 @@ import {
   syncCodexSubscriptionCatalog,
 } from '../../services/codexSubscriptionCatalog.js'
 import {
-  CODEX_SUBSCRIPTION_CONNECTION_KEY,
   CODEX_UNASSIGNED_CONNECTION_KEY,
   CodexSubscriptionInvalidConnectionKeyError,
   assertCodexConnectionKey,
@@ -22,7 +21,6 @@ import {
   listSafeCodexSubscriptionConnections,
   loadCodexSubscriptionSecrets,
   normalizeCodexConnectionKey,
-  readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
   type CodexOAuthDeps,
@@ -40,13 +38,18 @@ import {
   isPublicCodexCliClient,
   resolveCodexControlUiBaseUrl,
 } from '../../services/codexSubscriptionRedirectUri.js'
-import { getModelAllowlistState, isModelAllowed } from '../../services/llmAllowedModels.js'
 import { publishAllowedModelsConfigMapAfterGrantChange } from '../../services/llmAllowedModelsConfigMap.js'
+import { K8sConflictError } from '../../services/resourceService.js'
 import {
   adminCodexReadRateLimits,
   adminCodexWriteRateLimits,
 } from '../workflows/shared/rateLimit.js'
-import { validateHostSpec } from './hostSpecValidation.js'
+import { createHostValidationDeps, validateHostSpec } from './hostSpecValidation.js'
+import {
+  type HostSpecIncoherenceToleratedEvent,
+  emitHostSpecIncoherenceTolerated,
+} from './hostWriteGateAudit.js'
+import type { StaleModelWarning } from './staleModelWarning.js'
 
 const log = rootLogger.child({ module: 'admin-codex-subscription' })
 const BASE = '/admin/llm/providers/codex-subscription'
@@ -134,7 +137,8 @@ function hostModel(spec: unknown): { provider?: string; connectionRef?: string }
 function hostConnectionRef(spec: unknown): string | null {
   const model = hostModel(spec)
   if (!model || model.provider !== 'codex-subscription') return null
-  return readHostCodexConnectionRef(model.connectionRef)
+  const raw = typeof model.connectionRef === 'string' ? model.connectionRef.trim() : ''
+  return raw || CODEX_UNASSIGNED_CONNECTION_KEY
 }
 
 function assignableHostFromRecord(
@@ -214,7 +218,10 @@ export function createAdminCodexSubscriptionRouter(
     hostRef: string,
     host: HostRecord,
     nextConnectionRef: string
-  ): Promise<{ ok: true } | { ok: false; status: number; error: string; message?: string }> {
+  ): Promise<
+    | { ok: true; warnings: StaleModelWarning[] }
+    | { ok: false; status: number; error: string; message?: string; reason?: string }
+  > {
     if (!gateway) return { ok: false, status: 503, error: 'hosts_unavailable' }
     const spec =
       host.spec && typeof host.spec === 'object'
@@ -231,17 +238,14 @@ export function createAdminCodexSubscriptionRouter(
       host.spec && typeof host.spec === 'object'
         ? (host.spec as Record<string, unknown>)
         : undefined
-    const issue = await validateHostSpec(
-      spec,
-      {
-        isModelAllowed: (provider, model) => isModelAllowed(provider, model),
-        getModelAllowlistState,
-      },
-      {
-        stored,
-        hostRef: { namespace: config.hostsNamespace, name: hostRef },
-      }
-    )
+    const hostRefId = { namespace: config.hostsNamespace, name: hostRef }
+    const hostTolerations: HostSpecIncoherenceToleratedEvent[] = []
+    const hostWarnings: StaleModelWarning[] = []
+    const issue = await validateHostSpec(spec, createHostValidationDeps(pool), {
+      stored,
+      hostRef: hostRefId,
+      ...(stored !== undefined ? { tolerations: hostTolerations, warnings: hostWarnings } : {}),
+    })
     if (issue) {
       return {
         ok: false,
@@ -262,8 +266,12 @@ export function createAdminCodexSubscriptionRouter(
         },
         config.hostsNamespace
       )
-      return { ok: true }
+      for (const event of hostTolerations) emitHostSpecIncoherenceTolerated(event)
+      return { ok: true, warnings: hostWarnings }
     } catch (err) {
+      if (err instanceof K8sConflictError) {
+        return { ok: false, status: 409, error: 'conflict', reason: 'resource_changed' }
+      }
       log.warn(
         { event: 'codex_host_write_failed', err, hostRef },
         'failed to write host connectionRef'
@@ -397,9 +405,7 @@ export function createAdminCodexSubscriptionRouter(
         return
       }
       const db = dbClient()
-      const connectionKey = normalizeCodexConnectionKey(
-        typeof req.params.key === 'string' ? req.params.key : undefined
-      )
+      const connectionKey = keyFromReq(req)
       const secrets = await loadCodexSubscriptionSecrets(
         db,
         deriveOAuthEncryptionKey(config.oauthEncryptionKey),
@@ -598,12 +604,8 @@ export function createAdminCodexSubscriptionRouter(
         res.status(409).json({ error: 'not_codex_host' })
         return
       }
-      // Bind must see the stored ref. Empty/missing is not deployment-default.
-      if (action === 'bind' && !storedRef) {
-        res.status(409).json({ error: 'empty_connection_ref' })
-        return
-      }
-      const currentRef = storedRef || CODEX_SUBSCRIPTION_CONNECTION_KEY
+      // Empty/missing connectionRef is unassigned, never the reserved default grant.
+      const currentRef = storedRef || CODEX_UNASSIGNED_CONNECTION_KEY
 
       if (action === 'unbind') {
         if (currentRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
@@ -626,12 +628,14 @@ export function createAdminCodexSubscriptionRouter(
           res.status(written.status).json({
             error: written.error,
             ...(written.message ? { message: written.message } : {}),
+            ...(written.reason ? { reason: written.reason } : {}),
           })
           return
         }
         res.status(200).json({
           host: hostRef,
           connectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+          ...(written.warnings.length > 0 ? { warnings: written.warnings } : {}),
         })
         return
       }
@@ -645,10 +649,15 @@ export function createAdminCodexSubscriptionRouter(
         res.status(written.status).json({
           error: written.error,
           ...(written.message ? { message: written.message } : {}),
+          ...(written.reason ? { reason: written.reason } : {}),
         })
         return
       }
-      res.status(200).json({ host: hostRef, connectionRef: connectionKey })
+      res.status(200).json({
+        host: hostRef,
+        connectionRef: connectionKey,
+        ...(written.warnings.length > 0 ? { warnings: written.warnings } : {}),
+      })
     })
 
   router.post(

@@ -267,7 +267,13 @@ function isStepValid(
     // catalog model and no Secret. Any static primary/fallback still requires
     // the exact credential slots (existing Secret or a complete new one).
     if (!state.modelName.trim()) return false
-    if (state.provider === 'codex-subscription' && !state.connectionRef?.trim()) return false
+    if (
+      state.provider === 'codex-subscription' &&
+      (!state.connectionRef?.trim() ||
+        state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY)
+    ) {
+      return false
+    }
     if (!llmChainRequiresSecret(state.provider, state.llmPolicy?.fallbacks)) return true
     // New secret: the PRIMARY provider must be usable (asymmetric gate — a
     // fallback missing its key only warns). Cross-slot mistakes (half Bedrock
@@ -644,6 +650,13 @@ export function HostWizard({
     if (step === 1 && contextMode === 'new' && !contextName.trim())
       return 'Context name is required.'
     if (step === 2 && !modelName.trim()) return 'Model name is required.'
+    if (
+      step === 2 &&
+      provider === 'codex-subscription' &&
+      (!connectionRef.trim() || connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY)
+    ) {
+      return 'Choose a ChatGPT subscription before continuing.'
+    }
     if (step === 2 && llmChainRequiresSecret(provider, llmPolicy?.fallbacks)) {
       if (secretMode === 'existing' && !existingSecret.trim()) return 'Select an existing secret.'
       if (secretMode === 'new' && !toKebabCase(newSecretName)) {
@@ -676,6 +689,7 @@ export function HostWizard({
     llmPolicy,
     provider,
     modelName,
+    connectionRef,
     selectedUserIds,
     selectedTeamIds,
   ])

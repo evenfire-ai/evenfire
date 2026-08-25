@@ -65,6 +65,38 @@ describe('codex-subscription Host admission', () => {
     expect((spec.model as { connectionRef?: string }).connectionRef).toBe('unassigned')
   })
 
+  it('accepts an unbind write that re-validates the stored Host spec', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    const isModelAllowed = vi.fn().mockResolvedValue(false)
+    const stored = {
+      model: {
+        provider: 'codex-subscription',
+        name: 'gpt-5.1',
+        connectionRef: 'codex-aaa',
+      },
+    }
+    const spec = {
+      model: {
+        provider: 'codex-subscription',
+        name: 'gpt-5.1',
+        connectionRef: 'unassigned',
+      },
+    }
+    const tolerations: Array<Record<string, unknown>> = []
+    await expect(
+      validateHostSpec(
+        spec,
+        { isModelAllowed },
+        {
+          stored,
+          hostRef: { namespace: 'mcp-host', name: 'chatllm' },
+          tolerations,
+        }
+      )
+    ).resolves.toBeNull()
+    expect(isModelAllowed).not.toHaveBeenCalled()
+  })
+
   it('defaults a missing connectionRef to deployment-default and checks that grant', async () => {
     process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
     const isModelAllowed = vi.fn().mockResolvedValue(true)

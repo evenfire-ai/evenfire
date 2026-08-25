@@ -13,7 +13,6 @@ import {
   pollCodexDevice,
   startCodexDeviceConnect,
   syncCodexSubscriptionCatalog,
-  unbindCodexHost,
 } from '@lib/codexSubscription'
 import {
   type CodexSubscriptionCapability,
@@ -30,6 +29,7 @@ export type CodexAgentAssignmentProps = {
   connectionRef: string
   hostName?: string
   onConnectionRefChange: (connectionKey: string) => void
+  onAssignmentPersisted?: (connectionKey: string) => void
   onModelsChange?: (models: string[]) => void
   disabled?: boolean
 }
@@ -38,6 +38,7 @@ export function CodexAgentAssignment({
   connectionRef,
   hostName,
   onConnectionRefChange,
+  onAssignmentPersisted,
   onModelsChange,
   disabled = false,
 }: CodexAgentAssignmentProps) {
@@ -167,20 +168,11 @@ export function CodexAgentAssignment({
     if (!selected || !hostName) return
     const confirmed = await confirm({
       title: `Remove ${hostName} from this subscription?`,
-      message: `${hostName} will stop using "${selected.displayName ?? selected.connectionKey}" and will have no ChatGPT subscription assigned until you pick another one. The subscription stays connected and other agents are not affected.`,
+      message: `${hostName} will stop using "${selected.displayName ?? selected.connectionKey}" after you Save. Until then this is only a draft. The subscription stays connected and other agents are not affected.`,
       confirmLabel: 'Remove agent',
     })
     if (!confirmed) return
-    setBusy(true)
-    try {
-      await unbindCodexHost(selected.connectionKey, hostName)
-      onConnectionRefChange(CODEX_UNASSIGNED_CONNECTION_KEY)
-      await load()
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not remove agent', { tone: 'error' })
-    } finally {
-      setBusy(false)
-    }
+    onConnectionRefChange(CODEX_UNASSIGNED_CONNECTION_KEY)
   }
 
   if (!enabled) return null

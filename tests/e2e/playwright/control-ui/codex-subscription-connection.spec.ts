@@ -10,7 +10,7 @@
  * Device login         | same                          | Sign in with ChatGPT                         | stay on model, no oauth URL         | device start 200 + userCode in UI
  * Sync catalog         | same                          | Select grant → Sync                          | stay on model                       | disabled until connected; POST sync when connected
  * Reuse grant          | Agents list with 2 seeded     | Create grant on A → pick same grant on B     | second agent model tab              | picker value = shared key
- * Unbind               | agent model                   | Create → Save → Remove from this agent       | stay on model                       | unbind 200, connectionRef=unassigned, grant not revoked
+ * Unbind               | agent model                   | Create → Save → Remove → Save                | stay on model                       | PUT 200, connectionRef=unassigned, grant not revoked
  * Hub table + assign   | `/` → Secrets → Subscription  | Create grant → pick 2 agents → Add 2 → Revoke| `/secrets/subscription` + table     | 2 bind 200s, chips, revoke status
  * LLM → Subscription   | Secrets LLM                   | Empty-state link or Subscription tab         | `/secrets/subscription`             | hub visible
  *
@@ -291,21 +291,15 @@ test.describe('Codex subscription connection', () => {
     await expect(page.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0)
     await expect(page.getByRole('link', { name: 'Manage subscription' })).toBeVisible()
 
-    const unbind = page.waitForResponse(
-      response =>
-        new RegExp(
-          `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/hosts/${firstName}/unbind$`
-        ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
-    )
     await page.getByRole('button', { name: 'Remove from this agent' }).click()
     await expect(page.getByRole('alertdialog')).toBeVisible()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Remove agent' }).click()
-    const unbindRes = await unbind
-    expect(unbindRes.ok(), `unbind must succeed, got ${unbindRes.status()}`).toBe(true)
-    await expect(page).toHaveURL(new RegExp(`/((?:hosts|agents))/${firstName}/model`))
     await expect(page.getByTestId('codex-connection-status')).toHaveText(
       /No subscription assigned/i
     )
+    const saved = await model.saveHost(firstName)
+    expect(saved.spec?.model?.connectionRef).toBe('unassigned')
+    await expect(page).toHaveURL(new RegExp(`/((?:hosts|agents))/${firstName}/model`))
 
     const host = (await controlApi.getHost(firstName)) as {
       spec?: { model?: { connectionRef?: string } }
@@ -336,9 +330,19 @@ test.describe('Codex subscription connection', () => {
     const bound = await test.step('assign two agents in one hub action', () =>
       hub.assignFirstAgents(grantKey, 2))
 
+    await test.step('remove one agent from the hub chips without revoking', async () => {
+      await hub.removeAgentFromGrant(grantKey, bound[0])
+      const afterUnbind = (await controlApi.getHost(bound[0])) as {
+        spec?: { model?: { connectionRef?: string } }
+      }
+      expect(afterUnbind.spec?.model?.connectionRef).toBe('unassigned')
+    })
+
+    const remaining = bound.slice(1)
     const grantRow = hub.grantRow(grantKey)
     await expect(grantRow.getByTestId('codex-hub-agent-chips')).toBeVisible()
-    for (const hostName of bound) {
+    await expect(grantRow.getByRole('link', { name: bound[0] })).toHaveCount(0)
+    for (const hostName of remaining) {
       await expect(grantRow.getByRole('link', { name: hostName })).toBeVisible()
       const host = (await controlApi.getHost(hostName)) as {
         spec?: { model?: { connectionRef?: string } }
@@ -366,7 +370,11 @@ test.describe('Codex subscription connection', () => {
       expect(revokeBody.connectionKey).toBe(grantKey)
     })
 
-    for (const hostName of bound) {
+    const afterRemoved = (await controlApi.getHost(bound[0])) as {
+      spec?: { model?: { connectionRef?: string } }
+    }
+    expect(afterRemoved.spec?.model?.connectionRef).toBe('unassigned')
+    for (const hostName of remaining) {
       const afterHost = (await controlApi.getHost(hostName)) as {
         spec?: { model?: { connectionRef?: string } }
       }

@@ -240,4 +240,22 @@ export class CodexSubscriptionHubPage {
     }
     return names
   }
+
+  async removeAgentFromGrant(connectionKey: string, hostName: string) {
+    const row = this.grantRow(connectionKey)
+    const unbind = this.page.waitForResponse(
+      response =>
+        new RegExp(
+          `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/hosts/${hostName}/unbind$`
+        ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
+    )
+    await row.getByRole('button', { name: `Remove agent ${hostName}` }).click()
+    await expect(this.page.getByRole('alertdialog')).toBeVisible()
+    await this.page.getByRole('alertdialog').getByRole('button', { name: 'Remove agent' }).click()
+    const response = await unbind
+    expect(response.ok(), `hub unbind must succeed, got ${response.status()}`).toBe(true)
+    const body = (await response.json()) as { host?: string; connectionRef?: string }
+    expect(body.host).toBe(hostName)
+    expect(body.connectionRef).toBe('unassigned')
+  }
 }

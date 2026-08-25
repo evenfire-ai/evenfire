@@ -23,7 +23,17 @@ import { ToastProvider } from '../Toast'
  */
 
 vi.mock('../CodexAgentAssignment', () => ({
-  CodexAgentAssignment: () => <div data-testid="codex-agent-assignment" />,
+  CodexAgentAssignment: ({
+    onConnectionRefChange,
+  }: {
+    onConnectionRefChange: (connectionKey: string) => void
+  }) => (
+    <div data-testid="codex-agent-assignment">
+      <button type="button" onClick={() => onConnectionRefChange('codex-aaa')}>
+        Assign test grant
+      </button>
+    </div>
+  ),
 }))
 
 // Mock lib/api BEFORE importing the component. vi.mock is hoisted.
@@ -809,6 +819,11 @@ describe('HostWizard — broker-backed Codex authoring', () => {
     expect(screen.queryByLabelText(/OpenAI API key/i)).not.toBeInTheDocument()
     fireEvent.click(screen.getByLabelText('Default model', { selector: '#llm-primary-model' }))
     expect(screen.queryByRole('option', { name: 'old-codex' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Assign test grant' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
 
@@ -822,7 +837,7 @@ describe('HostWizard — broker-backed Codex authoring', () => {
             model: {
               provider: 'codex-subscription',
               name: 'gpt-5.1',
-              connectionRef: 'unassigned',
+              connectionRef: 'codex-aaa',
             },
           }),
         })
@@ -873,6 +888,7 @@ describe('HostWizard — broker-backed Codex authoring', () => {
     fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
     fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
     fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Assign test grant' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
     })

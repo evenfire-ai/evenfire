@@ -7,7 +7,6 @@ import {
   listCodexSubscriptionConnections,
   pollCodexDevice,
   startCodexDeviceConnect,
-  unbindCodexHost,
 } from '@lib/codexSubscription'
 import { CodexAgentAssignment } from '../CodexAgentAssignment'
 import { ToastProvider } from '../Toast'
@@ -36,7 +35,6 @@ vi.mock('@lib/codexSubscription', async importOriginal => {
     createCodexSubscriptionConnection: vi.fn(),
     startCodexDeviceConnect: vi.fn(),
     pollCodexDevice: vi.fn(),
-    unbindCodexHost: vi.fn(),
     syncCodexSubscriptionCatalog: vi.fn(),
   }
 })
@@ -60,15 +58,21 @@ function connection(
   }
 }
 
-function renderAssignment(connectionRef: string, onConnectionRefChange = vi.fn()) {
+function renderAssignment(
+  connectionRef: string,
+  onConnectionRefChange = vi.fn(),
+  onAssignmentPersisted = vi.fn()
+) {
   return {
     onConnectionRefChange,
+    onAssignmentPersisted,
     ...render(
       <ToastProvider>
         <CodexAgentAssignment
           connectionRef={connectionRef}
           hostName="chatllm"
           onConnectionRefChange={onConnectionRefChange}
+          onAssignmentPersisted={onAssignmentPersisted}
         />
       </ToastProvider>
     ),
@@ -188,20 +192,19 @@ describe('CodexAgentAssignment', () => {
     )
   })
 
-  it('unbinds this agent without calling revoke', async () => {
+  it('drafts an unassigned connectionRef on Remove and does not persist until Save', async () => {
     vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
       connection({ connectionKey: 'team-plus', displayName: 'Team Plus' }),
     ])
     confirmMock.mockResolvedValue(true)
-    vi.mocked(unbindCodexHost).mockResolvedValue({ host: 'chatllm', connectionRef: 'unassigned' })
-    const { onConnectionRefChange } = renderAssignment('team-plus')
+    const { onConnectionRefChange, onAssignmentPersisted } = renderAssignment('team-plus')
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Remove from this agent' })).toBeEnabled()
     })
     fireEvent.click(screen.getByRole('button', { name: 'Remove from this agent' }))
     await waitFor(() => {
-      expect(unbindCodexHost).toHaveBeenCalledWith('team-plus', 'chatllm')
+      expect(onConnectionRefChange).toHaveBeenCalledWith('unassigned')
     })
-    expect(onConnectionRefChange).toHaveBeenCalledWith('unassigned')
+    expect(onAssignmentPersisted).not.toHaveBeenCalled()
   })
 })

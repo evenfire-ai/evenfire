@@ -5,7 +5,9 @@ import {
   PROVIDER_CREDENTIAL_SLOTS,
   isLlmProviderId,
 } from '@clerum/llm-providers'
+import type { DbClient } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
+import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
 import {
   isCodexUnassignedConnectionKey,
   readHostCodexConnectionRef,
@@ -171,6 +173,21 @@ export interface HostSpecValidationDeps {
     provider: string,
     model: string
   ) => Promise<{ enabled: boolean; stale: boolean } | null>
+}
+
+/**
+ * Shared Host-write deps: Codex assignments check the grant catalog, not the
+ * global allowlist. Bind/unbind and Host PATCH must use this factory so a
+ * second writer cannot drop `connectionRef` or treat it as a DbClient.
+ */
+export function createHostValidationDeps(db: DbClient): HostSpecValidationDeps {
+  return {
+    isModelAllowed: (provider, model, connectionRef) =>
+      provider === 'codex-subscription'
+        ? isCodexAssignmentAllowed(db, connectionRef ?? 'deployment-default', model)
+        : isModelAllowedDefault(provider, model, db),
+    getModelAllowlistState: (provider, model) => getModelAllowlistStateDefault(provider, model, db),
+  }
 }
 
 /**

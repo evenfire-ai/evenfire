@@ -119,6 +119,14 @@ export default function HostDetailsPage() {
     channels: [] as string[],
     stateless: false,
   })
+  const savedModelRef = useRef({
+    provider: 'openai' as LlmProvider,
+    modelName: '',
+    connectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+    secretRef: '',
+    llmPolicy: undefined as LlmPolicy | undefined,
+    allowedModels: [] as HostAllowedModel[],
+  })
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
   // model is always kept selectable even if it fell out of the allowlist
@@ -305,6 +313,19 @@ export default function HostDetailsPage() {
         // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
         // → [] = unrestricted (offers the full global allowlist per provider).
         setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
+        savedModelRef.current = {
+          provider: nextProvider,
+          modelName:
+            currentModel ||
+            resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider)),
+          connectionRef:
+            String(
+              (spec.model as { connectionRef?: string } | undefined)?.connectionRef || ''
+            ).trim() || CODEX_UNASSIGNED_CONNECTION_KEY,
+          secretRef: String(spec.secretRef || ''),
+          llmPolicy: normalizeLlmPolicy(spec.llmPolicy),
+          allowedModels: normalizeAllowedModels(spec.allowedModels),
+        }
         // Write-only surfaces reset only when this tab is reloaded or saved.
         setLlmKeyDraft({})
         setRetireCandidates([])
@@ -402,6 +423,17 @@ export default function HostDetailsPage() {
     if (!editingContext) setContextRefDraft(saved.contextRef)
     setChannelsDraft(saved.channels)
     setStatelessDraft(saved.stateless)
+  }
+
+  function resetModelDrafts() {
+    const saved = savedModelRef.current
+    setProviderDraft(saved.provider)
+    setModelNameDraft(saved.modelName)
+    setConnectionRefDraft(saved.connectionRef)
+    setSecretRefDraft(saved.secretRef)
+    setLlmPolicyDraft(saved.llmPolicy)
+    setAllowedModelsDraft(saved.allowedModels)
+    setLlmKeyDraft({})
   }
 
   async function saveHost(): Promise<boolean> {
@@ -944,7 +976,10 @@ export default function HostDetailsPage() {
                     <button
                       type="button"
                       className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => setEditingModel(false)}
+                      onClick={() => {
+                        resetModelDrafts()
+                        setEditingModel(false)
+                      }}
                       disabled={busy}
                     >
                       Cancel
@@ -968,7 +1003,10 @@ export default function HostDetailsPage() {
                   <button
                     type="button"
                     className="cu-btn cu-btn--ghost cu-btn--sm"
-                    onClick={() => setEditingModel(true)}
+                    onClick={() => {
+                      resetModelDrafts()
+                      setEditingModel(true)
+                    }}
                     disabled={busy}
                   >
                     Edit
@@ -1095,6 +1133,13 @@ export default function HostDetailsPage() {
                         connectionRef={connectionRefDraft}
                         hostName={routeName}
                         onConnectionRefChange={setConnectionRefDraft}
+                        onAssignmentPersisted={connectionRef => {
+                          savedModelRef.current = {
+                            ...savedModelRef.current,
+                            connectionRef,
+                          }
+                          setConnectionRefDraft(connectionRef)
+                        }}
                         onModelsChange={setCodexModels}
                         disabled={busy}
                       />

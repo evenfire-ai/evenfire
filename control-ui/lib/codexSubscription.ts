@@ -124,11 +124,12 @@ export function sanitizeCodexConnection(raw: unknown): CodexSubscriptionConnecti
     catalogStatus === 'never_synced'
       ? catalogStatus
       : 'never_synced'
+  const connectionKey = typeof raw.connectionKey === 'string' ? raw.connectionKey.trim() : ''
+  if (!connectionKey || connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY) {
+    throw new Error('Codex subscription connection key is invalid')
+  }
   return {
-    connectionKey:
-      typeof raw.connectionKey === 'string' && raw.connectionKey.trim()
-        ? raw.connectionKey.trim()
-        : 'deployment-default',
+    connectionKey,
     displayName: pickString(raw.displayName) ?? undefined,
     assignedHosts: Array.isArray(raw.assignedHosts)
       ? raw.assignedHosts
@@ -287,7 +288,13 @@ export async function bindCodexHost(
   )) as { host?: unknown; connectionRef?: unknown }
   return {
     host: pickString(raw.host) ?? hostRef,
-    connectionRef: pickString(raw.connectionRef) ?? connectionKey,
+    connectionRef: (() => {
+      const next = pickString(raw.connectionRef)
+      if (!next) {
+        throw new Error('Codex subscription bind did not return connectionRef')
+      }
+      return next
+    })(),
   }
 }
 
