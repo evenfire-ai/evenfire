@@ -621,6 +621,27 @@ if T2_PUBLIC_BASE_REF=nonexistent-ref-for-contract \
   exit 1
 fi
 
+fixture_repo="$tmp/public-fixture-repo"
+mkdir -p "$fixture_repo/control-api/test" "$fixture_repo/external-rest-api/src/__tests__"
+git init -q -b dev "$fixture_repo"
+git -C "$fixture_repo" config user.email test@example.invalid
+git -C "$fixture_repo" config user.name boundary-test
+printf 'base\n' >"$fixture_repo/README.md"
+git -C "$fixture_repo" add README.md
+git -C "$fixture_repo" commit -q -m base
+fixture_base="$(git -C "$fixture_repo" rev-parse HEAD)"
+{
+  printf '%s\n' "const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL ?? 'postgresql://postgres@127.0.0.1/postgres'"
+  printf '%s\n' "const issued = { token: 'replacement-token', password: 'valid-password' }"
+} >"$fixture_repo/control-api/test/example.realPostgres.integration.test.ts"
+printf '%s\n' "const sentinel = 'postgres://secret@internal/var/run/service.sock'" \
+  >"$fixture_repo/external-rest-api/src/__tests__/publicErrorContract.test.ts"
+if ! T2_PUBLIC_ROOT="$fixture_repo" T2_PUBLIC_BASE_REF="$fixture_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh"; then
+  echo 'FAIL: public boundary rejected synthetic source/test fixtures' >&2
+  exit 1
+fi
+
 public_repo="$tmp/public-repo"
 mkdir -p "$public_repo"
 git init -q -b dev "$public_repo"
@@ -636,6 +657,34 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
   echo 'FAIL: public boundary ignored a secret in an untracked file' >&2
   exit 1
 fi
+malicious_repo="$tmp/public-malicious-repo"
+mkdir -p "$malicious_repo"
+git init -q -b dev "$malicious_repo"
+git -C "$malicious_repo" config user.email test@example.invalid
+git -C "$malicious_repo" config user.name boundary-test
+printf 'base\n' >"$malicious_repo/README.md"
+git -C "$malicious_repo" add README.md
+git -C "$malicious_repo" commit -q -m base
+malicious_base="$(git -C "$malicious_repo" rev-parse HEAD)"
+cat >"$malicious_repo/materialized.txt" <<'EOF'
+DATABASE_URL=postgresql://db_user:prod_password@127.0.0.1/postgres
+PUBLIC_CALLBACK=http://127.0.0.1:18443/status
+password: "ProdCustomerPassword123"
+Authorization: Bearer abcdefghijklmnopqrstuvwxyz1234567890
+-----BEGIN PRIVATE KEY-----
+EOF
+printf 'empty\n' >"$malicious_repo/.env"
+if T2_PUBLIC_ROOT="$malicious_repo" T2_PUBLIC_BASE_REF="$malicious_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/malicious-public.err"; then
+  echo 'FAIL: public boundary accepted materialized private boundary values' >&2
+  exit 1
+fi
+grep -Fq 'credentialed PostgreSQL URL' "$tmp/malicious-public.err"
+grep -Fq 'private runtime URL' "$tmp/malicious-public.err"
+grep -Fq 'credential assignment' "$tmp/malicious-public.err"
+grep -Fq 'bearer token' "$tmp/malicious-public.err"
+grep -Fq 'private key' "$tmp/malicious-public.err"
+grep -Fq 'sensitive file name' "$tmp/malicious-public.err"
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-profile-readiness.sh"
 bash "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"
