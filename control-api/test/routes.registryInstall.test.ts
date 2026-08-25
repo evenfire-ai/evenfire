@@ -4545,7 +4545,7 @@ describe('POST /admin/registry/upgrade', () => {
       uid: 'secret-uid-existing',
       resourceVersion: '7',
       labels: { existing: 'true' },
-      data: { API_KEY: 'prior-base64' },
+      data: { API_KEY: 'prior-test-token' },
     })
     vi.spyOn(gw, 'updateResource').mockRejectedValue(
       Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
@@ -4569,7 +4569,7 @@ describe('POST /admin/registry/upgrade', () => {
       namespace: 'mcp-server',
       type: 'Opaque',
       labels: { existing: 'true' },
-      data: { API_KEY: 'prior-base64' },
+      data: { API_KEY: 'prior-test-token' },
     })
     await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
       metadata: {
@@ -4578,7 +4578,7 @@ describe('POST /admin/registry/upgrade', () => {
         labels: { existing: 'true' },
       },
       type: 'Opaque',
-      data: { API_KEY: 'prior-base64' },
+      data: { API_KEY: 'prior-test-token' },
     })
   })
 
@@ -4596,7 +4596,7 @@ describe('POST /admin/registry/upgrade', () => {
       uid: 'secret-uid-1',
       resourceVersion: '7',
       labels: { existing: 'true' },
-      data: { [credentialKey]: 'prior-base64' },
+      data: { [credentialKey]: 'prior-test-token' },
     })
 
     const getResource = gw.getResource.bind(gw)
@@ -4654,7 +4654,7 @@ describe('POST /admin/registry/upgrade', () => {
         'kubectl.kubernetes.io/last-applied-configuration': '{"old":"cfg"}',
         'custom/safe-key': 'preserved',
       },
-      data: { API_KEY: 'prior-base64' },
+      data: { API_KEY: 'prior-test-token' },
     })
     const updateResourceSpy = vi
       .spyOn(gw, 'updateResource')
@@ -4720,7 +4720,7 @@ describe('POST /admin/registry/upgrade', () => {
       resourceVersion: '7',
       labels: { existing: 'true' },
       annotations: { [futureKey]: futureValue },
-      data: { [key]: 'prior-base64' },
+      data: { [key]: 'prior-test-token' },
     })
     vi.spyOn(gw, 'updateResource').mockRejectedValue(
       Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
@@ -4747,7 +4747,7 @@ describe('POST /admin/registry/upgrade', () => {
     })
     await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
       metadata: { annotations: { [futureKey]: futureValue } },
-      data: { [key]: 'prior-base64' },
+      data: { [key]: 'prior-test-token' },
     })
   })
 
@@ -4764,7 +4764,7 @@ describe('POST /admin/registry/upgrade', () => {
       uid: 'secret-uid-empty-annotations',
       resourceVersion: '7',
       labels: { existing: 'true' },
-      data: { API_KEY: 'prior-base64' },
+      data: { API_KEY: 'prior-test-token' },
     })
     vi.spyOn(gw, 'updateResource').mockRejectedValue(
       Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
