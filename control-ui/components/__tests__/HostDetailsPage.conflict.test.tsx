@@ -272,7 +272,7 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
       )
     ).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    fireEvent.change(screen.getByLabelText('Secret reference'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: '' } })
 
     navigateToTab(view, 'overview')
     await openOverviewEdit()
@@ -281,7 +281,7 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
 
     navigateToTab(view, 'model')
     await waitFor(() =>
-      expect((screen.getByLabelText('Secret reference') as HTMLSelectElement).value).toBe('')
+      expect((screen.getByLabelText('Credential') as HTMLSelectElement).value).toBe('')
     )
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
   })

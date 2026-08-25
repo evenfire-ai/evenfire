@@ -82,6 +82,7 @@ function deps(
     withTransaction: async work => work(db as never),
     getConnection: vi.fn().mockResolvedValue(connection()),
     getModelState: vi.fn().mockResolvedValue({ enabled: true, stale: false }),
+    resolveConnectionKey: vi.fn().mockResolvedValue('deployment-default'),
     evaluateBudget: vi.fn().mockResolvedValue({ allowed: true, reservationIds: ['res-1'] }),
     getActiveReservation: vi.fn().mockResolvedValue({ id: 'res-1' }),
     getMaxGeneration: vi.fn().mockResolvedValue(0),
