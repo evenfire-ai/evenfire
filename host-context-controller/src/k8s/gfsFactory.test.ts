@@ -163,8 +163,8 @@ describe('gfsFactory writer Deployment', () => {
       maxWriteBodyBytes: '25165824',
       uploadV2Enabled: 'true',
       uploadProtocolMaxFileBytes: '1073741824',
-      uploadProductMaxFileBytes: '209715200',
-      uploadMaxFileBytes: '209715200',
+      uploadProductMaxFileBytes: '314572800',
+      uploadMaxFileBytes: '314572800',
       uploadPreferredChunkBytes: '8388608',
       uploadMaxChunkBytes: '16777216',
       uploadMinPartBytes: '1048576',
@@ -184,8 +184,8 @@ describe('gfsFactory writer Deployment', () => {
     }
     const uploadEnv = {
       GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES: '1073741824',
-      GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES: '209715200',
-      GFS_UPLOAD_MAX_FILE_BYTES: '209715200',
+      GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES: '314572800',
+      GFS_UPLOAD_MAX_FILE_BYTES: '314572800',
       GFS_UPLOAD_PREFERRED_CHUNK_BYTES: '8388608',
       GFS_UPLOAD_MAX_CHUNK_BYTES: '16777216',
       GFS_UPLOAD_MIN_PART_BYTES: '1048576',
