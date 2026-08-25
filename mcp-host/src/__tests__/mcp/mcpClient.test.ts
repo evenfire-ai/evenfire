@@ -101,7 +101,7 @@ describe('McpClient — connect', () => {
   it('preserves direct SSE transport when proxyUrl is provided', async () => {
     const hostAuthorization = {
       getAccessToken: () => 'host-token',
-      refreshOnUnauthorized: vi.fn().mockResolvedValue(undefined),
+      rereadAccessToken: vi.fn().mockResolvedValue(false),
     }
     const client = new McpClient(
       makeServerInfo({ transport: { type: 'sse', url: 'http://server/mcp' } }),

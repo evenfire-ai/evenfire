@@ -5,11 +5,11 @@ import {
   MCP_PROXY_HOST_AUTH_CHALLENGE,
 } from './proxyAuth'
 
-function fixtureAuth(initial: string, refresh: () => Promise<void>) {
+function fixtureAuth(initial: string, reread: () => Promise<boolean>) {
   let current = initial
   return {
     getAccessToken: () => current,
-    refreshOnUnauthorized: refresh,
+    rereadAccessToken: reread,
     rotate: (next: string) => {
       current = next
     },
@@ -18,7 +18,7 @@ function fixtureAuth(initial: string, refresh: () => Promise<void>) {
 
 describe('mcp-host proxy Host bearer transport', () => {
   it('adds a fresh private Host bearer without replacing the MCP credential', async () => {
-    const auth = fixtureAuth('fixture-host-one', async () => undefined)
+    const auth = fixtureAuth('fixture-host-one', async () => false)
     const calls: RequestInit[] = []
     const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
       calls.push(init ?? {})
@@ -49,8 +49,8 @@ describe('mcp-host proxy Host bearer transport', () => {
   })
 
   it('does not retry a forwarded 401', async () => {
-    const refresh = vi.fn(async () => undefined)
-    const auth = fixtureAuth('fixture-host', refresh)
+    const reread = vi.fn(async () => false)
+    const auth = fixtureAuth('fixture-host', reread)
     const fetchMock = vi.fn(async () => new Response('denied', { status: 401 }))
     const proxyFetch = createMcpProxyFetch(auth, fetchMock)
 
@@ -58,24 +58,74 @@ describe('mcp-host proxy Host bearer transport', () => {
 
     expect(response.status).toBe(401)
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(refresh).not.toHaveBeenCalled()
+    expect(reread).not.toHaveBeenCalled()
   })
 
-  it('serializes one refresh when concurrent requests receive 401', async () => {
-    let releaseRefresh!: () => void
-    let signalRefreshStarted!: () => void
-    const refreshStarted = new Promise<void>(resolve => {
-      signalRefreshStarted = resolve
+  it('fails closed without replay when no newer access token exists', async () => {
+    const reread = vi.fn(async () => false)
+    const auth = fixtureAuth('fixture-host', reread)
+    const fetchMock = vi.fn(async () =>
+      new Response('denied', {
+        status: 401,
+        headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+      })
+    )
+    const proxyFetch = createMcpProxyFetch(auth, fetchMock)
+
+    await expect(proxyFetch('http://proxy.test/mcp', { method: 'GET' })).rejects.toThrow()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(reread).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not trust an out-of-band bearer change without an adopted reread', async () => {
+    const reread = vi.fn(async () => false)
+    const auth = fixtureAuth('fixture-host-before-reread', reread)
+    auth.rotate('fixture-host-untrusted-change')
+    const fetchMock = vi.fn(async () =>
+      new Response('denied', {
+        status: 401,
+        headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+      })
+    )
+    const proxyFetch = createMcpProxyFetch(auth, fetchMock)
+
+    await expect(proxyFetch('http://proxy.test/mcp', { method: 'GET' })).rejects.toThrow()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(reread).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not consume refresh or reissue after a proxy Host challenge', async () => {
+    const reread = vi.fn(async () => false)
+    const auth = fixtureAuth('fixture-host', reread)
+    const fetchMock = vi.fn(async () =>
+      new Response('denied', {
+        status: 401,
+        headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+      })
+    )
+    const proxyFetch = createMcpProxyFetch(auth, fetchMock)
+
+    await expect(proxyFetch('http://proxy.test/mcp', { method: 'GET' })).rejects.toThrow()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(reread).toHaveBeenCalledTimes(1)
+  })
+
+  it('serializes one access-only reread when concurrent requests receive 401', async () => {
+    let releaseReread!: () => void
+    let signalRereadStarted!: () => void
+    const rereadStarted = new Promise<void>(resolve => {
+      signalRereadStarted = resolve
     })
     let auth!: ReturnType<typeof fixtureAuth>
-    const refresh = vi.fn(async () => {
-      signalRefreshStarted()
+    const reread = vi.fn(async () => {
+      signalRereadStarted()
       await new Promise<void>(resolve => {
-        releaseRefresh = resolve
+        releaseReread = resolve
       })
-      auth.rotate('fixture-host-after-refresh')
+      auth.rotate('fixture-host-after-reread')
+      return true
     })
-    auth = fixtureAuth('fixture-host-before-refresh', refresh)
+    auth = fixtureAuth('fixture-host-before-reread', reread)
     const calls: RequestInit[] = []
     const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
       calls.push(init ?? {})
@@ -88,23 +138,23 @@ describe('mcp-host proxy Host bearer transport', () => {
     const first = proxyFetch('http://proxy.test/mcp', { method: 'GET' })
     const second = proxyFetch('http://proxy.test/mcp', { method: 'GET' })
 
-    await refreshStarted
-    expect(refresh).toHaveBeenCalledTimes(1)
-    releaseRefresh()
+    await rereadStarted
+    expect(reread).toHaveBeenCalledTimes(1)
+    releaseReread()
     await Promise.all([first, second])
 
     expect(fetchMock).toHaveBeenCalledTimes(4)
     expect(new Headers(calls[2].headers).get('Proxy-Authorization')).toBe(
-      'Bearer fixture-host-after-refresh'
+      'Bearer fixture-host-after-reread'
     )
     expect(new Headers(calls[3].headers).get('Proxy-Authorization')).toBe(
-      'Bearer fixture-host-after-refresh'
+      'Bearer fixture-host-after-reread'
     )
   })
 
-  it('shares refresh state across wrappers created for one auth object', async () => {
-    const refresh = vi.fn(async () => undefined)
-    const auth = fixtureAuth('x', refresh)
+  it('shares access-only reread state across wrappers created for one auth object', async () => {
+    const reread = vi.fn(async () => false)
+    const auth = fixtureAuth('x', reread)
     const response = new Response('denied', {
       status: 401,
       headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
@@ -113,24 +163,29 @@ describe('mcp-host proxy Host bearer transport', () => {
     const first = createMcpProxyFetch(auth, fetchMock)
     const second = createMcpProxyFetch(auth, fetchMock)
 
-    await Promise.all([
-      first('http://proxy.test/a', { method: 'GET' }),
-      second('http://proxy.test/b', { method: 'GET' }),
-    ])
+    await expect(
+      Promise.all([
+        first('http://proxy.test/a', { method: 'GET' }),
+        second('http://proxy.test/b', { method: 'GET' }),
+      ])
+    ).rejects.toThrow()
 
-    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(reread).toHaveBeenCalledTimes(1)
   })
 
   it('shares one Host authorization facade across production manager generations', async () => {
-    const refresh = vi.fn(async () => undefined)
     const runtimeAuth = { accessToken: 'h' }
+    const reread = vi.fn(async () => {
+      runtimeAuth.accessToken = 'h-after-reread'
+      return true
+    })
     const first = getSharedMcpProxyHostAuthorization(runtimeAuth, () => ({
       getAccessToken: () => runtimeAuth.accessToken,
-      refreshOnUnauthorized: refresh,
+      rereadAccessToken: reread,
     }))
     const second = getSharedMcpProxyHostAuthorization(runtimeAuth, () => ({
       getAccessToken: () => runtimeAuth.accessToken,
-      refreshOnUnauthorized: refresh,
+      rereadAccessToken: reread,
     }))
 
     expect(second).toBe(first)
@@ -156,11 +211,16 @@ describe('mcp-host proxy Host bearer transport', () => {
       createMcpProxyFetch(second, fetchMock)('http://proxy.test/b', { method: 'GET' }),
     ])
 
-    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(reread).toHaveBeenCalledTimes(1)
   })
 
-  it('retries a 401 once and never loops on a persistent rejection', async () => {
-    const auth = fixtureAuth('fixture-host', vi.fn(async () => undefined))
+  it('retries a 401 once and never loops on a second exact challenge', async () => {
+    let auth!: ReturnType<typeof fixtureAuth>
+    const reread = vi.fn(async () => {
+      auth.rotate('fixture-host-after-reread')
+      return true
+    })
+    auth = fixtureAuth('fixture-host', reread)
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -181,6 +241,112 @@ describe('mcp-host proxy Host bearer transport', () => {
 
     expect(response.status).toBe(401)
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(auth.refreshOnUnauthorized).toHaveBeenCalledTimes(1)
+    expect(reread).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    [400, undefined],
+    [401, 'Bearer realm="upstream"'],
+    [403, MCP_PROXY_HOST_AUTH_CHALLENGE],
+    [503, MCP_PROXY_HOST_AUTH_CHALLENGE],
+    [500, MCP_PROXY_HOST_AUTH_CHALLENGE],
+  ])('does not reread for non-exact auth status %s', async (status, challenge) => {
+    const reread = vi.fn(async () => false)
+    const auth = fixtureAuth('fixture-host', reread)
+    const headers = challenge ? { 'WWW-Authenticate': challenge } : undefined
+    const fetchMock = vi.fn(async () => new Response('denied', { status, headers }))
+    const proxyFetch = createMcpProxyFetch(auth, fetchMock)
+
+    const response = await proxyFetch('http://proxy.test/mcp', { method: 'GET' })
+
+    expect(response.status).toBe(status)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(reread).not.toHaveBeenCalled()
+  })
+
+  it('does not reread after a transport error', async () => {
+    const reread = vi.fn(async () => false)
+    const auth = fixtureAuth('fixture-host', reread)
+    const fetchMock = vi.fn(async () => {
+      throw new Error('transport failed')
+    })
+    const proxyFetch = createMcpProxyFetch(auth, fetchMock)
+
+    await expect(proxyFetch('http://proxy.test/mcp', { method: 'GET' })).rejects.toThrow(
+      'transport failed'
+    )
+    expect(reread).not.toHaveBeenCalled()
+  })
+
+  it('gives each independent HTTP exchange its own single replay budget', async () => {
+    let auth!: ReturnType<typeof fixtureAuth>
+    let next = 0
+    const reread = vi.fn(async () => {
+      next += 1
+      auth.rotate(`fixture-host-reread-${next}`)
+      return true
+    })
+    auth = fixtureAuth('fixture-host-initial', reread)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response('denied', {
+          status: 401,
+          headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+        })
+      )
+      .mockResolvedValueOnce(new Response('ok-1', { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response('denied', {
+          status: 401,
+          headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+        })
+      )
+      .mockResolvedValueOnce(new Response('ok-2', { status: 200 }))
+    const proxyFetch = createMcpProxyFetch(auth, fetchMock)
+
+    await expect(
+      proxyFetch('http://proxy.test/mcp', { method: 'POST', body: 'one' })
+    ).resolves.toMatchObject({ status: 200 })
+    await expect(proxyFetch('http://proxy.test/mcp', { method: 'GET' })).resolves.toMatchObject({
+      status: 200,
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(reread).toHaveBeenCalledTimes(2)
+  })
+
+  it('replays a buffered stream body exactly once after the access-only reread', async () => {
+    let auth!: ReturnType<typeof fixtureAuth>
+    const reread = vi.fn(async () => {
+      auth.rotate('fixture-host-after-stream-reread')
+      return true
+    })
+    auth = fixtureAuth('fixture-host-before-stream-reread', reread)
+    const bodies: string[] = []
+    const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      bodies.push(await new Response(init?.body).text())
+      return bodies.length === 1
+        ? new Response('denied', {
+            status: 401,
+            headers: { 'WWW-Authenticate': MCP_PROXY_HOST_AUTH_CHALLENGE },
+          })
+        : new Response('ok', { status: 200 })
+    })
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('mcp-payload'))
+        controller.close()
+      },
+    })
+    const proxyFetch = createMcpProxyFetch(auth, fetchMock)
+
+    await expect(
+      proxyFetch('http://proxy.test/mcp', { method: 'POST', body })
+    ).resolves.toMatchObject({ status: 200 })
+
+    expect(bodies).toEqual(['mcp-payload', 'mcp-payload'])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(reread).toHaveBeenCalledTimes(1)
   })
 })

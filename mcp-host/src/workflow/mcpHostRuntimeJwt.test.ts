@@ -3,6 +3,7 @@ import {
   decodeMcpHostRuntimeJwtClaims,
   getJwtIssuedAt,
   getJwtRuntimeBinding,
+  getStrictJwtRuntimeBinding,
   getMcpHostRuntimeCallerKey,
 } from './mcpHostRuntimeJwt'
 
@@ -50,6 +51,21 @@ describe('mcpHostRuntimeJwt', () => {
 
     expect(getMcpHostRuntimeCallerKey(token)).toBeNull()
     expect(getJwtRuntimeBinding(token)).toBeNull()
+  })
+
+  it('rejects additional Host refs at the access-only adoption boundary', () => {
+    const token = jwtWithClaims({
+      hostRefs: ['chatllm', 'secondary'],
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+    })
+
+    expect(getJwtRuntimeBinding(token)).toEqual({
+      hostRef: 'chatllm',
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+    })
+    expect(getStrictJwtRuntimeBinding(token)).toBeNull()
   })
 
   it('returns null claims and no runtime binding for malformed tokens', () => {

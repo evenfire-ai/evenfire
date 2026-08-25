@@ -46,7 +46,7 @@ describe("McpClient — proxy URL resolution", () => {
     server.transport.type = "sse";
     const client = new McpClient(server, undefined, "http://proxy:8083", {
       getAccessToken: () => "fixture-host-bearer",
-      refreshOnUnauthorized: async () => undefined,
+      rereadAccessToken: async () => false,
     });
     const transport = (client as any).createTransport();
     expect((client as any).resolveUrl()).toBe('http://sse-server:3000/sse')
@@ -58,7 +58,7 @@ describe("McpClient — proxy URL resolution", () => {
     server.transport.type = 'sse'
     const client = new McpClient(server, undefined, 'http://proxy:8083', {
       getAccessToken: () => 'h',
-      refreshOnUnauthorized: async () => undefined,
+      rereadAccessToken: async () => false,
     })
 
     expect((client as any).resolveUrl()).toBe('http://sse-server:3000/sse')
@@ -84,7 +84,7 @@ describe("McpClient — proxy URL resolution", () => {
   it('should attach the Host bearer fetch boundary only to proxied Streamable HTTP', () => {
     const hostAuthorization = {
       getAccessToken: () => 'fixture-host-bearer',
-      refreshOnUnauthorized: vi.fn(async () => undefined),
+      rereadAccessToken: vi.fn(async () => false),
     }
     const streamableClient = new McpClient(
       makeMockServer('streamable'),
@@ -155,7 +155,7 @@ describe("McpManager — proxy mode constructor", () => {
   it('should pass the Host bearer provider through the manager to the client', async () => {
     const hostAuthorization = {
       getAccessToken: () => 'fixture-host-bearer',
-      refreshOnUnauthorized: vi.fn(async () => undefined),
+      rereadAccessToken: vi.fn(async () => false),
     }
     const manager = new McpManager('http://proxy:8083', undefined, hostAuthorization)
     const server = makeMockServer('provider-wired-server')

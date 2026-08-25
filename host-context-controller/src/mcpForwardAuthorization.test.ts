@@ -113,6 +113,24 @@ describe('McpAuthorizationService live forwarding', () => {
     expect(store.readSecret).not.toHaveBeenCalled()
   })
 
+  it('projects managed stdio to the internal Streamable HTTP bridge', async () => {
+    const managedStdio = server('server-a', 'context-a')
+    managedStdio.transport = { type: 'stdio', port: 3000 }
+    managedStdio.managed = true
+    const store = makeStore(
+      { 'host-a': host('host-a', 'a', 'context-a') },
+      { 'context-a': context('context-a', ['server-a']) },
+      { 'server-a': managedStdio }
+    )
+    const service = new McpAuthorizationService(store, () => 200)
+
+    await expect(
+      service.getLiveForwardTarget(principal('host-a', 'host-uid-a'), 'server-a')
+    ).resolves.toMatchObject({
+      targetUrl: 'http://server-a.mcp-server.svc.cluster.local:3000/mcp',
+    })
+  })
+
   it.each([
     ['a destination bound to another McpServer', 'http://server-b.mcp-server.svc.cluster.local:3000/mcp'],
     ['a destination with the wrong port', 'http://server-a.mcp-server.svc.cluster.local:3001/mcp'],

@@ -295,21 +295,22 @@ function serverInfo(name: 'server-a' | 'server-b', proxyUrl: string): McpServerI
 
 function rotatingHostIdentity(initial: string): McpProxyHostAuthorization & {
   setHostIdentity(value: string): void
-  refreshCount: number
+  rereadCount: number
 } {
   let current = initial
-  let refreshCount = 0
+  let rereadCount = 0
   return {
     getAccessToken: () => current,
-    refreshOnUnauthorized: async () => {
-      refreshCount += 1
+    rereadAccessToken: async () => {
+      rereadCount += 1
       current = 'host-a-rotated'
+      return true
     },
     setHostIdentity: value => {
       current = value
     },
-    get refreshCount() {
-      return refreshCount
+    get rereadCount() {
+      return rereadCount
     },
   }
 }
@@ -408,7 +409,7 @@ describe('NP-08 real mcp-host manager/SDK proxy journey', () => {
       })
       const refreshed = await managerA.callTool('server-a__echo', {})
       expect(refreshed.isError).toBe(false)
-      expect(hostA.refreshCount).toBe(1)
+      expect(hostA.rereadCount).toBe(1)
       expect(proxy.observations.at(-1)?.hostIdentity).toBe('host-a-rotated')
 
       const clientA = (managerA as unknown as { clients: Map<string, unknown> }).clients.get('server-a') as {

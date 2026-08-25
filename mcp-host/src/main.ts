@@ -155,6 +155,7 @@ import { confirmProviderWorkflowApprovalTelegramVerification } from './workflow/
 import { resolveProviderWorkflowCallerContext } from './workflow/providerWorkflowCallerContextClient'
 import { wireWorkflowApprovalRuntimeRoutes } from './workflow/runtimeApprovalRouteWiring'
 import { createMcpHostRuntimeAuth } from './workflow/runtimeAuthFactory'
+import { rereadRuntimeAccessTokenFromPersistedState } from './workflow/mcpHostJwtState'
 import {
   startRuntimeAuthProactiveRefresh,
   stopRuntimeAuthProactiveRefresh,
@@ -824,7 +825,7 @@ function getMcpProxyHostAuthorization(): McpProxyHostAuthorization | undefined {
   const auth = runtimeAuth
   return getSharedMcpProxyHostAuthorization(auth, () => ({
     getAccessToken: () => auth.accessToken,
-    refreshOnUnauthorized: () => refreshWithRecovery(auth),
+    rereadAccessToken: async () => rereadRuntimeAccessTokenFromPersistedState(auth),
   }))
 }
 

@@ -217,7 +217,7 @@ if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   ! grep -Fq 'run_np08_flag_off_phase' "${E2E_SCRIPT}" ||
   ! grep -Fq 'positive-rotate)' "${E2E_SCRIPT}" ||
   ! grep -Fq 'forwarding-off)' "${E2E_SCRIPT}" ||
-  ! grep -Fq 'NP08_PROXY_FORCE_REFRESH' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'NP08_PROXY_FORCE_ACCESS_REREAD' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_projected_identity_digest' "${E2E_SCRIPT}" ||
   ! grep -Fq 'run_np08_sdk_protocol_journey' "${E2E_SCRIPT}" ||
   ! grep -Fq 'src/mcp/__tests__/np08ProxyJourney.test.ts' "${E2E_SCRIPT}" ||
@@ -228,18 +228,24 @@ if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
 fi
 pass 'the deployed E2E is wired to cleanup and provenance guards'
 
-forbidden_refresh_env='MCP_HOST_RUNTIME_'"REFRESH_TOKEN"
-forbidden_refresh_path='/api/v1/workflow-auth/'"refresh"
-forbidden_reissue_path='/api/v1/workflow-auth/'"reissue"
 for runtime_file in "${E2E_SCRIPT}" "${RUNTIME_ACCESS_MODULE}"; do
   [[ -f "${runtime_file}" ]] || fail 'the NP-08 access-only runtime module is missing'
-  if grep -Fq "${forbidden_refresh_env}" "${runtime_file}" ||
-    grep -Fq "${forbidden_refresh_path}" "${runtime_file}" ||
-    grep -Fq "${forbidden_reissue_path}" "${runtime_file}"; then
+  normalized_runtime_source="$(sed -E 's/[[:space:][:punct:]]//g' "${runtime_file}")"
+  if printf '%s' "${normalized_runtime_source}" | grep -Eiq 'refresh|reissue'; then
     fail 'the deployed NP-08 path can still consume or mutate the runtime credential lineage'
   fi
 done
 pass 'the deployed NP-08 path is access-only and has no refresh or reissue route'
+
+PROXY_AUTH_SOURCE="${ROOT}/mcp-host/src/mcp/proxyAuth.ts"
+if grep -Eq 'refreshOnUnauthorized|refreshToken|workflow-auth|reIssue' "${PROXY_AUTH_SOURCE}"; then
+  fail 'the proxy Host retry boundary contains a refresh or reissue path'
+fi
+normalized_proxy_auth="$(sed -E 's/[[:space:][:punct:]]//g' "${PROXY_AUTH_SOURCE}")"
+if printf '%s' "${normalized_proxy_auth}" | grep -Eiq 'refreshonunauthorized|refreshtoken|workflowauth|reissue'; then
+  fail 'the proxy Host retry boundary contains a constructed refresh or reissue path'
+fi
+pass 'the proxy Host retry boundary is statically access-only, including constructed names'
 
 if ! grep -Fq 'NP08_RUNTIME_ACTION=health' "${E2E_SCRIPT}" ||
   ! grep -Fq 'NP08_RUNTIME_ACTION=journey' "${E2E_SCRIPT}" ||
@@ -261,6 +267,11 @@ if [[ -z "${health_line}" || -z "${fixture_line}" || "${health_line}" -ge "${fix
   fail 'mcp-host runtime health is not required before fixture mutation'
 fi
 pass 'mcp-host runtime health is proven before fixture mutation'
+
+if grep -Fq 'kctl -n "${MCP_NS}" apply -f -' "${E2E_SCRIPT}"; then
+  fail 'mixed-namespace fixture apply inherits the MCP namespace'
+fi
+pass 'NP-08 fixture apply leaves every object namespace explicit'
 
 for expected_status in 200 403 400 401 410; do
   grep -Fq "status !== ${expected_status}" "${RUNTIME_ACCESS_MODULE}" ||

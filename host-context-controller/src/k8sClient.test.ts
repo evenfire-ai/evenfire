@@ -497,6 +497,7 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
           resourceVersion: '13',
         },
         spec: {
+          contextRef: 'context-a',
           description: 'Server A',
           transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
           auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
@@ -538,6 +539,7 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
       name: 'server-a',
       namespace: 'mcp-server',
       metadata: { uid: 'server-uid-a', generation: 2, resourceVersion: '13' },
+      contextRef: 'context-a',
       description: 'Server A',
       transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
       auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },

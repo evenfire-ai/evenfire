@@ -359,12 +359,12 @@ run_np08_manager_phase() {
   local allowed_context="$7"
   local forbidden_context="$8"
   local proxy_mode='cross'
-  local force_refresh='false'
+  local force_access_reread='false'
   case "${mode}" in
     positive) proxy_mode='positive' ;;
     positive-rotate)
       proxy_mode='positive'
-      force_refresh='true'
+      force_access_reread='true'
       ;;
     live-deny) proxy_mode='live-deny' ;;
     forwarding-off) proxy_mode='forwarding-off' ;;
@@ -373,7 +373,7 @@ run_np08_manager_phase() {
 
   kctl -n "${HOST_NS}" exec "deploy/${deployment}" -- \
     env "NP08_PROXY_MODE=${proxy_mode}" \
-      "NP08_PROXY_FORCE_REFRESH=${force_refresh}" \
+      "NP08_PROXY_FORCE_ACCESS_REREAD=${force_access_reread}" \
       "NP08_PROXY_SERVER_ALLOWED=${allowed_server}" \
       "NP08_PROXY_SERVER_FORBIDDEN=${forbidden_server}" \
       "NP08_PROXY_VALUE_ALLOWED=${allowed_value}" \
@@ -394,43 +394,49 @@ const allowedContext = process.env.NP08_PROXY_CONTEXT_ALLOWED
 const forbiddenContext = process.env.NP08_PROXY_CONTEXT_FORBIDDEN
 const proxyUrl = process.env.NP08_PROXY_URL
 const directUrl = process.env.NP08_PROXY_DIRECT_URL
-const forceRefresh = process.env.NP08_PROXY_FORCE_REFRESH === 'true'
+const forceAccessReread = process.env.NP08_PROXY_FORCE_ACCESS_REREAD === 'true'
 const runtimeKey = ['MCP', '_HOST_', '_RUNTIME_', '_ACCESS_', 'TOKEN'].join('')
-const refreshKey = ['MCP', '_HOST_', '_RUNTIME_', '_REFRESH_', 'TOKEN'].join('')
-const gatewayKey = ['MCP', '_HOST_', '_GATEWAY_', 'URL'].join('')
 const proxyEnabledKey = ['MCP', '_PROXY_', 'ENABLED'].join('')
+const { rereadRuntimeAccessTokenFromPersistedState } =
+  require('/app/mcp-host/dist/workflow/mcpHostJwtState.js')
 let runtimeValue = process.env[runtimeKey]
-const refreshValue = process.env[refreshKey]
-const gatewayValue = process.env[gatewayKey]
 
 if (!mode || !allowedServer || !forbiddenServer || !allowedValue || !forbiddenValue ||
     !allowedContext || !forbiddenContext || !proxyUrl || !runtimeValue ||
     (mode !== 'host-disabled' && process.env[proxyEnabledKey] !== 'true')) {
   throw new Error('deployed manager fixture inputs are unavailable')
 }
-if (forceRefresh) runtimeValue = ['expired', 'runtime'].join('-')
-let refreshCount = 0
-
-async function refreshRuntimeValue() {
-  if (!refreshValue || !gatewayValue) throw new Error('runtime refresh inputs are unavailable')
-  refreshCount += 1
-  const scheme = ['Be', 'arer'].join('')
-  if (scheme !== ['B', 'earer'].join('')) throw new Error('manager refresh bearer scheme is malformed')
-  const refreshPath = ['/api/v1/workflow-auth/', 'refresh'].join('')
-  const response = await fetch(`${gatewayValue}${refreshPath}`, {
-    method: 'POST',
-    headers: { [['author', 'ization'].join('')]: `${scheme} ${refreshValue}` },
-  })
-  const body = await response.json().catch(() => ({}))
-  if (response.status !== 200 || typeof body?.accessToken !== 'string') {
-    throw new Error(`runtime refresh failed: ${response.status}`)
+function expireAccessToken(value) {
+  const parts = value.split('.')
+  if (parts.length !== 3) throw new Error('runtime access token is malformed')
+  let claims
+  try {
+    claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
+  } catch {
+    throw new Error('runtime access token claims are malformed')
   }
-  runtimeValue = body.accessToken
+  if (!claims || typeof claims !== 'object' || Array.isArray(claims)) {
+    throw new Error('runtime access token claims are malformed')
+  }
+  const expiredClaims = { ...claims, exp: 1 }
+  return `${parts[0]}.${Buffer.from(JSON.stringify(expiredClaims)).toString('base64url')}.${parts[2]}`
+}
+
+if (forceAccessReread) runtimeValue = expireAccessToken(runtimeValue)
+let rereadCount = 0
+
+async function rereadAccessToken() {
+  rereadCount += 1
+  const runtimeAuth = { accessToken: runtimeValue }
+  if (!rereadRuntimeAccessTokenFromPersistedState(runtimeAuth)) {
+    throw new Error('runtime access reread unavailable')
+  }
+  runtimeValue = runtimeAuth.accessToken
 }
 
 const hostAuthorization = {
   getAccessToken: () => runtimeValue,
-  refreshOnUnauthorized: refreshRuntimeValue,
+  rereadAccessToken,
 }
 const serverInfo = (name, contextRef) => ({
   name,
@@ -474,8 +480,8 @@ try {
     console.log(`PASS deployed manager/SDK same-Context call for ${allowedServer}`)
   } else if (mode === 'positive-rotate') {
     const result = await manager.callTool(`${allowedServer}__echo`, { text: 'np08-deployed-rotated' })
-    if (!JSON.stringify(result).includes('Echo: np08-deployed-rotated') || refreshCount !== 1) {
-      throw new Error('rotated Host bearer was not refreshed exactly once')
+    if (!JSON.stringify(result).includes('Echo: np08-deployed-rotated') || rereadCount !== 1) {
+      throw new Error('rotated Host bearer was not reread exactly once')
     }
     console.log('PASS deployed manager/SDK rotated Host bearer and forwarded once')
   } else if (mode === 'host-disabled') {
@@ -805,7 +811,7 @@ kctl -n "${HOST_NS}" exec -i "deploy/${HOST_DEPLOYMENT}" -- \
 
 # The fixtures are deliberately managed:false: HCC must expose their live
 # authority state without creating a workload or opening a new transport lane.
-kctl -n "${MCP_NS}" apply -f - >/dev/null <<YAML
+kctl apply -f - >/dev/null <<YAML
 apiVersion: v1
 kind: Secret
 metadata:

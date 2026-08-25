@@ -31,6 +31,7 @@ export interface AuthorityMcpServer {
   description?: string
   transport: McpServerTransport
   auth?: McpServerAuth
+  managed?: boolean
   enabled: boolean
   status: McpServerStatus
 }
@@ -200,6 +201,12 @@ function expectedMcpServiceHostname(serverName: string): string | null {
 }
 
 function liveForwardUrl(server: AuthorityMcpServer): string | null {
+  if (server.transport.type === 'stdio' && server.managed !== false) {
+    const port = server.transport.port ?? DEFAULT_MCP_SERVICE_PORT
+    const hostname = expectedMcpServiceHostname(server.name)
+    if (!hostname || !Number.isSafeInteger(port) || port < 1 || port > 65_535) return null
+    return `http://${hostname}:${port}/mcp`
+  }
   if (server.transport.type !== 'sse' && server.transport.type !== 'streamableHttp') return null
   if (
     typeof server.transport.url !== 'string' ||

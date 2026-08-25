@@ -4862,6 +4862,7 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
           description: object.spec.description,
           transport: { ...object.spec.transport },
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
+          ...(typeof object.spec.managed === 'boolean' ? { managed: object.spec.managed } : {}),
           enabled: object.spec.enabled !== false,
           status,
         }
@@ -4918,6 +4919,7 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
           description: object.spec.description,
           transport: { ...object.spec.transport },
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
+          ...(typeof object.spec.managed === 'boolean' ? { managed: object.spec.managed } : {}),
           enabled: object.spec.enabled !== false,
           status,
         }
