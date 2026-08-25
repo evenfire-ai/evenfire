@@ -13,6 +13,7 @@ import {
   DEFAULT_HOOK_ORDER,
   HOOK_CAPABILITY_OPTIONS,
   HOOK_INSTALL_ERROR_LABELS,
+  ORDER_HINT_LABELS,
 } from './constants'
 import type { HookInstallFormProps } from './types'
 
@@ -85,14 +86,36 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
     : ''
   const targetRemote = hookMeta?.target?.remote?.baseUrl ?? ''
 
+  // What the author says the hook needs. Publisher-supplied, so filter to the
+  // known capability values — an unrecognised entry must degrade to "declared
+  // nothing", never widen what the operator can grant.
+  const declaredCapabilities = useMemo<HookCapability[]>(() => {
+    const raw = hookMeta?.requiredCapabilities
+    if (!Array.isArray(raw)) return []
+    return raw.filter((c): c is HookCapability =>
+      ALL_HOOK_CAPABILITIES.includes(c as HookCapability)
+    )
+  }, [hookMeta])
+
+  const authorDefaults = hookMeta?.authorDefaults ?? null
+  const authorFailMode =
+    authorDefaults?.failMode === 'open' || authorDefaults?.failMode === 'closed'
+      ? authorDefaults.failMode
+      : null
+  const authorOrderHint =
+    typeof authorDefaults?.orderHint === 'string' ? authorDefaults.orderHint.trim() : ''
+
   useEffect(() => {
     installInFlightRef.current = false
     setStep(0)
     setError('')
     setCredValues({})
-    setCapabilities(new Set())
+    // Seed from the author's declaration so the default install is the working
+    // one. The ceiling effect below narrows this once an agent is selected, and
+    // the operator can still untick anything.
+    setCapabilities(new Set(declaredCapabilities))
     setOrder(String(DEFAULT_HOOK_ORDER))
-    setFailMode('open')
+    setFailMode(authorFailMode ?? 'open')
     setLoading(true)
     ;(async () => {
       try {
@@ -131,6 +154,14 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
       return next.size === prev.size ? prev : next
     })
   }, [ceiling])
+
+  // Declared capabilities the hook will not get — either the operator unticked
+  // them or the agent's ceiling forbids them. Either way the hook is installed
+  // less capable than its author says it needs.
+  const missingDeclared = useMemo(
+    () => declaredCapabilities.filter(c => !capabilities.has(c)),
+    [declaredCapabilities, capabilities]
+  )
 
   // may_deny ⇒ fail-closed, matching the backend deny_requires_fail_closed rule.
   const mustFailClosed = capabilities.has('may_deny')
@@ -264,42 +295,6 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
               </FormSection>
 
               <FormSection
-                title="Hook details"
-                description="These facts come from the Marketplace entry and are applied as-is."
-              >
-                <div className="cu-summary-list">
-                  {targetImage ? (
-                    <div className="cu-summary-list__row">
-                      <span>Target image</span>
-                      <strong>{targetImage}</strong>
-                    </div>
-                  ) : null}
-                  {targetService ? (
-                    <div className="cu-summary-list__row">
-                      <span>Target service</span>
-                      <strong>{targetService}</strong>
-                    </div>
-                  ) : null}
-                  {targetRemote ? (
-                    <div className="cu-summary-list__row">
-                      <span>Target remote</span>
-                      <strong>{targetRemote}</strong>
-                    </div>
-                  ) : null}
-                  <div className="cu-summary-list__row">
-                    <span>Lifecycle points</span>
-                    <strong>{lifecyclePoints.length > 0 ? lifecyclePoints.join(', ') : '—'}</strong>
-                  </div>
-                  {hookMeta?.path ? (
-                    <div className="cu-summary-list__row">
-                      <span>Path</span>
-                      <strong>{hookMeta.path}</strong>
-                    </div>
-                  ) : null}
-                </div>
-              </FormSection>
-
-              <FormSection
                 title="Target agent"
                 description="Choose the agent to bind this hook to."
               >
@@ -356,38 +351,90 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
                 </FormSection>
               ) : null}
 
-              <FormSection
-                title="Capabilities"
-                description={
-                  ceiling
-                    ? "Only the capabilities within this agent's capability ceiling can be granted."
-                    : 'Grant only the capabilities this hook needs.'
-                }
-              >
-                {HOOK_CAPABILITY_OPTIONS.map(option => {
-                  const outsideCeiling = !!ceiling && !ceiling.includes(option.value)
-                  return (
-                    <CheckboxField
-                      key={option.value}
-                      label={option.label}
-                      description={
-                        outsideCeiling
-                          ? `${option.description} (outside the agent's ceiling)`
-                          : option.description
-                      }
-                      checked={capabilities.has(option.value)}
-                      disabled={outsideCeiling}
-                      onChange={() => toggleCapability(option.value)}
-                    />
-                  )
-                })}
-              </FormSection>
+              {/* Everything an install can leave at its default lives behind one
+                  disclosure: the entry's own facts, which are applied as-is, the
+                  granted capabilities, and the ordering/fail-mode knobs. */}
+              <FormSection title="Advanced details" collapsible>
+                <div className="cu-summary-list cu-summary-list--flush">
+                  {targetImage ? (
+                    <div className="cu-summary-list__row">
+                      <span>Target image</span>
+                      <strong>{targetImage}</strong>
+                    </div>
+                  ) : null}
+                  {targetService ? (
+                    <div className="cu-summary-list__row">
+                      <span>Target service</span>
+                      <strong>{targetService}</strong>
+                    </div>
+                  ) : null}
+                  {targetRemote ? (
+                    <div className="cu-summary-list__row">
+                      <span>Target remote</span>
+                      <strong>{targetRemote}</strong>
+                    </div>
+                  ) : null}
+                  <div className="cu-summary-list__row">
+                    <span>Lifecycle points</span>
+                    <strong>{lifecyclePoints.length > 0 ? lifecyclePoints.join(', ') : '—'}</strong>
+                  </div>
+                  {hookMeta?.path ? (
+                    <div className="cu-summary-list__row">
+                      <span>Path</span>
+                      <strong>{hookMeta.path}</strong>
+                    </div>
+                  ) : null}
+                </div>
 
-              <FormSection title="Execution" description="How this hook is ordered and fails.">
+                {/* Grouped rather than left as four loose checkboxes: they are a
+                    single decision, and fail mode below is constrained by it. */}
+                <fieldset className="cu-form-section__group">
+                  <legend className="cu-form-section__subheading">Capabilities</legend>
+                  <p className="cu-form-section__description">
+                    {declaredCapabilities.length > 0
+                      ? "Pre-selected from what the hook's author says it needs. Removing one does not stop the install — the hook runs without that power."
+                      : ceiling
+                        ? "Only the capabilities within this agent's capability ceiling can be granted."
+                        : 'Grant only the capabilities this hook needs.'}
+                  </p>
+                  {HOOK_CAPABILITY_OPTIONS.map(option => {
+                    const outsideCeiling = !!ceiling && !ceiling.includes(option.value)
+                    const declared = declaredCapabilities.includes(option.value)
+                    const suffix = outsideCeiling
+                      ? declared
+                        ? " (required by this hook, but outside the agent's ceiling)"
+                        : " (outside the agent's ceiling)"
+                      : declared
+                        ? ' (required by this hook)'
+                        : ''
+                    return (
+                      <CheckboxField
+                        key={option.value}
+                        label={option.label}
+                        description={`${option.description}${suffix}`}
+                        checked={capabilities.has(option.value)}
+                        disabled={outsideCeiling}
+                        onChange={() => toggleCapability(option.value)}
+                      />
+                    )
+                  })}
+                  {missingDeclared.length > 0 ? (
+                    <div className="cu-banner cu-banner--warning" role="status">
+                      This hook needs {missingDeclared.join(', ')} to function. Without{' '}
+                      {missingDeclared.length > 1 ? 'them' : 'it'}, it installs and reports Ready,
+                      but the actions it takes are discarded.
+                    </div>
+                  ) : null}
+                </fieldset>
+
                 <Field
                   htmlFor="hif-order"
                   label="Order"
-                  description="Lower runs first. Defaults to 100 when left blank."
+                  description={
+                    ORDER_HINT_LABELS[authorOrderHint]
+                      ? `Lower runs first. Defaults to 100 when left blank. ${ORDER_HINT_LABELS[authorOrderHint]}`
+                      : 'Lower runs first. Defaults to 100 when left blank.'
+                  }
                   error={orderValid ? undefined : 'Order must be a number.'}
                 >
                   <TextInput
@@ -405,7 +452,9 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
                   description={
                     mustFailClosed
                       ? 'A hook that may deny must fail closed.'
-                      : 'Fail open lets calls proceed when the hook errors; fail closed blocks them.'
+                      : authorFailMode
+                        ? `Fail open lets calls proceed when the hook errors; fail closed blocks them. The author suggests fail ${authorFailMode}.`
+                        : 'Fail open lets calls proceed when the hook errors; fail closed blocks them.'
                   }
                 >
                   <SelectInput

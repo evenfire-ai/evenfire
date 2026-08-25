@@ -34,6 +34,21 @@ export const ALL_HOOK_CAPABILITIES: HookCapability[] = HOOK_CAPABILITY_OPTIONS.m
 // Default installation order applied by the backend when none is supplied.
 export const DEFAULT_HOOK_ORDER = 100
 
+// `hook_meta.authorDefaults.orderHint` is a word ("early", "late"), while the
+// CRD's `order` is an integer. There is no published mapping between them, so
+// the hint is shown to the operator rather than silently converted to a number.
+//
+// Null-prototype on purpose: the key is a publisher-supplied string off the
+// registry entry, so an inherited key (`toString`, `constructor`, …) would
+// otherwise resolve to a function and be rendered as if it were a real hint.
+export const ORDER_HINT_LABELS: Record<string, string> = Object.assign(
+  Object.create(null) as Record<string, string>,
+  {
+    early: 'The author suggests running this hook early.',
+    late: 'The author suggests running this hook late.',
+  }
+)
+
 // Friendly copy for the coded error bodies the install-hook route returns
 // ({ error, reason? }). Any reason string from the backend is appended verbatim.
 export const HOOK_INSTALL_ERROR_LABELS: Record<string, string> = {
