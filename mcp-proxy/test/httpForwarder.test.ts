@@ -1,8 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import http from "node:http";
-import { HttpForwarder } from "../src/httpForwarder";
+import { HttpForwarder, normalizedUpstreamStatus } from "../src/httpForwarder";
 
 describe("HttpForwarder", () => {
+  it("normalizes an absent upstream status to 503 without rewriting MCP statuses", () => {
+    expect(normalizedUpstreamStatus(undefined)).toBe(503);
+    expect(normalizedUpstreamStatus(400)).toBe(400);
+  });
+
   let backend: http.Server;
   let backendPort: number;
   let forwarder: HttpForwarder;

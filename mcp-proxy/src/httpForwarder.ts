@@ -34,6 +34,10 @@ const RESPONSE_HEADERS = [
   'retry',
 ] as const
 
+export function normalizedUpstreamStatus(statusCode: number | undefined): number {
+  return statusCode ?? 503
+}
+
 function connectionTokens(headers: IncomingMessage['headers']): Set<string> {
   const value = headers.connection
   const values = Array.isArray(value) ? value : value ? [value] : []
@@ -171,7 +175,7 @@ export class HttpForwarder {
           const commit = () => {
             if (committed) return
             committed = true
-            res.writeHead(proxyRes.statusCode ?? 502, responseHeaders(proxyRes.headers))
+            res.writeHead(normalizedUpstreamStatus(proxyRes.statusCode), responseHeaders(proxyRes.headers))
             for (const chunk of buffer) res.write(chunk)
             buffer.length = 0
             bufferedSize = 0
