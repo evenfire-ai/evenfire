@@ -5,6 +5,8 @@ Frozen protocol version: `codex-subscription-transport.v1`.
 This document is the Phase 0 architecture freeze for provider `codex-subscription`.
 It is not a runtime client and does not authorize API-key billing.
 
+![Evenfire Codex subscription - grant, assign, project, spend](diagrams/codex-subscription-lifecycle.png)
+
 ## Ownership
 
 - Control API is the only OAuth custodian.
