@@ -339,6 +339,17 @@ export ADMIN_PASSWORD
 
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
+# Full setup is a mutating profile transition as well. It acquires the same
+# branch-owned lease used by T2 when run standalone, or validates the inherited
+# lease when called by the T2 orchestrator. This is initialized before the
+# config-only seam but acquired only after the profile is started and reachable.
+T2_PROJECT_DIR="${T2_PROJECT_DIR:-${PROJECT_DIR}}"
+T2_PROFILE="${T2_PROFILE:-${PROFILE}}"
+T2_CONTEXT="${T2_CONTEXT:-${PROFILE}}"
+T2_GATE_ID="${T2_GATE_ID:-minikube-setup}"
+T2_SKIP_LOCK="${T2_SKIP_LOCK:-false}"
+# shellcheck source=scripts/minikube/t2-common.sh
+source "${SCRIPT_DIR}/t2-common.sh"
 TOTAL_STEPS=12
 # MINIKUBE_IMAGE_TAG overrides the committed pin AT RENDER TIME ONLY.
 #
@@ -651,6 +662,48 @@ if ! $KC cluster-info &>/dev/null; then
 fi
 ok "Cluster '${PROFILE}' is reachable"
 maybe_exit_after_cluster_step
+
+SETUP_LOCK_CLEANUP_DONE=false
+cleanup_setup_lock() {
+  local status="${1:-$?}" cleanup_status=0
+  if [ "$SETUP_LOCK_CLEANUP_DONE" = true ]; then
+    return "$status"
+  fi
+  SETUP_LOCK_CLEANUP_DONE=true
+  trap - EXIT
+  trap '' INT TERM
+  t2_lock_release "$status" || cleanup_status=$?
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status="$cleanup_status"
+  fi
+  return "$status"
+}
+handle_setup_signal() {
+  local signal="$1" status
+  case "$signal" in
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=1 ;;
+  esac
+  cleanup_setup_lock "$status" || status=$?
+  exit "$status"
+}
+handle_setup_exit() {
+  local status=$?
+  cleanup_setup_lock "$status" || status=$?
+  exit "$status"
+}
+trap handle_setup_exit EXIT
+trap 'handle_setup_signal INT' INT
+trap 'handle_setup_signal TERM' TERM
+t2_require_commands
+t2_repo_metadata
+t2_profile_scope
+t2_profile_status
+t2_context_check
+t2_profile_context_identity_check
+t2_mutation_lock
+export T2_PROJECT_DIR T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV T2_SKIP_LOCK T2_LOCK_TOKEN
 
 # ======================================================================
 # Step 3: Namespaces + CRDs
@@ -978,7 +1031,37 @@ else
       exit 1
     fi
     log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    # REUSE_DB / T2 full-reconcile reaches this before pre-gate-sync. A prior T1
+    # can leave gfs_controller_reader NOLOGIN; restore from the committed
+    # Secret DSN (same opt-in as the GFS T1 gate). Still fail-loud on auth.
+    # GFS_RECOVER_ABANDONED_STATE: a timed-out prior setup can leave the
+    # reader Secret in rollout-running. This path holds the T2 profile lock,
+    # so the prior process is dead; resume that claim instead of asking for
+    # a manual retry flag between runs.
+    # A reader pod resolves gfs-config.jwt-public-key at container start and
+    # fails closed when it is empty (a prior interrupted run can leave it
+    # wiped by the overlay re-apply). Re-sync it from the live platform
+    # Secret before reconcile so a reader pod can actually start; this is a
+    # no-op when the key already matches.
+    GFS_AUTH_SYNC_ALLOW_STAGED=true \
+      bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+    # If gfsc-reader is already Ready, settle the leftover claim first so
+    # reconcile does not rollout restart and race HCC's gfsReconciler.
+    # The gfs-rollout-shim PATH prefix makes any reader rollout wait inside
+    # reconcile judge readiness instead of the template generation HCC keeps
+    # rewriting (it strips the restartedAt annotation, so a generation wait
+    # loops until timeout).
+    GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
+      T2_SKIP_LOCK=true \
+      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
+    PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+      GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+      T2_SKIP_LOCK=true \
+      CONTEXT="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    # A staged sync may have deferred active-pod proof until the reconciler
+    # created the reader DSN. Complete that proof before the overlay is applied.
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
   else
     log "Fresh bootstrap detected — reader staging deferred until migrations; GFSC remains fail-closed"
   fi
@@ -1040,7 +1123,22 @@ else
     # the split writer/reader templates; reconciling before that lands leaves
     # the staged reader credential rollout-pending and fails the final verify.
     CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    # The overlay apply above re-declared the base gfs-config with an empty
+    # jwt-public-key; re-sync it before any reader pod may need to start,
+    # otherwise the reconcile readiness wait can only time out.
+    GFS_AUTH_SYNC_ALLOW_STAGED=true \
+      bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+    GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
+      T2_SKIP_LOCK=true \
+      bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
+    PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+      GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+      T2_SKIP_LOCK=true \
+      CONTEXT="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    # The preceding staged sync is allowed to wait for this DSN-producing
+    # reconcile; the strict pass is the durable consumer attestation.
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
     ok "GFS credentials reconciled and writer bootstrap verified"
 fi
 
@@ -1351,7 +1449,7 @@ done
 # ----------------------------------------------------------------------
 if $KC get configmap gfs-config -n gfs &>/dev/null; then
   log "Provisioning gfs serving (public key → gfs-config + gfs_controller DB login)..."
-  if ! bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}"; then
+  if ! bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs; then
     err "gfs public-key sync FAILED — gfsc cannot verify tokens. Fix and re-run."
     exit 1
   fi

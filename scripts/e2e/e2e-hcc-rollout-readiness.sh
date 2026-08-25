@@ -13,11 +13,21 @@
 # measures it against the wall clock, over a synthetic clerum-dev-scale fleet
 # (the initial LISTs and the revocation pass are part of the window), and pins
 # the D1b failure mode empirically: `progressDeadlineSeconds: 1200` is
-# DETECTION only — a rollout whose new pod can never certify leaves the HCC
-# control plane down until a manual `kubectl rollout undo`, because Recreate
-# keeps zero old replicas to fall back on.
+# DETECTION only — a botched Recreate rollout leaves the HCC down until
+# evenfire-infra deploy workflows run automatic `rollout undo --to-revision`.
+# This e2e proves that operator action; cleanup `set image` is only the
+# leftover restore fallback.
 #
 # Modes:
+#   EXPECT_RECOVERY=1 — exclusive with EXPECT_STUCK. Botch the image, prove the
+#     D1b 503 outage (same sustained-outage pins as EXPECT_STUCK: >=1 503,
+#     zero 503->200, maxstreak > healthy budget), then run last-good revision
+#     restore as the TEST ACTION (not cleanup). Recovery must recertify /ready
+#     200, restore the original image and last-good revision, and replace the
+#     botched pod. An undo no-op is FAIL. IMAGE_BROKEN stays 1 unless every
+#     post-undo proof passed (e2e_fail==0), so a failed image/revision/uid/hold
+#     still lets cleanup restore the original image. This is the evenfire#391
+#     evidence path.
 #   EXPECT_STUCK=0 (default) — healthy rollout via `kubectl rollout restart`.
 #     rollout restart mutates the pod template (restartedAt annotation), which
 #     drives the SAME Deployment machinery — terminate old, then create new —
@@ -35,9 +45,10 @@
 #     total outage, empirically. The sustained 503 streak — longer than the
 #     healthy budget and still open at observation end — is the EXPECTED
 #     evidence. The observation is bounded (STUCK_OBSERVE_SEC) and cleanup
-#     performs the manual-operator recovery (restore the original image, wait
+#     performs the fallback image restore (restore the original image, wait
 #     for re-certification), so the gate always terminates loudly instead of
-#     hanging alongside the outage it reproduces.
+#     hanging alongside the outage it reproduces. Production recovery is the
+#     infra-owned automatic `rollout undo --to-revision` (evenfire#391).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/e2e-lib.sh
@@ -67,7 +78,7 @@ command -v jq >/dev/null 2>&1 || {
 }
 [ "${E2E_HCC_ROLLOUT_FAULT_INJECTION:-0}" = 1 ] || {
   echo "Set E2E_HCC_ROLLOUT_FAULT_INJECTION=1 to acknowledge that this gate rolls" >&2
-  echo "(and, with EXPECT_STUCK=1, deliberately breaks) the HCC deployment." >&2
+  echo "(and, with EXPECT_STUCK=1 or EXPECT_RECOVERY=1, deliberately breaks) the HCC deployment." >&2
   exit 1
 }
 case "${EXPECT_STUCK:-0}" in
@@ -78,6 +89,18 @@ case "${EXPECT_STUCK:-0}" in
     ;;
 esac
 EXPECT_STUCK="${EXPECT_STUCK:-0}"
+EXPECT_RECOVERY="${EXPECT_RECOVERY:-0}"
+case "${EXPECT_RECOVERY}" in
+  0 | 1) ;;
+  *)
+    echo "EXPECT_RECOVERY must be 0 or 1." >&2
+    exit 1
+    ;;
+esac
+if [ "$EXPECT_STUCK" = 1 ] && [ "$EXPECT_RECOVERY" = 1 ]; then
+  echo "EXPECT_STUCK=1 and EXPECT_RECOVERY=1 are exclusive." >&2
+  exit 1
+fi
 kctl get nodes -o json | jq -e --arg c "$E2E_KUBECONTEXT" \
   'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $c)' >/dev/null ||
   {
@@ -200,6 +223,85 @@ botched_image_ref() {
   printf '%s:e2e-botched-%s' "$base" "$RUN_ID"
 }
 
+# Shared D1b outage pins for EXPECT_STUCK and EXPECT_RECOVERY. flavor=stuck
+# keeps the longer D1b strings; flavor=recovery keeps the pre-undo variants.
+# A failed pod-UID listing must not count as "old pod terminated".
+assert_botched_outage() {
+  local flavor="$1" old_uid_query
+  local image_fail old_pod_ok old_pod_fail replacement_fail
+  local transitions_ok transitions_fail streak_ok streak_fail
+  case "$flavor" in
+    stuck | recovery) ;;
+    *) die "assert_botched_outage: flavor must be stuck or recovery, got '${flavor}'" ;;
+  esac
+
+  deployed_image_now="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}' 2>/dev/null || true)"
+  old_uid_live=-1
+  if old_uid_query="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
+    -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}')"; then
+    old_uid_live="$(printf '%s\n' "$old_uid_query" | grep -cxF "$OLD_POD_UID" || true)"
+  else
+    fail "could not list HCC pod UIDs — refusing to treat a query failure as old-pod termination"
+  fi
+  deployment_revision="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
+    -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)"
+  stuck_pod_rows="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\t"}{.status.phase}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.metadata.ownerReferences[?(@.kind=="ReplicaSet")].name}{"\t"}{.status.containerStatuses[?(@.name=="host-context-controller")].image}{"\t"}{.status.containerStatuses[?(@.name=="host-context-controller")].state.waiting.reason}{"\n"}{end}' 2>/dev/null || true)"
+  replacement_row="$(awk -F '\t' -v old="$OLD_POD_UID" -v image="$BOTCHED_IMAGE" \
+    '$2 != old && $2 != "" && $4 == "" && $3 != "Failed" && $3 != "Succeeded" && $5 != "" && $6 == image && $7 ~ /ErrImagePull|ImagePullBackOff/ { print; exit }' <<<"$stuck_pod_rows")"
+  replacement_owner="$(cut -f5 <<<"$replacement_row")"
+  replacement_owner_revision=""
+  if [ -n "$replacement_owner" ]; then
+    replacement_owner_revision="$(kctl get rs "$replacement_owner" -n "$HCC_NS" \
+      -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)"
+  fi
+
+  case "$flavor" in
+    recovery)
+      image_fail="deployment image is '${deployed_image_now:-unset}', not the injected ${BOTCHED_IMAGE}"
+      old_pod_ok="Recreate terminated the old HEALTHY pod before any viable replacement existed"
+      old_pod_fail="old pod ${OLD_POD_NAME} is still alive under a Recreate rollout"
+      replacement_fail="no replacement pod pinned in ErrImagePull|ImagePullBackOff (rows: ${stuck_pod_rows:-none})"
+      transitions_ok="no 503->200 transition closed the outage before undo — Kubernetes did NOT self-heal"
+      transitions_fail="the outage closed on its own (${stuck_transitions} 503->200 transition(s)) before undo"
+      streak_ok="SUSTAINED outage before undo: ${stuck_maxstreak}s continuous 503 (> ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget) — undo recovers D1b, not a blip"
+      streak_fail="outage lasted only ${stuck_maxstreak}s and did not exceed the ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget — undo would recover a blip, not D1b"
+      ;;
+    stuck)
+      image_fail="deployment image is '${deployed_image_now:-unset}', not the injected ${BOTCHED_IMAGE} — the outage (if any) has a different cause"
+      old_pod_ok="Recreate terminated the old HEALTHY pod before any viable replacement existed — zero fallback replicas (the D1b mechanism)"
+      old_pod_fail="old pod ${OLD_POD_NAME} is still alive under a Recreate rollout — the terminate-before-create premise did not hold"
+      replacement_fail="no replacement pod pinned in ErrImagePull|ImagePullBackOff (rows: ${stuck_pod_rows:-none}) — the outage is not attributable to the injected bad rollout"
+      transitions_ok="no 503->200 transition ever closed the outage — Kubernetes did NOT self-heal the botched Recreate rollout"
+      transitions_fail="the outage closed on its own (${stuck_transitions} 503->200 transition(s)) — the D1b premise that recovery requires an explicit rollback is refuted; investigate before trusting this gate"
+      streak_ok="SUSTAINED outage measured: ${stuck_maxstreak}s continuous 503 (> ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget) and still open at observation end — recovery requires an explicit rollback (infra-owned rollout undo --to-revision in production; cleanup's set image restore here) (D1b reproduced)"
+      streak_fail="outage lasted only ${stuck_maxstreak}s and did not exceed the ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget — the botched rollout did not produce the D1b total outage"
+      ;;
+  esac
+
+  [ "$stuck_total" -gt 0 ] && ok "sampled /ready ${stuck_total}x across the botched rollout" ||
+    fail "ZERO /ready samples across the botched rollout — the sampler never ran, and a zero-sample run must never pass"
+  [ "$deployed_image_now" = "$BOTCHED_IMAGE" ] &&
+    ok "the botched image is what the Deployment is actually rolling (${BOTCHED_IMAGE})" ||
+    fail "$image_fail"
+  [ "$old_uid_live" = 0 ] && ok "$old_pod_ok" || fail "$old_pod_fail"
+  if [ -n "$replacement_row" ] && grep -Eq 'ErrImagePull|ImagePullBackOff' <<<"$replacement_row"; then
+    if [ -n "$deployment_revision" ] && [ "$replacement_owner_revision" = "$deployment_revision" ]; then
+      ok "replacement pod is a live current-revision pod pinned by the injected image failure: ${replacement_row}"
+    else
+      fail "replacement pod owner revision ${replacement_owner_revision:-unset} does not match Deployment revision ${deployment_revision:-unset}"
+    fi
+  else
+    fail "$replacement_fail"
+  fi
+  [ "$stuck_503" -ge 1 ] &&
+    ok "the botched rollout bit the readiness path: ${stuck_503} sample(s) at 503" ||
+    fail "zero 503 samples under a botched Recreate rollout — the outage claim is VACUOUS"
+  [ "$stuck_transitions" -eq 0 ] && ok "$transitions_ok" || fail "$transitions_fail"
+  [ "$stuck_maxstreak" -gt "$ROLLOUT_DOWNTIME_BUDGET_SEC" ] && ok "$streak_ok" || fail "$streak_fail"
+}
+
 print_repair_instructions() {
   cat >&2 <<EOF
 HCC rollout gate cleanup could not restore a verified healthy state.
@@ -224,12 +326,17 @@ EOF
 }
 
 write_evidence_artifact() {
+  local rollout_transition="not-observed"
+  if [ -n "$rollout_recovered_at" ] && [ -n "$rollout_t0" ]; then
+    rollout_transition="$((rollout_recovered_at - rollout_t0))s"
+  fi
+
   # Diagnostics ONLY — every verdict input is computed before this runs, so
   # every command here is deliberately best-effort (same rationale as the
   # sibling churn gate: an empty grep under `set -euo pipefail` must never
   # abort the gate before its verdict).
   {
-    echo "=== mode: EXPECT_STUCK=${EXPECT_STUCK}  fleet=${WITH_SYNTHETIC_FLEET} (${FLEET_CONTEXTS}/${FLEET_MCPSERVERS}/${FLEET_HOSTS}) ==="
+    echo "=== mode: EXPECT_STUCK=${EXPECT_STUCK} EXPECT_RECOVERY=${EXPECT_RECOVERY}  fleet=${WITH_SYNTHETIC_FLEET} (${FLEET_CONTEXTS}/${FLEET_MCPSERVERS}/${FLEET_HOSTS}) ==="
     echo "=== HCC deploy ==="
     kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o wide || true
     echo "=== deployment conditions (progressDeadlineSeconds is DETECTION only) ==="
@@ -238,11 +345,20 @@ write_evidence_artifact() {
     echo ""
     echo "=== pods ==="
     kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" -o wide || true
-    echo "=== pod identity: old ${OLD_POD_NAME:-none} (${OLD_POD_UID:-?}) -> new ${NEW_POD_NAME:-none} (${NEW_POD_UID:-?}) restarts=${NEW_POD_RESTARTS:-?} ==="
     echo "=== baseline: samples=${baseline_total} 200=${baseline_200} 503=${baseline_503} ==="
-    echo "=== rollout: samples=${roll_total} 200=${roll_200} 503=${roll_503} MEASURED-window=${roll_maxstreak}s 503->200=${roll_transitions} budget=${ROLLOUT_DOWNTIME_BUDGET_SEC}s total-transition=${rollout_recovered_at:+$((rollout_recovered_at - rollout_t0))}s ==="
-    echo "=== stuck: samples=${stuck_total} 200=${stuck_200} 503=${stuck_503} max-503-streak=${stuck_maxstreak}s 503->200=${stuck_transitions} observe=${STUCK_OBSERVE_SEC}s ==="
-    echo "=== post-hold: samples=${hold_total} 503=${hold_503} ==="
+    if [ "$EXPECT_RECOVERY" = 1 ]; then
+      echo "=== recovered pod identity: old ${OLD_POD_NAME:-none} (${OLD_POD_UID:-not-observed}) -> recovered ${NEW_POD_NAME:-none} (${NEW_POD_UID:-not-observed}) restarts=${NEW_POD_RESTARTS:-not-observed} ==="
+      echo "=== recovery revisions: last-good=${LAST_GOOD_REVISION:-not-captured} botched=${live_revision_before_undo:-not-observed} recovered=${recovered_revision:-not-observed} ==="
+      echo "=== pre-undo outage: samples=${stuck_total} 200=${stuck_200} 503=${stuck_503} max-503-streak=${stuck_maxstreak}s 503->200=${stuck_transitions} observe=${STUCK_OBSERVE_SEC}s ==="
+      echo "=== post-undo hold: samples=${hold_total} 503=${hold_503} ==="
+    elif [ "$EXPECT_STUCK" = 1 ]; then
+      echo "=== botched replacement: ${replacement_row:-not-observed} ==="
+      echo "=== stuck outage: samples=${stuck_total} 200=${stuck_200} 503=${stuck_503} max-503-streak=${stuck_maxstreak}s 503->200=${stuck_transitions} observe=${STUCK_OBSERVE_SEC}s ==="
+    else
+      echo "=== pod identity: old ${OLD_POD_NAME:-none} (${OLD_POD_UID:-not-observed}) -> new ${NEW_POD_NAME:-none} (${NEW_POD_UID:-not-observed}) restarts=${NEW_POD_RESTARTS:-not-observed} ==="
+      echo "=== rollout: samples=${roll_total} 200=${roll_200} 503=${roll_503} MEASURED-window=${roll_maxstreak}s 503->200=${roll_transitions} budget=${ROLLOUT_DOWNTIME_BUDGET_SEC}s total-transition=${rollout_transition} ==="
+      echo "=== post-rollout hold: samples=${hold_total} 503=${hold_503} ==="
+    fi
     echo "=== /ready series (epoch status phase) ==="
     cat "$READY_SERIES" || true
   } >"$LOG_ARTIFACT" 2>&1 || true
@@ -253,8 +369,10 @@ cleanup() {
   trap - EXIT
   set +e
   if [ "$IMAGE_BROKEN" = 1 ]; then
-    # This IS the manual operator action D1b forces: roll back to the last
-    # good image, because Kubernetes will not do it on its own.
+    # Leftover restore fallback only. Pipeline/infra owns automatic
+    # `rollout undo --to-revision`; this e2e proves that operator action.
+    # Cleanup `set image` restores the original image if IMAGE_BROKEN is
+    # still set after that proof.
     kctl set image deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
       host-context-controller="$HCC_IMAGE" >/dev/null 2>&1 || restore_ok=0
   fi
@@ -321,8 +439,7 @@ OLD_POD_NAME="$(running_hcc_pod)"
 [ -n "$OLD_POD_NAME" ] || die "no running HCC pod after a clean baseline"
 OLD_POD_UID="$(kctl get pod "$OLD_POD_NAME" -n "$HCC_NS" -o jsonpath='{.metadata.uid}')"
 [ -n "$OLD_POD_UID" ] || die "could not pin the pre-rollout pod uid"
-
-if [ "$EXPECT_STUCK" = 0 ]; then
+if [ "$EXPECT_STUCK" = 0 ] && [ "$EXPECT_RECOVERY" = 0 ]; then
   # ── FASE D (healthy): Recreate rollout, sampled at 1Hz end to end ──
   log "Triggering a Recreate rollout (kubectl rollout restart) and sampling /ready at 1Hz"
   kctl rollout restart deployment/"$HCC_DEPLOY" -n "$HCC_NS" >/dev/null
@@ -364,7 +481,7 @@ if [ "$EXPECT_STUCK" = 0 ]; then
   [ "$hold_total" -gt 0 ] && [ "$hold_503" -eq 0 ] &&
     ok "post-rollout hold: ${hold_total} samples over ${STABILITY_WINDOW_SEC}s, zero 503 — the replacement is stable" ||
     fail "post-rollout hold saw ${hold_503} 503(s) across ${hold_total} sample(s) — the replacement did not stabilize"
-else
+elif [ "$EXPECT_STUCK" = 1 ]; then
   # ── FASE D (botched, D1b): roll to an unpullable image and watch the outage ──
   BOTCHED_IMAGE="$(botched_image_ref)"
   log "Botched rollout (D1b): rolling to unpullable image ${BOTCHED_IMAGE}; observing /ready for ${STUCK_OBSERVE_SEC}s"
@@ -374,39 +491,65 @@ else
   IMAGE_BROKEN=1
   sample_ready_series "$STUCK_OBSERVE_SEC" stuck 0
   read -r stuck_total stuck_200 stuck_503 stuck_maxstreak stuck_transitions <<<"$(series_metrics stuck)"
-  deployed_image_now="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
-    -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}' 2>/dev/null || true)"
-  old_uid_live="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
-    -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}' 2>/dev/null | grep -cxF "$OLD_POD_UID" || true)"
-  stuck_pod_rows="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\t"}{.status.phase}{"\t"}{.status.containerStatuses[*].state.waiting.reason}{"\n"}{end}' 2>/dev/null || true)"
-  replacement_row="$(awk -F '\t' -v old="$OLD_POD_UID" '$2 != old && $2 != "" { print; exit }' <<<"$stuck_pod_rows")"
+  assert_botched_outage stuck
+  write_evidence_artifact
+else
+  # ── FASE D (recovery, evenfire#391): botch, prove the outage, then undo ──
+  LAST_GOOD_REVISION="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+  [ -n "$LAST_GOOD_REVISION" ] || die "could not capture the last-known-good HCC revision"
+  BOTCHED_IMAGE="$(botched_image_ref)"
+  PRE_BOTCH_UID="$OLD_POD_UID"
+  log "Botched rollout (EXPECT_RECOVERY): observing /ready for ${STUCK_OBSERVE_SEC}s"
+  kctl set image deployment/"$HCC_DEPLOY" -n "$HCC_NS" host-context-controller="$BOTCHED_IMAGE" >/dev/null
+  ROLLOUT_TRIGGERED=1
+  IMAGE_BROKEN=1
+  sample_ready_series "$STUCK_OBSERVE_SEC" stuck 0
+  read -r stuck_total stuck_200 stuck_503 stuck_maxstreak stuck_transitions <<<"$(series_metrics stuck)"
+  # D1b outage pins, including stuck_maxstreak -gt ROLLOUT_DOWNTIME_BUDGET_SEC.
+  assert_botched_outage recovery
+  BOTCHED_POD_UID="$(awk -F '\t' '{ print $2; exit }' <<<"$replacement_row")"
+
+  live_revision_before_undo="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+  [ "$live_revision_before_undo" != "$LAST_GOOD_REVISION" ] ||
+    fail "live revision ${live_revision_before_undo} still equals last-good ${LAST_GOOD_REVISION} — undo would be a no-op"
+
+  log "TEST ACTION (evenfire#391): rollout undo --to-revision=${LAST_GOOD_REVISION}"
+  kctl rollout undo deployment/"$HCC_DEPLOY" -n "$HCC_NS" --to-revision="$LAST_GOOD_REVISION" >/dev/null ||
+    fail "rollout undo --to-revision=${LAST_GOOD_REVISION} failed"
+  kctl rollout status deployment/"$HCC_DEPLOY" -n "$HCC_NS" --timeout=240s >/dev/null ||
+    fail "last-known-good revision ${LAST_GOOD_REVISION} did not become Ready"
+  wait_until 90 "HCC /ready after undo" hcc_ready_now ||
+    fail "HCC /ready did not return 200 after last-good restore"
+
+  recovered_image="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}')"
+  recovered_revision="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+  NEW_POD_NAME="$(running_hcc_pod)"
+  NEW_POD_UID="$(kctl get pod "$NEW_POD_NAME" -n "$HCC_NS" -o jsonpath='{.metadata.uid}')"
+  NEW_POD_RESTARTS="$(hcc_restart_count "$NEW_POD_NAME" || true)"
+  sample_ready_series "$STABILITY_WINDOW_SEC" post-hold 0
+  read -r hold_total _ hold_503 _ _ <<<"$(series_metrics post-hold)"
   write_evidence_artifact
 
-  # ── Verdict (botched rollout): the sustained outage is the EXPECTED result ──
-  [ "$stuck_total" -gt 0 ] && ok "sampled /ready ${stuck_total}x across the botched rollout" ||
-    fail "ZERO /ready samples across the botched rollout — the sampler never ran, and a zero-sample run must never pass"
-  [ "$deployed_image_now" = "$BOTCHED_IMAGE" ] &&
-    ok "the botched image is what the Deployment is actually rolling (${BOTCHED_IMAGE})" ||
-    fail "deployment image is '${deployed_image_now:-unset}', not the injected ${BOTCHED_IMAGE} — the outage (if any) has a different cause"
-  [ "$old_uid_live" = 0 ] &&
-    ok "Recreate terminated the old HEALTHY pod before any viable replacement existed — zero fallback replicas (the D1b mechanism)" ||
-    fail "old pod ${OLD_POD_NAME} is still alive under a Recreate rollout — the terminate-before-create premise did not hold"
-  if [ -n "$replacement_row" ] && grep -Eq 'ErrImagePull|ImagePullBackOff' <<<"$replacement_row"; then
-    ok "replacement pod is pinned by the injected image failure: ${replacement_row}"
+  [ "$recovered_image" = "$HCC_IMAGE" ] &&
+    ok "undo restored the original image ${HCC_IMAGE}" ||
+    fail "image after undo is '${recovered_image:-unset}', expected ${HCC_IMAGE}"
+  [ "$recovered_revision" != "$live_revision_before_undo" ] &&
+    ok "undo created a new revision ${recovered_revision} from last-good ${LAST_GOOD_REVISION} (was ${live_revision_before_undo})" ||
+    fail "revision after undo is still ${recovered_revision:-unset} — undo was a no-op"
+  if [ -n "$NEW_POD_UID" ] && [ "$NEW_POD_UID" != "$PRE_BOTCH_UID" ] && [ "$NEW_POD_UID" != "$BOTCHED_POD_UID" ]; then
+    ok "recovered pod uid ${NEW_POD_UID} is neither the pre-botch nor the botched pod"
   else
-    fail "no replacement pod pinned in ErrImagePull|ImagePullBackOff (rows: ${stuck_pod_rows:-none}) — the outage is not attributable to the injected bad rollout"
+    fail "recovered pod uid '${NEW_POD_UID:-none}' matches pre-botch ${PRE_BOTCH_UID} or botched ${BOTCHED_POD_UID:-none} — undo was a no-op"
   fi
-  [ "$stuck_503" -ge 1 ] &&
-    ok "the botched rollout bit the readiness path: ${stuck_503} sample(s) at 503" ||
-    fail "zero 503 samples under a botched Recreate rollout — the outage claim is VACUOUS"
-  [ "$stuck_transitions" -eq 0 ] &&
-    ok "no 503->200 transition ever closed the outage — Kubernetes did NOT self-heal the botched Recreate rollout" ||
-    fail "the outage closed on its own (${stuck_transitions} 503->200 transition(s)) — the D1b manual-undo premise is refuted; investigate before trusting this gate"
-  [ "$stuck_maxstreak" -gt "$ROLLOUT_DOWNTIME_BUDGET_SEC" ] &&
-    ok "SUSTAINED outage measured: ${stuck_maxstreak}s continuous 503 (> ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget) and still open at observation end — recovery requires the manual image rollback cleanup performs (D1b reproduced)" ||
-    fail "outage lasted only ${stuck_maxstreak}s and did not exceed the ${ROLLOUT_DOWNTIME_BUDGET_SEC}s healthy budget — the botched rollout did not produce the D1b total outage"
+  [ "$hold_total" -gt 0 ] && [ "$hold_503" -eq 0 ] &&
+    ok "post-undo hold: ${hold_total} samples over ${STABILITY_WINDOW_SEC}s, zero 503" ||
+    fail "post-undo hold saw ${hold_503} 503(s) across ${hold_total} sample(s)"
+  # fail() records and continues, so only clear the broken-image flag when
+  # every post-undo proof above actually passed. Otherwise cleanup must still
+  # restore the original image.
+  [ "$e2e_fail" -eq 0 ] && IMAGE_BROKEN=0
 fi
+
 
 log "Evidence artifact: ${LOG_ARTIFACT}"
 # cleanup() (EXIT trap) restores the image if broken, waits for re-certification,

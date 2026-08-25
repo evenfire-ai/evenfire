@@ -355,13 +355,13 @@ describe('network/gateway intent (manifest-level)', () => {
     //    hard-413s while the client-side cap says it should have worked.
     const hccDeployment = read(`${BASE}/control-plane/host-context-controller.yaml`)
     const gfscCapMatch = hccDeployment.match(
-      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*"?(\d+)"?/
+      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*(["']?)(\d+)\1/
     )
     expect(
       gfscCapMatch,
       'GFS_MAX_WRITE_BODY_BYTES env must be set on the HCC deployment'
     ).not.toBeNull()
-    expect(Number(gfscCapMatch![1])).toBe(GFSC_WRITE_CAP)
+    expect(Number(gfscCapMatch![2])).toBe(GFSC_WRITE_CAP)
 
     // 2. Both clients advertise the same hard binary part cap and product cap.
     const parseClientCaps = (relPath: string): { product: number; part: number } => {

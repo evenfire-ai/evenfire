@@ -216,15 +216,27 @@ EOF
 }
 
 delete_synthetic_fleet() {
-  local failed=0 kind
+  local failed=0 kind host_query host
+  if ! host_query="$(kctl get host -A \
+    -l "e2e.clerum.io/suite=hcc-watch-churn,e2e.clerum.io/run=${RUN_ID}" \
+    -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"; then
+    printf 'HCC cleanup: unable to enumerate synthetic Host names for run %s; refusing broad child deletion\n' "$RUN_ID" >&2
+    return 1
+  fi
   for kind in mcpserver context host; do
-    kctl delete "$kind" -A -l e2e.clerum.io/suite=hcc-watch-churn \
+    kctl delete "$kind" -A \
+      -l "e2e.clerum.io/suite=hcc-watch-churn,e2e.clerum.io/run=${RUN_ID}" \
       --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 || failed=1
   done
   kctl delete secret "$FLEET_SECRET" -n "$HOST_NS" --ignore-not-found >/dev/null 2>&1 || failed=1
-  # HCC-managed runtime left behind by the fleet Hosts.
-  kctl delete deployment,service,serviceaccount,role,rolebinding,secret,pvc,networkpolicy \
-    -A -l "clerum.io/managed-by=host-context-controller" --ignore-not-found >/dev/null 2>&1 || true
+  # HCC-managed runtime left behind by these exact synthetic Hosts. Never use
+  # the cluster-wide managed-by label: legitimate platform Hosts can own
+  # resources with that label while this cleanup is running.
+  while IFS= read -r host; do
+    [ -n "$host" ] || continue
+    kctl delete deployment,service,serviceaccount,role,rolebinding,secret,pvc,networkpolicy \
+      -A -l "clerum.io/host=${host}" --ignore-not-found >/dev/null 2>&1 || failed=1
+  done <<<"$host_query"
   return "$failed"
 }
 

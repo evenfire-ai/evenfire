@@ -43,20 +43,81 @@ runtime_script="$(sed '/^[[:space:]]*#/d' deploy/scripts/provision-gfs-runtime.s
   || fail 'post-overlay runtime path does not wait for exact GFSC rollouts'
 [[ "$runtime_script" != *'rollout restart'* && "$runtime_script" != *'rotate-writer'* ]] \
   || fail 'post-overlay runtime path rotates or unconditionally restarts GFS'
+# Use a clean, minimal Git fixture so this contract tests the profile/cluster
+# boundary rather than whichever unrelated files a developer has open in the
+# main worktree. The fake Minikube command fails closed with no status output;
+# it must never be interpreted as authorization for a remote mutation.
+T2_FIXTURE_ROOT="$(mktemp -d)"
+T2_PROFILE_ROOT="${T2_FIXTURE_ROOT}/profiles"
+T2_PROFILE="contract-profile"
+T2_CONTEXT="${T2_PROFILE}"
+T2_PROFILE_DIR="${T2_PROFILE_ROOT}/${T2_PROFILE}"
+T2_PROFILE_ENV="${T2_PROFILE_DIR}/profile.env"
+T2_PORTS_ENV="${T2_PROFILE_DIR}/ports.env"
+T2_BIN="${T2_FIXTURE_ROOT}/bin"
+T2_MUTATION_LOG="${T2_FIXTURE_ROOT}/mutations.log"
+trap 'rm -rf "${T2_FIXTURE_ROOT}"' EXIT
+mkdir -p "${T2_PROFILE_DIR}" "${T2_BIN}"
+git init -q "${T2_FIXTURE_ROOT}/repo"
+git -C "${T2_FIXTURE_ROOT}/repo" config user.email contract@example.invalid
+git -C "${T2_FIXTURE_ROOT}/repo" config user.name contract-fixture
+git -C "${T2_FIXTURE_ROOT}/repo" checkout -q -b feat/contract-lock
+git -C "${T2_FIXTURE_ROOT}/repo" remote add origin https://github.com/evenfire-ai/evenfire.git
+git -C "${T2_FIXTURE_ROOT}/repo" commit --allow-empty -qm fixture
+git -C "${T2_FIXTURE_ROOT}/repo" update-ref refs/remotes/origin/dev HEAD
+T2_HEAD_SHORT="$(git -C "${T2_FIXTURE_ROOT}/repo" rev-parse --short HEAD)"
+printf 'PROFILE=%s\nREPO_DIR=%s\nBRANCH=feat/contract-lock\nSHA_SHORT=%s\nDIRTY=false\n' \
+  "${T2_PROFILE}" "${T2_FIXTURE_ROOT}/repo" "${T2_HEAD_SHORT}" >"${T2_PROFILE_ENV}"
+: >"${T2_PORTS_ENV}"
+printf '#!/usr/bin/env bash\nexit 42\n' >"${T2_BIN}/minikube"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$T2_MUTATION_LOG"\nexit 99\n' >"${T2_BIN}/kubectl"
+chmod +x "${T2_BIN}/minikube" "${T2_BIN}/kubectl"
+
+reconcile_context_err="$(mktemp)"
+if CONTEXT="${T2_CONTEXT}" T2_PROJECT_DIR="${T2_FIXTURE_ROOT}/repo" \
+  T2_PROFILE="${T2_PROFILE}" T2_CONTEXT="${T2_CONTEXT}" \
+  T2_PROFILE_ROOT="${T2_PROFILE_ROOT}" T2_PROFILE_ENV="${T2_PROFILE_ENV}" \
+  T2_PORTS_ENV="${T2_PORTS_ENV}" PATH="${T2_BIN}:$PATH" \
+  bash deploy/scripts/reconcile-gfs-deploy-credentials.sh 2>"$reconcile_context_err"; then
+  rm -f "$reconcile_context_err"
+  fail 'credential reconciliation accepted an unverified Kubernetes context'
+fi
+grep -Fq 'DEVELOPMENT_SCOPE_REQUIRED' "$reconcile_context_err" \
+  || fail 'credential reconciliation did not fail closed when the local profile was not bootstrapped'
+[[ ! -s "$T2_MUTATION_LOG" ]] \
+  || fail 'credential reconciliation mutated Kubernetes after Minikube status failed'
+rm -f "$reconcile_context_err"
+reconcile_remote_context_err="$(mktemp)"
+if CONTEXT="${T2_CONTEXT}" GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS=other-context \
+  T2_PROJECT_DIR="${T2_FIXTURE_ROOT}/repo" T2_PROFILE="${T2_PROFILE}" T2_CONTEXT="${T2_CONTEXT}" \
+  T2_PROFILE_ROOT="${T2_PROFILE_ROOT}" T2_PROFILE_ENV="${T2_PROFILE_ENV}" \
+  T2_PORTS_ENV="${T2_PORTS_ENV}" PATH="${T2_BIN}:$PATH" \
+  bash deploy/scripts/reconcile-gfs-deploy-credentials.sh 2>"$reconcile_remote_context_err"; then
+  rm -f "$reconcile_remote_context_err"
+  fail 'credential reconciliation accepted a GKE context outside the explicit allowlist'
+fi
+grep -Fq 'remote context is not explicitly allowlisted' "$reconcile_remote_context_err" \
+  || fail 'credential reconciliation did not fail closed before a protected context could mutate GFS'
+[[ ! -s "$T2_MUTATION_LOG" ]] \
+  || fail 'credential reconciliation mutated Kubernetes after remote allowlist validation failed'
+rm -f "$reconcile_remote_context_err"
+grep -Fq 't2_mutation_lock' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
+  || fail 'GFS reconciliation does not require the canonical profile mutation lock'
+! grep -Fq 'minikube_profile_exists' deploy/scripts/reconcile-gfs-deploy-credentials.sh \
+  || fail 'GFS reconciliation still infers remote ownership from Minikube status'
 make_block() {
   awk -v target="$1" '$0 ~ "^" target ":" {active=1} active && /^\.PHONY:/ {exit} active {print}' Makefile
 }
-for target in minikube-db-reset; do
-  block="$(make_block "$target")"
-  reset="$(grep -n 'reset-control-db-storage.sh' <<<"$block" | head -1 | cut -d: -f1)"
-  recreate="$(grep -n 'apply -k .* -l app=control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
-  postgres_ready="$(grep -nE 'wait .*control-postgres|wait .*deploy/control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
-  converge="$(grep -n 'converge-control-db-after-reset.sh' <<<"$block" | head -1 | cut -d: -f1)"
-  success="$(grep -n 'DB reset complete' <<<"$block" | tail -1 | cut -d: -f1)"
-  [[ -n "$reset" && -n "$recreate" && -n "$postgres_ready" && -n "$converge" && -n "$success" ]] && \
-    [[ "$reset" -lt "$recreate" && "$recreate" -lt "$postgres_ready" && "$postgres_ready" -lt "$converge" && "$converge" -lt "$success" ]] \
-    || fail "$target bypasses safe GFS reset recovery"
-done
+target=minikube-db-reset
+block="$(make_block "$target")"
+reset="$(grep -n 'reset-control-db-storage.sh' <<<"$block" | head -1 | cut -d: -f1)"
+recreate="$(grep -n 'apply -k .* -l app=control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
+postgres_ready="$(grep -nE 'wait .*control-postgres|wait .*deploy/control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
+converge="$(grep -n 'converge-control-db-after-reset.sh' <<<"$block" | head -1 | cut -d: -f1)"
+success="$(grep -n 'DB reset complete' <<<"$block" | tail -1 | cut -d: -f1)"
+[[ -n "$reset" && -n "$recreate" && -n "$postgres_ready" && -n "$converge" && -n "$success" ]] && \
+  [[ "$reset" -lt "$recreate" && "$recreate" -lt "$postgres_ready" && "$postgres_ready" -lt "$converge" && "$converge" -lt "$success" ]] \
+  || fail "$target bypasses safe GFS reset recovery"
 reset_storage="$(cat deploy/scripts/reset-control-db-storage.sh)"
 for required in preflight-gfs-db-reset.sh 'scale deployment/control-api --replicas=0' 'scale deployment/control-postgres --replicas=0' 'wait_for_pods_gone app=control-api' 'wait_for_pods_gone app=control-postgres' 'preconditions":{"uid":"%s"}' 'persistentvolumeclaims/${PVC}'; do
   [[ "$reset_storage" == *"$required"* ]] || fail "reset storage boundary omits $required"
@@ -113,7 +174,8 @@ assert_minikube_upgrade_classifier() {
     || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
 }
 assert_pre_gate_defers_gfs_reconcile() {
-  local block="$({ awk -v start="$1" -v end="$2" '
+  local block
+  block="$({ awk -v start="$1" -v end="$2" '
     index($0, start) { active=1 }
     active { print }
     active && index($0, end) { exit }
