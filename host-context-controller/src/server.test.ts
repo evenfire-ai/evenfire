@@ -308,6 +308,28 @@ describe('ContextMapperServer', () => {
     expect(response.headers['Cache-Control']).toBe('no-store, private')
   })
 
+  it('normalizes an unexpected protected-route handler failure', async () => {
+    server = protectedServer().server
+    const handleRequest = vi
+      .spyOn(server as unknown as { handleRequest: (...args: unknown[]) => Promise<void> }, 'handleRequest')
+      .mockRejectedValue(new Error('fixture_handler_failure'))
+
+    await server.start()
+    const boundServer = (server as unknown as { server: import('node:http').Server }).server
+    const address = boundServer.address()
+    if (!address || typeof address === 'string') throw new Error('server did not bind')
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v2/hosts/self/mcpservers`)
+      const body = await response.text()
+      expect(response.status).toBe(503)
+      expect(JSON.parse(body)).toEqual({ error: 'authorization_unavailable' })
+      expect(body).not.toContain('fixture_handler_failure')
+    } finally {
+      handleRequest.mockRestore()
+    }
+  })
+
   it('accepts only the exact credential body and returns the fenced token DTO', async () => {
     const protectedRoute = protectedServer()
     server = protectedRoute.server

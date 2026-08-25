@@ -700,12 +700,11 @@ export class ContextMapperServer {
     return new Promise((resolve, reject) => {
       this.server = http.createServer((req, res) => {
         this.handleRequest(req, res).catch(err => {
-          console.error('[Server] Request handler failed:', err)
+          mcpApiLog.error('MCP request handler failed', {
+            reason: err instanceof Error ? err.name : 'unknown',
+          })
           if (!res.headersSent) {
-            this.sendJson(res, 500, {
-              error: 'Internal Server Error',
-              message: 'Unhandled server error',
-            })
+            this.sendProtectedJson(res, 503, { error: 'authorization_unavailable' })
           } else {
             res.end()
           }

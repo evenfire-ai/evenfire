@@ -311,6 +311,7 @@ np08_product_manager_status_probe() {
   local expected_server="$2"
   kctl -n "${HOST_NS}" exec "deploy/${deployment}" -- \
     env "NP08_EXPECTED_SERVER=${expected_server}" node - <<'NODE' >/dev/null 2>&1
+;(async () => {
 const expectedServer = process.env.NP08_EXPECTED_SERVER
 const runtimeScheme = ['ht', 'tp://'].join('')
 const runtimeHost = ['127', '0', '0', '1'].join('.')
@@ -327,6 +328,9 @@ const entry = Array.isArray(body?.mcpServers)
   ? body.mcpServers.find(server => server?.name === expectedServer)
   : undefined
 if (!entry || entry.expected !== true || entry.state !== 'connected') process.exit(1)
+})().catch(() => {
+  process.exitCode = 1
+})
 NODE
 }
 
@@ -948,6 +952,7 @@ kctl -n "${HOST_NS}" exec -i "deploy/${HOST_DEPLOYMENT}" -- \
   node --input-type=module - < "${NP08_RUNTIME_MODULE}"
   env "NP08_SERVER_A=${SERVER_A}" "NP08_SERVER_B=${SERVER_B}" "NP08_SERVER_C=${SERVER_C}" \
   "NP08_EXPECTED_SYNTHETIC_TOKEN=np08-synthetic-${RUN_ID}-a" node - <<'NODE'
+;(async () => {
 const base = 'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
 let accessToken = process.env.MCP_HOST_RUNTIME_ACCESS_TOKEN
 const refreshToken = process.env.MCP_HOST_RUNTIME_REFRESH_TOKEN
@@ -1098,6 +1103,9 @@ for (const path of [
   }
 }
 console.log('PASS legacy caller-selected routes are tombstoned')
+})().catch(() => {
+  process.exitCode = 1
+})
 NODE
 
 run_np08_gateway_raw_header_checks

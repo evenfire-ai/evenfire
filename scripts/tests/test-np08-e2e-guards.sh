@@ -153,7 +153,7 @@ pass 'provenance rejects a non-local image coordinate'
 check_embedded_node() {
   local ordinal="$1"
   if ! awk -v ordinal="${ordinal}" '
-    /node - <<'\''NODE'\''$/ {
+    index($0, "node - <<'\''NODE'\''") {
       block += 1
       in_block = block == ordinal
       next
@@ -171,8 +171,15 @@ check_embedded_node() {
 if grep -Eq '^[[:space:]]+NODE$' "${E2E_SCRIPT}"; then
   fail 'an embedded Node heredoc terminator is indented'
 fi
-check_embedded_node 1
-check_embedded_node 2
+embedded_node_count="$(
+  awk 'index($0, "node - <<'\''NODE'\''") { count += 1 } END { print count + 0 }' "${E2E_SCRIPT}"
+)"
+if [[ "${embedded_node_count}" -ne 4 ]]; then
+  fail "expected four embedded Node heredocs, found ${embedded_node_count}"
+fi
+for ordinal in $(seq 1 "${embedded_node_count}"); do
+  check_embedded_node "${ordinal}"
+done
 pass 'embedded Node heredocs have column-zero terminators and valid CommonJS syntax'
 
 if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
