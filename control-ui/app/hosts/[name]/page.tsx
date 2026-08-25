@@ -1133,13 +1133,6 @@ export default function HostDetailsPage() {
                         connectionRef={connectionRefDraft}
                         hostName={routeName}
                         onConnectionRefChange={setConnectionRefDraft}
-                        onAssignmentPersisted={connectionRef => {
-                          savedModelRef.current = {
-                            ...savedModelRef.current,
-                            connectionRef,
-                          }
-                          setConnectionRefDraft(connectionRef)
-                        }}
                         onModelsChange={setCodexModels}
                         disabled={busy}
                       />

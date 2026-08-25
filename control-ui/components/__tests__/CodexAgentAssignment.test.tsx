@@ -58,21 +58,15 @@ function connection(
   }
 }
 
-function renderAssignment(
-  connectionRef: string,
-  onConnectionRefChange = vi.fn(),
-  onAssignmentPersisted = vi.fn()
-) {
+function renderAssignment(connectionRef: string, onConnectionRefChange = vi.fn()) {
   return {
     onConnectionRefChange,
-    onAssignmentPersisted,
     ...render(
       <ToastProvider>
         <CodexAgentAssignment
           connectionRef={connectionRef}
           hostName="chatllm"
           onConnectionRefChange={onConnectionRefChange}
-          onAssignmentPersisted={onAssignmentPersisted}
         />
       </ToastProvider>
     ),
@@ -197,7 +191,7 @@ describe('CodexAgentAssignment', () => {
       connection({ connectionKey: 'team-plus', displayName: 'Team Plus' }),
     ])
     confirmMock.mockResolvedValue(true)
-    const { onConnectionRefChange, onAssignmentPersisted } = renderAssignment('team-plus')
+    const { onConnectionRefChange } = renderAssignment('team-plus')
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Remove from this agent' })).toBeEnabled()
     })
@@ -205,6 +199,21 @@ describe('CodexAgentAssignment', () => {
     await waitFor(() => {
       expect(onConnectionRefChange).toHaveBeenCalledWith('unassigned')
     })
-    expect(onAssignmentPersisted).not.toHaveBeenCalled()
+  })
+
+  it('drafts a selected grant and does not persist until Save', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'team-plus', displayName: 'Team Plus' }),
+      connection({ connectionKey: 'personal-pro', displayName: 'Personal Pro' }),
+    ])
+    const { onConnectionRefChange } = renderAssignment('team-plus')
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'Personal Pro' })).toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByLabelText('ChatGPT subscription'), {
+      target: { value: 'personal-pro' },
+    })
+    expect(onConnectionRefChange).toHaveBeenCalledWith('personal-pro')
+    expect(onConnectionRefChange).toHaveBeenCalledTimes(1)
   })
 })

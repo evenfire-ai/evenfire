@@ -855,6 +855,21 @@ describe('HostWizard — broker-backed Codex authoring', () => {
     ).toBe(false)
   }, 15_000)
 
+  it('blocks Next until a ChatGPT subscription is chosen', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-needs-grant' })
+    await selectCodexSubscription()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(screen.getByText('Choose a ChatGPT subscription before continuing.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Assign test grant' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    })
+    expect(
+      screen.queryByText('Choose a ChatGPT subscription before continuing.')
+    ).not.toBeInTheDocument()
+  }, 15_000)
+
   it('seeds the first offered grant model when switching to a ChatGPT subscription', async () => {
     await renderWizard()
     await walkToModelStep({ agentName: 'codex-keep-model' })

@@ -29,7 +29,6 @@ export type CodexAgentAssignmentProps = {
   connectionRef: string
   hostName?: string
   onConnectionRefChange: (connectionKey: string) => void
-  onAssignmentPersisted?: (connectionKey: string) => void
   onModelsChange?: (models: string[]) => void
   disabled?: boolean
 }
@@ -38,7 +37,6 @@ export function CodexAgentAssignment({
   connectionRef,
   hostName,
   onConnectionRefChange,
-  onAssignmentPersisted,
   onModelsChange,
   disabled = false,
 }: CodexAgentAssignmentProps) {
