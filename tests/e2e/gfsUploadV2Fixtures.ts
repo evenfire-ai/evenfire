@@ -22,19 +22,36 @@ export interface DiskUploadFixture {
   sha256: string
 }
 
+interface FixtureHandle {
+  truncate(length: number): Promise<void>
+  close(): Promise<void>
+}
+
 interface FixtureLease {
-  handle: FileHandle
-  state: 'active' | 'disposed'
+  handle: FixtureHandle
+  state: 'active' | 'disposed' | 'neutralize-failed-closed' | 'close-failed'
+  neutralized: boolean
+  failure?: unknown
 }
 
 const fixtureLeases = new WeakMap<DiskUploadFixture, FixtureLease>()
 let afterFixtureHandleForTest: ((fixture: DiskUploadFixture) => Promise<void> | void) | undefined
+let fixtureHandleForTest:
+  | ((handle: FileHandle, fixture: DiskUploadFixture) => FixtureHandle)
+  | undefined
 
 /** Test-only seam for exercising cleanup after a failure that follows handle acquisition. */
 export function setAfterFixtureHandleForTest(
   hook: ((fixture: DiskUploadFixture) => Promise<void> | void) | undefined
 ): void {
   afterFixtureHandleForTest = hook
+}
+
+/** Test-only seam for exercising retained-handle disposal failures. */
+export function setFixtureHandleForTest(
+  hook: ((handle: FileHandle, fixture: DiskUploadFixture) => FixtureHandle) | undefined
+): void {
+  fixtureHandleForTest = hook
 }
 
 /**
@@ -97,9 +114,14 @@ async function createFixture(
       byteLength,
       sha256: '',
     }
-    fixtureLeases.set(fixture, { handle, state: 'active' })
+    const ownedHandle = fixtureHandleForTest?.(handle, fixture) ?? handle
+    fixtureLeases.set(fixture, {
+      handle: ownedHandle,
+      state: 'active',
+      neutralized: false,
+    })
     await afterFixtureHandleForTest?.(fixture)
-    await handle.truncate(byteLength)
+    await ownedHandle.truncate(byteLength)
     fixture.sha256 = await sha256File(filePath)
     return fixture
   } catch (error) {
@@ -137,16 +159,73 @@ async function disposeFixtureLease(fixture: DiskUploadFixture): Promise<void> {
     throw new Error(`refusing to neutralize an unowned GFS v2 fixture: ${fixture.filePath}`)
   }
   if (lease.state === 'disposed') return
+  if (lease.state === 'neutralize-failed-closed') {
+    throw (
+      lease.failure ??
+      new Error(`GFS v2 fixture disposal failed without a recorded cause: ${fixture.filePath}`)
+    )
+  }
+  if (lease.state === 'close-failed') {
+    await retryCloseAfterFailure(fixture, lease)
+    return
+  }
   try {
     await lease.handle.truncate(0)
+    lease.neutralized = true
     await lease.handle.close()
     lease.state = 'disposed'
   } catch (error) {
-    try {
-      await lease.handle.close()
-    } catch {
-      // Preserve the original failure; this test-only helper has no pathname fallback.
-    }
-    throw error
+    await closeAfterDisposalFailure(lease, error)
   }
+}
+
+async function closeAfterDisposalFailure(lease: FixtureLease, failure: unknown): Promise<never> {
+  try {
+    await lease.handle.close()
+  } catch (closeError) {
+    lease.failure = combineFixtureDisposalFailures(lease.neutralized, failure, closeError)
+    lease.state = 'close-failed'
+    throw lease.failure
+  }
+  if (lease.neutralized) {
+    lease.state = 'disposed'
+  } else {
+    lease.failure = failure
+    lease.state = 'neutralize-failed-closed'
+  }
+  throw failure
+}
+
+async function retryCloseAfterFailure(
+  fixture: DiskUploadFixture,
+  lease: FixtureLease
+): Promise<void> {
+  const previousFailure =
+    lease.failure ??
+    new Error(`GFS v2 fixture disposal failed without a recorded cause: ${fixture.filePath}`)
+  try {
+    await lease.handle.close()
+  } catch (closeError) {
+    lease.failure = combineFixtureDisposalFailures(lease.neutralized, previousFailure, closeError)
+    throw lease.failure
+  }
+  if (lease.neutralized) {
+    lease.state = 'disposed'
+    return
+  }
+  lease.state = 'neutralize-failed-closed'
+  throw previousFailure
+}
+
+function combineFixtureDisposalFailures(
+  neutralized: boolean,
+  failure: unknown,
+  closeError: unknown
+): AggregateError {
+  return new AggregateError(
+    [failure, closeError],
+    neutralized
+      ? 'failed to close neutralized GFS v2 fixture'
+      : 'failed to neutralize and close GFS v2 fixture'
+  )
 }
