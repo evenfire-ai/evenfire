@@ -551,8 +551,9 @@ normalize_minikube_image_tag() {
 MINIKUBE_IMAGE_INVENTORY_JSON=""
 MINIKUBE_IMAGE_INVENTORY_CACHED=false
 # Return code 1 is reserved for a successful inventory proving that a requested
-# image is absent. Any failed or invalid inventory must stay distinguishable so
-# callers cannot turn an infrastructure failure into a pull/load cache miss.
+# image is absent. Remap only a real inventory failure that happens to return 1;
+# preserve every other deadline/process status so callers retain diagnostics and
+# cannot turn an infrastructure failure into a pull/load cache miss.
 MINIKUBE_IMAGE_INVENTORY_ERROR_STATUS=2
 
 minikube_image_inventory() {
@@ -562,7 +563,10 @@ minikube_image_inventory() {
     minikube -p "$PROFILE" image ls --format=json || inventory_status=$?
   if [[ "$inventory_status" -ne 0 ]]; then
     err "Minikube image inventory failed or exceeded its deadline" >&2
-    return "$MINIKUBE_IMAGE_INVENTORY_ERROR_STATUS"
+    if [[ "$inventory_status" -eq 1 ]]; then
+      return "$MINIKUBE_IMAGE_INVENTORY_ERROR_STATUS"
+    fi
+    return "$inventory_status"
   fi
 }
 
