@@ -2,6 +2,7 @@ import { getCodexSubscriptionConnection } from './codexSubscription'
 
 export type CodexSubscriptionCapability = {
   enabled: boolean
+  error?: string
 }
 
 const DISABLED_CAPABILITY: CodexSubscriptionCapability = { enabled: false }
@@ -23,7 +24,7 @@ export async function loadCodexSubscriptionCapability(): Promise<CodexSubscripti
     return { enabled: true }
   } catch (error) {
     if (isDisabledCapabilityError(error)) return DISABLED_CAPABILITY
-    return DISABLED_CAPABILITY
+    throw error
   }
 }
 

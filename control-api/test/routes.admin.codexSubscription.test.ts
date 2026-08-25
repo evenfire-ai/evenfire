@@ -417,7 +417,7 @@ describe('admin Codex subscription routes', () => {
     assertNoLeak(res.body)
   })
 
-  it('keeps a connected device poll at 200 when ConfigMap publish fails', async () => {
+  it('returns 503 when a connected device poll cannot publish the runtime ConfigMap', async () => {
     const materialize = vi.fn(async () => {
       throw new Error('apiserver down')
     })
@@ -425,8 +425,8 @@ describe('admin Codex subscription routes', () => {
     const res = await request(makeAuthedApp(makeGateway(materialize))).get(
       '/admin/llm/providers/codex-subscription/device/poll'
     )
-    expect(res.status).toBe(200)
-    expect(res.body.status).toBe('connected')
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('configmap_write_failed')
     expect(materialize).toHaveBeenCalledTimes(1)
     assertNoLeak(res.body)
   })
@@ -673,6 +673,23 @@ describe('admin Codex subscription routes', () => {
       .send({ defaultModel: 'gpt-5.6-luna' })
     expect(res.status).toBe(422)
     expect(res.body).toEqual({ error: 'default_model_not_offered' })
+  })
+
+  it('rejects an empty metadata patch', async () => {
+    const res = await request(app)
+      .patch('/admin/llm/providers/codex-subscription/connections/codex-aaa')
+      .send({})
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'empty_patch' })
+  })
+
+  it('does not rewrite a revoked grant tombstone', async () => {
+    vi.mocked(pool.query).mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    const res = await request(app)
+      .patch('/admin/llm/providers/codex-subscription/connections/codex-aaa')
+      .send({ displayName: 'Tomb' })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'no_grant' })
   })
 
   it('lists grant models and toggles enabled', async () => {

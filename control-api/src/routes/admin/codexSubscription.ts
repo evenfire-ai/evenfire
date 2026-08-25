@@ -423,7 +423,7 @@ export function createAdminCodexSubscriptionRouter(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req)),
         state
       )
-      if (result.status === 'connected') await publishRuntimeAllowlistBestEffort()
+      if (result.status === 'connected' && (await publishRuntimeAllowlistOrFail(res))) return
       res.status(200).json(result)
     } catch (err) {
       sendOAuthError(res, err)
@@ -461,6 +461,21 @@ export function createAdminCodexSubscriptionRouter(
       const synced = await syncCodexSubscriptionCatalog(db, catalogTransport, secrets.accessToken, {
         connectionKey,
       })
+      if (!synced.connection) {
+        res.status(409).json({ error: 'stale_revision' })
+        return
+      }
+      if (synced.outcome !== 'ready') {
+        res.status(503).json({
+          error: 'catalog_sync_failed',
+          outcome: synced.outcome,
+          added: synced.added,
+          refreshed: synced.refreshed,
+          staled: synced.staled,
+          connection: synced.connection,
+        })
+        return
+      }
       if (await publishRuntimeAllowlistOrFail(res)) return
       res.status(200).json({
         outcome: synced.outcome,
@@ -555,6 +570,10 @@ export function createAdminCodexSubscriptionRouter(
           typeof req.body?.displayName === 'string' && req.body.displayName.trim()
             ? req.body.displayName.trim()
             : 'Codex subscription'
+        if (displayName.length > 64) {
+          res.status(400).json({ error: 'display_name_too_long' })
+          return
+        }
         const requestedKey =
           typeof req.body?.connectionKey === 'string' && req.body.connectionKey.trim()
             ? assertCodexConnectionKey(req.body.connectionKey.trim())
@@ -591,7 +610,7 @@ export function createAdminCodexSubscriptionRouter(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req))
       )
       if (!('id' in connection)) {
-        res.status(200).json({ models: [] })
+        res.status(409).json({ error: 'not_connected' })
         return
       }
       const models = await listCodexCatalogModels(dbClient(), connection.id)
@@ -618,6 +637,10 @@ export function createAdminCodexSubscriptionRouter(
       const hasDefaultModel = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'defaultModel')
       if (!hasDisplayName && !hasDefaultModel) {
         res.status(400).json({ error: 'empty_patch' })
+        return
+      }
+      if (hasDisplayName && req.body.displayName.trim().length > 64) {
+        res.status(400).json({ error: 'display_name_too_long' })
         return
       }
       const defaultModel = hasDefaultModel

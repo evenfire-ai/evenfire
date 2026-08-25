@@ -19,6 +19,12 @@ export const TOKEN_LEAK_REDACT_PATHS: readonly string[] = [
   'claimToken',
   'client_secret',
   'clientSecret',
+  'executionTicket',
+  'attemptReceipt',
+  'id_token',
+  'idToken',
+  'pkceVerifier',
+  'refresh_token',
 ]
 
 /** Asserted by unit tests so redactions can grow but never shrink. */
@@ -34,4 +40,10 @@ export const REQUIRED_REDACT_PATHS: readonly string[] = [
   'claimToken',
   'client_secret',
   'clientSecret',
+  'executionTicket',
+  'attemptReceipt',
+  'id_token',
+  'idToken',
+  'pkceVerifier',
+  'refresh_token',
 ]

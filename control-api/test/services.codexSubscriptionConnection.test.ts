@@ -11,6 +11,7 @@ import {
   normalizeCodexConnectionKey,
   readHostCodexConnectionRef,
   rotateCodexSubscriptionCredentials,
+  updateCodexSubscriptionConnectionMetadata,
 } from '../src/services/codexSubscriptionConnection.js'
 
 const KEY = deriveOAuthEncryptionKey('ab'.repeat(32))
@@ -167,6 +168,15 @@ describe('codex subscription connection repository', () => {
     expect(sql).toMatch(/credential_revision = \$/)
     expect(sql).toMatch(/revoked_at IS NULL/)
     expect(sql).not.toMatch(/revoked_at = NULL/)
+  })
+
+  it('refuses metadata writes on a revoked grant', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await expect(
+      updateCodexSubscriptionConnectionMetadata({ query }, KEY, { displayName: 'Tomb' })
+    ).resolves.toBeNull()
+    const [sql] = query.mock.calls[0] as [string]
+    expect(sql).toMatch(/revoked_at IS NULL/)
   })
 
   it('rejects the reserved unassigned key and keeps it on Host reads', () => {

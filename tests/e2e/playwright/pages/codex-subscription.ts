@@ -127,12 +127,18 @@ export class SecretsLlmSubscriptionsPage {
   constructor(readonly page: Page) {}
 
   async expectTable() {
-    await expect(this.page.getByRole('columnheader', { name: 'Name' })).toBeVisible()
-    await expect(this.page.getByRole('columnheader', { name: 'Status' })).toBeVisible()
-    await expect(this.page.getByRole('columnheader', { name: 'Agents' })).toHaveCount(0)
-    await expect(this.page.getByRole('tab', { name: /^Subscription$/ })).toHaveCount(0)
     await expect(this.page.getByRole('tab', { name: 'API-KEY' })).toBeVisible()
     await expect(this.page.getByRole('tab', { name: 'Subscriptions' })).toBeVisible()
+    await expect(this.page.getByRole('tab', { name: /^Subscription$/ })).toHaveCount(0)
+    await expect(this.page.getByRole('columnheader', { name: 'Agents' })).toHaveCount(0)
+    const hasHeaders = (await this.page.getByRole('columnheader', { name: 'Name' }).count()) > 0
+    if (hasHeaders) {
+      await expect(this.page.getByRole('columnheader', { name: 'Status' })).toBeVisible()
+    } else {
+      await expect(
+        this.page.getByText(/No ChatGPT subscriptions|Add subscription/i).first()
+      ).toBeVisible()
+    }
   }
 
   grantRow(displayName: string): Locator {

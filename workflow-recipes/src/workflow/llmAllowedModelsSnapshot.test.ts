@@ -34,9 +34,17 @@ function multiGrantConfigMap() {
 
 describe('WRC parseAllowedModelsSnapshot per assigned connection', () => {
   it('reads clerum.io/codex-connections instead of the flat status annotation', () => {
-    const snapshot = parseAllowedModelsSnapshot(multiGrantConfigMap())
+    const snapshot = parseAllowedModelsSnapshot(multiGrantConfigMap(), 'deployment-default')
     expect(snapshot.connectionStatus).toBe('revoked')
     expect(snapshot.connectionRevision).toBe(9)
+  })
+
+  it('does not inherit a reserved grant when the recipe has no assigned key', () => {
+    const snapshot = parseAllowedModelsSnapshot(multiGrantConfigMap())
+    expect(snapshot.connectionStatus).toBe('disconnected')
+    expect(Array.from(snapshot.enabledModels ?? [])).not.toContain(
+      'codex-subscription:gpt-5.3-codex'
+    )
   })
 
   it('can project a non-default grant when a recipe is later bound to one', () => {

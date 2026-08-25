@@ -68,7 +68,7 @@ export type CodexCatalogSyncView = {
   added: number
   refreshed: number
   staled: number
-  connection: CodexSubscriptionConnectionView
+  connection: CodexSubscriptionConnectionView | null
 }
 
 const FORBIDDEN_KEY =
@@ -223,7 +223,7 @@ export function sanitizeCodexCatalogSync(raw: unknown): CodexCatalogSyncView {
     added: pickNumber(raw.added),
     refreshed: pickNumber(raw.refreshed),
     staled: pickNumber(raw.staled),
-    connection: sanitizeCodexConnection(raw.connection),
+    connection: raw.connection == null ? null : sanitizeCodexConnection(raw.connection),
   }
 }
 
@@ -273,44 +273,6 @@ export async function listCodexSubscriptionFleet(): Promise<{
     assignableHostsUnavailable:
       raw.assignableHostsUnavailable === true ||
       connections.some(row => row.assignedHostsUnavailable === true),
-  }
-}
-
-export async function unbindCodexHost(
-  connectionKey: string,
-  hostRef: string
-): Promise<{ host: string; connectionRef: string; model?: string }> {
-  const raw = (await apiSend(
-    'POST',
-    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/hosts/${encodeURIComponent(hostRef)}/unbind`
-  )) as { host?: unknown; connectionRef?: unknown; model?: unknown }
-  const model = pickString(raw.model)
-  return {
-    host: pickString(raw.host) ?? hostRef,
-    connectionRef: pickString(raw.connectionRef) ?? CODEX_UNASSIGNED_CONNECTION_KEY,
-    ...(model ? { model } : {}),
-  }
-}
-
-export async function bindCodexHost(
-  connectionKey: string,
-  hostRef: string
-): Promise<{ host: string; connectionRef: string; model?: string }> {
-  const raw = (await apiSend(
-    'POST',
-    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/hosts/${encodeURIComponent(hostRef)}/bind`
-  )) as { host?: unknown; connectionRef?: unknown; model?: unknown }
-  const model = pickString(raw.model)
-  return {
-    host: pickString(raw.host) ?? hostRef,
-    connectionRef: (() => {
-      const next = pickString(raw.connectionRef)
-      if (!next) {
-        throw new Error('Codex subscription bind did not return connectionRef')
-      }
-      return next
-    })(),
-    ...(model ? { model } : {}),
   }
 }
 

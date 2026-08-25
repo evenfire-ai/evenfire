@@ -10,6 +10,10 @@ export const REDACT_PATHS = [
   'headers.authorization',
   'req.headers.authorization',
   'attemptReceipt',
+  'id_token',
+  'idToken',
+  'pkceVerifier',
+  'refresh_token',
 ]
 
 export function createProxyLogger(destination?: DestinationStream) {

@@ -355,14 +355,7 @@ export async function revokeCodexSubscription(
   const key = connectionKeyOf(deps)
   const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
   const local = await revokeCodexSubscriptionConnection(deps.db, key)
-  try {
-    await rebuildLiveCodexUnionAllowlist(deps.db)
-  } catch (err) {
-    log.warn(
-      { event: 'codex_union_rebuild_after_revoke_failed', err },
-      'union allowlist rebuild failed'
-    )
-  }
+  await rebuildLiveCodexUnionAllowlist(deps.db)
   if (secrets?.refreshToken) {
     try {
       const revokePayload: Record<string, string> = {

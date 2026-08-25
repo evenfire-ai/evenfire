@@ -312,11 +312,15 @@ async function consumeSse(
   let completed = false
   let failed = false
   let usage: SafeUsage | undefined
+  const maxSseBufferBytes = 1_048_576
   try {
     while (!signal.aborted) {
       const { done, value } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
+      if (buffer.length > maxSseBufferBytes) {
+        throw new CodexTransportError('sse_buffer_exceeded', 'upstream SSE buffer exceeded')
+      }
       const parts = buffer.split('\n\n')
       buffer = parts.pop() ?? ''
       for (const part of parts) {

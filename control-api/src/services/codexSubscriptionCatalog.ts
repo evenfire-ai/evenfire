@@ -190,7 +190,7 @@ export function pickCodexGrantModel(
   if (trimmed && offered.includes(trimmed)) return trimmed
   const fallback = grantDefault?.trim() ?? ''
   if (fallback && offered.includes(fallback)) return fallback
-  return offered[0] ?? trimmed
+  return offered[0] ?? ''
 }
 
 /** Enabled, non-stale models on a connected grant whose catalog is ready. */
@@ -251,6 +251,17 @@ export async function setCodexCatalogModelEnabled(
     [connectionId, model, enabled]
   )
   if (updated.rowCount === 0) return null
+  if (!enabled) {
+    await db.query(
+      `UPDATE codex_subscription_connections
+          SET default_model = NULL,
+              updated_at = now()
+        WHERE id = $1
+          AND default_model = $2
+          AND revoked_at IS NULL`,
+      [connectionId, model]
+    )
+  }
   await rebuildLiveCodexUnionAllowlist(db)
   return listCodexCatalogModels(db, connectionId)
 }

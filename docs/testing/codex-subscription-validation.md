@@ -37,9 +37,6 @@ cd tests/e2e
 npm test -- --run integration/codex-subscription-contract-freeze.test.ts
 ```
 
-Live upstream (Task 25):
-
-```bash
-KUBECONTEXT="$KUBECONTEXT" CODEX_REAL_UPSTREAM_CONFIRM=1 \
-  bash scripts/e2e/e2e-codex-subscription-real-upstream.sh
-```
+Live upstream is the Playwright connection lane (`codex-subscription-connection.spec.ts`)
+against a signed-in Control UI. There is no standalone
+`e2e-codex-subscription-real-upstream.sh` script.

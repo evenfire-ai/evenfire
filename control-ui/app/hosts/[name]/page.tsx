@@ -39,6 +39,7 @@ import {
   normalizeAllowedModels,
   normalizeLlmPolicy,
   normalizeProvider,
+  offeredCodexModelNames,
   projectCredentialDraft,
   resolveCodexGrantModel,
   resolveDefaultModel,
@@ -144,6 +145,7 @@ export default function HostDetailsPage() {
   const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [grantCatalogError, setGrantCatalogError] = useState('')
   const catalogForEditor = useMemo(() => {
     if (providerDraft !== 'codex-subscription') return allowedCatalog
     const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
@@ -238,8 +240,10 @@ export default function HostDetailsPage() {
         allowedModelsDraft,
         'codex-subscription'
       )
-      const next = resolveCodexGrantModel(modelNameDraft, offered)
-      if (next && next !== modelNameDraft) setModelNameDraft(next)
+      if (offered.length === 0) return
+      const grant = codexConnections.find(row => row.connectionKey === connectionRefDraft)
+      const next = resolveCodexGrantModel(modelNameDraft, offered, grant?.defaultModel)
+      if (next !== modelNameDraft) setModelNameDraft(next)
       return
     }
     if (modelNameDraft === '' && providerModelOptions.length > 0) {
@@ -253,8 +257,11 @@ export default function HostDetailsPage() {
       .then(rows => {
         if (!cancelled) setCodexConnections(rows)
       })
-      .catch(() => {
-        if (!cancelled) setCodexConnections([])
+      .catch(err => {
+        if (!cancelled) {
+          setCodexConnections([])
+          setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+        }
       })
     return () => {
       cancelled = true
@@ -264,16 +271,23 @@ export default function HostDetailsPage() {
   useEffect(() => {
     if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
       setCodexModels([])
+      setGrantCatalogError('')
       return
     }
     let cancelled = false
+    setGrantCatalogError('')
     void listCodexConnectionModels(connectionRefDraft)
       .then(models => {
         if (cancelled) return
-        setCodexModels(models.filter(row => row.enabled && !row.stale).map(row => row.model))
+        setCodexModels(offeredCodexModelNames(models))
       })
-      .catch(() => {
-        if (!cancelled) setCodexModels([])
+      .catch(err => {
+        if (cancelled) return
+        setCodexModels([])
+        setModelNameDraft('')
+        setGrantCatalogError(
+          err instanceof Error ? err.message : 'Could not load ChatGPT grant models'
+        )
       })
     return () => {
       cancelled = true
@@ -481,27 +495,20 @@ export default function HostDetailsPage() {
       setSecretRefDraft('')
       setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
       setCodexModels([])
+      setGrantCatalogError('')
       return
     }
     if (parsed.kind === 'subscription') {
-      const grant = codexConnections.find(row => row.connectionKey === parsed.connectionKey)
       setSecretRefDraft('')
       setConnectionRefDraft(parsed.connectionKey)
       setProviderDraft('codex-subscription')
-      void listCodexConnectionModels(parsed.connectionKey)
-        .then(models => {
-          const offered = models.filter(row => row.enabled && !row.stale).map(row => row.model)
-          setCodexModels(offered)
-          setModelNameDraft(resolveCodexGrantModel(grant?.defaultModel ?? '', offered))
-        })
-        .catch(() => {
-          setCodexModels([])
-        })
+      setModelNameDraft('')
       return
     }
     setSecretRefDraft(parsed.name)
     setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
     setCodexModels([])
+    setGrantCatalogError('')
     if (providerDraft === 'codex-subscription') {
       setProviderDraft('openai')
       setModelNameDraft(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
@@ -587,6 +594,22 @@ export default function HostDetailsPage() {
     if (modelNameProblem) {
       setError(modelNameProblem)
       return false
+    }
+    if (providerDraft === 'codex-subscription') {
+      if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
+        setError('Choose a ChatGPT subscription before saving.')
+        return false
+      }
+      if (grantCatalogError) {
+        setError(grantCatalogError)
+        return false
+      }
+      if (!codexModels.includes(modelNameDraft.trim())) {
+        setError(
+          'This subscription has no offered models yet. Sign in and sync the catalog before assigning agents.'
+        )
+        return false
+      }
     }
     // Client-side mirror of control-api's write gate (spec R5.3): block a save
     // with an out-of-allowlist fallback model before the round-trip. Skip the
@@ -1066,7 +1089,14 @@ export default function HostDetailsPage() {
                           setEditingModel(false)
                         }
                       }}
-                      disabled={busy || Boolean(hostModelNameError(modelNameDraft))}
+                      disabled={
+                        busy ||
+                        Boolean(hostModelNameError(modelNameDraft)) ||
+                        (providerDraft === 'codex-subscription' &&
+                          (connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY ||
+                            Boolean(grantCatalogError) ||
+                            !codexModels.includes(modelNameDraft.trim())))
+                      }
                     >
                       {busy ? 'Saving…' : 'Save'}
                     </button>
@@ -1196,7 +1226,9 @@ export default function HostDetailsPage() {
                           <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
                         </optgroup>
                       ) : null}
-                      {codexConnections.some(row => row.status !== 'revoked') ? (
+                      {codexConnections.some(row => row.status !== 'revoked') ||
+                      (connectionRefDraft &&
+                        connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY) ? (
                         <optgroup label="Subscriptions">
                           {codexConnections
                             .filter(row => row.status !== 'revoked')
@@ -1208,6 +1240,16 @@ export default function HostDetailsPage() {
                                 {row.displayName || row.connectionKey}
                               </option>
                             ))}
+                          {connectionRefDraft &&
+                          connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY &&
+                          !codexConnections.some(
+                            row =>
+                              row.connectionKey === connectionRefDraft && row.status !== 'revoked'
+                          ) ? (
+                            <option value={credentialSelectValue('', connectionRefDraft)}>
+                              {connectionRefDraft} (unavailable)
+                            </option>
+                          ) : null}
                         </optgroup>
                       ) : null}
                     </select>

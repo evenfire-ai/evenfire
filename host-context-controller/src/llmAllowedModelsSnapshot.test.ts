@@ -66,6 +66,19 @@ describe('parseAllowedModelsSnapshot per assigned connection', () => {
     )
   })
 
+  it('drops the union when the reserved grant omits models[]', () => {
+    const cm = multiGrantConfigMap()
+    const parsed = JSON.parse(
+      String(cm.metadata.annotations['clerum.io/codex-connections'])
+    ) as Record<string, { models?: string[] }>
+    delete parsed['deployment-default'].models
+    cm.metadata.annotations['clerum.io/codex-connections'] = JSON.stringify(parsed)
+    const snapshot = parseAllowedModelsSnapshot(cm, 'deployment-default')
+    expect(Array.from(snapshot.enabledModels ?? [])).not.toContain(
+      'codex-subscription:gpt-5.3-codex'
+    )
+  })
+
   it('does not rematch a missing deployment-default onto another grant in the map', () => {
     const cm = multiGrantConfigMap()
     const parsed = JSON.parse(

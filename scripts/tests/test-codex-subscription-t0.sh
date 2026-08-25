@@ -155,6 +155,7 @@ run_group "shared-contract" "packages/llm-provider-attempt-contract" "index.test
 run_group "control-api" "control-api" \
   "test/codexSubscriptionRedirectUri.test.ts" \
   "test/routes.admin.codexSubscription.test.ts" \
+  "test/routes.admin.codexSubscription.hostWrite.test.ts" \
   "test/routes.auth.codexSubscriptionCallback.test.ts" \
   "test/routes.mcp-host.llmProviderAttempts.test.ts" \
   "test/hostSpecValidation.codexSubscription.test.ts" \
@@ -178,25 +179,30 @@ run_group "mcp-host" "mcp-host" \
   "src/llm/__tests__/codexSubscription.test.ts" \
   "src/llm/__tests__/codexLlmProxyClient.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
+  "src/llm/hostLlmBinding.test.ts" \
+  "src/config/configStore.test.ts" \
   "src/llm/failover/__tests__/engine.test.ts" \
   "src/pluginWorkloadSdk/promptBridge/llmBridge.failover.test.ts"
 
 run_group "host-context-controller" "host-context-controller" \
   "src/codexExecutionProjection.test.ts" \
   "src/hostReconciler.codexScopeProvenance.test.ts" \
+  "src/llmAllowedModelsSnapshot.test.ts" \
   "src/networkPolicyReconciler.test.ts"
 
 run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/codexExecutionProjection.test.ts" \
   "src/workflow/workflowReconciler.codexScopeProvenance.test.ts" \
+  "src/workflow/llmAllowedModelsSnapshot.test.ts" \
   "src/workflow/networkPolicyFactory.codex.test.ts"
 
 run_group "control-ui" "control-ui" \
-  "components/__tests__/CodexAgentAssignment.test.tsx" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \
   "components/__tests__/LlmProviderConfig.test.tsx" \
   "lib/__tests__/llm.codexGrantModel.test.ts" \
+  "lib/__tests__/llmCredentialSelect.test.ts" \
   "components/__tests__/HostWizard.test.tsx" \
+  "components/__tests__/HostDetailsPage.identity.test.tsx" \
   "components/__tests__/RecipeEditor.test.tsx"
 
 node_major=$(node --version | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')

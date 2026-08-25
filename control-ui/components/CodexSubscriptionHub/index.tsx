@@ -60,7 +60,13 @@ export function CodexSubscriptionHub() {
   const enabled = isCodexSubscriptionUiEnabled(capability)
 
   useEffect(() => {
-    void loadCodexSubscriptionCapability().then(setCapability)
+    void loadCodexSubscriptionCapability()
+      .then(setCapability)
+      .catch(err => {
+        setCapability({ enabled: false, error: err instanceof Error ? err.message : 'unavailable' })
+        setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
+        setLoading(false)
+      })
   }, [])
 
   const load = useCallback(async () => {
@@ -125,8 +131,9 @@ export function CodexSubscriptionHub() {
       try {
         const models = await listCodexConnectionModels(row.connectionKey)
         setEditModels(models)
-      } catch {
+      } catch (err) {
         setEditModels([])
+        setError(err instanceof Error ? err.message : 'Could not load grant models')
       }
     } else {
       setEditModels([])
@@ -187,11 +194,13 @@ export function CodexSubscriptionHub() {
         if (polled.status === 'expired' || polled.status === 'denied') {
           setUserCode(null)
           setVerificationUri(null)
-          break
+          setError(`ChatGPT sign-in ${polled.status}. Try again.`)
+          return
         }
       }
       setUserCode(null)
       setVerificationUri(null)
+      setError('ChatGPT sign-in timed out. Try again.')
     } catch (err) {
       setUserCode(null)
       setVerificationUri(null)
@@ -205,7 +214,11 @@ export function CodexSubscriptionHub() {
     if (row.status !== 'connected') return
     setBusyKey(row.connectionKey)
     try {
-      await syncCodexSubscriptionCatalog(row.connectionKey)
+      const synced = await syncCodexSubscriptionCatalog(row.connectionKey)
+      if (synced.outcome !== 'ready') {
+        setError(`Catalog sync ${synced.outcome}`)
+        return
+      }
       const models = await listCodexConnectionModels(row.connectionKey)
       setEditModels(models)
       await load()
@@ -274,7 +287,9 @@ export function CodexSubscriptionHub() {
           <SecretsScopeTabs activeValue="llm" />
           <LlmSecretsSubTabs activeValue="subscriptions" />
         </div>
-        <div className="cu-empty">ChatGPT subscriptions are disabled.</div>
+        <div className="cu-empty">
+          {capability.error || error || 'ChatGPT subscriptions are disabled.'}
+        </div>
       </div>
     )
   }
@@ -302,7 +317,13 @@ export function CodexSubscriptionHub() {
               <button
                 type="button"
                 className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void load()}
+                onClick={() =>
+                  void load().catch(err => {
+                    setError(
+                      err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions'
+                    )
+                  })
+                }
                 disabled={initialLoad || loading}
                 aria-label={loading ? 'Refreshing...' : 'Reload ChatGPT subscriptions'}
               >
@@ -329,7 +350,7 @@ export function CodexSubscriptionHub() {
           <LlmSecretsSubTabs activeValue="subscriptions" />
         </div>
 
-        {error ? (
+        {error && !creating && !editing ? (
           <div className="cu-card__body cu-card__body--auto cu-secrets-message-strip">
             <div className="cu-banner cu-banner--error">{error}</div>
           </div>
@@ -423,16 +444,7 @@ export function CodexSubscriptionHub() {
 
       {creating ? (
         <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
+          className="cu-modal-overlay"
           role="presentation"
           onClick={e => {
             if (e.target === e.currentTarget && busyKey !== 'create') {
@@ -443,6 +455,7 @@ export function CodexSubscriptionHub() {
           <div
             className="cu-modal-panel"
             role="dialog"
+            aria-modal="true"
             aria-labelledby="codex-create-title"
             onClick={e => e.stopPropagation()}
           >
@@ -461,6 +474,7 @@ export function CodexSubscriptionHub() {
               </button>
             </div>
             <div className="cu-form-stack">
+              {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
               <div className="cu-field">
                 <label htmlFor="codex-new-name">Name</label>
                 <input
@@ -495,16 +509,7 @@ export function CodexSubscriptionHub() {
 
       {editing ? (
         <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
+          className="cu-modal-overlay"
           role="presentation"
           onClick={e => {
             if (e.target === e.currentTarget && !busyKey) closeEdit()
@@ -513,6 +518,7 @@ export function CodexSubscriptionHub() {
           <div
             className="cu-modal-panel"
             role="dialog"
+            aria-modal="true"
             aria-labelledby="codex-edit-title"
             onClick={e => e.stopPropagation()}
           >
@@ -531,6 +537,7 @@ export function CodexSubscriptionHub() {
               </button>
             </div>
             <div className="cu-form-stack" style={{ maxWidth: '100%' }}>
+              {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
               <div className="cu-field">
                 <label htmlFor="codex-edit-name">Name</label>
                 <input

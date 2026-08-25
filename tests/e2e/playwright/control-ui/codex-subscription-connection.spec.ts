@@ -162,15 +162,15 @@ test.describe('Codex subscription connection', () => {
     const grantKey = connected!.connectionKey
     const displayName = connected!.displayName || grantKey
 
-    await hub.openGrant(displayName)
     const modelsGet = page.waitForResponse(
       response =>
         new RegExp(
           `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/models$`
         ).test(new URL(response.url()).pathname) && response.request().method() === 'GET'
     )
+    await hub.openGrant(displayName)
     await modelsGet
-    const firstToggle = page.locator('dialog input[type="checkbox"]').first()
+    const firstToggle = page.getByRole('dialog').locator('input[type="checkbox"]').first()
     await expect(firstToggle, 'grant modal must list catalog models').toBeVisible()
     const modelName = (
       (await firstToggle.evaluate(node => node.closest('label')?.textContent)) ?? ''
@@ -207,13 +207,13 @@ test.describe('Codex subscription connection', () => {
       true
     )
 
-    await hub.openGrant(displayName)
     const reopened = page.waitForResponse(
       response =>
         new RegExp(
           `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/models$`
         ).test(new URL(response.url()).pathname) && response.request().method() === 'GET'
     )
+    await hub.openGrant(displayName)
     const modelsRes = await reopened
     const modelsBody = (await modelsRes.json()) as {
       models?: Array<{ model?: string; enabled?: boolean }>

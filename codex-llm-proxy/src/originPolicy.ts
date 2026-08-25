@@ -116,7 +116,8 @@ export function isBlockedAddress(address: string): boolean {
   if (a === 172 && b >= 16 && b <= 31) return true
   if (a === 192 && b === 168) return true
   if (a === 192 && b === 0) return true
-  if (a === 198 && (b === 51 || b === 18)) return true
+  if (a === 100 && b >= 64 && b <= 127) return true
+  if (a === 198 && (b === 18 || b === 19 || b === 51)) return true
   if (a === 203 && b === 113) return true
   if (a >= 224) return true
   return false
@@ -130,6 +131,8 @@ function isBlockedV6(address: string): boolean {
     normalized.startsWith('fc') ||
     normalized.startsWith('fd') ||
     normalized.startsWith('fe80') ||
+    normalized.startsWith('ff') ||
+    normalized.startsWith('64:ff9b:') ||
     normalized.startsWith('::ffff:')
   )
 }

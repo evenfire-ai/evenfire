@@ -254,15 +254,11 @@ export function LlmProviderConfig({
                 const nextProviderValue = next[0]
                 if (!nextProviderValue) return
                 const nextProvider = normalizeProvider(nextProviderValue)
-                const resolved =
-                  nextProvider === 'openai' && provider === OPENAI_SUBSCRIPTION_PROVIDER
-                    ? OPENAI_SUBSCRIPTION_PROVIDER
-                    : nextProvider
                 onPrimaryChange({
-                  provider: resolved,
+                  provider: nextProvider,
                   model: resolveDefaultModel(
-                    resolved,
-                    constrainModelOptions(catalog, allowedModels, resolved)
+                    nextProvider,
+                    constrainModelOptions(catalog, allowedModels, nextProvider)
                   ),
                 })
               }}

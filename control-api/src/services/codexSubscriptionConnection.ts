@@ -663,6 +663,7 @@ export async function updateCodexSubscriptionConnectionMetadata(
     `UPDATE codex_subscription_connections
         SET ${sets.join(', ')}
       WHERE connection_key = $${values.length}
+        AND revoked_at IS NULL
       RETURNING ${SAFE_CONNECTION_COLUMNS}`,
     values
   )

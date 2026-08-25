@@ -21,7 +21,7 @@ describe('pickCodexGrantModel', () => {
   })
 
   it('does not invent a model when the grant list is empty', () => {
-    expect(pickCodexGrantModel('gpt-5.4-mini', [])).toBe('gpt-5.4-mini')
+    expect(pickCodexGrantModel('gpt-5.4-mini', [])).toBe('')
     expect(pickCodexGrantModel('', [])).toBe('')
   })
 

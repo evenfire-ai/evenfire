@@ -25,6 +25,8 @@ export function verifyPlatformJwt(
     if (!Array.isArray(claims.hostRefs) || !Array.isArray(claims.workflowControlScopes)) {
       return null
     }
+    if (typeof claims.exp !== 'number') return null
+    if (claims.hostRefs.some(ref => String(ref) === '*')) return null
     if (!claims.workflowControlScopes.includes('llm:codex:execute')) return null
     return {
       sub: String(claims.sub),

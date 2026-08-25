@@ -545,17 +545,26 @@ export function hostModelNameError(name: string): string | null {
 }
 
 /**
- * ChatGPT grants still need a concrete spec.model.name. Keep the draft only
- * when it is already in the offered grant list (or the list is empty, so a
- * named draft can save before catalog sync). Otherwise seed the first offered
- * model — never resolveDefaultModel, which is always '' for oauth-broker.
+ * ChatGPT grants still need a concrete spec.model.name. Same policy as
+ * control-api pickCodexGrantModel: current if offered, else grant default if
+ * offered, else first offered. An empty catalog invents nothing.
  */
-export function resolveCodexGrantModel(current: string, grantModels: string[]): string {
+export function resolveCodexGrantModel(
+  current: string,
+  grantModels: string[],
+  grantDefault?: string | null
+): string {
   const trimmed = current.trim()
-  if (trimmed && (grantModels.length === 0 || grantModels.includes(trimmed))) {
-    return trimmed
-  }
-  return grantModels[0] ?? trimmed
+  if (trimmed && grantModels.includes(trimmed)) return trimmed
+  const fallback = grantDefault?.trim() ?? ''
+  if (fallback && grantModels.includes(fallback)) return fallback
+  return grantModels[0] ?? ''
+}
+
+export function offeredCodexModelNames(
+  rows: Array<{ model: string; enabled: boolean; stale: boolean }>
+): string[] {
+  return rows.filter(row => row.enabled && !row.stale).map(row => row.model)
 }
 
 // ── Per-host model allowlist subset (spec Topic 3a) ───────────────────────

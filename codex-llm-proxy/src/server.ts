@@ -134,7 +134,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       reject(res, 403, 'ticket_invalid')
       return
     }
-    if (!platform.hostRefs.includes('*') && !platform.hostRefs.includes(ticket.hostRef)) {
+    if (platform.hostRefs.includes('*') || !platform.hostRefs.includes(ticket.hostRef)) {
       reject(res, 403, 'host_binding_mismatch')
       return
     }
@@ -212,7 +212,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       reject(res, 403, 'insufficient_scope')
       return
     }
-    if (!verifyAdminPermit(bearer(req), config)) {
+    if (!verifyAdminPermit(bearer(req), config, kind === 'models' ? 'catalog_list' : 'connection_test')) {
       reject(res, 401, 'Unauthorized')
       return
     }

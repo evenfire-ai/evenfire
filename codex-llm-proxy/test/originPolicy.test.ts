@@ -6,6 +6,7 @@ import {
   assertAllowedUpstreamUrl,
   assertRedirectLocation,
   fetchFrozenOrigin,
+  isBlockedAddress,
 } from '../src/originPolicy.js'
 
 const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
@@ -29,6 +30,11 @@ describe('originPolicy', () => {
       OriginDeniedError
     )
     expect(() => assertAllowedUpstreamUrl('https://169.254.169.254/', 'catalog')).toThrow(OriginDeniedError)
+    expect(isBlockedAddress('100.64.0.1')).toBe(true)
+    expect(isBlockedAddress('198.18.0.1')).toBe(true)
+    expect(isBlockedAddress('198.19.255.1')).toBe(true)
+    expect(isBlockedAddress('64:ff9b::1')).toBe(true)
+    expect(isBlockedAddress('ff02::1')).toBe(true)
     expect(() => assertAllowedUpstreamUrl('https://chatgpt.com/backend-api/codex/responses?hijack=1', 'completions')).toThrow(
       OriginDeniedError
     )

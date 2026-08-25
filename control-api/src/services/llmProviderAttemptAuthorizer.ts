@@ -13,10 +13,10 @@ import { evaluateBudgetCheck } from './budgets/check.js'
 import { getActiveReservation } from './budgets/reservations.js'
 import { getCodexCatalogModelState } from './codexSubscriptionCatalog.js'
 import {
-  CODEX_SUBSCRIPTION_CONNECTION_KEY,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   getSafeCodexSubscriptionConnection,
   isCodexUnassignedConnectionKey,
-  normalizeCodexConnectionKey,
+  readHostCodexConnectionRef,
 } from './codexSubscriptionConnection.js'
 import {
   getMaxLlmProviderAttemptGeneration,
@@ -95,7 +95,7 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
   withTransaction,
   getConnection: getSafeCodexSubscriptionConnection,
   getModelState: getCodexCatalogModelState,
-  resolveConnectionKey: async () => CODEX_SUBSCRIPTION_CONNECTION_KEY,
+  resolveConnectionKey: async () => CODEX_UNASSIGNED_CONNECTION_KEY,
   evaluateBudget: evaluateBudgetCheck,
   getActiveReservation,
   getMaxGeneration: getMaxLlmProviderAttemptGeneration,
@@ -245,7 +245,7 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
-  const connectionKey = normalizeCodexConnectionKey(
+  const connectionKey = readHostCodexConnectionRef(
     await resolvedDeps.resolveConnectionKey(caller.hostRef)
   )
   if (isCodexUnassignedConnectionKey(connectionKey)) {

@@ -4,7 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
-import { listCodexSubscriptionConnections } from '../../lib/codexSubscription'
+import {
+  listCodexConnectionModels,
+  listCodexSubscriptionConnections,
+} from '../../lib/codexSubscription'
 import { ToastProvider } from '../Toast'
 
 const replaceMock = vi.fn()
@@ -177,6 +180,9 @@ describe('HostDetailsPage identity integration', () => {
         refreshLockHeld: false,
         defaultModel: 'gpt-5.1',
       },
+    ])
+    vi.mocked(listCodexConnectionModels).mockResolvedValue([
+      { model: 'gpt-5.1', enabled: true, stale: false },
     ])
     const codexHost = {
       ...host,
@@ -445,23 +451,17 @@ describe('HostDetailsPage identity integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     expect(screen.getByLabelText('Credential')).toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-
-    await waitFor(() =>
-      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'PUT',
+      '/api/v1/admin/hosts/foo',
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          model: expect.objectContaining({ connectionRef: 'unassigned' }),
+        }),
+      })
     )
-    const putCall = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
-      c => c[0] === 'PUT' && c[1] === '/api/v1/admin/hosts/foo'
-    )
-    const payload = putCall![2]
-    expect(payload.spec.model).toEqual({
-      provider: 'codex-subscription',
-      name: 'gpt-5.1',
-      connectionRef: 'unassigned',
-    })
-    expect(payload.spec.secretRef).toBeUndefined()
-    expect(payload.spec.hostRef).toBeUndefined()
-    expect(payload.spec.userId).toBeUndefined()
-    expect(payload.metadata?.name).toBeUndefined()
+    expect(screen.queryByText('OpenAI Codex Subscription')).not.toBeInTheDocument()
   })
 })

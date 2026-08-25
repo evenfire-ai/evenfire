@@ -39,6 +39,7 @@ import {
   getProvidersWithCompleteCredentials,
   isProviderUsable,
   llmChainRequiresSecret,
+  offeredCodexModelNames,
   projectCredentialDraft,
   resolveCodexGrantModel,
   resolveDefaultModel,
@@ -261,6 +262,7 @@ function isStepValid(
     provider: LlmProvider
     modelName: string
     connectionRef?: string
+    codexModels?: string[]
     selectedUserIds: string[]
     selectedTeamIds: string[]
     directoryLoadFailed: boolean
@@ -280,7 +282,8 @@ function isStepValid(
     if (
       state.provider === 'codex-subscription' &&
       (!state.connectionRef?.trim() ||
-        state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY)
+        state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY ||
+        !state.codexModels?.includes(state.modelName.trim()))
     ) {
       return false
     }
@@ -463,18 +466,9 @@ export function HostWizard({
       setExistingSecret(secretName)
       const parsed = parseCredentialSelect(secretName)
       if (parsed.kind === 'subscription') {
-        const grant = codexConnections.find(row => row.connectionKey === parsed.connectionKey)
         setConnectionRef(parsed.connectionKey)
         setProvider('codex-subscription')
-        void listCodexConnectionModels(parsed.connectionKey)
-          .then(models => {
-            const offered = models.filter(row => row.enabled && !row.stale).map(row => row.model)
-            setCodexModels(offered)
-            setModelName(resolveCodexGrantModel(grant?.defaultModel ?? '', offered))
-          })
-          .catch(() => {
-            setCodexModels([])
-          })
+        setModelName('')
         return
       }
       setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
@@ -505,13 +499,37 @@ export function HostWizard({
       .then(rows => {
         if (!cancelled) setCodexConnections(rows)
       })
-      .catch(() => {
-        if (!cancelled) setCodexConnections([])
+      .catch(err => {
+        if (!cancelled) {
+          setCodexConnections([])
+          setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+        }
       })
     return () => {
       cancelled = true
     }
   }, [])
+  useEffect(() => {
+    if (!connectionRef.trim() || connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
+      setCodexModels([])
+      return
+    }
+    let cancelled = false
+    void listCodexConnectionModels(connectionRef)
+      .then(models => {
+        if (!cancelled) setCodexModels(offeredCodexModelNames(models))
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCodexModels([])
+          setModelName('')
+          setError('Could not load ChatGPT grant models')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [connectionRef])
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
   // switch left the model out of range.
@@ -519,7 +537,9 @@ export function HostWizard({
     if (modelsLoading) return
     if (provider === 'codex-subscription') {
       const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
-      const next = resolveCodexGrantModel(modelName, offered)
+      if (offered.length === 0) return
+      const grant = codexConnections.find(row => row.connectionKey === connectionRef)
+      const next = resolveCodexGrantModel(modelName, offered, grant?.defaultModel)
       if (next !== modelName) setModelName(next)
       return
     }
@@ -586,6 +606,7 @@ export function HostWizard({
       provider,
       modelName,
       connectionRef,
+      codexModels,
       selectedUserIds,
       selectedTeamIds,
       directoryLoadFailed: directoryLoadError.length > 0,
@@ -606,6 +627,7 @@ export function HostWizard({
     provider,
     modelName,
     connectionRef,
+    codexModels,
     selectedUserIds,
     selectedTeamIds,
     directoryLoadError,
@@ -681,6 +703,7 @@ export function HostWizard({
             provider,
             modelName,
             connectionRef,
+            codexModels,
             selectedUserIds,
             selectedTeamIds,
             directoryLoadFailed: directoryLoadError.length > 0,
@@ -1224,6 +1247,9 @@ export function HostWizard({
                 if (next.provider !== 'codex-subscription') {
                   setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
                   setCodexModels([])
+                  if (parseCredentialSelect(existingSecret).kind === 'subscription') {
+                    setExistingSecret('')
+                  }
                 }
               }}
               policy={llmPolicy}

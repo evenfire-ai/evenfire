@@ -23,8 +23,8 @@ describe('resolveCodexGrantModel', () => {
     )
   })
 
-  it('keeps a named draft when the grant catalog is empty so Save is not an empty-name 422', () => {
-    expect(resolveCodexGrantModel('gpt-5.4-mini', [])).toBe('gpt-5.4-mini')
+  it('invents nothing when the grant catalog is empty', () => {
+    expect(resolveCodexGrantModel('gpt-5.4-mini', [])).toBe('')
     expect(resolveCodexGrantModel('', [])).toBe('')
   })
 })

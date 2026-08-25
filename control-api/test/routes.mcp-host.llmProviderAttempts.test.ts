@@ -171,13 +171,13 @@ describe('resolveHostAssignedConnectionKey', () => {
     )
   })
 
-  it('aliases a recipe caller to deployment-default without a Host GET', async () => {
+  it('aliases a recipe caller to unassigned without a Host GET', async () => {
     const gateway = {
       getResource: vi.fn(),
     }
     await expect(
       resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
-    ).resolves.toBe('deployment-default')
+    ).resolves.toBe('unassigned')
     expect(gateway.getResource).not.toHaveBeenCalled()
   })
 

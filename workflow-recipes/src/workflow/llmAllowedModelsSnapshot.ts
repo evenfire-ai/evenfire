@@ -29,10 +29,10 @@ function intersectCodexModels(
   enabledModels: Set<string>,
   staleModels: Set<string>,
   models: string[] | undefined,
-  connectionKey: string
+  _connectionKey: string
 ): void {
   if (!Array.isArray(models)) {
-    if (connectionKey !== 'deployment-default') dropCodexModels(enabledModels, staleModels)
+    dropCodexModels(enabledModels, staleModels)
     return
   }
   const allowed = new Set(models.filter(model => typeof model === 'string' && model.trim()))
@@ -57,7 +57,7 @@ function parseOptionalIntegerAnnotation(
 
 export function parseAllowedModelsSnapshot(
   cm: V1ConfigMap | undefined,
-  connectionKey = 'deployment-default'
+  connectionKey = 'unassigned'
 ): CodexCatalogSnapshot {
   if (!cm) return snapshotFromConfigMapError('missing')
   const annotations = cm.metadata?.annotations ?? {}

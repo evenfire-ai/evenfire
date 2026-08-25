@@ -64,7 +64,10 @@ function ticket(): string {
 }
 
 function adminPermit(): string {
-  return sign({ sub: 'admin-1', typ: 'codex-admin-permit' }, 'codex-llm-proxy-admin')
+  return sign(
+    { sub: 'admin-1', typ: 'codex-admin-permit', operation: 'catalog_list' },
+    'codex-llm-proxy-admin'
+  )
 }
 
 describe('codex-llm-proxy security surface', () => {
@@ -161,6 +164,40 @@ describe('codex-llm-proxy security surface', () => {
       })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('host_binding_mismatch')
+  })
+
+  it('rejects a platform JWT whose hostRefs is a wildcard', async () => {
+    const { runtimeApp } = createProxyApps(config())
+    const wildcard = sign(
+      {
+        sub: 'default/research-host',
+        hostRefs: ['*'],
+        workflowControlScopes: ['llm:codex:execute'],
+      },
+      'workflow-approvals'
+    )
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${wildcard}`)
+      .send({
+        executionTicket: ticket(),
+        requestHash: 'a'.repeat(64),
+        request: {},
+      })
+    expect(res.status).toBe(401)
+  })
+
+  it('rejects an admin permit whose operation does not match the route', async () => {
+    const { adminApp } = createProxyApps(config())
+    const wrong = sign(
+      { sub: 'admin-1', typ: 'codex-admin-permit', operation: 'connection_test' },
+      'codex-llm-proxy-admin'
+    )
+    const res = await request(adminApp)
+      .post('/internal/admin/v1/codex/models')
+      .set('Authorization', `Bearer ${wrong}`)
+      .send({ accessToken: 'tok' })
+    expect(res.status).toBe(401)
   })
 
   it('rejects missing, zero, and unbounded config', () => {

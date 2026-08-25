@@ -30,7 +30,7 @@
  * backoff; on "too old" the watch falls back to a fresh list and resumes.
  */
 import * as k8s from '@kubernetes/client-node'
-import { assignedConnectionRef } from '../llm/hostLlmBinding'
+import { CODEX_UNASSIGNED_CONNECTION_KEY, assignedConnectionRef } from '../llm/hostLlmBinding'
 import {
   ALL_PROVIDERS,
   ALL_PROVIDER_SLOT_ENV_NAMES,
@@ -627,13 +627,14 @@ export class ConfigStore {
           entry.contextWindowTokens = rec.contextWindowTokens as number
         }
         if (typeof rec.vendor === 'string') entry.vendor = rec.vendor
+        if (rec.stale === true) continue
         entries.push(entry)
       }
       if (provider === 'codex-subscription') {
         if (Array.isArray(binding?.models)) {
           const allowed = new Set(binding.models)
           entries = entries.filter(entry => allowed.has(entry.model))
-        } else if (!binding || binding.connectionKey !== 'deployment-default') {
+        } else {
           entries = []
         }
       }
@@ -933,9 +934,9 @@ function parseOptionalIntegerAnnotation(
 
 function parseCodexPolicyBinding(
   annotations: Record<string, string> | undefined,
-  connectionKey = 'deployment-default'
+  connectionKey = CODEX_UNASSIGNED_CONNECTION_KEY
 ): CodexPolicyBinding | null {
-  if (!annotations) return null
+  if (!annotations || connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY) return null
   let catalogRevision = parseOptionalIntegerAnnotation(annotations, CATALOG_REVISION_ANNOTATION)
   let credentialRevision = parseOptionalIntegerAnnotation(
     annotations,

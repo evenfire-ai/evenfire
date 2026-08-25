@@ -5,7 +5,7 @@ import type { K8sGateway } from '../../k8s.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
-  CODEX_SUBSCRIPTION_CONNECTION_KEY,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
@@ -47,7 +47,7 @@ export async function resolveHostAssignedConnectionKey(
   hostRef: string
 ): Promise<string> {
   if (hostRef.includes('/')) {
-    return CODEX_SUBSCRIPTION_CONNECTION_KEY
+    return CODEX_UNASSIGNED_CONNECTION_KEY
   }
   try {
     const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace)) as {
