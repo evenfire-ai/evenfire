@@ -475,7 +475,20 @@ try {
   if (mode === 'positive') {
     const result = await manager.callTool(`${allowedServer}__echo`, { text: 'np08-deployed' })
     if (!JSON.stringify(result).includes('Echo: np08-deployed')) {
-      throw new Error('same-Context manager call returned an unexpected result')
+      const errorText = typeof result?.result?.error === 'string' ? result.result.error : ''
+      const safeError = errorText
+        .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+        .replace(/https?:\/\/\S+/gi, '[url]')
+        .replace(/[A-Za-z0-9_-]{20,}/g, '[opaque]')
+        .slice(0, 160)
+      throw new Error(
+        'same-Context manager call returned an unexpected result: ' +
+          JSON.stringify({
+            isError: result?.isError === true,
+            hasErrorText: Boolean(errorText),
+            error: safeError,
+          })
+      )
     }
     console.log(`PASS deployed manager/SDK same-Context call for ${allowedServer}`)
   } else if (mode === 'positive-rotate') {
