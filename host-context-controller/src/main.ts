@@ -21,7 +21,11 @@ import {
 } from './k8sClient'
 import { McpApiAuthenticator } from './mcpApiAuthentication'
 import { McpAuthorizationService } from './mcpAuthorization'
-import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
+import {
+  resolveHostAuthoritativeFn,
+  resolveProviderAuthoritativeFn,
+  resolveReadinessDetailFn,
+} from './readinessGate'
 import { ContextMapperServer } from './server'
 import { StatelessLifecycleTracker } from './statelessLifecycleTracker'
 import {
@@ -145,6 +149,7 @@ async function main(): Promise<void> {
   // server's fail-closed default would pin /api/v1/desktop/* at 503 forever in
   // dev (R2-M1). See resolveHostAuthoritativeFn.
   const hostAuthoritativeFn = resolveHostAuthoritativeFn(watcher)
+  const readinessDetailFn = resolveReadinessDetailFn(watcher)
 
   // Stateless heartbeat consumption — mcp-host pods authenticate their
   // heartbeats toward control-api's /mcp-host facade (control-api is the
@@ -186,7 +191,8 @@ async function main(): Promise<void> {
     providerAuthoritativeFn,
     hostAuthoritativeFn,
     mcpAuthenticator,
-    mcpAuthorization
+    mcpAuthorization,
+    readinessDetailFn
   )
   await server.start()
 

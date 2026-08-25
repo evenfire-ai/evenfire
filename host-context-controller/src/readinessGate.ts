@@ -1,3 +1,46 @@
+/** Closed-gate booleans for /ready 503 `reasons`. No CR names, counts, or secrets. */
+export type ReadinessInventoryDetail = {
+  stopped: boolean
+  mcpServerCacheSynced: boolean
+  contextCacheSynced: boolean
+  hostCacheSynced: boolean
+  safetyInventoryCertified: boolean
+  contextRevisionAligned: boolean
+  serverRevisionAligned: boolean
+}
+
+export type ReadinessReason =
+  | 'mcp_watch_unsynced'
+  | 'context_watch_unsynced'
+  | 'host_watch_unsynced'
+  | 'safety_pass_uncertified'
+  | 'revocation_revision_mismatch'
+
+export function readinessReasonsFromDetail(detail: ReadinessInventoryDetail): ReadinessReason[] {
+  const reasons: ReadinessReason[] = []
+  if (!detail.mcpServerCacheSynced) reasons.push('mcp_watch_unsynced')
+  if (!detail.contextCacheSynced) reasons.push('context_watch_unsynced')
+  if (!detail.hostCacheSynced) reasons.push('host_watch_unsynced')
+  if (!detail.safetyInventoryCertified) reasons.push('safety_pass_uncertified')
+  if (!detail.contextRevisionAligned || !detail.serverRevisionAligned) {
+    reasons.push('revocation_revision_mismatch')
+  }
+  return reasons
+}
+
+/**
+ * Resolve per-clause readiness detail for structured /ready 503 bodies.
+ *
+ * Production (McpServerWatcher present): expose the live inventory booleans.
+ * Dev (no watcher): omit the detail fn so 503 bodies stay `{status, ready}`
+ * and do not invent watch/safety clauses that do not exist.
+ */
+export function resolveReadinessDetailFn(
+  watcher: { getReadinessInventoryDetail(): ReadinessInventoryDetail } | null
+): (() => ReadinessInventoryDetail) | undefined {
+  return watcher ? () => watcher.getReadinessInventoryDetail() : undefined
+}
+
 /**
  * Resolve the readiness-authority gate for the server from the provider.
  *

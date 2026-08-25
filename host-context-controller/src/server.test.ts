@@ -11,7 +11,11 @@ import {
   McpAuthorizationService,
   type McpAuthorizationStore,
 } from './mcpAuthorization'
-import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
+import {
+  type ReadinessInventoryDetail,
+  resolveHostAuthoritativeFn,
+  resolveProviderAuthoritativeFn,
+} from './readinessGate'
 import { ContextMapperServer, McpHostApiRateLimiter } from './server'
 import type { McpServerInfo } from './types'
 
@@ -634,5 +638,89 @@ describe('ContextMapperServer desktop status authority', () => {
       error: 'Service Unavailable',
       message: 'Host inventory is not authoritative',
     })
+  })
+})
+
+describe('ContextMapperServer /ready reasons', () => {
+  let server: ContextMapperServer | null = null
+
+  const authoritativeDetail = (): ReadinessInventoryDetail => ({
+    stopped: false,
+    mcpServerCacheSynced: true,
+    contextCacheSynced: true,
+    hostCacheSynced: true,
+    safetyInventoryCertified: true,
+    contextRevisionAligned: true,
+    serverRevisionAligned: true,
+  })
+
+  afterEach(async () => {
+    await server?.stop()
+    server = null
+    vi.restoreAllMocks()
+  })
+
+  it('adds closed-gate reasons on 503 and keeps the 200 body unchanged', async () => {
+    let detail = authoritativeDetail()
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      () =>
+        detail.mcpServerCacheSynced &&
+        detail.contextCacheSynced &&
+        detail.hostCacheSynced &&
+        detail.safetyInventoryCertified &&
+        detail.contextRevisionAligned &&
+        detail.serverRevisionAligned,
+      () => false,
+      undefined,
+      undefined,
+      () => detail
+    )
+    server.setReady(true)
+
+    let response = await invoke(server, '/ready')
+    expect(response.statusCode).toBe(200)
+    expect(JSON.parse(response.body)).toEqual({ status: 'ready', ready: true })
+    expect(JSON.parse(response.body)).not.toHaveProperty('reasons')
+
+    detail = { ...detail, mcpServerCacheSynced: false, safetyInventoryCertified: false }
+    response = await invoke(server, '/ready')
+    expect(response.statusCode).toBe(503)
+    expect(JSON.parse(response.body)).toEqual({
+      status: 'degraded',
+      ready: false,
+      reasons: ['mcp_watch_unsynced', 'safety_pass_uncertified'],
+    })
+  })
+
+  it('omits reasons when the detail fn is missing or throws', async () => {
+    server = new ContextMapperServer(new FakeProvider(), 0, undefined, undefined, () => false)
+    server.setReady(true)
+    let response = await invoke(server, '/ready')
+    expect(response.statusCode).toBe(503)
+    expect(JSON.parse(response.body)).toEqual({ status: 'degraded', ready: false })
+
+    await server.stop()
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      () => false,
+      () => false,
+      undefined,
+      undefined,
+      () => {
+        throw new Error('detail unavailable')
+      }
+    )
+    server.setReady(true)
+    response = await invoke(server, '/ready')
+    expect(response.statusCode).toBe(503)
+    expect(JSON.parse(response.body)).toEqual({ status: 'degraded', ready: false })
+    expect(JSON.parse(response.body)).not.toHaveProperty('reasons')
   })
 })

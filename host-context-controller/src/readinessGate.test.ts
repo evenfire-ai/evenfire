@@ -1,5 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
+import {
+  type ReadinessInventoryDetail,
+  readinessReasonsFromDetail,
+  resolveHostAuthoritativeFn,
+  resolveProviderAuthoritativeFn,
+  resolveReadinessDetailFn,
+} from './readinessGate'
+
+function authoritativeDetail(
+  overrides: Partial<ReadinessInventoryDetail> = {}
+): ReadinessInventoryDetail {
+  return {
+    stopped: false,
+    mcpServerCacheSynced: true,
+    contextCacheSynced: true,
+    hostCacheSynced: true,
+    safetyInventoryCertified: true,
+    contextRevisionAligned: true,
+    serverRevisionAligned: true,
+    ...overrides,
+  }
+}
 
 describe('resolveProviderAuthoritativeFn (dev-mode readiness gate — B1)', () => {
   it('dev provider (no watcher) is unconditionally authoritative', () => {
@@ -49,5 +70,44 @@ describe('resolveHostAuthoritativeFn (dev-mode desktop gate — R2-M1)', () => {
     expect(asked).toBe(true)
     watcher.isHostInventoryAuthoritative = () => true
     expect(resolveHostAuthoritativeFn(watcher)()).toBe(true)
+  })
+})
+
+describe('resolveReadinessDetailFn', () => {
+  it('omits detail when there is no watcher', () => {
+    expect(resolveReadinessDetailFn(null)).toBeUndefined()
+  })
+
+  it('delegates to the watcher inventory detail', () => {
+    const detail = authoritativeDetail({ mcpServerCacheSynced: false })
+    const watcher = { getReadinessInventoryDetail: () => detail }
+    expect(resolveReadinessDetailFn(watcher)?.()).toEqual(detail)
+  })
+})
+
+describe('readinessReasonsFromDetail', () => {
+  it('returns no reasons when every inventory clause is true', () => {
+    expect(readinessReasonsFromDetail(authoritativeDetail())).toEqual([])
+  })
+
+  it('maps each false clause to a closed reason key', () => {
+    expect(
+      readinessReasonsFromDetail(authoritativeDetail({ mcpServerCacheSynced: false }))
+    ).toEqual(['mcp_watch_unsynced'])
+    expect(readinessReasonsFromDetail(authoritativeDetail({ contextCacheSynced: false }))).toEqual([
+      'context_watch_unsynced',
+    ])
+    expect(readinessReasonsFromDetail(authoritativeDetail({ hostCacheSynced: false }))).toEqual([
+      'host_watch_unsynced',
+    ])
+    expect(
+      readinessReasonsFromDetail(authoritativeDetail({ safetyInventoryCertified: false }))
+    ).toEqual(['safety_pass_uncertified'])
+    expect(
+      readinessReasonsFromDetail(authoritativeDetail({ contextRevisionAligned: false }))
+    ).toEqual(['revocation_revision_mismatch'])
+    expect(
+      readinessReasonsFromDetail(authoritativeDetail({ serverRevisionAligned: false }))
+    ).toEqual(['revocation_revision_mismatch'])
   })
 })

@@ -17,7 +17,14 @@ import {
   toPublicMcpTransport,
 } from './mcpAuthorization'
 import { mcpHostApiRequestsTotal, registry } from './metrics'
+import {
+  type ReadinessInventoryDetail,
+  type ReadinessReason,
+  readinessReasonsFromDetail,
+} from './readinessGate'
 import { McpServersResponse } from './types'
+
+const readinessLog = hccLogger.child({ module: 'readiness' })
 
 const MCP_SELECTOR_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/
 const MCP_REQUEST_BODY_LIMIT = 1024
@@ -75,7 +82,12 @@ export class McpHostApiRateLimiter {
 
 type ReadinessState =
   | { ready: true; status: 'ready' }
-  | { ready: false; status: 'starting' | 'degraded'; message: string }
+  | {
+      ready: false
+      status: 'starting' | 'degraded'
+      message: string
+      reasons?: ReadinessReason[]
+    }
 
 export class ContextMapperServer {
   private server: http.Server | null = null
@@ -88,7 +100,9 @@ export class ContextMapperServer {
   private mcpRateLimiter: McpHostApiRateLimiter
   private providerAuthoritativeFn: () => boolean
   private hostAuthoritativeFn: () => boolean
+  private readinessDetailFn: (() => ReadinessInventoryDetail) | undefined
   private ready = false
+  private lastReadinessTransitionKey = ''
 
   constructor(
     provider: McpServerProvider,
@@ -104,7 +118,8 @@ export class ContextMapperServer {
     // that omits it gets a 503 on desktop rather than a wrong 200 'inactive'.
     hostAuthoritativeFn: () => boolean = () => false,
     mcpAuthenticator?: McpApiAuthenticator,
-    mcpAuthorization?: McpAuthorizationService
+    mcpAuthorization?: McpAuthorizationService,
+    readinessDetailFn?: () => ReadinessInventoryDetail
   ) {
     this.provider = provider
     this.port = port
@@ -115,6 +130,7 @@ export class ContextMapperServer {
     this.mcpRateLimiter = new McpHostApiRateLimiter(config.mcpHostApiRateLimitPerMinute)
     this.providerAuthoritativeFn = providerAuthoritativeFn
     this.hostAuthoritativeFn = hostAuthoritativeFn
+    this.readinessDetailFn = readinessDetailFn
   }
 
   /**
@@ -137,28 +153,57 @@ export class ContextMapperServer {
     this.ready = ready
   }
 
+  private collectReadinessReasons(): ReadinessReason[] | undefined {
+    if (!this.readinessDetailFn) return undefined
+    try {
+      return readinessReasonsFromDetail(this.readinessDetailFn())
+    } catch (err) {
+      readinessLog.error('readiness detail check failed', { err })
+      return undefined
+    }
+  }
+
+  private emitReadinessTransition(state: ReadinessState): void {
+    const reasons = !state.ready ? (state.reasons ?? []) : []
+    const key = `${state.ready}:${state.status}:${reasons.join(',')}`
+    if (key === this.lastReadinessTransitionKey) return
+    this.lastReadinessTransitionKey = key
+    if (state.ready) {
+      readinessLog.info('readiness became ready')
+      return
+    }
+    readinessLog.warn('readiness not ready', { status: state.status, reasons })
+  }
+
   private getReadinessState(): ReadinessState {
     if (!this.ready) {
-      return {
+      const starting: ReadinessState = {
         ready: false,
         status: 'starting',
         message: 'Context mapper is still starting',
       }
+      this.emitReadinessTransition(starting)
+      return starting
     }
 
     try {
       if (this.providerAuthoritativeFn()) {
-        return { ready: true, status: 'ready' }
+        const ready: ReadinessState = { ready: true, status: 'ready' }
+        this.emitReadinessTransition(ready)
+        return ready
       }
     } catch (err) {
       console.error('[Server] Provider authority readiness check failed:', err)
     }
 
-    return {
+    const degraded: ReadinessState = {
       ready: false,
       status: 'degraded',
       message: 'Context mapper provider inventory is not authoritative',
+      reasons: this.collectReadinessReasons(),
     }
+    this.emitReadinessTransition(degraded)
+    return degraded
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -211,10 +256,14 @@ export class ContextMapperServer {
     // Readiness check
     if (req.method === 'GET' && url.pathname === '/ready') {
       const readiness = this.getReadinessState()
-      this.sendJson(res, readiness.ready ? 200 : 503, {
+      const body: { status: string; ready: boolean; reasons?: ReadinessReason[] } = {
         status: readiness.status,
         ready: readiness.ready,
-      })
+      }
+      if (!readiness.ready && readiness.reasons && readiness.reasons.length > 0) {
+        body.reasons = readiness.reasons
+      }
+      this.sendJson(res, readiness.ready ? 200 : 503, body)
       return
     }
 

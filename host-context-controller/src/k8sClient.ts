@@ -1013,12 +1013,35 @@ export class McpServerWatcher implements McpServerProvider {
    * by preserving replicas and disabling stateless suspension until recovery.
    * SFS/GFS retain their established eventual-resync contract.
    */
+  getReadinessInventoryDetail(): {
+    stopped: boolean
+    mcpServerCacheSynced: boolean
+    contextCacheSynced: boolean
+    hostCacheSynced: boolean
+    safetyInventoryCertified: boolean
+    contextRevisionAligned: boolean
+    serverRevisionAligned: boolean
+  } {
+    return {
+      stopped: this.stopped,
+      mcpServerCacheSynced: this.mcpServerCacheSynced,
+      contextCacheSynced: this.contextCacheSynced,
+      hostCacheSynced: this.hostCacheSynced,
+      safetyInventoryCertified: this.netPolReconciler.hasCertifiedSafetyInventory(),
+      contextRevisionAligned:
+        this.networkPolicyRevocationContextRevision === this.contextDesiredRevision,
+      serverRevisionAligned:
+        this.networkPolicyRevocationServerRevision === this.mcpServerDesiredRevision,
+    }
+  }
+
   isReadinessInventoryAuthoritative(): boolean {
+    const detail = this.getReadinessInventoryDetail()
     return (
-      !this.stopped &&
-      this.mcpServerCacheSynced &&
-      this.contextCacheSynced &&
-      this.hostCacheSynced &&
+      !detail.stopped &&
+      detail.mcpServerCacheSynced &&
+      detail.contextCacheSynced &&
+      detail.hostCacheSynced &&
       // Certification is pinned to CONTENT identity (the desired-revision
       // counters), not CHANNEL identity (the watch-generation counters). A
       // "Premature close" reconnect re-LISTs the same inventory and bumps the
@@ -1031,9 +1054,9 @@ export class McpServerWatcher implements McpServerProvider {
       // forces re-certification. Losing a delete fence bumps no revision, so
       // hasCertifiedSafetyInventory() remains the fence for that one failure
       // mode that no equality below can see.
-      this.netPolReconciler.hasCertifiedSafetyInventory() &&
-      this.networkPolicyRevocationContextRevision === this.contextDesiredRevision &&
-      this.networkPolicyRevocationServerRevision === this.mcpServerDesiredRevision
+      detail.safetyInventoryCertified &&
+      detail.contextRevisionAligned &&
+      detail.serverRevisionAligned
     )
   }
 

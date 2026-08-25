@@ -43,6 +43,8 @@ set -euo pipefail
 #                                        control-api Secret already has a value.
 #   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET override WRC HMAC (default: preserve-or-generate)
 #   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET override HCC HMAC (default: preserve-or-generate)
+#   FORCE_CONSUMER_RESTART               if true, restart every consumer including
+#                                        HCC even when the HCC HMAC is unchanged
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=lib/clerum-minikube-context.sh
@@ -229,6 +231,17 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials \
   -p='[{"op":"remove","path":"/data/service-token"}]' >/dev/null 2>&1 || true
 
 # --- 2. internal-control-jwt-secrets (control-plane) ---
+# Compare the HCC-consumed key only. The merge patch writes WRC + HCC together,
+# so a whole-Secret resourceVersion (or parsing `patched (no change)`) would
+# Recreate HCC on a WRC-only rotation. Values stay in shell locals — never logged.
+HCC_HMAC_BEFORE="$(read_secret_key control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET)"
+if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || \
+   [ -z "$HCC_HMAC_BEFORE" ] || \
+   [ "$HCC_HMAC_BEFORE" != "$INTERNAL_CONTROL_HCC_HMAC" ]; then
+  HCC_SECRET_CHANGED=true
+else
+  HCC_SECRET_CHANGED=false
+fi
 log "Patching Secret internal-control-jwt-secrets (control-plane)"
 ensure_secret control-plane internal-control-jwt-secrets
 INTERNAL_CONTROL_PATCH="$(jq -cn \
@@ -296,7 +309,9 @@ WA_READER_PATCH="$(jq -cn \
 kctl -n channels patch secret workflow-approval-request-reader-credentials --type=merge -p "$WA_READER_PATCH"
 
 # Roll the consumers so they pick up the fresh tokens on first deploy. Safe
-# no-ops if the Deployments do not yet exist.
+# no-ops if the Deployments do not yet exist. HCC is Recreate + replicas:1
+# and reloads HMAC only at process start, so skip that extra rollout when the
+# in-memory HCC key is unchanged (image/spec applies still roll HCC themselves).
 for pair in "control-plane:control-api" \
             "control-plane:workflow-recipes" \
             "control-plane:host-context-controller" \
@@ -306,6 +321,11 @@ for pair in "control-plane:control-api" \
             "channels:clerum-workflow-approval-request-reader"; do
   ns="${pair%%:*}"
   dep="${pair#*:}"
+  if [ "$ns" = "control-plane" ] && [ "$dep" = "host-context-controller" ] && \
+     [ "$HCC_SECRET_CHANGED" != "true" ]; then
+    log "Skipping rollout of $ns/$dep: hcc-hmac unchanged"
+    continue
+  fi
   if kctl -n "$ns" get deploy "$dep" >/dev/null 2>&1; then
     log "Rolling deployment $ns/$dep to pick up fresh Secret values"
     kctl -n "$ns" rollout restart deploy "$dep" >/dev/null
