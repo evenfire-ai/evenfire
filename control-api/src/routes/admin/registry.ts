@@ -4067,7 +4067,11 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               'clerum.io/managed-by': 'control-api',
             },
             annotations: {
-              ...(previousSecretSnapshot?.annotations ?? {}),
+              // Do not replay annotations from the preflight snapshot. The
+              // SecretService reads the live object and preserves opaque
+              // infrastructure/platform metadata that this writer does not
+              // own. Replaying the old map would turn a concurrent metadata
+              // update into a false 400 after preflight (R3-L1).
               ...catalogAnnotations(body.registryEntryName, body.registryEntryVersion),
               [REGISTRY_SECRET_OPERATION_ID_ANNOTATION]: operationId,
             },

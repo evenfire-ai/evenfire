@@ -3570,6 +3570,68 @@ describe('POST /admin/registry/upgrade', () => {
     expect(updateBody.metadata?.uid).toBe(before.metadata?.uid)
   })
 
+  it('fails closed when live infrastructure metadata changes after credential preflight', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    const secretName = 'my-srv-credentials'
+    const credentialKey = ['API', 'KEY'].join('_')
+    const annotationKey = 'kubectl.kubernetes.io/last-applied-configuration'
+    const originalGetSecret = gw.getSecret.bind(gw)
+    let raced = false
+
+    gw.seedSecret(secretName, 'mcp-server', {
+      type: 'Opaque',
+      uid: 'uid-raced-credentials',
+      resourceVersion: '1',
+      annotations: { [annotationKey]: 'old-live-value' },
+      data: { [credentialKey]: Buffer.from('old-value').toString('base64') },
+    })
+    vi.spyOn(gw, 'getSecret').mockImplementation(async (...args) => {
+      const snapshot = await originalGetSecret(...args)
+      if (args[0] === secretName && !raced) {
+        raced = true
+        gw.seedSecret(secretName, 'mcp-server', {
+          type: 'Opaque',
+          uid: 'uid-raced-credentials',
+          resourceVersion: '2',
+          annotations: { [annotationKey]: 'new-live-value' },
+          data: { [credentialKey]: Buffer.from('old-value').toString('base64') },
+        })
+      }
+      return snapshot
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [credentialKey]: 'new-value' },
+      })
+      .expect(409)
+
+    expect(raced).toBe(true)
+    expect(res.body.error).toContain('modified')
+    expect(res.body.upgraded).toBeUndefined()
+    await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
+      metadata: {
+        uid: 'uid-raced-credentials',
+        resourceVersion: '2',
+        annotations: { [annotationKey]: 'new-live-value' },
+      },
+      data: { [credentialKey]: Buffer.from('old-value').toString('base64') },
+    })
+    await expect(gw.getResource('mcpservers', 'my-srv', 'mcp-server')).resolves.toMatchObject({
+      spec: { image: 'test:1.0' },
+    })
+  })
+
   it('does not overwrite a same-name CR replacement with a new identity', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
     const { app, gw } = makeApp()
@@ -4734,9 +4796,7 @@ describe('POST /admin/registry/upgrade', () => {
     ]
       .map(code => String.fromCharCode(code))
       .join('')
-    expect(updateSecretSpy.mock.calls[0][0].annotations).toMatchObject({
-      [legacyApplyKey]: '{"old":"cfg"}',
-    })
+    expect(updateSecretSpy.mock.calls[0][0].annotations).not.toHaveProperty(legacyApplyKey)
     expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({
       [legacyApplyKey]: '{"old":"cfg"}',
     })
@@ -4786,9 +4846,7 @@ describe('POST /admin/registry/upgrade', () => {
 
     expect(res.body.error).toBe('upgrade conflict')
     expect(updateSecretSpy).toHaveBeenCalledTimes(2)
-    expect(updateSecretSpy.mock.calls[0][0].annotations).toMatchObject({
-      [futureKey]: futureValue,
-    })
+    expect(updateSecretSpy.mock.calls[0][0].annotations).not.toHaveProperty(futureKey)
     expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({
       [futureKey]: futureValue,
     })
