@@ -39,6 +39,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh" \
   "$ROOT/scripts/tests/test-real-postgres-local-preflight.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh" \
+  "$ROOT/scripts/tests/test-minikube-docker-cli-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh" \
   "$ROOT/scripts/tests/test-minikube-port-forward-owner.sh" \
   "$ROOT/scripts/tests/test-minikube-docker-cli-env.sh" \
@@ -330,6 +331,10 @@ grep -Fq 'NP08_HCC_AUTHORIZATION PASS' "$T2"
 grep -Fq "NP08_HCC_AUTHORIZATION=\$T2_NP08_HCC_AUTHORIZATION_STATUS" "$T2"
 grep -Fq 'already-synced' "$T2" "$COMMON"
 grep -Fq 'T2_LOCK_TOKEN="$T2_LOCK_TOKEN"' "$T2"
+[[ "$(grep -Fc 'ARGS= make minikube-setup' "$T2")" -eq 4 ]] || {
+  echo 'FAIL: T2 bootstrap/reconcile does not clear inherited setup ARGS on all four paths' >&2
+  exit 1
+}
 grep -Fq 'T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
 grep -Fq 'T2_PLAN_MODE=false T2_PLAN_FILE' "$T2"
 grep -Fq 'T2_PLAN_MODE=false' "$PREFLIGHT"
@@ -579,8 +584,10 @@ fi
 # Exercise the adjudicator with representative failure statuses without Docker
 # or Kubernetes; every one must fail the suite despite the green JSON payload.
 t1_exit_root="$tmp/t1-exit-adjudicator"
-mkdir -p "$t1_exit_root/control-api/test"
+mkdir -p "$t1_exit_root/control-api/test" "$t1_exit_root/control-api/node_modules/.bin"
 printf 'fixture\n' >"$t1_exit_root/control-api/test/fake.realPostgres.test.ts"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$t1_exit_root/control-api/node_modules/.bin/vitest"
+chmod +x "$t1_exit_root/control-api/node_modules/.bin/vitest"
 for exit_code in 1 2 7 126 137; do
   if EXIT_CODE="$exit_code" T1_EXIT_ROOT="$t1_exit_root" bash -c '
     set -euo pipefail
@@ -652,6 +659,7 @@ bash "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh"
 bash "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"
 bash "$ROOT/scripts/tests/test-real-postgres-local-preflight.sh"
 bash "$ROOT/scripts/tests/test-minikube-port-forward-owner.sh"
+bash "$ROOT/scripts/tests/test-minikube-docker-cli-boundary.sh"
 bash "$ROOT/scripts/tests/test-minikube-docker-cli-env.sh"
 bash "$ROOT/scripts/tests/test-minikube-build-images-hardening.sh"
 bash "$ROOT/scripts/tests/test-minikube-build-section-headers.sh"

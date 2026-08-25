@@ -35,7 +35,7 @@ import {
   secretYaml,
   waitForRolloutCondition,
   withServicePortForward,
-} from './mcpCredentialRotation.helpers.js'
+} from './mcpRotation.helpers.js'
 
 const RUN_ID = randomSuffix()
 const SHARED_SECRET_NAME = `e2e-rot-shared-${RUN_ID}`

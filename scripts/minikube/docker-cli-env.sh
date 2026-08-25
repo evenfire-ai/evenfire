@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Isolate local Minikube image operations from ambient Docker credentials.
-# Source this file, call docker_cli_env_prepare, and install a caller-owned EXIT
-# trap that invokes docker_cli_env_cleanup.
+# Source this file, call docker_cli_env_prepare with `probe`, `pull`, or `build`,
+# and install a caller-owned EXIT trap that invokes docker_cli_env_cleanup.
 
 if [[ -n "${DOCKER_CLI_ENV_LOADED:-}" ]]; then
   return 0
@@ -14,6 +14,12 @@ DOCKER_CLI_TASK_CONFIG=""
 DOCKER_CLI_AUTH_CONFIG=""
 DOCKER_CLI_PINNED_HOST=""
 DOCKER_CLI_ENDPOINT_SOURCE=""
+DOCKER_CLI_ORIGINAL_EXPECTED_MINIKUBE_IP_SET="${DOCKER_CLI_EXPECTED_MINIKUBE_IP+x}"
+DOCKER_CLI_ORIGINAL_EXPECTED_MINIKUBE_IP="${DOCKER_CLI_EXPECTED_MINIKUBE_IP-}"
+DOCKER_CLI_EXPECTED_MINIKUBE_IP="${DOCKER_CLI_EXPECTED_MINIKUBE_IP:-}"
+DOCKER_CLI_ORIGINAL_EXPECTED_MINIKUBE_ENDPOINT_SET="${DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT+x}"
+DOCKER_CLI_ORIGINAL_EXPECTED_MINIKUBE_ENDPOINT="${DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT-}"
+DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT="${DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT:-}"
 DOCKER_CLI_ORIGINAL_CONFIG_SET="${DOCKER_CONFIG+x}"
 DOCKER_CLI_ORIGINAL_CONFIG="${DOCKER_CONFIG-}"
 DOCKER_CLI_ORIGINAL_AUTH_SET="${DOCKER_AUTH_CONFIG+x}"
@@ -114,6 +120,76 @@ docker_cli_env_validate_local_endpoint() {
   esac
 }
 
+docker_cli_env_validate_minikube_endpoint() {
+  local endpoint="$1" expected_ip="${2:-}" octet
+  local -a octets=()
+  if [[ -n "${DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT:-}" ]]; then
+    [[ "$endpoint" == "$DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT" ]] || {
+      docker_cli_env_error "DOCKER_ENDPOINT_MISMATCH: Docker endpoint is not owned by the selected Minikube profile"
+      return 1
+    }
+    if docker_cli_env_validate_local_endpoint "$endpoint" >/dev/null 2>&1; then
+      return 0
+    fi
+    [[ -n "$expected_ip" ]] || {
+      docker_cli_env_error "DOCKER_ENDPOINT_REQUIRED: the expected Minikube IP is unavailable for a non-loopback endpoint"
+      return 1
+    }
+  fi
+  IFS=. read -r -a octets <<<"$expected_ip"
+  [[ "${#octets[@]}" -eq 4 ]] || {
+    docker_cli_env_error "DOCKER_ENDPOINT_REQUIRED: the expected Minikube IP is invalid"
+    return 1
+  }
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]{1,3}$ ]] && (( 10#$octet <= 255 )) || {
+      docker_cli_env_error "DOCKER_ENDPOINT_REQUIRED: the expected Minikube IP is invalid"
+      return 1
+    }
+  done
+  if [[ -n "${DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT:-}" ]]; then
+    case "$endpoint" in
+      "tcp://${expected_ip}:2375"|"tcp://${expected_ip}:2376")
+        return 0
+        ;;
+      *)
+        docker_cli_env_error "DOCKER_ENDPOINT_UNSAFE: the selected Minikube Docker endpoint is not local"
+        return 1
+        ;;
+    esac
+  fi
+  case "$endpoint" in
+    "tcp://${expected_ip}:2375"|"tcp://${expected_ip}:2376")
+      return 0
+      ;;
+    *)
+      docker_cli_env_error "DOCKER_ENDPOINT_MISMATCH: Docker endpoint is not owned by the selected Minikube profile"
+      return 1
+      ;;
+  esac
+}
+
+docker_cli_env_endpoint_from_minikube_env() {
+  local env_script="$1" endpoint_line endpoint count
+  endpoint_line="$(printf '%s\n' "$env_script" | awk '$1 == "export" && $2 ~ /^DOCKER_HOST=/ { print $2 }')"
+  count="$(printf '%s\n' "$endpoint_line" | awk 'NF { count++ } END { print count + 0 }')"
+  [[ "$count" == 1 ]] || {
+    docker_cli_env_error "DOCKER_ENDPOINT_REQUIRED: minikube docker-env did not expose exactly one DOCKER_HOST"
+    return 1
+  }
+  endpoint="${endpoint_line#DOCKER_HOST=}"
+  endpoint="${endpoint%;}"
+  endpoint="${endpoint#\"}"
+  endpoint="${endpoint%\"}"
+  endpoint="${endpoint#\'}"
+  endpoint="${endpoint%\'}"
+  [[ -n "$endpoint" ]] || {
+    docker_cli_env_error "DOCKER_ENDPOINT_REQUIRED: minikube docker-env returned an empty DOCKER_HOST"
+    return 1
+  }
+  printf '%s\n' "$endpoint"
+}
+
 docker_cli_env_resolve_context_endpoint() {
   local record="" status=0 context_host="" skip_tls="" tls_material=""
 
@@ -165,10 +241,20 @@ docker_cli_env_resolve_context_endpoint() {
 
 docker_cli_env_resolve_endpoint() {
   if [[ -n "${DOCKER_HOST:-}" ]]; then
+    if [[ -n "${DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT:-}" || -n "${DOCKER_CLI_EXPECTED_MINIKUBE_IP:-}" ]]; then
+      docker_cli_env_validate_minikube_endpoint "$DOCKER_HOST" "${DOCKER_CLI_EXPECTED_MINIKUBE_IP:-}" || return $?
+      DOCKER_CLI_PINNED_HOST="$DOCKER_HOST"
+      DOCKER_CLI_ENDPOINT_SOURCE=minikube
+      return 0
+    fi
     docker_cli_env_validate_local_endpoint "$DOCKER_HOST" || return $?
     DOCKER_CLI_PINNED_HOST="$DOCKER_HOST"
     DOCKER_CLI_ENDPOINT_SOURCE=explicit_host
     return 0
+  fi
+  if [[ -n "${DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT:-}" ]]; then
+    docker_cli_env_error "DOCKER_ENDPOINT_REQUIRED: the selected Minikube Docker endpoint is not present"
+    return 1
   fi
   docker_cli_env_resolve_context_endpoint
 }
@@ -223,7 +309,15 @@ docker_cli_env_find_buildx() {
 docker_cli_run_with_config() {
   local config="$1" label="$2" timeout_seconds="$3"
   shift 3
-  docker_cli_env_validate_local_endpoint "${DOCKER_HOST:-}" || return $?
+  if [[ "$DOCKER_CLI_ENDPOINT_SOURCE" == minikube ]]; then
+    [[ -n "${DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT:-}" || -n "${DOCKER_CLI_EXPECTED_MINIKUBE_IP:-}" ]] || {
+      docker_cli_env_error "DOCKER_ENDPOINT_REQUIRED: the Minikube endpoint has no expected profile identity"
+      return 1
+    }
+    docker_cli_env_validate_minikube_endpoint "${DOCKER_HOST:-}" "${DOCKER_CLI_EXPECTED_MINIKUBE_IP:-}" || return $?
+  else
+    docker_cli_env_validate_local_endpoint "${DOCKER_HOST:-}" || return $?
+  fi
   (
     # This override intentionally belongs only to the child operation.
     # shellcheck disable=SC2030
@@ -288,15 +382,15 @@ docker_cli_run_private() {
 }
 
 docker_cli_env_prepare() {
-  local validate_buildx="${1:-true}"
+  local mode="${1:-build}"
   local temp_root old_umask buildx_path="" buildx_status=0
   if [[ -n "$DOCKER_CLI_TASK_CONFIG" && -d "$DOCKER_CLI_TASK_CONFIG" ]]; then
     return 0
   fi
-  case "$validate_buildx" in
-    true|false) ;;
+  case "$mode" in
+    probe|pull|build) ;;
     *)
-      docker_cli_env_error "DOCKER_CONFIG_REQUIRED: buildx validation mode must be true or false"
+      docker_cli_env_error "DOCKER_MODE_REQUIRED: mode must be probe, pull, or build"
       return 2
       ;;
   esac
@@ -313,7 +407,7 @@ docker_cli_env_prepare() {
     docker_cli_env_error "DOCKER_DEADLINE_REQUIRED: the deadline runner is missing"
     return 1
   }
-  if [[ "$validate_buildx" == true ]]; then
+  if [[ "$mode" == pull || "$mode" == build ]]; then
     docker_cli_env_validate_deadlines || return $?
   else
     docker_cli_env_validate_seconds MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS \
@@ -353,7 +447,7 @@ docker_cli_env_prepare() {
   unset DOCKER_AUTH_CONFIG 2>/dev/null || true
   docker_cli_env_verify_pinned_endpoint || return $?
 
-  if [[ "$validate_buildx" == false ]]; then
+  if [[ "$mode" != build ]]; then
     return 0
   fi
 
@@ -420,6 +514,10 @@ docker_cli_env_cleanup() {
   docker_cli_env_restore_variable DOCKER_API_VERSION "$DOCKER_CLI_ORIGINAL_API_VERSION_SET" "$DOCKER_CLI_ORIGINAL_API_VERSION"
   docker_cli_env_restore_variable DOCKER_CUSTOM_HEADERS "$DOCKER_CLI_ORIGINAL_CUSTOM_HEADERS_SET" "$DOCKER_CLI_ORIGINAL_CUSTOM_HEADERS"
   docker_cli_env_restore_variable MINIKUBE_ACTIVE_DOCKERD "$DOCKER_CLI_ORIGINAL_MINIKUBE_ACTIVE_SET" "$DOCKER_CLI_ORIGINAL_MINIKUBE_ACTIVE"
+  docker_cli_env_restore_variable DOCKER_CLI_EXPECTED_MINIKUBE_IP \
+    "$DOCKER_CLI_ORIGINAL_EXPECTED_MINIKUBE_IP_SET" "$DOCKER_CLI_ORIGINAL_EXPECTED_MINIKUBE_IP"
+  docker_cli_env_restore_variable DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT \
+    "$DOCKER_CLI_ORIGINAL_EXPECTED_MINIKUBE_ENDPOINT_SET" "$DOCKER_CLI_ORIGINAL_EXPECTED_MINIKUBE_ENDPOINT"
   return "$cleanup_status"
 }
 
@@ -452,7 +550,7 @@ docker_cli_env_main() {
   # Startup probes do not build images, so requiring buildx here would delay or
   # block Docker Desktop startup for an unrelated plugin. They still use the
   # same empty task-local config and process-group deadline runner.
-  docker_cli_env_prepare false || return $?
+  docker_cli_env_prepare probe || return $?
   docker_cli_env_validate_startup_deadlines || return $?
   case "$1" in
     --check-info)

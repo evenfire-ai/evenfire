@@ -63,10 +63,11 @@ printf 'docker %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
   context)
     if [[ "${2:-}" == inspect ]]; then
+      effective_host="${DOCKER_HOST:-unix:///tmp/evenfire-docker.sock}"
       if [[ "$*" == *SkipTLSVerify* ]]; then
-        printf 'unix:///tmp/evenfire-docker.sock\tfalse\t{}\n'
+        printf '%s\tfalse\t{}\n' "$effective_host"
       else
-        printf 'unix:///tmp/evenfire-docker.sock\n'
+        printf '%s\n' "$effective_host"
       fi
     fi
     ;;

@@ -59,10 +59,11 @@ printf 'docker %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
   context)
     if [[ "${2:-}" == inspect ]]; then
+      effective_host="${DOCKER_HOST:-unix:///tmp/evenfire-docker.sock}"
       if [[ "$*" == *SkipTLSVerify* ]]; then
-        printf 'unix:///tmp/evenfire-docker.sock\tfalse\t{}\n'
+        printf '%s\tfalse\t{}\n' "$effective_host"
       else
-        printf 'unix:///tmp/evenfire-docker.sock\n'
+        printf '%s\n' "$effective_host"
       fi
     fi
     ;;
@@ -491,8 +492,9 @@ assert_no_marker_and_no_revision_label_fails_closed() {
 
 # The baseline read runs inside a command substitution, so a diagnostic printed
 # on stdout there would be captured AS the baseline and then diffed against.
-# A daemon this pre-gate cannot reach must produce no baseline at all.
-assert_an_unreachable_docker_daemon_cannot_become_a_baseline() {
+# The Docker boundary now proves ownership before planning; an unreachable
+# profile must therefore fail before it can publish any baseline or plan.
+assert_an_unreachable_docker_daemon_fails_before_planning() {
   local d out rc
   d="$(mktemp -d)"
   prepare_repo "$d"
@@ -510,10 +512,12 @@ STUB
       run_incremental "$d" 'incremental_plan; echo "full=${INCREMENTAL_FULL_IMAGE_BUILD} reason=${INCREMENTAL_FULL_IMAGE_BUILD_REASON}"'
   )"
   rc=$?
-  if grep -Fq 'full=true' <<< "$out" && grep -Fq 'reason=no-baseline' <<< "$out"; then
-    pass "an unreachable Docker daemon produces no baseline instead of a diagnostic-shaped one"
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<< "$out" \
+     && ! grep -Fq 'full=' <<< "$out"; then
+    pass "an unreachable Docker daemon fails before publishing a baseline or plan"
   else
-    fail "expected full=true reason=no-baseline from an unreachable daemon; rc=$rc out=$out"
+    fail "expected an early DOCKER_ENV_UNRESOLVED failure without a plan; rc=$rc out=$out"
   fi
   rm -rf "$d"
 }
@@ -1066,7 +1070,7 @@ assert_an_unmapped_change_hard_fails_in_ghcr_mode_with_a_remedy
 assert_an_unresolvable_baseline_hard_fails_in_ghcr_mode
 assert_the_release_image_revision_label_supplies_the_missing_baseline
 assert_no_marker_and_no_revision_label_fails_closed
-assert_an_unreachable_docker_daemon_cannot_become_a_baseline
+assert_an_unreachable_docker_daemon_fails_before_planning
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode
 assert_an_untouched_image_set_keeps_the_marker_baseline

@@ -18,7 +18,7 @@ const NP_TIMEOUT = 3
 // This suite drives kubectl against a live minikube cluster (Calico CNI + all
 // services deployed). Mirrors the opt-in-skip convention already used by the
 // sibling integration suites — channel-reader-via-api.test.ts and
-// mcpCredentialRotation.helpers.ts (E2E_SKIP_IF_CLUSTER_UNREACHABLE) plus
+// mcpRotation.helpers.ts (E2E_SKIP_IF_CLUSTER_UNREACHABLE) plus
 // registry-pull-secret-runtime.test.ts (E2E_REQUIRE_CLUSTER / CI):
 //   - Default (no flag): fail-fast when the cluster is unreachable. A silent
 //     pass would hide a broken E2E setup, so the suite must NOT be neutralized

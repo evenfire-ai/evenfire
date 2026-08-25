@@ -206,8 +206,11 @@ grep -Fq 'T2_SETUP_HANDOFF_REQUIRED=true' "${T2_SCRIPT}" \
 # shellcheck disable=SC2016
 grep -Fq 'T2_SETUP_HANDOFF_SETUP_COMPLETE="${all_ready}"' "${FULL_SETUP_SCRIPT}" \
   || fail 'full setup does not bind handoff publication to readiness'
-grep -Fq 'if ! t2_deployment_check; then' "${FULL_SETUP_SCRIPT}" \
-  || fail 'T2 full setup does not enforce the complete deployment inventory'
+grep -Fq 'if ! t2_wait_for_deployments; then' "${FULL_SETUP_SCRIPT}" \
+  || fail 'T2 full setup does not wait for the complete deployment inventory'
+if grep -Fq 't2_wait_for_deployments' "${T2_SCRIPT}" "${PRE_GATE_SCRIPT}"; then
+  fail 'bounded deployment waiting escaped the setup-handoff publication boundary'
+fi
 grep -Fq 't2-setup-handoff.sh" consume --' "${PRE_GATE_SCRIPT}" \
   || fail 'pre-gate does not consume the attested handoff'
 # This is a literal production contract.

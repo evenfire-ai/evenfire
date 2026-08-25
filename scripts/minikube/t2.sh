@@ -168,7 +168,7 @@ run_bootstrap_or_reconcile() {
           T2_SETUP_HANDOFF_ROOT="$T2_SETUP_HANDOFF_ROOT" \
           T2_SETUP_HANDOFF_TTL_SECONDS="$T2_SETUP_HANDOFF_TTL_SECONDS" \
           MINIKUBE_PROFILE="$T2_PROFILE" IMAGE_SOURCE="$T2_BOOTSTRAP_IMAGE_SOURCE" \
-            REUSE_DB=false CONTROL_DB_RESET_PVC_UID="$T2_EXPECTED_PVC_UID" make minikube-setup
+            REUSE_DB=false CONTROL_DB_RESET_PVC_UID="$T2_EXPECTED_PVC_UID" ARGS= make minikube-setup
       else
         T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
           T2_RUN_ID="$T2_RUN_ID" T2_SETUP_HANDOFF_REQUIRED=true \
@@ -176,7 +176,7 @@ run_bootstrap_or_reconcile() {
           T2_SETUP_HANDOFF_ROOT="$T2_SETUP_HANDOFF_ROOT" \
           T2_SETUP_HANDOFF_TTL_SECONDS="$T2_SETUP_HANDOFF_TTL_SECONDS" \
           MINIKUBE_PROFILE="$T2_PROFILE" IMAGE_SOURCE="$T2_BOOTSTRAP_IMAGE_SOURCE" \
-          REUSE_DB=true make minikube-setup
+          REUSE_DB=true ARGS= make minikube-setup
       fi
       ;;
     full-reconcile)
@@ -188,7 +188,7 @@ run_bootstrap_or_reconcile() {
           T2_SETUP_HANDOFF_ROOT="$T2_SETUP_HANDOFF_ROOT" \
           T2_SETUP_HANDOFF_TTL_SECONDS="$T2_SETUP_HANDOFF_TTL_SECONDS" \
           MINIKUBE_PROFILE="$T2_PROFILE" IMAGE_SOURCE="$T2_BOOTSTRAP_IMAGE_SOURCE" \
-          REUSE_DB=false CONTROL_DB_RESET_PVC_UID="$T2_EXPECTED_PVC_UID" make minikube-setup
+          REUSE_DB=false CONTROL_DB_RESET_PVC_UID="$T2_EXPECTED_PVC_UID" ARGS= make minikube-setup
       else
         T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
           T2_RUN_ID="$T2_RUN_ID" T2_SETUP_HANDOFF_REQUIRED=true \
@@ -196,7 +196,7 @@ run_bootstrap_or_reconcile() {
           T2_SETUP_HANDOFF_ROOT="$T2_SETUP_HANDOFF_ROOT" \
           T2_SETUP_HANDOFF_TTL_SECONDS="$T2_SETUP_HANDOFF_TTL_SECONDS" \
           MINIKUBE_PROFILE="$T2_PROFILE" IMAGE_SOURCE="$T2_BOOTSTRAP_IMAGE_SOURCE" \
-          REUSE_DB=true make minikube-setup
+          REUSE_DB=true ARGS= make minikube-setup
       fi
       ;;
     targeted-sync)

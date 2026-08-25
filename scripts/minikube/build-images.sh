@@ -726,7 +726,11 @@ ensure_base_images_in_minikube() {
 }
 
 if [ "$VERIFY_ONLY" = false ]; then
-  docker_cli_env_prepare
+  DOCKER_CLI_IMAGE_MODE=build
+  if [ "$PUBLIC_ONLY" = true ]; then
+    DOCKER_CLI_IMAGE_MODE=pull
+  fi
+  docker_cli_env_prepare "$DOCKER_CLI_IMAGE_MODE"
   require_docker_info docker-info-host
   ensure_base_images_in_minikube
 
@@ -746,7 +750,21 @@ if [ "$VERIFY_ONLY" = false ]; then
       err "Minikube '${PROFILE}' returned an empty Docker environment"
       exit 1
     fi
+    # Re-pin the task-local Docker boundary to the exact endpoint published by
+    # this profile. The initial boundary above belongs to the host daemon used
+    # for base-image acquisition and must not authorize an arbitrary loopback
+    # endpoint after docker-env switches daemons.
+    docker_cli_env_cleanup
     eval "$docker_env_output"
+    DOCKER_CLI_EXPECTED_MINIKUBE_IP=""
+    minikube_docker_ip="$(run_with_deadline minikube-ip \
+      "$MINIKUBE_STATUS_TIMEOUT_SECONDS" minikube -p "$PROFILE" ip 2>/dev/null || true)"
+    if [[ -n "$minikube_docker_ip" ]]; then
+      export DOCKER_CLI_EXPECTED_MINIKUBE_IP="$minikube_docker_ip"
+    fi
+    minikube_docker_endpoint="$(docker_cli_env_endpoint_from_minikube_env "$docker_env_output")" || exit $?
+    export DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT="$minikube_docker_endpoint"
+    docker_cli_env_prepare "$DOCKER_CLI_IMAGE_MODE" || exit $?
     # Let Docker negotiate API version automatically (minikube v1.38+ requires >=1.44)
     unset DOCKER_API_VERSION 2>/dev/null || true
     require_docker_info docker-info-minikube

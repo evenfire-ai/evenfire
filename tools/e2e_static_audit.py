@@ -15,7 +15,12 @@ from pathlib import Path
 
 
 RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("fixed sleep", re.compile(r"\b(?:waitForTimeout|sleep\s*\()")),
+    (
+        "fixed sleep",
+        re.compile(
+            r"\b(?:waitForTimeout\s*\(|sleep\s*\(|setTimeout\s*\([^,\n]+,\s*(?:[5-9]\d{3}|[1-9]\d{4,}|[5-9]_\d{3,}|[1-9]\d+_\d{3,})\s*\))"
+        ),
+    ),
     ("browser storage/session mutation", re.compile(r"\b(?:localStorage|sessionStorage|storageState)\b")),
     ("fragile positional selector", re.compile(r"\.(?:nth|first|last)\s*\(")),
     ("fragile text/class CSS selector", re.compile(r"locator\(\s*['\"](?:[^'\"]*has-text|[^'\"]*class=)")),
@@ -23,31 +28,102 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+def strip_comments(source: str) -> str:
+    """Blank comments without changing line/column offsets used in findings."""
+    result: list[str] = []
+    index = 0
+    state = "code"
+    while index < len(source):
+        char = source[index]
+        next_char = source[index + 1] if index + 1 < len(source) else ""
+        if state == "code":
+            if char == "/" and next_char == "/":
+                result.extend((" ", " "))
+                index += 2
+                state = "line-comment"
+                continue
+            if char == "/" and next_char == "*":
+                result.extend((" ", " "))
+                index += 2
+                state = "block-comment"
+                continue
+            if char == "'" or char == '"' or char == chr(96):
+                state = char
+            result.append(char)
+            index += 1
+            continue
+        if state == "line-comment":
+            if char == "\n":
+                result.append(char)
+                state = "code"
+            else:
+                result.append(" ")
+            index += 1
+            continue
+        if state == "block-comment":
+            if char == "*" and next_char == "/":
+                result.extend((" ", " "))
+                index += 2
+                state = "code"
+            else:
+                result.append("\n" if char == "\n" else " ")
+                index += 1
+            continue
+        # String/template literal. Keep its contents so URLs and text values
+        # remain available to the source audit, but do not interpret comments.
+        result.append(char)
+        if char == "\\" and index + 1 < len(source):
+            result.append(source[index + 1])
+            index += 2
+            continue
+        if char == state:
+            state = "code"
+        index += 1
+    return "".join(result)
+
+
 def audit_file(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
+    audit_text = strip_comments(text)
     findings: list[str] = []
     for label, pattern in RULES:
-        for match in pattern.finditer(text):
-            line = text.count("\n", 0, match.start()) + 1
+        for match in pattern.finditer(audit_text):
+            line = audit_text.count("\n", 0, match.start()) + 1
             findings.append(f"{path}:{line}: {label}")
 
     # Electron GFS browser discovery is brokered through the main process IPC
     # bridge, so there is no renderer HTTP request to await. Such specs must
     # opt in with an explicit, explanatory marker rather than adding a fake
     # network wait that can hide a broken user transition.
-    if (
-        "waitForResponse" not in text
-        and "waitForRequest" not in text
-        and "E2E_GUARDIAN_IPC_FLOW" not in text
-    ):
+    has_browser_wait = "waitForResponse" in audit_text or "waitForRequest" in audit_text
+    is_browser_spec = bool(
+        re.search(
+            r"['\"](?:@playwright/test|playwright(?:-core)?)['\"]"
+            r"|\bpage\.(?:goto|getByRole|getByLabel|getByText|getByTestId|locator|waitFor\w+)\s*\(",
+            audit_text,
+        )
+    )
+    has_http_integration = not is_browser_spec and any(
+        re.search(pattern, audit_text)
+        for pattern in (
+            r"\bfetch\s*\(",
+            r"\bpostJson\s*\(",
+            r"\bputJson\s*\(",
+            r"\bdeleteJson\s*\(",
+            r"\bputMcpSecret\s*\(",
+            r"\bkubectl\s*\(",
+            r"\bexecFileSync\(\s*['\"]kubectl['\"]",
+        )
+    )
+    if not has_browser_wait and not has_http_integration and "E2E_GUARDIAN_IPC_FLOW" not in audit_text:
         findings.append(f"{path}: missing critical network-response/request wait")
 
     # Direct navigation is allowed only in an explicitly negative terminal
     # guard. Happy-path large-upload journeys must enter through UI actions.
-    for match in re.finditer(r"\bpage\.goto\s*\(", text):
-        before = text[max(0, match.start() - 240) : match.start()]
+    for match in re.finditer(r"\bpage\.goto\s*\(", audit_text):
+        before = audit_text[max(0, match.start() - 240) : match.start()]
         if not re.search(r"terminal|deep.?link|foreign|missing|guard", before, re.IGNORECASE):
-            line = text.count("\n", 0, match.start()) + 1
+            line = audit_text.count("\n", 0, match.start()) + 1
             findings.append(f"{path}:{line}: direct page.goto outside an explicit negative guard")
     return findings
 

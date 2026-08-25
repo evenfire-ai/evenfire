@@ -230,6 +230,9 @@ finalize_pre_gate_sync() {
   if ! restore_pre_gate_writers; then
     restore_status=1
   fi
+  if ! incremental_docker_cleanup; then
+    restore_status=1
+  fi
   if [[ "${status}" -eq 0 && "${restore_status}" -ne 0 ]]; then
     status=1
   fi

@@ -60,7 +60,11 @@ case "$*" in
     ;;
   *" docker-env"*)
     fake_run_mode "${FAKE_MINIKUBE_DOCKER_ENV_MODE:-success}" minikube-docker-env
+    printf 'export DOCKER_HOST="tcp://127.0.0.1:2376"\n'
     printf 'export MINIKUBE_ACTIVE_DOCKERD="fixture"\n'
+    ;;
+  *" ip")
+    printf '127.0.0.1\n'
     ;;
   *" image ls"*)
     fake_run_mode "${FAKE_MINIKUBE_INVENTORY_MODE:-success}" minikube-image-inventory
@@ -90,10 +94,11 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${DOCKER_LOG:?}"
 
 if [[ "${1:-}" == context && "${2:-}" == inspect ]]; then
+  effective_host="${DOCKER_HOST:-unix:///tmp/evenfire-fake-docker.sock}"
   if [[ "$*" == *TLSMaterial* ]]; then
-    printf 'unix:///tmp/evenfire-fake-docker.sock\tfalse\t{}\n'
+    printf '%s\tfalse\t{}\n' "$effective_host"
   else
-    printf 'unix:///tmp/evenfire-fake-docker.sock\n'
+    printf '%s\n' "$effective_host"
   fi
   exit 0
 fi

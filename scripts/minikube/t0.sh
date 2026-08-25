@@ -9,6 +9,9 @@ HEAD="${T0_HEAD:-HEAD}"
 
 shell_files=()
 package_dirs=()
+e2e_spec_files=()
+e2e_typecheck_files=()
+e2e_audit_changed=0
 seen_packages="|"
 while IFS= read -r path; do
   [ -n "$path" ] || continue
@@ -22,6 +25,31 @@ while IFS= read -r path; do
         bash -n "$absolute_path"
         shell_files+=("$absolute_path")
       fi
+      ;;
+  esac
+
+  case "$path" in
+    tests/e2e/*)
+      case "$path" in
+        *.test.ts|*.spec.ts)
+          if [ -f "$absolute_path" ]; then
+            e2e_spec_files+=("$absolute_path")
+          fi
+          ;;
+      esac
+      case "$path" in
+        tests/e2e/integration/*.ts)
+          if [ -f "$absolute_path" ]; then
+            e2e_typecheck_files+=("${path#tests/e2e/}")
+          fi
+          ;;
+      esac
+      ;;
+  esac
+
+  case "$path" in
+    tools/e2e_static_audit.py|tools/test_e2e_static_audit.py)
+      e2e_audit_changed=1
       ;;
   esac
 
@@ -58,12 +86,53 @@ else
   printf 'T0_SHELLCHECK=NOT_APPLICABLE\n'
 fi
 
+if [ "${#e2e_spec_files[@]}" -gt 0 ]; then
+  python3 "$PROJECT_DIR/tools/e2e_static_audit.py" "${e2e_spec_files[@]}"
+fi
+if [ "$e2e_audit_changed" -eq 1 ]; then
+  python3 "$PROJECT_DIR/tools/test_e2e_static_audit.py"
+fi
+
 if [ "${#package_dirs[@]}" -gt 0 ]; then
   for package in "${package_dirs[@]}"; do
-    printf '[minikube-t0] affected package: %s test\n' "$package"
-    (cd "$PROJECT_DIR/$package" && npm test)
-    printf '[minikube-t0] affected package: %s build/typecheck\n' "$package"
-    (cd "$PROJECT_DIR/$package" && npm run build)
+    if [ "$package" = "tests/e2e" ]; then
+      if [ "${#e2e_typecheck_files[@]}" -eq 0 ]; then
+        printf '[minikube-t0] affected package: %s typecheck NOT_APPLICABLE (no changed integration TypeScript)\n' "$package"
+      elif [ ! -x "$PROJECT_DIR/$package/node_modules/.bin/tsc" ]; then
+        printf 'LOCAL_DEPENDENCY_MISSING: TypeScript is not installed for %s\n' "$package" >&2
+        printf 'next: run npm ci in %s, then re-run T0\n' "$package" >&2
+        exit 1
+      else
+        printf '[minikube-t0] affected package: %s focused typecheck (%s files)\n' \
+          "$package" "${#e2e_typecheck_files[@]}"
+        (
+          cd "$PROJECT_DIR/$package" &&
+          ./node_modules/.bin/tsc --noEmit --target ES2022 --module ESNext \
+            --moduleResolution Bundler --esModuleInterop --skipLibCheck \
+            --types node,vitest/globals "${e2e_typecheck_files[@]}"
+        )
+      fi
+      printf '[minikube-t0] affected package: %s runtime tests NOT_APPLICABLE (dedicated E2E lane)\n' "$package"
+      continue
+    fi
+    if (
+      cd "$PROJECT_DIR/$package" &&
+      node -e "const scripts = require('./package.json').scripts ?? {}; process.exit(typeof scripts.test === 'string' && scripts.test.trim() ? 0 : 1)"
+    ); then
+      printf '[minikube-t0] affected package: %s test\n' "$package"
+      (cd "$PROJECT_DIR/$package" && npm test)
+    else
+      printf '[minikube-t0] affected package: %s test NOT_APPLICABLE (no scripts.test)\n' "$package"
+    fi
+    if (
+      cd "$PROJECT_DIR/$package" &&
+      node -e "const scripts = require('./package.json').scripts ?? {}; process.exit(typeof scripts.build === 'string' && scripts.build.trim() ? 0 : 1)"
+    ); then
+      printf '[minikube-t0] affected package: %s build/typecheck\n' "$package"
+      (cd "$PROJECT_DIR/$package" && npm run build)
+    else
+      printf '[minikube-t0] affected package: %s build/typecheck NOT_APPLICABLE (no scripts.build)\n' "$package"
+    fi
   done
 fi
 

@@ -148,6 +148,16 @@ source "${SCRIPT_DIR}/image-mode.sh"
 # shellcheck source=scripts/minikube/docker-cli-env.sh
 source "${SCRIPT_DIR}/docker-cli-env.sh"
 
+docker_pull_run() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  if [[ -n "${MINIKUBE_DOCKER_AUTH_CONFIG:-}" ]]; then
+    docker_cli_run_private "$label" "$timeout_seconds" "$@"
+  else
+    docker_cli_run_public "$label" "$timeout_seconds" "$@"
+  fi
+}
+
 # Pulling and loading images mutates the branch-owned Minikube profile. The
 # caller must already hold the canonical T2 mutation lease; this child only
 # validates the opaque inherited token and never acquires or releases it.
@@ -219,7 +229,7 @@ trap 'exit 143' TERM
 # before asking Minikube for its daemon endpoint. Every subsequent Docker and
 # image-load operation then runs through the same isolated config and deadline
 # runner, with ambient auth/context/header variables excluded.
-docker_cli_env_prepare false
+docker_cli_env_prepare pull
 if [ "$MINIKUBE_MULTI_NODE" = false ]; then
   log "Configuring Docker CLI to use minikube's Docker daemon..."
   docker_env_status=0
@@ -233,7 +243,19 @@ if [ "$MINIKUBE_MULTI_NODE" = false ]; then
     fi
     exit 1
   fi
+  minikube_ip_status=0
+  minikube_docker_ip="$(docker_cli_run_public minikube-ip \
+    "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+    minikube -p "$PROFILE" ip)" || minikube_ip_status=$?
+  docker_cli_env_cleanup
   eval "$docker_env_output"
+  DOCKER_CLI_EXPECTED_MINIKUBE_IP=""
+  if [ "$minikube_ip_status" -eq 0 ] && [ -n "$minikube_docker_ip" ]; then
+    export DOCKER_CLI_EXPECTED_MINIKUBE_IP="$minikube_docker_ip"
+  fi
+  minikube_docker_endpoint="$(docker_cli_env_endpoint_from_minikube_env "$docker_env_output")" || exit $?
+  export DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT="$minikube_docker_endpoint"
+  docker_cli_env_prepare pull || exit $?
   unset DOCKER_API_VERSION 2>/dev/null || true
 else
   log "Multi-node profile: pulling on the host, then 'minikube image load' onto every node"
@@ -254,7 +276,7 @@ pull_with_retry() {
   local ref="$1" out_file="$2" image_name="$3"
   local attempt=1
   while [ "$attempt" -le "$MINIKUBE_IMAGE_PULL_RETRIES" ]; do
-    if docker_cli_run_public "pull-image-${image_name}" \
+    if docker_pull_run "pull-image-${image_name}" \
       "$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS" docker pull "$ref" >"$out_file" 2>&1; then
       return 0
     fi

@@ -11,6 +11,9 @@
 # the exact ghcr ref the Deployment already carries, which IfNotPresent picks up
 # with no manifest edit, leaving every other image on its release digest.
 
+# shellcheck source=scripts/minikube/docker-cli-env.sh
+source "${PROJECT_DIR}/scripts/minikube/docker-cli-env.sh"
+
 INCREMENTAL_TARGETS=()
 INCREMENTAL_FULL_IMAGE_BUILD=false
 INCREMENTAL_FULL_DEPLOYMENT=false
@@ -25,6 +28,7 @@ INCREMENTAL_UNMAPPED=()
 INCREMENTAL_REPULL_ALL=false
 INCREMENTAL_SHADOWED=()
 INCREMENTAL_DOCKER_ENV_APPLIED=false
+INCREMENTAL_RELEASE_BASELINE_COMMIT=""
 INCREMENTAL_DEADLINE_RUNNER="${INCREMENTAL_DEADLINE_RUNNER:-${PROJECT_DIR}/scripts/minikube/run-with-deadline.mjs}"
 INCREMENTAL_RUNTIME_TIMEOUT_SECONDS="${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS:-30}"
 INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS="${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS:-1800}"
@@ -54,6 +58,20 @@ incremental_run_with_deadline() {
     --heartbeat-seconds "${MINIKUBE_DOCKER_HEARTBEAT_SECONDS:-20}" \
     --kill-grace-seconds "${MINIKUBE_DOCKER_KILL_GRACE_SECONDS:-5}" \
     --label "${label}" -- "$@"
+}
+
+incremental_docker_run() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  if [[ -n "${MINIKUBE_DOCKER_AUTH_CONFIG:-}" ]]; then
+    docker_cli_run_private "$label" "$timeout_seconds" "$@"
+  else
+    docker_cli_run_public "$label" "$timeout_seconds" "$@"
+  fi
+}
+
+incremental_docker_cleanup() {
+  docker_cli_env_cleanup
 }
 
 incremental_add_target() {
@@ -96,13 +114,14 @@ incremental_marker_git_head() {
 # kubelet looks. build-images.sh does this in its own process, which does not
 # propagate back to this one.
 incremental_use_minikube_docker() {
-  local env_script
+  local env_script minikube_docker_ip minikube_docker_endpoint
   if [[ "${INCREMENTAL_DOCKER_ENV_APPLIED}" == "true" ]]; then
     return 0
   fi
   if [[ "${MINIKUBE_MULTI_NODE:-false}" == "true" ]]; then
     # Multi-node cannot use docker-env: images are built/pulled in the host
     # daemon and placed on every node with `minikube image load`.
+    docker_cli_env_prepare pull || exit $?
     INCREMENTAL_DOCKER_ENV_APPLIED=true
     return 0
   fi
@@ -122,6 +141,16 @@ incremental_use_minikube_docker() {
     exit 1
   fi
   unset DOCKER_API_VERSION 2>/dev/null || true
+  DOCKER_CLI_EXPECTED_MINIKUBE_IP=""
+  minikube_docker_ip="$(incremental_run_with_deadline incremental-minikube-ip \
+    "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
+    minikube -p "${PROFILE}" ip 2>/dev/null || true)"
+  if [[ -n "${minikube_docker_ip}" ]]; then
+    export DOCKER_CLI_EXPECTED_MINIKUBE_IP="${minikube_docker_ip}"
+  fi
+  minikube_docker_endpoint="$(docker_cli_env_endpoint_from_minikube_env "${env_script}")" || exit $?
+  export DOCKER_CLI_EXPECTED_MINIKUBE_ENDPOINT="${minikube_docker_endpoint}"
+  docker_cli_env_prepare pull || exit $?
   INCREMENTAL_DOCKER_ENV_APPLIED=true
 }
 
@@ -134,27 +163,28 @@ incremental_use_minikube_docker() {
 # image. Nothing else is guessed: without a baseline the changed image set is
 # unknowable, and the caller must refuse to gate rather than shadow nothing.
 incremental_release_baseline_commit() {
-  local probe ref revision rc
+  local probe ref revision probe_output
+  INCREMENTAL_RELEASE_BASELINE_COMMIT=""
   incremental_use_minikube_docker
   for probe in control-api workflow-recipes external-rest-api; do
     ref="ghcr.io/evenfire-ai/${probe}:${IMAGE_TAG}"
-    revision="$(incremental_run_with_deadline incremental-image-inspect \
-      "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
-      docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${ref}")"
-    rc=$?
-    if [[ "${rc}" -ne 0 ]]; then
+    if ! probe_output="$(incremental_docker_run incremental-image-inspect \
+      "${MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS}" \
+      docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${ref}" 2>&1)"; then
       continue
     fi
-    revision="$(printf '%s' "${revision}" | tr -d '[:space:]')"
+    # The deadline runner reports lifecycle events on stderr. Keep only an
+    # exact OCI revision so diagnostics can never become a git baseline.
+    revision="$(printf '%s\n' "${probe_output}" | awk 'length($0) == 40 && $0 !~ /[^0-9a-f]/ { print; exit }')"
     if [[ "${revision}" =~ ^[0-9a-f]{40}$ ]] &&
        git -C "${PROJECT_DIR}" cat-file -e "${revision}^{commit}" 2>/dev/null; then
-      printf '%s' "${revision}"
+      INCREMENTAL_RELEASE_BASELINE_COMMIT="${revision}"
       return 0
     fi
   done
   revision="$(git -C "${PROJECT_DIR}" rev-parse -q --verify "${IMAGE_TAG}^{commit}" 2>/dev/null || true)"
   if [[ "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
-    printf '%s' "${revision}"
+    INCREMENTAL_RELEASE_BASELINE_COMMIT="${revision}"
     return 0
   fi
   return 0
@@ -266,7 +296,8 @@ incremental_plan() {
     # A ghcr cluster has a second baseline the local path does not: the commit
     # its release images were built from. Without it the changed set cannot be
     # derived and no amount of building would make the cluster match the tree.
-    baseline="$(incremental_release_baseline_commit)"
+    incremental_release_baseline_commit
+    baseline="${INCREMENTAL_RELEASE_BASELINE_COMMIT}"
     # Not `-z`: anything that is not a commit id (including a diagnostic that
     # leaked onto stdout) must take the fail-closed branch, never become a
     # git revision this plan then diffs against.
@@ -363,8 +394,8 @@ incremental_shadow_selector() {
       log "  ${local_ref} has no published counterpart; the local build is what runs"
       continue
     fi
-    if ! incremental_run_with_deadline incremental-image-tag \
-      "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
+    if ! incremental_docker_run incremental-image-tag \
+      "${MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS}" \
       docker tag "${local_ref}" "${shadow_ref}"; then
       log "ERROR: could not shadow ${shadow_ref} with ${local_ref}; the gate would test undeployed code"
       exit 1

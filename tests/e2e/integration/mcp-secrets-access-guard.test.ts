@@ -18,7 +18,7 @@ import {
   randomSuffix,
   requireControlApiUp,
   secretYaml,
-} from './mcpCredentialRotation.helpers.js'
+} from './mcpRotation.helpers.js'
 
 const RUN_ID = randomSuffix()
 const SECRET_NAME = `e2e-rot-guard-${RUN_ID}`

@@ -46,7 +46,7 @@ import {
   waitFor,
   waitForDeploymentRolloutComplete,
   waitForRolloutCondition,
-} from './mcpCredentialRotation.helpers.js'
+} from './mcpRotation.helpers.js'
 
 const HCC_NAMESPACE = 'control-plane'
 const HCC_DEPLOYMENT = 'host-context-controller'

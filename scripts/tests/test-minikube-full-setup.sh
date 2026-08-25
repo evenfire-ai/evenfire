@@ -488,6 +488,24 @@ full_setup_resolves() {
     "$REPO_ROOT/scripts/minikube/full-setup.sh"
 }
 
+assert_t2_handoff_rejects_skip_build() {
+  local output status=0 handoff_root="$FULL_SETUP_STUB_DIR/skip-build-handoff"
+  output="$(
+    PATH="$FULL_SETUP_STUB_DIR:$PATH" MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
+      T2_SETUP_HANDOFF_REQUIRED=true T2_SKIP_LOCK=true T2_RUN_ID=fixture-run \
+      T2_SETUP_HANDOFF_TRANSITION=full-reconcile IMAGE_SOURCE=local \
+      T2_SETUP_HANDOFF_ROOT="$handoff_root" \
+      bash "$REPO_ROOT/scripts/minikube/full-setup.sh" --skip-build 2>&1
+  )" || status=$?
+  if [[ "$status" -ne 0 ]] &&
+    grep -Fq 'T2 setup handoff requires same-run image acquisition; --skip-build is forbidden' <<<"$output" &&
+    [[ ! -e "$handoff_root" ]]; then
+    pass "T2 setup handoff rejects --skip-build before any cluster operation"
+  else
+    fail "T2 setup handoff accepted --skip-build or failed without the explicit acquisition error"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # A PROJECT_DIR whose recorded image manifest the test controls
 # ---------------------------------------------------------------------------
@@ -1524,6 +1542,7 @@ assert_reset_db_flag_backcompat
 assert_skip_build_staleness_find_is_sigpipe_guarded
 assert_pipefail_head_guard_prevents_abort
 assert_setup_runtime_operations_are_bounded
+assert_t2_handoff_rejects_skip_build
 assert_ghcr_is_the_default_image_source
 assert_image_source_local_is_honoured
 assert_bootstrap_seed_deferral_is_opt_in

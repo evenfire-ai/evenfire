@@ -371,6 +371,10 @@ if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
     err "T2 setup handoff requires IMAGE_SOURCE=local"
     exit 1
   fi
+  if [ "${SKIP_BUILD}" = true ]; then
+    err "T2 setup handoff requires same-run image acquisition; --skip-build is forbidden"
+    exit 1
+  fi
 fi
 TOTAL_STEPS=12
 # MINIKUBE_IMAGE_TAG overrides the committed pin AT RENDER TIME ONLY.
@@ -2382,13 +2386,14 @@ if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
   # The ordinary setup summary historically gates only CORE_DEPLOYS and may
   # return zero after printing "partially complete". A T2 handoff is stricter:
   # reuse the final T2 deployment inventory contract (including additional
-  # deployed workloads) and make an unready/missing required deployment block
-  # both publication and setup success.
+  # deployed workloads) and wait through the bounded post-restart convergence
+  # window before an unready/missing deployment blocks both publication and
+  # setup success.
   prior_bootstrap_required="${T2_BOOTSTRAP_REQUIRED}"
   prior_plan_mode="${T2_PLAN_MODE}"
   T2_BOOTSTRAP_REQUIRED=false
   T2_PLAN_MODE=false
-  if ! t2_deployment_check; then
+  if ! t2_wait_for_deployments; then
     all_ready=false
   fi
   T2_BOOTSTRAP_REQUIRED="${prior_bootstrap_required}"

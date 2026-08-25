@@ -17,10 +17,29 @@ grep -Fq 'get secret control-postgres' "${SCRIPT}"
 grep -Fq 'PROFILE_PG_FORWARD_RECORD' "${SCRIPT}"
 grep -Fq 'pf_owner_record_process "${PROFILE_PG_FORWARD_RECORD}"' "${SCRIPT}"
 grep -Fq 'pf_owner_cleanup_record "${PROFILE_PG_FORWARD_RECORD}"' "${SCRIPT}"
-grep -Fq 'docker_cli_env_prepare false' "${SCRIPT}"
+grep -Fq 'docker_cli_env_prepare probe' "${SCRIPT}"
 grep -Fq 'docker_cli_run_public gfs-t1-postgres-run' "${SCRIPT}"
 grep -Fq 'docker run -d --rm' "${SCRIPT}"
 grep -Fq 'ISOLATED_PG_IMAGE' "${SCRIPT}"
+grep -Fq -- '-p "127.0.0.1::5432"' "${SCRIPT}"
+python3 - "${SCRIPT}" <<'PY'
+from pathlib import Path
+import sys
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+port_call = next(
+    index
+    for index, line in enumerate(lines)
+    if "docker_cli_run_public gfs-t1-postgres-port" in line
+)
+assert '${MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS}' in lines[port_call + 1]
+assert 'docker port "${ISOLATED_CONTAINER}" 5432/tcp' in lines[port_call + 2]
+assert all("GFS_DOCKER_INFO_TIMEOUT_SECONDS" not in line for line in lines)
+PY
+if grep -Fq -- '-p "127.0.0.1:${ISOLATED_PORT}:5432"' "${SCRIPT}"; then
+  echo 'FAIL: isolated GFS PostgreSQL still has a choose-then-bind port race' >&2
+  exit 1
+fi
 grep -Fq 'pending_files' "${SCRIPT}"
 grep -Fq -- '--reporter=json' "${SCRIPT}"
 grep -Fq "gfs*.realPostgres.integration.test.ts" "${SCRIPT}"

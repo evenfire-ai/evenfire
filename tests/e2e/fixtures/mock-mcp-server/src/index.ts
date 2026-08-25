@@ -11,7 +11,7 @@
  *
  * Health check on a separate port. Also serves two additive, opt-in routes
  * used by the issue #223 credential-rotation E2E suites (see
- * tests/e2e/integration/mcpCredentialRotation.helpers.ts):
+ * tests/e2e/integration/mcpRotation.helpers.ts):
  *   - GET /whoami-credential : echoes E2E_ROTATION_API_KEY as currently
  *     injected into THIS pod's env — proves a rotated credential actually
  *     reached a running container after rollout.
@@ -41,7 +41,7 @@ const records = new Map<string, string>()
 
 // ─── Issue #223: opt-in credential-rotation test gate ───────────────────────
 // Must match ROTATION_CREDENTIAL_ENV_VAR / ROTATION_INVALID_SENTINEL in
-// tests/e2e/integration/mcpCredentialRotation.helpers.ts. When the E2E
+// tests/e2e/integration/mcpRotation.helpers.ts. When the E2E
 // scenario for a FAILED rollout (E2) rotates this env var to the reserved
 // sentinel, the process refuses to start — a real crash-loop, not a
 // simulated one, so the Deployment's rolling update genuinely never

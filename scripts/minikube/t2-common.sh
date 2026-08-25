@@ -428,6 +428,24 @@ t2_profile_status() {
   T2_PROFILE_HEALTHY=true
 }
 
+t2_missing_profile_context_check() {
+  local context_inventory context_status=0
+  [ "$T2_PROFILE_STATUS" = missing ] || return 0
+  context_inventory="$(kubectl --context="$T2_CONTEXT" config get-contexts -o name 2>&1)" || context_status=$?
+  if [ "$context_status" -ne 0 ]; then
+    T2_NEXT_COMMAND='repair the local kubeconfig before bootstrapping this branch-owned profile'
+    t2_fail PROFILE_UNHEALTHY \
+      "unable to inspect kubeconfig for the missing profile context (kubectl status $context_status)"
+    return 1
+  fi
+  if printf '%s\n' "$context_inventory" | awk -v target="$T2_CONTEXT" '$0 == target { found=1 } END { exit(found ? 0 : 1) }'; then
+    T2_NEXT_COMMAND='resolve ownership of the stale kubeconfig context before bootstrapping; do not overwrite it'
+    t2_fail PROFILE_OWNERSHIP_MISMATCH \
+      "Minikube profile is missing but a same-name Kubernetes context still exists: $T2_CONTEXT"
+    return 1
+  fi
+}
+
 t2_marker_check() {
   local marker_probe marker_status=0
   # `--ignore-not-found` makes an absent marker an explicit empty-object
@@ -653,8 +671,15 @@ PY
 }
 
 t2_deployment_check() {
-  local deployment_json unready
-  deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null || true)"
+  local deployment_json unready deployment_status=0
+  T2_UNREADY_DEPLOYMENTS=""
+  deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null)" || deployment_status=$?
+  if [ "$deployment_status" -ne 0 ]; then
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    t2_fail PROFILE_UNHEALTHY \
+      "deployment readiness inventory query failed with exit $deployment_status"
+    return 1
+  fi
   if [ -z "$deployment_json" ]; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
       T2_PLAN_STATE=full-bootstrap
@@ -663,6 +688,7 @@ t2_deployment_check() {
     fi
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is unavailable'
+    return 1
   fi
   if ! unready="$(python3 - "$deployment_json" "$T2_REQUIRED_DEPLOYMENTS" "$T2_REQUIRED_DEPLOYMENTS_INCLUDE_ADDITIONAL" 2>/dev/null <<'PY'
 import json
@@ -740,8 +766,10 @@ PY
     fi
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is invalid'
+    return 1
   fi
   if [ -n "$unready" ]; then
+    T2_UNREADY_DEPLOYMENTS="$unready"
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
       T2_PLAN_STATE=full-bootstrap
       T2_PLAN_REASON="one or more deployments are not Ready: $unready"
@@ -759,7 +787,40 @@ PY
     fi
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
     t2_fail PROFILE_UNHEALTHY "one or more deployments are not Ready: $unready"
+    return 1
   fi
+}
+
+t2_wait_for_deployments() {
+  local deadline remaining original_runtime_timeout sleep_seconds
+  deadline=$((SECONDS + T2_TIMEOUT_SECONDS))
+  original_runtime_timeout="$T2_RUNTIME_TIMEOUT_SECONDS"
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    if [ "$T2_RUNTIME_TIMEOUT_SECONDS" -gt "$remaining" ]; then
+      T2_RUNTIME_TIMEOUT_SECONDS="$remaining"
+    fi
+    if t2_deployment_check >/dev/null 2>&1; then
+      T2_RUNTIME_TIMEOUT_SECONDS="$original_runtime_timeout"
+      T2_ERROR_CODE=""
+      return 0
+    fi
+    T2_RUNTIME_TIMEOUT_SECONDS="$original_runtime_timeout"
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    sleep_seconds=2
+    if [ "$remaining" -lt "$sleep_seconds" ]; then
+      sleep_seconds="$remaining"
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  T2_RUNTIME_TIMEOUT_SECONDS="$original_runtime_timeout"
+  T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+  t2_fail PROFILE_UNHEALTHY \
+    "deployments did not converge within $T2_TIMEOUT_SECONDS seconds: ${T2_UNREADY_DEPLOYMENTS:-deployment readiness inventory is unavailable}"
+  return 1
 }
 
 t2_port_forward_targets_context() {
@@ -815,6 +876,28 @@ t2_pid_file_matches_process() {
   pf_owner_record_process_matches "$pid_file" "$T2_PROFILE" "$T2_CONTEXT" \
     "$T2_PROJECT_DIR" "$PF_OWNER_RECORD_NAMESPACE" "$PF_OWNER_RECORD_SERVICE" \
     "$PF_OWNER_RECORD_LOCAL_PORT" "$PF_OWNER_RECORD_REMOTE_PORT"
+}
+
+t2_cluster_state_checks() {
+  # A missing or stopped branch-owned profile is already a complete planner
+  # verdict. There is no Kubernetes context to interrogate yet, and attempting
+  # marker/resource reads here turns a valid full-bootstrap into a false
+  # PROFILE_UNHEALTHY failure before the orchestrator can create the profile.
+  if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
+    return 0
+  fi
+  t2_profile_context_identity_check
+  t2_marker_check
+  # A healthy but uninitialized profile can have a working API without the
+  # exact-head marker. That is still a bootstrap verdict; do not reinterpret
+  # partially created resources as a runtime health failure.
+  if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
+    return 0
+  fi
+  t2_image_check
+  t2_resource_checks
+  t2_postgres_check
+  t2_deployment_check
 }
 
 t2_process_check() {
