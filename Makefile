@@ -783,8 +783,12 @@ local-web: ## Run Control UI locally against minikube control-api port-forward
 	wait_for_port control-api 8090 "$$api_pid" http://127.0.0.1:8090/health; \
 	CONTROL_API_INTERNAL_URL=http://localhost:8090 npm --prefix control-ui run dev
 
+.PHONY: local-app-onboarding
+local-app-onboarding: ## Run Desktop App showing the first-run onboarding flow (isolated; real environments untouched)
+	@$(MAKE) --no-print-directory EVENFIRE_ONBOARDING_PREVIEW=true local-app
+
 .PHONY: local-app
-local-app: ## Run Desktop App locally against minikube API port-forwards
+local-app: ## Run Desktop App locally against minikube API port-forwards (EVENFIRE_ONBOARDING_PREVIEW=true previews onboarding)
 	@set -euo pipefail; \
 	cleanup() { \
 		local pids; \
@@ -854,7 +858,7 @@ local-app: ## Run Desktop App locally against minikube API port-forwards
 	wait_for_port control-api 8090 "$$control_api_pid" http://127.0.0.1:8090/health; \
 	wait_for_port external-rest-api 8091 "$$external_api_pid" http://127.0.0.1:8091/health; \
 	wait_for_port rpc-proxy 8094 "$$rpc_proxy_pid" http://127.0.0.1:8094/health; \
-	env -u ELECTRON_RUN_AS_NODE EXTERNAL_REST_API_BASE_URL=http://127.0.0.1:8091 RPC_PROXY_BASE_URL=http://127.0.0.1:8094 CONTROL_API_BASE_URL=http://127.0.0.1:8090 npm --prefix desktop-app run dev
+	env -u ELECTRON_RUN_AS_NODE EXTERNAL_REST_API_BASE_URL=http://127.0.0.1:8091 RPC_PROXY_BASE_URL=http://127.0.0.1:8094 CONTROL_API_BASE_URL=http://127.0.0.1:8090 EVENFIRE_ONBOARDING_PREVIEW="$(EVENFIRE_ONBOARDING_PREVIEW)" npm --prefix desktop-app run dev
 
 .PHONY: local-ui
 local-ui: ## Run Control UI, Profile UI, and Desktop App locally against minikube port-forwards

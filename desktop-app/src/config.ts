@@ -56,6 +56,25 @@ const LOCALHOST_RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
 const DEFAULT_DEPLOYMENT_DOCS_URL =
   'https://github.com/evenfire-ai/evenfire#deploying-to-a-remote-cluster'
 const RUNTIME_CONFIG_DIR_NAME = 'runtime-configs'
+/**
+ * Dev switch for previewing the first-run onboarding flow (spec §5.1) on a
+ * machine that already has environments configured. Defaults to false; only
+ * the exact string "true" enables it.
+ *
+ * Onboarding is by definition the zero-environment state, so a developer whose
+ * app is already configured — including anyone launched by `make local-app`,
+ * which exports EXTERNAL_REST_API_BASE_URL and RPC_PROXY_BASE_URL — can never
+ * reach it. Rather than fake the view, this makes the app genuinely start cold:
+ * it reads and writes runtime config in a SEPARATE directory and ignores the
+ * env-var runtime config. The wizard is real, saving an environment works, and
+ * the developer's actual environments are neither read nor modified — unset the
+ * variable and they are all still there.
+ */
+const ONBOARDING_PREVIEW = process.env.EVENFIRE_ONBOARDING_PREVIEW?.trim().toLowerCase() === 'true'
+const ONBOARDING_PREVIEW_DIR_NAME = 'runtime-configs-onboarding-preview'
+const activeRuntimeConfigDirName = ONBOARDING_PREVIEW
+  ? ONBOARDING_PREVIEW_DIR_NAME
+  : RUNTIME_CONFIG_DIR_NAME
 const RUNTIME_CONFIG_INDEX_FILE = 'index.json'
 const PACKAGED_ENV_FILE = '.env.prod'
 const MAX_PROFILE_FILE_ATTEMPTS = 1000
@@ -143,6 +162,9 @@ loadPackagedEnv()
 
 function explicitRuntimeConfigPath(): string {
   if (app?.isPackaged) return ''
+  // The onboarding preview owns its own directory; an explicit config file
+  // would hand it a configured environment and defeat the point.
+  if (ONBOARDING_PREVIEW) return ''
   return process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim() || ''
 }
 
@@ -198,11 +220,11 @@ function runtimeConfigDirectoryPath(): string {
   if (explicit) return path.dirname(explicit)
 
   if (app?.isReady()) {
-    return path.join(app.getPath('userData'), RUNTIME_CONFIG_DIR_NAME)
+    return path.join(app.getPath('userData'), activeRuntimeConfigDirName)
   }
 
   // Keep a deterministic fallback before Electron is ready.
-  return path.join(defaultUserDataDirectoryPath(), RUNTIME_CONFIG_DIR_NAME)
+  return path.join(defaultUserDataDirectoryPath(), activeRuntimeConfigDirName)
 }
 
 function runtimeConfigIndexPath(): string {
@@ -516,6 +538,9 @@ const desktopDevPackageRuntimeConfigEnabled =
   runtimeEndpointsMatch(envRuntimeConfig, localhostRuntimeConfig)
 const canUseEnvRuntimeConfig = !app?.isPackaged || desktopDevPackageRuntimeConfigEnabled
 const envRuntimeConfigured = Boolean(
+  // `make local-app` exports both of these, which would mark the app
+  // configured and skip the wizard the preview exists to show.
+  !ONBOARDING_PREVIEW &&
   canUseEnvRuntimeConfig &&
   process.env.EXTERNAL_REST_API_BASE_URL?.trim() &&
   process.env.RPC_PROXY_BASE_URL?.trim()
@@ -549,6 +574,33 @@ if (
 let desktopRuntimeConfigured = Boolean(
   activeStoredProfile || envRuntimeConfigured || activeRuntimeOptionId === LOCALHOST_OPTION_ID
 )
+
+/**
+ * Diagnostic for "why did the app open on this screen?".
+ *
+ * `configured` decides sign-in vs. the first-run onboarding wizard, and it is
+ * resolved twice: once at module load, then again by
+ * `hydrateDesktopRuntimeConfig` once Electron is ready. Only the second value
+ * reaches the renderer, so this is logged from there — logging the module-load
+ * value instead reports a screen the user never sees. No URLs, tokens or paths
+ * beyond the config directory name; nothing secret.
+ */
+function logRuntimeConfigResolution(): void {
+  if (process.env.VITEST) return
+  console.log(
+    '[evenfire] runtime config:',
+    JSON.stringify({
+      configured: desktopRuntimeConfigured,
+      screen: desktopRuntimeConfigured ? 'sign-in' : 'onboarding',
+      onboardingPreview: ONBOARDING_PREVIEW,
+      onboardingPreviewRaw: process.env.EVENFIRE_ONBOARDING_PREVIEW ?? '(unset)',
+      activeOptionId: activeRuntimeOptionId,
+      configDir: activeRuntimeConfigDirName,
+      isPackaged: Boolean(app?.isPackaged),
+      devPackageLaunch: desktopDevPackageRuntimeConfigEnabled,
+    })
+  )
+}
 
 const initialRuntimeConfig =
   activeRuntimeOptionId === LOCALHOST_OPTION_ID
@@ -602,14 +654,24 @@ export function hydrateDesktopRuntimeConfig(): void {
   if (runtimeConfigHydrated) return
   if (!app?.isReady()) return
   runtimeConfigHydrated = true
+  resolveHydratedRuntimeConfig()
+  logRuntimeConfigResolution()
+}
 
+function resolveHydratedRuntimeConfig(): void {
   const loaded = loadStoredProfilesSync()
   storedProfiles = loaded.profiles
   const preserveLocalhostRuntime =
-    preferLocalhostRuntimeByDefault ||
-    (desktopDevPackageRuntimeConfigEnabled &&
-      envMatchesLocalhostOption &&
-      isLocalhostRuntimeConfig(currentRuntimeConfig()))
+    // The onboarding preview must not be pulled back onto the Localhost
+    // option here. `make local-app` satisfies every condition below — it
+    // passes --evenfire-desktop-dev-package and points the env endpoints at
+    // 127.0.0.1 — which would re-mark the app configured after boot and land
+    // the developer on sign-in, the exact screen the preview exists to bypass.
+    !ONBOARDING_PREVIEW &&
+    (preferLocalhostRuntimeByDefault ||
+      (desktopDevPackageRuntimeConfigEnabled &&
+        envMatchesLocalhostOption &&
+        isLocalhostRuntimeConfig(currentRuntimeConfig())))
   activeRuntimeOptionId = preserveLocalhostRuntime ? LOCALHOST_OPTION_ID : loaded.activeProfileId
 
   const selectedProfile = resolveActiveProfile(storedProfiles, activeRuntimeOptionId)

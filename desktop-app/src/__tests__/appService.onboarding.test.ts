@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const openExternal = vi.fn(async () => undefined)
+const openExternal = vi.fn(async (_url: string) => undefined)
 
 // config.ts touches the Electron `app` at module load; provide a minimal mock
 // with a NON-packaged, ready app so the env-var runtime-config path is active.
