@@ -10,6 +10,7 @@ import {
 } from '../../middleware/externalSessionAuth.js'
 import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { type Logger, rootLogger } from '../../observability/logger.js'
 import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
@@ -46,6 +47,10 @@ type TeamDirectoryPartialError = {
   teamId?: string
   source: 'operational_resources' | 'members' | 'contexts' | 'agents'
   code: 'unavailable'
+}
+
+function requestLogger(req: { log?: Logger }): Logger {
+  return req.log ?? rootLogger
 }
 
 function projectTeamMembers(values: unknown): TeamDirectoryMember[] {
@@ -142,7 +147,10 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           activeContextIds = new Set(contextIds)
           activeAgentNames = new Set(agentNames)
         } catch (err) {
-          console.warn('[external/users] access reconciliation failed for team directory:', err)
+          requestLogger(req).warn(
+            { err, userId: req.params.userId, source: 'operational_resources' },
+            'external user team directory reconciliation failed'
+          )
           initialPartialErrors.push({ source: 'operational_resources', code: 'unavailable' })
         }
 
@@ -160,9 +168,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
             ['agents', agents],
           ] as const) {
             if (result.status === 'rejected') {
-              console.warn(
-                `[external/users] team-directory ${source} fetch failed for team ${team.id}:`,
-                result.reason
+              requestLogger(req).warn(
+                { err: result.reason, userId: req.params.userId, teamId: team.id, source },
+                'external user team directory source fetch failed'
               )
               partialErrors.push({ teamId: team.id, source, code: 'unavailable' })
             }
@@ -252,9 +260,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         try {
           active = new Set(await listActiveContextIds(gateway))
         } catch (err) {
-          console.warn(
-            `[external/users] context reconciliation failed for ${req.params.userId}:`,
-            err
+          requestLogger(req).warn(
+            { err, userId: req.params.userId, source: 'contexts' },
+            'external user context reconciliation failed'
           )
         }
         const contextIds = filterAccessValues(base.contextIds, active)
@@ -307,9 +315,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           // Spec §7.2: never fail the catalog purely because Kubernetes is
           // unavailable. Preserve the names authorized by the directory DB;
           // omit enriched DTOs because their live Host identity is unverified.
-          console.warn(
-            `[external/users] MCP server enrichment failed for ${req.params.userId}:`,
-            err
+          requestLogger(req).warn(
+            { err, userId: req.params.userId, source: 'agents' },
+            'external user MCP server enrichment failed'
           )
           agents = []
           mcpEnrichmentComplete = false

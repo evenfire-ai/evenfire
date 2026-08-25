@@ -584,6 +584,45 @@ describe('routes/profile', () => {
     expect(svc.listMembers).not.toHaveBeenCalledWith('t1')
   })
 
+  it('logs team-directory partial failures through the structured request logger', async () => {
+    const warn = vi.fn()
+    const rejection = new Error('provider token secret')
+    svc.listTeams.mockResolvedValue({
+      currentTeamId: 't1',
+      items: [{ id: 't1', name: 'Alpha', role: 'admin' }],
+    })
+    svc.listMembers.mockResolvedValue([])
+    svc.getTeamContexts.mockRejectedValue(rejection)
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => {
+      ;(req as express.Request & { log?: { warn: typeof warn } }).log = { warn } as never
+      next()
+    })
+    mountInternalRoutes(app, accessCatalogGateway())
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const res = await withInternalServiceAuthAndUserSession(
+        request(app).get('/external/users/u1/team-directory')
+      ).expect(200)
+
+      expect(res.body.complete).toBe(false)
+      expect(res.body.partialErrors).toEqual([
+        { teamId: 't1', source: 'contexts', code: 'unavailable' },
+      ])
+      expect(warn).toHaveBeenCalledWith(
+        { err: rejection, userId: 'u1', teamId: 't1', source: 'contexts' },
+        'external user team directory source fetch failed'
+      )
+      expect(consoleWarn).not.toHaveBeenCalled()
+    } finally {
+      consoleWarn.mockRestore()
+    }
+  })
+
   it('caps initial team directory fan-out and reports truncation', async () => {
     const teams = Array.from({ length: 51 }, (_, index) => ({
       id: `t${index + 1}`,
