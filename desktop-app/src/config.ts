@@ -336,6 +336,14 @@ function loadStoredProfilesSync(): {
   profiles: StoredRuntimeProfile[]
   activeProfileId: string | null
 } {
+  // The onboarding preview starts cold on EVERY launch. Selecting Localhost or
+  // saving an environment writes to the preview directory, which would leave
+  // the next launch configured — the switch would show onboarding once and
+  // then silently stop, which is exactly the confusion it exists to prevent.
+  // Reads are dropped rather than the directory deleted: writes still work, so
+  // the wizard can be completed and used for the rest of the session.
+  if (ONBOARDING_PREVIEW) return { profiles: [], activeProfileId: null }
+
   const explicitPath = explicitRuntimeConfigPath()
   if (explicitPath) {
     const configFromFile = readRuntimeConfigFileSync(explicitPath)

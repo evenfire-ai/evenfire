@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs'
+import path from 'node:path'
 
 vi.mock('electron', () => ({
   app: {
@@ -120,6 +122,29 @@ describe('EVENFIRE_ONBOARDING_PREVIEW', () => {
     } finally {
       process.argv = process.argv.filter(a => a !== '--evenfire-desktop-dev-package')
     }
+  })
+
+  it('starts cold again after a previous preview selected an environment', async () => {
+    // Regression: selecting Localhost (or saving) inside the preview wrote
+    // activeProfileId into the preview's own directory, so the NEXT launch
+    // came up configured and went to sign-in. The switch showed onboarding
+    // once and then quietly stopped working.
+    const previewDir = path.join(
+      '/tmp/evenfire-test-userdata',
+      'runtime-configs-onboarding-preview'
+    )
+    fs.mkdirSync(previewDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(previewDir, 'index.json'),
+      JSON.stringify({ version: 1, activeProfileId: '__localhost__', profiles: [] })
+    )
+
+    process.env.EVENFIRE_ONBOARDING_PREVIEW = 'true'
+
+    const state = await loadState()
+
+    expect(state.configured).toBe(false)
+    expect(state.activeOptionId).not.toBe('__localhost__')
   })
 
   it('does not let an explicit config path hand the preview an environment', async () => {
