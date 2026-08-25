@@ -2,6 +2,8 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "${REPO_ROOT}/scripts/tests/lib/minikube-fixture-repo.sh"
 
 FAIL=0
 
@@ -12,20 +14,11 @@ write_test_profile_metadata() {
   local root="$1" profile="clerum-full-setup-fixture"
   local repo="$root/repo" profile_dir="$root/profiles/$profile"
   local branch short_sha
-  mkdir -p "$repo"
-  (
-    cd "$repo"
-    git init -q .
-    git config user.email t2-fixture@example.invalid
-    git config user.name t2-fixture
-    printf 'fixture\n' > README.md
-    git add README.md
-    git commit -qm fixture
-    git branch -M test/minikube-fixture
-    git remote add origin https://github.com/evenfire-ai/evenfire.git
-    git update-ref refs/remotes/origin/dev HEAD
-  )
-  branch="$(git -C "$repo" branch --show-current)"
+  MINIKUBE_TEST_PROFILE="$profile"
+  MINIKUBE_TEST_CONTEXT="$profile"
+  minikube_test_fixture_repo_init "$REPO_ROOT" "$root"
+  repo="$MINIKUBE_TEST_PROJECT_DIR"
+  branch="$MINIKUBE_TEST_BRANCH"
   short_sha="$(git -C "$repo" rev-parse --short=8 HEAD)"
   mkdir -p "$profile_dir"
   printf 'PROFILE=%s\nBRANCH=%s\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
@@ -59,6 +52,13 @@ EOF_PORTS
   TEST_PORTS_ENV="$profile_dir/ports.env"
   TEST_LOCK_ROOT="$root/locks"
   TEST_PROJECT_DIR="$repo"
+}
+
+assert_fixture_host_unchanged() {
+  if ! minikube_test_assert_host_unchanged; then
+    fail "minikube fixture mutated the host checkout"
+    return 1
+  fi
 }
 
 assert_broken_profile_is_recreated() {
@@ -188,6 +188,7 @@ STUB
     cat "$setup_log_file"
   fi
 
+  assert_fixture_host_unchanged
   rm -rf "$tmp"
 }
 
@@ -289,6 +290,7 @@ STUB
     cat "$setup_log_file"
   fi
 
+  assert_fixture_host_unchanged
   rm -rf "$tmp"
 }
 
