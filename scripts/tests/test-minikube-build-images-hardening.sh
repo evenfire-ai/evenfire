@@ -364,6 +364,22 @@ else
   fail "a Minikube inventory failure was treated as an image miss (status=$inventory_failure_status)"
 fi
 
+clear_runtime_state
+mutation_inventory_failure_output="$TMP_DIR/mutation-inventory-failure.out"
+mutation_inventory_failure_status=0
+run_build "$mutation_inventory_failure_output" valid \
+  MINIKUBE_PRELOAD_BASE_IMAGES=true \
+  FAKE_MINIKUBE_INVENTORY_MODE=exit-1 \
+  bash "$BUILD_SCRIPT" --only=control-api || mutation_inventory_failure_status=$?
+if [[ "$mutation_inventory_failure_status" -eq 2 ]] \
+  && grep -Fq 'Could not inspect' "$mutation_inventory_failure_output" \
+  && ! grep -Fq 'image load' "$MINIKUBE_LOG" \
+  && ! grep -Fq ' pull ' "$DOCKER_LOG"; then
+  pass 'a failed Minikube inventory blocks mutation before pull or load'
+else
+  fail "a failed Minikube inventory reached image mutation (status=$mutation_inventory_failure_status)"
+fi
+
 descendant_is_dead() {
   local record descendant
   [[ -f "$DESCENDANT_PID_FILE" ]] || return 1

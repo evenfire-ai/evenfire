@@ -134,6 +134,7 @@ case "$*" in
     done
     printf '%s' "${FAKE_CONTEXT:-}" ;;
   *"config view"*) printf '%s://%s:6443' https "${FAKE_ENDPOINT:-10.0.0.1}" ;;
+  *"get configmap"*) printf '%s' "${FAKE_MARKER:-}" ;;
   *) exit 0 ;;
 esac
 EOF
@@ -445,8 +446,9 @@ plan_mode_head="$(env "${marker_env[@]}" T2_PLAN_MODE=true FAKE_MARKER='{"data":
 marker_stderr="$tmp/marker-deadline.stderr"
 marker_fast_path_status=0
 marker_fast_path="$(env "${marker_env[@]}" T2_PLAN_MODE=false \
+  PATH="$fake_bin:$PATH" \
   FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"feature","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"generated"}}' \
-  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=false; t2_kc(){ printf "%s" "$FAKE_MARKER"; printf "%s\n" "[HARNESS_DEADLINE] label=t2-kubectl event=exit" >&2; }; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON" 2>"$marker_stderr")" || marker_fast_path_status=$?
+  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=false; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON" 2>"$marker_stderr")" || marker_fast_path_status=$?
 if [ "$marker_fast_path_status" -ne 0 ] || [ "$marker_fast_path" != true ]; then
   fail "stderr from the bounded marker read broke the valid-marker fast path (status=$marker_fast_path_status result=$marker_fast_path)"
 fi
