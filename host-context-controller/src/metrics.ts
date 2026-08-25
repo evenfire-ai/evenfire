@@ -173,6 +173,14 @@ export const administrativeOutcomeReporterTotal = counter({
   labelNames: ['result'] as const,
 })
 
+// Low-cardinality Host-scoped MCP API decisions. Resource names, JWT IDs,
+// Contexts, and Secret selectors must never become metric labels.
+export const mcpHostApiRequestsTotal = counter({
+  name: 'clerum_hcc_mcp_host_api_requests_total',
+  help: 'Host-scoped MCP API requests by route class, outcome, and bounded reason.',
+  labelNames: ['action', 'outcome', 'reason'] as const,
+})
+
 // ── Host reconciliation scheduler telemetry (issue #791 follow-up) ──
 // Low-cardinality labels only — never host names, users, teams, or session IDs.
 

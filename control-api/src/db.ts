@@ -5915,7 +5915,25 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGfsUploadFinalizingSchema,
   },
   {
-    version: '0100_oauth_grants_owner_generalization',
+    version: '0100_seed_minimax_allowed_model',
+    apply: async db => {
+      // Seed one sensible default model for the newly added `minimax` provider
+      // (packages/llm-providers). Same shape as 0056/0057/0058: enabled=true (a
+      // provider without credentials is unusable regardless), a `vendor` label
+      // for UI grouping, and ON CONFLICT DO NOTHING so the migration stays
+      // idempotent and never clobbers an admin-edited row. `MiniMax-M2` mirrors
+      // registryCore's minimax defaultModel. Operators curate the rest via
+      // /llm-models.
+      await db.query(`
+        INSERT INTO llm_allowed_models (provider, model, vendor)
+        VALUES
+          ('minimax', 'MiniMax-M2', 'MiniMax')
+        ON CONFLICT DO NOTHING;
+      `)
+    },
+  },
+  {
+    version: '0101_oauth_grants_owner_generalization',
     apply: applyOAuthGrantsOwnerGeneralization,
   },
 ]

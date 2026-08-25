@@ -74,6 +74,7 @@ spec:
                         - moonshot
                         - nebius
                         - novita
+                        - minimax
                         - azure
                       description: LLM provider to use.
                     name:
@@ -189,6 +190,7 @@ spec:
                               - moonshot
                               - nebius
                               - novita
+                              - minimax
                               - azure
                             description: >-
                               Fallback LLM provider. Same enum as spec.model.provider.

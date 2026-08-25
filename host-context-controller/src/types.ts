@@ -589,14 +589,16 @@ export interface McpServerStatus {
   deployed: boolean
   /** Whether the Deployment has at least one ready replica. */
   ready: boolean
-  /** Human-readable status message. */
-  message?: string
   /**
-   * Whether HCC can tie this status to the current McpServer identity and
-   * generation. False means discovery is authoritative but runtime status has
-   * not yet been re-established after controller startup.
+   * Whether this readiness observation is current and authoritative — HCC can
+   * tie the status to the current McpServer identity and generation. Omitted
+   * when the status source cannot make that guarantee; false means discovery
+   * is authoritative but runtime status has not yet been re-established after
+   * controller startup.
    */
   authoritative?: boolean
+  /** Human-readable status message. */
+  message?: string
 }
 
 /**

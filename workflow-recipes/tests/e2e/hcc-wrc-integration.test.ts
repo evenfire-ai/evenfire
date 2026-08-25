@@ -116,13 +116,15 @@ describe('HCC-WRC Integration E2E', () => {
     expect(logs).toContain(MCP_SERVER_NAME)
   })
 
-  // E6.10: HCC Discovery API serves the delegated McpServer
-  // The Discovery API filters by Context allowlist. The WRC must first:
+  // E6.10: temporary PR 2 system inventory serves the delegated McpServer
+  // This suite does not mint a Host JWT, so it cannot exercise the v2 Host
+  // route. Keep the current global metadata-only poll assertion here until
+  // PR 2 adds an authenticated system-inventory fixture.
   // 1. Create the McpServer CRD (done in E6.9)
   // 2. Patch the Context to add the server to mcpServers[]
   // 3. HCC watches Context change → caches the server → serves via API
   // We wait for Context to be patched first, then poll the Discovery API.
-  it('E6.10 — HCC Discovery API lists delegated McpServer', { timeout: 60_000 }, async () => {
+  it('E6.10 — HCC metadata inventory lists delegated McpServer', { timeout: 60_000 }, async () => {
     // Wait for WRC to patch Context (may take a reconciliation cycle)
     const ctxStart = Date.now()
     while (Date.now() - ctxStart < 30_000) {
@@ -138,9 +140,7 @@ describe('HCC-WRC Integration E2E', () => {
     let found: { name: string; transport?: { type: string } } | undefined
 
     while (Date.now() - start < 20_000) {
-      const { data } = await fetchJson(
-        `http://localhost:${HCC_LOCAL_PORT}/api/v1/mcpservers/context/default`
-      )
+      const { data } = await fetchJson(`http://localhost:${HCC_LOCAL_PORT}/api/v1/mcpservers`)
       const response = data as { servers: Array<{ name: string; transport?: { type: string } }> }
       if (response.servers) {
         found = response.servers.find(s => s.name === MCP_SERVER_NAME)
@@ -151,6 +151,9 @@ describe('HCC-WRC Integration E2E', () => {
 
     expect(found).toBeDefined()
     expect(found!.transport?.type).toBe('streamableHttp')
+    expect(found).not.toHaveProperty('secretRef')
+    expect(found).not.toHaveProperty('secretKey')
+    expect(found).not.toHaveProperty('auth')
   })
 
   // E6.11: Context patch triggers L2 context-allow NetworkPolicy from HCC
@@ -228,11 +231,9 @@ describe('HCC-WRC Integration E2E', () => {
     expect(body).toContain('clerum_hcc_mcpservers_total')
   })
 
-  // E6.14: HCC Discovery API no longer serves the deleted McpServer
-  it('E6.14 — HCC Discovery API no longer lists deleted McpServer', async () => {
-    const { data } = await fetchJson(
-      `http://localhost:${HCC_LOCAL_PORT}/api/v1/mcpservers/context/default`
-    )
+  // E6.14: temporary PR 2 metadata inventory no longer lists the deleted server
+  it('E6.14 — HCC metadata inventory no longer lists deleted McpServer', async () => {
+    const { data } = await fetchJson(`http://localhost:${HCC_LOCAL_PORT}/api/v1/mcpservers`)
 
     const response = data as { servers: Array<{ name: string }> }
     const found = (response.servers ?? []).find(s => s.name === MCP_SERVER_NAME)

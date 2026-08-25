@@ -41,6 +41,14 @@ import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
 import { LlmHookReconciler, computePodKey, referencedHookIds } from './llmHookReconciler'
+import type {
+  AuthorityContext,
+  AuthorityHost,
+  AuthorityMcpServer,
+  AuthoritySecret,
+  AuthoritySecretMetadata,
+  McpAuthorizationStore,
+} from './mcpAuthorization'
 import {
   confirmAuthoritativeMcpServerAbsence,
   isMcpServerStatusOnlyUpdate,
@@ -306,8 +314,6 @@ export interface McpServerProvider {
   getAllServerInfos(): McpServerInfo[]
   /** Get curated server info filtered by context (API consumers). Reads the Context CRD to determine allowed servers. */
   getServerInfosByContext(contextRef: string): Promise<McpServerInfo[]>
-  /** Get auth token for a server from K8s secret. */
-  getAuthToken(serverName: string): Promise<string | undefined>
   /** Set callback for when servers change. */
   onChange(callback: () => void): void
   start(): Promise<void>
@@ -477,50 +483,6 @@ async function listHostSnapshot(): Promise<HostSnapshot> {
 
 export async function listAllHosts(): Promise<HostCRD[]> {
   return (await listHostSnapshot()).hosts
-}
-
-/**
- * Get auth token from a secret.
- */
-export async function getAuthToken(
-  secretRef: string,
-  secretKey?: string
-): Promise<string | undefined> {
-  if (!coreApi) {
-    throw new Error('K8s client not initialized - are you in dev mode?')
-  }
-
-  try {
-    console.log(`[K8s] Getting auth token from secret: ${secretRef}`)
-
-    const response = await coreApi.readNamespacedSecret({
-      name: secretRef,
-      namespace: config.namespace,
-    })
-
-    const data = response.data || {}
-
-    // Try the specified key, or common key names
-    const keys = secretKey ? [secretKey] : ['token', 'api-key', 'apiKey', 'password']
-
-    for (const key of keys) {
-      if (data[key]) {
-        const token = Buffer.from(data[key], 'base64').toString('utf-8')
-        console.log(`[K8s] Found auth token in secret (key: ${key})`)
-        return token
-      }
-    }
-
-    console.warn(`[K8s] No auth token found in secret ${secretRef}`)
-    return undefined
-  } catch (error) {
-    if ((error as { response?: { statusCode?: number } }).response?.statusCode === 404) {
-      console.warn(`[K8s] Secret not found: ${secretRef}`)
-      return undefined
-    }
-    console.error(`[K8s] Failed to get auth token:`, error)
-    return undefined
-  }
 }
 
 /**
@@ -729,10 +691,7 @@ export async function getContext(contextId: string): Promise<ContextCRD | null> 
       spec: obj.spec,
     }
   } catch (error) {
-    const code =
-      (error as { code?: number; response?: { statusCode?: number } }).code ??
-      (error as { response?: { statusCode?: number } }).response?.statusCode
-    if (code === 404) {
+    if (getErrorCode(error) === 404) {
       console.warn(`[K8s] Context CRD not found: ${contextId}`)
       return null
     }
@@ -2647,17 +2606,6 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
-   * Get auth token for a server from K8s secret.
-   */
-  async getAuthToken(serverName: string): Promise<string | undefined> {
-    const server = this.servers.get(serverName)
-    if (!server?.spec.auth?.secretRef) {
-      return undefined
-    }
-    return getAuthToken(server.spec.auth.secretRef, server.spec.auth.secretKey)
-  }
-
-  /**
    * Set callback for when servers change.
    */
   onChange(callback: () => void): void {
@@ -4551,12 +4499,7 @@ export class McpServerWatcher implements McpServerProvider {
 export class DevMcpServerProvider implements McpServerProvider {
   private servers: Map<string, McpServerCRD> = new Map()
   private contexts: Map<string, ContextCRD> = new Map()
-  private authTokens: Map<string, string>
   private changeCallback?: () => void
-
-  constructor() {
-    this.authTokens = config.devAuthTokens
-  }
 
   getAllServers(): McpServerCRD[] {
     return [...this.servers.values()]
@@ -4609,10 +4552,6 @@ export class DevMcpServerProvider implements McpServerProvider {
     return this.getAllServers()
       .filter(s => s.spec.contextRef === contextRef && s.spec.enabled !== false)
       .map(s => this.toServerInfo(s))
-  }
-
-  async getAuthToken(serverName: string): Promise<string | undefined> {
-    return this.authTokens.get(serverName)
   }
 
   onChange(callback: () => void): void {
@@ -4678,11 +4617,6 @@ export class DevMcpServerProvider implements McpServerProvider {
     this.contexts.delete(contextId)
     this.changeCallback?.()
   }
-
-  /** Set auth token for a server (useful for testing). */
-  setAuthToken(serverName: string, token: string): void {
-    this.authTokens.set(serverName, token)
-  }
 }
 
 /**
@@ -4695,5 +4629,188 @@ export function createMcpServerProvider(): McpServerProvider {
   } else {
     console.log('[Provider] Creating K8s watcher provider (with reconciler)')
     return new McpServerWatcher()
+  }
+}
+
+function authorizationMetadata(metadata: {
+  uid?: string
+  resourceVersion?: string
+  deletionTimestamp?: string | Date
+}): { uid: string; resourceVersion: string; deletionTimestamp?: string } {
+  return {
+    uid: metadata.uid ?? '',
+    resourceVersion: metadata.resourceVersion ?? '',
+    ...(metadata.deletionTimestamp
+      ? { deletionTimestamp: new Date(metadata.deletionTimestamp).toISOString() }
+      : {}),
+  }
+}
+
+export function isMcpAuthorizationNotFound(error: unknown): boolean {
+  return getErrorCode(error) === 404
+}
+
+/**
+ * Live Kubernetes authority used only by the protected v2 Host MCP routes.
+ * Reads are deliberately not served from watch caches: every successful
+ * credential operation is fenced against current object UIDs/resourceVersions.
+ */
+export function createMcpAuthorizationStore(provider: McpServerProvider): McpAuthorizationStore {
+  if (config.devMode || !customObjectsApi || !hostCustomObjectsApi || !coreApi) {
+    return {
+      async readHost() {
+        return null
+      },
+      async readContext() {
+        return null
+      },
+      async readMcpServer() {
+        return null
+      },
+      async readSecretMetadata() {
+        return null
+      },
+      async readSecret() {
+        return null
+      },
+    }
+  }
+
+  return {
+    async readHost(name: string): Promise<AuthorityHost | null> {
+      try {
+        const object = (await hostCustomObjectsApi!.getNamespacedCustomObject({
+          group: GROUP,
+          version: VERSION,
+          namespace: config.hostNamespace,
+          plural: PLURAL_HOSTS,
+          name,
+        })) as {
+          metadata: {
+            name: string
+            namespace?: string
+            uid?: string
+            resourceVersion?: string
+            deletionTimestamp?: string
+          }
+          spec: HostSpec
+        }
+        return {
+          name: object.metadata.name,
+          namespace: object.metadata.namespace ?? config.hostNamespace,
+          metadata: authorizationMetadata(object.metadata),
+          contextRef: object.spec.contextRef,
+        }
+      } catch (error) {
+        if (isMcpAuthorizationNotFound(error)) return null
+        throw error
+      }
+    },
+
+    async readContext(name: string): Promise<AuthorityContext | null> {
+      try {
+        const object = (await customObjectsApi!.getNamespacedCustomObject({
+          group: GROUP,
+          version: VERSION,
+          namespace: config.namespace,
+          plural: PLURAL_CONTEXTS,
+          name,
+        })) as {
+          metadata: {
+            name: string
+            namespace?: string
+            uid?: string
+            resourceVersion?: string
+            deletionTimestamp?: string
+          }
+          spec: ContextSpec
+        }
+        return {
+          name: object.metadata.name,
+          namespace: object.metadata.namespace ?? config.namespace,
+          metadata: authorizationMetadata(object.metadata),
+          mcpServers: [...object.spec.mcpServers],
+        }
+      } catch (error) {
+        if (isMcpAuthorizationNotFound(error)) return null
+        throw error
+      }
+    },
+
+    async readMcpServer(name: string): Promise<AuthorityMcpServer | null> {
+      try {
+        const object = (await customObjectsApi!.getNamespacedCustomObject({
+          group: GROUP,
+          version: VERSION,
+          namespace: config.namespace,
+          plural: PLURAL_MCPSERVERS,
+          name,
+        })) as McpServerWatchObject & {
+          metadata: McpServerWatchObject['metadata'] & {
+            resourceVersion?: string
+            deletionTimestamp?: string
+          }
+        }
+        const status = provider.getAllServerInfos().find(server => server.name === name)
+          ?.status ?? {
+          deployed: false,
+          ready: false,
+        }
+        return {
+          name: object.metadata.name,
+          namespace: object.metadata.namespace ?? config.namespace,
+          metadata: authorizationMetadata(object.metadata),
+          description: object.spec.description,
+          transport: { ...object.spec.transport },
+          auth: object.spec.auth ? { ...object.spec.auth } : undefined,
+          enabled: object.spec.enabled !== false,
+          status,
+        }
+      } catch (error) {
+        if (isMcpAuthorizationNotFound(error)) return null
+        throw error
+      }
+    },
+
+    async readSecretMetadata(name: string): Promise<AuthoritySecretMetadata | null> {
+      try {
+        // CoreV1Api returns a Secret object, but this boundary intentionally
+        // drops `data` immediately. Inventory authorization can therefore use
+        // UID/resourceVersion without making credential bytes available to the
+        // service layer or its DTO/logging path.
+        const object = await coreApi!.readNamespacedSecret({ name, namespace: config.namespace })
+        return {
+          name: object.metadata?.name ?? name,
+          namespace: object.metadata?.namespace ?? config.namespace,
+          metadata: authorizationMetadata({
+            uid: object.metadata?.uid,
+            resourceVersion: object.metadata?.resourceVersion,
+            deletionTimestamp: object.metadata?.deletionTimestamp,
+          }),
+        }
+      } catch (error) {
+        if (isMcpAuthorizationNotFound(error)) return null
+        throw error
+      }
+    },
+
+    async readSecret(name: string): Promise<AuthoritySecret | null> {
+      try {
+        const object = await coreApi!.readNamespacedSecret({ name, namespace: config.namespace })
+        return {
+          name: object.metadata?.name ?? name,
+          namespace: object.metadata?.namespace ?? config.namespace,
+          metadata: authorizationMetadata({
+            uid: object.metadata?.uid,
+            resourceVersion: object.metadata?.resourceVersion,
+            deletionTimestamp: object.metadata?.deletionTimestamp,
+          }),
+          data: { ...(object.data ?? {}) },
+        }
+      } catch (error) {
+        if (isMcpAuthorizationNotFound(error)) return null
+        throw error
+      }
+    },
   }
 }

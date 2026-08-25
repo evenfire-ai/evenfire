@@ -24,6 +24,11 @@ import type {
   ThemeMode,
   Tone,
 } from '@/uiTypes'
+import {
+  DESKTOP_COMMANDS,
+  formatDesktopShortcut,
+  platformFromNavigator,
+} from '../../../src/desktopCommands'
 import type {
   DependencyHealth,
   DesktopAppInfo,
@@ -34,7 +39,14 @@ import type {
 import type { SettingsPageProps } from './SettingsPage.types'
 
 type NotificationPreferenceSection = 'inApp' | 'desktop'
-type SettingsTab = 'account' | 'appearance' | 'notifications' | 'plugins' | 'social' | 'information'
+type SettingsTab =
+  | 'account'
+  | 'appearance'
+  | 'notifications'
+  | 'plugins'
+  | 'shortcuts'
+  | 'social'
+  | 'information'
 
 type EndpointDiagnostics = {
   appInfo: DesktopAppInfo | null
@@ -279,6 +291,7 @@ function socialChannelLabel(medium: string): string {
 }
 
 export function SettingsPage({
+  shortcutsFocusRequestId = 0,
   notificationSettings,
   desktopNotificationPermission,
   themeMode,
@@ -316,6 +329,14 @@ export function SettingsPage({
     accounts: [],
   })
   const [socialChannelsLoading, setSocialChannelsLoading] = useState(true)
+  const shortcutPlatform = platformFromNavigator(navigator.platform)
+  const shortcutCommands = DESKTOP_COMMANDS.filter(
+    command => command.visibleInSettings && command.defaultBinding
+  ).sort((left, right) => left.order - right.order)
+
+  useEffect(() => {
+    if (shortcutsFocusRequestId > 0) setActiveSettingsTab('shortcuts')
+  }, [shortcutsFocusRequestId])
 
   const runtimeConfigOptions = runtimeConfigState?.options || []
   const activeRuntimeConfigId = runtimeConfigState?.activeOptionId ?? ''
@@ -551,6 +572,16 @@ export function SettingsPage({
           </TabButton>
         ) : null}
         <TabButton
+          active={activeSettingsTab === 'shortcuts'}
+          className="page-tab"
+          id="settings-tab-shortcuts"
+          role="tab"
+          aria-controls="settings-panel-shortcuts"
+          onClick={() => setActiveSettingsTab('shortcuts')}
+        >
+          Shortcuts
+        </TabButton>
+        <TabButton
           active={activeSettingsTab === 'information'}
           className="page-tab"
           id="settings-tab-information"
@@ -563,6 +594,66 @@ export function SettingsPage({
       </div>
 
       <div className="page-layout settings-layout">
+        {activeSettingsTab === 'shortcuts' ? (
+          <section
+            className="settings-tab-panel"
+            id="settings-panel-shortcuts"
+            role="tabpanel"
+            aria-labelledby="settings-tab-shortcuts"
+          >
+            <section
+              className="page-card settings-card"
+              aria-labelledby="settings-shortcuts-heading"
+            >
+              <div className="page-card__header">
+                <div className="settings-card-title-row">
+                  <span className="settings-card-title-icon" aria-hidden="true">
+                    <IconSettings />
+                  </span>
+                  <div>
+                    <h3 id="settings-shortcuts-heading">Keyboard shortcuts</h3>
+                    <p className="muted">Desktop commands available from the keyboard.</p>
+                  </div>
+                </div>
+              </div>
+              <div
+                aria-label="Keyboard shortcuts"
+                className="da-grid settings-shortcuts-grid"
+                role="table"
+                style={
+                  {
+                    '--da-grid-cols': 'minmax(12ch, 0.55fr) minmax(0, 1.45fr)',
+                  } as React.CSSProperties
+                }
+              >
+                <div className="da-grid__head" role="row">
+                  <span className="da-grid__col-header" role="columnheader">
+                    Shortcut
+                  </span>
+                  <span className="da-grid__col-header" role="columnheader">
+                    Action
+                  </span>
+                </div>
+                <div className="da-grid__body" role="rowgroup">
+                  {shortcutCommands.map(command => (
+                    <div className="da-grid__row da-grid__row--compact" key={command.id} role="row">
+                      <span className="da-grid__cell" role="cell">
+                        <kbd>
+                          {formatDesktopShortcut(command.defaultBinding!, shortcutPlatform)}
+                        </kbd>
+                      </span>
+                      <span className="da-grid__cell settings-shortcuts-action" role="cell">
+                        <strong>{command.label}</strong>
+                        <span>{command.description}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+          </section>
+        ) : null}
+
         {activeSettingsTab === 'account' ? (
           <section
             className="settings-tab-panel"

@@ -7,6 +7,7 @@ import {
   mcpHostJwtRefreshTotal,
 } from '../../../observability/metrics.js'
 import {
+  MCP_HOST_CREDENTIAL_CAPABILITY,
   consumeMcpHostRefreshJwt,
   getMcpHostRefreshRateLimitKey,
   issueMcpHostAccessJwt,
@@ -58,19 +59,23 @@ export function createMcpHostRefreshRoutes(): Router {
             return res.status(401).json({ error: 'Unauthorized' })
           }
 
+          const hccCredential = claims.mcpCapabilities.includes(MCP_HOST_CREDENTIAL_CAPABILITY)
+            ? { hostUid: claims.host_uid! }
+            : undefined
+
           // Preserve hostRefs from the incoming refresh token so the host
           // identity binding (1st-party hostRefs[0]) survives rotation.
           const access = issueMcpHostAccessJwt(
             claims.recipeNamespace,
             claims.recipeName,
             claims.hostRefs,
-            { workflowControlScopes: claims.workflowControlScopes }
+            { workflowControlScopes: claims.workflowControlScopes, hccCredential }
           )
           const refresh = issueMcpHostRefreshJwt(
             claims.recipeNamespace,
             claims.recipeName,
             claims.hostRefs,
-            { workflowControlScopes: claims.workflowControlScopes }
+            { workflowControlScopes: claims.workflowControlScopes, hccCredential }
           )
           const control = issueMcpHostControlJwt(
             claims.recipeNamespace,

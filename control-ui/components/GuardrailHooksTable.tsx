@@ -18,13 +18,13 @@ import { TablePanelHeader } from './TablePanelHeader'
 import { IconChevronRight, IconRefresh, IconX } from './icons'
 
 const HOOK_COLUMNS: TableHeaderColumn[] = [
-  { key: 'open', ariaLabel: 'Open guardrail' },
   { key: 'name', label: 'Name' },
   { key: 'lifecycle', label: 'Lifecycle' },
   { key: 'order', label: 'Order' },
   { key: 'failMode', label: 'Fail mode' },
   { key: 'status', label: 'Status' },
   { key: 'actions', align: 'right', ariaLabel: 'Actions' },
+  { key: 'navigation', align: 'right', ariaLabel: 'Navigation' },
 ]
 
 function StatusBadge({ status }: { status?: LlmHookStatus }) {
@@ -74,6 +74,7 @@ function describeTarget(target?: LlmHookTarget): string {
 
 export function GuardrailHooksTable({
   items,
+  onInstall,
   onUninstall,
   uninstallingKey,
   onRefresh,
@@ -163,12 +164,22 @@ export function GuardrailHooksTable({
                 />
               </button>
             ) : null}
+            {onInstall ? (
+              <button
+                type="button"
+                className="cu-btn cu-btn--primary cu-btn--sm"
+                onClick={onInstall}
+                disabled={isInitialLoad}
+              >
+                Install Guardrail
+              </button>
+            ) : null}
           </>
         }
       />
       {isInitialLoad ? (
         <div className="cu-table-wrap cu-guardrails-table-wrap">
-          <table className="cu-table cu-table--header-band cu-expandable-table cu-guardrails-table">
+          <table className="cu-table cu-table--header-band cu-guardrails-table">
             <thead>
               <TableHeaderRow columns={HOOK_COLUMNS} />
             </thead>
@@ -183,7 +194,7 @@ export function GuardrailHooksTable({
         </div>
       ) : (
         <div className="cu-table-wrap cu-guardrails-table-wrap">
-          <table className="cu-table cu-table--header-band cu-expandable-table cu-guardrails-table">
+          <table className="cu-table cu-table--header-band cu-guardrails-table">
             <thead>
               <TableHeaderRow columns={HOOK_COLUMNS} />
             </thead>
@@ -206,9 +217,6 @@ export function GuardrailHooksTable({
                     tabIndex={0}
                     aria-label={`View guardrail ${name}`}
                   >
-                    <td className="cu-expandable-row__chevron" aria-hidden="true">
-                      <IconChevronRight width={18} height={18} />
-                    </td>
                     <td>
                       <span className="cu-expandable-row__name">{name}</span>
                     </td>
@@ -253,6 +261,9 @@ export function GuardrailHooksTable({
                           </button>
                         ) : null}
                       </div>
+                    </td>
+                    <td className="cu-installed-plugin__navigation" aria-hidden="true">
+                      <IconChevronRight width={18} height={18} />
                     </td>
                   </tr>
                 )
