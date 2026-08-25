@@ -2,6 +2,10 @@ import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
+import {
+  buildHostReferencesForContext,
+  materializeContextResource,
+} from '../../test/fixtures/contextResource'
 import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { HostWizard } from '../HostWizard'
 import { ToastProvider } from '../Toast'
@@ -366,13 +370,24 @@ describe('HostWizard — connector selection and automatic context creation', ()
     const hostCall = vi
       .mocked(api.apiSend)
       .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
-    const contextPayload = contextCall![2] as {
-      metadata: { name: string }
-      spec: { mcpServers: string[] }
-    }
+    const contextPayload = contextCall![2] as Parameters<typeof materializeContextResource>[0]
     const hostPayload = hostCall![2] as { spec: { contextRef: string } }
+    const persistedContext = materializeContextResource(contextPayload)
 
-    expect(contextPayload.spec.mcpServers).toEqual(['mcp-a'])
+    expect(persistedContext).toMatchObject({
+      metadata: {
+        name: contextPayload.metadata.name,
+        namespace: 'mcp-server',
+        resourceVersion: 'rv-context-read',
+      },
+      spec: {
+        contextId: contextPayload.metadata.name,
+        description: 'Connector context for agent connector-agent',
+        mcpServers: ['mcp-a'],
+        sharedFileSystems: [],
+      },
+      status: { sharedFileSystems: [] },
+    })
     expect(hostPayload.spec.contextRef).toBe(contextPayload.metadata.name)
   })
 
@@ -396,18 +411,55 @@ describe('HostWizard — connector selection and automatic context creation', ()
     const contextCall = vi
       .mocked(api.apiSend)
       .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
-    const contextPayload = contextCall![2] as {
-      metadata: { name: string }
-      spec: { contextId: string; mcpServers: string[] }
-    }
-    expect(contextPayload.spec.contextId).toBe(contextPayload.metadata.name)
-    expect(contextPayload.spec.mcpServers).toEqual([])
+    const contextPayload = contextCall![2] as Parameters<typeof materializeContextResource>[0]
+    const persistedContext = materializeContextResource(contextPayload)
+    expect(persistedContext.spec.contextId).toBe(persistedContext.metadata.name)
+    expect(persistedContext.spec.mcpServers).toEqual([])
+    expect(persistedContext.spec.sharedFileSystems).toEqual([])
 
     const hostCall = vi
       .mocked(api.apiSend)
       .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
     expect((hostCall![2] as { spec: { contextRef: string } }).spec.contextRef).toBe(
       contextPayload.metadata.name
+    )
+  })
+
+  it('creates a producer-shaped Context that can be referenced by two Hosts (R1-H1)', async () => {
+    // Previous-head reproduction (43e0d17cc): the test only inspected a
+    // hand-cast POST body. Materializing the real producer response here keeps
+    // the generated Context contract explicit before checking shared references.
+    await renderWizard()
+    await walkToAccessStep({ agentName: 'shared-context-agent' })
+    continueToConnectorsStep()
+    fireEvent.click(screen.getByRole('checkbox', { name: /mcp-a/i }))
+    submitFromConnectorsStep()
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/hosts', expect.any(Object))
+    )
+    const contextCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect(contextCall).toBeDefined()
+    expect(hostCall).toBeDefined()
+
+    const context = materializeContextResource(
+      contextCall![2] as Parameters<typeof materializeContextResource>[0]
+    )
+    const contextRef = (hostCall![2] as { spec: { contextRef: string } }).spec.contextRef
+    const twoHosts = buildHostReferencesForContext(contextRef, [
+      'shared-context-agent',
+      'second-agent',
+    ])
+
+    expect(context.spec.mcpServers).toEqual(['mcp-a'])
+    expect(context.metadata.name).toBe(contextRef)
+    expect(new Set(Object.values(twoHosts).map(host => host.spec.contextRef))).toEqual(
+      new Set([contextRef])
     )
   })
 })

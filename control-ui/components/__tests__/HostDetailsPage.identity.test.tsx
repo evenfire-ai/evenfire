@@ -132,29 +132,24 @@ describe('HostDetailsPage identity integration', () => {
     )
   })
 
-  it('shows the current model and opens the linked LLM Secret modal inline', async () => {
+  it('shows the provider model configuration and opens the linked LLM Secret modal inline', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     const { container } = render(<HostDetailsPage />)
 
-    expect(await screen.findByText('Allowed models')).toBeInTheDocument()
+    const summary = await screen.findByRole('region', { name: 'LLM configuration summary' })
+    expect(summary).toHaveTextContent('Primary provider')
+    expect(summary).toHaveTextContent('OpenAI')
+    expect(summary).toHaveTextContent('gpt-5.4')
+    expect(summary).toHaveTextContent('Allowed models · OpenAI')
+    expect(summary).toHaveTextContent('All enabled models')
     expect(screen.queryByText('Model name')).not.toBeInTheDocument()
     expect(screen.getByText('LLM Secret')).toBeInTheDocument()
-    expect(
-      Array.from(container.querySelectorAll('.cu-form-stack > .cu-field label')).map(label =>
-        label.textContent?.trim()
-      )
-    ).toEqual([
-      'LLM Secret',
-      'Current model',
-      'Model provider',
-      'Allowed models',
-      'Fallback policy',
-    ])
+    expect(container.querySelectorAll('.cu-llm-summary__value')).toHaveLength(2)
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
     expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
     expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit LLM Secret credentials' }))
 
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
@@ -168,7 +163,7 @@ describe('HostDetailsPage identity integration', () => {
     mockParams = { name: 'foo', tab: 'model' }
     render(<HostDetailsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit LLM Secret credentials' }))
 
     expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Manage LLM Secrets' })).toBeNull()

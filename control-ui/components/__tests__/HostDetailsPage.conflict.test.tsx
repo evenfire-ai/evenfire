@@ -87,7 +87,10 @@ function setupApiMocks(bundleHost: TestHost, refetchHost: TestHost = bundleHost)
   ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
     host: bundleHost,
     contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
-    secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
+    secrets: [
+      { name: 'openai-secret', keys: ['openai-api-key'] },
+      { name: 'anthropic-secret', keys: ['claude-api-key'] },
+    ],
     users: [],
     teams: [],
     agentUsers: [],
@@ -245,7 +248,7 @@ describe('HostDetailsPage current model and credential flow', () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     expect(await screen.findByText('Current model')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit LLM Secret credentials' }))
 
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
@@ -257,11 +260,51 @@ describe('HostDetailsPage current model and credential flow', () => {
     ).toBe(false)
   })
 
+  it('opens the model configuration editor separately from credential editing', async () => {
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    expect(await screen.findByText('Current model')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    expect(screen.getByRole('region', { name: 'LLM configuration' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save model configuration' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Update secret' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+    const payload = findHostPutPayload() as { spec: Record<string, unknown> }
+    expect(payload.spec.model).toEqual(baseSpec.model)
+    expect(payload.spec.secretRef).toBe('openai-secret')
+    expect(await screen.findByText('Model configuration saved.')).toBeInTheDocument()
+  })
+
+  it('changes the linked LLM Secret from the inline credentials dropdown', async () => {
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'LLM Secret' }), {
+      target: { value: 'anthropic-secret' },
+    })
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+    const payload = findHostPutPayload() as { spec: Record<string, unknown> }
+    expect(payload.spec.secretRef).toBe('anthropic-secret')
+    expect(payload.spec.model).toEqual(baseSpec.model)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   it('updates the linked Secret without writing Host model configuration', async () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     await screen.findByText('Current model')
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit LLM Secret credentials' }))
     fireEvent.click(screen.getByRole('button', { name: 'Replace OpenAI API key' }))
     fireEvent.change(screen.getByLabelText(/^OpenAI API key/i), {
       target: { value: 'sk-live' },

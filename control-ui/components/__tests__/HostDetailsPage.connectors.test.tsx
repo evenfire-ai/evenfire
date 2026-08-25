@@ -10,14 +10,19 @@ import {
 } from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
+import {
+  buildContextResource,
+  buildSharedContextScenario,
+} from '../../test/fixtures/contextResource'
 import { ToastProvider } from '../Toast'
 
 const replaceMock = vi.fn()
 const pushMock = vi.fn()
+let activeHostName = 'foo'
 
 vi.mock('next/navigation', () => ({
-  useParams: () => ({ name: 'foo', tab: 'connectors' }),
-  usePathname: () => '/agents/foo/connectors',
+  useParams: () => ({ name: activeHostName, tab: 'connectors' }),
+  usePathname: () => `/agents/${activeHostName}/connectors`,
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
   useSearchParams: () => new URLSearchParams(),
 }))
@@ -49,19 +54,19 @@ vi.mock('../../lib/api', () => ({
 }))
 
 const contextName = 'foo-12345'
-const baseContext = {
+const baseContext = buildContextResource({
   metadata: { name: contextName, resourceVersion: 'rv-context-1' },
   spec: {
     contextId: contextName,
     description: 'Connector context for agent foo',
     mcpServers: ['mcp-existing'],
   },
-}
+})
 
 function setupApiMocks() {
   ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
     host: {
-      metadata: { name: 'foo', resourceVersion: 'rv-host-1' },
+      metadata: { name: activeHostName, resourceVersion: 'rv-host-1' },
       spec: {
         contextRef: contextName,
         host: 'Foo',
@@ -76,7 +81,7 @@ function setupApiMocks() {
     agentTeams: [],
   })
   ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-    metadata: { name: 'foo' },
+    metadata: { name: activeHostName },
     spec: {},
   })
   ;(api.getMcpServers as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -105,6 +110,7 @@ function renderPage() {
 
 afterEach(() => {
   cleanup()
+  activeHostName = 'foo'
 })
 
 describe('HostDetailsPage connectors', () => {
@@ -163,5 +169,92 @@ describe('HostDetailsPage connectors', () => {
         screen.queryByRole('button', { name: 'Actions for connector mcp-existing' })
       ).toBeNull()
     )
+  })
+
+  it('keeps connector membership shared for two Hosts backed by one producer Context (R1-H1)', async () => {
+    const scenario = buildSharedContextScenario({
+      contextName: 'shared-connectors',
+      description: 'Shared connector context for two agents',
+      mcpServers: ['mcp-existing'],
+      hostNames: ['foo', 'bar'],
+    })
+    let persistedContext = scenario.context
+
+    // Previous-head reproduction (43e0d17cc): the old test mounted only one
+    // Host and supplied a partial hand-built Context. That fixture could pass
+    // even if the page accidentally treated connector membership as Host-local.
+    // Both producer-shaped Hosts below point at the same persisted Context, so
+    // the second mount must observe the first Host's Context update.
+    expect(scenario.hosts.foo.spec.contextRef).toBe(scenario.hosts.bar.spec.contextRef)
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (name: string) => ({
+        host: scenario.hosts[name as 'foo' | 'bar'],
+        contexts: [persistedContext],
+        secrets: [],
+        users: [],
+        teams: [],
+        agentUsers: [],
+        agentTeams: [],
+      })
+    )
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (name: string) => ({ ...scenario.hosts[name as 'foo' | 'bar'] })
+    )
+    ;(api.updateContext as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (
+        _name: string,
+        payload: { metadata: { resourceVersion: string }; spec: Record<string, unknown> }
+      ) => {
+        persistedContext = buildContextResource({
+          metadata: {
+            ...persistedContext.metadata,
+            resourceVersion: 'rv-context-shared-2',
+          },
+          spec: {
+            ...persistedContext.spec,
+            ...payload.spec,
+            contextId: persistedContext.spec.contextId,
+            mcpServers: Array.isArray(payload.spec.mcpServers)
+              ? payload.spec.mcpServers.map(String)
+              : [],
+          },
+        })
+        return persistedContext
+      }
+    )
+
+    activeHostName = 'foo'
+    renderPage()
+    expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
+    fireEvent.click(await screen.findByRole('option', { name: 'mcp-new' }))
+    fireEvent.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Add connector' })
+    )
+    await waitFor(() =>
+      expect(api.updateContext).toHaveBeenCalledWith(
+        'shared-connectors',
+        expect.objectContaining({
+          metadata: { resourceVersion: 'rv-context-shared-1' },
+          spec: expect.objectContaining({
+            contextId: 'shared-connectors',
+            mcpServers: ['mcp-existing', 'mcp-new'],
+          }),
+        })
+      )
+    )
+
+    cleanup()
+    activeHostName = 'bar'
+    renderPage()
+
+    // Regression assertion: a second Host referencing the same Context sees
+    // the membership written through the first Host, without exposing the
+    // implementation Context name in the Connectors UI.
+    expect(await screen.findByText('mcp-new')).toBeInTheDocument()
+    expect(screen.queryByText('shared-connectors')).not.toBeInTheDocument()
+    expect(api.getHostDetailBundle).toHaveBeenLastCalledWith('bar')
   })
 })
