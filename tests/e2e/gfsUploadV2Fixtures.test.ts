@@ -1,66 +1,64 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync } from 'node:fs'
-import {
-  lstat,
-  mkdir,
-  mkdtemp,
-  readdir,
-  rename,
-  rmdir,
-  stat,
-  symlink,
-  unlink,
-  writeFile,
-} from 'node:fs/promises'
+import { mkdir, readdir, rename, rmdir, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
   createDiskUploadFixture,
   createOversizedDiskUploadFixture,
   removeDiskUploadFixture,
-  setAfterFixtureQuarantineForTest,
+  setAfterFixtureHandleForTest,
+  sha256File,
 } from './gfsUploadV2Fixtures.js'
 
 const fixturePrefix = 'evenfire-gfs-upload-v2-'
 
 async function fixtureDirectories(): Promise<string[]> {
-  return (await readdir(os.tmpdir())).filter(entry => entry.startsWith(fixturePrefix)).sort()
+  return (await readdir(os.tmpdir()))
+    .filter(entry => entry.startsWith(fixturePrefix))
+    .map(entry => path.join(os.tmpdir(), entry))
+    .sort()
 }
 
-async function removeKnownFixtureDirectory(directory: string, fileName: string): Promise<void> {
-  const filePath = path.join(directory, fileName)
-  if (existsSync(filePath)) await unlink(filePath)
+async function removeKnownFixtureDirectory(directory: string, fileNames: string[]): Promise<void> {
+  for (const fileName of fileNames) {
+    const filePath = path.join(directory, fileName)
+    if (existsSync(filePath)) await unlink(filePath)
+  }
   if (existsSync(directory)) await rmdir(directory)
 }
 
 describe('GFS Upload v2 disk fixtures', () => {
   const fixtures: Array<Awaited<ReturnType<typeof createDiskUploadFixture>>> = []
-  const ownedDirectories: string[] = []
 
   afterEach(async () => {
-    setAfterFixtureQuarantineForTest(undefined)
+    setAfterFixtureHandleForTest?.(undefined)
     for (const fixture of fixtures.splice(0)) {
-      if (existsSync(fixture.directory)) await removeDiskUploadFixture(fixture)
-    }
-    for (const directory of ownedDirectories.splice(0)) {
-      if (existsSync(directory)) await rmdir(directory)
+      await removeDiskUploadFixture(fixture).catch(() => undefined)
+      await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName]).catch(
+        () => undefined
+      )
     }
   })
 
-  it('removes an owned fixture after a successful setup', async () => {
+  it('neutralizes an owned fixture through its retained handle without deleting its pathname', async () => {
     const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-success')
     fixtures.push(fixture)
     expect((await stat(fixture.filePath)).size).toBe(1)
+    expect(await sha256File(fixture.filePath)).toBe(fixture.sha256)
+
     await removeDiskUploadFixture(fixture)
-    expect(existsSync(fixture.directory)).toBe(false)
-    expect(existsSync(fixture.filePath)).toBe(false)
+
+    expect((await stat(fixture.filePath)).size).toBe(0)
+    expect(existsSync(fixture.directory)).toBe(true)
+    await expect(removeDiskUploadFixture(fixture)).resolves.toBeUndefined()
   })
 
-  it('removes a tracked owned fixture after an assertion-failure lifecycle', async () => {
+  it('neutralizes a tracked fixture after an assertion-failure lifecycle', async () => {
     const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-assertion-failure')
     fixtures.push(fixture)
-
     const assertionFailure = new Error('synthetic assertion failure')
+
     await expect(
       (async () => {
         try {
@@ -70,159 +68,126 @@ describe('GFS Upload v2 disk fixtures', () => {
         }
       })()
     ).rejects.toBe(assertionFailure)
-    expect(existsSync(fixture.directory)).toBe(false)
+    expect((await stat(fixture.filePath)).size).toBe(0)
+    await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
   })
 
-  it('cleans an owned directory when fixture setup fails part-way through', async () => {
+  it('closes and neutralizes a partial fixture once its handle has been acquired', async () => {
     const before = await fixtureDirectories()
-    await expect(createDiskUploadFixture(1, '.bin', 'nested/partial')).rejects.toThrow()
-    expect(await fixtureDirectories()).toEqual(before)
-  })
-
-  it('refuses to delete a directory the fixture did not create', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'unowned-gfs-upload-v2-'))
-    ownedDirectories.push(directory)
-    await expect(
-      removeDiskUploadFixture({
-        directory,
-        filePath: path.join(directory, 'payload.bin'),
-        fileName: 'payload.bin',
-        byteLength: 0,
-        sha256: '',
-      })
-    ).rejects.toThrow('refusing to remove an unowned GFS v2 fixture directory')
-    expect(existsSync(directory)).toBe(true)
-  })
-
-  it('rejects a replaced owned pathname and preserves its sentinel', async () => {
-    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-replacement')
-    const movedDirectory = `${fixture.directory}-original`
-    const sentinel = path.join(fixture.directory, 'sentinel.txt')
-    await rename(fixture.directory, movedDirectory)
-    await mkdir(fixture.directory)
-    await writeFile(sentinel, 'replacement must survive')
-
-    try {
-      await expect(removeDiskUploadFixture(fixture)).rejects.toThrow(
-        'refusing to quarantine a replaced GFS v2 fixture directory'
-      )
-      await expect(stat(sentinel)).resolves.toBeDefined()
-    } finally {
-      await unlink(sentinel)
-      await rmdir(fixture.directory)
-      await removeKnownFixtureDirectory(movedDirectory, fixture.fileName)
-    }
-  })
-
-  it('does not treat a missing active fixture directory as already disposed', async () => {
-    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-missing')
-    const movedDirectory = `${fixture.directory}-original`
-    await rename(fixture.directory, movedDirectory)
-
-    try {
-      await expect(removeDiskUploadFixture(fixture)).rejects.toThrow(
-        'cannot quarantine active GFS v2 fixture directory'
-      )
-      expect(existsSync(movedDirectory)).toBe(true)
-    } finally {
-      await removeKnownFixtureDirectory(movedDirectory, fixture.fileName)
-    }
-  })
-
-  it('leaves a recreated original pathname untouched after quarantining the real fixture', async () => {
-    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-recreated-original')
-    const sentinel = path.join(fixture.directory, 'sentinel.txt')
-    setAfterFixtureQuarantineForTest(async directory => {
-      await mkdir(directory)
-      await writeFile(sentinel, 'replacement after quarantine')
+    expect(setAfterFixtureHandleForTest).toBeTypeOf('function')
+    setAfterFixtureHandleForTest?.(() => {
+      throw new Error('synthetic setup failure after handle acquisition')
     })
+
+    await expect(createDiskUploadFixture(1, '.bin', 'partial-handle')).rejects.toThrow(
+      'synthetic setup failure after handle acquisition'
+    )
+
+    const created = (await fixtureDirectories()).filter(directory => !before.includes(directory))
+    expect(created).toHaveLength(1)
+    const partialFile = path.join(created[0]!, 'partial-handle-1.bin')
+    expect((await stat(partialFile)).size).toBe(0)
+    await removeKnownFixtureDirectory(created[0]!, ['partial-handle-1.bin'])
+  })
+
+  it('rejects a fabricated fixture object with copied pathname data', async () => {
+    const fixture = await createDiskUploadFixture(32, '.bin', 'cleanup-fabricated')
+    const fabricated = { ...fixture }
+
+    try {
+      await expect(removeDiskUploadFixture(fabricated)).rejects.toThrow(
+        'refusing to neutralize an unowned GFS v2 fixture'
+      )
+      expect((await stat(fixture.filePath)).size).toBe(32)
+    } finally {
+      await removeDiskUploadFixture(fixture)
+      await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
+    }
+  })
+
+  it('neutralizes the created file after its visible child pathname is replaced', async () => {
+    const fixture = await createDiskUploadFixture(32, '.bin', 'cleanup-child-replacement')
+    const retainedOriginal = `${fixture.filePath}-retained`
+    await rename(fixture.filePath, retainedOriginal)
+    await writeFile(fixture.filePath, 'replacement sentinel')
 
     try {
       await removeDiskUploadFixture(fixture)
-      await expect(stat(sentinel)).resolves.toBeDefined()
+      expect((await stat(retainedOriginal)).size).toBe(0)
+      expect((await stat(fixture.filePath)).size).toBe('replacement sentinel'.length)
     } finally {
-      setAfterFixtureQuarantineForTest(undefined)
-      await unlink(sentinel)
-      await rmdir(fixture.directory)
+      await removeKnownFixtureDirectory(fixture.directory, [
+        fixture.fileName,
+        `${fixture.fileName}-retained`,
+      ])
     }
   })
 
-  it('rejects unexpected contents in a verified owned fixture directory', async () => {
-    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-unexpected')
-    const unexpected = path.join(fixture.directory, 'unexpected.txt')
-    let quarantineDirectory: string | undefined
-    setAfterFixtureQuarantineForTest((_directory, quarantined) => {
-      quarantineDirectory = quarantined
-    })
-    await writeFile(unexpected, 'preserve unexpected content')
+  it('does not redirect cleanup when the fixture directory pathname is replaced', async () => {
+    const fixture = await createDiskUploadFixture(32, '.bin', 'cleanup-directory-replacement')
+    const retainedDirectory = `${fixture.directory}-retained`
+    const replacementSentinel = path.join(fixture.directory, 'sentinel.txt')
+    await rename(fixture.directory, retainedDirectory)
+    await mkdir(fixture.directory)
+    await writeFile(replacementSentinel, 'replacement directory sentinel')
 
     try {
-      await expect(removeDiskUploadFixture(fixture)).rejects.toThrow(
-        'refusing to remove unexpected GFS v2 fixture contents'
-      )
-      expect(quarantineDirectory).toBeDefined()
-      await expect(stat(path.join(quarantineDirectory!, 'unexpected.txt'))).resolves.toBeDefined()
-      await unlink(path.join(quarantineDirectory!, 'unexpected.txt'))
-      await removeKnownFixtureDirectory(quarantineDirectory!, fixture.fileName)
+      await removeDiskUploadFixture(fixture)
+      expect((await stat(path.join(retainedDirectory, fixture.fileName))).size).toBe(0)
+      expect((await stat(replacementSentinel)).size).toBe('replacement directory sentinel'.length)
     } finally {
-      setAfterFixtureQuarantineForTest(undefined)
+      await removeKnownFixtureDirectory(fixture.directory, ['sentinel.txt'])
+      await removeKnownFixtureDirectory(retainedDirectory, [fixture.fileName])
     }
   })
 
-  it('rejects a symlink replacement without deleting its target', async () => {
-    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-symlink')
-    const movedDirectory = `${fixture.directory}-original`
-    const targetDirectory = await mkdtemp(path.join(os.tmpdir(), 'unowned-gfs-upload-v2-target-'))
-    const targetSentinel = path.join(targetDirectory, 'sentinel.txt')
-    await rename(fixture.directory, movedDirectory)
-    await writeFile(targetSentinel, 'symlink target must survive')
-    await symlink(targetDirectory, fixture.directory)
+  it('cannot redirect cleanup by replacing the pathname immediately before disposal', async () => {
+    const fixture = await createDiskUploadFixture(32, '.bin', 'cleanup-last-moment-replacement')
+    const retainedOriginal = `${fixture.filePath}-retained`
+    await rename(fixture.filePath, retainedOriginal)
+    await writeFile(fixture.filePath, 'last moment sentinel')
 
     try {
-      await expect(removeDiskUploadFixture(fixture)).rejects.toThrow(
-        'cannot quarantine active GFS v2 fixture directory'
-      )
-      await expect(stat(targetSentinel)).resolves.toBeDefined()
-      expect((await lstat(fixture.directory)).isSymbolicLink()).toBe(true)
+      await removeDiskUploadFixture(fixture)
+      expect((await stat(retainedOriginal)).size).toBe(0)
+      expect((await stat(fixture.filePath)).size).toBe('last moment sentinel'.length)
     } finally {
-      await unlink(fixture.directory)
-      await unlink(targetSentinel)
-      await rmdir(targetDirectory)
-      await removeKnownFixtureDirectory(movedDirectory, fixture.fileName)
+      await removeKnownFixtureDirectory(fixture.directory, [
+        fixture.fileName,
+        `${fixture.fileName}-retained`,
+      ])
     }
   })
 
-  it('makes repeated cleanup of a successfully disposed fixture a no-op', async () => {
-    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-repeated')
+  it('does not mutate a symlink replacement target', async () => {
+    const fixture = await createDiskUploadFixture(32, '.bin', 'cleanup-symlink-replacement')
+    const retainedOriginal = `${fixture.filePath}-retained`
+    const targetPath = `${fixture.filePath}-target`
+    await rename(fixture.filePath, retainedOriginal)
+    await writeFile(targetPath, 'symlink target sentinel')
+    await symlink(targetPath, fixture.filePath)
+
+    try {
+      await removeDiskUploadFixture(fixture)
+      expect((await stat(retainedOriginal)).size).toBe(0)
+      expect((await stat(targetPath)).size).toBe('symlink target sentinel'.length)
+    } finally {
+      if (existsSync(fixture.filePath)) await unlink(fixture.filePath)
+      await removeKnownFixtureDirectory(fixture.directory, [
+        `${fixture.fileName}-retained`,
+        `${fixture.fileName}-target`,
+      ])
+    }
+  })
+
+  it('keeps a large sparse fixture from retaining its logical size after disposal', async () => {
+    const fixture = await createDiskUploadFixture(32 * 1024 * 1024, '.bin', 'cleanup-large-sparse')
     fixtures.push(fixture)
+    expect((await stat(fixture.filePath)).size).toBe(32 * 1024 * 1024)
+
     await removeDiskUploadFixture(fixture)
-    await expect(removeDiskUploadFixture(fixture)).resolves.toBeUndefined()
-    expect(existsSync(fixture.directory)).toBe(false)
-  })
 
-  it('rejects a replacement that appears after the original directory is quarantined', async () => {
-    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-quarantine-replacement')
-    let quarantinedOriginal: string | undefined
-    let quarantineReplacement: string | undefined
-    setAfterFixtureQuarantineForTest(async (_directory, quarantineDirectory) => {
-      quarantinedOriginal = `${quarantineDirectory}-original`
-      quarantineReplacement = quarantineDirectory
-      await rename(quarantineDirectory, quarantinedOriginal)
-      await mkdir(quarantineDirectory)
-      await writeFile(path.join(quarantineDirectory, 'sentinel.txt'), 'quarantine replacement')
-    })
-
-    try {
-      await expect(removeDiskUploadFixture(fixture)).rejects.toThrow(
-        'refusing to remove a replaced GFS v2 fixture directory'
-      )
-      await expect(stat(path.join(quarantineReplacement!, 'sentinel.txt'))).resolves.toBeDefined()
-    } finally {
-      setAfterFixtureQuarantineForTest(undefined)
-      await unlink(path.join(quarantineReplacement!, 'sentinel.txt'))
-      await rmdir(quarantineReplacement!)
-      await removeKnownFixtureDirectory(quarantinedOriginal!, fixture.fileName)
-    }
+    expect((await stat(fixture.filePath)).size).toBe(0)
   })
 
   it('validates before creating a fixture directory', async () => {

@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { constants, createReadStream } from 'node:fs'
-import { lstat, mkdtemp, open, readdir, rename, rmdir, truncate, unlink } from 'node:fs/promises'
+import { type FileHandle, mkdtemp, open } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -22,30 +22,19 @@ export interface DiskUploadFixture {
   sha256: string
 }
 
-interface FilesystemIdentity {
-  dev: number
-  ino: number
-}
-
 interface FixtureLease {
-  directory: string
-  directoryIdentity: FilesystemIdentity
-  expectedFileName?: string
-  expectedFileIdentity?: FilesystemIdentity
-  quarantineDirectory?: string
-  state: 'active' | 'quarantined' | 'disposed'
+  handle: FileHandle
+  state: 'active' | 'disposed'
 }
 
-const fixtureLeases = new Map<string, FixtureLease>()
-let afterFixtureQuarantineForTest:
-  | ((directory: string, quarantineDirectory: string) => Promise<void> | void)
-  | undefined
+const fixtureLeases = new WeakMap<DiskUploadFixture, FixtureLease>()
+let afterFixtureHandleForTest: ((fixture: DiskUploadFixture) => Promise<void> | void) | undefined
 
-/** Test-only synchronization seam for proving that recreation after quarantine is harmless. */
-export function setAfterFixtureQuarantineForTest(
-  hook: ((directory: string, quarantineDirectory: string) => Promise<void> | void) | undefined
+/** Test-only seam for exercising cleanup after a failure that follows handle acquisition. */
+export function setAfterFixtureHandleForTest(
+  hook: ((fixture: DiskUploadFixture) => Promise<void> | void) | undefined
 ): void {
-  afterFixtureQuarantineForTest = hook
+  afterFixtureHandleForTest = hook
 }
 
 /**
@@ -92,43 +81,37 @@ async function createFixture(
   label: string
 ): Promise<DiskUploadFixture> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'evenfire-gfs-upload-v2-'))
-  let lease: FixtureLease
-  try {
-    lease = {
-      directory,
-      directoryIdentity: await directoryIdentity(directory),
-      state: 'active',
-    }
-    fixtureLeases.set(directory, lease)
-  } catch (error) {
-    await rmdir(directory).catch(() => undefined)
-    throw error
-  }
-
   const fileName = `${label}-${byteLength}${extension}`
   const filePath = path.join(directory, fileName)
-  lease.expectedFileName = fileName
+  let fixture: DiskUploadFixture | undefined
   try {
     const handle = await open(
       filePath,
-      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
       0o600
     )
-    lease.expectedFileIdentity = await regularFileIdentity(filePath)
-    await handle.close()
-    await truncate(filePath, byteLength)
-    return {
+    fixture = {
       directory,
       filePath,
       fileName,
       byteLength,
-      sha256: await sha256File(filePath),
+      sha256: '',
     }
+    fixtureLeases.set(fixture, { handle, state: 'active' })
+    await afterFixtureHandleForTest?.(fixture)
+    await handle.truncate(byteLength)
+    fixture.sha256 = await sha256File(filePath)
+    return fixture
   } catch (error) {
-    try {
-      await disposeFixtureLease(lease)
-    } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], 'failed to clean partial GFS v2 fixture')
+    if (fixture) {
+      try {
+        await disposeFixtureLease(fixture)
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'failed to neutralize partial GFS v2 fixture'
+        )
+      }
     }
     throw error
   }
@@ -141,100 +124,29 @@ export async function sha256File(filePath: string): Promise<string> {
 }
 
 export async function removeDiskUploadFixture(fixture: DiskUploadFixture): Promise<void> {
-  const lease = fixtureLeases.get(fixture.directory)
+  const lease = fixtureLeases.get(fixture)
   if (!lease) {
-    throw new Error(`refusing to remove an unowned GFS v2 fixture directory: ${fixture.directory}`)
+    throw new Error(`refusing to neutralize an unowned GFS v2 fixture: ${fixture.filePath}`)
   }
-  await disposeFixtureLease(lease)
+  await disposeFixtureLease(fixture)
 }
 
-async function disposeFixtureLease(lease: FixtureLease): Promise<void> {
+async function disposeFixtureLease(fixture: DiskUploadFixture): Promise<void> {
+  const lease = fixtureLeases.get(fixture)
+  if (!lease) {
+    throw new Error(`refusing to neutralize an unowned GFS v2 fixture: ${fixture.filePath}`)
+  }
   if (lease.state === 'disposed') return
-  if (lease.state === 'active') await quarantineFixtureDirectory(lease)
-  await cleanQuarantinedFixtureDirectory(lease)
-}
-
-async function directoryIdentity(directory: string): Promise<FilesystemIdentity> {
-  const metadata = await lstat(directory)
-  if (!metadata.isDirectory()) throw new Error(`fixture directory is not a directory: ${directory}`)
-  return { dev: metadata.dev, ino: metadata.ino }
-}
-
-async function regularFileIdentity(filePath: string): Promise<FilesystemIdentity> {
-  const metadata = await lstat(filePath)
-  if (!metadata.isFile()) throw new Error(`fixture file is not a regular file: ${filePath}`)
-  return { dev: metadata.dev, ino: metadata.ino }
-}
-
-function identitiesMatch(left: FilesystemIdentity, right: FilesystemIdentity): boolean {
-  return left.dev === right.dev && left.ino === right.ino
-}
-
-async function quarantineFixtureDirectory(lease: FixtureLease): Promise<void> {
-  let currentIdentity: FilesystemIdentity
   try {
-    currentIdentity = await directoryIdentity(lease.directory)
+    await lease.handle.truncate(0)
+    await lease.handle.close()
+    lease.state = 'disposed'
   } catch (error) {
-    throw new Error(`cannot quarantine active GFS v2 fixture directory: ${lease.directory}`, {
-      cause: error,
-    })
-  }
-  if (!identitiesMatch(currentIdentity, lease.directoryIdentity)) {
-    throw new Error(
-      `refusing to quarantine a replaced GFS v2 fixture directory: ${lease.directory}`
-    )
-  }
-
-  const quarantineDirectory = path.join(
-    path.dirname(lease.directory),
-    `${path.basename(lease.directory)}-quarantine-${randomUUID()}`
-  )
-  await rename(lease.directory, quarantineDirectory)
-  lease.quarantineDirectory = quarantineDirectory
-  lease.state = 'quarantined'
-  await afterFixtureQuarantineForTest?.(lease.directory, quarantineDirectory)
-
-  const quarantinedIdentity = await directoryIdentity(quarantineDirectory)
-  if (identitiesMatch(quarantinedIdentity, lease.directoryIdentity)) return
-
-  throw new Error(
-    `refusing to remove a replaced GFS v2 fixture directory; retained at ${quarantineDirectory}`
-  )
-}
-
-async function cleanQuarantinedFixtureDirectory(lease: FixtureLease): Promise<void> {
-  const quarantineDirectory = lease.quarantineDirectory
-  if (!quarantineDirectory) {
-    throw new Error(`missing quarantine directory for GFS v2 fixture: ${lease.directory}`)
-  }
-
-  const quarantinedIdentity = await directoryIdentity(quarantineDirectory)
-  if (!identitiesMatch(quarantinedIdentity, lease.directoryIdentity)) {
-    throw new Error(
-      `refusing to remove a replaced GFS v2 fixture directory; retained at ${quarantineDirectory}`
-    )
-  }
-
-  const entries = await readdir(quarantineDirectory)
-  if (!lease.expectedFileIdentity) {
-    if (entries.length > 0) {
-      throw new Error(
-        `refusing to remove unexpected GFS v2 fixture contents: ${quarantineDirectory}`
-      )
+    try {
+      await lease.handle.close()
+    } catch {
+      // Preserve the original failure; this test-only helper has no pathname fallback.
     }
-  } else {
-    if (entries.length !== 1 || entries[0] !== lease.expectedFileName) {
-      throw new Error(
-        `refusing to remove unexpected GFS v2 fixture contents: ${quarantineDirectory}`
-      )
-    }
-    const filePath = path.join(quarantineDirectory, lease.expectedFileName)
-    const fileIdentity = await regularFileIdentity(filePath)
-    if (!identitiesMatch(fileIdentity, lease.expectedFileIdentity)) {
-      throw new Error(`refusing to remove a replaced GFS v2 fixture file: ${filePath}`)
-    }
-    await unlink(filePath)
+    throw error
   }
-  await rmdir(quarantineDirectory)
-  lease.state = 'disposed'
 }
