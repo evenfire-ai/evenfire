@@ -596,7 +596,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -1136,7 +1136,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(503)
 
@@ -1188,7 +1188,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'api-key-value' },
+        credentials: { AIRTABLE_API_KEY: 'api-key-test-token' },
       })
       .expect(422)
 
@@ -1233,7 +1233,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(500)
 
@@ -1477,7 +1477,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -1500,7 +1500,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -1523,7 +1523,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -1573,7 +1573,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(422)
 
@@ -1594,7 +1594,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
   })
@@ -1778,7 +1778,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123', AIRTABLE_BASE_ID: '   ' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123', AIRTABLE_BASE_ID: '   ' },
       })
       .expect(400)
 
@@ -1847,7 +1847,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: scopedName,
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -4429,7 +4429,7 @@ describe('POST /admin/registry/upgrade', () => {
         serverName: 'my-srv',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '2.0.0',
-        credentials: { API_KEY: 'fresh-secret' },
+        credentials: { API_KEY: 'fresh-test-token' },
       })
       .expect(422)
 
@@ -4558,7 +4558,7 @@ describe('POST /admin/registry/upgrade', () => {
         serverName: 'my-srv',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '2.0.0',
-        credentials: { API_KEY: 'fresh-secret' },
+        credentials: { API_KEY: 'fresh-test-token' },
       })
       .expect(422)
 
@@ -4669,7 +4669,7 @@ describe('POST /admin/registry/upgrade', () => {
         serverName: 'my-srv',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '2.0.0',
-        credentials: { API_KEY: 'fresh-secret' },
+        credentials: { API_KEY: 'fresh-test-token' },
       })
       .expect(422)
 
@@ -4777,7 +4777,7 @@ describe('POST /admin/registry/upgrade', () => {
         serverName: 'my-srv',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '2.0.0',
-        credentials: { API_KEY: 'fresh-secret' },
+        credentials: { API_KEY: 'fresh-test-token' },
       })
       .expect(422)
 
