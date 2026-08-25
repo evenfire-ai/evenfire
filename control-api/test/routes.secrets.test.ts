@@ -154,7 +154,10 @@ describe('routes/secrets', () => {
             data: entry.data,
           }
         }),
-        createSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+        createSecret: vi.fn(async (body: unknown) => {
+          const summary = writeSummary(body)
+          return { ...summary, uid: `uid-${summary.name}`, resourceVersion: '1' }
+        }),
         updateSecret: vi.fn(async (body: unknown) => writeSummary(body)),
         deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
           deleted: true,

@@ -98,6 +98,15 @@ describe('ResourceService.updateResource', () => {
           namespace: 'channels',
           uid: 'uid-original',
           resourceVersion: '10',
+          ownerReferences: [
+            {
+              apiVersion: 'clerum.io/v1alpha1',
+              kind: 'WorkflowRecipe',
+              name: 'parent',
+              uid: 'uid-parent',
+            },
+          ],
+          finalizers: ['clerum.io/workload-cleanup'],
         },
         spec: { enabled: true },
       }),
@@ -128,6 +137,15 @@ describe('ResourceService.updateResource', () => {
     const replaceArgs = customApi.replaceNamespacedCustomObject.mock.calls[0][0]
     expect(replaceArgs.body.metadata.uid).toBe('uid-original')
     expect(replaceArgs.body.metadata.resourceVersion).toBe('10')
+    expect(replaceArgs.body.metadata.ownerReferences).toEqual([
+      {
+        apiVersion: 'clerum.io/v1alpha1',
+        kind: 'WorkflowRecipe',
+        name: 'parent',
+        uid: 'uid-parent',
+      },
+    ])
+    expect(replaceArgs.body.metadata.finalizers).toEqual(['clerum.io/workload-cleanup'])
   })
 
   it('fails closed before replacement when the identity precondition names a replacement object', async () => {
@@ -474,6 +492,41 @@ describe('ResourceService annotation merge — platform keys survive admin write
 })
 
 describe('ResourceService.mutateResource', () => {
+  it('preserves lifecycle metadata from the live object during a full replace', async () => {
+    const customApi = {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          name: 'recipe-a',
+          namespace: 'sandbox-recipes',
+          resourceVersion: '21',
+          ownerReferences: [
+            { apiVersion: 'v1', kind: 'WorkflowRecipe', name: 'parent', uid: 'uid-parent' },
+          ],
+          finalizers: ['clerum.io/workload-cleanup'],
+        },
+        spec: { enabled: true },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+      listNamespacedCustomObject: vi.fn(),
+    }
+    const service = new ResourceService(customApi as never, 'control-plane', {
+      workflowrecipes: 'sandbox-recipes',
+    })
+
+    await service.mutateResource(
+      'workflowrecipes',
+      'recipe-a',
+      current => ({ spec: { ...current.spec, enabled: false } }),
+      'sandbox-recipes'
+    )
+
+    const metadata = customApi.replaceNamespacedCustomObject.mock.calls[0][0].body.metadata
+    expect(metadata.ownerReferences).toEqual([
+      { apiVersion: 'v1', kind: 'WorkflowRecipe', name: 'parent', uid: 'uid-parent' },
+    ])
+    expect(metadata.finalizers).toEqual(['clerum.io/workload-cleanup'])
+  })
+
   it('recomputes the replacement body from the refetched resource after a conflict', async () => {
     const customApi = {
       getNamespacedCustomObject: vi

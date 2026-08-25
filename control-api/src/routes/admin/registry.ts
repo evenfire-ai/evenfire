@@ -1417,7 +1417,7 @@ async function rollbackCreatedSecret(gateway: K8sGateway, snapshot: SecretSnapsh
   // or the reference graph cannot be read completely, preserve it for repair;
   // a name-only compensation decision is not safe across independent CRDs.
   const referenceState = await findSecretReferenceState(gateway, snapshot.name, snapshot.namespace)
-  if (referenceState !== 'not-referenced') return
+  if (referenceState !== 'not-referenced') throw new RegistryInstallRollbackError()
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
@@ -3632,6 +3632,38 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
         } else {
           // Uninstall MCP Server
+          let credentialSecretSnapshot: SecretSnapshot | null = null
+          const credentialSecretName = `${resourceName}-credentials`
+
+          // Capture the credential identity before deleting the parent CR. A
+          // same-name Secret replacement can be created after the CR delete;
+          // reading by name afterwards would make the cleanup delete a
+          // different owner's object. The later delete is bound to this exact
+          // UID/RV snapshot.
+          try {
+            credentialSecretSnapshot = normalizeSecretSnapshot(
+              await gateway.getSecret(credentialSecretName, namespace),
+              credentialSecretName,
+              namespace
+            )
+          } catch (err) {
+            if (extractK8sError(err)?.status !== 404) {
+              res.status(503).json({
+                error: 'registry_uninstall_outcome_ambiguous',
+                outcome: 'repair_required',
+                resourceName,
+                resourceType,
+                namespace,
+                deleted,
+                warnings: [
+                  ...warnings,
+                  `Secret/${credentialSecretName}: ${err instanceof Error ? err.message : 'unable to verify identity'}`,
+                ],
+              })
+              return
+            }
+          }
+
           try {
             const current = await readResourceForRollback(gateway, 'mcpservers', {
               metadata: { name: resourceName, namespace },
@@ -3670,15 +3702,22 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
 
           // Delete credential Secret
           try {
-            const secretName = `${resourceName}-credentials`
-            const current = await gateway.getSecret(secretName, namespace)
-            const snapshot = normalizeSecretSnapshot(current, secretName, namespace)
-            await gateway.deleteSecret(secretName, namespace, secretPreconditions(snapshot))
-            await waitForDeletion(
-              () => gateway.getSecret(secretName, namespace),
-              `Secret/${secretName}`
-            )
-            deleted.push(`Secret/${secretName}`)
+            if (credentialSecretSnapshot) {
+              await gateway.deleteSecret(
+                credentialSecretSnapshot.name,
+                credentialSecretSnapshot.namespace,
+                secretPreconditions(credentialSecretSnapshot)
+              )
+              await waitForDeletion(
+                () =>
+                  gateway.getSecret(
+                    credentialSecretSnapshot!.name,
+                    credentialSecretSnapshot!.namespace
+                  ),
+                `Secret/${credentialSecretSnapshot.name}`
+              )
+              deleted.push(`Secret/${credentialSecretSnapshot.name}`)
+            }
           } catch (err) {
             if (extractK8sError(err)?.status !== 404) {
               res.status(503).json({
@@ -3690,7 +3729,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 deleted,
                 warnings: [
                   ...warnings,
-                  `Secret/${resourceName}-credentials: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
+                  `Secret/${credentialSecretName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
                 ],
               })
               return
@@ -4194,7 +4233,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           // on the Secret, and the failed request may have been accepted by a
           // different apiserver path. Preserve the credential state and make
           // repair explicit until the caller can reconcile both resources.
-          if (outcomeIsAmbiguous && hasCredentialUpdates) {
+          if (upgradeOutcome === 'ambiguous' && hasCredentialUpdates) {
             res.status(503).json({
               error: 'registry_upgrade_outcome_ambiguous',
               outcome: 'repair_required',
@@ -4210,7 +4249,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
 
-          if (!outcomeIsAmbiguous && hasCredentialUpdates) {
+          if (upgradeOutcome !== 'ambiguous' && hasCredentialUpdates) {
             try {
               if (!mutatedSecretPreconditions) {
                 throw Object.assign(new Error('mutated Secret identity unavailable'), {

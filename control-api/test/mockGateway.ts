@@ -41,6 +41,8 @@ type ResourceBody = {
     creationTimestamp?: string
     resourceVersion?: string
     uid?: string
+    ownerReferences?: Array<Record<string, unknown>>
+    finalizers?: string[]
   }
   spec: Record<string, unknown>
   status?: Record<string, unknown>
@@ -55,6 +57,8 @@ type ResourceRecord = {
     creationTimestamp?: string
     resourceVersion?: string
     uid?: string
+    ownerReferences?: Array<Record<string, unknown>>
+    finalizers?: string[]
   }
   spec: Record<string, unknown>
   status?: Record<string, unknown>
@@ -268,6 +272,8 @@ export class MockGateway {
         ...(body.metadata.creationTimestamp && {
           creationTimestamp: body.metadata.creationTimestamp,
         }),
+        ...(body.metadata.ownerReferences && { ownerReferences: body.metadata.ownerReferences }),
+        ...(body.metadata.finalizers && { finalizers: body.metadata.finalizers }),
         resourceVersion: body.metadata.resourceVersion ?? '1',
       },
       spec: body.spec || {},
@@ -294,6 +300,8 @@ export class MockGateway {
         annotations?: Record<string, string>
         uid?: string
         resourceVersion?: string
+        ownerReferences?: Array<Record<string, unknown>>
+        finalizers?: string[]
       }
       spec: Record<string, unknown>
     },

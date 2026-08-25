@@ -81,6 +81,8 @@ export class SecretService {
       metadata: {
         name: s.metadata?.name,
         namespace: s.metadata?.namespace,
+        ...(s.metadata?.uid ? { uid: s.metadata.uid } : {}),
+        ...(s.metadata?.resourceVersion ? { resourceVersion: s.metadata.resourceVersion } : {}),
         labels: s.metadata?.labels || {},
         annotations: s.metadata?.annotations || {},
       },

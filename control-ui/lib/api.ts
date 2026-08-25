@@ -8,6 +8,24 @@ import {
 
 export type AnyRecord = Record<string, unknown>
 
+export type SecretIdentity = {
+  uid: string
+  resourceVersion: string
+}
+
+function requireSecretIdentity(raw: unknown, operation: string): SecretIdentity {
+  const value = (raw ?? {}) as { uid?: unknown; resourceVersion?: unknown }
+  if (
+    typeof value.uid !== 'string' ||
+    !value.uid.trim() ||
+    typeof value.resourceVersion !== 'string' ||
+    !value.resourceVersion.trim()
+  ) {
+    throw new Error(`${operation} returned an incomplete Secret identity; repair is required`)
+  }
+  return { uid: value.uid, resourceVersion: value.resourceVersion }
+}
+
 // Global error handler for 401s - managed by AuthContext
 let globalHandleAuthError: (() => void) | null = null
 
@@ -1448,10 +1466,15 @@ export async function updateMcpServer(name: string, payload: { spec: Record<stri
 }
 
 export async function createMcpSecret(name: string, data: Record<string, string>) {
-  return apiSend('POST', '/api/v1/admin/mcp-secrets', { name, data }) as Promise<{
+  const response = await apiSend('POST', '/api/v1/admin/mcp-secrets', { name, data })
+  const identity = requireSecretIdentity(response, 'createMcpSecret')
+  return {
+    ...(response as { name: string; namespace: string }),
+    ...identity,
+  } as {
     name: string
     namespace: string
-  }>
+  } & SecretIdentity
 }
 
 /**
@@ -1460,8 +1483,12 @@ export async function createMcpSecret(name: string, data: Record<string, string>
  * back a just-created Secret when the subsequent McpServer CRD creation fails,
  * so we never leave orphan Secrets behind.
  */
-export async function deleteMcpSecret(name: string) {
-  return apiSend('DELETE', `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`) as Promise<{
+export async function deleteMcpSecret(name: string, identity: SecretIdentity) {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`,
+    identity
+  ) as Promise<{
     name: string
     namespace: string
   }>
@@ -1500,6 +1527,8 @@ export type RecipeSecretItem = {
   namespace: string
   keys: string[]
   ownership: RecipeSecretOwnership
+  uid?: string
+  resourceVersion?: string
 }
 
 export async function getRecipeSecrets() {
@@ -1517,12 +1546,14 @@ export async function createRecipeSecret(
     data,
     ownership,
     ...(targetNamespace ? { targetNamespace } : {}),
-  }) as Promise<{
-    name: string
-    namespace: string
-    ownership: RecipeSecretOwnership
-    created: boolean
-  }>
+  }) as Promise<
+    {
+      name: string
+      namespace: string
+      ownership: RecipeSecretOwnership
+      created: boolean
+    } & SecretIdentity
+  >
 }
 
 export async function updateRecipeSecret(
@@ -1539,9 +1570,17 @@ export async function updateRecipeSecret(
   })
 }
 
-export async function deleteRecipeSecret(name: string, targetNamespace?: string) {
+export async function deleteRecipeSecret(
+  name: string,
+  targetNamespace: string | undefined,
+  identity: SecretIdentity
+) {
   const qs = targetNamespace ? `?targetNamespace=${encodeURIComponent(targetNamespace)}` : ''
-  return apiSend('DELETE', `/api/v1/admin/recipe-secrets/${encodeURIComponent(name)}${qs}`)
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/recipe-secrets/${encodeURIComponent(name)}${qs}`,
+    identity
+  )
 }
 
 // ── LLM model prices (token-budgets P0b) ──────────────────────────────────

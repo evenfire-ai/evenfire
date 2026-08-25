@@ -22,6 +22,7 @@ import {
 } from '@/lib/api'
 import type { EnvSecretKeyMapping, EnvVar, OrgImage } from '@/lib/api'
 import type { EgressBinding } from '@/lib/api'
+import type { SecretIdentity } from '@/lib/api'
 import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
 import { EgressEditor } from '../EgressEditor'
@@ -532,11 +533,11 @@ export function CreateMcpServerForm({
     const willCreateSecret =
       useEnvSecret && envSecretName.trim().length > 0 && Object.keys(secretData).length > 0
 
-    let secretCreated = false
+    let createdSecretIdentity: SecretIdentity | null = null
     try {
       if (willCreateSecret) {
-        await createMcpSecret(envSecretName.trim(), secretData)
-        secretCreated = true
+        const created = await createMcpSecret(envSecretName.trim(), secretData)
+        createdSecretIdentity = { uid: created.uid, resourceVersion: created.resourceVersion }
       }
 
       await createMcpServer({
@@ -577,9 +578,9 @@ export function CreateMcpServerForm({
     } catch (submitError) {
       // Rollback: if we created the Secret but the CRD (or anything after)
       // failed, the Secret is orphan — best-effort delete.
-      if (secretCreated) {
+      if (createdSecretIdentity) {
         try {
-          await deleteMcpSecret(envSecretName.trim())
+          await deleteMcpSecret(envSecretName.trim(), createdSecretIdentity)
         } catch {
           // best-effort rollback; swallow — the operator already sees the
           // primary error below.

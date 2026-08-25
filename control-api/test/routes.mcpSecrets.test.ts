@@ -31,12 +31,8 @@ function createGateway() {
     listSecrets: vi.fn(async () => []),
     createSecret: vi.fn(async (body: SecretWrite) => ({
       ...writeSummary(body),
-      metadata: {
-        name: body.name,
-        namespace: body.namespace || 'mcp-server',
-        uid: `uid-${body.name}`,
-        resourceVersion: '1',
-      },
+      uid: `uid-${body.name}`,
+      resourceVersion: '1',
     })),
     updateSecret: vi.fn(async (body: SecretWrite) => writeSummary(body)),
     deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
@@ -74,12 +70,8 @@ function createGateway() {
     mergeSecret: vi.fn(async (body: SecretWrite) => ({
       name: body.name,
       namespace: body.namespace || 'mcp-server',
-      metadata: {
-        name: body.name,
-        namespace: body.namespace || 'mcp-server',
-        uid: `uid-${body.name}`,
-        resourceVersion: '2',
-      },
+      uid: `uid-${body.name}`,
+      resourceVersion: '2',
       keys: ['EXISTING_KEY', ...Object.keys(body.stringData ?? {})].sort((a, b) =>
         a.localeCompare(b)
       ),

@@ -59,6 +59,8 @@ export type MutableResourceSnapshot = {
     uid?: string
     resourceVersion?: string
     generation?: number
+    ownerReferences?: Array<Record<string, unknown>>
+    finalizers?: string[]
   }
   spec?: Record<string, unknown>
 }
@@ -346,6 +348,8 @@ export class ResourceService {
           uid?: string
           resourceVersion?: string
           generation?: number
+          ownerReferences?: Array<Record<string, unknown>>
+          finalizers?: string[]
         }
       }
 
@@ -382,6 +386,10 @@ export class ResourceService {
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
           ...(sanitizedMetadata?.labels && { labels: sanitizedMetadata.labels }),
           ...(annotations && { annotations }),
+          ...(current.metadata?.ownerReferences && {
+            ownerReferences: current.metadata.ownerReferences,
+          }),
+          ...(current.metadata?.finalizers && { finalizers: current.metadata.finalizers }),
         },
         spec: body.spec,
       }
@@ -602,6 +610,10 @@ export class ResourceService {
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
           ...(sanitizedMetadata?.labels && { labels: sanitizedMetadata.labels }),
           ...(annotations && { annotations }),
+          ...(current.metadata?.ownerReferences && {
+            ownerReferences: current.metadata.ownerReferences,
+          }),
+          ...(current.metadata?.finalizers && { finalizers: current.metadata.finalizers }),
         },
         spec: next.spec,
       }

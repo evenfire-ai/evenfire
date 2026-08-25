@@ -14,7 +14,12 @@ vi.mock('../../lib/api', async () => {
   })
   return {
     createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
-    createMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
+    createMcpSecret: vi.fn().mockResolvedValue({
+      name: 'test-credentials',
+      namespace: 'mcp-server',
+      uid: 'uid-test-credentials',
+      resourceVersion: '1',
+    }),
     deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
     getContexts: vi.fn().mockResolvedValue(
       buildContextList([
@@ -523,7 +528,10 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     await waitFor(() => {
       expect(api.deleteMcpSecret).toHaveBeenCalledTimes(1)
     })
-    expect(api.deleteMcpSecret).toHaveBeenCalledWith('brave-credentials')
+    expect(api.deleteMcpSecret).toHaveBeenCalledWith('brave-credentials', {
+      uid: 'uid-test-credentials',
+      resourceVersion: '1',
+    })
 
     // JSON API errors surface their server message after rollback.
     await waitFor(() => {

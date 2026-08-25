@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
+  type SecretIdentity,
   apiSend,
   deleteRecipeSecret,
   getMcpServers,
@@ -56,6 +57,8 @@ type RecipeSecretRow = {
   recipes: string[]
   status: RecipeSecretStatus
   ownership: RecipeSecretRowOwnership
+  uid?: string
+  resourceVersion?: string
 }
 
 const DEFAULT_RECIPE_SECRET_NAMESPACE = 'sandbox-recipes'
@@ -382,6 +385,8 @@ export function SecretsTable({
         ).sort((a, b) => a.localeCompare(b)),
         status: 'provisioned',
         ownership: item.ownership ?? { kind: 'unlabeled' },
+        uid: item.uid,
+        resourceVersion: item.resourceVersion,
       }))
 
       const missingRows: RecipeSecretRow[] = Array.from(usage.entries())
@@ -454,7 +459,12 @@ export function SecretsTable({
     router.push(CONTROL_ROUTES.secrets.editRecipe(name, Object.fromEntries(qs)))
   }
 
-  async function deleteRecipeSecretRow(name: string, namespace: string) {
+  async function deleteRecipeSecretRow(row: RecipeSecretRow) {
+    const { name, namespace, uid, resourceVersion } = row
+    if (!uid || !resourceVersion) {
+      setRecipeError(`Secret ${name} has no current identity; refresh before deleting it.`)
+      return
+    }
     const ok = await confirm({
       title: 'Delete Recipe Secret',
       message: `Delete recipe secret ${name} from ${namespace}?`,
@@ -466,7 +476,7 @@ export function SecretsTable({
     setRecipeDeletingName(deleteKey)
     setRecipeError('')
     try {
-      await deleteRecipeSecret(name, namespace)
+      await deleteRecipeSecret(name, namespace, { uid, resourceVersion } satisfies SecretIdentity)
       showToast(`Secret ${name} deleted.`, { tone: 'success' })
       await loadRecipeSecretsAndUsage()
     } catch (e) {
@@ -931,8 +941,12 @@ export function SecretsTable({
                           <button
                             type="button"
                             className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void deleteRecipeSecretRow(row.name, row.namespace)}
-                            disabled={recipeDeletingName === `${row.namespace}/${row.name}`}
+                            onClick={() => void deleteRecipeSecretRow(row)}
+                            disabled={
+                              !row.uid ||
+                              !row.resourceVersion ||
+                              recipeDeletingName === `${row.namespace}/${row.name}`
+                            }
                             aria-label={
                               recipeDeletingName === `${row.namespace}/${row.name}`
                                 ? 'Deleting…'

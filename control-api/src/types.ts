@@ -18,6 +18,8 @@ export interface Metadata {
   labels?: Record<string, string>
   annotations?: Record<string, string>
   resourceVersion?: string
+  ownerReferences?: Array<Record<string, unknown>>
+  finalizers?: string[]
 }
 
 export interface ClerumResource<TSpec = Record<string, unknown>> {

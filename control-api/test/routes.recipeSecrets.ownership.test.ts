@@ -55,8 +55,16 @@ function createGateway(opts: { recipes?: string[]; secrets?: MockSecret[] } = {}
     listSecrets: vi.fn(async () => [...secrets.values()]),
     getSecret: vi.fn(async (name: string) => secrets.get(name) ?? null),
     createSecret: vi.fn(async (body: MockWrite) => {
-      secrets.set(body.name, { metadata: { name: body.name, labels: body.labels ?? {} } })
-      return writeSummary(body)
+      const created = {
+        metadata: {
+          name: body.name,
+          labels: body.labels ?? {},
+          uid: `uid-${body.name}`,
+          resourceVersion: '1',
+        },
+      }
+      secrets.set(body.name, created)
+      return { ...writeSummary(body), uid: created.metadata.uid, resourceVersion: '1' }
     }),
     updateSecret: vi.fn(async (body: MockWrite) => {
       const existing = secrets.get(body.name)

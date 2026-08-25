@@ -19,6 +19,7 @@ import {
 } from '../../services/secretConstraints.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
+import { secretIdentityPreconditions } from '../../services/secretRepository.js'
 import { toPublicDeleteSecretSummary, toPublicSecretSummary } from '../../services/secretService.js'
 import { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
@@ -58,23 +59,14 @@ const PLATFORM_MANAGED_SECRET_ERROR =
   `Secret "${EVENFIRE_REGISTRY_PULL_SECRET_NAME}" is platform-managed (the evenfire ` +
   'registry image-pull credential) and cannot be created, modified, or deleted here'
 
-function secretIdentityPreconditions(raw: unknown): SecretPreconditions | null {
-  const metadata = (raw as { metadata?: { uid?: unknown; resourceVersion?: unknown } } | null)
-    ?.metadata
-  if (typeof metadata?.uid !== 'string' || !metadata.uid) return null
-  if (typeof metadata.resourceVersion !== 'string' || !metadata.resourceVersion) return null
-  return { uid: metadata.uid, resourceVersion: metadata.resourceVersion }
-}
-
 /**
  * A data-only merge is allowed to compose with another owner updating a
  * disjoint key. UID still fences delete/recreate, while resourceVersion is
  * deliberately omitted so the merge-patch remains multi-owner safe.
  */
 function secretUidPrecondition(raw: unknown): SecretPreconditions | null {
-  const metadata = (raw as { metadata?: { uid?: unknown } } | null)?.metadata
-  if (typeof metadata?.uid !== 'string' || !metadata.uid) return null
-  return { uid: metadata.uid }
+  const identity = secretIdentityPreconditions(raw)
+  return identity ? { uid: identity.uid } : null
 }
 
 function requestSecretPreconditions(raw: unknown): SecretPreconditions | null {
@@ -835,14 +827,28 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           })
           .map(item => {
             const metadata = (
-              item as { metadata?: { name?: string; labels?: Record<string, string> } }
+              item as {
+                metadata?: {
+                  name?: string
+                  labels?: Record<string, string>
+                  uid?: string
+                  resourceVersion?: string
+                }
+              }
             ).metadata
             const name = String(metadata?.name || '').trim()
             const keys = Array.isArray((item as { keys?: string[] }).keys)
               ? (item as { keys: string[] }).keys
               : []
             const ownership = parseSecretOwnership(metadata?.labels || {})
-            return { name, namespace, keys, ownership }
+            const identity = secretIdentityPreconditions(item)
+            return {
+              name,
+              namespace,
+              keys,
+              ownership,
+              ...(identity ?? {}),
+            }
           })
           .filter(row => row.name.length > 0)
       )
@@ -921,11 +927,17 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         stringData: data,
       }
 
-      await gateway.createSecret(secretReq)
+      const created = await gateway.createSecret(secretReq)
+      const identity = secretIdentityPreconditions(created)
+      if (!identity) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
       res.status(201).json({
         name: name.trim(),
         namespace: targetNamespace,
         ownership,
+        ...identity,
         created: true,
       })
     })

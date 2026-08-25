@@ -1190,9 +1190,12 @@ describe('POST /admin/registry/install', () => {
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: 'api-key-test-token' },
       })
-      .expect(422)
+      .expect(500)
 
-    expect(res.body.error).toContain('resource rejected by validation')
+    expect(res.body).toMatchObject({
+      error: 'registry_install_rollback_incomplete',
+      outcome: 'compensation_failed',
+    })
     expect(deleteSecretSpy).not.toHaveBeenCalled()
     await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
       metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
@@ -3364,6 +3367,48 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
     expect(res.body.resourceName).toBe('nonexistent')
   })
 
+  it('does not delete a replacement Secret that wins after the resource delete', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource(
+      'mcpservers',
+      { metadata: { name: 'secret-race' }, spec: { image: 'test:original' } },
+      'mcp-server'
+    )
+    const secretName = 'secret-race-credentials'
+    gw.seedSecret(secretName, 'mcp-server', {
+      uid: 'uid-secret-original',
+      resourceVersion: '1',
+    })
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+
+    const originalDeleteResource = gw.deleteResource.bind(gw)
+    let raced = false
+    vi.spyOn(gw, 'deleteResource').mockImplementation(async (...args) => {
+      if (args[0] === 'mcpservers' && !raced) {
+        raced = true
+        const result = await originalDeleteResource(...args)
+        await gw.deleteSecret(secretName, 'mcp-server')
+        gw.seedSecret(secretName, 'mcp-server', {
+          uid: 'uid-secret-replacement',
+          resourceVersion: '1',
+        })
+        return result
+      }
+      return originalDeleteResource(...args)
+    })
+
+    const { app } = makeApp(gw)
+    const res = await request(app).delete('/admin/registry/uninstall/secret-race').expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_uninstall_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: 'uid-secret-replacement', resourceVersion: '1' },
+    })
+  })
+
   it('does not delete a same-name replacement that wins the uninstall race', async () => {
     const gw = new MockGateway('mcp-server')
     await gw.createResource('mcpservers', {
@@ -3610,13 +3655,11 @@ describe('POST /admin/registry/upgrade', () => {
       .expect(503)
 
     expect(res.body).toMatchObject({
-      error: 'registry_upgrade_outcome_ambiguous',
-      outcome: 'repair_required',
+      error: 'registry_upgrade_outcome_not_committed',
+      outcome: 'not_committed',
     })
     expect(updateSpy).toHaveBeenCalled()
-    await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
-    })
+    await expect(gw.getSecret(secretName, 'mcp-server')).rejects.toMatchObject({ statusCode: 404 })
   })
 
   it('persists envSecret and returns pendingCredentials during MCP upgrade when credentials remain unmaterialized', async () => {
@@ -4051,7 +4094,7 @@ describe('POST /admin/registry/upgrade', () => {
     getResourceSpy.mockRestore()
   })
 
-  it('preserves credentials after a CAS fence proves the CR update did not commit', async () => {
+  it('compensates credentials after a CAS fence proves the CR update did not commit', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce({
       required: true,
@@ -4083,13 +4126,17 @@ describe('POST /admin/registry/upgrade', () => {
       .expect(503)
 
     expect(res.body).toMatchObject({
-      error: 'registry_upgrade_outcome_ambiguous',
-      outcome: 'repair_required',
+      error: 'registry_upgrade_outcome_not_committed',
+      outcome: 'not_committed',
     })
     expect(updateSpy).toHaveBeenCalledTimes(2)
-    expect(deleteSecretSpy).not.toHaveBeenCalled()
-    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
-      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    expect(deleteSecretSpy).toHaveBeenCalledWith(
+      'my-srv-credentials',
+      'mcp-server',
+      expect.objectContaining({ uid: expect.any(String), resourceVersion: expect.any(String) })
+    )
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).rejects.toMatchObject({
+      statusCode: 404,
     })
   })
 
@@ -4515,11 +4562,11 @@ describe('POST /admin/registry/upgrade', () => {
           registryEntryVersion: '2.0.0',
           [authField]: { [apiKey]: 'fresh-value' },
         })
-        .expect(503)
+        .expect(500)
 
       expect(res.body).toMatchObject({
-        error: 'registry_upgrade_outcome_ambiguous',
-        outcome: 'repair_required',
+        error: 'registry_upgrade_rollback_incomplete',
+        outcome: 'compensation_failed',
       })
       expect(updateSpy).toHaveBeenCalledTimes(2)
       expect(deleteSpy).not.toHaveBeenCalled()

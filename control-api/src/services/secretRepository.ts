@@ -94,3 +94,25 @@ export function toSecretSnapshot(
     ...(source.stringData ? { stringData: source.stringData } : {}),
   }
 }
+
+/**
+ * Read a Secret identity at a boundary that may receive either the raw
+ * Kubernetes resource or the flat server-owned SecretSnapshot. Mutation
+ * routes must not depend on one representation accidentally being returned by
+ * a mock or a different gateway method.
+ */
+export function secretIdentityPreconditions(raw: unknown): SecretPreconditions | null {
+  const value = (raw ?? {}) as {
+    uid?: unknown
+    resourceVersion?: unknown
+    metadata?: { uid?: unknown; resourceVersion?: unknown }
+  }
+  const uid = typeof value.uid === 'string' ? value.uid : value.metadata?.uid
+  const resourceVersion =
+    typeof value.resourceVersion === 'string'
+      ? value.resourceVersion
+      : value.metadata?.resourceVersion
+  if (typeof uid !== 'string' || !uid.trim()) return null
+  if (typeof resourceVersion !== 'string' || !resourceVersion.trim()) return null
+  return { uid, resourceVersion }
+}
