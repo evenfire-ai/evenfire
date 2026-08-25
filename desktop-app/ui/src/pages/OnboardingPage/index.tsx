@@ -25,7 +25,7 @@ export function OnboardingPage({ onboarding }: OnboardingPageProps) {
 
   return (
     <main className="auth-page">
-      <section className="auth-card glass-card">
+      <section className="auth-card glass-card onboarding-card">
         <header className="auth-card__header">
           <div className="auth-brand" title={desktopVersionTooltip}>
             <img className="auth-brand-mark" src="./logo.svg" alt="" aria-hidden="true" />

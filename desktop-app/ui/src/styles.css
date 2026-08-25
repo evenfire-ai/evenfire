@@ -10263,6 +10263,16 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 /* First-run onboarding (spec §5.2). The wizard reuses the auth card shell and
    the auth form/link primitives; only the answer list is new. */
+
+/* A bare h1 falls back to the browser's 2em — 32px, which is off the type
+   scale entirely and oversized inside a 420px card. Pull it onto the scale,
+   above the 18px brand title so the step heading still leads. */
+.onboarding-card h1 {
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
 .onboarding-options {
   display: grid;
   gap: var(--space-2);
