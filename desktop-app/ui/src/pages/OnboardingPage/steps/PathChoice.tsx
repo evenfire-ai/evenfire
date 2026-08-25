@@ -26,7 +26,7 @@ export function PathChoice({ step, onAnswerOrigin, onAnswerRunStyle }: PathChoic
           >
             <span className="onboarding-option__title">Evenfire hosts it for me</span>
             <span className="onboarding-option__hint">
-              Free for 1 week. Nothing to deploy or operate.
+              We run and operate it for you. Nothing to deploy.
             </span>
           </SelectableOption>
           <SelectableOption
@@ -75,7 +75,7 @@ export function PathChoice({ step, onAnswerOrigin, onAnswerRunStyle }: PathChoic
           onClick={() => onAnswerOrigin('gettingStarted')}
         >
           <span className="onboarding-option__title">No, I’m just getting started</span>
-          <span className="onboarding-option__hint">See what it takes to run Evenfire.</span>
+          <span className="onboarding-option__hint">See your options for running Evenfire.</span>
         </SelectableOption>
       </div>
     </>

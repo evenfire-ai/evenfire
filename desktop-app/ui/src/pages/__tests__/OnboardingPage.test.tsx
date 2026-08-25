@@ -14,12 +14,14 @@ afterEach(() => {
 
 let probeLocalhostReachable = vi.fn()
 let openDeploymentDocs = vi.fn()
+let openHostedSignup = vi.fn()
 
 beforeEach(() => {
   probeLocalhostReachable = vi.fn().mockResolvedValue(false)
   openDeploymentDocs = vi.fn().mockResolvedValue({ opened: true })
+  openHostedSignup = vi.fn().mockResolvedValue({ opened: true })
   ;(window as unknown as { clerum: unknown }).clerum = {
-    auth: { probeLocalhostReachable, openDeploymentDocs },
+    auth: { probeLocalhostReachable, openDeploymentDocs, openHostedSignup },
   }
 })
 
@@ -132,16 +134,47 @@ describe('OnboardingPage', () => {
     expect(screen.getByLabelText('External REST API')).toBeTruthy()
   })
 
-  it('sends the getting-started answer to the self-hosted step while path A is unavailable', async () => {
+  it('sends the getting-started answer to Q2, leading with the hosted option', async () => {
     const user = userEvent.setup()
 
     renderOnboarding()
 
     await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
 
-    // Q2 is skipped entirely rather than offering a choice with one real answer.
-    expect(screen.queryByText('How do you want to run Evenfire?')).toBeNull()
-    expect(screen.getByText('Run Evenfire yourself')).toBeTruthy()
+    expect(screen.getByText('How do you want to run Evenfire?')).toBeTruthy()
+    const options = screen.getAllByRole('button', { name: /Evenfire hosts it|run it myself/ })
+    // Hosting is what someone just getting started should see first.
+    expect(options[0]?.textContent).toContain('Evenfire hosts it for me')
+  })
+
+  it('does not promise a trial the hosted service cannot deliver yet', async () => {
+    const user = userEvent.setup()
+
+    renderOnboarding()
+    await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+
+    const hosted = screen.getByRole('button', { name: /Evenfire hosts it for me/ })
+    expect(hosted.textContent).not.toMatch(/free|trial|week|\d+\s*day/i)
+  })
+
+  it('routes the hosted answer to a link-out step with a manual fallback', async () => {
+    const user = userEvent.setup()
+    const handleSaveRuntimeConfig = vi.fn()
+
+    renderOnboarding({ handleSaveRuntimeConfig })
+    await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+    await user.click(screen.getByRole('button', { name: /Evenfire hosts it for me/ }))
+
+    expect(screen.getByText('Evenfire hosts it for you')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: 'See hosted Evenfire' }))
+    expect(openHostedSignup).toHaveBeenCalledTimes(1)
+    // No argument: the renderer never names a URL for the main process (spec §6.8).
+    expect(openHostedSignup).toHaveBeenCalledWith()
+    expect(handleSaveRuntimeConfig).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: /I have a server — enter its address/ }))
+    expect(screen.getByLabelText('Environment name')).toBeTruthy()
   })
 
   it('keeps the self-hosted step neutral about where the server runs', async () => {
@@ -149,6 +182,7 @@ describe('OnboardingPage', () => {
 
     renderOnboarding()
     await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+    await user.click(screen.getByRole('button', { name: /I’ll run it myself/ }))
 
     const step = screen.getByText('Run Evenfire yourself').closest('section')
     const copy = step?.textContent || ''
@@ -163,6 +197,7 @@ describe('OnboardingPage', () => {
 
     renderOnboarding({ handleSaveRuntimeConfig })
     await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+    await user.click(screen.getByRole('button', { name: /I’ll run it myself/ }))
     await user.click(screen.getByRole('button', { name: 'Open the deployment guide' }))
 
     expect(openDeploymentDocs).toHaveBeenCalledTimes(1)
@@ -176,22 +211,27 @@ describe('OnboardingPage', () => {
 
     renderOnboarding()
     await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+    await user.click(screen.getByRole('button', { name: /I’ll run it myself/ }))
     await user.click(screen.getByRole('button', { name: /I have a server — enter its address/ }))
 
     expect(screen.getByLabelText('Environment name')).toBeTruthy()
   })
 
-  it('walks back to the previous step, and to Q1 from a two-step path', async () => {
+  it('walks back through every step of the longest path to Q1', async () => {
     const user = userEvent.setup()
 
     renderOnboarding()
     await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+    await user.click(screen.getByRole('button', { name: /I’ll run it myself/ }))
     await user.click(screen.getByRole('button', { name: /I have a server — enter its address/ }))
 
     expect(screen.getByLabelText('Environment name')).toBeTruthy()
 
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByText('Run Evenfire yourself')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByText('How do you want to run Evenfire?')).toBeTruthy()
 
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByText('Do you already have an Evenfire server?')).toBeTruthy()

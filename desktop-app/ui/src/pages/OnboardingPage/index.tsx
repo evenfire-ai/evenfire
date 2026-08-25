@@ -1,5 +1,6 @@
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
+import { Hosted } from './steps/Hosted'
 import { InvitedMember } from './steps/InvitedMember'
 import { ManualEnvironment } from './steps/ManualEnvironment'
 import { PathChoice } from './steps/PathChoice'
@@ -39,6 +40,7 @@ export function OnboardingPage({ onboarding }: OnboardingPageProps) {
           <PathChoice step={step} onAnswerOrigin={answerOrigin} onAnswerRunStyle={answerRunStyle} />
         ) : null}
         {step === 'invited' ? <InvitedMember /> : null}
+        {step === 'hosted' ? <Hosted onContinue={goToManual} /> : null}
         {step === 'selfHosted' ? <SelfHosted onContinue={goToManual} /> : null}
         {step === 'manual' ? <ManualEnvironment /> : null}
 

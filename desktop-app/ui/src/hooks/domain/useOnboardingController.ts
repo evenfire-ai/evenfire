@@ -7,14 +7,16 @@ import type {
 } from '@pages/OnboardingPage/types'
 
 /**
- * Whether the hosted trial path (spec §5.3) is reachable in this build.
+ * Whether the hosted path (spec §5.3) is offered in Q2.
  *
- * False until the hosted signup project exists: Q2 would otherwise offer a
- * choice with one real answer. While false, Q1's "just getting started"
- * routes straight to the self-hosted step. Flipping this to true is the only
- * change this file needs when path A ships (spec §7.1).
+ * True: hosting is the first thing someone just getting started should see,
+ * and the hosted step has somewhere real to send them — the Evenfire site.
+ * It is a link-out, not an in-app signup, because tenant provisioning and the
+ * deep-link handoff do not exist yet (see `steps/Hosted.tsx`). Setting this to
+ * false collapses Q2 and routes "just getting started" straight to
+ * self-hosting.
  */
-const HOSTED_SIGNUP_AVAILABLE = false
+const HOSTED_SIGNUP_AVAILABLE = true
 
 interface OnboardingState {
   step: OnboardingStep
@@ -52,10 +54,7 @@ export function useOnboardingController(): OnboardingViewModel {
 
   const answerRunStyle = useCallback(
     (answer: OnboardingRunStyleAnswer) => {
-      // 'hosted' gets its own waiting step in the PR that ships path A
-      // (spec §5.3). Until then Q2 is never rendered, so only 'selfHosted'
-      // can arrive here.
-      if (answer === 'selfHosted') goTo('selfHosted')
+      goTo(answer === 'hosted' ? 'hosted' : 'selfHosted')
     },
     [goTo]
   )

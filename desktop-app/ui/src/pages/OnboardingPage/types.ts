@@ -6,17 +6,12 @@
  * action touches disk.
  */
 
-export type OnboardingStep = 'origin' | 'runStyle' | 'invited' | 'selfHosted' | 'manual'
+export type OnboardingStep = 'origin' | 'runStyle' | 'invited' | 'hosted' | 'selfHosted' | 'manual'
 
 /** Q1 — "Do you already have an Evenfire server?" */
 export type OnboardingOriginAnswer = 'invited' | 'haveAddress' | 'gettingStarted'
 
-/**
- * Q2 — "How do you want to run Evenfire?"
- *
- * Only reachable once the hosted trial path ships; until then Q1's
- * "just getting started" goes straight to the self-hosted step (spec §7.1).
- */
+/** Q2 — "How do you want to run Evenfire?" */
 export type OnboardingRunStyleAnswer = 'hosted' | 'selfHosted'
 
 export interface OnboardingViewModel {

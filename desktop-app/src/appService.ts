@@ -1787,6 +1787,17 @@ export class AppService {
     return { opened: true }
   }
 
+  /**
+   * Open the hosted Evenfire site for onboarding's hosted path (spec §5.3).
+   * Also a build-time constant. No credentials, no tenant name and no nonce
+   * cross this boundary — the app only opens a page.
+   */
+  async openHostedSignup(): Promise<{ opened: true }> {
+    const { shell } = await import('electron')
+    await shell.openExternal(config.hostedSignupUrl)
+    return { opened: true }
+  }
+
   /** True iff `<baseUrl>/health` returns `{ status: 'ok' }` within the probe bound. */
   private async probeBackendHealthy(baseUrl: string): Promise<boolean> {
     if (!baseUrl?.trim()) return false

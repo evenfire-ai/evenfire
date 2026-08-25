@@ -36,6 +36,7 @@ async function makeService(healthAt: HealthByUrl) {
     authClient: { healthAt: ReturnType<typeof vi.fn> }
     probeLocalhostReachable: () => Promise<boolean>
     openDeploymentDocs: () => Promise<{ opened: true }>
+    openHostedSignup: () => Promise<{ opened: true }>
   }
   service.authClient = { healthAt: vi.fn(healthAt) } as never
   return service
@@ -117,6 +118,26 @@ describe('onboarding main-process surface', () => {
       // Self-hosting covers any cluster the user controls, so the link must not
       // land on the local-cluster quickstart (spec §5.4).
       expect(opened).not.toMatch(/minikube|quickstart/i)
+    })
+  })
+
+  describe('openHostedSignup', () => {
+    it('opens the build-time hosted URL, taking no argument', async () => {
+      const service = await makeService(healthReachableFor())
+
+      expect(await service.openHostedSignup()).toEqual({ opened: true })
+      expect(openExternal).toHaveBeenCalledTimes(1)
+      expect(String(openExternal.mock.calls[0]?.[0] || '')).toMatch(/^https:\/\//)
+    })
+
+    it('is a distinct destination from the deployment docs', async () => {
+      const service = await makeService(healthReachableFor())
+
+      await service.openHostedSignup()
+      await service.openDeploymentDocs()
+
+      const [hosted, docs] = openExternal.mock.calls.map(call => String(call[0] || ''))
+      expect(hosted).not.toBe(docs)
     })
   })
 })

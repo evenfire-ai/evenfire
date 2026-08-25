@@ -77,6 +77,7 @@ declare global {
         diagnoseLoginBackend: () => Promise<LoginBackendHint | null>
         probeLocalhostReachable: () => Promise<boolean>
         openDeploymentDocs: () => Promise<{ opened: true }>
+        openHostedSignup: () => Promise<{ opened: true }>
         startDesktopSetup: (email: string) => Promise<{ profileUiUrl: string; appName: string }>
         openForgotPassword: (email?: string) => Promise<{ profileUiUrl: string }>
         openProfileSettings: (

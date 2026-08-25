@@ -16,6 +16,7 @@ type DesktopConfig = Omit<DesktopRuntimeConfig, 'appName' | 'rpcProxyBaseUrl'> &
   desktopProfileUiBaseUrl: string
   desktopProfileUiBaseUrlExplicit: boolean
   deploymentDocsUrl: string
+  hostedSignupUrl: string
   requestTimeoutMs: number
   gfsUploadTimeoutMs: number
   appName: string
@@ -55,6 +56,12 @@ const LOCALHOST_RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
 // already allows overrides, so a packaged build cannot be pointed elsewhere.
 const DEFAULT_DEPLOYMENT_DOCS_URL =
   'https://github.com/evenfire-ai/evenfire#deploying-to-a-remote-cluster'
+// Where onboarding's hosted path sends the user (spec §5.3). Today this is the
+// marketing site, not a signup endpoint: there is no tenant provisioning and no
+// evenfire://desktop-environment handoff yet, so the hosted step links out and
+// offers the manual-address fallback for when the user returns with a server.
+// Same build-time-constant rule as the docs URL.
+const DEFAULT_HOSTED_SIGNUP_URL = 'https://evenfire.ai'
 const RUNTIME_CONFIG_DIR_NAME = 'runtime-configs'
 /**
  * Dev switch for previewing the first-run onboarding flow (spec §5.1) on a
@@ -619,6 +626,9 @@ export const config: DesktopConfig = {
   deploymentDocsUrl: canUseEnvRuntimeConfig
     ? requiredOrDefault('DEPLOYMENT_DOCS_URL', DEFAULT_DEPLOYMENT_DOCS_URL)
     : DEFAULT_DEPLOYMENT_DOCS_URL,
+  hostedSignupUrl: canUseEnvRuntimeConfig
+    ? requiredOrDefault('HOSTED_SIGNUP_URL', DEFAULT_HOSTED_SIGNUP_URL)
+    : DEFAULT_HOSTED_SIGNUP_URL,
   requestTimeoutMs: Number(requiredOrDefault('REQUEST_TIMEOUT_MS', '60000')),
   // Generous deadline for legacy JSON GFS uploads: a 16 MiB file is a ~22.4 MiB
   // base64 body, ~60s alone on a slow uplink. v2 streams binary indexed parts and

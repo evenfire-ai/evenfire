@@ -33,13 +33,27 @@ describe('useOnboardingController', () => {
     expect(result.current.canGoBack).toBe(false)
   })
 
-  it('skips Q2 while the hosted path is unavailable', () => {
+  it('sends "just getting started" to Q2, where hosting is offered', () => {
     const { result } = renderHook(() => useOnboardingController())
 
-    expect(result.current.hostedAvailable).toBe(false)
+    expect(result.current.hostedAvailable).toBe(true)
 
     act(() => result.current.answerOrigin('gettingStarted'))
 
+    expect(result.current.step).toBe('runStyle')
+  })
+
+  it('routes each Q2 answer to its own step', () => {
+    const { result } = renderHook(() => useOnboardingController())
+
+    act(() => result.current.answerOrigin('gettingStarted'))
+    act(() => result.current.answerRunStyle('hosted'))
+    expect(result.current.step).toBe('hosted')
+
+    act(() => result.current.back())
+    expect(result.current.step).toBe('runStyle')
+
+    act(() => result.current.answerRunStyle('selfHosted'))
     expect(result.current.step).toBe('selfHosted')
   })
 
@@ -47,6 +61,7 @@ describe('useOnboardingController', () => {
     const { result } = renderHook(() => useOnboardingController())
 
     act(() => result.current.answerOrigin('gettingStarted'))
+    act(() => result.current.answerRunStyle('hosted'))
     act(() => result.current.goToManual())
     expect(result.current.canGoBack).toBe(true)
 

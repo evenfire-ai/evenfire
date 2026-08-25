@@ -259,6 +259,10 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.openDeploymentDocs()
   })
+  ipcMain.handle('auth:openHostedSignup', async event => {
+    assertTrustedSender(event)
+    return service.openHostedSignup()
+  })
   ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
     assertTrustedSender(event)
     return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())
