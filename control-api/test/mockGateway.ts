@@ -66,24 +66,19 @@ function mergePatchMap(
   patch: Record<string, unknown> | undefined
 ): Record<string, string> | undefined {
   if (patch === undefined) return existing
-  const merged: Record<string, string> = { ...(existing ?? {}) }
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) {
-      delete merged[key]
-    } else if (typeof value === 'string') {
-      // Define a data property explicitly so a Kubernetes annotation/label key
-      // such as `__proto__` cannot invoke an inherited setter while the mock
-      // models RFC 7396. Production validation still owns which keys are valid;
-      // this boundary must also model arbitrary server-returned map members safely.
-      Object.defineProperty(merged, key, {
-        configurable: true,
-        enumerable: true,
-        value,
-        writable: true,
-      })
-    }
-  }
-  return merged
+  // Build the result from entries instead of assigning/deleting through a
+  // caller-controlled property name. Object.fromEntries creates own data
+  // properties, so a Kubernetes map key such as `__proto__` remains data and
+  // cannot invoke an inherited setter while the mock models RFC 7396.
+  const appliedEntries = Object.entries(patch).filter(
+    ([, value]) => value === null || typeof value === 'string'
+  )
+  const appliedKeys = new Set(appliedEntries.map(([key]) => key))
+  const retainedEntries = Object.entries(existing ?? {}).filter(([key]) => !appliedKeys.has(key))
+  const replacementEntries = appliedEntries.filter(
+    ([, value]): value is string => typeof value === 'string'
+  )
+  return Object.fromEntries([...retainedEntries, ...replacementEntries])
 }
 
 export type MockGatewaySecretWriteFault = (input: {

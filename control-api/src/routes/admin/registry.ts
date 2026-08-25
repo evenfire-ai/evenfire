@@ -2117,7 +2117,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
 
         // ── Step 4: Create McpServer CRD (rollback by UID on failure) ────
         let createdMcpServerSnapshot: RegistryResourceSnapshot | null = null
-        let createdMcpServerIdentityProven = false
         const desiredMcpServerMutation = {
           spec: mcpServerSpec,
           metadata: { labels: registryLabels, annotations: registryAnnotations },
@@ -2147,7 +2146,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           ) {
             throw new RegistryInstallRollbackError()
           }
-          createdMcpServerIdentityProven = true
         } catch (err) {
           const k8sErr = extractK8sError(err)
           const ambiguousCreate =
@@ -2313,10 +2311,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
           if (associationOutcome !== 'committed') {
-            if (
-              !createdMcpServerIdentityProven ||
-              (createdSecretSnapshot && !createdSecretIdentityProven)
-            ) {
+            if (createdSecretSnapshot && !createdSecretIdentityProven) {
               res.status(503).json({
                 error: 'registry_install_outcome_ambiguous',
                 outcome: 'repair_required',
@@ -2324,17 +2319,15 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               return
             }
             let resourceRollbackFailed = false
-            if (createdMcpServerSnapshot) {
-              try {
-                await rollbackCreatedResource(
-                  gateway,
-                  'mcpservers',
-                  createdMcpServerSnapshot,
-                  `McpServer/${serverName}`
-                )
-              } catch {
-                resourceRollbackFailed = true
-              }
+            try {
+              await rollbackCreatedResource(
+                gateway,
+                'mcpservers',
+                createdMcpServerSnapshot!,
+                `McpServer/${serverName}`
+              )
+            } catch {
+              resourceRollbackFailed = true
             }
             if (resourceRollbackFailed) {
               res.status(500).json({
@@ -2920,7 +2913,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         registryAnnotations[REGISTRY_SPEC_DIGEST_ANNOTATION] = registrySpecDigest(hookSpec)
 
         let createdHookSnapshot: RegistryResourceSnapshot | null = null
-        let createdHookIdentityProven = false
         const desiredHookMutation = {
           spec: hookSpec,
           metadata: { labels: registryLabels, annotations: registryAnnotations },
@@ -2939,7 +2931,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           if (!createdHookSnapshot.metadata?.uid || !createdHookSnapshot.metadata.resourceVersion) {
             throw new RegistryInstallRollbackError()
           }
-          createdHookIdentityProven = true
         } catch (err) {
           const k8sErr = extractK8sError(err)
           const ambiguousCreate =
@@ -3098,10 +3089,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
           if (associationOutcome !== 'committed') {
-            if (
-              !createdHookIdentityProven ||
-              (secretCreated && createdSecretSnapshot && !createdSecretIdentityProven)
-            ) {
+            if (secretCreated && createdSecretSnapshot && !createdSecretIdentityProven) {
               res.status(503).json({
                 error: 'registry_install_outcome_ambiguous',
                 outcome: 'repair_required',
@@ -3109,17 +3097,15 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               return
             }
             let resourceRollbackFailed = false
-            if (createdHookSnapshot) {
-              try {
-                await rollbackCreatedResource(
-                  gateway,
-                  'llmhooks',
-                  createdHookSnapshot,
-                  `LlmHook/${crName}`
-                )
-              } catch {
-                resourceRollbackFailed = true
-              }
+            try {
+              await rollbackCreatedResource(
+                gateway,
+                'llmhooks',
+                createdHookSnapshot!,
+                `LlmHook/${crName}`
+              )
+            } catch {
+              resourceRollbackFailed = true
             }
             if (resourceRollbackFailed) {
               res.status(500).json({
