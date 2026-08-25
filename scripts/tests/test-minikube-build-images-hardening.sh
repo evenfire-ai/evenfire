@@ -349,6 +349,21 @@ else
   fail "verify-only did not preserve its read-only lease exemption (status=$verify_status)"
 fi
 
+clear_runtime_state
+inventory_failure_output="$TMP_DIR/inventory-failure.out"
+inventory_failure_status=0
+run_build "$inventory_failure_output" verify \
+  FAKE_MINIKUBE_INVENTORY_MODE=exit-1 \
+  bash "$BUILD_SCRIPT" --verify-only || inventory_failure_status=$?
+if [[ "$inventory_failure_status" -eq 2 ]] \
+  && grep -Fq 'Minikube image inventory failed or exceeded its deadline' "$inventory_failure_output" \
+  && ! grep -Fq 'MISSING:' "$inventory_failure_output" \
+  && [[ ! -s "$DOCKER_LOG" ]]; then
+  pass 'a Minikube inventory failure is not misclassified as a missing image'
+else
+  fail "a Minikube inventory failure was treated as an image miss (status=$inventory_failure_status)"
+fi
+
 descendant_is_dead() {
   local record descendant
   [[ -f "$DESCENDANT_PID_FILE" ]] || return 1

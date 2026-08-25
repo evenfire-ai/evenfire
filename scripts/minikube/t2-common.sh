@@ -434,7 +434,7 @@ t2_marker_check() {
   # result. Preserve every other kubectl failure: a timeout, RBAC denial, or
   # transport error must never be reclassified as bootstrap permission.
   marker_probe="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get configmap "$T2_MARKER_NAME" \
-    -o json --ignore-not-found 2>&1)" || marker_status=$?
+    -o json --ignore-not-found)" || marker_status=$?
   if [ "$marker_status" -ne 0 ]; then
     T2_NEXT_COMMAND='verify the explicit branch-owned Kubernetes context and retry the read-only preflight'
     t2_fail PROFILE_UNHEALTHY \

@@ -439,6 +439,20 @@ plan_mode_head="$(env "${marker_env[@]}" T2_PLAN_MODE=true FAKE_MARKER='{"data":
   bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=true; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON")"
 [ "$plan_mode_head" = false ] || fail "planner mode still treated a stale marker as matching HEAD"
 
+# The bounded kubectl runner writes HARNESS_DEADLINE diagnostics to stderr.
+# They must remain outside the captured JSON so a valid exact-head marker keeps
+# the already-synced fast path.
+marker_stderr="$tmp/marker-deadline.stderr"
+marker_fast_path_status=0
+marker_fast_path="$(env "${marker_env[@]}" T2_PLAN_MODE=false \
+  FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"feature","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"generated"}}' \
+  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=false; t2_kc(){ printf "%s" "$FAKE_MARKER"; printf "%s\n" "[HARNESS_DEADLINE] label=t2-kubectl event=exit" >&2; }; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON" 2>"$marker_stderr")" || marker_fast_path_status=$?
+if [ "$marker_fast_path_status" -ne 0 ] || [ "$marker_fast_path" != true ]; then
+  fail "stderr from the bounded marker read broke the valid-marker fast path (status=$marker_fast_path_status result=$marker_fast_path)"
+fi
+grep -Fq '[HARNESS_DEADLINE] label=t2-kubectl event=exit' "$marker_stderr" ||
+  fail 'marker deadline diagnostics were not preserved on stderr'
+
 evidence="$tmp/evidence.json"
 detail_value="$(printf '%s://%s:%s@%s' postgresql user marker local-db)"
 env "${repo_env[@]}" T2_EVIDENCE_FILE="$evidence" T2_EVIDENCE_DIR="$tmp/evidence-dir" \
