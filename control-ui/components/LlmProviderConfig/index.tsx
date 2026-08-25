@@ -11,7 +11,6 @@ import { IconChevronRight } from '@/components/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
-  LLM_PROVIDER_OPTIONS,
   type LlmCredentialField,
   type LlmCredentialGroup,
   type LlmProvider,
@@ -29,7 +28,6 @@ import {
   mintFallbackSlot,
   normalizeProvider,
   providerSupportsFallbackCredentialSlot,
-  resolveCodexGrantModel,
   resolveDefaultModel,
   validateLlmSecretData,
 } from '@/lib/llm'
@@ -105,8 +103,6 @@ export function LlmProviderConfig({
   secretKeys = [],
   fallbackProvidersInitiallyCollapsed = false,
   disabled = false,
-  subscriptionCredentialEnabled = false,
-  afterPrimaryProvider,
 }: LlmProviderConfigProps) {
   const [fallbackProvidersOpen, setFallbackProvidersOpen] = useState(
     !fallbackProvidersInitiallyCollapsed
@@ -129,9 +125,7 @@ export function LlmProviderConfig({
     [catalog, allowedModels, provider]
   )
   const primaryModelOutOfAllowlist = Boolean(model) && !primaryModelOptions.includes(model)
-  const pickerOptions = subscriptionCredentialEnabled
-    ? OPERATOR_PROVIDER_OPTIONS
-    : LLM_PROVIDER_OPTIONS
+  const pickerOptions = OPERATOR_PROVIDER_OPTIONS
   const primaryProviderOptions = useMemo(
     () =>
       pickerOptions.map(option => ({
@@ -274,64 +268,6 @@ export function LlmProviderConfig({
               }}
             />
           </Field>
-          {subscriptionCredentialEnabled && isOpenAiFamily(provider) ? (
-            <fieldset
-              className="cu-field cu-llm-config__credential-kind"
-              data-testid="openai-credential-kind"
-            >
-              <legend className="cu-field__label">OpenAI credential</legend>
-              <div
-                className="cu-agent-radio-group"
-                role="radiogroup"
-                aria-label="OpenAI credential"
-              >
-                <label className="cu-agent-radio">
-                  <input
-                    type="radio"
-                    name="openai-credential-kind"
-                    checked={provider === 'openai'}
-                    disabled={disabled}
-                    onChange={() =>
-                      onPrimaryChange({
-                        provider: 'openai',
-                        model: resolveDefaultModel(
-                          'openai',
-                          constrainModelOptions(catalog, allowedModels, 'openai')
-                        ),
-                      })
-                    }
-                  />
-                  API key
-                </label>
-                <label className="cu-agent-radio">
-                  <input
-                    type="radio"
-                    name="openai-credential-kind"
-                    checked={provider === OPENAI_SUBSCRIPTION_PROVIDER}
-                    disabled={disabled}
-                    onChange={() =>
-                      onPrimaryChange({
-                        provider: OPENAI_SUBSCRIPTION_PROVIDER,
-                        model: resolveCodexGrantModel(
-                          model,
-                          constrainModelOptions(
-                            catalog,
-                            allowedModels,
-                            OPENAI_SUBSCRIPTION_PROVIDER
-                          )
-                        ),
-                      })
-                    }
-                  />
-                  ChatGPT subscription
-                </label>
-              </div>
-            </fieldset>
-          ) : null}
-          {afterPrimaryProvider ? (
-            <div className="cu-llm-config__after-provider">{afterPrimaryProvider}</div>
-          ) : null}
-
           {replacePrimaryModelWithAllowedModels && showAllowedModels ? (
             <AllowedModelsField
               provider={provider}

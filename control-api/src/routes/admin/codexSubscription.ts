@@ -12,6 +12,7 @@ import {
   listCodexCatalogModels,
   listOfferedCodexModelsForAssignment,
   pickCodexGrantModel,
+  setCodexCatalogModelEnabled,
   syncCodexSubscriptionCatalog,
 } from '../../services/codexSubscriptionCatalog.js'
 import {
@@ -20,9 +21,11 @@ import {
   assertCodexConnectionKey,
   createNamedCodexSubscriptionConnection,
   generateCodexConnectionKey,
+  getSafeCodexSubscriptionConnection,
   listSafeCodexSubscriptionConnections,
   loadCodexSubscriptionSecrets,
   normalizeCodexConnectionKey,
+  updateCodexSubscriptionConnectionMetadata,
 } from '../../services/codexSubscriptionConnection.js'
 import {
   type CodexOAuthDeps,
@@ -269,7 +272,8 @@ export function createAdminCodexSubscriptionRouter(
             'This subscription has no offered models yet. Sign in and sync the catalog before assigning agents.',
         }
       }
-      resolvedModel = pickCodexGrantModel(resolvedModel, offered)
+      const grant = await getSafeCodexSubscriptionConnection(dbClient(), nextConnectionRef)
+      resolvedModel = pickCodexGrantModel(resolvedModel, offered, grant?.defaultModel)
       model.name = resolvedModel
     }
     spec.model = model
@@ -591,6 +595,95 @@ export function createAdminCodexSubscriptionRouter(
         return
       }
       const models = await listCodexCatalogModels(dbClient(), connection.id)
+      res.status(200).json({ models })
+    })
+  )
+
+  router.patch(
+    `${BASE}/connections/:key`,
+    ...adminCodexWriteRateLimits(),
+    asyncHandler(async (req, res) => {
+      if (!config.codexSubscriptionEnabled) {
+        res.status(404).json({ error: 'disabled' })
+        return
+      }
+      let connectionKey: string
+      try {
+        connectionKey = keyFromReq(req)
+      } catch (err) {
+        sendOAuthError(res, err)
+        return
+      }
+      const hasDisplayName = typeof req.body?.displayName === 'string'
+      const hasDefaultModel = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'defaultModel')
+      if (!hasDisplayName && !hasDefaultModel) {
+        res.status(400).json({ error: 'empty_patch' })
+        return
+      }
+      const defaultModel = hasDefaultModel
+        ? typeof req.body.defaultModel === 'string'
+          ? req.body.defaultModel.trim()
+          : ''
+        : undefined
+      if (defaultModel) {
+        const offered = await listOfferedCodexModelsForAssignment(dbClient(), connectionKey)
+        if (!offered.includes(defaultModel)) {
+          res.status(422).json({ error: 'default_model_not_offered' })
+          return
+        }
+      }
+      const updated = await updateCodexSubscriptionConnectionMetadata(dbClient(), connectionKey, {
+        ...(hasDisplayName ? { displayName: req.body.displayName } : {}),
+        ...(hasDefaultModel ? { defaultModel: defaultModel || null } : {}),
+      })
+      if (!updated) {
+        res.status(404).json({ error: 'no_grant' })
+        return
+      }
+      res.status(200).json(await withAssignedHosts(updated))
+    })
+  )
+
+  router.patch(
+    `${BASE}/connections/:key/models/:model`,
+    ...adminCodexWriteRateLimits(),
+    asyncHandler(async (req, res) => {
+      if (!config.codexSubscriptionEnabled) {
+        res.status(404).json({ error: 'disabled' })
+        return
+      }
+      let connectionKey: string
+      try {
+        connectionKey = keyFromReq(req)
+      } catch (err) {
+        sendOAuthError(res, err)
+        return
+      }
+      if (typeof req.body?.enabled !== 'boolean') {
+        res.status(400).json({ error: 'invalid_enabled' })
+        return
+      }
+      const connection = await getSafeCodexSubscriptionConnection(dbClient(), connectionKey)
+      if (!connection) {
+        res.status(404).json({ error: 'no_grant' })
+        return
+      }
+      const model = typeof req.params.model === 'string' ? req.params.model.trim() : ''
+      if (!model) {
+        res.status(404).json({ error: 'model_not_found' })
+        return
+      }
+      const models = await setCodexCatalogModelEnabled(
+        dbClient(),
+        connection.id,
+        model,
+        req.body.enabled
+      )
+      if (!models) {
+        res.status(404).json({ error: 'model_not_found' })
+        return
+      }
+      if (await publishRuntimeAllowlistOrFail(res)) return
       res.status(200).json({ models })
     })
   )

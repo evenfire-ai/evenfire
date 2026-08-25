@@ -103,6 +103,7 @@ function safeCreatedRow(connectionKey: string, displayName: string) {
     id: `id-${connectionKey}`,
     connection_key: connectionKey,
     display_name: displayName,
+    default_model: null,
     created_by: null,
     status: 'disconnected',
     credential_revision: 1,
@@ -559,6 +560,10 @@ describe('admin Codex subscription routes', () => {
 
   it('binds an unassigned host and can switch from another named grant', async () => {
     const gateway = makeGateway()
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: [{ ...safeCreatedRow('codex-aaa', 'Team A'), default_model: 'gpt-5.1' }],
+      rowCount: 1,
+    })
     gateway.getResource.mockResolvedValueOnce({
       metadata: { name: 'chatllm' },
       spec: {
@@ -596,6 +601,10 @@ describe('admin Codex subscription routes', () => {
 
   it('binds a Codex host whose connectionRef is missing as unassigned', async () => {
     const gateway = makeGateway()
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: [{ ...safeCreatedRow('codex-aaa', 'Team A'), default_model: 'gpt-5.1' }],
+      rowCount: 1,
+    })
     gateway.getResource.mockResolvedValue({
       metadata: { name: 'chatllm' },
       spec: { model: { provider: 'codex-subscription' } },
@@ -640,5 +649,84 @@ describe('admin Codex subscription routes', () => {
     expect(res.status).toBe(409)
     expect(res.body).toEqual({ error: 'not_codex_host' })
     expect(gateway.updateResource).not.toHaveBeenCalled()
+  })
+
+  it('patches displayName and defaultModel when the model is offered', async () => {
+    catalog.listOffered.mockResolvedValue(['gpt-5.1', 'gpt-5.6-luna'])
+    vi.mocked(pool.query).mockResolvedValueOnce({
+      rows: [{ ...safeCreatedRow('codex-aaa', 'Team Plus'), default_model: 'gpt-5.6-luna' }],
+      rowCount: 1,
+    })
+    const res = await request(app)
+      .patch('/admin/llm/providers/codex-subscription/connections/codex-aaa')
+      .send({ displayName: 'Team Plus', defaultModel: 'gpt-5.6-luna' })
+    expect(res.status).toBe(200)
+    expect(res.body.displayName).toBe('Team Plus')
+    expect(res.body.defaultModel).toBe('gpt-5.6-luna')
+    assertNoLeak(res.body)
+  })
+
+  it('rejects a defaultModel that the grant does not offer', async () => {
+    catalog.listOffered.mockResolvedValue(['gpt-5.1'])
+    const res = await request(app)
+      .patch('/admin/llm/providers/codex-subscription/connections/codex-aaa')
+      .send({ defaultModel: 'gpt-5.6-luna' })
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ error: 'default_model_not_offered' })
+  })
+
+  it('lists grant models and toggles enabled', async () => {
+    oauth.getConnection.mockResolvedValue({
+      id: 'id-codex-aaa',
+      connectionKey: 'codex-aaa',
+      status: 'connected',
+    })
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({
+        rows: [
+          { model: 'gpt-5.1', enabled: true, stale: false },
+          { model: 'gpt-5.6-luna', enabled: true, stale: false },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ ...safeCreatedRow('codex-aaa', 'Team') }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ model: 'gpt-5.1' }], rowCount: 1 })
+      .mockResolvedValue({ rows: [], rowCount: 0 })
+    const listed = await request(app).get(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/models'
+    )
+    expect(listed.status).toBe(200)
+    expect(listed.body.models).toEqual([
+      { model: 'gpt-5.1', enabled: true, stale: false },
+      { model: 'gpt-5.6-luna', enabled: true, stale: false },
+    ])
+
+    const gateway = makeGateway()
+    vi.mocked(pool.query).mockImplementation(async (sql: unknown) => {
+      const text = String(sql)
+      if (text.includes('UPDATE codex_catalog_models')) {
+        return { rows: [{ model: 'gpt-5.1' }], rowCount: 1 }
+      }
+      if (text.includes('SELECT model, enabled, stale')) {
+        return {
+          rows: [
+            { model: 'gpt-5.1', enabled: false, stale: false },
+            { model: 'gpt-5.6-luna', enabled: true, stale: false },
+          ],
+          rowCount: 2,
+        }
+      }
+      if (text.includes('codex_subscription_connections')) {
+        return { rows: [{ ...safeCreatedRow('codex-aaa', 'Team') }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const patched = await request(makeAuthedApp(gateway))
+      .patch('/admin/llm/providers/codex-subscription/connections/codex-aaa/models/gpt-5.1')
+      .send({ enabled: false })
+    expect(patched.status).toBe(200)
+    expect(patched.body.models).toEqual([
+      { model: 'gpt-5.1', enabled: false, stale: false },
+      { model: 'gpt-5.6-luna', enabled: true, stale: false },
+    ])
   })
 })

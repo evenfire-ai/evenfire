@@ -7,7 +7,6 @@ import { DetailPageShell } from '@components/DetailPageShell'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { CodexAgentAssignment } from '../../../components/CodexAgentAssignment'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
@@ -19,6 +18,7 @@ import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
 import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexSubscriptionConnectionView,
+  listCodexConnectionModels,
   listCodexSubscriptionConnections,
 } from '../../../lib/codexSubscription'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
@@ -34,7 +34,6 @@ import {
   getModelOptions,
   getProviderLabel,
   hostModelNameError,
-  isOpenAiFamily,
   isProviderUsable,
   llmChainRequiresSecret,
   normalizeAllowedModels,
@@ -46,6 +45,7 @@ import {
   validateLlmPolicy,
   validateLlmSecretData,
 } from '../../../lib/llm'
+import { credentialSelectValue, parseCredentialSelect } from '../../../lib/llmCredentialSelect'
 import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
@@ -145,8 +145,9 @@ export default function HostDetailsPage() {
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const catalogForEditor = useMemo(() => {
-    if (providerDraft !== 'codex-subscription' || codexModels.length === 0) return allowedCatalog
+    if (providerDraft !== 'codex-subscription') return allowedCatalog
     const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+    if (codexModels.length === 0) return others
     return [
       ...others,
       ...codexModels.map(model => ({
@@ -247,10 +248,6 @@ export default function HostDetailsPage() {
   }, [allowedModelsDraft, catalogForEditor, modelNameDraft, providerDraft, providerModelOptions])
 
   useEffect(() => {
-    if (providerDraft !== 'codex-subscription') {
-      setCodexConnections([])
-      return
-    }
     let cancelled = false
     void listCodexSubscriptionConnections()
       .then(rows => {
@@ -262,7 +259,26 @@ export default function HostDetailsPage() {
     return () => {
       cancelled = true
     }
-  }, [providerDraft])
+  }, [])
+
+  useEffect(() => {
+    if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
+      setCodexModels([])
+      return
+    }
+    let cancelled = false
+    void listCodexConnectionModels(connectionRefDraft)
+      .then(models => {
+        if (cancelled) return
+        setCodexModels(models.filter(row => row.enabled && !row.stale).map(row => row.model))
+      })
+      .catch(() => {
+        if (!cancelled) setCodexModels([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [connectionRefDraft])
 
   useEffect(() => {
     setActiveTab(parseHostTab(params.tab))
@@ -457,6 +473,39 @@ export default function HostDetailsPage() {
     setLlmPolicyDraft(saved.llmPolicy)
     setAllowedModelsDraft(saved.allowedModels)
     setLlmKeyDraft({})
+  }
+
+  function handleCredentialChange(value: string) {
+    const parsed = parseCredentialSelect(value)
+    if (parsed.kind === 'empty') {
+      setSecretRefDraft('')
+      setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+      setCodexModels([])
+      return
+    }
+    if (parsed.kind === 'subscription') {
+      const grant = codexConnections.find(row => row.connectionKey === parsed.connectionKey)
+      setSecretRefDraft('')
+      setConnectionRefDraft(parsed.connectionKey)
+      setProviderDraft('codex-subscription')
+      void listCodexConnectionModels(parsed.connectionKey)
+        .then(models => {
+          const offered = models.filter(row => row.enabled && !row.stale).map(row => row.model)
+          setCodexModels(offered)
+          setModelNameDraft(resolveCodexGrantModel(grant?.defaultModel ?? '', offered))
+        })
+        .catch(() => {
+          setCodexModels([])
+        })
+      return
+    }
+    setSecretRefDraft(parsed.name)
+    setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+    setCodexModels([])
+    if (providerDraft === 'codex-subscription') {
+      setProviderDraft('openai')
+      setModelNameDraft(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
+    }
   }
 
   async function saveHost(): Promise<boolean> {
@@ -1044,25 +1093,17 @@ export default function HostDetailsPage() {
                   <label htmlFor="model-provider">Model provider</label>
                   <div className="cu-field__readonly">{getProviderLabel(providerDraft)}</div>
                 </div>
-                {isOpenAiFamily(providerDraft) ? (
-                  <div className="cu-field">
-                    <label htmlFor="model-openai-credential">OpenAI credential</label>
-                    <div className="cu-field__readonly">
-                      {providerDraft === 'codex-subscription' ? 'ChatGPT subscription' : 'API key'}
-                    </div>
-                  </div>
-                ) : null}
-                {providerDraft === 'codex-subscription' ? (
-                  <div className="cu-field">
-                    <label htmlFor="model-subscription">Subscription</label>
-                    <div className="cu-field__readonly" id="model-subscription">
-                      {connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY
-                        ? 'No subscription assigned'
+                <div className="cu-field">
+                  <label htmlFor="model-credential">Credential</label>
+                  <div className="cu-field__readonly" id="model-credential">
+                    {providerDraft === 'codex-subscription'
+                      ? connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY
+                        ? 'No credential assigned'
                         : codexConnections.find(row => row.connectionKey === connectionRefDraft)
-                            ?.displayName || connectionRefDraft}
-                    </div>
+                            ?.displayName || connectionRefDraft
+                      : secretRefDraft || '-'}
                   </div>
-                ) : null}
+                </div>
                 <div className="cu-field">
                   <label htmlFor="model-name">Default model</label>
                   <div className="cu-field__readonly" id="model-name">
@@ -1085,17 +1126,13 @@ export default function HostDetailsPage() {
                     </div>
                   )}
                 </div>
-                {llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks) ? (
+                {providerDraft === 'codex-subscription' &&
+                llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks) ? (
                   <div className="cu-field">
                     <label htmlFor="model-secret">Secret reference</label>
                     <div className="cu-field__readonly">{secretRefDraft || '-'}</div>
                   </div>
-                ) : (
-                  <div className="cu-field">
-                    <label htmlFor="model-secret">Secret reference</label>
-                    <div className="cu-field__readonly">Broker-backed — no LLM secret required</div>
-                  </div>
-                )}
+                ) : null}
                 <div className="cu-field">
                   <label htmlFor="model-fallback">Fallback policy</label>
                   {llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0 ? (
@@ -1130,12 +1167,68 @@ export default function HostDetailsPage() {
                     </button>
                   </div>
                 ) : null}
-                {llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks) ? (
-                  <div className="cu-form-stack" style={{ marginBottom: '1rem' }}>
+                <div className="cu-form-stack" style={{ marginBottom: '1rem' }}>
+                  <div className="cu-field">
+                    <label htmlFor="host-secret">Credential</label>
+                    <select
+                      id="host-secret"
+                      value={credentialSelectValue(secretRefDraft, connectionRefDraft)}
+                      onChange={e => handleCredentialChange(e.target.value)}
+                      disabled={busy}
+                    >
+                      <option value="">Select credential</option>
+                      {availableSecrets.length > 0 ? (
+                        <optgroup label="API keys">
+                          {availableSecrets.map(secretName => (
+                            <option key={secretName} value={secretName}>
+                              {secretName}
+                            </option>
+                          ))}
+                          {secretRefDraft &&
+                          parseCredentialSelect(secretRefDraft).kind === 'secret' &&
+                          !availableSecrets.includes(secretRefDraft) ? (
+                            <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
+                          ) : null}
+                        </optgroup>
+                      ) : secretRefDraft &&
+                        parseCredentialSelect(secretRefDraft).kind === 'secret' ? (
+                        <optgroup label="API keys">
+                          <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
+                        </optgroup>
+                      ) : null}
+                      {codexConnections.some(row => row.status !== 'revoked') ? (
+                        <optgroup label="Subscriptions">
+                          {codexConnections
+                            .filter(row => row.status !== 'revoked')
+                            .map(row => (
+                              <option
+                                key={row.connectionKey}
+                                value={credentialSelectValue('', row.connectionKey)}
+                              >
+                                {row.displayName || row.connectionKey}
+                              </option>
+                            ))}
+                        </optgroup>
+                      ) : null}
+                    </select>
+                    <p className="cu-muted" style={{ marginTop: '0.35rem' }}>
+                      <a
+                        href={
+                          providerDraft === 'codex-subscription'
+                            ? CONTROL_ROUTES.secrets.llmSubscriptions
+                            : CONTROL_ROUTES.secrets.llm
+                        }
+                      >
+                        Manage credentials in Secrets
+                      </a>
+                    </p>
+                  </div>
+                  {providerDraft === 'codex-subscription' &&
+                  llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks) ? (
                     <div className="cu-field">
-                      <label htmlFor="host-secret">Secret reference</label>
+                      <label htmlFor="host-fallback-secret">Secret reference</label>
                       <select
-                        id="host-secret"
+                        id="host-fallback-secret"
                         value={secretRefDraft}
                         onChange={e => setSecretRefDraft(e.target.value)}
                         disabled={busy}
@@ -1151,27 +1244,19 @@ export default function HostDetailsPage() {
                         ) : null}
                       </select>
                     </div>
-                  </div>
-                ) : null}
+                  ) : null}
+                </div>
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
                   modelLabel="Default model"
-                  subscriptionCredentialEnabled
-                  afterPrimaryProvider={
-                    providerDraft === 'codex-subscription' ? (
-                      <CodexAgentAssignment
-                        connectionRef={connectionRefDraft}
-                        hostName={routeName}
-                        onConnectionRefChange={setConnectionRefDraft}
-                        onModelsChange={setCodexModels}
-                        disabled={busy}
-                      />
-                    ) : null
-                  }
                   onPrimaryChange={next => {
                     setProviderDraft(next.provider)
                     setModelNameDraft(next.model)
+                    if (next.provider !== 'codex-subscription') {
+                      setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+                      setCodexModels([])
+                    }
                   }}
                   policy={llmPolicyDraft}
                   onPolicyChange={handlePolicyChange}

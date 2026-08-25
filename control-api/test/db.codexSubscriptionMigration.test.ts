@@ -57,6 +57,11 @@ describe('00a0/00a1 Codex subscription persistence', () => {
     expect(dbSource.indexOf("version: '0102_codex_catalog_models'")).toBeLessThan(
       dbSource.indexOf("version: '0103_llm_provider_attempts_connection_id'")
     )
+    expect(dbSource).toContain("version: '0104_codex_grant_default_model'")
+    expect(dbSource.indexOf("version: '0103_llm_provider_attempts_connection_id'")).toBeLessThan(
+      dbSource.indexOf("version: '0104_codex_grant_default_model'")
+    )
+    expect(connectionSource).toContain('ADD COLUMN IF NOT EXISTS default_model')
   })
 
   it('creates a single active deployment-default connection with ciphertext and revisions', () => {

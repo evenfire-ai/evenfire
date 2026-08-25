@@ -32,10 +32,6 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
-vi.mock('../CodexAgentAssignment', () => ({
-  CodexAgentAssignment: () => <div data-testid="codex-agent-assignment" />,
-}))
-
 vi.mock('../HostAccessTab', () => ({
   HostAccessTab: ({ hostName }: { hostName: string }) => (
     <div data-testid="access-tab">Access editor for {hostName}</div>
@@ -47,6 +43,7 @@ vi.mock('../../lib/codexSubscription', async importOriginal => {
   return {
     ...actual,
     listCodexSubscriptionConnections: vi.fn().mockResolvedValue([]),
+    listCodexConnectionModels: vi.fn().mockResolvedValue([]),
   }
 })
 
@@ -145,7 +142,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.getByText('Default model')).toBeInTheDocument()
     expect(screen.getByText('gpt-5.4')).toBeInTheDocument()
     expect(screen.queryByText('Model name')).not.toBeInTheDocument()
-    expect(screen.getByText('Secret reference')).toBeInTheDocument()
+    expect(screen.getByText('Credential')).toBeInTheDocument()
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
     expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
     expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
@@ -156,7 +153,7 @@ describe('HostDetailsPage identity integration', () => {
       screen.getByLabelText('Allowed models · OpenAI', { selector: '#llm-allowed-openai' })
     ).toBeInTheDocument()
     expect(screen.queryByLabelText('Model', { selector: '#llm-primary-model' })).toBeNull()
-    expect(screen.getByLabelText('Secret reference')).toBeInTheDocument()
+    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: 'Save' }).closest('.cu-agent-detail-toolbar')
     ).not.toBeNull()
@@ -178,6 +175,7 @@ describe('HostDetailsPage identity integration', () => {
         lastRefreshAt: '2026-08-20T00:00:00.000Z',
         lastAuthAt: '2026-08-20T00:00:00.000Z',
         refreshLockHeld: false,
+        defaultModel: 'gpt-5.1',
       },
     ])
     const codexHost = {
@@ -207,7 +205,9 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.getByText('gpt-5.1')).toBeInTheDocument()
     expect(screen.getByText('Team A')).toBeInTheDocument()
     expect(screen.queryByText('codex-aaa')).not.toBeInTheDocument()
-    expect(screen.getByText('Broker-backed — no LLM secret required')).toBeInTheDocument()
+    expect(screen.getByText('Team A')).toBeInTheDocument()
+    expect(screen.getByText('Credential')).toBeInTheDocument()
+    expect(screen.queryByText('Broker-backed — no LLM secret required')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
   })
 
@@ -439,10 +439,12 @@ describe('HostDetailsPage identity integration', () => {
     mockParams = { name: 'foo', tab: 'model' }
     render(<HostDetailsPage />)
 
-    expect(await screen.findByText('Broker-backed — no LLM secret required')).toBeInTheDocument()
-    expect(screen.getByText('ChatGPT subscription')).toBeInTheDocument()
+    expect(await screen.findByText('No credential assigned')).toBeInTheDocument()
+    expect(screen.getByText('Credential')).toBeInTheDocument()
     expect(screen.queryByText('OpenAI Codex Subscription')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>

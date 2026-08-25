@@ -29,6 +29,7 @@ export type CodexSubscriptionConnectionView = {
   id?: string
   connectionKey: string
   displayName?: string
+  defaultModel?: string | null
   status: CodexConnectionStatus
   credentialRevision: number
   catalogRevision: number
@@ -133,6 +134,7 @@ export function sanitizeCodexConnection(raw: unknown): CodexSubscriptionConnecti
   return {
     connectionKey,
     displayName: pickString(raw.displayName) ?? undefined,
+    defaultModel: pickString(raw.defaultModel),
     assignedHosts: Array.isArray(raw.assignedHosts)
       ? raw.assignedHosts
           .filter(
@@ -393,6 +395,40 @@ export async function revokeCodexSubscription(
   connectionKey?: string
 ): Promise<CodexSubscriptionConnectionView> {
   return sanitizeCodexConnection(await apiSend('POST', keyedPath(connectionKey, 'revoke')))
+}
+
+export async function patchCodexSubscriptionConnection(
+  connectionKey: string,
+  patch: { displayName?: string; defaultModel?: string | null }
+): Promise<CodexSubscriptionConnectionView> {
+  return sanitizeCodexConnection(
+    await apiSend(
+      'PATCH',
+      `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}`,
+      patch
+    )
+  )
+}
+
+export async function patchCodexCatalogModel(
+  connectionKey: string,
+  model: string,
+  enabled: boolean
+): Promise<Array<{ model: string; enabled: boolean; stale: boolean }>> {
+  const raw = (await apiSend(
+    'PATCH',
+    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/models/${encodeURIComponent(model)}`,
+    { enabled }
+  )) as { models?: Array<{ model?: string; enabled?: boolean; stale?: boolean }> }
+  return Array.isArray(raw.models)
+    ? raw.models
+        .filter(row => typeof row.model === 'string' && row.model.trim())
+        .map(row => ({
+          model: String(row.model),
+          enabled: row.enabled === true,
+          stale: row.stale === true,
+        }))
+    : []
 }
 
 const CODEX_OAUTH_QUERY_PARAM = 'codex_oauth'

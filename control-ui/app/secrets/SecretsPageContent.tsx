@@ -9,7 +9,8 @@ import { SecretsTable } from '@components/SecretsTable'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, isSilentApiError } from '@lib/api'
 
-export type SecretScope = 'llm' | 'mcp' | 'recipe' | 'subscription'
+export type SecretScope = 'llm' | 'mcp' | 'recipe'
+export type LlmSecretsSubTab = 'api-key' | 'subscriptions'
 
 type SecretItem = {
   name?: string
@@ -17,7 +18,13 @@ type SecretItem = {
   keys?: string[]
 }
 
-export function SecretsPageContent({ activeScope }: { activeScope: SecretScope }) {
+export function SecretsPageContent({
+  activeScope,
+  llmSubTab = 'api-key',
+}: {
+  activeScope: SecretScope
+  llmSubTab?: LlmSecretsSubTab
+}) {
   const router = useRouter()
   const [secrets, setSecrets] = useState<SecretItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -41,7 +48,7 @@ export function SecretsPageContent({ activeScope }: { activeScope: SecretScope }
     void loadAll()
   }, [])
 
-  if (activeScope === 'subscription') {
+  if (activeScope === 'llm' && llmSubTab === 'subscriptions') {
     return (
       <AuthGate>
         <DashboardLayout>

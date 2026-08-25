@@ -21,7 +21,6 @@ function Harness({
   withCredentials = true,
   existingKeys,
   replacePrimaryModelWithAllowedModels = false,
-  subscriptionCredentialEnabled = false,
   catalog = CATALOG,
 }: {
   initialProvider?: LlmProvider
@@ -31,7 +30,6 @@ function Harness({
   withCredentials?: boolean
   existingKeys?: string[]
   replacePrimaryModelWithAllowedModels?: boolean
-  subscriptionCredentialEnabled?: boolean
   catalog?: LlmModelCatalogEntry[]
 }) {
   const [provider, setProvider] = useState<LlmProvider>(initialProvider)
@@ -62,7 +60,6 @@ function Harness({
           : undefined
       }
       replacePrimaryModelWithAllowedModels={replacePrimaryModelWithAllowedModels}
-      subscriptionCredentialEnabled={subscriptionCredentialEnabled}
       secretKeys={existingKeys}
     />
   )
@@ -178,60 +175,15 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
     expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toBeInTheDocument()
   })
 
-  it('offers OpenAI plus a credential type instead of a Codex provider option', () => {
-    render(<Harness subscriptionCredentialEnabled />)
+  it('offers one OpenAI provider and does not invent a ChatGPT radio', () => {
+    render(<Harness />)
     fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
     expect(screen.getByRole('option', { name: /^OpenAI$/i })).toBeInTheDocument()
     expect(
       screen.queryByRole('option', { name: /OpenAI Codex Subscription/i })
     ).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
-    expect(screen.getByRole('radio', { name: /ChatGPT subscription/i })).toBeChecked()
-    expect(screen.getByText(/Connect and sync the grant first/i)).toBeInTheDocument()
-  })
-
-  it('keeps the current model name when the ChatGPT grant catalog is empty', () => {
-    render(<Harness subscriptionCredentialEnabled initialModel="gpt-5.4-mini" />)
-    fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
-    expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toHaveTextContent(
-      'gpt-5.4-mini'
-    )
-  })
-
-  it('seeds the first offered grant model when the draft is outside the ChatGPT catalog', () => {
-    const catalog: LlmModelCatalogEntry[] = [
-      ...CATALOG,
-      { provider: 'codex-subscription', model: 'gpt-5.6-luna', enabled: true },
-      { provider: 'codex-subscription', model: 'gpt-5.6-sol', enabled: true },
-    ]
-    render(<Harness subscriptionCredentialEnabled initialModel="gpt-5.4-mini" catalog={catalog} />)
-    fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
-    expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toHaveTextContent(
-      'gpt-5.6-luna'
-    )
-  })
-
-  it('seeds the first ChatGPT subset model so Save is not model_not_offered', () => {
-    const catalog: LlmModelCatalogEntry[] = [
-      ...CATALOG,
-      { provider: 'codex-subscription', model: 'gpt-5.6-luna', enabled: true },
-      { provider: 'codex-subscription', model: 'gpt-5.6-sol', enabled: true },
-    ]
-    render(
-      <Harness
-        subscriptionCredentialEnabled
-        initialModel="gpt-5.4-mini"
-        catalog={catalog}
-        initialAllowed={[
-          { provider: 'codex-subscription', model: 'gpt-5.6-luna' },
-          { provider: 'codex-subscription', model: 'gpt-5.6-sol' },
-        ]}
-      />
-    )
-    fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
-    expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toHaveTextContent(
-      'gpt-5.6-luna'
-    )
+    expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /API key/i })).not.toBeInTheDocument()
   })
 })
 

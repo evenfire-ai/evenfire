@@ -21,6 +21,7 @@ import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs
 import { useConfirmDialog } from './ConfirmDialog'
 import { LlmCredentialFields } from './LlmCredentialFields'
 import { LlmProviderIcon } from './LlmProviderIcon'
+import { LlmSecretsSubTabs } from './LlmSecretsSubTabs'
 import { SecretsScopeTabs } from './SecretsScopeTabs'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconKey } from './Sidebar/icons'
@@ -572,6 +573,7 @@ export function SecretsTable({
 
         <div className="cu-card__body cu-card__body--auto cu-secrets-strip">
           <SecretsScopeTabs activeValue={scope} />
+          {scope === 'llm' ? <LlmSecretsSubTabs activeValue="api-key" /> : null}
         </div>
 
         {scope === 'llm' && error && (
@@ -627,16 +629,7 @@ export function SecretsTable({
           </div>
         ) : scope === 'llm' && filteredRows.length === 0 ? (
           <div className="cu-empty">
-            {normalizedLlmSearch ? (
-              'No LLM secrets match this search.'
-            ) : (
-              <>
-                No LLM secrets found.{' '}
-                <a href={CONTROL_ROUTES.secrets.subscription}>
-                  ChatGPT subscriptions are managed in the Subscription tab.
-                </a>
-              </>
-            )}
+            {normalizedLlmSearch ? 'No LLM secrets match this search.' : <>No LLM secrets found.</>}
           </div>
         ) : scope === 'llm' ? (
           <div className="cu-table-wrap">

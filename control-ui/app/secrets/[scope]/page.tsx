@@ -7,7 +7,7 @@ interface SecretsScopePageProps {
 
 export default async function SecretsScopePage({ params }: SecretsScopePageProps) {
   const { scope } = await params
-  if (scope !== 'llm' && scope !== 'connector' && scope !== 'recipe' && scope !== 'subscription') {
+  if (scope !== 'llm' && scope !== 'connector' && scope !== 'recipe') {
     notFound()
   }
 

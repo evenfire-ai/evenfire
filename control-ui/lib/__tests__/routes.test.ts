@@ -32,7 +32,8 @@ describe('CONTROL_ROUTES', () => {
     expect('codexSubscription' in CONTROL_ROUTES.llmModels).toBe(false)
   })
 
-  it('exposes the Secrets Subscription hub path', () => {
-    expect(CONTROL_ROUTES.secrets.subscription).toBe('/secrets/subscription')
+  it('nests ChatGPT subscriptions under Secrets LLM', () => {
+    expect(CONTROL_ROUTES.secrets.llmSubscriptions).toBe('/secrets/llm/subscriptions')
+    expect(CONTROL_ROUTES.secrets.subscription).toBe('/secrets/llm/subscriptions')
   })
 })

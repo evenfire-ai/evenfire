@@ -1,7 +1,6 @@
 'use client'
 
 import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { CodexAgentAssignment } from '@/components/CodexAgentAssignment'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
@@ -19,7 +18,12 @@ import {
   updateAgentUsers,
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
-import { CODEX_UNASSIGNED_CONNECTION_KEY } from '@/lib/codexSubscription'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  type CodexSubscriptionConnectionView,
+  listCodexConnectionModels,
+  listCodexSubscriptionConnections,
+} from '@/lib/codexSubscription'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
 import { getAgentNameError } from '@/lib/k8sValidation'
 import {
@@ -40,6 +44,7 @@ import {
   resolveDefaultModel,
   validateLlmSecretData,
 } from '@/lib/llm'
+import { credentialSelectValue, parseCredentialSelect } from '@/lib/llmCredentialSelect'
 import { toKebabCase, toKebabInput } from '@/lib/string'
 import {
   HOST_NAMESPACE,
@@ -121,39 +126,43 @@ function WizardSelect({
           {options.length === 0 ? (
             <span className="cu-agent-select__empty">No options available.</span>
           ) : (
-            options.map(option => (
-              <button
-                key={option.value}
-                type="button"
-                className="cu-agent-select__option"
-                data-active={value === option.value ? 'true' : 'false'}
-                role="option"
-                aria-selected={value === option.value}
-                onClick={() => {
-                  onChange(option.value)
-                  setOpen(false)
-                }}
-              >
-                <span className="cu-agent-select__option-copy">
-                  <span className="cu-agent-select__option-name">{option.label}</span>
-                  {option.providers && option.providers.length > 0 ? (
-                    <span className="cu-agent-select__providers">
-                      <span className="cu-agent-select__providers-label">Providers: </span>
-                      {option.providers.map((provider, index) => (
-                        <Fragment key={provider.id}>
-                          {index > 0 ? ', ' : null}
-                          <span className="cu-agent-select__provider">
-                            <LlmProviderIcon provider={provider.id} label={provider.label} />
-                            <span>{provider.label}</span>
-                          </span>
-                        </Fragment>
-                      ))}
-                    </span>
-                  ) : option.meta ? (
-                    <span className="cu-agent-select__option-meta">{option.meta}</span>
-                  ) : null}
-                </span>
-              </button>
+            options.map((option, index) => (
+              <Fragment key={option.value}>
+                {option.group && option.group !== options[index - 1]?.group ? (
+                  <span className="cu-agent-select__empty">{option.group}</span>
+                ) : null}
+                <button
+                  type="button"
+                  className="cu-agent-select__option"
+                  data-active={value === option.value ? 'true' : 'false'}
+                  role="option"
+                  aria-selected={value === option.value}
+                  onClick={() => {
+                    onChange(option.value)
+                    setOpen(false)
+                  }}
+                >
+                  <span className="cu-agent-select__option-copy">
+                    <span className="cu-agent-select__option-name">{option.label}</span>
+                    {option.providers && option.providers.length > 0 ? (
+                      <span className="cu-agent-select__providers">
+                        <span className="cu-agent-select__providers-label">Providers: </span>
+                        {option.providers.map((provider, index) => (
+                          <Fragment key={provider.id}>
+                            {index > 0 ? ', ' : null}
+                            <span className="cu-agent-select__provider">
+                              <LlmProviderIcon provider={provider.id} label={provider.label} />
+                              <span>{provider.label}</span>
+                            </span>
+                          </Fragment>
+                        ))}
+                      </span>
+                    ) : option.meta ? (
+                      <span className="cu-agent-select__option-meta">{option.meta}</span>
+                    ) : null}
+                  </span>
+                </button>
+              </Fragment>
             ))
           )}
         </div>
@@ -245,6 +254,7 @@ function isStepValid(
     selectedMcp: string[]
     secretMode: HostLlmSecretMode
     existingSecret: string
+    existingLlmSecret: string
     newSecretName: string
     llmKeyDraft: Record<string, string>
     llmPolicy: LlmPolicy | undefined
@@ -287,7 +297,9 @@ function isStepValid(
       getActiveCredentialKeys(state.provider, state.llmPolicy)
     )
     return state.secretMode === 'existing'
-      ? state.existingSecret.trim().length > 0
+      ? state.provider === 'codex-subscription'
+        ? state.existingLlmSecret.trim().length > 0
+        : parseCredentialSelect(state.existingSecret).kind === 'secret'
       : toKebabCase(state.newSecretName).length > 0 &&
           primaryCredentialUsable(state.provider, state.llmKeyDraft) &&
           validateLlmSecretData(projectedDraft).length === 0
@@ -333,6 +345,7 @@ export function HostWizard({
   // remains available when the operator explicitly chooses New credential.
   const [secretMode, setSecretMode] = useState<HostLlmSecretMode>('existing')
   const [existingSecret, setExistingSecret] = useState('')
+  const [existingLlmSecret, setExistingLlmSecret] = useState('')
   const [newSecretName, setNewSecretName] = useState('')
   const [secretNameTouched, setSecretNameTouched] = useState(false)
   const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>(createEmptyLlmKeyDraft)
@@ -353,6 +366,7 @@ export function HostWizard({
   const [modelName, setModelName] = useState('')
   const [connectionRef, setConnectionRef] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
+  const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -372,8 +386,8 @@ export function HostWizard({
   )
 
   const secretOptions = useMemo(
-    () =>
-      existingSecrets
+    () => [
+      ...existingSecrets
         .map(secret => {
           const name = secret.name || secret.metadata?.name
           if (!name) return null
@@ -387,6 +401,7 @@ export function HostWizard({
                 ? `Providers: ${providers.map(getProviderLabel).join(', ')}`
                 : 'No recognized provider credentials'
           return {
+            group: 'API keys',
             value: name,
             label: name,
             meta: providerSummary,
@@ -398,7 +413,20 @@ export function HostWizard({
         })
         .filter(option => option !== null)
         .sort((left, right) => left.value.localeCompare(right.value)),
-    [existingSecrets]
+      ...codexConnections
+        .filter(row => row.status !== 'revoked')
+        .map(row => ({
+          group: 'Subscriptions',
+          value: credentialSelectValue('', row.connectionKey),
+          label: row.displayName || row.connectionKey,
+          meta: 'ChatGPT subscription',
+        })),
+    ],
+    [codexConnections, existingSecrets]
+  )
+  const apiKeyOptions = useMemo(
+    () => secretOptions.filter(option => option.group === 'API keys'),
+    [secretOptions]
   )
   const selectedContextOption = useMemo(
     () =>
@@ -407,8 +435,9 @@ export function HostWizard({
     [existingContexts, selectedExistingContext]
   )
   const catalogForEditor = useMemo(() => {
-    if (provider !== 'codex-subscription' || codexModels.length === 0) return allowedCatalog
+    if (provider !== 'codex-subscription') return allowedCatalog
     const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+    if (codexModels.length === 0) return others
     return [
       ...others,
       ...codexModels.map(model => ({
@@ -432,19 +461,57 @@ export function HostWizard({
   const handleExistingSecretChange = useCallback(
     (secretName: string) => {
       setExistingSecret(secretName)
+      const parsed = parseCredentialSelect(secretName)
+      if (parsed.kind === 'subscription') {
+        const grant = codexConnections.find(row => row.connectionKey === parsed.connectionKey)
+        setConnectionRef(parsed.connectionKey)
+        setProvider('codex-subscription')
+        void listCodexConnectionModels(parsed.connectionKey)
+          .then(models => {
+            const offered = models.filter(row => row.enabled && !row.stale).map(row => row.model)
+            setCodexModels(offered)
+            setModelName(resolveCodexGrantModel(grant?.defaultModel ?? '', offered))
+          })
+          .catch(() => {
+            setCodexModels([])
+          })
+        return
+      }
+      setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+      setCodexModels([])
       const selectedSecret = existingSecrets.find(
         secret => (secret.name || secret.metadata?.name) === secretName
       )
       if (!Array.isArray(selectedSecret?.keys)) return
       const [linkedProvider] = getProvidersWithCompleteCredentials(selectedSecret.keys)
       if (!linkedProvider) return
-      setProvider(linkedProvider)
+      setProvider(linkedProvider === 'codex-subscription' ? 'openai' : linkedProvider)
       setModelName(
-        resolveDefaultModel(linkedProvider, getModelOptions(allowedCatalog, linkedProvider))
+        resolveDefaultModel(
+          linkedProvider === 'codex-subscription' ? 'openai' : linkedProvider,
+          getModelOptions(
+            allowedCatalog,
+            linkedProvider === 'codex-subscription' ? 'openai' : linkedProvider
+          )
+        )
       )
     },
-    [allowedCatalog, existingSecrets]
+    [allowedCatalog, codexConnections, existingSecrets]
   )
+
+  useEffect(() => {
+    let cancelled = false
+    void listCodexSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) setCodexConnections(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setCodexConnections([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
   // switch left the model out of range.
@@ -512,6 +579,7 @@ export function HostWizard({
       selectedMcp,
       secretMode,
       existingSecret,
+      existingLlmSecret,
       newSecretName,
       llmKeyDraft,
       llmPolicy,
@@ -531,6 +599,7 @@ export function HostWizard({
     selectedMcp,
     secretMode,
     existingSecret,
+    existingLlmSecret,
     newSecretName,
     llmKeyDraft,
     llmPolicy,
@@ -605,11 +674,13 @@ export function HostWizard({
             selectedMcp,
             secretMode,
             existingSecret,
+            existingLlmSecret,
             newSecretName,
             llmKeyDraft,
             llmPolicy,
             provider,
             modelName,
+            connectionRef,
             selectedUserIds,
             selectedTeamIds,
             directoryLoadFailed: directoryLoadError.length > 0,
@@ -629,11 +700,13 @@ export function HostWizard({
       selectedMcp,
       secretMode,
       existingSecret,
+      existingLlmSecret,
       newSecretName,
       llmKeyDraft,
       llmPolicy,
       provider,
       modelName,
+      connectionRef,
       selectedUserIds,
       selectedTeamIds,
       directoryLoadError,
@@ -658,7 +731,20 @@ export function HostWizard({
       return 'Choose a ChatGPT subscription before continuing.'
     }
     if (step === 2 && llmChainRequiresSecret(provider, llmPolicy?.fallbacks)) {
-      if (secretMode === 'existing' && !existingSecret.trim()) return 'Select an existing secret.'
+      if (
+        secretMode === 'existing' &&
+        provider === 'codex-subscription' &&
+        !existingLlmSecret.trim()
+      ) {
+        return 'Select an existing secret.'
+      }
+      if (
+        secretMode === 'existing' &&
+        provider !== 'codex-subscription' &&
+        !existingSecret.trim()
+      ) {
+        return 'Select an existing secret.'
+      }
       if (secretMode === 'new' && !toKebabCase(newSecretName)) {
         return 'For a new secret, set a name.'
       }
@@ -684,6 +770,7 @@ export function HostWizard({
     selectedMcp,
     secretMode,
     existingSecret,
+    existingLlmSecret,
     newSecretName,
     llmKeyDraft,
     llmPolicy,
@@ -705,6 +792,9 @@ export function HostWizard({
     setSelectedMcp([])
     setSecretMode('existing')
     setExistingSecret('')
+    setExistingLlmSecret('')
+    setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+    setCodexModels([])
     setNewSecretName('')
     setSecretNameTouched(false)
     setLlmKeyDraft(createEmptyLlmKeyDraft())
@@ -816,12 +906,20 @@ export function HostWizard({
         allowedCatalog
       )
 
+      const resolvedSecretRef = !chainRequiresSecret
+        ? ''
+        : secretMode === 'new'
+          ? normalizedSecretName
+          : provider === 'codex-subscription'
+            ? existingLlmSecret.trim()
+            : parseCredentialSelect(existingSecret).kind === 'secret'
+              ? existingSecret
+              : ''
+
       const hostSpec: Record<string, unknown> = {
         host: normalizedHostName,
         contextRef: resolvedContextName,
-        ...(chainRequiresSecret
-          ? { secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName }
-          : {}),
+        ...(resolvedSecretRef ? { secretRef: resolvedSecretRef } : {}),
         channels: [],
         model: {
           provider,
@@ -1120,19 +1218,13 @@ export function HostWizard({
             <LlmProviderConfig
               provider={provider}
               model={modelName}
-              subscriptionCredentialEnabled
-              afterPrimaryProvider={
-                provider === 'codex-subscription' ? (
-                  <CodexAgentAssignment
-                    connectionRef={connectionRef}
-                    onConnectionRefChange={setConnectionRef}
-                    onModelsChange={setCodexModels}
-                  />
-                ) : null
-              }
               onPrimaryChange={next => {
                 setProvider(next.provider)
                 setModelName(next.model)
+                if (next.provider !== 'codex-subscription') {
+                  setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+                  setCodexModels([])
+                }
               }}
               policy={llmPolicy}
               onPolicyChange={setLlmPolicy}
@@ -1156,85 +1248,100 @@ export function HostWizard({
               fallbackProvidersInitiallyCollapsed
               disabled={busy}
             />
-            {chainRequiresSecret ? (
-              <div className="cu-agent-access-section">
-                <strong>Credentials</strong>
-                <span className="cu-muted cu-agent-access-hint">
-                  Store this agent&apos;s own LLM credentials, or use a shared secret.
-                </span>
-                <div className="cu-agent-radio-group">
-                  <label className="cu-agent-radio cu-agent-radio--card">
-                    <input
-                      type="radio"
-                      checked={secretMode === 'existing'}
-                      onChange={() => setSecretMode('existing')}
-                    />
-                    <span className="cu-agent-radio__copy">
-                      <span className="cu-agent-radio__title">Use an existing secret</span>
-                      <span className="cu-agent-radio__description">
-                        Select a saved secret that already contains LLM API keys.
-                      </span>
+            <div className="cu-agent-access-section">
+              <strong>Credentials</strong>
+              <span className="cu-muted cu-agent-access-hint">
+                Choose an API key secret or a ChatGPT subscription, or create a new secret.
+              </span>
+              <div className="cu-agent-radio-group">
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    checked={secretMode === 'existing'}
+                    onChange={() => setSecretMode('existing')}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Use an existing secret</span>
+                    <span className="cu-agent-radio__description">
+                      Select a saved API key secret or a ChatGPT grant.
                     </span>
-                  </label>
-                  <label className="cu-agent-radio cu-agent-radio--card">
-                    <input
-                      type="radio"
-                      checked={secretMode === 'new'}
-                      onChange={() => setSecretMode('new')}
-                    />
-                    <span className="cu-agent-radio__copy">
-                      <span className="cu-agent-radio__title">New secret</span>
-                      <span className="cu-agent-radio__description">
-                        Create a new secret for this agent. Its name is derived from the agent name.
-                      </span>
+                  </span>
+                </label>
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    checked={secretMode === 'new'}
+                    onChange={() => {
+                      setSecretMode('new')
+                      if (provider === 'codex-subscription' && !llmPolicy?.fallbacks.length) {
+                        setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+                        setCodexModels([])
+                        setExistingSecret('')
+                        setProvider('openai')
+                        setModelName(
+                          resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai'))
+                        )
+                      }
+                    }}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">New secret</span>
+                    <span className="cu-agent-radio__description">
+                      Create a new secret for this agent. Its name is derived from the agent name.
                     </span>
-                  </label>
-                </div>
-                {secretMode === 'existing' ? (
-                  <div className="cu-agent-access-section">
-                    <strong>Credential</strong>
-                    <WizardSelect
-                      value={existingSecret}
-                      placeholder="Select secret..."
-                      options={secretOptions}
-                      onChange={handleExistingSecretChange}
-                    />
-                  </div>
-                ) : (
-                  <Field
-                    description="Auto-named from the agent — edit if you prefer a different name."
-                    label="Secret name"
-                  >
-                    <span className="cu-agent-input-shell">
-                      <TextInput
-                        value={newSecretName}
-                        onChange={e => {
-                          setSecretNameTouched(true)
-                          setNewSecretName(toKebabInput(e.target.value))
-                        }}
-                        placeholder="secret-name"
-                      />
-                      <span
-                        className={cn(
-                          'cu-agent-input-shell__status',
-                          !toKebabCase(newSecretName) && 'cu-agent-input-shell__status--empty'
-                        )}
-                        aria-label={
-                          toKebabCase(newSecretName) ? 'Valid secret name' : 'Secret name empty'
-                        }
-                      >
-                        {toKebabCase(newSecretName) ? <IconCheck width={16} height={16} /> : null}
-                      </span>
-                    </span>
-                  </Field>
-                )}
+                  </span>
+                </label>
               </div>
-            ) : (
-              <p className="cu-muted cu-agent-access-hint">
-                This OpenAI credential authenticates through a ChatGPT subscription. No LLM secret
-                is required unless you add a static-credentials fallback.
-              </p>
-            )}
+              {secretMode === 'existing' ? (
+                <div className="cu-agent-access-section">
+                  <strong>Credential</strong>
+                  <WizardSelect
+                    value={existingSecret}
+                    placeholder="Select credential"
+                    options={secretOptions}
+                    onChange={handleExistingSecretChange}
+                  />
+                  {provider === 'codex-subscription' && chainRequiresSecret ? (
+                    <>
+                      <strong>LLM secret</strong>
+                      <WizardSelect
+                        value={existingLlmSecret}
+                        placeholder="Select secret..."
+                        options={apiKeyOptions}
+                        onChange={setExistingLlmSecret}
+                      />
+                    </>
+                  ) : null}
+                </div>
+              ) : (
+                <Field
+                  description="Auto-named from the agent — edit if you prefer a different name."
+                  label="Secret name"
+                >
+                  <span className="cu-agent-input-shell">
+                    <TextInput
+                      value={newSecretName}
+                      onChange={e => {
+                        setSecretNameTouched(true)
+                        setNewSecretName(toKebabInput(e.target.value))
+                      }}
+                      placeholder="secret-name"
+                    />
+                    <span
+                      className={cn(
+                        'cu-agent-input-shell__status',
+                        !toKebabCase(newSecretName) && 'cu-agent-input-shell__status--empty'
+                      )}
+                      aria-label={
+                        toKebabCase(newSecretName) ? 'Valid secret name' : 'Secret name empty'
+                      }
+                    >
+                      {toKebabCase(newSecretName) ? <IconCheck width={16} height={16} /> : null}
+                    </span>
+                  </span>
+                </Field>
+              )}
+            </div>
           </div>
         )}
 

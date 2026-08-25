@@ -22,19 +22,31 @@ import { ToastProvider } from '../Toast'
  * These tests lock the new behavior so it cannot regress.
  */
 
-vi.mock('../CodexAgentAssignment', () => ({
-  CodexAgentAssignment: ({
-    onConnectionRefChange,
-  }: {
-    onConnectionRefChange: (connectionKey: string) => void
-  }) => (
-    <div data-testid="codex-agent-assignment">
-      <button type="button" onClick={() => onConnectionRefChange('codex-aaa')}>
-        Assign test grant
-      </button>
-    </div>
-  ),
-}))
+vi.mock('../../lib/codexSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
+  return {
+    ...actual,
+    listCodexSubscriptionConnections: vi.fn().mockResolvedValue([
+      {
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'connected',
+        defaultModel: 'gpt-5.1',
+        credentialRevision: 1,
+        catalogRevision: 1,
+        accountFingerprint: 'fp',
+        catalogStatus: 'ready',
+        catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+        lastRefreshAt: '2026-08-20T00:00:00.000Z',
+        lastAuthAt: '2026-08-20T00:00:00.000Z',
+        refreshLockHeld: false,
+      },
+    ]),
+    listCodexConnectionModels: vi
+      .fn()
+      .mockResolvedValue([{ model: 'gpt-5.1', enabled: true, stale: false }]),
+  }
+})
 
 // Mock lib/api BEFORE importing the component. vi.mock is hoisted.
 vi.mock('../../lib/api', () => ({
@@ -176,7 +188,7 @@ async function walkToAccessStep(opts?: { agentName?: string }) {
 
   // Step 2: Model & Credentials — default model is valid; reuse the secret we provided.
   fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
-  fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+  fireEvent.click(screen.getByRole('button', { name: /Select credential/i }))
   fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
@@ -261,7 +273,7 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
-    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Select credential/i }))
 
     const option = screen.getByRole('option', { name: /shared-llm-keys/ })
     expect(option).toHaveTextContent(/Providers: OpenAI, Amazon Bedrock/)
@@ -285,7 +297,7 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Select credential/i }))
     fireEvent.click(screen.getByRole('option', { name: /zai-only/i }))
     const providerField = screen.getByText('Provider', { selector: 'label' }).parentElement
     const modelField = screen.getByText('Default model', { selector: 'label' }).parentElement
@@ -798,17 +810,14 @@ async function walkToModelStep(opts?: { agentName?: string }) {
 }
 
 async function selectCodexSubscription(model = 'gpt-5.1') {
-  fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
-  fireEvent.click(screen.getByRole('option', { name: /^OpenAI$/i }))
-  fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
+  fireEvent.click(screen.getByRole('button', { name: /Select credential/i }))
+  fireEvent.click(screen.getByRole('option', { name: /Team A/i }))
   await waitFor(() => {
-    expect(screen.queryByText(/Use an existing secret/i)).not.toBeInTheDocument()
+    expect(
+      screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent(model)
   })
-  expect(
-    screen.queryByRole('option', { name: /OpenAI Codex Subscription/i })
-  ).not.toBeInTheDocument()
-  fireEvent.click(screen.getByLabelText('Default model', { selector: '#llm-primary-model' }))
-  fireEvent.click(screen.getByRole('option', { name: model }))
+  expect(screen.queryByRole('radio', { name: /^ChatGPT subscription$/i })).not.toBeInTheDocument()
 }
 
 describe('HostWizard — broker-backed Codex authoring', () => {
@@ -819,11 +828,7 @@ describe('HostWizard — broker-backed Codex authoring', () => {
     expect(screen.queryByLabelText(/OpenAI API key/i)).not.toBeInTheDocument()
     fireEvent.click(screen.getByLabelText('Default model', { selector: '#llm-primary-model' }))
     expect(screen.queryByRole('option', { name: 'old-codex' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Assign test grant' }))
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
-    })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
 
@@ -858,19 +863,16 @@ describe('HostWizard — broker-backed Codex authoring', () => {
   it('blocks Next until a ChatGPT subscription is chosen', async () => {
     await renderWizard()
     await walkToModelStep({ agentName: 'codex-needs-grant' })
-    await selectCodexSubscription()
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
-    expect(screen.getByText('Choose a ChatGPT subscription before continuing.')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Assign test grant' }))
+    expect(screen.getByText('Select an existing secret.')).toBeInTheDocument()
+    await selectCodexSubscription()
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
     })
-    expect(
-      screen.queryByText('Choose a ChatGPT subscription before continuing.')
-    ).not.toBeInTheDocument()
+    expect(screen.queryByText('Select an existing secret.')).not.toBeInTheDocument()
   }, 15_000)
 
-  it('seeds the first offered grant model when switching to a ChatGPT subscription', async () => {
+  it('seeds the grant default model when a ChatGPT subscription is chosen', async () => {
     await renderWizard()
     await walkToModelStep({ agentName: 'codex-keep-model' })
     await waitFor(() => {
@@ -878,13 +880,11 @@ describe('HostWizard — broker-backed Codex authoring', () => {
         screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
       ).toHaveTextContent(/\S/)
     })
-    fireEvent.click(screen.getByRole('radio', { name: /ChatGPT subscription/i }))
-    await waitFor(() => {
-      expect(
-        screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
-      ).toHaveTextContent('gpt-5.1')
-    })
-    expect(screen.queryByText(/Use an existing secret/i)).not.toBeInTheDocument()
+    await selectCodexSubscription()
+    expect(
+      screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent('gpt-5.1')
+    expect(screen.getByText(/Use an existing secret/i)).toBeInTheDocument()
   }, 15_000)
 
   it('requires exact credential slots when a static fallback joins a Codex primary', async () => {
@@ -897,13 +897,11 @@ describe('HostWizard — broker-backed Codex authoring', () => {
       target: { value: 'openai' },
     })
     await waitFor(() => {
-      expect(screen.getByText(/Use an existing secret/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Select secret/i })).toBeInTheDocument()
     })
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
-    fireEvent.click(screen.getByLabelText(/Use an existing Secret/i))
     fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
     fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Assign test grant' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
     })

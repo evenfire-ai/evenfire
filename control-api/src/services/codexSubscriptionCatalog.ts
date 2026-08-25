@@ -181,9 +181,15 @@ export async function isCodexAssignmentAllowed(
  * only when that grant already offers it. Otherwise seed the first offered
  * model — never invent deployment-default or a global allowlist default.
  */
-export function pickCodexGrantModel(current: string, offered: string[]): string {
+export function pickCodexGrantModel(
+  current: string,
+  offered: string[],
+  grantDefault?: string | null
+): string {
   const trimmed = current.trim()
   if (trimmed && offered.includes(trimmed)) return trimmed
+  const fallback = grantDefault?.trim() ?? ''
+  if (fallback && offered.includes(fallback)) return fallback
   return offered[0] ?? trimmed
 }
 
@@ -227,6 +233,26 @@ export async function listEnabledCodexModelsGroupedByConnection(
     grouped[key].push(String(row.model))
   }
   return grouped
+}
+
+export async function setCodexCatalogModelEnabled(
+  db: DbClient,
+  connectionId: string,
+  model: string,
+  enabled: boolean
+): Promise<Array<{ model: string; enabled: boolean; stale: boolean }> | null> {
+  const updated = await db.query(
+    `UPDATE codex_catalog_models
+        SET enabled = $3,
+            updated_at = now()
+      WHERE connection_id = $1
+        AND model = $2
+      RETURNING model`,
+    [connectionId, model, enabled]
+  )
+  if (updated.rowCount === 0) return null
+  await rebuildLiveCodexUnionAllowlist(db)
+  return listCodexCatalogModels(db, connectionId)
 }
 
 export async function listCodexCatalogModels(

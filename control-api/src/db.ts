@@ -8,6 +8,7 @@ import { config } from './config.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
+  applyCodexGrantDefaultModelSchema,
   applyCodexMultiConnectionSchema,
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
@@ -5975,6 +5976,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0103_llm_provider_attempts_connection_id',
     apply: applyLlmProviderAttemptConnectionIdSchema,
+  },
+  {
+    version: '0104_codex_grant_default_model',
+    apply: applyCodexGrantDefaultModelSchema,
   },
 ]
 

@@ -506,7 +506,7 @@ describe('SecretsTable — recipe pending refs', () => {
 })
 
 describe('SecretsTable — LLM empty state', () => {
-  it('links ChatGPT subscriptions to the Subscription hub', async () => {
+  it('keeps LLM nested under API-KEY without a sibling Subscription scope', async () => {
     rtlRender(
       <ToastProvider>
         <SecretsTable
@@ -520,9 +520,13 @@ describe('SecretsTable — LLM empty state', () => {
         />
       </ToastProvider>
     )
-    const link = await screen.findByRole('link', {
-      name: 'ChatGPT subscriptions are managed in the Subscription tab.',
-    })
-    expect(link).toHaveAttribute('href', '/secrets/subscription')
+    expect(await screen.findByText('No LLM secrets found.')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'API-KEY' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'Subscriptions' })).toHaveAttribute(
+      'href',
+      '/secrets/llm/subscriptions'
+    )
+    expect(screen.getByRole('tab', { name: 'LLM' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /^Subscription$/ })).not.toBeInTheDocument()
   })
 })

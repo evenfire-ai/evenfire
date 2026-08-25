@@ -21,6 +21,7 @@ vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
 }))
 
+const { pool } = await import('../src/db.js')
 const { config } = await import('../src/config.js')
 const { createAdminCodexSubscriptionRouter } =
   await import('../src/routes/admin/codexSubscription.js')
@@ -57,6 +58,32 @@ describe('admin Codex bind/unbind host write contract', () => {
     assignment.isCodexAssignmentAllowed.mockResolvedValue(true)
     assignment.listOfferedCodexModelsForAssignment.mockReset()
     assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.6-luna'])
+    vi.mocked(pool.query).mockReset()
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: [
+        {
+          id: 'id-codex-aaa',
+          connection_key: 'codex-aaa',
+          display_name: 'Team A',
+          default_model: null,
+          created_by: null,
+          status: 'connected',
+          credential_revision: 1,
+          catalog_revision: 1,
+          account_fingerprint: 'fp',
+          catalog_status: 'ready',
+          catalog_synced_at: new Date(),
+          last_refresh_at: new Date(),
+          last_auth_at: new Date(),
+          refresh_lock_token: null,
+          refresh_lock_expires_at: null,
+          revoked_at: null,
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+      ],
+      rowCount: 1,
+    })
   })
 
   afterEach(() => {
@@ -209,7 +236,32 @@ describe('admin Codex bind/unbind host write contract', () => {
   })
 
   it('converts a non-Codex host and seeds the grant default model', async () => {
-    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.1'])
+    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.1', 'gpt-5.6-luna'])
+    vi.mocked(pool.query).mockResolvedValue({
+      rows: [
+        {
+          id: 'id-codex-aaa',
+          connection_key: 'codex-aaa',
+          display_name: 'Team A',
+          default_model: 'gpt-5.1',
+          created_by: null,
+          status: 'connected',
+          credential_revision: 1,
+          catalog_revision: 1,
+          account_fingerprint: 'fp',
+          catalog_status: 'ready',
+          catalog_synced_at: new Date(),
+          last_refresh_at: new Date(),
+          last_auth_at: new Date(),
+          refresh_lock_token: null,
+          refresh_lock_expires_at: null,
+          revoked_at: null,
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+      ],
+      rowCount: 1,
+    })
     const gateway = makeGateway()
     gateway.getResource.mockResolvedValue({
       metadata: { name: 'api-agent', resourceVersion: '4' },

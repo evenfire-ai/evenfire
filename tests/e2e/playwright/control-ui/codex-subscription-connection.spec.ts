@@ -1,25 +1,8 @@
 /**
- * Codex subscription — assign/unbind on the agent model tab; create, multi-assign,
- * and revoke from Secrets → Subscription.
+ * Codex subscription — Secrets LLM nested tabs + one agent Credential select.
  *
- * E2E contract
- * ------------
- * Journey              | Entry                         | Actions                                      | Transitions                         | Business signal
- * API key → ChatGPT    | `/` + visible login + Agents  | Open agent → Models → ChatGPT → Save         | `/agents/:name/model`               | PUT host ≠ 422, spec.model.name non-empty
- * Assign from agent    | same                          | Create grant in UI → Save                    | stay on model tab                   | PUT 200, connectionRef persisted
- * Device login         | same                          | Sign in with ChatGPT                         | stay on model, no oauth URL         | device start 200 + userCode in UI
- * Sync catalog         | same                          | Select grant → Sync                          | stay on model                       | disabled until connected; POST sync when connected
- * Reuse grant          | Agents list with 2 seeded     | Create grant on A → pick same grant on B     | second agent model tab              | picker value = shared key
- * Unbind               | agent model                   | Create → Save → Remove → Save                | stay on model                       | PUT 200, connectionRef=unassigned, grant not revoked
- * Hub table + assign   | `/` → Secrets → Subscription  | Create grant → pick 2 agents → Add 2 → Revoke| `/secrets/subscription` + table     | 2 bind 200s, chips, revoke status
- * LLM → Subscription   | Secrets LLM                   | Empty-state link or Subscription tab         | `/secrets/subscription`             | hub visible
- *
- * Forbidden shortcuts: happy-path `goto` of `/secrets/subscription` or an agent
- * model tab; `test.skip`; silent `return` after an empty model; mutating storage
- * to skip login. API host create is a named precondition only.
- *
- * ChatGPT OAuth is the only mocked/external boundary (live device code is
- * asserted, not completed).
+ * Journeys J1–J10 from the redesign plan. Auth: `/` + loginControlUiVisible.
+ * Terminal `goto` only in J2. No test.skip. No silent return.
  */
 import { type Page, expect, test } from '@playwright/test'
 import { controlApi } from '../helpers/api-client'
@@ -27,16 +10,15 @@ import { loginControlUiVisible } from '../helpers/visible-login'
 import {
   AgentListPage,
   AgentModelPage,
-  CodexSubscriptionHubPage,
   ControlUiShell,
+  SecretsLlmSubscriptionsPage,
 } from '../pages/codex-subscription'
 
 type CodexConnection = {
   connectionKey: string
   displayName?: string
+  defaultModel?: string | null
   status: string
-  catalogRevision: number
-  assignedHosts?: Array<{ name: string }>
 }
 
 async function loginFromHome(page: Page) {
@@ -45,10 +27,6 @@ async function loginFromHome(page: Page) {
   await expect(page.getByLabel('Main navigation')).toBeVisible()
 }
 
-/**
- * Named API precondition — not the behavior under test. Seeds ChatGPT-capable
- * hosts so the Agents table and hub picker have rows. Fails loud if create fails.
- */
 async function seedCodexAgents(page: Page, minimum: number): Promise<void> {
   const listed = await controlApi.getHosts()
   const items = Array.isArray(listed.items) ? listed.items : []
@@ -86,93 +64,56 @@ async function listConnections(): Promise<CodexConnection[]> {
 }
 
 test.describe('Codex subscription connection', () => {
-  test('switching from API key to ChatGPT keeps a model name and never 422s', async ({ page }) => {
+  test('J1 nested LLM tabs open Subscriptions without a sibling Subscription scope', async ({
+    page,
+  }) => {
     const shell = new ControlUiShell(page)
-    const agents = new AgentListPage(page)
-    const model = new AgentModelPage(page)
-
-    await test.step('enter from home and open the first agent model editor', async () => {
-      await loginFromHome(page)
-      await shell.openAgents()
-      await seedCodexAgents(page, 1)
-      await agents.openNth(0)
-      await model.openEditor()
-    })
-
-    await test.step('switch OpenAI API key → ChatGPT subscription', async () => {
-      await model.chooseChatGPTSubscription()
-      await model.expectNamedModel()
-    })
-
-    await test.step('Save persists a non-empty spec.model.name', async () => {
-      const save = model.saveButton()
-      await expect(save).toBeEnabled()
-      const put = page.waitForResponse(
-        response =>
-          /\/api\/v1\/admin\/hosts\/[^/]+$/.test(new URL(response.url()).pathname) &&
-          response.request().method() === 'PUT'
-      )
-      await save.click()
-      const response = await put
-      expect(
-        response.status(),
-        'API-key → ChatGPT save must not 422 empty model.name or model_not_offered'
-      ).not.toBe(422)
-      expect(response.ok(), `save must succeed, got ${response.status()}`).toBe(true)
-      const body = (await response.json()) as { spec?: { model?: { name?: string } } }
-      expect(body.spec?.model?.name).toEqual(expect.stringMatching(/\S/))
-    })
+    const hub = new SecretsLlmSubscriptionsPage(page)
+    await loginFromHome(page)
+    await shell.openSecretsLlmSubscriptions()
+    await hub.expectTable()
+    await expect(page.getByRole('tab', { name: 'LLM' })).toBeVisible()
+    await expect(page.getByRole('tab', { name: 'Connector' })).toBeVisible()
+    await expect(page.getByRole('tab', { name: 'Recipe' })).toBeVisible()
   })
 
-  test('operator assigns a subscription from the agent model tab', async ({ page }) => {
-    const shell = new ControlUiShell(page)
-    const agents = new AgentListPage(page)
-    const model = new AgentModelPage(page)
-    const displayName = `e2e-assign-${Date.now().toString(36)}`
+  test('J2 authenticated deep link and legacy redirect; unauth is AuthGate', async ({ page }) => {
+    await page.goto('/secrets/llm/subscriptions')
+    await expect(page.getByLabel('Username or email')).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByRole('button', { name: 'Add subscription' })).toHaveCount(0)
 
-    await loginFromHome(page)
-    await shell.openAgents()
-    await seedCodexAgents(page, 1)
-    const agentName = await agents.openNth(0)
-    await model.openEditor()
-    await model.chooseChatGPTSubscription()
-
-    const grantKey = await test.step('create the grant through the agent UI', () =>
-      model.createGrant(displayName))
-    await model.expectNamedModel()
-
-    const body = await test.step('Save assigns the grant without a 422', () =>
-      model.saveHost(agentName))
-    expect(body.spec?.model?.provider).toBe('codex-subscription')
-    expect(body.spec?.model?.name).toEqual(expect.stringMatching(/\S/))
-    expect(body.spec?.model?.connectionRef).toBe(grantKey)
-
-    const host = (await controlApi.getHost(agentName)) as {
-      spec?: { model?: { connectionRef?: string; name?: string } }
-    }
-    expect(host.spec?.model?.connectionRef).toBe(grantKey)
-    expect(host.spec?.model?.name).toEqual(expect.stringMatching(/\S/))
+    await page.goto('/')
+    await loginControlUiVisible(page)
+    await page.goto('/secrets/subscription')
+    await expect(page).toHaveURL(/\/secrets\/llm\/subscriptions$/)
+    await expect(page.getByRole('tab', { name: 'Subscriptions', selected: true })).toBeVisible()
   })
 
-  test('Sign in with ChatGPT starts device login from the agent page', async ({ page }) => {
+  test('J3 Add subscription POSTs 201 and shows the displayName row', async ({ page }) => {
     const shell = new ControlUiShell(page)
+    const hub = new SecretsLlmSubscriptionsPage(page)
+    const displayName = `e2e-add-${Date.now().toString(36)}`
+    await loginFromHome(page)
+    await shell.openSecretsLlmSubscriptions()
+    const key = await hub.createGrant(displayName)
+    const listed = await listConnections()
+    expect(listed.find(row => row.connectionKey === key)?.displayName).toBe(displayName)
+  })
+
+  test('J4 pencil Sign in and Sync live on Secrets, never on the agent', async ({ page }) => {
+    const shell = new ControlUiShell(page)
+    const hub = new SecretsLlmSubscriptionsPage(page)
     const agents = new AgentListPage(page)
     const model = new AgentModelPage(page)
+    const displayName = `e2e-signin-${Date.now().toString(36)}`
 
     await loginFromHome(page)
-    await shell.openAgents()
-    await seedCodexAgents(page, 1)
-    await agents.openNth(0)
-    await model.openEditor()
-    await model.chooseChatGPTSubscription()
-    await expect(model.subscriptionPicker()).toBeVisible()
+    await shell.openSecretsLlmSubscriptions()
+    const grantKey = await hub.createGrant(displayName)
+    await hub.openGrant(displayName)
 
     const signIn = page.getByRole('button', { name: 'Sign in with ChatGPT' })
-    if ((await signIn.count()) === 0 || !(await signIn.isEnabled())) {
-      await model.createGrant(`e2e-device-${Date.now().toString(36)}`)
-    }
     await expect(signIn).toBeEnabled()
-
     const deviceStart = page.waitForResponse(
       response =>
         /\/api\/v1\/admin\/llm\/providers\/codex-subscription\/(connections\/[^/]+\/)?device\/start$/.test(
@@ -180,225 +121,255 @@ test.describe('Codex subscription connection', () => {
         ) && response.request().method() === 'POST'
     )
     await signIn.click()
-    const response = await deviceStart
-    expect(response.ok(), `device start must succeed, got ${response.status()}`).toBe(true)
-    const body = (await response.json()) as { userCode?: string; verificationUri?: string }
-    expect(body.userCode).toEqual(expect.any(String))
-    expect(body.verificationUri).toMatch(/^https:\/\/auth\.openai\.com\/codex\/device/)
-    await expect(page.getByTestId('codex-device-code')).toContainText(String(body.userCode))
-    await expect(page).toHaveURL(/\/(?:hosts|agents)\/[^/]+\/model/)
-    await expect(page).not.toHaveURL(/oauth\/authorize/)
-  })
+    const deviceRes = await deviceStart
+    expect(deviceRes.ok(), `device start must succeed, got ${deviceRes.status()}`).toBe(true)
+    const deviceBody = (await deviceRes.json()) as { userCode?: string }
+    expect(deviceBody.userCode).toEqual(expect.any(String))
+    await expect(page.getByTestId('codex-device-code')).toContainText(String(deviceBody.userCode))
 
-  test('Sync catalog is disabled until that grant is connected', async ({ page }) => {
-    const shell = new ControlUiShell(page)
-    const agents = new AgentListPage(page)
-    const model = new AgentModelPage(page)
+    const grant = (await listConnections()).find(row => row.connectionKey === grantKey)
+    expect(grant, 'created grant must be listed').toBeTruthy()
+    const sync = page.getByRole('button', { name: 'Sync catalog' })
+    if (grant?.status === 'connected') {
+      const syncResPromise = page.waitForResponse(
+        response =>
+          new RegExp(
+            `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/catalog/sync$`
+          ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
+      )
+      await sync.click()
+      const syncRes = await syncResPromise
+      expect(syncRes.ok(), `catalog sync must succeed, got ${syncRes.status()}`).toBe(true)
+    } else {
+      await expect(sync, 'Sync stays disabled until the grant is connected').toBeDisabled()
+    }
 
-    await loginFromHome(page)
+    await page.getByRole('button', { name: 'Cancel' }).click()
     await shell.openAgents()
     await seedCodexAgents(page, 1)
     await agents.openNth(0)
     await model.openEditor()
-    await model.chooseChatGPTSubscription()
-
-    const connections = await listConnections()
-    const picker = model.subscriptionPicker()
-    const disconnected = connections.find(
-      row => row.status !== 'connected' && row.status !== 'revoked'
-    )
-    const connected = connections.find(row => row.status === 'connected')
-
-    if (disconnected) {
-      await picker.selectOption(disconnected.connectionKey)
-      await expect(page.getByRole('button', { name: 'Sync catalog' })).toBeDisabled()
-    }
-
-    if (!connected) {
-      await expect(
-        page.getByRole('button', { name: 'Sync catalog' }),
-        'without a connected grant Sync must stay disabled'
-      ).toBeDisabled()
-      return
-    }
-
-    await picker.selectOption(connected.connectionKey)
-    const sync = page.waitForResponse(
-      response =>
-        new RegExp(
-          `/api/v1/admin/llm/providers/codex-subscription/connections/${connected.connectionKey}/catalog/sync$`
-        ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
-    )
-    await page.getByRole('button', { name: 'Sync catalog' }).click()
-    const response = await sync
-    expect(response.ok(), `catalog sync must succeed, got ${response.status()}`).toBe(true)
-    const body = (await response.json()) as {
-      added?: number
-      refreshed?: number
-      connection?: { catalogRevision?: number; connectionKey?: string }
-    }
-    expect(body.connection?.connectionKey).toBe(connected.connectionKey)
-    expect(typeof body.connection?.catalogRevision).toBe('number')
-    expect((body.added ?? 0) + (body.refreshed ?? 0)).toBeGreaterThanOrEqual(0)
+    await model.expectOneCredentialSelect()
   })
 
-  test('operator reuses the same grant on a second agent', async ({ page }) => {
+  test('J5 enable and default PATCH, then reopen matches GET models', async ({ page }) => {
     const shell = new ControlUiShell(page)
+    const hub = new SecretsLlmSubscriptionsPage(page)
+    await loginFromHome(page)
+    await shell.openSecretsLlmSubscriptions()
+    const connected = (await listConnections()).find(row => row.status === 'connected')
+    expect(connected, 'J5 named precondition: a connected grant with a synced catalog').toBeTruthy()
+    const grantKey = connected!.connectionKey
+    const displayName = connected!.displayName || grantKey
+
+    await hub.openGrant(displayName)
+    const modelsGet = page.waitForResponse(
+      response =>
+        new RegExp(
+          `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/models$`
+        ).test(new URL(response.url()).pathname) && response.request().method() === 'GET'
+    )
+    await modelsGet
+    const firstToggle = page.locator('dialog input[type="checkbox"]').first()
+    await expect(firstToggle, 'grant modal must list catalog models').toBeVisible()
+    const modelName = (
+      (await firstToggle.evaluate(node => node.closest('label')?.textContent)) ?? ''
+    )
+      .replace('(stale)', '')
+      .trim()
+    expect(modelName).toMatch(/\S/)
+
+    const patchModel = page.waitForResponse(
+      response =>
+        new RegExp(
+          `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/models/`
+        ).test(new URL(response.url()).pathname) && response.request().method() === 'PATCH'
+    )
+    const wasEnabled = await firstToggle.isChecked()
+    await firstToggle.click()
+    const patchRes = await patchModel
+    expect(patchRes.ok(), `model PATCH must succeed, got ${patchRes.status()}`).toBe(true)
+
+    await page.getByLabel('Default model').click()
+    const defaultOption = page.getByRole('option').first()
+    await expect(defaultOption).toBeVisible()
+    const defaultName = ((await defaultOption.textContent()) ?? '').trim()
+    const patchDefault = page.waitForResponse(
+      response =>
+        new RegExp(`/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}$`).test(
+          new URL(response.url()).pathname
+        ) && response.request().method() === 'PATCH'
+    )
+    await defaultOption.click()
+    await page.getByRole('button', { name: 'Update subscription' }).click()
+    const defaultRes = await patchDefault
+    expect(defaultRes.ok(), `defaultModel PATCH must succeed, got ${defaultRes.status()}`).toBe(
+      true
+    )
+
+    await hub.openGrant(displayName)
+    const reopened = page.waitForResponse(
+      response =>
+        new RegExp(
+          `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/models$`
+        ).test(new URL(response.url()).pathname) && response.request().method() === 'GET'
+    )
+    const modelsRes = await reopened
+    const modelsBody = (await modelsRes.json()) as {
+      models?: Array<{ model?: string; enabled?: boolean }>
+    }
+    const toggled = modelsBody.models?.find(row => row.model === modelName)
+    expect(toggled?.enabled).toBe(!wasEnabled)
+    if (defaultName) {
+      await expect(page.getByLabel('Default model')).toContainText(defaultName)
+    }
+  })
+
+  test('J6 one Credential select saves subscription or secret without a ChatGPT radio', async ({
+    page,
+  }) => {
+    const shell = new ControlUiShell(page)
+    const hub = new SecretsLlmSubscriptionsPage(page)
     const agents = new AgentListPage(page)
     const model = new AgentModelPage(page)
-    const displayName = `e2e-shared-${Date.now().toString(36)}`
+    const displayName = `e2e-cred-${Date.now().toString(36)}`
 
     await loginFromHome(page)
+    await shell.openSecretsLlmSubscriptions()
+    const grantKey = await hub.createGrant(displayName)
+    await shell.openAgents()
+    await seedCodexAgents(page, 1)
+    const agentName = await agents.openNth(0)
+    await model.openEditor()
+    await model.expectOneCredentialSelect()
+    await expect(model.credentialSelect().locator('optgroup[label="Subscriptions"]')).toBeVisible()
+    const secretName = (
+      await page.locator('#host-secret optgroup[label="API keys"] option').allTextContents()
+    )
+      .map(text => text.replace(' (custom)', '').trim())
+      .find(Boolean)
+    await model.chooseSubscription(displayName)
+    const saved = await model.saveHost(agentName)
+    expect(saved.spec?.model?.provider).toBe('codex-subscription')
+    expect(saved.spec?.model?.connectionRef).toBe(grantKey)
+    expect(saved.spec?.model?.name).toEqual(expect.stringMatching(/\S/))
+    expect(saved.spec?.secretRef).toBeUndefined()
+    await expect(page.getByLabel('Credential')).toHaveText(displayName)
+
+    expect(secretName, 'J6 named precondition: at least one API key secret').toMatch(/\S/)
+    await page.getByRole('button', { name: 'Edit' }).click()
+    await model.chooseSecret(secretName!)
+    const secretSaved = await model.saveHost(agentName)
+    expect(secretSaved.spec?.secretRef).toBe(secretName)
+    expect(secretSaved.spec?.model?.connectionRef).toBeUndefined()
+    await expect(page.getByLabel('Credential')).toHaveText(secretName!)
+  })
+
+  test('J7 the same displayName appears once on a second agent', async ({ page }) => {
+    const shell = new ControlUiShell(page)
+    const hub = new SecretsLlmSubscriptionsPage(page)
+    const agents = new AgentListPage(page)
+    const model = new AgentModelPage(page)
+    const displayName = `e2e-reuse-${Date.now().toString(36)}`
+
+    await loginFromHome(page)
+    await shell.openSecretsLlmSubscriptions()
+    await hub.createGrant(displayName)
     await shell.openAgents()
     await seedCodexAgents(page, 2)
     await agents.openNth(0)
     await model.openEditor()
-    await model.chooseChatGPTSubscription()
-    const sharedKey = await model.createGrant(displayName)
-
-    await test.step('open a second agent through the list', async () => {
-      await shell.openAgents()
-      expect(
-        await agents.rows().count(),
-        'reuse requires two seeded agents'
-      ).toBeGreaterThanOrEqual(2)
-      await agents.openNth(1)
-      await model.openEditor()
-      await model.chooseChatGPTSubscription()
-    })
-
-    await model.subscriptionPicker().selectOption(sharedKey)
-    await expect(model.subscriptionPicker()).toHaveValue(sharedKey)
-    await expect(page.getByRole('option', { name: displayName })).toHaveCount(1)
+    await model.chooseSubscription(displayName)
+    await shell.openAgents()
+    await agents.openNth(1)
+    await model.openEditor()
+    await expect(model.credentialSelect().locator(`option:text-is("${displayName}")`)).toHaveCount(
+      1
+    )
   })
 
-  test('agent models can unbind this host and never expose grant Revoke', async ({ page }) => {
+  test('J8 clearing Credential saves unassigned and does not revoke the grant', async ({
+    page,
+  }) => {
     const shell = new ControlUiShell(page)
+    const hub = new SecretsLlmSubscriptionsPage(page)
     const agents = new AgentListPage(page)
     const model = new AgentModelPage(page)
-    const displayName = `e2e-unbind-${Date.now().toString(36)}`
+    const displayName = `e2e-clear-${Date.now().toString(36)}`
 
     await loginFromHome(page)
+    await shell.openSecretsLlmSubscriptions()
+    const grantKey = await hub.createGrant(displayName)
     await shell.openAgents()
     await seedCodexAgents(page, 1)
-    const firstName = await agents.openNth(0)
+    const agentName = await agents.openNth(0)
     await model.openEditor()
-    await model.chooseChatGPTSubscription()
-    const grantKey = await model.createGrant(displayName)
-    await model.expectNamedModel()
-    await model.saveHost(firstName)
-
-    await expect(page.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0)
-    await expect(page.getByRole('link', { name: 'Manage subscription' })).toBeVisible()
-
-    await page.getByRole('button', { name: 'Remove from this agent' }).click()
-    await expect(page.getByRole('alertdialog')).toBeVisible()
-    await page.getByRole('alertdialog').getByRole('button', { name: 'Remove agent' }).click()
-    await expect(page.getByTestId('codex-connection-status')).toHaveText(
-      /No subscription assigned/i
-    )
-    const saved = await model.saveHost(firstName)
-    expect(saved.spec?.model?.connectionRef).toBe('unassigned')
-    await expect(page).toHaveURL(new RegExp(`/((?:hosts|agents))/${firstName}/model`))
-
-    const host = (await controlApi.getHost(firstName)) as {
-      spec?: { model?: { connectionRef?: string } }
-    }
-    expect(host.spec?.model?.connectionRef).toBe('unassigned')
+    await model.chooseSubscription(displayName)
+    await model.saveHost(agentName)
+    await page.getByRole('button', { name: 'Edit' }).click()
+    await model.clearCredential()
+    const saved = await model.saveHost(agentName)
+    expect(saved.spec?.model?.connectionRef ?? 'unassigned').toBe('unassigned')
+    expect(saved.spec?.secretRef).toBeUndefined()
     const after = await listConnections()
     expect(after.find(row => row.connectionKey === grantKey)?.status).not.toBe('revoked')
   })
 
-  test('Secrets Subscription hub creates, assigns two agents, and is the only revoke path', async ({
+  test('J9 revoke is only the Secrets IconX and does not rewrite hosts', async ({ page }) => {
+    const shell = new ControlUiShell(page)
+    const hub = new SecretsLlmSubscriptionsPage(page)
+    const agents = new AgentListPage(page)
+    const model = new AgentModelPage(page)
+    const displayName = `e2e-revoke-${Date.now().toString(36)}`
+
+    await loginFromHome(page)
+    await shell.openSecretsLlmSubscriptions()
+    const grantKey = await hub.createGrant(displayName)
+    await shell.openAgents()
+    await seedCodexAgents(page, 1)
+    const agentName = await agents.openNth(0)
+    await model.openEditor()
+    await model.chooseSubscription(displayName)
+    await model.saveHost(agentName)
+    const before = (await controlApi.getHost(agentName)) as {
+      spec?: { model?: { connectionRef?: string } }
+    }
+    await shell.openSecretsLlmSubscriptions()
+    await hub.revokeGrant(displayName, grantKey)
+    const after = (await controlApi.getHost(agentName)) as {
+      spec?: { model?: { connectionRef?: string } }
+    }
+    expect(after.spec?.model?.connectionRef).toBe(before.spec?.model?.connectionRef)
+    await expect(page.getByRole('cell', { name: displayName, exact: true })).toHaveCount(0)
+  })
+
+  test('J10 API-KEY does not PATCH grants; Subscriptions does not PUT secrets', async ({
     page,
   }) => {
     const shell = new ControlUiShell(page)
-    const hub = new CodexSubscriptionHubPage(page)
-    const displayName = `e2e-hub-${Date.now().toString(36)}`
-
-    await test.step('reach the hub through Secrets → Subscription', async () => {
-      await loginFromHome(page)
-      await shell.openAgents()
-      await seedCodexAgents(page, 2)
-      await shell.openSecretsSubscription()
-      await hub.expectTable()
-    })
-
-    const grantKey = await test.step('create a grant from the hub CTA', () =>
-      hub.createGrant(displayName))
-
-    const bound = await test.step('assign two agents in one hub action', () =>
-      hub.assignFirstAgents(grantKey, 2))
-
-    await test.step('remove one agent from the hub chips without revoking', async () => {
-      await hub.removeAgentFromGrant(grantKey, bound[0])
-      const afterUnbind = (await controlApi.getHost(bound[0])) as {
-        spec?: { model?: { connectionRef?: string } }
-      }
-      expect(afterUnbind.spec?.model?.connectionRef).toBe('unassigned')
-    })
-
-    const remaining = bound.slice(1)
-    const grantRow = hub.grantRow(grantKey)
-    await expect(grantRow.getByTestId('codex-hub-agent-chips')).toBeVisible()
-    await expect(grantRow.getByRole('link', { name: bound[0] })).toHaveCount(0)
-    for (const hostName of remaining) {
-      await expect(grantRow.getByRole('link', { name: hostName })).toBeVisible()
-      const host = (await controlApi.getHost(hostName)) as {
-        spec?: { model?: { connectionRef?: string } }
-      }
-      expect(host.spec?.model?.connectionRef).toBe(grantKey)
-    }
-
-    await test.step('revoke only from the hub danger action', async () => {
-      const revoke = page.waitForResponse(
-        response =>
-          new RegExp(
-            `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/revoke$`
-          ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
-      )
-      await grantRow.getByRole('button', { name: 'Revoke subscription' }).click()
-      await expect(page.getByRole('alertdialog')).toBeVisible()
-      await page
-        .getByRole('alertdialog')
-        .getByRole('button', { name: 'Revoke subscription' })
-        .click()
-      const revokeRes = await revoke
-      expect(revokeRes.ok(), `revoke must succeed, got ${revokeRes.status()}`).toBe(true)
-      const revokeBody = (await revokeRes.json()) as { status?: string; connectionKey?: string }
-      expect(revokeBody.status).toBe('revoked')
-      expect(revokeBody.connectionKey).toBe(grantKey)
-    })
-
-    const afterRemoved = (await controlApi.getHost(bound[0])) as {
-      spec?: { model?: { connectionRef?: string } }
-    }
-    expect(afterRemoved.spec?.model?.connectionRef).toBe('unassigned')
-    for (const hostName of remaining) {
-      const afterHost = (await controlApi.getHost(hostName)) as {
-        spec?: { model?: { connectionRef?: string } }
-      }
-      expect(afterHost.spec?.model?.connectionRef).toBe(grantKey)
-    }
-  })
-
-  test('LLM secrets empty state or tab reaches the Subscription hub', async ({ page }) => {
-    const shell = new ControlUiShell(page)
+    const hub = new SecretsLlmSubscriptionsPage(page)
+    const displayName = `e2e-iso-${Date.now().toString(36)}`
     await loginFromHome(page)
     await shell.openSecretsLlm()
-    await expect(page).toHaveURL(/\/secrets\/llm$/)
-
-    const emptyLink = page.getByRole('link', {
-      name: 'ChatGPT subscriptions are managed in the Subscription tab.',
+    const grantPatches: string[] = []
+    const secretPuts: string[] = []
+    page.on('request', request => {
+      const url = new URL(request.url())
+      if (
+        request.method() === 'PATCH' &&
+        /\/codex-subscription\/connections\//.test(url.pathname)
+      ) {
+        grantPatches.push(url.pathname)
+      }
+      if (request.method() === 'PUT' && /\/api\/v1\/admin\/secrets$/.test(url.pathname)) {
+        secretPuts.push(url.pathname)
+      }
     })
-    const tab = page.getByRole('tab', { name: 'Subscription' })
-    await expect(tab).toBeVisible()
-    if ((await emptyLink.count()) > 0) {
-      await emptyLink.click()
-    } else {
-      await tab.click()
-    }
-    await expect(page).toHaveURL(/\/secrets\/subscription$/)
-    await expect(page.getByTestId('codex-subscription-hub')).toBeVisible()
+    await page.getByRole('tab', { name: 'API-KEY' }).click()
+    await expect(page).toHaveURL(/\/secrets\/llm$/)
+    expect(grantPatches, 'API-KEY must not PATCH grant metadata').toEqual([])
+    await shell.openSecretsLlmSubscriptions()
+    await hub.createGrant(displayName)
+    expect(secretPuts, 'Subscriptions must not PUT LLM secrets').toEqual([])
   })
 })

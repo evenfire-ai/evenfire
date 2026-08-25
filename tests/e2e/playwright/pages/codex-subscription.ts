@@ -1,5 +1,5 @@
 /**
- * Page objects for Codex subscription Control UI journeys.
+ * Page objects for Secrets LLM subscriptions and the agent Credential select.
  *
  * Guardian: helpers only click/assert user-visible controls. API seeding lives
  * in the spec and is named as a precondition, never as the behavior under test.
@@ -20,11 +20,13 @@ export class ControlUiShell {
     await expect(this.page).toHaveURL(/\/secrets\/(llm)?$/)
   }
 
-  async openSecretsSubscription() {
+  async openSecretsLlmSubscriptions() {
     await this.openSecretsLlm()
-    await this.page.getByRole('tab', { name: 'Subscription' }).click()
-    await expect(this.page).toHaveURL(/\/secrets\/subscription$/)
-    await expect(this.page.getByTestId('codex-subscription-hub')).toBeVisible()
+    await this.page.getByRole('tab', { name: 'Subscriptions' }).click()
+    await expect(this.page).toHaveURL(/\/secrets\/llm\/subscriptions$/)
+    await expect(
+      this.page.getByRole('tab', { name: 'Subscriptions', selected: true })
+    ).toBeVisible()
   }
 }
 
@@ -57,12 +59,8 @@ export class AgentListPage {
 export class AgentModelPage {
   constructor(readonly page: Page) {}
 
-  subscriptionPicker(): Locator {
-    return this.page.locator('#codex-subscription')
-  }
-
-  modelSelect(): Locator {
-    return this.page.getByLabel(/^Model$/i)
+  credentialSelect(): Locator {
+    return this.page.getByLabel('Credential', { exact: true })
   }
 
   saveButton(): Locator {
@@ -79,50 +77,27 @@ export class AgentModelPage {
     if ((await edit.count()) > 0) {
       await edit.click()
     }
-    await expect(this.page.getByLabel('Provider')).toBeVisible()
+    await expect(this.credentialSelect()).toBeVisible()
   }
 
-  async chooseChatGPTSubscription() {
-    await this.page.getByLabel('Provider').click()
-    await this.page.getByRole('option', { name: 'OpenAI', exact: true }).click()
-    await expect(this.page.getByRole('option', { name: 'OpenAI Codex Subscription' })).toHaveCount(
-      0
-    )
-    await this.page.getByRole('radio', { name: 'ChatGPT subscription' }).check()
-    await expect(this.page.getByTestId('codex-agent-assignment')).toBeVisible()
-    await expect(this.page.getByLabel(/OpenAI API key/i)).toHaveCount(0)
+  async expectOneCredentialSelect() {
+    await expect(this.credentialSelect()).toHaveCount(1)
+    await expect(this.page.getByRole('radio', { name: /ChatGPT subscription/i })).toHaveCount(0)
+    await expect(this.page.getByRole('button', { name: 'Sign in with ChatGPT' })).toHaveCount(0)
+    await expect(this.page.getByRole('button', { name: 'Sync catalog' })).toHaveCount(0)
+    await expect(this.page.getByRole('button', { name: 'New subscription' })).toHaveCount(0)
   }
 
-  async expectNamedModel(): Promise<string> {
-    const select = this.modelSelect()
-    await expect(select).toBeVisible()
-    const value = ((await select.textContent()) ?? '').trim()
-    expect(
-      value,
-      'ChatGPT switch must keep or seed spec.model.name — empty name is the 422 bug'
-    ).toMatch(/\S/)
-    expect(value, 'placeholder is not a saved model name').not.toMatch(
-      /select model|no enabled models/i
-    )
-    return value
+  async chooseSubscription(displayName: string) {
+    await this.credentialSelect().selectOption({ label: displayName })
   }
 
-  async createGrant(displayName: string): Promise<string> {
-    await this.page.getByRole('button', { name: 'New subscription' }).click()
-    await this.page.getByLabel('New subscription name').fill(displayName)
-    const created = this.page.waitForResponse(
-      response =>
-        /\/api\/v1\/admin\/llm\/providers\/codex-subscription\/connections$/.test(
-          new URL(response.url()).pathname
-        ) && response.request().method() === 'POST'
-    )
-    await this.page.getByRole('button', { name: 'Create', exact: true }).click()
-    const response = await created
-    expect(response.ok(), `create grant must succeed, got ${response.status()}`).toBe(true)
-    const body = (await response.json()) as { connectionKey?: string }
-    expect(body.connectionKey).toEqual(expect.any(String))
-    await expect(this.subscriptionPicker()).toHaveValue(String(body.connectionKey))
-    return String(body.connectionKey)
+  async chooseSecret(secretName: string) {
+    await this.credentialSelect().selectOption(secretName)
+  }
+
+  async clearCredential() {
+    await this.credentialSelect().selectOption('')
   }
 
   async saveHost(agentName: string) {
@@ -140,34 +115,33 @@ export class AgentModelPage {
     ).not.toBe(422)
     expect(response.ok(), `assign save must succeed, got ${response.status()}`).toBe(true)
     return (await response.json()) as {
-      spec?: { model?: { provider?: string; name?: string; connectionRef?: string } }
+      spec?: {
+        secretRef?: string
+        model?: { provider?: string; name?: string; connectionRef?: string }
+      }
     }
   }
 }
 
-export class CodexSubscriptionHubPage {
+export class SecretsLlmSubscriptionsPage {
   constructor(readonly page: Page) {}
 
-  table(): Locator {
-    return this.page.getByTestId('codex-hub-table')
-  }
-
-  grantRow(connectionKey: string): Locator {
-    return this.page.getByTestId(`codex-hub-grant-${connectionKey}`)
-  }
-
   async expectTable() {
-    await expect(this.table()).toBeVisible()
     await expect(this.page.getByRole('columnheader', { name: 'Name' })).toBeVisible()
     await expect(this.page.getByRole('columnheader', { name: 'Status' })).toBeVisible()
-    await expect(this.page.getByRole('columnheader', { name: 'Agents' })).toBeVisible()
-    await expect(this.page.getByRole('heading', { name: 'Available' })).toHaveCount(0)
-    await expect(this.page.getByRole('heading', { name: 'Assigned' })).toHaveCount(0)
+    await expect(this.page.getByRole('columnheader', { name: 'Agents' })).toHaveCount(0)
+    await expect(this.page.getByRole('tab', { name: /^Subscription$/ })).toHaveCount(0)
+    await expect(this.page.getByRole('tab', { name: 'API-KEY' })).toBeVisible()
+    await expect(this.page.getByRole('tab', { name: 'Subscriptions' })).toBeVisible()
+  }
+
+  grantRow(displayName: string): Locator {
+    return this.page.getByRole('row', { name: new RegExp(displayName) })
   }
 
   async createGrant(displayName: string): Promise<string> {
     await this.page.getByRole('button', { name: 'Add subscription' }).click()
-    await this.page.getByLabel('New subscription name').fill(displayName)
+    await this.page.getByLabel('Name', { exact: true }).fill(displayName)
     const created = this.page.waitForResponse(
       response =>
         /\/api\/v1\/admin\/llm\/providers\/codex-subscription\/connections$/.test(
@@ -176,86 +150,36 @@ export class CodexSubscriptionHubPage {
     )
     await this.page.getByRole('button', { name: 'Create', exact: true }).click()
     const response = await created
-    expect(response.ok(), `hub create must succeed, got ${response.status()}`).toBe(true)
+    expect(response.ok(), `create grant must succeed, got ${response.status()}`).toBe(true)
     const body = (await response.json()) as { connectionKey?: string }
     expect(body.connectionKey).toEqual(expect.any(String))
-    await expect(this.page.getByText(displayName)).toBeVisible()
+    await expect(this.page.getByRole('cell', { name: displayName, exact: true })).toBeVisible()
     return String(body.connectionKey)
   }
 
-  async assignFirstAgents(connectionKey: string, count: number): Promise<string[]> {
-    const row = this.grantRow(connectionKey)
-    await expect(row.getByLabel('Add agents to this subscription')).toBeVisible()
-    await row.getByLabel('Add agents to this subscription').click()
-    const options = row.getByRole('option')
-    await expect(
-      options.first(),
-      'hub assign requires seeded Codex agents — API seed is a named precondition'
-    ).toBeVisible()
-    const available = await options.count()
-    expect(
-      available,
-      `hub multi-assign needs ${count} agents, found ${available}`
-    ).toBeGreaterThanOrEqual(count)
-
-    const names: string[] = []
-    for (let index = 0; index < count; index += 1) {
-      const option = options.nth(index)
-      const label = ((await option.getAttribute('aria-label')) ?? '').trim()
-      expect(label, `assignable agent #${index + 1} must have a name`).toMatch(/\S/)
-      names.push(label)
-      await option.click()
-    }
-
-    const bindPath = new RegExp(
-      `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/hosts/[^/]+/bind$`
-    )
-    const bindBodies: Promise<{ host?: string; connectionRef?: string; ok: boolean }>[] = []
-    const onResponse = (response: import('@playwright/test').Response) => {
-      if (
-        bindPath.test(new URL(response.url()).pathname) &&
-        response.request().method() === 'POST'
-      ) {
-        bindBodies.push(
-          response.json().then(body => ({
-            ...(body as { host?: string; connectionRef?: string }),
-            ok: response.ok(),
-          }))
-        )
-      }
-    }
-    this.page.on('response', onResponse)
-
-    await row
-      .getByRole('button', { name: count > 1 ? `Add ${count} agents` : 'Add agents' })
+  async openGrant(displayName: string) {
+    await this.page
+      .getByRole('button', { name: `Update ChatGPT subscription ${displayName}` })
       .click()
-    await expect
-      .poll(() => bindBodies.length, { message: `expected ${count} bind responses` })
-      .toBe(count)
-    this.page.off('response', onResponse)
-    const binds = await Promise.all(bindBodies)
-    for (const bind of binds) {
-      expect(bind.ok, 'each hub bind must succeed').toBe(true)
-      expect(bind.connectionRef).toBe(connectionKey)
-    }
-    return names
+    await expect(this.page.getByRole('dialog')).toBeVisible()
   }
 
-  async removeAgentFromGrant(connectionKey: string, hostName: string) {
-    const row = this.grantRow(connectionKey)
-    const unbind = this.page.waitForResponse(
+  async revokeGrant(displayName: string, connectionKey: string) {
+    const revoke = this.page.waitForResponse(
       response =>
         new RegExp(
-          `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/hosts/${hostName}/unbind$`
+          `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/revoke$`
         ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
     )
-    await row.getByRole('button', { name: `Remove agent ${hostName}` }).click()
+    await this.page
+      .getByRole('button', { name: `Delete ChatGPT subscription ${displayName}` })
+      .click()
     await expect(this.page.getByRole('alertdialog')).toBeVisible()
-    await this.page.getByRole('alertdialog').getByRole('button', { name: 'Remove agent' }).click()
-    const response = await unbind
-    expect(response.ok(), `hub unbind must succeed, got ${response.status()}`).toBe(true)
-    const body = (await response.json()) as { host?: string; connectionRef?: string }
-    expect(body.host).toBe(hostName)
-    expect(body.connectionRef).toBe('unassigned')
+    await this.page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click()
+    const response = await revoke
+    expect(response.ok(), `revoke must succeed, got ${response.status()}`).toBe(true)
   }
 }
+
+/** @deprecated Use SecretsLlmSubscriptionsPage. Kept for any leftover imports. */
+export class CodexSubscriptionHubPage extends SecretsLlmSubscriptionsPage {}

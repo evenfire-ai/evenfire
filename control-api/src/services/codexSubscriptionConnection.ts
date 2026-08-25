@@ -76,6 +76,7 @@ export type CodexSubscriptionSafeConnection = {
   id: string
   connectionKey: string
   displayName: string
+  defaultModel: string | null
   createdBy: string | null
   status: CodexSubscriptionConnectionStatus
   credentialRevision: number
@@ -112,6 +113,7 @@ type SafeConnectionRow = {
   id: string
   connection_key: string
   display_name: string | null
+  default_model: string | null
   created_by: string | null
   status: CodexSubscriptionConnectionStatus
   credential_revision: string | number
@@ -132,6 +134,7 @@ const SAFE_CONNECTION_COLUMNS = `
   id,
   connection_key,
   display_name,
+  default_model,
   created_by,
   status,
   credential_revision,
@@ -243,6 +246,13 @@ export async function applyCodexMultiConnectionSchema(db: DbClient): Promise<voi
     CREATE UNIQUE INDEX IF NOT EXISTS codex_subscription_connections_active_fingerprint
       ON codex_subscription_connections (account_fingerprint)
       WHERE revoked_at IS NULL AND account_fingerprint IS NOT NULL;
+  `)
+}
+
+export async function applyCodexGrantDefaultModelSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE codex_subscription_connections
+      ADD COLUMN IF NOT EXISTS default_model TEXT
   `)
 }
 
@@ -628,11 +638,44 @@ function remapFingerprintConflict(err: unknown): never | Error {
   throw err
 }
 
+export async function updateCodexSubscriptionConnectionMetadata(
+  db: DbClient,
+  connectionKey: string,
+  patch: { displayName?: string; defaultModel?: string | null }
+): Promise<CodexSubscriptionSafeConnection | null> {
+  const key = assertCodexConnectionKey(normalizeCodexConnectionKey(connectionKey))
+  const sets: string[] = ['updated_at = now()']
+  const values: unknown[] = []
+  if (typeof patch.displayName === 'string') {
+    values.push(patch.displayName.trim() || key)
+    sets.push(`display_name = $${values.length}`)
+  }
+  if (patch.defaultModel !== undefined) {
+    const next = typeof patch.defaultModel === 'string' ? patch.defaultModel.trim() : ''
+    values.push(next || null)
+    sets.push(`default_model = $${values.length}`)
+  }
+  if (values.length === 0) {
+    return getSafeCodexSubscriptionConnection(db, key)
+  }
+  values.push(key)
+  const result = await db.query(
+    `UPDATE codex_subscription_connections
+        SET ${sets.join(', ')}
+      WHERE connection_key = $${values.length}
+      RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+    values
+  )
+  const row = result.rows[0] as SafeConnectionRow | undefined
+  return row ? toSafeConnection(row) : null
+}
+
 function toSafeConnection(row: SafeConnectionRow): CodexSubscriptionSafeConnection {
   return {
     id: String(row.id),
     connectionKey: row.connection_key,
     displayName: row.display_name?.trim() || row.connection_key,
+    defaultModel: row.default_model?.trim() || null,
     createdBy: row.created_by,
     status: row.status,
     credentialRevision: Number(row.credential_revision),

@@ -24,6 +24,17 @@ describe('pickCodexGrantModel', () => {
     expect(pickCodexGrantModel('gpt-5.4-mini', [])).toBe('gpt-5.4-mini')
     expect(pickCodexGrantModel('', [])).toBe('')
   })
+
+  it('prefers the grant default when the current name is not offered', () => {
+    expect(pickCodexGrantModel('', ['gpt-5.1', 'gpt-5.6-luna'], 'gpt-5.6-luna')).toBe(
+      'gpt-5.6-luna'
+    )
+    expect(pickCodexGrantModel('gpt-5.1', ['gpt-5.1', 'gpt-5.6-luna'], 'gpt-5.6-luna')).toBe(
+      'gpt-5.1'
+    )
+    expect(pickCodexGrantModel('', ['gpt-5.1'], 'missing')).toBe('gpt-5.1')
+    expect(pickCodexGrantModel('', [], 'gpt-5.6-luna')).toBe('')
+  })
 })
 
 describe('planCodexCatalogReconcile', () => {
