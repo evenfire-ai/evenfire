@@ -10261,6 +10261,35 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   align-items: stretch;
 }
 
+/* First-run onboarding (spec §5.2). The wizard reuses the auth card shell and
+   the auth form/link primitives; only the answer list is new. */
+.onboarding-options {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.onboarding-option {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: start;
+  text-align: left;
+  white-space: normal;
+}
+
+.onboarding-option__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text);
+}
+
+.onboarding-option__hint {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-regular);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
 .auth-button-loading {
   display: inline-flex;
   align-items: center;

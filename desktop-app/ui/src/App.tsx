@@ -69,6 +69,7 @@ import { ContextDetailsPage } from '@pages/ContextDetailsPage'
 import { ContextsPage } from '@pages/ContextsPage'
 import { FilesPage } from '@pages/FilesPage'
 import { McpServersPage } from '@pages/McpServersPage'
+import { OnboardingPage } from '@pages/OnboardingPage'
 import { SandboxUiPage } from '@pages/SandboxUiPage'
 import type {
   SandboxUiConversationOrigin,
@@ -1956,7 +1957,13 @@ export function App() {
           </NavigationContext.Provider>
         ) : (
           <>
-            {vm.hasDependencyOutage ? <UnavailablePage /> : <AuthPage />}
+            {vm.unauthenticatedView === 'outage' ? (
+              <UnavailablePage />
+            ) : vm.unauthenticatedView === 'onboarding' ? (
+              <OnboardingPage onboarding={vm.onboarding} />
+            ) : (
+              <AuthPage />
+            )}
             {environmentSetupConfirmationDialog}
             {environmentSetupSuccessDialog}
             <ToastStack items={vm.toasts} />

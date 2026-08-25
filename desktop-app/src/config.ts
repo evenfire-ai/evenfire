@@ -15,6 +15,7 @@ type DesktopConfig = Omit<DesktopRuntimeConfig, 'appName' | 'rpcProxyBaseUrl'> &
   memberRegistrationServiceBaseUrl: string
   desktopProfileUiBaseUrl: string
   desktopProfileUiBaseUrlExplicit: boolean
+  deploymentDocsUrl: string
   requestTimeoutMs: number
   gfsUploadTimeoutMs: number
   appName: string
@@ -47,6 +48,13 @@ const DEFAULT_APP_NAME = 'Evenfire'
 const LOCALHOST_OPTION_ID = '__localhost__'
 const LOCALHOST_EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
 const LOCALHOST_RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
+// Where onboarding's self-hosted path sends the user (spec §5.4). Self-hosting
+// means any cluster the user controls — remote or local — so this must land on
+// documentation that covers both shapes, never on the minikube quickstart
+// alone. A build-time constant, overridable only where the dev env config gate
+// already allows overrides, so a packaged build cannot be pointed elsewhere.
+const DEFAULT_DEPLOYMENT_DOCS_URL =
+  'https://github.com/evenfire-ai/evenfire#deploying-to-a-remote-cluster'
 const RUNTIME_CONFIG_DIR_NAME = 'runtime-configs'
 const RUNTIME_CONFIG_INDEX_FILE = 'index.json'
 const PACKAGED_ENV_FILE = '.env.prod'
@@ -556,6 +564,9 @@ export const config: DesktopConfig = {
   ),
   desktopProfileUiBaseUrl: deriveProfileUiBaseUrl(initialRuntimeConfig.externalRestApiBaseUrl),
   desktopProfileUiBaseUrlExplicit: hasExplicitProfileUiBaseUrl(),
+  deploymentDocsUrl: canUseEnvRuntimeConfig
+    ? requiredOrDefault('DEPLOYMENT_DOCS_URL', DEFAULT_DEPLOYMENT_DOCS_URL)
+    : DEFAULT_DEPLOYMENT_DOCS_URL,
   requestTimeoutMs: Number(requiredOrDefault('REQUEST_TIMEOUT_MS', '60000')),
   // Generous deadline for legacy JSON GFS uploads: a 16 MiB file is a ~22.4 MiB
   // base64 body, ~60s alone on a slow uplink. v2 streams binary indexed parts and

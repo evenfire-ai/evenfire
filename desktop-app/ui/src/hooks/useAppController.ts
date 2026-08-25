@@ -11,6 +11,7 @@ import type {
 import { DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
+import { selectUnauthenticatedView } from '../lib/unauthenticatedView'
 import { summarizeWorkflowResource } from '../lib/workflows'
 import type {
   AgentApprovalNotificationTarget,
@@ -39,6 +40,7 @@ import { useMcpServersDataController } from './domain/useMcpServersDataControlle
 import { useNavigationController } from './domain/useNavigationController'
 import { useNotificationSettingsController } from './domain/useNotificationSettingsController'
 import { useNotificationsController } from './domain/useNotificationsController'
+import { useOnboardingController } from './domain/useOnboardingController'
 import { useTeamsDataController } from './domain/useTeamsDataController'
 import { useToastController } from './domain/useToastController'
 import {
@@ -165,6 +167,18 @@ export function useAppController() {
   const auth = useAuthController({
     setStatus: fullSetStatus,
     onSessionNeedsLoad,
+  })
+
+  // ─── First-run onboarding ───
+  const onboarding = useOnboardingController()
+  // Onboarding owns the unauthenticated screen only while the app has no
+  // environment at all (spec §5.1). Saving one — or selecting Localhost —
+  // flips `configured`, which retires the wizard; deleting the last one brings
+  // it back rather than leaving a sign-in form with nothing to sign in to.
+  const unauthenticatedView = selectUnauthenticatedView({
+    hasDependencyOutage: auth.hasDependencyOutage,
+    runtimeConfigMissing: auth.runtimeConfigMissing,
+    isAuthenticated: auth.isAuthenticated,
   })
 
   // ─── First-screen data contexts ───
@@ -1119,6 +1133,8 @@ export function useAppController() {
     authTransitioning: auth.authTransitioning,
     runtimeConfigState: auth.runtimeConfigState,
     runtimeConfigMissing: auth.runtimeConfigMissing,
+    onboarding,
+    unauthenticatedView,
     desktopReleaseStatus: auth.desktopReleaseStatus,
     desktopEnvironmentSetupComplete: auth.desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup: auth.pendingDesktopEnvironmentSetup,

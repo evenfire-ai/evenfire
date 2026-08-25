@@ -75,6 +75,8 @@ declare global {
         googleLogin: (idToken: string) => Promise<SessionState>
         passwordLogin: (email: string, password: string) => Promise<PasswordLoginResult>
         diagnoseLoginBackend: () => Promise<LoginBackendHint | null>
+        probeLocalhostReachable: () => Promise<boolean>
+        openDeploymentDocs: () => Promise<{ opened: true }>
         startDesktopSetup: (email: string) => Promise<{ profileUiUrl: string; appName: string }>
         openForgotPassword: (email?: string) => Promise<{ profileUiUrl: string }>
         openProfileSettings: (

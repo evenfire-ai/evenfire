@@ -251,6 +251,14 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.diagnoseLoginBackend()
   })
+  ipcMain.handle('auth:probeLocalhostReachable', async event => {
+    assertTrustedSender(event)
+    return service.probeLocalhostReachable()
+  })
+  ipcMain.handle('auth:openDeploymentDocs', async event => {
+    assertTrustedSender(event)
+    return service.openDeploymentDocs()
+  })
   ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
     assertTrustedSender(event)
     return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())

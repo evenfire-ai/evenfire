@@ -1760,6 +1760,33 @@ export class AppService {
     }
   }
 
+  /**
+   * Onboarding's path-D hint (spec §5.6): is a local Evenfire answering?
+   *
+   * Takes **no argument** on purpose. The renderer cannot name a URL for the
+   * main process to fetch — it can only ask about the built-in Localhost
+   * option, whose address is a constant in config. Best-effort and
+   * time-bounded, like every other use of `probeBackendHealthy`; a negative
+   * result means "show no hint", never an error.
+   */
+  async probeLocalhostReachable(): Promise<boolean> {
+    hydrateDesktopRuntimeConfig()
+    const state = getDesktopRuntimeConfigState()
+    const localhostOption = state.options.find(option => option.source === 'localhost')
+    if (!localhostOption?.externalRestApiBaseUrl) return false
+    return this.probeBackendHealthy(localhostOption.externalRestApiBaseUrl)
+  }
+
+  /**
+   * Open the deployment documentation for onboarding's self-hosted path
+   * (spec §5.4). The URL is a build-time constant, not a renderer argument.
+   */
+  async openDeploymentDocs(): Promise<{ opened: true }> {
+    const { shell } = await import('electron')
+    await shell.openExternal(config.deploymentDocsUrl)
+    return { opened: true }
+  }
+
   /** True iff `<baseUrl>/health` returns `{ status: 'ok' }` within the probe bound. */
   private async probeBackendHealthy(baseUrl: string): Promise<boolean> {
     if (!baseUrl?.trim()) return false

@@ -78,10 +78,12 @@ function renderAuthPage(auth?: Partial<AuthContextValue>) {
 }
 
 describe('AuthPage', () => {
-  it('asks for invitation email when no environment is configured', async () => {
-    const user = userEvent.setup()
+  // The invitation email form moved to onboarding's invited step (spec §5.5).
+  // AuthPage has one mode again, and must keep it even if it is somehow
+  // rendered without an environment — the unauthenticated branch routes that
+  // case to OnboardingPage instead.
+  it('renders sign-in only, never the invitation form, when no environment is configured', () => {
     const handleStartDesktopSetup = vi.fn()
-    const setEmail = vi.fn()
 
     renderAuthPage({
       runtimeConfigMissing: true,
@@ -95,16 +97,13 @@ describe('AuthPage', () => {
         options: [],
       },
       email: 'new-user@example.com',
-      setEmail,
       handleStartDesktopSetup,
     })
 
     expect(screen.getByLabelText('Email')).toBeTruthy()
-    expect(screen.queryByLabelText('Password')).toBeNull()
-
-    await user.click(screen.getByRole('button', { name: 'Continue setup' }))
-
-    expect(handleStartDesktopSetup).toHaveBeenCalledTimes(1)
+    expect(screen.getByLabelText('Password')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Continue setup' })).toBeNull()
+    expect(handleStartDesktopSetup).not.toHaveBeenCalled()
   })
 
   it('hides login while adding an environment and can return to login', async () => {
