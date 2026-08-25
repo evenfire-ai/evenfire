@@ -189,7 +189,7 @@ export class ProxyServer {
       } else if (error instanceof HttpForwarderError) {
         this.sendError(res, 503, 'authorization_unavailable')
       } else if (!res.headersSent) {
-        this.sendError(res, 502, 'upstream_error')
+        this.sendError(res, 503, 'authorization_unavailable')
       }
     } finally {
       this.metrics.decrementActive(serverName)

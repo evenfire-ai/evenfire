@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import http from "node:http";
 import { Router } from "../src/router";
 import { HttpForwarder } from "../src/httpForwarder";
@@ -111,5 +111,58 @@ describe("ProxyServer", () => {
     router.update([makeRoute("server-a", false)]);
     const res = await httpRequest(actualPort, "/servers/server-a/mcp", "POST");
     expect(res.status).toBe(503);
+  });
+
+  it("should normalize unexpected forwarding failures to 503", async () => {
+    await server.stop();
+    const config = makeConfig(0);
+    config.forwardingEnabled = true;
+    const throwingForwarder = {
+      forward: vi.fn().mockRejectedValue(new Error("unexpected_forwarder_failure")),
+    } as unknown as HttpForwarder;
+    const authorizedHcc = {
+      authorizeForward: vi.fn().mockResolvedValue({
+        serverName: "server-a",
+        contextRef: "ctx1",
+        targetUrl: "http://127.0.0.1:3000/mcp",
+        destinationRevision: "revision-a",
+      }),
+    } as unknown as HccClient;
+    const metrics = new Metrics();
+    const health = new Health(router, authorizedHcc);
+    server = new ProxyServer(
+      router,
+      throwingForwarder,
+      metrics,
+      health,
+      config,
+      authorizedHcc
+    );
+    await server.start();
+    actualPort = server.getPort();
+
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port: actualPort,
+          path: "/servers/server-a/mcp",
+          method: "GET",
+          headers: { "proxy-authorization": "Bearer host-token" },
+        },
+        response => {
+          let body = "";
+          response.on("data", (chunk: Buffer) => (body += chunk.toString()));
+          response.on("end", () => resolve({ status: response.statusCode || 0, body }));
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.body)).toEqual({ error: "authorization_unavailable" });
+    expect(res.body).not.toContain("unexpected_forwarder_failure");
+    expect(throwingForwarder.forward).toHaveBeenCalledTimes(1);
   });
 });
