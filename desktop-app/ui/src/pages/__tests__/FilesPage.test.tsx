@@ -54,6 +54,15 @@ function baseController() {
     refreshGrants: vi.fn(),
     revokeGrant: vi.fn(),
     revoking: false,
+    shares: [],
+    sharesError: null,
+    loadingShares: false,
+    refreshShares: vi.fn(),
+    revokeShare: vi.fn(),
+    revokingShare: false,
+    accessState: 'active',
+    retryAccess: vi.fn(),
+    handleAuthorityFailure: vi.fn(() => false),
     createShare: vi.fn(),
     createFolder: vi.fn(),
     createFile: vi.fn(),
@@ -1235,6 +1244,78 @@ describe('FilesPage', () => {
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Access revoked for chatllm', 'success')
     )
+  })
+
+  it('lists direct shares in the who-has-access list and revokes them', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const revokeShare = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read'],
+        canCreateShare: true,
+      },
+      grants: [],
+      shares: [
+        {
+          id: 'share-1',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'user', id: 'user-9' },
+          permissions: ['read'],
+          includeDescendants: true,
+        },
+      ],
+      revokeShare,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Team folder')
+
+    const shareRow = await screen.findByTestId('gfs-access-row-share-share-1')
+    expect(shareRow.textContent).toContain('Includes contents')
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke shared access for user-9' }))
+
+    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-1'))
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Shared access revoked for user-9', 'success')
+    )
+  })
+
+  it('renders the fail-closed state when GFS access is revoked and retries on demand', async () => {
+    const retryAccess = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessState: 'revoked',
+      retryAccess,
+    })
+
+    renderFilesPage()
+
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    // Fail closed: no cached rows, no loading spinner — only the retry path.
+    expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Shared with me' }).hasAttribute('disabled')).toBe(
+      true
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry file access' }))
+    expect(retryAccess).toHaveBeenCalledTimes(1)
   })
 
   it('refreshes server affordances whenever the manage dialog opens', async () => {

@@ -273,46 +273,73 @@ export function GfsBrowser(): React.JSX.Element {
   const current = crumbs[crumbs.length - 1]
   const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
 
-  const load = useCallback(async (crumb: Crumb, cursor?: string): Promise<void> => {
-    const appending = Boolean(cursor)
-    if (appending) {
-      setLoadingMore(true)
-    } else {
-      setLoading(true)
-      setItems([])
-      setNextCursor(null)
-    }
-    setError('')
-    try {
-      const path =
-        crumb.id === null
-          ? '/api/v1/gfs/tree'
-          : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id)}/children`
-      const query: Record<string, string> = { drive: DRIVE }
-      if (cursor) query.cursor = cursor
-      const page = (await apiGet(path, query)) as TreePage
-      if (crumb.id === null && page.rootResourceId) {
-        setCrumbs(prev =>
-          prev[0]?.id === null
-            ? [
-                { ...prev[0], id: page.rootResourceId, rid: ridOfResourceId(page.rootResourceId) },
-                ...prev.slice(1),
-              ]
-            : prev
-        )
+  const load = useCallback(
+    async (crumb: Crumb, cursor?: string, options?: { background?: boolean }): Promise<void> => {
+      const appending = Boolean(cursor)
+      const background = Boolean(options?.background)
+      // Only the newest load may apply results; a superseded navigation's
+      // response (including a background revalidation) must be dropped.
+      const seq = ++loadSeqRef.current
+      if (appending) {
+        setLoadingMore(true)
+      } else if (!background) {
+        setLoading(true)
+        setItems([])
+        setNextCursor(null)
       }
-      const sortedItems = sortChildrenWithDirectoriesFirst(page.items)
-      setItems(prev => (cursor ? [...prev, ...sortedItems] : sortedItems))
-      setNextCursor(page.nextCursor)
-    } catch (err) {
-      if (!isSilentApiError(err)) {
-        setError(err instanceof Error ? err.message : 'Failed to load the Global File System')
+      if (!background) setError('')
+      try {
+        const path =
+          crumb.id === null
+            ? '/api/v1/gfs/tree'
+            : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id)}/children`
+        const query: Record<string, string> = { drive: DRIVE }
+        if (cursor) query.cursor = cursor
+        const page = (await apiGet(path, query)) as TreePage
+        if (seq !== loadSeqRef.current) return
+        if (crumb.id === null && page.rootResourceId) {
+          setCrumbs(prev =>
+            prev[0]?.id === null
+              ? [
+                  {
+                    ...prev[0],
+                    id: page.rootResourceId,
+                    rid: ridOfResourceId(page.rootResourceId),
+                  },
+                  ...prev.slice(1),
+                ]
+              : prev
+          )
+        }
+        const sortedItems = sortChildrenWithDirectoriesFirst(page.items)
+        setItems(prev => (cursor ? [...prev, ...sortedItems] : sortedItems))
+        setNextCursor(page.nextCursor)
+        // Keep the folder cache coherent with what the server just returned:
+        // navigation, refresh-after-mutation, and pagination all land here, so
+        // a later openDirectory() can never serve rows older than this load.
+        if (crumb.id !== null) {
+          const existing = childCacheRef.current.get(crumb.id)
+          childCacheRef.current.set(crumb.id, {
+            items: cursor ? [...(existing?.items ?? []), ...page.items] : page.items,
+            nextCursor: page.nextCursor,
+          })
+        }
+      } catch (err) {
+        if (seq !== loadSeqRef.current) return
+        if (!isSilentApiError(err)) {
+          // Background revalidation keeps the (stale) rows visible but still
+          // surfaces the failure instead of silently ignoring it.
+          setError(err instanceof Error ? err.message : 'Failed to load the Global File System')
+        }
+      } finally {
+        if (seq === loadSeqRef.current) {
+          if (appending) setLoadingMore(false)
+          else if (!background) setLoading(false)
+        }
       }
-    } finally {
-      if (appending) setLoadingMore(false)
-      else setLoading(false)
-    }
-  }, [])
+    },
+    []
+  )
 
   function sortChildrenWithDirectoriesFirst(children: GfsChild[]): GfsChild[] {
     return [...children].sort((a, b) => {
@@ -321,15 +348,50 @@ export function GfsBrowser(): React.JSX.Element {
     })
   }
 
+  // ┌─────────────────────────────────────────────────────────────────────────┐
+  // │ GfsBrowser data-path decision table (keep behavior and tests aligned).  │
+  // ├─────────────────────────────────────────────────────────────────────────┤
+  // │ UPLOAD TRANSPORT (create & replace)                                     │
+  // │ • Default: resumable Upload v2 (createGfsUploadJob) for EVERY size;     │
+  // │   the writer-advertised maxFileBytes (≤ 1 GiB protocol ceiling) is      │
+  // │   enforced before any bytes move. 8 MiB streamed parts.                 │
+  // │ • Legacy contentBase64 runs ONLY for fresh (non-resume) uploads after   │
+  // │   a capability error with allowLegacyFallback, and is refused above     │
+  // │   the legacy 16 MiB raw limit. Persisted resume sessions never          │
+  // │   downgrade (see tests: legacy-*.test, persisted-resume, >16 MiB).      │
+  // ├─────────────────────────────────────────────────────────────────────────┤
+  // │ FOLDER CACHE (childCacheRef) — revalidate vs. invalidate                │
+  // │ • Prefetch warms UNcached folder rows (best-effort, non-fatal) and      │
+  // │   never overwrites an entry a load() wrote meanwhile.                   │
+  // │ • openDirectory serves a cached page instantly and marks the next       │
+  // │   effect pass for BACKGROUND revalidation (stale-while-revalidate):     │
+  // │   no spinner/row-clear; rows are replaced when the server diverged.     │
+  // │ • Every completed load() (navigation, refresh-after-mutation,           │
+  // │   pagination) writes the fresh page back into the cache, so uploads,    │
+  // │   folder creation, rename, and delete keep cached folders coherent.     │
+  // │ • Deleting a directory row drops its cache entry.                        │
+  // │ • Loads are sequence-guarded: a response from a superseded navigation   │
+  // │   can no longer overwrite the folder on screen (covers the background   │
+  // │   path too).                                                            │
+  // ├─────────────────────────────────────────────────────────────────────────┤
+  // │ AUTHORITATIVE SERVER STATE                                              │
+  // │ • Listings, resource versions (ifMatch), grants, and share rows always  │
+  // │   come from control-api responses; this cache is never an authority for │
+  // │   permissions or versions.                                              │
+  // └─────────────────────────────────────────────────────────────────────────┘
+
   // Cache of prefetched directory children, keyed by the folder's
   // resourceId. Refs over state because we don't want to re-render
   // every time a prefetch resolves — the data is consumed lazily in
   // openDirectory(). Survives across navigation; cleared on unmount.
   const childCacheRef = useRef<Map<string, TreePage>>(new Map())
-  // True after openDirectory() served cached data; the next useEffect
-  // pass skips the redundant load() so the user keeps seeing the
-  // cached rows instead of a flash of empty items + spinner.
-  const skipNextLoadRef = useRef(false)
+  // Monotonic load sequence: only the newest load() may apply its results,
+  // so a slow response cannot clobber the folder the user navigated to next.
+  const loadSeqRef = useRef(0)
+  // True after openDirectory() served cached data; the next useEffect pass
+  // runs a BACKGROUND revalidation instead of a clearing reload, so the user
+  // keeps the cached rows (no spinner) while the server state re-syncs.
+  const revalidateNextLoadRef = useRef(false)
 
   // Warm the cache for every folder row visible in the current view.
   // Re-runs whenever the listing changes (folder navigation, refresh,
@@ -346,6 +408,9 @@ export function GfsBrowser(): React.JSX.Element {
           { drive: DRIVE }
         )) as TreePage | undefined
         if (cancelled || !page) return
+        // A load() may have cached a fresher page while this prefetch was in
+        // flight (the user navigated into the folder); never overwrite it.
+        if (childCacheRef.current.has(folder.resourceId)) return
         childCacheRef.current.set(folder.resourceId, page)
       } catch {
         /* ignore — openDirectory will surface the real error */
@@ -362,8 +427,11 @@ export function GfsBrowser(): React.JSX.Element {
   }, [items])
 
   useEffect(() => {
-    if (skipNextLoadRef.current) {
-      skipNextLoadRef.current = false
+    if (revalidateNextLoadRef.current) {
+      revalidateNextLoadRef.current = false
+      // Stale-while-revalidate: cached rows stay on screen (no spinner) while
+      // the server state re-syncs; divergence overwrites the rows in place.
+      void load(current, undefined, { background: true })
       return
     }
     void load(current)
@@ -384,15 +452,14 @@ export function GfsBrowser(): React.JSX.Element {
     setCrumbs(prev => [...prev, { id: child.resourceId, rid: child.rid, name: child.name }])
     const cached = childCacheRef.current.get(child.resourceId)
     if (cached) {
-      // Render the cached listing immediately. The useEffect-driven
-      // load() will refresh in the background and overwrite if the
-      // server state diverged, so the user still gets fresh data —
-      // they just don't see the loading spinner.
+      // Render the cached listing instantly; the effect-driven background
+      // revalidation refreshes in place if the server state diverged, so the
+      // user gets fresh data without a loading spinner (decision table above).
       setItems(sortChildrenWithDirectoriesFirst(cached.items))
       setNextCursor(cached.nextCursor)
       setError('')
       setLoading(false)
-      skipNextLoadRef.current = true
+      revalidateNextLoadRef.current = true
       return
     }
     setLoading(true)
@@ -823,6 +890,8 @@ export function GfsBrowser(): React.JSX.Element {
       await apiSend('DELETE', `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(child.rid)}`, {
         ifMatch: child.version,
       })
+      // A deleted directory's cached children must never be served again.
+      if (child.kind === 'directory') childCacheRef.current.delete(child.resourceId)
       showToast('Resource deleted.', { tone: 'success' })
       setSelected(null)
       await refreshCurrent()

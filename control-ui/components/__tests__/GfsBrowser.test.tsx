@@ -965,6 +965,8 @@ describe('GfsBrowser', () => {
       // The 'org' folder prefetch resolves with an empty children page
       // so the cache holds something realistic.
       .mockResolvedValueOnce({ items: [], nextCursor: null })
+      // Entering org serves that cache and revalidates in the background.
+      .mockResolvedValueOnce({ items: [], nextCursor: null })
       // Navigate back: re-fetch the root listing.
       .mockResolvedValueOnce({
         items: [child('org', 'directory', 1), child('report.md', 'file', 2)],
@@ -1086,8 +1088,10 @@ describe('GfsBrowser', () => {
       .mockResolvedValueOnce({ items: [child('org', 'directory', 1)], nextCursor: null })
       // Prefetch returns org's children so the cache is populated.
       .mockResolvedValueOnce({ items: [child('eng', 'directory', 3)], nextCursor: null })
-      // After the click navigates into eng, the prefetcher also reaches
-      // for eng's children. Empty page is fine — eng has no folders.
+      // Entering org serves the cache and revalidates in the background.
+      .mockResolvedValueOnce({ items: [child('eng', 'directory', 3)], nextCursor: null })
+      // After the revalidated view renders, the prefetcher reaches for eng's
+      // children. Empty page is fine — eng has no folders.
       .mockResolvedValueOnce({ items: [], nextCursor: null })
       // Navigate back: re-fetch the root listing.
       .mockResolvedValueOnce({ items: [child('org', 'directory', 1)], nextCursor: null })
@@ -1104,6 +1108,89 @@ describe('GfsBrowser', () => {
     const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
     fireEvent.click(within(breadcrumb).getAllByRole('button')[0])
     await screen.findAllByRole('button', { name: 'org' })
+  })
+
+  it('revalidates a prefetched folder in the background when navigating into it', async () => {
+    mockApiGet
+      .mockResolvedValueOnce({ items: [child('org', 'directory', 1)], nextCursor: null }) // root listing
+      .mockResolvedValueOnce({ items: [child('stale.md', 'file', 3)], nextCursor: null }) // prefetch org
+      .mockResolvedValueOnce({ items: [child('fresh.md', 'file', 4)], nextCursor: null }) // background revalidation
+    renderBrowser()
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'org' }))[0])
+    // The cached page renders instantly — no spinner, stale rows visible…
+    await screen.findByText('stale.md')
+    expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    // …then the background revalidation replaces them with the server state.
+    await waitFor(() => expect(screen.getByText('fresh.md')).toBeTruthy())
+    await waitFor(() => expect(screen.queryByText('stale.md')).toBeNull())
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
+      drive: 'main',
+    })
+  })
+
+  it('reflects mutations in the folder cache when returning to a folder', async () => {
+    const rootPage = { items: [child('org', 'directory', 1)], nextCursor: null }
+    mockApiGet
+      .mockResolvedValueOnce(rootPage) // initial root listing
+      .mockResolvedValueOnce({ items: [], nextCursor: null }) // prefetch org (empty)
+      .mockResolvedValueOnce({ items: [], nextCursor: null }) // background revalidation on entering org
+      .mockResolvedValueOnce({ items: [child('report.md', 'file', 3)], nextCursor: null }) // refresh after upload
+      .mockResolvedValueOnce(rootPage) // navigate back to the root
+      // Re-entering org revalidates in the background against fresh rows.
+      .mockResolvedValue({ items: [child('report.md', 'file', 3)], nextCursor: null })
+    renderBrowser()
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'org' }))[0])
+    await screen.findByText('No resources are visible in this folder.')
+
+    // Upload into org: the resumable job mock completes → refreshCurrent().
+    fireEvent.click(screen.getByRole('button', { name: /upload file/i }))
+    const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
+    fireEvent.change(within(uploadDialog).getByLabelText('Choose file to upload'), {
+      target: { files: [new File(['report'], 'report.md', { type: 'text/markdown' })] },
+    })
+    fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Upload' }))
+    await waitFor(() => expect(screen.getByText('report.md')).toBeTruthy())
+
+    // Navigate back to the root, then into org again: the served cache must
+    // hold the post-mutation rows, not the prefetched empty page.
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    fireEvent.click(within(breadcrumb).getAllByRole('button')[0])
+    await screen.findAllByRole('button', { name: 'org' })
+    fireEvent.click(screen.getByRole('button', { name: 'org' }))
+    await waitFor(() => expect(screen.getByText('report.md')).toBeTruthy())
+  })
+
+  it('routes files above the legacy limit through the resumable transport, not contentBase64', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const rootRid = '11111111111111111111111111111111'
+    mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    // One byte above the legacy raw ceiling: legacy transport must be
+    // impossible; the resumable job is the only path. The transport decision
+    // reads only `size`, so the fixture overrides it instead of allocating
+    // 16 MiB through jsdom's fireEvent serialization.
+    const bigFile = new File(['x'], 'big-report.bin')
+    Object.defineProperty(bigFile, 'size', { value: 16 * 1024 * 1024 + 1 })
+    fireEvent.click(screen.getByRole('button', { name: /upload file/i }))
+    const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
+    fireEvent.change(within(uploadDialog).getByLabelText('Choose file to upload'), {
+      target: { files: [bigFile] },
+    })
+    fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Upload' }))
+
+    await waitFor(() =>
+      expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'big-report.bin',
+          target: { operation: 'create', parentRid: rootRid },
+        })
+      )
+    )
+    expect(mockApiSend).not.toHaveBeenCalled()
   })
 
   it('keeps the new-folder modal open after an error and allows a retry', async () => {

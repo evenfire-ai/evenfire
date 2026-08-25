@@ -231,8 +231,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     () => (ctrl.grantsError ? describeGfsGrantError(ctrl.grantsError) : null),
     [ctrl.grantsError]
   )
-  const canWriteCurrent = hasBit(affordances, 'write')
-  const canDeleteCurrent = hasBit(affordances, 'delete')
+  const sharesError = useMemo(
+    () => (ctrl.sharesError ? describeGfsGrantError(ctrl.sharesError) : null),
+    [ctrl.sharesError]
+  )
+  const accessRevoked = ctrl.accessState === 'revoked'
+  const canWriteCurrent = !accessRevoked && hasBit(affordances, 'write')
+  const canDeleteCurrent = !accessRevoked && hasBit(affordances, 'delete')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
@@ -335,11 +340,39 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   }
 
   const handleCreateShare = async (subjectKeys: string[]) => {
-    await ctrl.createShare(subjectKeys)
+    try {
+      await ctrl.createShare(subjectKeys)
+    } catch (error) {
+      // A session-authority rejection fails the browser closed; anything
+      // else re-throws to the delegation panel's own error surface.
+      if (
+        !ctrl.handleAuthorityFailure(
+          error instanceof Error ? error.message : String(error),
+          'operation'
+        )
+      )
+        throw error
+      return
+    }
     pushToast?.(
       `${subjectKeys.length} ${subjectKeys.length === 1 ? 'share' : 'shares'} created`,
       'success'
     )
+    // List-after-write: make the new share row visible without a remount.
+    await ctrl.refreshShares()
+  }
+
+  const handleRevokeShare = async (shareId: string, label: string) => {
+    try {
+      await ctrl.revokeShare(shareId)
+      pushToast?.(`Shared access revoked for ${label}`, 'success')
+    } catch (revokeError) {
+      ctrl.handleAuthorityFailure(
+        revokeError instanceof Error ? revokeError.message : String(revokeError),
+        'operation'
+      )
+      pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+    }
   }
 
   const handleDownload = async (uri: string, name: string) => {
@@ -711,9 +744,23 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
-          {visibleError ? <StatusBanner tone="error" text={visibleError} /> : null}
+          {visibleError && !accessRevoked ? (
+            <StatusBanner tone="error" text={visibleError} />
+          ) : null}
 
-          {visibleLoading ? (
+          {accessRevoked ? (
+            <>
+              <EmptyState
+                title="File access is not authorized"
+                body="Your current Desktop session cannot access this location. Sign in again or contact an administrator."
+              />
+              <div className="da-gfs-footer-actions">
+                <Button onClick={() => ctrl.retryAccess()} size="sm" variant="outline">
+                  Retry file access
+                </Button>
+              </div>
+            </>
+          ) : visibleLoading ? (
             <div
               className="da-gfs-loading"
               role="status"
@@ -1164,7 +1211,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                   <div>
                     <h4>Who has access</h4>
                     <p className="muted">
-                      Existing grants on this resource. Revoking is immediate.
+                      Existing direct grants and shares on this resource. Revoking is immediate.
                     </p>
                   </div>
                 </div>
@@ -1172,9 +1219,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                   agents={agentSubjects}
                   error={grantsError}
                   items={ctrl.grants}
-                  loading={ctrl.loadingGrants}
+                  loading={ctrl.loadingGrants || ctrl.loadingShares}
                   onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
+                  onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
                   revoking={ctrl.revoking}
+                  revokingShare={ctrl.revokingShare}
+                  shareError={sharesError}
+                  shares={ctrl.shares}
                   subjects={delegationSubjects}
                 />
               </section>
