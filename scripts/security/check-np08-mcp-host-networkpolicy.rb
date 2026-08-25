@@ -133,6 +133,11 @@ allows_tcp_port = lambda do |rule, expected_port|
   end
 end
 
+allows_only_tcp_port = lambda do |rule, expected_port|
+  ports = Array(rule["ports"])
+  ports.length == 1 && allows_tcp_port.call(rule, expected_port)
+end
+
 broad_internal_peer = lambda do |peer, policy, rule|
   next true unless peer.is_a?(Hash)
   next true if peer.empty?
@@ -180,7 +185,7 @@ broad_internal_peer = lambda do |peer, policy, rule|
       pod_selector.keys.sort == ["matchLabels"] &&
       pod_selector["matchLabels"] == { "app" => "mcp-proxy" } &&
       Array(pod_selector["matchExpressions"]).empty? &&
-      allows_tcp_port.call(rule, 8083)
+      allows_only_tcp_port.call(rule, 8083)
     static_proxy_source = policy.dig("metadata", "name") == "mcp-host-proxy-egress" &&
       policy.dig("spec", "podSelector") == {
         "matchExpressions" => [
@@ -288,7 +293,7 @@ proxy_8083 = policy_rules.any? do |policy, rule|
     peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "mcp-server" &&
       peer.dig("podSelector", "matchLabels") == { "app" => "mcp-proxy" } &&
       Array(peer.dig("podSelector", "matchExpressions")).empty? &&
-      allows_tcp_port.call(rule, 8083) &&
+      allows_only_tcp_port.call(rule, 8083) &&
       (
         policy.dig("metadata", "name") == "mcp-host-proxy-egress" &&
           policy.dig("spec", "podSelector") == {

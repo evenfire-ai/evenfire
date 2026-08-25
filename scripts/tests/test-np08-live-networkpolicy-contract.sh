@@ -91,6 +91,10 @@ proxy_range="$(mutate proxy-range 'data["items"].find { |d| d["metadata"]["name"
 assert_result "${proxy_range}" '{"egress_contract_ok":false,"hcc_lane":true,"proxy_8083":true}'
 echo "PASS: live policy helper rejects a TCP range containing 8083"
 
+proxy_extra_port="$(mutate proxy-extra-port 'data["items"].find { |d| d["metadata"]["name"] == "mcp-host-proxy-egress" }["spec"]["egress"].first["ports"] << { "port" => 8443, "protocol" => "TCP" }')"
+assert_result "${proxy_extra_port}" '{"egress_contract_ok":false,"selector_contract_ok":true,"hcc_lane":true,"proxy_8083":false}'
+echo "PASS: live policy helper rejects an extra port on the exact mcp-proxy lane"
+
 invalid_selector="$(mutate invalid-selector 'data["items"].select { |d| d["kind"] == "NetworkPolicy" && d.dig("metadata", "namespace") == "mcp-host" }.each { |d| d["spec"]["podSelector"] = { "matchLabels" => { "np08.invalid/never" => "true" } } }')"
 assert_result "${invalid_selector}" '{"egress_contract_ok":false,"selector_contract_ok":false,"hcc_lane":false,"proxy_8083":false}'
 echo "PASS: live policy helper rejects ineffective Host selectors"
