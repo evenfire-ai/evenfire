@@ -71,7 +71,16 @@ function mergePatchMap(
     if (value === null) {
       delete merged[key]
     } else if (typeof value === 'string') {
-      merged[key] = value
+      // Define a data property explicitly so a Kubernetes annotation/label key
+      // such as `__proto__` cannot invoke an inherited setter while the mock
+      // models RFC 7396. Production validation still owns which keys are valid;
+      // this boundary must also model arbitrary server-returned map members safely.
+      Object.defineProperty(merged, key, {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      })
     }
   }
   return merged

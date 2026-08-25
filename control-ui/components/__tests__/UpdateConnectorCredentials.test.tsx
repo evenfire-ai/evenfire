@@ -37,8 +37,6 @@ function secretRotationResponse(keys: string[], affectedConnectors = [SERVER_NAM
   return {
     ...buildSecretSummary({ name: ENV_SECRET.name, keys }),
     namespace: 'mcp-server',
-    uid: 'uid-linear-credentials',
-    resourceVersion: '2',
     affectedConnectors,
   }
 }

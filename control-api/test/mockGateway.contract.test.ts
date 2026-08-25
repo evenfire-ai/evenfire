@@ -197,6 +197,25 @@ describe('MockGateway Kubernetes identity contract', () => {
     })
   })
 
+  it('stores a dynamic map key as data without changing the object prototype', async () => {
+    const gateway = new MockGateway('mcp-server')
+    gateway.seedSecret('credentials', 'mcp-server', { type: 'Opaque' })
+    const annotations = JSON.parse('{"__proto__":"safe-value"}') as Record<string, string>
+
+    await gateway.mergeSecret({
+      name: 'credentials',
+      namespace: 'mcp-server',
+      annotations,
+    })
+
+    const stored = await gateway.getSecret('credentials', 'mcp-server')
+    expect(Object.prototype.hasOwnProperty.call(stored.metadata?.annotations, '__proto__')).toBe(
+      true
+    )
+    expect(stored.metadata?.annotations?.['__proto__']).toBe('safe-value')
+    expect(Object.prototype).not.toHaveProperty('safe-value')
+  })
+
   it('rejects stale identity on key removal instead of deleting a concurrent value', async () => {
     const gateway = new MockGateway('mcp-server')
     const key = ['FIE', 'LD'].join('')

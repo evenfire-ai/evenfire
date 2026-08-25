@@ -184,15 +184,6 @@ function formatCreateError(err: unknown): string {
   return message
 }
 
-const DETERMINISTIC_CREATE_FAILURE_STATUSES = new Set([
-  400, 401, 403, 404, 405, 406, 411, 413, 415, 422,
-])
-
-function isDeterministicCreateFailure(err: unknown): boolean {
-  const status = err && typeof err === 'object' ? (err as { status?: unknown }).status : undefined
-  return typeof status === 'number' && DETERMINISTIC_CREATE_FAILURE_STATUSES.has(status)
-}
-
 export function CreateMcpServerForm({
   mode = 'inline',
   onCancel,
@@ -542,17 +533,9 @@ export function CreateMcpServerForm({
       useEnvSecret && envSecretName.trim().length > 0 && Object.keys(secretData).length > 0
 
     let secretCreated = false
-    let createdSecretIdentity: { uid: string; resourceVersion: string } | null = null
     try {
       if (willCreateSecret) {
-        const created = await createMcpSecret(envSecretName.trim(), secretData)
-        if (!created.uid || !created.resourceVersion) {
-          throw new Error('Created Secret identity is unavailable; refusing an unsafe rollback.')
-        }
-        createdSecretIdentity = {
-          uid: created.uid,
-          resourceVersion: created.resourceVersion,
-        }
+        await createMcpSecret(envSecretName.trim(), secretData)
         secretCreated = true
       }
 
@@ -592,25 +575,17 @@ export function CreateMcpServerForm({
         onCreated()
       }, 600)
     } catch (submitError) {
-      // Only an allowlisted pre-admission rejection proves that the CRD cannot
-      // own the Secret. A conflict, timeout, throttling, network, or 5xx
-      // response is ambiguous: preserve the Secret for repair instead of
-      // deleting a live dependency.
-      const deterministicFailure = isDeterministicCreateFailure(submitError)
-      if (secretCreated && createdSecretIdentity && deterministicFailure) {
+      // Rollback: if we created the Secret but the CRD (or anything after)
+      // failed, the Secret is orphan — best-effort delete.
+      if (secretCreated) {
         try {
-          await deleteMcpSecret(envSecretName.trim(), createdSecretIdentity)
+          await deleteMcpSecret(envSecretName.trim())
         } catch {
           // best-effort rollback; swallow — the operator already sees the
           // primary error below.
         }
       }
-      const errorMessage = formatCreateError(submitError)
-      setError(
-        secretCreated && !deterministicFailure
-          ? `${errorMessage} The Secret was retained because connector creation was ambiguous; repair the connector state before retrying.`
-          : errorMessage
-      )
+      setError(formatCreateError(submitError))
     } finally {
       setSubmitting(false)
     }

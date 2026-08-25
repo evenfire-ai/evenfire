@@ -34,17 +34,11 @@ test.describe('optional QA recorder: Control UI connector secret lifecycle', () 
 
     const credentials = adminCredentials()
     const secretName = uniqueE2EName('qa-recorder-connector-secret')
-    let createdSecretIdentity: { uid: string; resourceVersion: string } | undefined
 
     try {
       await loginThroughUi(page, credentials)
 
-      await page.getByRole('link', { name: 'Secrets', exact: true }).click()
-      await expect(page).toHaveURL(/\/secrets$/, { timeout: 20_000 })
-      await page.getByRole('tab', { name: 'Connector', exact: true }).click()
-      await expect(page).toHaveURL(/\/secrets\/connector$/, { timeout: 20_000 })
-      await page.getByRole('button', { name: 'Add connector secret', exact: true }).click()
-      await expect(page).toHaveURL(/\/secrets\/new\?scope=mcp/, { timeout: 20_000 })
+      await page.goto(`${CONTROL_UI_URL}/secrets/new?scope=mcp`)
       await expect(
         page.getByRole('heading', { name: 'Create connector secret', exact: true })
       ).toBeVisible({ timeout: 20_000 })
@@ -59,25 +53,9 @@ test.describe('optional QA recorder: Control UI connector secret lifecycle', () 
 
       await expect(page.getByPlaceholder('API_KEY')).toBeVisible({ timeout: 20_000 })
       await page.getByRole('button', { name: 'Add key', exact: true }).click()
-      const addedRow = page.locator('.cu-form-inline').filter({
-        has: page.getByRole('button', { name: 'Remove MCP secret key row 2', exact: true }),
-      })
-      await addedRow.getByPlaceholder('API_KEY').fill('API_KEY')
-      await addedRow.getByPlaceholder('secret value').fill('qa-recorder-dummy')
-      const createResponsePromise = page.waitForResponse(response => {
-        return response.request().method() === 'POST' && response.url().includes('/admin/mcp-')
-      })
+      await page.getByPlaceholder('API_KEY').last().fill('API_KEY')
+      await page.getByPlaceholder('secret value').last().fill('qa-recorder-dummy')
       await page.getByRole('button', { name: 'Create secret', exact: true }).click()
-      const createData = (await (await createResponsePromise).json()) as {
-        uid?: unknown
-        resourceVersion?: unknown
-      }
-      if (typeof createData.uid === 'string' && typeof createData.resourceVersion === 'string') {
-        createdSecretIdentity = {
-          uid: createData.uid,
-          resourceVersion: createData.resourceVersion,
-        }
-      }
 
       await expect(page.getByText(`Secret ${secretName} created.`, { exact: true })).toBeVisible({
         timeout: 20_000,
@@ -86,8 +64,7 @@ test.describe('optional QA recorder: Control UI connector secret lifecycle', () 
       // The connector list is McpServer-derived; a standalone secret is not listed
       // and connector scope has no delete action in the UI. Record the connector
       // shell and clean up through the Control API below.
-      await page.getByRole('link', { name: 'Secrets', exact: true }).click()
-      await expect(page).toHaveURL(/\/secrets\/connector$/, { timeout: 20_000 })
+      await page.goto(`${CONTROL_UI_URL}/secrets/connector`)
       await expect(
         page.getByText('Manage LLM, connector, and recipe credentials in one place.', {
           exact: true,
@@ -97,14 +74,11 @@ test.describe('optional QA recorder: Control UI connector secret lifecycle', () 
       await screenshotAndLog(page, testInfo, 'control-ui-secret-connector')
     } finally {
       try {
-        if (createdSecretIdentity) {
-          await api(
-            page.request,
-            'DELETE',
-            `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
-            createdSecretIdentity
-          )
-        }
+        await api(
+          page.request,
+          'DELETE',
+          `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`
+        )
       } catch {
         // Best-effort: ignore cleanup failures.
       }

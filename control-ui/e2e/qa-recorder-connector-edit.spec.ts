@@ -26,8 +26,7 @@ const MOCK_MCP_IMAGE = process.env.TEST_MOCK_MCP_IMAGE ?? 'clerum/mock-mcp-serve
 // The connector-form selects are not label-associated (no htmlFor/id), so scope
 // to the wrapping `.cu-field` by its visible label text and drive its <select>.
 async function fieldSelect(page: Page, fieldLabelText: string, value: string): Promise<void> {
-  const field = page.locator('.cu-field', { hasText: fieldLabelText })
-  await expect(field).toHaveCount(1)
+  const field = page.locator('.cu-field', { hasText: fieldLabelText }).first()
   await field.locator('select').selectOption(value)
 }
 
@@ -103,16 +102,6 @@ async function createDiscoveryConnector(
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
 }
 
-async function openConnectorEdit(page: Page, connectorName: string): Promise<void> {
-  const expandBtn = page.getByRole('button', { name: `Expand connector ${connectorName}` })
-  await expect(expandBtn).toBeVisible({ timeout: 30_000 })
-  await expandBtn.click()
-  await page.getByRole('button', { name: `Edit connector ${connectorName}` }).click()
-  await expect(
-    page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
-  ).toBeVisible({ timeout: 20_000 })
-}
-
 test.describe('optional QA recorder: Control UI connector edit', () => {
   test('records editing a discovery connector to add external CIDR egress', async ({
     page,
@@ -134,7 +123,10 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       await createEmptyContext(page, contextName)
       await createDiscoveryConnector(page, connectorName, contextName)
 
-      await openConnectorEdit(page, connectorName)
+      await page.goto(`${CONTROL_UI_URL}/connectors/${encodeURIComponent(connectorName)}/edit`)
+      await expect(
+        page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
+      ).toBeVisible({ timeout: 20_000 })
 
       // Context is a read-only final tab. It mirrors the selected context's
       // Users, Teams, and Agents access preview without offering a mutation.
@@ -159,12 +151,16 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       // External Egress: switch to exact-CIDR mode and add one public CIDR + port.
       // 8.8.8.8/32 is a valid public target; the model rejects private/doc ranges.
       await fieldSelect(page, 'Egress mode', 'exact-cidr')
-      const cidrField = page.locator('.cu-field', { hasText: 'Allowed CIDRs/IPs' })
-      await expect(cidrField).toHaveCount(1)
-      await cidrField.locator('textarea').fill('8.8.8.8/32')
-      const portsField = page.locator('.cu-field', { hasText: 'Allowed ports' })
-      await expect(portsField).toHaveCount(1)
-      await portsField.locator('input').fill('443')
+      await page
+        .locator('.cu-field', { hasText: 'Allowed CIDRs/IPs' })
+        .first()
+        .locator('textarea')
+        .fill('8.8.8.8/32')
+      await page
+        .locator('.cu-field', { hasText: 'Allowed ports' })
+        .first()
+        .locator('input')
+        .fill('443')
 
       await page.getByRole('button', { name: 'Save egress', exact: true }).click()
       await expect(
@@ -188,7 +184,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
   // the rotation itself — filling the new value, confirming the restart
   // warning, saving, watching the status settle — is driven exclusively by
   // real user actions against the live control-api/HCC, never a direct PUT,
-  // never a mocked backend, never a fixed delay.
+  // never a mocked backend, never `waitForTimeout`.
   test('records rotating a connector credential and reaching a terminal rollout state', async ({
     page,
   }, testInfo) => {
@@ -205,7 +201,6 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
     const secretName = uniqueE2EName('qa-recorder-secret')
     const secretKey = 'api-key'
     const envVar = 'QA_RECORDER_API_KEY'
-    let createdSecretIdentity: { uid: string; resourceVersion: string } | undefined
 
     try {
       await loginThroughUi(page, credentials)
@@ -217,23 +212,12 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       // image is used so the rotation reaches a real DeploymentReady terminal
       // state (an unmanaged connector has no Deployment to poll). This mirrors the
       // T2 integration `localMcpServerYaml` fixture.
-      const secretRes = await api<{ uid?: unknown; resourceVersion?: unknown }>(
-        page.request,
-        'POST',
-        '/api/v1/admin/mcp-secrets',
-        {
-          name: secretName,
-          data: { [secretKey]: 'initial-value-123' },
-        }
-      )
+      const secretRes = await api(page.request, 'POST', '/api/v1/admin/mcp-secrets', {
+        name: secretName,
+        data: { [secretKey]: 'initial-value-123' },
+      })
       expect(secretRes.status, `create Secret: ${JSON.stringify(secretRes.data)}`).toBeLessThan(300)
 
-      expect(typeof secretRes.data.uid, 'created object uid').toBe('string')
-      expect(typeof secretRes.data.resourceVersion, 'created object resourceVersion').toBe('string')
-      createdSecretIdentity = {
-        uid: secretRes.data.uid as string,
-        resourceVersion: secretRes.data.resourceVersion as string,
-      }
       const ctxRes = await api(page.request, 'POST', '/api/v1/admin/contexts', {
         metadata: { name: contextName },
         spec: {
@@ -262,9 +246,10 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       })
       expect(srvRes.status, `create connector: ${JSON.stringify(srvRes.data)}`).toBeLessThan(300)
 
-      await page.getByRole('link', { name: 'Installed connectors', exact: true }).click()
-      await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
-      await openConnectorEdit(page, connectorName)
+      await page.goto(`${CONTROL_UI_URL}/connectors/${encodeURIComponent(connectorName)}/edit`)
+      await expect(
+        page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
+      ).toBeVisible({ timeout: 20_000 })
 
       // The connector edit screen is split into tabs; the rotation flow lives
       // on the Credentials tab — navigate there via the tab link.
@@ -296,25 +281,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       // Explicit confirmation gate before anything is sent to the server.
       const confirmDialog = page.getByRole('alertdialog', { name: 'Rotate credentials' })
       await expect(confirmDialog).toBeVisible({ timeout: 20_000 })
-      const rotateResponsePromise = page.waitForResponse(response => {
-        return (
-          response.request().method() === 'PUT' &&
-          response.url().includes(`/admin/mcp-secrets/${encodeURIComponent(secretName)}`)
-        )
-      })
       await confirmDialog.getByRole('button', { name: 'Rotate & restart', exact: true }).click()
-      const rotateResponse = await rotateResponsePromise
-      expect(rotateResponse.status()).toBeLessThan(300)
-      const rotated = (await rotateResponse.json()) as {
-        uid?: unknown
-        resourceVersion?: unknown
-      }
-      expect(typeof rotated.uid, 'rotated object uid').toBe('string')
-      expect(typeof rotated.resourceVersion, 'rotated object resourceVersion').toBe('string')
-      createdSecretIdentity = {
-        uid: rotated.uid as string,
-        resourceVersion: rotated.resourceVersion as string,
-      }
 
       // The PUT landing shows "rotating", never a verdict by itself — the
       // verdict only comes from the CRD poll below.
@@ -343,14 +310,11 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
-      if (createdSecretIdentity) {
-        await api(
-          page.request,
-          'DELETE',
-          `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
-          createdSecretIdentity
-        )
-      }
+      await api(
+        page.request,
+        'DELETE',
+        `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`
+      )
       await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
     }
   })

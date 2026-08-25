@@ -2314,7 +2314,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
           if (associationOutcome !== 'committed') {
             if (
-              (createdMcpServerSnapshot && !createdMcpServerIdentityProven) ||
+              !createdMcpServerIdentityProven ||
               (createdSecretSnapshot && !createdSecretIdentityProven)
             ) {
               res.status(503).json({
@@ -3064,34 +3064,32 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         } catch (err) {
           const associationOutcome = isDeterministicRegistryNoCommit(err)
             ? 'not-committed'
-            : hostBefore
-              ? await readRegistryAssociationOutcome(
-                  gateway,
-                  'hosts',
-                  body.hostRef,
-                  config.hostsNamespace,
-                  hostBefore,
-                  spec => {
-                    const hooks = ((
-                      spec.guardrails as { hooks?: Record<string, unknown> } | undefined
-                    )?.hooks ?? {}) as Record<string, unknown>
-                    return hookMeta.lifecyclePoints.every(phase => {
-                      const refs = hooks[phase]
-                      return (
-                        Array.isArray(refs) &&
-                        refs.some(ref => {
-                          if (!ref || typeof ref !== 'object') return false
-                          const candidate = ref as { id?: unknown; digest?: unknown }
-                          return (
-                            candidate.id === crName &&
-                            (digest === undefined || candidate.digest === digest)
-                          )
-                        })
-                      )
-                    })
-                  }
-                )
-              : 'ambiguous'
+            : await readRegistryAssociationOutcome(
+                gateway,
+                'hosts',
+                body.hostRef,
+                config.hostsNamespace,
+                hostBefore!,
+                spec => {
+                  const hooks = ((
+                    spec.guardrails as { hooks?: Record<string, unknown> } | undefined
+                  )?.hooks ?? {}) as Record<string, unknown>
+                  return hookMeta.lifecyclePoints.every(phase => {
+                    const refs = hooks[phase]
+                    return (
+                      Array.isArray(refs) &&
+                      refs.some(ref => {
+                        if (!ref || typeof ref !== 'object') return false
+                        const candidate = ref as { id?: unknown; digest?: unknown }
+                        return (
+                          candidate.id === crName &&
+                          (digest === undefined || candidate.digest === digest)
+                        )
+                      })
+                    )
+                  })
+                }
+              )
           if (associationOutcome === 'ambiguous') {
             res.status(503).json({
               error: 'registry_install_outcome_ambiguous',
@@ -3101,7 +3099,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
           if (associationOutcome !== 'committed') {
             if (
-              (createdHookSnapshot && !createdHookIdentityProven) ||
+              !createdHookIdentityProven ||
               (secretCreated && createdSecretSnapshot && !createdSecretIdentityProven)
             ) {
               res.status(503).json({
@@ -4242,7 +4240,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 }
                 await rollbackCreatedSecret(gateway, createdSecret)
               } else if (previousSecretSnapshot) {
-                const restored = await gateway.updateSecret(
+                await gateway.updateSecret(
                   {
                     name: previousSecretSnapshot.name,
                     namespace: previousSecretSnapshot.namespace,
@@ -4255,7 +4253,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                   mutatedSecretPreconditions,
                   REGISTRY_SECRET_WRITE_OPTIONS
                 )
-                mutatedSecretSnapshot = restored
               }
             } catch (rollbackErr) {
               log.error(

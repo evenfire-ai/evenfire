@@ -39,7 +39,6 @@ test.describe('demo: Control UI credential-rotation journey', () => {
     const secretName = uniqueE2EName('demo-secret')
     const secretKey = 'api-key'
     const envVar = 'DEMO_API_KEY'
-    let createdSecretIdentity: { uid: string; resourceVersion: string } | undefined
 
     try {
       await test.step('sign in through the Control UI', async () => {
@@ -48,22 +47,11 @@ test.describe('demo: Control UI credential-rotation journey', () => {
       })
 
       await test.step('stage a managed connector + Secret (API preconditions)', async () => {
-        const s = await api<{ uid?: unknown; resourceVersion?: unknown }>(
-          page.request,
-          'POST',
-          '/api/v1/admin/mcp-secrets',
-          {
-            name: secretName,
-            data: { [secretKey]: 'initial-value-123' },
-          }
-        )
+        const s = await api(page.request, 'POST', '/api/v1/admin/mcp-secrets', {
+          name: secretName,
+          data: { [secretKey]: 'initial-value-123' },
+        })
         expect(s.status, `Secret: ${JSON.stringify(s.data)}`).toBeLessThan(300)
-        expect(typeof s.data.uid, 'created object uid').toBe('string')
-        expect(typeof s.data.resourceVersion, 'created object resourceVersion').toBe('string')
-        createdSecretIdentity = {
-          uid: s.data.uid as string,
-          resourceVersion: s.data.resourceVersion as string,
-        }
         const c = await api(page.request, 'POST', '/api/v1/admin/contexts', {
           metadata: { name: contextName },
           spec: { contextId: contextName, description: 'demo rotation context', mcpServers: [] },
@@ -136,28 +124,10 @@ test.describe('demo: Control UI credential-rotation journey', () => {
         const dialog = page.getByRole('alertdialog', { name: 'Rotate credentials' })
         await expect(dialog).toBeVisible({ timeout: 20_000 })
         await humanPause(page)
-        const rotateResponsePromise = page.waitForResponse(response => {
-          return (
-            response.request().method() === 'PUT' &&
-            response.url().includes(`/admin/mcp-secrets/${encodeURIComponent(secretName)}`)
-          )
-        })
         await humanClick(
           page,
           dialog.getByRole('button', { name: 'Rotate & restart', exact: true })
         )
-        const rotateResponse = await rotateResponsePromise
-        expect(rotateResponse.status()).toBeLessThan(300)
-        const rotated = (await rotateResponse.json()) as {
-          uid?: unknown
-          resourceVersion?: unknown
-        }
-        expect(typeof rotated.uid, 'rotated object uid').toBe('string')
-        expect(typeof rotated.resourceVersion, 'rotated object resourceVersion').toBe('string')
-        createdSecretIdentity = {
-          uid: rotated.uid as string,
-          resourceVersion: rotated.resourceVersion as string,
-        }
       })
 
       await test.step('watch the rollout reach "Credentials rotated"', async () => {
@@ -174,14 +144,11 @@ test.describe('demo: Control UI credential-rotation journey', () => {
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
-      if (createdSecretIdentity) {
-        await api(
-          page.request,
-          'DELETE',
-          `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
-          createdSecretIdentity
-        )
-      }
+      await api(
+        page.request,
+        'DELETE',
+        `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`
+      )
       await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
     }
   })

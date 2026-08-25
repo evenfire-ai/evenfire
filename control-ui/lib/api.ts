@@ -1451,8 +1451,6 @@ export async function createMcpSecret(name: string, data: Record<string, string>
   return apiSend('POST', '/api/v1/admin/mcp-secrets', { name, data }) as Promise<{
     name: string
     namespace: string
-    uid: string
-    resourceVersion: string
   }>
 }
 
@@ -1462,15 +1460,8 @@ export async function createMcpSecret(name: string, data: Record<string, string>
  * back a just-created Secret when the subsequent McpServer CRD creation fails,
  * so we never leave orphan Secrets behind.
  */
-export async function deleteMcpSecret(
-  name: string,
-  precondition: { uid: string; resourceVersion: string }
-) {
-  return apiSend(
-    'DELETE',
-    `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`,
-    precondition
-  ) as Promise<{
+export async function deleteMcpSecret(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`) as Promise<{
     name: string
     namespace: string
   }>
@@ -1494,8 +1485,6 @@ export async function updateMcpSecret(name: string, data: Record<string, string>
   }) as Promise<{
     name: string
     namespace: string
-    uid: string
-    resourceVersion: string
     keys: string[]
     affectedConnectors: string[]
   }>

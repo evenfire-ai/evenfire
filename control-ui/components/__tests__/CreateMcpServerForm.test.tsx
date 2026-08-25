@@ -14,11 +14,7 @@ vi.mock('../../lib/api', async () => {
   })
   return {
     createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
-    createMcpSecret: vi.fn().mockResolvedValue({
-      name: 'test-credentials',
-      uid: 'uid-test-credentials',
-      resourceVersion: '1',
-    }),
+    createMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
     deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
     getContexts: vi.fn().mockResolvedValue(
       buildContextList([
@@ -494,9 +490,7 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
 
   it('rolls back the created Secret when createMcpServer rejects', async () => {
     ;(api.createMcpServer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      Object.assign(new Error('422 Unprocessable - {"message":"Connector create failed"}'), {
-        status: 422,
-      })
+      new Error('422 Unprocessable - {"message":"Connector create failed"}')
     )
 
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
@@ -529,77 +523,13 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     await waitFor(() => {
       expect(api.deleteMcpSecret).toHaveBeenCalledTimes(1)
     })
-    expect(api.deleteMcpSecret).toHaveBeenCalledWith('brave-credentials', {
-      uid: 'uid-test-credentials',
-      resourceVersion: '1',
-    })
+    expect(api.deleteMcpSecret).toHaveBeenCalledWith('brave-credentials')
 
     // JSON API errors surface their server message after rollback.
     await waitFor(() => {
       expect(screen.getByText('Connector create failed')).toBeInTheDocument()
     })
   })
-
-  it('keeps the Secret when createMcpServer fails ambiguously', async () => {
-    ;(api.createMcpServer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      Object.assign(new Error('503 Service Unavailable - {"error":"repair_required"}'), {
-        status: 503,
-      })
-    )
-
-    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-    await fillRequiredBasics()
-    enableEnvSecret('ambiguous-credentials')
-    fireEvent.click(screen.getByRole('button', { name: 'Add Key Mapping' }))
-    fireEvent.change(screen.getByPlaceholderText('api-key'), {
-      target: { value: 'api-key' },
-    })
-    fireEvent.change(screen.getByPlaceholderText('BRAVE_API_KEY'), {
-      target: { value: 'BRAVE_API_KEY' },
-    })
-    fireEvent.change(screen.getByPlaceholderText('sk-...'), {
-      target: { value: 'sk-ambiguous' },
-    })
-
-    const submit = screen.getByRole('button', { name: 'Create connector' })
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
-
-    await waitFor(() => expect(api.createMcpServer).toHaveBeenCalledTimes(1))
-    await waitFor(() => expect(screen.getByText(/Secret was retained/i)).toBeInTheDocument())
-    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
-  })
-
-  it.each([408, 409, 429])(
-    'keeps the Secret when connector creation returns ambiguous HTTP %s',
-    async status => {
-      ;(api.createMcpServer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        Object.assign(new Error(`${status} connector create outcome is ambiguous`), { status })
-      )
-
-      render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
-      await fillRequiredBasics()
-      enableEnvSecret('ambiguous-credentials')
-      fireEvent.click(screen.getByRole('button', { name: 'Add Key Mapping' }))
-      fireEvent.change(screen.getByPlaceholderText('api-key'), {
-        target: { value: 'api-key' },
-      })
-      fireEvent.change(screen.getByPlaceholderText('BRAVE_API_KEY'), {
-        target: { value: 'BRAVE_API_KEY' },
-      })
-      fireEvent.change(screen.getByPlaceholderText('sk-...'), {
-        target: { value: 'sk-ambiguous' },
-      })
-
-      const submit = screen.getByRole('button', { name: 'Create connector' })
-      await waitFor(() => expect(submit).not.toBeDisabled())
-      fireEvent.click(submit)
-
-      await waitFor(() => expect(api.createMcpServer).toHaveBeenCalledTimes(1))
-      await waitFor(() => expect(screen.getByText(/Secret was retained/i)).toBeInTheDocument())
-      expect(api.deleteMcpSecret).not.toHaveBeenCalled()
-    }
-  )
 
   it('happy path: creates Secret then CRD, no rollback', async () => {
     const onCreated = vi.fn()
