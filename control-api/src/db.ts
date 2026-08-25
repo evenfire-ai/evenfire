@@ -5934,6 +5934,17 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   },
   {
     version: '0101_oauth_grants_owner_generalization',
+    // Renamed twice while rebasing onto dev: 0091 -> 0100 -> 0101 (each dev sync
+    // collided with a migration dev landed at the same number). Environments where
+    // the feature branch already deployed recorded it under an earlier name (the
+    // dev cluster most likely as 0100_...). legacyVersions lets the runner mark
+    // 0101 applied from that prior row instead of re-running the DDL and leaving an
+    // orphan schema_migrations entry. Both names are unique to this migration
+    // (dev's 0100 is 0100_seed_minimax_allowed_model), so there is no false-skip.
+    legacyVersions: [
+      '0100_oauth_grants_owner_generalization',
+      '0091_oauth_grants_owner_generalization',
+    ],
     apply: applyOAuthGrantsOwnerGeneralization,
   },
 ]
