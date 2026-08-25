@@ -50,7 +50,10 @@ const server: AuthorityMcpServer = {
   name: 'server-a',
   namespace: 'mcp-server',
   metadata: meta('server-uid-a', '30'),
-  transport: { type: 'streamableHttp', url: 'http://server-a/mcp' },
+  transport: {
+    type: 'streamableHttp',
+    url: 'http://server-a.mcp-server.svc.cluster.local:3000/mcp',
+  },
   auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
   enabled: true,
   status: { deployed: true, ready: true, authoritative: false },
@@ -59,7 +62,10 @@ const serverB: AuthorityMcpServer = {
   ...server,
   name: 'server-b',
   metadata: meta('server-uid-b', '31'),
-  transport: { type: 'streamableHttp', url: 'http://server-b/mcp' },
+  transport: {
+    type: 'streamableHttp',
+    url: 'http://server-b.mcp-server.svc.cluster.local:3000/mcp',
+  },
   auth: { type: 'bearer', secretRef: 'server-b-auth', secretKey: 'token' },
 }
 const secret: AuthoritySecret = {

@@ -167,7 +167,17 @@ export class ProxyServer {
     if (isCallerGone()) return
 
     try {
-      validateInternalTarget(authorization.targetUrl, this.config.allowLoopbackTargets)
+      if (
+        authorization.serverName !== serverName
+      ) {
+        this.sendError(res, 503, 'authorization_unavailable')
+        return
+      }
+      validateInternalTarget(
+        authorization.targetUrl,
+        this.config.allowLoopbackTargets,
+        serverName
+      )
     } catch {
       this.sendError(res, 503, 'authorization_unavailable')
       return
@@ -176,7 +186,7 @@ export class ProxyServer {
     const startedAt = Date.now()
     this.metrics.incrementActive(serverName)
     try {
-      await this.forwarder.forward(req, res, authorization.targetUrl, body)
+      await this.forwarder.forward(req, res, authorization.targetUrl, body, serverName)
       this.metrics.recordRequest({
         server: serverName,
         method: req.method || 'GET',

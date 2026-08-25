@@ -29,6 +29,7 @@ describe("HccClient", () => {
   let responseBody: unknown;
   let responseStatus: number;
   let responseHeaders: Record<string, string>;
+  let authorizationBody: unknown;
   let compatibilityBody: unknown;
   let compatibilityStatus: number | undefined;
   let requests: Array<{ method: string; path: string; headers: http.IncomingHttpHeaders }>;
@@ -38,6 +39,7 @@ describe("HccClient", () => {
     responseBody = { schemaVersion: 1, servers: [], timestamp: new Date().toISOString() };
     responseStatus = 200;
     responseHeaders = {};
+    authorizationBody = undefined;
     compatibilityBody = undefined;
     compatibilityStatus = undefined;
     requests = [];
@@ -60,10 +62,10 @@ describe("HccClient", () => {
           isCompatibilityRequest && compatibilityBody !== undefined
             ? compatibilityBody
             : req.method === "POST"
-            ? {
+            ? authorizationBody ?? {
                 schemaVersion: 1,
                 serverName: "mongo-mcp",
-                targetUrl: "http://mongo.mcp-server.svc.cluster.local:3000/mcp",
+                targetUrl: "http://mongo-mcp.mcp-server.svc.cluster.local:3000/mcp",
                 destinationRevision: "revision-1",
               }
             : responseBody;
@@ -334,6 +336,20 @@ describe("HccClient", () => {
     expect(requests[1].headers["x-clerum-host-authorization"]).toBe(
       "Bearer fixture-host-bearer"
     );
+  });
+
+  it("should reject an authorization target bound to another McpServer", async () => {
+    authorizationBody = {
+      schemaVersion: 1,
+      serverName: "mongo-mcp",
+      targetUrl: "http://other-mcp.mcp-server.svc.cluster.local:3000/mcp",
+      destinationRevision: "revision-1",
+    };
+    const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
+
+    await expect(client.authorizeForward("mongo-mcp", "fixture-host-bearer")).rejects.toMatchObject({
+      code: "unavailable",
+    });
   });
 
   it("should never use the cached inventory as authorization fallback", async () => {

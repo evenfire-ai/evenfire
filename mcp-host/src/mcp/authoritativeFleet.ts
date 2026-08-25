@@ -697,6 +697,8 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
   getAuthToken: (serverName: string) => Promise<AuthTokenResponse>
   maxConcurrency?: number
   coordinator?: AuthoritativeMcpFleetCoordinator
+  /** Await background effects when the caller uses completion as authority evidence. */
+  awaitCompletion?: boolean
 }): Promise<void> {
   const maxConcurrency = resolveMcpFleetConcurrency(options.maxConcurrency)
   const coordinator =
@@ -901,6 +903,7 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
   }
 
   const effects: Array<() => Promise<void>> = []
+  let firstReconciliationFailure: unknown = null
   // Authoritative absence is a revocation signal. Queue deletions before
   // admissions so a full budget of slow new peers cannot delay retiring
   // servers that are no longer desired.
@@ -928,6 +931,7 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
           reconcileServer(server, isCurrent)
         )
       } catch (error) {
+        firstReconciliationFailure ??= error
         console.error(`[Main] MCP server reconciliation failed; will retry: ${server.name}`, error)
       }
     })
@@ -938,6 +942,11 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
   // deletion keys, so effects can progress independently under one bounded
   // fleet-wide budget without weakening same-server ordering.
   const reconciliation = runMcpFleetEffects(effects, maxConcurrency, effect => effect())
+  if (options.awaitCompletion) {
+    await reconciliation
+    if (firstReconciliationFailure !== null) throw firstReconciliationFailure
+    return
+  }
   if (coordinator.reconcilesInBackground) {
     void reconciliation.catch(error => {
       console.error('[Main] MCP background snapshot reconciliation failed:', error)

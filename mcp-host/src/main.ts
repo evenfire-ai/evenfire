@@ -1008,6 +1008,7 @@ async function pollContextMapper(): Promise<void> {
           grantState: lastGrantState,
           getAuthToken: serverName => contextMapperClient!.getAuthToken(serverName),
           coordinator: mcpFleetCoordinator,
+          awaitCompletion: true,
         }),
     })
     if (!isShuttingDown && mcpManager === manager) {

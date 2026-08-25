@@ -41,6 +41,22 @@ const BEARER_SCHEME = 'Bearer'
 const SYSTEM_AUTH_FAILURE_HEADER = 'x-clerum-mcp-proxy-auth-failure'
 const MAX_HCC_RESPONSE_BYTES = 1_048_576
 const SERVER_NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/
+const MCP_SERVICE_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
+
+export function expectedMcpServiceHostname(serverName: string): string | null {
+  if (serverName.length > 63 || !MCP_SERVICE_NAME_RE.test(serverName)) return null
+  return `${serverName}.mcp-server.svc.cluster.local`
+}
+
+export function isExpectedMcpServiceTarget(targetUrl: string, serverName: string): boolean {
+  const expectedHostname = expectedMcpServiceHostname(serverName)
+  if (!expectedHostname) return false
+  try {
+    return new URL(targetUrl).hostname.toLowerCase() === expectedHostname
+  } catch {
+    return false
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -235,7 +251,10 @@ export class HccClient {
         JSON.stringify({ serverName })
       )
     )
-    if (authorization.serverName !== serverName) {
+    if (
+      authorization.serverName !== serverName ||
+      !isExpectedMcpServiceTarget(authorization.targetUrl, serverName)
+    ) {
       throw new HccAuthorizationError('unavailable')
     }
     return authorization

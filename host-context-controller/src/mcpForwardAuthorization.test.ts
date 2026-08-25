@@ -113,6 +113,24 @@ describe('McpAuthorizationService live forwarding', () => {
     expect(store.readSecret).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['a destination bound to another McpServer', 'http://server-b.mcp-server.svc.cluster.local:3000/mcp'],
+    ['a destination with the wrong port', 'http://server-a.mcp-server.svc.cluster.local:3001/mcp'],
+  ])('denies %s before returning a live forwarding grant', async (_label, targetUrl) => {
+    const serverA = server('server-a', 'context-a')
+    serverA.transport = { type: 'streamableHttp', url: targetUrl }
+    const store = makeStore(
+      { 'host-a': host('host-a', 'a', 'context-a') },
+      { 'context-a': context('context-a', ['server-a']) },
+      { 'server-a': serverA }
+    )
+    const service = new McpAuthorizationService(store, () => 200)
+
+    await expect(
+      service.getLiveForwardTarget(principal('host-a', 'host-uid-a'), 'server-a')
+    ).rejects.toMatchObject({ code: 'not_found' })
+  })
+
   it('denies an McpServer whose live contextRef disagrees with Context membership', async () => {
     const store = makeStore(
       { 'host-a': host('host-a', 'a', 'context-a') },

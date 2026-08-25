@@ -132,6 +132,9 @@ type AuthorizedMcpServerGrant = AuthorizedHostContext & {
 }
 
 const FALLBACK_SECRET_KEYS = ['token', 'api-key', 'apiKey', 'password'] as const
+const MCP_SERVICE_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
+const MCP_SERVICE_NAMESPACE = 'mcp-server'
+const DEFAULT_MCP_SERVICE_PORT = 3000
 
 function isLive(metadata: AuthorityMetadata): boolean {
   return Boolean(metadata.uid && metadata.resourceVersion && !metadata.deletionTimestamp)
@@ -191,6 +194,11 @@ function forwardRevision(server: AuthorityMcpServer, targetUrl: string): string 
   return createHash('sha256').update(material).digest('base64url')
 }
 
+function expectedMcpServiceHostname(serverName: string): string | null {
+  if (serverName.length > 63 || !MCP_SERVICE_NAME_RE.test(serverName)) return null
+  return `${serverName}.${MCP_SERVICE_NAMESPACE}.svc.cluster.local`
+}
+
 function liveForwardUrl(server: AuthorityMcpServer): string | null {
   if (server.transport.type !== 'sse' && server.transport.type !== 'streamableHttp') return null
   if (
@@ -199,13 +207,28 @@ function liveForwardUrl(server: AuthorityMcpServer): string | null {
   ) {
     return null
   }
+  const expectedHostname = expectedMcpServiceHostname(server.name)
+  const expectedPort = server.transport.port ?? DEFAULT_MCP_SERVICE_PORT
+  if (
+    !expectedHostname ||
+    !Number.isSafeInteger(expectedPort) ||
+    expectedPort < 1 ||
+    expectedPort > 65_535
+  ) {
+    return null
+  }
   try {
     const target = new URL(server.transport.url)
+    const actualPort = Number(target.port) || (target.protocol === 'https:' ? 443 : 80)
     if (
       (target.protocol !== 'http:' && target.protocol !== 'https:') ||
       target.username ||
       target.password ||
-      target.hash
+      target.hash ||
+      target.search ||
+      target.hostname.toLowerCase() !== expectedHostname ||
+      actualPort !== expectedPort ||
+      !target.pathname.startsWith('/')
     ) {
       return null
     }

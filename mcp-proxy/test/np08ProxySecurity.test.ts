@@ -73,16 +73,22 @@ describe('NP-08 mcp-proxy authorization gate', () => {
     upstream = undefined
   })
 
-  async function start(fakeHcc: Partial<HccClient>, overrides: Record<string, unknown> = {}) {
+  async function start(
+    fakeHcc: Partial<HccClient>,
+    overrides: Record<string, unknown> = {},
+    forwarderOverride?: HttpForwarder
+  ) {
     const cfg = config(overrides)
     const router = new Router()
     const hccClient = fakeHcc as HccClient
-    const forwarder = new HttpForwarder({
-      requestTimeout: cfg.requestTimeout,
-      maxResponseSize: cfg.maxResponseSize,
-      maxBufferSize: 65_536,
-      allowLoopbackTargets: cfg.allowLoopbackTargets,
-    })
+    const forwarder =
+      forwarderOverride ??
+      new HttpForwarder({
+        requestTimeout: cfg.requestTimeout,
+        maxResponseSize: cfg.maxResponseSize,
+        maxBufferSize: 65_536,
+        allowLoopbackTargets: cfg.allowLoopbackTargets,
+      })
     const health = new Health(router, hccClient)
     proxy = new ProxyServer(router, forwarder, new Metrics(), health, cfg, hccClient)
     await proxy.start()
@@ -277,6 +283,38 @@ describe('NP-08 mcp-proxy authorization gate', () => {
     })
 
     expect(response.status).toBe(503)
+    expect(upstream.connectionCountValue).toBe(0)
+    expect(upstream.requestCountValue).toBe(0)
+    expect(upstream.bytesReceivedValue).toBe(0)
+  })
+
+  it('denies a live grant targeting another McpServer before forwarding', async () => {
+    upstream = new InstrumentedUpstream()
+    await upstream.start()
+    const authorizeForward = vi.fn(async () => ({
+      serverName: 'server-a',
+      contextRef: 'context-a',
+      targetUrl: 'http://server-b.mcp-server.svc.cluster.local:3000/mcp',
+      destinationRevision: 'revision-b',
+    }))
+    const forwarder = new HttpForwarder({
+      requestTimeout: 5_000,
+      maxResponseSize: 1_048_576,
+      maxBufferSize: 65_536,
+      allowLoopbackTargets: false,
+    })
+    const forward = vi.spyOn(forwarder, 'forward').mockImplementation(async (_req, res) => {
+      res.writeHead(200)
+      res.end()
+    })
+    const port = await start({ authorizeForward }, { allowLoopbackTargets: false }, forwarder)
+    const response = await request(port, '/servers/server-a/mcp', {
+      headers: { 'proxy-authorization': hostHeader('host-a') },
+      body: 'denied-body',
+    })
+
+    expect(response.status).toBe(503)
+    expect(forward).not.toHaveBeenCalled()
     expect(upstream.connectionCountValue).toBe(0)
     expect(upstream.requestCountValue).toBe(0)
     expect(upstream.bytesReceivedValue).toBe(0)

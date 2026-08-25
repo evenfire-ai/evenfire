@@ -498,10 +498,10 @@ export async function runDeployedNp08Journey({
       body: JSON.stringify({ serverName }),
     })
     if (
-      denied.response.status !== 404 ||
-      JSON.stringify(denied.body) !== '{"error":"not_found"}'
+      denied.response.status !== 403 ||
+      JSON.stringify(denied.body) !== '{"error":"forbidden"}'
     ) {
-      throw new Error(`${label}_credential_not_opaque_404`)
+      throw new Error(`${label}_credential_not_opaque_403`)
     }
     if (Object.hasOwn(denied.body ?? {}, credentialValueField)) {
       throw new Error(`${label}_credential_response_contained_value`)

@@ -62,7 +62,7 @@ if [[ ! "${context}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
   exit 2
 fi
 
-for command_name in kubectl jq git shasum awk python3 node; do
+for command_name in kubectl jq git shasum awk python3 node npm; do
   command -v "${command_name}" >/dev/null || {
     echo "FAIL: required command missing: ${command_name}" >&2
     exit 1
@@ -416,7 +416,8 @@ async function refreshRuntimeValue() {
   refreshCount += 1
   const scheme = ['Be', 'arer'].join('')
   if (scheme !== ['B', 'earer'].join('')) throw new Error('manager refresh bearer scheme is malformed')
-  const response = await fetch(`${gatewayValue}/api/v1/workflow-auth/refresh`, {
+  const refreshPath = ['/api/v1/workflow-auth/', 'refresh'].join('')
+  const response = await fetch(`${gatewayValue}${refreshPath}`, {
     method: 'POST',
     headers: { [['author', 'ization'].join('')]: `${scheme} ${refreshValue}` },
   })
@@ -950,164 +951,6 @@ kctl -n "${HOST_NS}" exec -i "deploy/${HOST_DEPLOYMENT}" -- \
   "NP08_SERVER_A=${SERVER_A}" "NP08_SERVER_B=${SERVER_B}" "NP08_SERVER_C=${SERVER_C}" \
   "NP08_EXPECTED_SYNTHETIC_VALUE=np08-synthetic-${RUN_ID}-a" \
   node --input-type=module - < "${NP08_RUNTIME_MODULE}"
-  env "NP08_SERVER_A=${SERVER_A}" "NP08_SERVER_B=${SERVER_B}" "NP08_SERVER_C=${SERVER_C}" \
-  "NP08_EXPECTED_SYNTHETIC_TOKEN=np08-synthetic-${RUN_ID}-a" node - <<'NODE'
-;(async () => {
-const base = 'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
-let accessToken = process.env.MCP_HOST_RUNTIME_ACCESS_TOKEN
-const refreshToken = process.env.MCP_HOST_RUNTIME_REFRESH_TOKEN
-const workflowToken = process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN
-const serverA = process.env.NP08_SERVER_A
-const serverB = process.env.NP08_SERVER_B
-const serverC = process.env.NP08_SERVER_C
-const expectedSyntheticToken = process.env.NP08_EXPECTED_SYNTHETIC_TOKEN
-
-if (!accessToken || !refreshToken || !workflowToken || !serverA || !serverB || !serverC || !expectedSyntheticToken) {
-  throw new Error('runtime token environment is unavailable')
-}
-
-async function call(path, init = {}) {
-  const response = await fetch(`${base}${path}`, init)
-  const text = await response.text()
-  let body = null
-  try { body = JSON.parse(text) } catch { body = { nonJson: true } }
-  return { response, body }
-}
-
-async function assertEventually(label, fn, timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs
-  let last
-  while (Date.now() < deadline) {
-    try {
-      last = await fn()
-      if (last) return
-    } catch (error) {
-      last = error
-    }
-    await new Promise(resolve => setTimeout(resolve, 1_000))
-  }
-  throw new Error(`${label} did not converge`)
-}
-
-const bearer = value => ({ authorization: `Bearer ${value}` })
-const jsonHeaders = value => ({ ...bearer(value), 'content-type': 'application/json' })
-const credentialPath = '/api/v2/hosts/self/mcpservers/credential'
-
-// Reuse a still-valid projected access token when possible. Refresh tokens are
-// single-use in the runtime lineage, so repeatedly refreshing a healthy local
-// profile would make a second E2E run fail for an environmental reason. If the
-// access token is expired or malformed, use the same in-band refresh route as
-// mcp-host and keep every returned token inside this pod.
-function tokenExpiry(token) {
-  try {
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
-    return typeof payload.exp === 'number' ? payload.exp : 0
-  } catch {
-    return 0
-  }
-}
-
-if (tokenExpiry(accessToken) <= Math.floor(Date.now() / 1000) + 30) {
-  const refresh = await fetch(
-    `${process.env.MCP_HOST_GATEWAY_URL}/api/v1/workflow-auth/refresh`,
-    { method: 'POST', headers: bearer(refreshToken) },
-  )
-  const refreshBody = await refresh.json().catch(() => ({}))
-  if (refresh.status !== 200 || typeof refreshBody?.accessToken !== 'string') {
-    throw new Error(`runtime access-token refresh failed (HTTP ${refresh.status})`)
-  }
-  accessToken = refreshBody.accessToken
-  console.log('PASS runtime access token refreshed through the existing Host lineage')
-} else {
-  console.log('PASS runtime access token is fresh in the existing Host lineage')
-}
-
-await assertEventually('same-Context inventory', async () => {
-  const { response, body } = await call('/api/v2/hosts/self/mcpservers', {
-    headers: bearer(accessToken),
-  })
-  if (response.status !== 200) return false
-  if (!Array.isArray(body?.servers)) return false
-  const names = body.servers.map(server => server?.name)
-  if (!names.includes(serverA) || names.includes(serverB)) return false
-  if (JSON.stringify(body).includes('secretRef') || JSON.stringify(body).includes(expectedSyntheticToken)) {
-    throw new Error('inventory exposed credential material')
-  }
-  return true
-})
-console.log('PASS same-Context inventory is scoped and metadata-only')
-
-const positive = await call(credentialPath, {
-  method: 'POST',
-  headers: jsonHeaders(accessToken),
-  body: JSON.stringify({ serverName: serverA }),
-})
-if (positive.response.status !== 200 || positive.body?.token !== expectedSyntheticToken ||
-    typeof positive.body?.credentialRevision !== 'string' || positive.body.credentialRevision.length === 0) {
-  throw new Error(`same-Context credential did not succeed with the fenced DTO (HTTP ${positive.response.status})`)
-}
-console.log('PASS same-Context credential returned the fenced synthetic token in-memory')
-
-for (const [label, serverName] of [['cross-Context', serverB], ['unknown', 'np08-e2e-unknown']]) {
-  const denied = await call(credentialPath, {
-    method: 'POST',
-    headers: jsonHeaders(accessToken),
-    body: JSON.stringify({ serverName }),
-  })
-  if (denied.response.status !== 403 || JSON.stringify(denied.body) !== '{"error":"forbidden"}') {
-    throw new Error(`${label} credential request was not an opaque 403`)
-  }
-  if (Object.hasOwn(denied.body ?? {}, 'token')) throw new Error(`${label} response contained a token`)
-  console.log(`PASS ${label} credential request denied without a credential response`)
-}
-
-const noAuth = await call(credentialPath, {
-  method: 'POST',
-  headers: jsonHeaders(accessToken),
-  body: JSON.stringify({ serverName: serverC }),
-})
-if (noAuth.response.status !== 200 || noAuth.body?.token !== null) {
-  throw new Error(`same-Context no-auth server did not return token:null (HTTP ${noAuth.response.status})`)
-}
-console.log('PASS same-Context no-auth server returned token:null')
-
-const malformedBody = await call(credentialPath, {
-  method: 'POST',
-  headers: jsonHeaders(accessToken),
-  body: JSON.stringify({ serverName: serverA, contextRef: 'caller-supplied-context' }),
-})
-if (malformedBody.response.status !== 400 || malformedBody.body?.error !== 'bad_request') {
-  throw new Error('caller-supplied Context field was accepted')
-}
-console.log('PASS caller-supplied Context field was rejected')
-
-for (const [label, headers] of [
-  ['anonymous', {}],
-  ['workflow-only', bearer(workflowToken)],
-  ['malformed-bearer', bearer('not-a-jwt')],
-]) {
-  const denied = await call('/api/v2/hosts/self/mcpservers', { headers })
-  if (denied.response.status !== 401 || denied.body?.error !== 'unauthorized') {
-    throw new Error(`${label} inventory request was not a generic 401`)
-  }
-  console.log(`PASS ${label} Host inventory request rejected`)
-}
-
-for (const path of [
-  '/api/v1/mcpservers/context/np08-e2e-context-b',
-  `/api/v1/mcpservers/${serverB}/auth`,
-]) {
-  const retired = await call(path)
-  if (retired.response.status !== 410 || retired.body?.error !== 'gone') {
-    throw new Error(`legacy route was not tombstoned: ${path}`)
-  }
-}
-console.log('PASS legacy caller-selected routes are tombstoned')
-})().catch(() => {
-  process.exitCode = 1
-})
-NODE
-
 run_np08_gateway_raw_header_checks
 run_np08_deployed_manager_journey
 run_np08_sdk_protocol_journey

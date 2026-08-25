@@ -526,6 +526,31 @@ describe('authoritative poll publication fence', () => {
 
     expect(reconcile).not.toHaveBeenCalled()
   })
+
+  it('does not complete a poll before a background credential grant is resolved', async () => {
+    const server = readyServer()
+    const manager = {
+      addServer: appliedAdmission(),
+      replaceServer: appliedAdmission(),
+      removeServer: vi.fn(),
+      getConnectedServers: vi.fn(() => [server.name]),
+      getKnownServers: vi.fn(() => [server.name]),
+      recordAdmissionFailure: vi.fn(),
+    }
+    const credentialFailure = new ContextMapperRequestError(503, 'credential', false)
+
+    await expect(
+      reconcileAuthoritativeMcpSnapshot({
+        servers: [server],
+        manager,
+        serverState: new Map([[server.name, JSON.stringify(server)]]),
+        grantState: new Map([[server.name, 'credential-revision-1']]),
+        getAuthToken: vi.fn().mockRejectedValue(credentialFailure),
+        coordinator: new AuthoritativeMcpFleetCoordinator(1, 1, true),
+        awaitCompletion: true,
+      })
+    ).rejects.toBe(credentialFailure)
+  })
 })
 
 describe('context-mapper polling lifecycle', () => {

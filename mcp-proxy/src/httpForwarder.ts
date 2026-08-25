@@ -1,5 +1,6 @@
 import http, { ClientRequest, IncomingMessage, ServerResponse } from 'node:http'
 import https from 'node:https'
+import { expectedMcpServiceHostname } from './hccClient'
 
 export interface ForwarderConfig {
   requestTimeout: number
@@ -51,7 +52,8 @@ function connectionTokens(headers: IncomingMessage['headers']): Set<string> {
 
 export function validateInternalTarget(
   backendUrl: string,
-  allowLoopback = false
+  allowLoopback = false,
+  expectedServerName?: string
 ): URL {
   let parsed: URL
   try {
@@ -61,7 +63,12 @@ export function validateInternalTarget(
   }
   const host = parsed.hostname.toLowerCase()
   const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1'
-  const serviceHost = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.mcp-server\.svc\.cluster\.local$/.test(host)
+  const expectedHost = expectedServerName
+    ? expectedMcpServiceHostname(expectedServerName)
+    : undefined
+  const serviceHost = expectedHost
+    ? host === expectedHost
+    : /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.mcp-server\.svc\.cluster\.local$/.test(host)
   if (
     (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
     (!serviceHost && !(allowLoopback && loopback)) ||
@@ -95,9 +102,14 @@ export class HttpForwarder {
     req: IncomingMessage,
     res: ServerResponse,
     backendUrl: string,
-    body: Buffer
+    body: Buffer,
+    expectedServerName?: string
   ): Promise<void> {
-    const parsed = validateInternalTarget(backendUrl, this.config.allowLoopbackTargets)
+    const parsed = validateInternalTarget(
+      backendUrl,
+      this.config.allowLoopbackTargets,
+      expectedServerName
+    )
     const headers = this.buildHeaders(req, parsed.host, body)
     const requestModule = parsed.protocol === 'https:' ? https : http
 

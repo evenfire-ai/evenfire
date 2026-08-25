@@ -174,16 +174,16 @@ fi
 embedded_node_count="$(
   awk 'index($0, "node - <<'\''NODE'\''") { count += 1 } END { print count + 0 }' "${E2E_SCRIPT}"
 )"
-if [[ "${embedded_node_count}" -ne 4 ]]; then
-  fail "expected four embedded Node heredocs, found ${embedded_node_count}"
+if [[ "${embedded_node_count}" -ne 3 ]]; then
+  fail "expected three embedded Node heredocs, found ${embedded_node_count}"
 fi
 for ordinal in $(seq 1 "${embedded_node_count}"); do
   check_embedded_node "${ordinal}"
 done
 pass 'embedded Node heredocs have column-zero terminators and valid CommonJS syntax'
 
-if ! grep -Fq 'denied.response.status !== 403' "${E2E_SCRIPT}" ||
-  ! grep -Fq '{"error":"forbidden"}' "${E2E_SCRIPT}"; then
+if ! grep -Fq 'denied.response.status !== 403' "${RUNTIME_ACCESS_MODULE}" ||
+  ! grep -Fq '{"error":"forbidden"}' "${RUNTIME_ACCESS_MODULE}"; then
   fail 'membership denial E2E does not assert the approved generic 403 contract'
 fi
 pass 'membership denial E2E asserts the approved generic 403 contract'
@@ -262,7 +262,7 @@ if [[ -z "${health_line}" || -z "${fixture_line}" || "${health_line}" -ge "${fix
 fi
 pass 'mcp-host runtime health is proven before fixture mutation'
 
-for expected_status in 200 404 400 401 410; do
+for expected_status in 200 403 400 401 410; do
   grep -Fq "status !== ${expected_status}" "${RUNTIME_ACCESS_MODULE}" ||
     fail "the access-only journey lost its HTTP ${expected_status} assertion"
 done

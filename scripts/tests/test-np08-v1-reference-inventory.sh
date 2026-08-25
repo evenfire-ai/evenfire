@@ -30,6 +30,7 @@ declare -A V1_ALLOWLIST=(
   [scripts/e2e/e2e-hcc-mcp-context-readiness.sh]=compatibility
   [scripts/e2e/e2e-hcc-readiness-bootstrap.sh]=compatibility
   [scripts/e2e/e2e-np08-hcc-authorization.sh]=negative-tombstone-tests
+  [scripts/e2e/_lib/np08-runtime-access.mjs]=negative-tombstone-tests
   [tests/e2e/helpers.ts]=compatibility
   [tests/e2e/mcp-host/context-mapper.test.ts]=compatibility-and-tombstones
   [workflow-recipes/tests/e2e/hcc-wrc-integration.test.ts]=compatibility
