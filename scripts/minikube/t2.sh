@@ -247,6 +247,7 @@ run_pre_gate() {
     T2_SETUP_HANDOFF_TRANSITION="$T2_PLAN_STATE" \
     T2_SETUP_HANDOFF_ROOT="$T2_SETUP_HANDOFF_ROOT" \
     T2_SETUP_HANDOFF_TTL_SECONDS="$T2_SETUP_HANDOFF_TTL_SECONDS" \
+    T2_CANONICAL_ORCHESTRATOR=true \
     MINIKUBE_PROFILE="$T2_PROFILE" CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" \
     make minikube-pre-gate-sync GATE=minikube-t2 ARGS='--skip-port-forwards'
   t2_evidence_write pre-gate-sync PASS \

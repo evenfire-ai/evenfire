@@ -76,14 +76,19 @@ Before any cluster-backed E2E gate, sync the running cluster to the current
 worktree:
 
 ```bash
-make minikube-pre-gate-sync GATE=<gate-name>
+make minikube-pre-gate-sync GATE=<non-T2-gate>
 ```
+
+`<non-T2-gate>` must be an explicitly named non-T2 gate. Never use
+`GATE=minikube-t2` here: that reserved form is private to the canonical T2
+orchestrator and is rejected standalone. For T2, use `make minikube-t2` (or
+`make minikube-t2-runtime` only after its exact-head T0/T1 preconditions).
 
 Use `--force-cluster-sync --skip-port-forwards` when deployable code changed
 and your test runner will hold its own port-forwards:
 
 ```bash
-make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
+make minikube-pre-gate-sync GATE=<non-T2-gate> ARGS="--force-cluster-sync --skip-port-forwards"
 ```
 
 After the deploy sync, verify a clean state before reading E2E results:

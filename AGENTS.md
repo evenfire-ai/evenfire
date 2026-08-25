@@ -76,16 +76,19 @@ Examples: `control-api` / `control-plane` / `control-api`,
 image-only primitive; do not call the all-image builder for a known
 single-service change.
 
-Use `make minikube-pre-gate-sync` to reconcile the owned profile after T1
-inputs change. It owns the cluster fingerprint, migration ordering, rollout
-checks, and runtime marker. It is not a T2 verdict. It compares the deployed
-marker to the current worktree, rebuilds only the known affected image
-selectors, and restarts only their deployments. A fresh profile, an explicit
-forced sync, or an unmapped runtime path must fall back to the established
-complete image build. A service-only update may use the targeted path when the
-profile is already healthy; record it as a *targeted sync* and prove the
-affected deployment is Ready plus its user-facing health endpoint. Do not
-report that as a full reconcile or as T2.
+Use `make minikube-pre-gate-sync GATE=<non-T2-gate>` to reconcile the owned
+profile for a named non-T2 gate. It owns the cluster fingerprint, migration
+ordering, rollout checks, and runtime marker, but it is not a T2 verdict.
+`GATE=minikube-t2` is reserved for the internal delegation from the canonical
+`make minikube-t2`/`make minikube-t2-runtime` orchestrator and is rejected when
+called standalone. Never use pre-gate-sync to bootstrap, close, or certify T2.
+It compares the deployed marker to the current worktree, rebuilds only the
+known affected image selectors, and restarts only their deployments. A fresh
+profile, an explicit forced sync, or an unmapped runtime path must fall back
+to the established complete image build. A service-only update may use the
+targeted path when the profile is already healthy; record it as a *targeted
+sync* and prove the affected deployment is Ready plus its user-facing health
+endpoint. Do not report that as a full reconcile or as T2.
 
 The image acquisition stamp is part of the baseline in both GHCR and local
 image modes. If the manifest's `generated` value differs from the pre-gate
@@ -117,7 +120,7 @@ working-tree status are unchanged on exit. The source checkout remains the
 Makefile/script root; the temporary repository is only the lease identity
 under test.
 
-Use these canonical entry points:
+Use only these canonical T2 entry points:
 
 ```text
 MINIKUBE_PROFILE=<verified-profile> CONTROL_API_REAL_PG_CONTEXT=<verified-context> make minikube-t2-preflight
@@ -134,6 +137,10 @@ is produced only by the final exact-head preflight inside that orchestrator
 (`T2_PLAN_MODE=false` with plan state `already-synced`; `T2_PLAN_MODE=true` is
 only the internal planner so `full-bootstrap` is reachable).
 `make minikube-pre-gate-sync` alone never constitutes T2 evidence.
+For T2, do not invoke `make minikube-pre-gate-sync GATE=minikube-t2` or
+`scripts/minikube/pre-gate-sync.sh --gate minikube-t2` directly; the tooling
+rejects both forms before repository, image, lease, or cluster
+inspection. The script remains available for explicitly named non-T2 gates.
 Follow the rule `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
 `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
 

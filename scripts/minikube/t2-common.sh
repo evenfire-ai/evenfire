@@ -489,7 +489,7 @@ print("\t".join([
 PY
   )"; then
     case "$marker_values" in
-      *ownership*) T2_NEXT_COMMAND='run pre-gate-sync for this worktree/profile, then retry'; t2_fail PROFILE_OWNERSHIP_MISMATCH 'pre-gate marker belongs to another worktree' ;;
+      *ownership*) T2_NEXT_COMMAND='resolve the branch-owned profile and context through the primary checkout .local-notes/minikube-profiles/branch.mk helper, then rerun minikube-t2-preflight'; t2_fail PROFILE_OWNERSHIP_MISMATCH 'pre-gate marker belongs to another worktree' ;;
       *head*)
         # Standalone preflight is fail-loud. The orchestrator planner
         # (T2_PLAN_MODE=true) must keep going so it can select targeted-sync
@@ -499,10 +499,10 @@ PY
           T2_PLAN_REASON='pre-gate marker does not match current HEAD'
           return 0
         fi
-        T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+        T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
         t2_fail HEAD_MARKER_MISMATCH 'pre-gate marker does not match current HEAD'
         ;;
-      *) T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"; t2_fail BOOTSTRAP_REQUIRED 'pre-gate marker is incomplete' ;;
+      *) T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"; t2_fail BOOTSTRAP_REQUIRED 'pre-gate marker is incomplete' ;;
     esac
   fi
   T2_MARKER_MATCHES_HEAD=true
@@ -517,7 +517,7 @@ t2_image_check() {
       T2_PLAN_REASON='image manifest is absent'
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is missing: $T2_IMAGE_MANIFEST"
   fi
   local manifest_values
@@ -554,14 +554,14 @@ PY
       T2_PLAN_REASON='image manifest is invalid or has no source/tag; bootstrap will replace it'
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or incomplete for its image source'
   fi
   local manifest_source manifest_tag manifest_generated
   IFS=$'\t' read -r manifest_source manifest_tag manifest_generated <<< "$manifest_values"
   if { [ -n "$T2_IMAGE_SOURCE" ] && [ "$manifest_source" != "$T2_IMAGE_SOURCE" ]; } ||
      { [ -n "$T2_IMAGE_TAG" ] && [ "$manifest_tag" != "$T2_IMAGE_TAG" ]; }; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest does not match the deployed marker'
   fi
   T2_IMAGE_SOURCE="$manifest_source"
@@ -590,7 +590,7 @@ t2_resource_checks() {
         T2_PLAN_REASON="namespace $namespace is not present"
         continue
       fi
-      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
       t2_fail PROFILE_UNHEALTHY "required namespace is missing: $namespace"
     fi
   done
@@ -602,7 +602,7 @@ t2_resource_checks() {
         T2_PLAN_REASON="service $item is not present"
         continue
       fi
-      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
       t2_fail PROFILE_UNHEALTHY "required Service is missing: $item"
     fi
   done
@@ -614,7 +614,7 @@ t2_resource_checks() {
         T2_PLAN_REASON="Secret $item is not present"
         continue
       fi
-      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
       t2_fail SECRET_MISSING "required Secret is missing: $namespace/$name"
     fi
   done
@@ -626,7 +626,7 @@ t2_resource_checks() {
         T2_PLAN_REASON="ConfigMap $item is not present"
         continue
       fi
-      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
       t2_fail CONFIGMAP_MISSING "required ConfigMap is missing: $namespace/$name"
     fi
   done
@@ -642,7 +642,7 @@ t2_postgres_check() {
       T2_PLAN_REASON="PVC $T2_REQUIRED_PVC is not present"
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail POSTGRES_NOT_READY "required PVC is missing: $T2_REQUIRED_PVC"
   fi
   phase="$(python3 - "$pvc_json" <<'PY'
@@ -657,15 +657,15 @@ PY
       T2_PLAN_REASON="PVC $T2_REQUIRED_PVC is not Bound"
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail POSTGRES_NOT_READY "PostgreSQL PVC is not Bound: $T2_REQUIRED_PVC ($phase)"
   fi
   if ! t2_kc -n "$namespace" get service control-postgres >/dev/null 2>&1; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail POSTGRES_NOT_READY 'control-postgres Service is missing'
   fi
   if ! t2_kc -n "$namespace" rollout status deployment/control-postgres --timeout="${T2_TIMEOUT_SECONDS}s" >/dev/null 2>&1; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail POSTGRES_NOT_READY "control-postgres did not become Ready within $T2_TIMEOUT_SECONDS seconds"
   fi
 }
@@ -675,7 +675,7 @@ t2_deployment_check() {
   T2_UNREADY_DEPLOYMENTS=""
   deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null)" || deployment_status=$?
   if [ "$deployment_status" -ne 0 ]; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail PROFILE_UNHEALTHY \
       "deployment readiness inventory query failed with exit $deployment_status"
     return 1
@@ -686,7 +686,7 @@ t2_deployment_check() {
       T2_PLAN_REASON='deployment readiness inventory is unavailable'
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is unavailable'
     return 1
   fi
@@ -764,7 +764,7 @@ PY
       T2_PLAN_REASON='deployment readiness inventory is invalid'
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is invalid'
     return 1
   fi
@@ -785,7 +785,7 @@ PY
       T2_UNREADY_DEPLOYMENTS="$unready"
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail PROFILE_UNHEALTHY "one or more deployments are not Ready: $unready"
     return 1
   fi
@@ -817,7 +817,7 @@ t2_wait_for_deployments() {
   done
 
   T2_RUNTIME_TIMEOUT_SECONDS="$original_runtime_timeout"
-  T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+  T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
   t2_fail PROFILE_UNHEALTHY \
     "deployments did not converge within $T2_TIMEOUT_SECONDS seconds: ${T2_UNREADY_DEPLOYMENTS:-deployment readiness inventory is unavailable}"
   return 1

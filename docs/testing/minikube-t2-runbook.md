@@ -22,7 +22,8 @@ or T2. Default
 `pre-gate-sync`:
 
 ```bash
-make minikube-t2-preflight MINIKUBE_PROFILE=<generated-profile>
+MINIKUBE_PROFILE=<generated-profile> CONTROL_API_REAL_PG_CONTEXT=<generated-context> \
+  make minikube-t2-preflight
 ```
 
 The full orchestrator uses the same checks as a planner (`T2_PLAN_MODE=true`
@@ -31,19 +32,24 @@ transition, T0, T1, and the exact-head T2 verdict (`T2_PLAN_MODE=false` and
 the plan must be `already-synced`):
 
 ```bash
-make minikube-t2 MINIKUBE_PROFILE=<generated-profile>
+MINIKUBE_PROFILE=<generated-profile> CONTROL_API_REAL_PG_CONTEXT=<generated-context> \
+  make minikube-t2
 ```
 
 After T0 and T1 are already green on the same HEAD and owned profile, close
 T2 without re-running those lanes:
 
 ```bash
-make minikube-t2-runtime MINIKUBE_PROFILE=<generated-profile>
+MINIKUBE_PROFILE=<generated-profile> CONTROL_API_REAL_PG_CONTEXT=<generated-context> \
+  make minikube-t2-runtime
 ```
 
 `make minikube-t2-runtime` is valid only when the pre-gate marker already
-matches HEAD. `make minikube-pre-gate-sync` reconciles the profile; it does
-not emit a T2 verdict.
+matches HEAD. `make minikube-pre-gate-sync GATE=<non-T2-gate>` reconciles the
+profile for a named non-T2 gate; it does not emit a T2 verdict. Its reserved
+`GATE=minikube-t2` form is callable only from the internal canonical
+orchestrator delegation and fails closed when invoked standalone. Never use
+pre-gate-sync to bootstrap, close, or certify T2.
 
 The profile helper that generated the profile remains the source of truth for
 the profile metadata and random localhost port mapping. Resolve it from the

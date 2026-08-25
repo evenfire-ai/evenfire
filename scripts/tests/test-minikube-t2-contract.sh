@@ -24,6 +24,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/minikube/wait-gfs-reader-ready.sh" \
   "$ROOT/scripts/minikube/gfs-rollout-shim/kubectl" \
   "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh" \
+  "$ROOT/scripts/tests/test-minikube-canonical-entrypoint.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
   "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \
@@ -55,6 +56,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   bash -n "$file"
 done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
+"$ROOT/scripts/tests/test-minikube-canonical-entrypoint.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
@@ -99,6 +101,8 @@ required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BU
 for code in $required_codes; do
   grep -Fq "$code" "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T1_LOCAL_PREFLIGHT"
 done
+
+grep -Fq 'T2_CANONICAL_ENTRYPOINT_REQUIRED' "$ROOT/Makefile" "$ROOT/scripts/minikube/pre-gate-sync.sh"
 
 grep -Fq 'kubectl --context=' "$COMMON"
 grep -Fq 't2_bounded_command' "$COMMON"

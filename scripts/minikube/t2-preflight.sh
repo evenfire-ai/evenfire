@@ -54,7 +54,7 @@ main() {
   t2_write_plan "$T2_PLAN_FILE"
 
   if [ "$T2_PLAN_STATE" = full-bootstrap ] && [ "$T2_PLAN_MODE" != true ]; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE IMAGE_SOURCE=local make minikube-setup"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail BOOTSTRAP_REQUIRED "$T2_PLAN_REASON"
     return 1
   fi

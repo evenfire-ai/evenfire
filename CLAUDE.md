@@ -15,7 +15,11 @@ evidence rules in `AGENTS.md` and `docs/testing/minikube-t2-runbook.md`.
 `make minikube-t2-preflight` is a planner, not a lane verdict. A T2 verdict is
 produced only by the final exact-head preflight inside `make minikube-t2` (or
 `make minikube-t2-runtime` after T0 and T1 are already green on the same HEAD).
-`make minikube-pre-gate-sync` alone is not T2. Playwright and product E2E
+`make minikube-pre-gate-sync` alone is not T2, and its reserved
+`GATE=minikube-t2` form is private to the canonical orchestrator. Never invoke
+that form standalone; the runtime guard rejects it before repository, image,
+lease, or cluster inspection.
+Playwright and product E2E
 scripts are separate lanes. T1 requires both a complete green JSON reporter
 (expected files, executed/passed, zero failures, zero pending) and a zero
 Vitest process exit; a green reporter cannot hide teardown, worker, OOM, or

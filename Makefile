@@ -641,6 +641,11 @@ minikube-pf-all-bg: ## Refresh background port-forwards for gate automation
 
 .PHONY: minikube-pre-gate-sync
 minikube-pre-gate-sync: ## Enforce minikube sync before a gate (use GATE=<name>)
+	@if [ "$${GATE:-manual}" = "minikube-t2" ] && [ "$${T2_CANONICAL_ORCHESTRATOR:-false}" != "true" ]; then \
+		echo 'T2_CANONICAL_ENTRYPOINT_REQUIRED: GATE=minikube-t2 is private to the canonical minikube-t2 orchestrator' >&2; \
+		echo 'next: run MINIKUBE_PROFILE=<owned-profile> CONTROL_API_REAL_PG_CONTEXT=<owned-context> make minikube-t2' >&2; \
+		exit 1; \
+	fi
 	@scripts/minikube/pre-gate-sync.sh --gate "$${GATE:-manual}" $(ARGS)
 
 .PHONY: test-gfs-real-postgres-minikube

@@ -7,6 +7,7 @@ T2_SETUP_HANDOFF_EXPECTED="${T2_SETUP_HANDOFF_EXPECTED:-}"
 T2_SETUP_HANDOFF_TRANSITION="${T2_SETUP_HANDOFF_TRANSITION:-}"
 T2_SETUP_HANDOFF_ROOT="${T2_SETUP_HANDOFF_ROOT:-}"
 T2_SETUP_HANDOFF_TTL_SECONDS="${T2_SETUP_HANDOFF_TTL_SECONDS:-}"
+T2_CANONICAL_ORCHESTRATOR="${T2_CANONICAL_ORCHESTRATOR:-false}"
 if [ -z "$PRE_GATE_SYNC_CONFIG_ONLY" ]; then PRE_GATE_SYNC_CONFIG_ONLY=false; fi
 if [ -z "$T2_SETUP_HANDOFF_EXPECTED" ]; then T2_SETUP_HANDOFF_EXPECTED=false; fi
 if [ -z "$T2_SETUP_HANDOFF_TTL_SECONDS" ]; then T2_SETUP_HANDOFF_TTL_SECONDS=300; fi
@@ -66,6 +67,22 @@ T2_GATE_ID="$GATE_NAME"
 # shellcheck source=scripts/minikube/t2-common.sh
 source "$SCRIPT_DIR/t2-common.sh"
 if [ -z "$T2_SKIP_LOCK" ]; then T2_SKIP_LOCK=false; fi
+
+# `minikube-t2` is a private transition owned by t2.sh. Reject a standalone
+# caller before repository, image, lease, or cluster inspection;
+# an internal child must still validate the exact live inherited lease below.
+if [ "$GATE_NAME" = "minikube-t2" ]; then
+  if [ "$T2_CANONICAL_ORCHESTRATOR" != true ] ||
+     [ "$T2_SKIP_LOCK" != true ] ||
+     [ -z "${T2_LOCK_TOKEN:-}" ] ||
+     [ -z "${T2_RUN_ID:-}" ]; then
+    T2_NEXT_COMMAND='run MINIKUBE_PROFILE=<owned-profile> CONTROL_API_REAL_PG_CONTEXT=<owned-context> make minikube-t2; do not invoke pre-gate-sync standalone'
+    t2_fail T2_CANONICAL_ENTRYPOINT_REQUIRED \
+      'GATE=minikube-t2 is private to the canonical minikube-t2 orchestrator and requires its inherited lease' || true
+    exit 1
+  fi
+fi
+
 if [ "$PRE_GATE_SYNC_CONFIG_ONLY" != true ]; then
   t2_require_commands
   t2_repo_metadata

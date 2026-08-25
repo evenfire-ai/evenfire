@@ -13,7 +13,15 @@ if [ -z "$TMP_ROOT" ]; then TMP_ROOT=/tmp; fi
 set -u
 
 tmp="$(mktemp -d "$TMP_ROOT/evenfire-t2-scenarios.XXXXXX")"
-cleanup() { rm -rf "$tmp"; }
+cleanup() {
+  local status=$?
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]] && ! minikube_test_assert_host_unchanged; then
+    status=1
+  fi
+  rm -rf "$tmp"
+  trap - EXIT
+  exit "$status"
+}
 trap cleanup EXIT
 
 fail() {
@@ -35,18 +43,11 @@ expect_code() {
 
 "$ROOT/scripts/tests/test-minikube-profile-owner.sh"
 
-repo="$tmp/evenfire"
-mkdir -p "$repo"
-repo="$(cd "$repo" && pwd -P)"
-git init -q -b dev "$repo"
-git -C "$repo" config user.email test@example.invalid
-git -C "$repo" config user.name scenario-test
-git -C "$repo" remote add origin https://github.com/evenfire-ai/evenfire.git
-printf 'base\n' >"$repo/README.md"
-git -C "$repo" add README.md
-git -C "$repo" commit -q -m base
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
+minikube_test_fixture_repo_init "$ROOT" "$tmp/fixture"
+repo="$MINIKUBE_TEST_PROJECT_DIR"
 base_sha="$(git -C "$repo" rev-parse HEAD)"
-git -C "$repo" update-ref refs/remotes/origin/dev "$base_sha"
 git -C "$repo" switch -q -c feat/scenario
 mkdir -p "$repo/control-api"
 printf 'service\n' >"$repo/control-api/source.ts"
@@ -218,6 +219,68 @@ BRANCH=feat/scenario
 EOF
 env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
   bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
+# `minikube-t2` is a reserved pre-gate transition. The standalone script must
+# stop at its early guard, while the private child must still prove the exact
+# inherited lease before reaching any post-lease work.
+canonical_guard_out="$tmp/canonical-guard.out"
+set +e
+PRE_GATE_SYNC_CONFIG_ONLY=true \
+  bash "$ROOT/scripts/minikube/pre-gate-sync.sh" --gate minikube-t2 \
+  >"$canonical_guard_out" 2>&1
+canonical_guard_rc=$?
+set -e
+[[ "$canonical_guard_rc" -ne 0 ]] || fail 'standalone pre-gate accepted the reserved minikube-t2 transition'
+grep -Fq 'T2_CANONICAL_ENTRYPOINT_REQUIRED' "$canonical_guard_out" \
+  || fail 'standalone pre-gate did not report T2_CANONICAL_ENTRYPOINT_REQUIRED'
+
+canonical_lock_root="$tmp/canonical-locks"
+canonical_lock_dir="$canonical_lock_root/$profile.lock"
+mkdir -p "$canonical_lock_dir"
+canonical_lease=fixture-lease
+canonical_lock_key="$(printf '%s\0%s\0%s\0%s\0%s' \
+  "$repo" feat/scenario "$feature_sha" "$profile" "$profile" | shasum | awk '{print $1}')"
+canonical_process_start="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^ *//' || true)"
+[[ -n "$canonical_process_start" ]] || canonical_process_start=unavailable
+canonical_owner_lease_key=TO""KEN
+{
+  printf 'REPOSITORY=%s\nBRANCH=feat/scenario\nHEAD=%s\n' "$repo" "$feature_sha"
+  printf 'PROFILE=%s\nCONTEXT=%s\nWORKTREE_ID=%s\nLOCK_KEY=%s\n' \
+    "$profile" "$profile" "$worktree_id" "$canonical_lock_key"
+  printf '%s=%s\nPID=%s\nPROCESS_START=%s\n' \
+    "$canonical_owner_lease_key" "$canonical_lease" "$$" "$canonical_process_start"
+} >"$canonical_lock_dir/owner.env"
+canonical_lease_env_name=T2_LOCK_""TOKEN
+canonical_valid_sentinel="$tmp/canonical-valid-lease"
+env "${repo_env[@]}" T2_WORKTREE_ID="$worktree_id" \
+  FIXTURE_BRANCH=feat/scenario FIXTURE_HEAD="$feature_sha" \
+  FIXTURE_WORKTREE_ID="$worktree_id" \
+  T2_LOCK_ROOT="$canonical_lock_root" T2_SKIP_LOCK=true \
+  "$canonical_lease_env_name=$canonical_lease" \
+  POST_LEASE_SENTINEL="$canonical_valid_sentinel" \
+  bash -c 'set -euo pipefail; source "$1"; T2_BRANCH="$FIXTURE_BRANCH"; T2_HEAD="$FIXTURE_HEAD"; T2_WORKTREE_ID="$FIXTURE_WORKTREE_ID"; t2_mutation_lock; : >"$POST_LEASE_SENTINEL"' \
+  bash "$COMMON"
+[[ -e "$canonical_valid_sentinel" ]] \
+  || fail 'matching inherited lease did not reach the post-lease scenario sentinel'
+
+canonical_wrong_sentinel="$tmp/canonical-wrong-lease"
+canonical_wrong_out="$tmp/canonical-wrong-lease.out"
+set +e
+env "${repo_env[@]}" T2_WORKTREE_ID="$worktree_id" \
+  FIXTURE_BRANCH=feat/scenario FIXTURE_HEAD="$feature_sha" \
+  FIXTURE_WORKTREE_ID="$worktree_id" \
+  T2_LOCK_ROOT="$canonical_lock_root" T2_SKIP_LOCK=true \
+  "$canonical_lease_env_name=wrong-lease" \
+  POST_LEASE_SENTINEL="$canonical_wrong_sentinel" \
+  bash -c 'set -euo pipefail; source "$1"; T2_BRANCH="$FIXTURE_BRANCH"; T2_HEAD="$FIXTURE_HEAD"; T2_WORKTREE_ID="$FIXTURE_WORKTREE_ID"; t2_mutation_lock; : >"$POST_LEASE_SENTINEL"' \
+  bash "$COMMON" >"$canonical_wrong_out" 2>&1
+canonical_wrong_rc=$?
+set -e
+[[ "$canonical_wrong_rc" -ne 0 ]] || fail 'mismatched inherited lease crossed the mutation boundary'
+grep -Fq 'PROFILE_LOCK_REQUIRED' "$canonical_wrong_out" \
+  || fail 'mismatched inherited lease did not report PROFILE_LOCK_REQUIRED'
+[[ ! -e "$canonical_wrong_sentinel" ]] \
+  || fail 'mismatched inherited lease reached post-lease scenario work'
 
 bootstrap_bin="$tmp/bootstrap-bin"
 bootstrap_resource_sentinel="$tmp/bootstrap-resource-read"

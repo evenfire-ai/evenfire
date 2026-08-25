@@ -1045,7 +1045,7 @@ if [ "$SKIP_BUILD" = true ]; then
       if [ "$IMAGE_SOURCE" = ghcr ]; then
         warn "Local source is newer than the pulled images (e.g., $NEWEST_SRC)."
         warn "This cluster runs RELEASE images (${EFFECTIVE_IMAGE_TAG}); your local edits are NOT in them."
-        warn "To test local edits: 'make minikube-pre-gate-sync' shadow-builds only the changed"
+        warn "For a named non-T2 gate, 'make minikube-pre-gate-sync GATE=<gate>' shadow-builds only the changed"
         warn "services over the release tag, or 'make minikube-setup-local' builds everything."
       else
         warn "Source files changed since last image build (e.g., $NEWEST_SRC)."

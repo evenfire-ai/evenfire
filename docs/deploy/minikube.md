@@ -100,8 +100,13 @@ Run the pre-gate sync before cluster-backed E2E so images, CRDs, manifests,
 generated config, secrets, and rollouts match the current worktree:
 
 ```bash
-make minikube-pre-gate-sync GATE=<gate-name>
+make minikube-pre-gate-sync GATE=<non-T2-gate>
 ```
+
+`<non-T2-gate>` names an explicit non-T2 gate. `GATE=minikube-t2` is reserved
+for the internal canonical T2 orchestrator and fails closed when invoked
+directly; use `make minikube-t2` or the preconditioned
+`make minikube-t2-runtime` for T2.
 
 On a cluster running published images (the default), every pod runs a release
 image, so the pre-gate **shadow-builds**: it builds only the services your tree
@@ -125,7 +130,7 @@ When deployable code changed and the E2E runner will manage port-forwards
 itself, force the sync and skip the short-lived background port-forward refresh:
 
 ```bash
-make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
+make minikube-pre-gate-sync GATE=<non-T2-gate> ARGS="--force-cluster-sync --skip-port-forwards"
 ```
 
 ### Invitation email (self-hosted deployments only)
@@ -410,7 +415,7 @@ scripts/minikube/image-mode.sh --image-tag      # the ghcr tag (empty in local m
 ### The one-command path (both modes)
 
 ```bash
-make minikube-pre-gate-sync GATE=<gate-name>
+make minikube-pre-gate-sync GATE=<non-T2-gate>
 ```
 
 In ghcr mode this shadow-builds: it builds only the services your tree changed

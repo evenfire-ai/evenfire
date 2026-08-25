@@ -6,16 +6,26 @@ globs:
   - scripts/minikube/pre-gate-sync.sh
   - scripts/e2e/minikube-real-postgres.sh
   - scripts/tests/test-minikube-t2-*.sh
+  - scripts/tests/test-minikube-canonical-entrypoint.sh
   - Makefile
 alwaysApply: false
 ---
 
 # T2 harness change discipline
 
+The public Make orchestrator is the canonical T2 entrypoint. The
+`minikube-t2` pre-gate name is private: only `t2.sh` may delegate to
+`pre-gate-sync.sh` with the inherited lease and its internal marker. A
+standalone `make minikube-pre-gate-sync GATE=minikube-t2` or direct script call
+must fail with `T2_CANONICAL_ENTRYPOINT_REQUIRED` before repository, image,
+lease, or cluster inspection. Non-T2 gates keep their existing pre-gate
+path.
+
 When editing the T0/T1/T2 harness (these globs), the contract is duplicated in
 docs and guidance. A behavior change here MUST update, in the same change:
 
-- `scripts/tests/test-minikube-t2-contract.sh` and
+- `scripts/tests/test-minikube-t2-contract.sh`,
+  `scripts/tests/test-minikube-canonical-entrypoint.sh`, and
   `scripts/tests/test-minikube-t2-scenarios.sh` (they assert harness behavior)
 - `docs/testing/minikube-t2-runbook.md`
 - `.cursor/rules/minikube-t0-t1-t2.mdc` and
