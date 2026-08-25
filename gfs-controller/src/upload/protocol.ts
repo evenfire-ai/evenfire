@@ -9,7 +9,8 @@
  * legacy surface and reject v2 mutations.
  */
 
-export const GFS_UPLOAD_V2_PRODUCT_MAX_BYTES = 209_715_200
+/** Default product policy; deployments may lower or raise it within the protocol bound. */
+export const GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES = 209_715_200
 export const GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES = 1_073_741_824
 export const GFS_UPLOAD_V2_PREFERRED_PART_BYTES = 8 * 1024 * 1024
 export const GFS_UPLOAD_V2_MAX_PART_BYTES = 16 * 1024 * 1024
