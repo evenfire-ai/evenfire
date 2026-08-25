@@ -246,36 +246,44 @@ describe('OnboardingPage', () => {
     renderOnboarding({ handleSelectRuntimeConfig })
     await user.click(screen.getByRole('button', { name: /I have a server address/ }))
 
-    const hint = await screen.findByRole('button', { name: 'Use Localhost' })
+    // Presented as a plain option carrying its address, not a callout banner.
+    const option = await screen.findByRole('button', { name: /Localhost/ })
+    expect(option.textContent).toContain('http://127.0.0.1:8091')
     // The probe takes no URL argument (spec §5.6).
     expect(probeLocalhostReachable).toHaveBeenCalledWith()
 
-    await user.click(hint)
+    await user.click(option)
 
     // Reuses the built-in Localhost option rather than saving a duplicate
     // environment that points at the same address.
     expect(handleSelectRuntimeConfig).toHaveBeenCalledWith(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)
   })
 
-  it('shows no local-cluster hint when nothing answers', async () => {
+  it('shows nothing about Localhost anywhere when nothing answers', async () => {
     const user = userEvent.setup()
 
     renderOnboarding()
     await user.click(screen.getByRole('button', { name: /I have a server address/ }))
-
     await screen.findByLabelText('Environment name')
-    expect(probeLocalhostReachable).toHaveBeenCalledTimes(1)
-    expect(screen.queryByRole('button', { name: 'Use Localhost' })).toBeNull()
+
+    expect(probeLocalhostReachable).toHaveBeenCalledWith()
+    expect(screen.queryByRole('button', { name: /Localhost/ })).toBeNull()
+
+    // Not in the environment dock either — the menu must not advertise a
+    // server that isn't running.
+    await user.click(screen.getByLabelText('Open environment selector'))
+    expect(screen.queryByRole('button', { name: /Localhost/ })).toBeNull()
   })
 
-  it('keeps the Localhost escape hatch reachable from onboarding', async () => {
+  it('keeps the Localhost escape hatch in the dock once one is detected', async () => {
     const user = userEvent.setup()
     const handleSelectRuntimeConfig = vi.fn()
+    probeLocalhostReachable.mockResolvedValue(true)
 
     renderOnboarding({ handleSelectRuntimeConfig })
 
     await user.click(screen.getByLabelText('Open environment selector'))
-    await user.click(screen.getByRole('button', { name: 'Localhost' }))
+    await user.click(await screen.findByRole('button', { name: 'Localhost' }))
 
     expect(handleSelectRuntimeConfig).toHaveBeenCalledWith(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)
   })

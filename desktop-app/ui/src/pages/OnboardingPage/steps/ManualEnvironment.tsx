@@ -1,8 +1,11 @@
 import type { FormEvent } from 'react'
-import { useEffect, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
-import { Button, Field, StatusBanner, TextInput } from '@components/Common'
-import { LOCALHOST_RUNTIME_CONFIG_OPTION_ID } from '@constants/runtimeConfig'
+import { Button, Field, SelectableOption, TextInput } from '@components/Common'
+import {
+  LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
+  createLocalhostRuntimeConfigOption,
+} from '@constants/runtimeConfig'
+import { useLocalhostReachable } from '@hooks/useLocalhostReachable'
 
 /**
  * Path D — manual environment (spec §5.6).
@@ -22,31 +25,15 @@ export function ManualEnvironment() {
     handleSelectRuntimeConfig,
   } = useAuthContext()
 
-  const [localhostReachable, setLocalhostReachable] = useState(false)
+  // One bounded probe on entry (spec §9.4). A negative or failed result
+  // renders nothing, so a user with no local cluster sees no trace of it. The
+  // probe never fills the form or saves on its own.
+  const localhostReachable = useLocalhostReachable()
+  const localhostOption = createLocalhostRuntimeConfigOption()
 
   const hasRuntimeSetupValues =
     Boolean(runtimeConfigSetupName.trim()) &&
     Boolean(runtimeConfigSetupExternalRestApiBaseUrl.trim())
-
-  // One bounded probe on entry (spec §9.4). It takes no URL — the main process
-  // only ever checks the built-in Localhost option — and a negative or failed
-  // result renders nothing, so a user with no local cluster sees no trace of
-  // it. The probe never fills the form or saves on its own.
-  useEffect(() => {
-    let cancelled = false
-    const probe = window.clerum.auth.probeLocalhostReachable
-    if (typeof probe !== 'function') return
-
-    probe()
-      .then(reachable => {
-        if (!cancelled) setLocalhostReachable(reachable)
-      })
-      .catch(() => undefined)
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -62,21 +49,19 @@ export function ManualEnvironment() {
         Enter the address of your Evenfire server. You can add more environments later.
       </p>
       {localhostReachable ? (
-        <StatusBanner tone="info">
-          <span className="auth-backend-hint">
-            <span>A local Evenfire looks like it’s running on this machine.</span>
-            <Button
-              type="button"
-              size="sm"
-              variant="soft"
-              block
-              disabled={busy}
-              onClick={() => void handleSelectRuntimeConfig(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)}
-            >
-              Use Localhost
-            </Button>
-          </span>
-        </StatusBanner>
+        <div className="onboarding-options">
+          <SelectableOption
+            className="onboarding-option"
+            size="lg"
+            disabled={busy}
+            onClick={() => void handleSelectRuntimeConfig(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)}
+          >
+            <span className="onboarding-option__title">Localhost</span>
+            <span className="onboarding-option__hint">
+              {localhostOption.externalRestApiBaseUrl}
+            </span>
+          </SelectableOption>
+        </div>
       ) : null}
       <form className="auth-form-stack" onSubmit={handleSubmit}>
         <Field

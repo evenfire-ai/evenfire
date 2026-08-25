@@ -6,6 +6,7 @@ import {
   LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
   createLocalhostRuntimeConfigOption,
 } from '@constants/runtimeConfig'
+import { useLocalhostReachable } from '@hooks/useLocalhostReachable'
 import type { DesktopRuntimeConfigOption } from '../../../../src/types'
 
 interface RuntimeConfigDockProps {
@@ -44,8 +45,19 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
   const localhostRuntimeConfigOption = runtimeConfigOptions.find(
     option => option.source === 'localhost'
   )
+  // Offer Localhost only when a local Evenfire actually answers, so the menu
+  // never advertises a server that isn't there. The exception is a Localhost
+  // that is already the active environment: hiding the row the user is
+  // currently on would strand them with no way to see or leave it — a cluster
+  // that went down mid-session is exactly when that row matters most.
+  const localhostIsActive =
+    activeRuntimeConfigId === LOCALHOST_RUNTIME_CONFIG_OPTION_ID ||
+    selectedRuntimeConfig?.source === 'localhost'
+  const localhostReachable = useLocalhostReachable()
   const displayedLocalhostRuntimeConfigOption =
-    localhostRuntimeConfigOption || createLocalhostRuntimeConfigOption()
+    localhostReachable || localhostIsActive
+      ? localhostRuntimeConfigOption || createLocalhostRuntimeConfigOption()
+      : null
 
   const handleRuntimeOptionSelect = (optionId: string) => {
     setRuntimeMenuOpen(false)

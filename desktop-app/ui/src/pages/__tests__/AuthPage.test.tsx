@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { LOCALHOST_RUNTIME_CONFIG_OPTION_ID } from '../../constants/runtimeConfig'
@@ -9,6 +9,15 @@ import { AuthPage } from '../AuthPage'
 
 afterEach(() => {
   cleanup()
+})
+
+// The environment dock probes for a local Evenfire and only lists Localhost
+// when one answers, so these tests must say whether one is running.
+let probeLocalhostReachable = vi.fn()
+
+beforeEach(() => {
+  probeLocalhostReachable = vi.fn().mockResolvedValue(false)
+  ;(window as unknown as { clerum: unknown }).clerum = { auth: { probeLocalhostReachable } }
 })
 
 const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextValue => ({
@@ -129,9 +138,10 @@ describe('AuthPage', () => {
     expect(screen.queryByLabelText('Environment name')).toBeNull()
   })
 
-  it('shows localhost in the environment menu even when no options are configured', async () => {
+  it('shows localhost in the environment menu when one is detected', async () => {
     const user = userEvent.setup()
     const handleSelectRuntimeConfig = vi.fn()
+    probeLocalhostReachable.mockResolvedValue(true)
 
     renderAuthPage({
       runtimeConfigMissing: true,
@@ -149,14 +159,44 @@ describe('AuthPage', () => {
 
     await user.click(screen.getByLabelText('Open environment selector'))
 
-    expect(screen.getByRole('button', { name: 'Localhost' })).toBeTruthy()
-    expect(
-      screen.getByRole('button', { name: 'Localhost' }).getAttribute('aria-current')
-    ).toBeNull()
+    const localhost = await screen.findByRole('button', { name: 'Localhost' })
+    expect(localhost.getAttribute('aria-current')).toBeNull()
 
-    await user.click(screen.getByRole('button', { name: 'Localhost' }))
+    await user.click(localhost)
 
     expect(handleSelectRuntimeConfig).toHaveBeenCalledWith(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)
+  })
+
+  it('omits localhost from the environment menu when nothing is running', async () => {
+    const user = userEvent.setup()
+
+    renderAuthPage()
+
+    await user.click(screen.getByLabelText('Open environment selector'))
+
+    expect(screen.queryByRole('button', { name: 'Localhost' })).toBeNull()
+  })
+
+  it('keeps localhost listed while it is the active environment', async () => {
+    const user = userEvent.setup()
+
+    // A local cluster that went down mid-session must not silently vanish from
+    // the menu the user is currently pointed at.
+    renderAuthPage({
+      runtimeConfigState: {
+        configured: true,
+        isLocalhost: true,
+        selectorVisible: true,
+        activeOptionId: LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
+        envKey: 'env-test-key',
+        storagePath: '/tmp/evenfire-runtime-config',
+        options: [],
+      },
+    })
+
+    await user.click(screen.getByLabelText('Open environment selector'))
+
+    expect(screen.getByRole('button', { name: 'Localhost' })).toBeTruthy()
   })
 
   it('offers a switch-and-retry action when a backend-mismatch hint is present', async () => {
