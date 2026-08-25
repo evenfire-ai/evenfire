@@ -71,7 +71,19 @@ case "${1:-}" in
     ;;
   tag) exit 0 ;;
   images) echo "sha256:aaaaaaaaaaaa"; exit 0 ;;
-  inspect) echo "sha256:aaaaaaaaaaaabbbbbbbbbbbbcccccccccccc"; exit 0 ;;
+  inspect)
+    if [ "${TEST_INSPECT_FAIL:-false}" = true ]; then
+      exit 1
+    fi
+    if [ "${TEST_INSPECT_HANG:-false}" = true ]; then
+      while :; do sleep 60; done
+    fi
+    if [ "${TEST_INSPECT_EMPTY:-false}" = true ]; then
+      exit 0
+    fi
+    echo "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    exit 0
+    ;;
   *) exit 0 ;;
 esac
 STUB
@@ -153,12 +165,16 @@ run_puller_prepared() {
   TEST_FLAKY_COUNTER_DIR="${TEST_FLAKY_COUNTER_DIR:-}" \
   TEST_EMPTY_DOCKER_ENV="${TEST_EMPTY_DOCKER_ENV:-}" \
   TEST_IMAGE_LOAD_ALIAS_FAIL="${TEST_IMAGE_LOAD_ALIAS_FAIL:-}" \
+  TEST_INSPECT_FAIL="${TEST_INSPECT_FAIL:-}" \
+  TEST_INSPECT_HANG="${TEST_INSPECT_HANG:-}" \
+  TEST_INSPECT_EMPTY="${TEST_INSPECT_EMPTY:-}" \
   MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}" \
   MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-}" \
   MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-}" \
   MINIKUBE_PULL_PARALLELISM="${MINIKUBE_PULL_PARALLELISM:-}" \
   TEST_HANG_PULL="${TEST_HANG_PULL:-}" \
   MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS:-}" \
+  MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS:-}" \
   MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS:-}" \
   T2_PROJECT_DIR="$d/repo" \
   T2_PROFILE=clerum-test T2_CONTEXT=clerum-test \
@@ -446,6 +462,104 @@ assert_minikube_image_tag_overrides_the_pin() {
     pass "MINIKUBE_IMAGE_TAG overrides the committed pin"
   else
     fail "MINIKUBE_IMAGE_TAG=latest did not reach the pull: $out"
+  fi
+  rm -rf "$d"
+}
+
+# Manifest publication must be transactional. Mutation coverage: restoring the
+# old `|| echo NOT_PULLED` fallback or writing directly to MANIFEST_FILE makes
+# this case either return success or destroy the known-good manifest.
+assert_manifest_inspect_failure_preserves_previous_manifest() {
+  local d out rc before after
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr previous-good-tag)"
+  before="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  export TEST_INSPECT_FAIL=true MINIKUBE_IMAGE_TAG=inspect-fail-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=1 MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller_prepared "$d" --only=control-api)"; rc=$?
+  unset TEST_INSPECT_FAIL MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  after="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  if [ "$rc" -ne 0 ] \
+     && [ "$after" = "$before" ] \
+     && ! grep -Fq 'NOT_PULLED' <<<"$out" \
+     && ! grep -Fq 'published image(s) pulled at' <<<"$out"; then
+    pass "docker inspect failure preserves the previous manifest and fails closed"
+  else
+    fail "docker inspect failure published false evidence: rc=$rc unchanged=$([ "$after" = "$before" ] && echo yes || echo no) out=$out"
+  fi
+  rm -rf "$d"
+}
+
+# A deadline is an inspect failure too. Mutation coverage: removing the
+# inspect deadline or turning its status into NOT_PULLED makes this case pass
+# without the required HARNESS_DEADLINE evidence and manifest preservation.
+assert_manifest_inspect_deadline_preserves_previous_manifest() {
+  local d out rc before after
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr previous-good-tag)"
+  before="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  export TEST_INSPECT_HANG=true MINIKUBE_IMAGE_TAG=inspect-hang-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=1 MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  export MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS=1
+  out="$(run_puller_prepared "$d" --only=control-api)"; rc=$?
+  unset TEST_INSPECT_HANG MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES \
+    MINIKUBE_IMAGE_PULL_DELAY_SECS MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS
+  after="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  if [ "$rc" -ne 0 ] \
+     && grep -Eq 'HARNESS_DEADLINE.*inspect-image' <<<"$out" \
+     && [ "$after" = "$before" ] \
+     && ! grep -Fq 'published image(s) pulled at' <<<"$out"; then
+    pass "docker inspect deadline preserves the previous manifest and fails closed"
+  else
+    fail "docker inspect deadline did not preserve the manifest: rc=$rc unchanged=$([ "$after" = "$before" ] && echo yes || echo no) out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_empty_manifest_inspect_output_fails_closed() {
+  local d out rc before after
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr previous-good-tag)"
+  before="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  export TEST_INSPECT_EMPTY=true MINIKUBE_IMAGE_TAG=inspect-empty-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=1 MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller_prepared "$d" --only=control-api)"; rc=$?
+  unset TEST_INSPECT_EMPTY MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  after="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  if [ "$rc" -ne 0 ] \
+     && [ "$after" = "$before" ] \
+     && ! grep -Fq 'published image(s) pulled at' <<<"$out"; then
+    pass "empty docker inspect output is rejected without changing the manifest"
+  else
+    fail "empty docker inspect output was accepted: rc=$rc unchanged=$([ "$after" = "$before" ] && echo yes || echo no) out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_successful_manifest_contains_valid_digests_and_aliases() {
+  local d out rc manifest problems
+  d="$(mktemp -d)"
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  manifest="$d/repo/deploy/minikube/.image-manifest.json"
+  problems="$(node -e '
+    const fs = require("node:fs")
+    const path = process.argv[1]
+    const j = JSON.parse(fs.readFileSync(path, "utf8"))
+    const entries = Object.entries(j.images || {})
+    const bad = entries.filter(([, id]) => !/^sha256:[0-9a-f]{64}$/.test(id))
+    const keys = entries.map(([ref]) => ref)
+    if (bad.length) console.log("invalid image id")
+    if (entries.some(([, id]) => id === "NOT_PULLED")) console.log("NOT_PULLED")
+    if (!keys.includes("ghcr.io/evenfire-ai/control-api:manifest-success-tag")) console.log("missing ghcr ref")
+    if (!keys.includes("clerum/control-api:test")) console.log("missing local alias")
+  ' "$manifest" 2>&1)"
+  if [ "$rc" -eq 0 ] && [ -z "$problems" ] && [ -f "$manifest" ]; then
+    pass "successful manifest publication records valid digests and GHCR/local refs"
+  else
+    fail "successful manifest publication was invalid: rc=$rc problems=$problems out=$out"
   fi
   rm -rf "$d"
 }
@@ -831,6 +945,10 @@ assert_it_aliases_each_image_to_its_local_ref
 assert_the_alias_honours_local_tag_and_local_name
 assert_a_missing_tag_names_the_tag_and_the_override
 assert_minikube_image_tag_overrides_the_pin
+assert_manifest_inspect_failure_preserves_previous_manifest
+assert_manifest_inspect_deadline_preserves_previous_manifest
+assert_empty_manifest_inspect_output_fails_closed
+MINIKUBE_IMAGE_TAG=manifest-success-tag assert_successful_manifest_contains_valid_digests_and_aliases
 assert_it_writes_the_image_manifest_consumers_read
 assert_a_transient_pull_failure_is_retried_until_it_succeeds
 assert_a_permanently_failing_pull_stops_after_the_retry_bound

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd -P)"
+MUTATION_WRAPPER="${ROOT}/scripts/minikube/with-t2-mutation-lock.sh"
 TMP_DIR="$(mktemp -d)"
 source "${ROOT}/scripts/tests/lib/minikube-fixture-repo.sh"
 
@@ -70,11 +71,69 @@ run_child() {
   return "${status}"
 }
 
+assert_makeflags_dry_run_matrix() {
+  local flags label output status sentinel lock_root profile_root
+  local dry_flags='n --no-print-directory|ns --no-print-directory|kn --no-print-directory|rns --no-print-directory|--dry-run|--just-print|--recon'
+  local non_dry_flags='--no-print-directory|NAME=contains-n'
+
+  IFS='|' read -r -a dry_cases <<<"${dry_flags}"
+  for flags in "${dry_cases[@]}"; do
+    label="$(printf '%s' "${flags}" | tr ' =-' '_')"
+    sentinel="${TMP_DIR}/${label}.sentinel"
+    lock_root="${TMP_DIR}/${label}.locks"
+    profile_root="${TMP_DIR}/${label}.profiles"
+    mkdir -p "${lock_root}" "${profile_root}"
+    output=""; status=0
+    MAKEFLAGS="${flags}" T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" \
+      T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
+      MINIKUBE_PROFILE="${PROFILE}" CONTROL_API_REAL_PG_CONTEXT="${PROFILE}" \
+      T2_PROFILE_ROOT="${profile_root}" T2_LOCK_ROOT="${lock_root}" \
+      SENTINEL="${sentinel}" \
+      bash "${MUTATION_WRAPPER}" -- bash -c 'printf invoked >"${SENTINEL}"' \
+      >"${TMP_DIR}/${label}.out" 2>&1 || status=$?
+    output="$(cat "${TMP_DIR}/${label}.out")"
+    if [ "${status}" -ne 0 ] || [ -e "${sentinel}" ] \
+       || [ -n "$(find "${lock_root}" -mindepth 1 -print -quit)" ] \
+       || [ -n "$(find "${profile_root}" -mindepth 1 -print -quit)" ]; then
+      printf 'FAIL: MAKEFLAGS=%s did not stop before mutation: rc=%s output=%s\n' \
+        "${flags}" "${status}" "${output}" >&2
+      exit 1
+    fi
+  done
+
+  IFS='|' read -r -a non_dry_cases <<<"${non_dry_flags}"
+  for flags in "${non_dry_cases[@]}"; do
+    label="non-dry-$(printf '%s' "${flags}" | tr ' =-' '_')"
+    sentinel="${TMP_DIR}/${label}.sentinel"
+    lock_root="${TMP_DIR}/${label}.locks"
+    profile_root="${TMP_DIR}/${label}.profiles"
+    mkdir -p "${lock_root}" "${profile_root}"
+    output=""; status=0
+    MAKEFLAGS="${flags}" T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" \
+      T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
+      MINIKUBE_PROFILE="${PROFILE}" CONTROL_API_REAL_PG_CONTEXT="${PROFILE}" \
+      T2_PROFILE_ROOT="${profile_root}" T2_LOCK_ROOT="${lock_root}" \
+      SENTINEL="${sentinel}" \
+      bash "${MUTATION_WRAPPER}" -- bash -c 'printf invoked >"${SENTINEL}"' \
+      >"${TMP_DIR}/${label}.out" 2>&1 || status=$?
+    output="$(cat "${TMP_DIR}/${label}.out")"
+    if [ "${status}" -eq 0 ] || [ -e "${sentinel}" ]; then
+      printf 'FAIL: MAKEFLAGS=%s was treated as a dry-run: rc=%s output=%s\n' \
+        "${flags}" "${status}" "${output}" >&2
+      exit 1
+    fi
+  done
+
+  printf 'PASS: compact and long GNU Make dry-run flags stop the real wrapper before profile or lock mutation\n'
+}
+
 run_child
 [[ "$(wc -l <"${LOG}" | tr -d ' ')" -eq 1 ]] || {
   echo 'FAIL: valid inherited lease did not reach the child boundary' >&2
   exit 1
 }
+
+assert_makeflags_dry_run_matrix
 
 if T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" T2_PROFILE="${PROFILE}" T2_CONTEXT="${PROFILE}" \
   T2_LOCK_ROOT="${LOCK_ROOT}" T2_LOCK_TOKEN=wrong-token \

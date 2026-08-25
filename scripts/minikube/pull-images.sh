@@ -116,6 +116,15 @@ ok()   { echo -e "${GREEN}  OK${NC} -- $*"; }
 warn() { echo -e "${YELLOW}  WARN${NC} -- $*"; }
 err()  { echo -e "${RED}  ERROR${NC} -- $*" >&2; }
 
+validate_manifest_image_id() {
+  local image="$1" image_id="$2"
+  if [[ -z "${image_id}" || "${image_id}" == "NOT_PULLED" ||
+        ! "${image_id}" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+    err "IMAGE_MANIFEST_INVALID: docker inspect returned an invalid image ID for ${image}"
+    return 1
+  fi
+}
+
 validate_pull_integer MINIKUBE_PULL_PARALLELISM "${PULL_PARALLELISM}" 1 64
 validate_pull_integer MINIKUBE_IMAGE_PULL_RETRIES "${MINIKUBE_IMAGE_PULL_RETRIES}" 1 10
 validate_pull_integer MINIKUBE_IMAGE_PULL_DELAY_SECS "${MINIKUBE_IMAGE_PULL_DELAY_SECS}" 0 300
@@ -187,10 +196,15 @@ if [ "$SKIP_UIS" = true ]; then
 fi
 
 STATUS_DIR="$(mktemp -d)"
+MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+MANIFEST_TMP_FILE=""
 cleanup() {
   local status=$? cleanup_status=0
   trap - EXIT INT TERM
   rm -rf -- "$STATUS_DIR" || cleanup_status=$?
+  if [ -n "${MANIFEST_TMP_FILE}" ]; then
+    rm -f -- "${MANIFEST_TMP_FILE}" || cleanup_status=$?
+  fi
   docker_cli_env_cleanup || cleanup_status=$?
   if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
     status="$cleanup_status"
@@ -393,8 +407,36 @@ fi
 # recorded mode it falls back to the IMAGE_SOURCE env default (ghcr), which is
 # how a locally built cluster came to be reported as "25 of 28 images missing".
 # This writer only ever pulls, so the value is always "ghcr".
-MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+# Resolve and validate every digest before opening the existing manifest. A
+# failed inspect is inventory failure, not evidence that an image was absent;
+# publishing NOT_PULLED or an empty value would create green evidence for a
+# run whose acquisition cannot be verified.
+MANIFEST_GHCR_REFS=()
+MANIFEST_LOCAL_REFS=()
+MANIFEST_SHAS=()
+for f in "${STATUS_DIR}"/*.done; do
+  [ -e "$f" ] || continue
+  ghcr_ref="$(cut -f1 "$f")"
+  local_ref="$(cut -f2 "$f")"
+  manifest_inspect_status=0
+  sha="$(docker_cli_run_public "inspect-image" \
+    "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+    docker inspect --format='{{.Id}}' "$ghcr_ref")" || manifest_inspect_status=$?
+  if [ "$manifest_inspect_status" -ne 0 ]; then
+    err "Could not inspect ${ghcr_ref} while generating the image manifest"
+    exit "$manifest_inspect_status"
+  fi
+  validate_manifest_image_id "$ghcr_ref" "$sha" || exit 1
+  MANIFEST_GHCR_REFS+=("$ghcr_ref")
+  MANIFEST_LOCAL_REFS+=("$local_ref")
+  MANIFEST_SHAS+=("$sha")
+done
+
 mkdir -p "$(dirname "$MANIFEST_FILE")"
+MANIFEST_TMP_FILE="$(mktemp "${MANIFEST_FILE}.tmp.XXXXXX")" || {
+  err "IMAGE_MANIFEST_INVALID: could not create a temporary manifest beside ${MANIFEST_FILE}"
+  exit 1
+}
 {
   echo "{"
   echo "  \"generated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
@@ -403,14 +445,9 @@ mkdir -p "$(dirname "$MANIFEST_FILE")"
   echo "  \"imageTag\": \"${IMAGE_TAG}\","
   echo "  \"images\": {"
   first=true
-  for f in "${STATUS_DIR}"/*.done; do
-    [ -e "$f" ] || continue
-    ghcr_ref="$(cut -f1 "$f")"
-    local_ref="$(cut -f2 "$f")"
-    sha="$(docker_cli_run_public "inspect-image" \
-      "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
-      docker inspect --format='{{.Id}}' "$ghcr_ref" 2>/dev/null || echo "NOT_PULLED")"
-    for ref in "$ghcr_ref" "$local_ref"; do
+  for image_index in "${!MANIFEST_SHAS[@]}"; do
+    sha="${MANIFEST_SHAS[$image_index]}"
+    for ref in "${MANIFEST_GHCR_REFS[$image_index]}" "${MANIFEST_LOCAL_REFS[$image_index]}"; do
       if [ "$first" = true ]; then first=false; else echo ","; fi
       printf '    "%s": "%s"' "$ref" "$sha"
     done
@@ -418,7 +455,18 @@ mkdir -p "$(dirname "$MANIFEST_FILE")"
   echo ""
   echo "  }"
   echo "}"
-} > "$MANIFEST_FILE"
+} > "$MANIFEST_TMP_FILE"
+
+if ! node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' \
+  "$MANIFEST_TMP_FILE"; then
+  err "IMAGE_MANIFEST_INVALID: generated manifest is not valid JSON"
+  exit 1
+fi
+if ! mv -- "$MANIFEST_TMP_FILE" "$MANIFEST_FILE"; then
+  err "IMAGE_MANIFEST_INVALID: could not publish the validated manifest"
+  exit 1
+fi
+MANIFEST_TMP_FILE=""
 ok "Manifest: deploy/minikube/.image-manifest.json"
 
 echo ""
