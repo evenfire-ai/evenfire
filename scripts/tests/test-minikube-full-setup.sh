@@ -54,7 +54,7 @@ EOF_PORTS
   TEST_PROJECT_DIR="$repo"
 }
 
-assert_fixture_host_unchanged() {
+verify_fixture_host_unchanged() {
   if ! minikube_test_assert_host_unchanged; then
     fail "minikube fixture mutated the host checkout"
     return 1
@@ -188,7 +188,7 @@ STUB
     cat "$setup_log_file"
   fi
 
-  assert_fixture_host_unchanged
+  verify_fixture_host_unchanged
   rm -rf "$tmp"
 }
 
@@ -290,7 +290,7 @@ STUB
     cat "$setup_log_file"
   fi
 
-  assert_fixture_host_unchanged
+  verify_fixture_host_unchanged
   rm -rf "$tmp"
 }
 
