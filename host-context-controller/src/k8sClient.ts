@@ -40,6 +40,7 @@ import {
 import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
+import { LlmHookReconciler, computePodKey, referencedHookIds } from './llmHookReconciler'
 import type {
   AuthorityContext,
   AuthorityHost,
@@ -48,7 +49,6 @@ import type {
   AuthoritySecretMetadata,
   McpAuthorizationStore,
 } from './mcpAuthorization'
-import { LlmHookReconciler, computePodKey, referencedHookIds } from './llmHookReconciler'
 import {
   confirmAuthoritativeMcpServerAbsence,
   isMcpServerStatusOnlyUpdate,
