@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 940" role="img" aria-labelledby="title desc">
-  <title id="title">Issue 431 - Current vs fixed workflow trigger rate-limit keying</title>
-  <desc id="desc">external-rest-api always sends a service bearer and a user session token. On origin/dev the service bearer wins, so all users share one 10/min bucket. The fix keys on the verified Profile userId for the external lane and on the bearer only for mcp-host.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" role="img" aria-labelledby="title desc">
+  <title id="title">Issue 431 - Current vs fixed workflow trigger rate-limit key order</title>
+  <desc id="desc">external-rest-api always sends a service bearer and a user session token. Today the service bearer wins, so all users share one 10/min bucket. The fix prefers the user token so each user gets an independent bucket.</desc>
   <defs>
     <marker id="arrowBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
       <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
@@ -19,11 +19,12 @@
     </style>
   </defs>
 
-  <rect width="1200" height="940" fill="#ffffff"/>
+  <rect width="1200" height="900" fill="#ffffff"/>
 
   <text x="600" y="32" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#111827">Issue 431 - Per-user workflow trigger rate limit</text>
-  <text x="600" y="52" text-anchor="middle" class="sans" font-size="13" fill="#4b5563">External lane keys on verified userId. mcp-host lane keys on the bearer only.</text>
+  <text x="600" y="52" text-anchor="middle" class="sans" font-size="13" fill="#4b5563">Key-order fix: 10/min cap is per end-user, not per external-rest-api service identity</text>
 
+  <!-- INGRESS -->
   <rect x="40" y="68" width="1120" height="148" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="6 4"/>
   <text x="56" y="88" class="sans" font-size="11" font-weight="700" fill="#64748b">PRODUCTION INGRESS - unchanged</text>
 
@@ -58,10 +59,11 @@
   <text x="994" y="142" text-anchor="middle" class="sans" font-size="13" font-weight="700" fill="#111827">control-api</text>
   <text x="994" y="162" text-anchor="middle" class="sans" font-size="12" fill="#4b5563">POST /external/.../trigger</text>
 
-  <rect x="40" y="236" width="548" height="520" rx="12" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5"/>
+  <!-- CURRENT -->
+  <rect x="40" y="236" width="548" height="500" rx="12" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5"/>
   <rect x="40" y="236" width="548" height="44" rx="12" fill="#ea580c"/>
   <rect x="40" y="264" width="548" height="16" fill="#ea580c"/>
-  <text x="314" y="265" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#ffffff">CURRENT on origin/dev - broken key order</text>
+  <text x="314" y="265" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#ffffff">CURRENT - broken key order</text>
 
   <text x="64" y="308" class="sans" font-size="12" font-weight="700" fill="#9a3412">workflowTriggerRateLimitCredential()</text>
 
@@ -96,45 +98,46 @@
   <text x="442" y="488" text-anchor="middle" class="sans" font-size="12" fill="#991b1b">User A exhausts the shared quota</text>
   <text x="442" y="508" text-anchor="middle" class="sans" font-size="12" fill="#991b1b">User B is denied with 429</text>
 
-  <rect x="64" y="676" width="500" height="56" rx="8" fill="#ffffff" stroke="#ea580c" stroke-width="1.5"/>
-  <text x="314" y="698" text-anchor="middle" class="sans" font-size="13" font-weight="700" fill="#9a3412">Result: platform-wide fairness failure</text>
-  <text x="314" y="718" text-anchor="middle" class="sans" font-size="12" fill="#c2410c">One noisy user blocks every other Profile user</text>
+  <rect x="64" y="656" width="500" height="56" rx="8" fill="#ffffff" stroke="#ea580c" stroke-width="1.5"/>
+  <text x="314" y="678" text-anchor="middle" class="sans" font-size="13" font-weight="700" fill="#9a3412">Result: platform-wide fairness failure</text>
+  <text x="314" y="698" text-anchor="middle" class="sans" font-size="12" fill="#c2410c">One noisy user blocks every other Profile user</text>
 
-  <rect x="612" y="236" width="548" height="520" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+  <!-- NEW -->
+  <rect x="612" y="236" width="548" height="500" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
   <rect x="612" y="236" width="548" height="44" rx="12" fill="#059669"/>
   <rect x="612" y="264" width="548" height="16" fill="#059669"/>
-  <text x="886" y="265" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#ffffff">NEW - verified userId + lane split</text>
+  <text x="886" y="265" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#ffffff">NEW - effective per-user order</text>
 
-  <text x="636" y="308" class="sans" font-size="12" font-weight="700" fill="#065f46">external: workflowTriggerRateLimitCredential()</text>
+  <text x="636" y="308" class="sans" font-size="12" font-weight="700" fill="#065f46">Same function, reordered priority</text>
 
   <rect x="636" y="324" width="216" height="56" rx="8" fill="#86efac" stroke="#059669" stroke-width="2"/>
-  <text x="744" y="346" text-anchor="middle" class="sans" font-size="13" font-weight="700" fill="#14532d">1. Verified userId</text>
-  <text x="744" y="366" text-anchor="middle" class="sans" font-size="11" fill="#166534">user:claims.userId, not raw JWT</text>
+  <text x="744" y="346" text-anchor="middle" class="sans" font-size="13" font-weight="700" fill="#14532d">1. User session token</text>
+  <text x="744" y="366" text-anchor="middle" class="sans" font-size="11" fill="#166534">wins when present and non-empty</text>
 
   <path d="M744 380 V396" stroke="#059669" stroke-width="1.5" fill="none" marker-end="url(#arrowGreen)"/>
 
   <rect x="636" y="396" width="216" height="56" rx="8" fill="#ffffff" stroke="#6ee7b7" stroke-width="1.5"/>
-  <text x="744" y="418" text-anchor="middle" class="sans" font-size="13" font-weight="600" fill="#065f46">2. Unverified session - IP</text>
-  <text x="744" y="438" text-anchor="middle" class="sans" font-size="11" fill="#047857">rotation cannot mint a bucket</text>
+  <text x="744" y="418" text-anchor="middle" class="sans" font-size="13" font-weight="600" fill="#065f46">2. Admin cookie</text>
+  <text x="744" y="438" text-anchor="middle" class="sans" font-size="11" fill="#047857">verified subject or IP fallback</text>
 
   <path d="M744 452 V468" stroke="#059669" stroke-width="1.5" fill="none" marker-end="url(#arrowGreen)"/>
 
   <rect x="636" y="468" width="216" height="56" rx="8" fill="#ffffff" stroke="#6ee7b7" stroke-width="1.5"/>
-  <text x="744" y="490" text-anchor="middle" class="sans" font-size="13" font-weight="600" fill="#065f46">3. Cookie, then bearer LAST</text>
-  <text x="744" y="510" text-anchor="middle" class="sans" font-size="11" fill="#047857">only if no session header</text>
+  <text x="744" y="490" text-anchor="middle" class="sans" font-size="13" font-weight="600" fill="#065f46">3. Service bearer LAST</text>
+  <text x="744" y="510" text-anchor="middle" class="sans" font-size="11" fill="#047857">only if no user token or cookie</text>
 
   <path d="M852 352 H884" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
   <rect x="848" y="334" width="52" height="16" rx="3" fill="#ecfdf5"/>
   <text x="874" y="346" text-anchor="middle" class="sans" font-size="11" fill="#047857">keys on 1</text>
 
   <rect x="892" y="324" width="244" height="200" rx="8" fill="#ffffff" stroke="#059669" stroke-width="1.5"/>
-  <text x="1014" y="348" text-anchor="middle" class="sans" font-size="11" font-weight="700" fill="#047857">PER-ACCOUNT BUCKETS</text>
+  <text x="1014" y="348" text-anchor="middle" class="sans" font-size="11" font-weight="700" fill="#047857">PER-USER BUCKETS</text>
 
   <rect x="908" y="360" width="212" height="40" rx="6" fill="#d1fae5" stroke="#059669" stroke-width="1"/>
-  <text x="1014" y="385" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#065f46">hash(user:A)</text>
+  <text x="1014" y="385" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#065f46">hash(user A token)</text>
 
   <rect x="908" y="408" width="212" height="40" rx="6" fill="#d1fae5" stroke="#059669" stroke-width="1"/>
-  <text x="1014" y="433" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#065f46">hash(user:B)</text>
+  <text x="1014" y="433" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#065f46">hash(user B token)</text>
 
   <rect x="908" y="464" width="100" height="44" rx="6" fill="#bbf7d0" stroke="#059669" stroke-width="1"/>
   <text x="958" y="482" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#14532d">Bucket A</text>
@@ -144,26 +147,24 @@
   <text x="1070" y="482" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#14532d">Bucket B</text>
   <text x="1070" y="498" text-anchor="middle" class="sans" font-size="11" fill="#166534">10/min B</text>
 
-  <rect x="636" y="544" width="500" height="52" rx="8" fill="#ffffff" stroke="#047857" stroke-width="1.5"/>
-  <text x="886" y="566" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#065f46">mcp-host lane: bearer only</text>
-  <text x="886" y="584" text-anchor="middle" class="sans" font-size="11" fill="#047857">Injected x-user-session-token does not mint a new bucket</text>
+  <rect x="636" y="656" width="500" height="56" rx="8" fill="#ffffff" stroke="#059669" stroke-width="1.5"/>
+  <text x="886" y="678" text-anchor="middle" class="sans" font-size="13" font-weight="700" fill="#065f46">Result: A cannot exhaust B</text>
+  <text x="886" y="698" text-anchor="middle" class="sans" font-size="12" fill="#047857">Fairness and abuse containment per user</text>
 
-  <rect x="636" y="676" width="500" height="56" rx="8" fill="#ffffff" stroke="#059669" stroke-width="1.5"/>
-  <text x="886" y="698" text-anchor="middle" class="sans" font-size="13" font-weight="700" fill="#065f46">Result: A cannot exhaust B</text>
-  <text x="886" y="718" text-anchor="middle" class="sans" font-size="12" fill="#047857">Same account keeps one bucket across token rotation</text>
+  <!-- RESOLUTION -->
+  <rect x="40" y="756" width="1120" height="88" rx="12" fill="#111827"/>
+  <text x="60" y="784" class="sans" font-size="14" font-weight="700" fill="#f8fafc">What we resolve</text>
+  <text x="60" y="808" class="sans" font-size="13" fill="#e5e7eb">Reorder credential priority only. Same PG limiter, same 10/min, same sha256[:32] hash.</text>
+  <text x="60" y="828" class="sans" font-size="13" fill="#9ca3af">User token first makes the cap effective per user when both headers are present. Service bearer stays last resort. Authz unchanged.</text>
 
-  <rect x="40" y="776" width="1120" height="100" rx="12" fill="#111827"/>
-  <text x="60" y="804" class="sans" font-size="14" font-weight="700" fill="#f8fafc">What we resolve</text>
-  <text x="60" y="828" class="sans" font-size="13" fill="#e5e7eb">External lane: verified userId first. Unverified session header falls back to IP. mcp-host has its own bearer-only limiter.</text>
-  <text x="60" y="848" class="sans" font-size="13" fill="#9ca3af">Same PG limiter, same 10/min, same sha256[:32] hash. Authz unchanged. Service bearer stays last resort when no session header is present.</text>
-
-  <rect x="40" y="892" width="1120" height="32" rx="6" fill="#f8fafc" stroke="#e5e7eb"/>
-  <line x1="60" y1="908" x2="92" y2="908" stroke="#2563eb" stroke-width="2.5"/>
-  <text x="100" y="912" class="sans" font-size="11" fill="#374151">Request / headers</text>
-  <line x1="248" y1="908" x2="280" y2="908" stroke="#ea580c" stroke-width="2"/>
-  <text x="288" y="912" class="sans" font-size="11" fill="#374151">Current key path (shared bucket)</text>
-  <line x1="520" y1="908" x2="552" y2="908" stroke="#059669" stroke-width="2"/>
-  <text x="560" y="912" class="sans" font-size="11" fill="#374151">New key path (per-account buckets)</text>
-  <line x1="800" y1="908" x2="832" y2="908" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4 2"/>
-  <text x="840" y="912" class="sans" font-size="11" fill="#374151">Unchanged hop to control-api</text>
+  <!-- LEGEND -->
+  <rect x="40" y="856" width="1120" height="32" rx="6" fill="#f8fafc" stroke="#e5e7eb"/>
+  <line x1="60" y1="872" x2="92" y2="872" stroke="#2563eb" stroke-width="2.5"/>
+  <text x="100" y="876" class="sans" font-size="11" fill="#374151">Request / headers</text>
+  <line x1="248" y1="872" x2="280" y2="872" stroke="#ea580c" stroke-width="2"/>
+  <text x="288" y="876" class="sans" font-size="11" fill="#374151">Current key path (shared bucket)</text>
+  <line x1="520" y1="872" x2="552" y2="872" stroke="#059669" stroke-width="2"/>
+  <text x="560" y="876" class="sans" font-size="11" fill="#374151">New key path (per-user buckets)</text>
+  <line x1="800" y1="872" x2="832" y2="872" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4 2"/>
+  <text x="840" y="876" class="sans" font-size="11" fill="#374151">Unchanged hop to control-api</text>
 </svg>
