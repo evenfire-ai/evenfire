@@ -11,14 +11,19 @@ import {
   type Transactor,
   type TxClient,
 } from '../db/writeStore'
-import { GFS_UPLOAD_V2_PRODUCT_MAX_BYTES, partGeometry } from './protocol'
-import { GfsUploadSessionService, type UploadSessionServiceDeps } from './uploadSession'
+import { GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES, partGeometry } from './protocol'
+import {
+  GfsUploadSessionService,
+  type UploadSessionServiceDeps,
+  uploadCapabilities,
+} from './uploadSession'
 
 type Row = Record<string, unknown>
 
 class MemoryDb {
   sessions: Row[] = []
   parts: Row[] = []
+  idempotencyLookupCount = 0
   failReconciliationReads = false
   failSessionReconciliationReads = false
 
@@ -27,6 +32,7 @@ class MemoryDb {
     if (sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ') return { rows: [] }
     if (sql.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
     if (sql.startsWith('SELECT * FROM gfs_upload_sessions WHERE owner_subject')) {
+      this.idempotencyLookupCount += 1
       const [owner, drive, key] = values.map(String)
       return {
         rows: this.sessions.filter(
@@ -461,7 +467,7 @@ afterEach(async () => {
 function service(
   db: MemoryDb,
   config: GfsUploadConfig = TEST_CONFIG,
-  overrides: Partial<Pick<UploadSessionServiceDeps, 'now' | 'finalize' | 'tx'>> = {}
+  overrides: Partial<Pick<UploadSessionServiceDeps, 'now' | 'finalize' | 'tx' | 'authorize'>> = {}
 ): GfsUploadSessionService {
   return new GfsUploadSessionService({
     db,
@@ -571,11 +577,11 @@ describe('GfsUploadSessionService', () => {
     const exactDb = new MemoryDb()
     const exact = await service(exactDb, CONFIG).create({
       ...input,
-      sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+      sizeBytes: GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
       idempotencyKey: '11111111-1111-4111-8111-111111111112',
     })
     expect(exact.created).toBe(true)
-    expect(exact.session.expectedBytes).toBe(GFS_UPLOAD_V2_PRODUCT_MAX_BYTES)
+    expect(exact.session.expectedBytes).toBe(GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES)
     expect(exact.session.partBytes).toBe(8 * 1024 * 1024)
     expect(exact.session.partCount).toBe(25)
     expect(exactDb.sessions).toHaveLength(1)
@@ -584,7 +590,7 @@ describe('GfsUploadSessionService', () => {
     await expect(
       service(overDb, CONFIG).create({
         ...input,
-        sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES + 1,
+        sizeBytes: GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES + 1,
         idempotencyKey: '11111111-1111-4111-8111-111111111113',
       })
     ).rejects.toMatchObject({ code: 'payload_too_large' })
@@ -594,11 +600,66 @@ describe('GfsUploadSessionService', () => {
     await expect(
       service(partCountDb, { ...CONFIG, maxPartCount: 24 }).create({
         ...input,
-        sizeBytes: GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+        sizeBytes: GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
         idempotencyKey: '11111111-1111-4111-8111-111111111114',
       })
     ).rejects.toMatchObject({ code: 'payload_too_large' })
     expect(partCountDb.sessions).toHaveLength(0)
+  })
+
+  it.each([
+    ['100 MiB', 100 * 1024 * 1024],
+    ['250 MiB', 250 * 1024 * 1024],
+    ['300 MiB', 300 * 1024 * 1024],
+    ['the protocol maximum', 1024 * 1024 * 1024],
+  ] as const)(
+    'advertises and enforces the configured %s product limit before allocation',
+    async (_label, productMaxFileBytes) => {
+      tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-runtime-boundary-'))
+      const config = { ...CONFIG, productMaxFileBytes }
+      const capability = uploadCapabilities(true, config).resumableV2
+      expect(capability).toMatchObject({ enabled: true, maxFileBytes: productMaxFileBytes })
+
+      const input = {
+        ...principal,
+        operation: 'create' as const,
+        parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        name: 'runtime-boundary.bin',
+      }
+      const exactDb = new MemoryDb()
+      const exact = await service(exactDb, config).create({
+        ...input,
+        sizeBytes: productMaxFileBytes,
+        idempotencyKey: '21111111-1111-4111-8111-111111111112',
+      })
+      expect(exact.session.expectedBytes).toBe(productMaxFileBytes)
+      expect(exactDb.sessions).toHaveLength(1)
+
+      const overDb = new MemoryDb()
+      await expect(
+        service(overDb, config).create({
+          ...input,
+          sizeBytes: productMaxFileBytes + 1,
+          idempotencyKey: '21111111-1111-4111-8111-111111111113',
+        })
+      ).rejects.toMatchObject({ code: 'payload_too_large' })
+      expect(overDb.sessions).toHaveLength(0)
+    }
+  )
+
+  it('keeps zero-byte uploads valid with a positive configured product limit', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-empty-file-'))
+    const db = new MemoryDb()
+    const created = await service(db, { ...CONFIG, productMaxFileBytes: 1 }).create({
+      ...principal,
+      operation: 'create',
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'empty.bin',
+      sizeBytes: 0,
+      idempotencyKey: '21111111-1111-4111-8111-111111111114',
+    })
+    expect(created.session.expectedBytes).toBe(0)
+    expect(created.session.partCount).toBe(0)
   })
 
   it(
@@ -661,6 +722,69 @@ describe('GfsUploadSessionService', () => {
       expect(duplicate.part.sha256).toBe(checksum(first))
     }
   )
+
+  it('replays an admitted create after the runtime product policy is lowered', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-policy-replay-'))
+    const db = new MemoryDb()
+    const request = {
+      ...principal,
+      operation: 'create' as const,
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'admitted-before-policy-lowering.bin',
+      sizeBytes: 250 * 1024 * 1024,
+      idempotencyKey: '31111111-1111-4111-8111-111111111111',
+    }
+    const admitted = await service(db, {
+      ...CONFIG,
+      productMaxFileBytes: 300 * 1024 * 1024,
+    }).create(request)
+    expect(admitted.created).toBe(true)
+    expect(db.sessions).toHaveLength(1)
+
+    const lowered = service(db, { ...CONFIG, productMaxFileBytes: 100 * 1024 * 1024 })
+    const replay = await lowered.create(request)
+    expect(replay).toMatchObject({
+      created: false,
+      session: { uploadId: admitted.session.uploadId, expectedBytes: request.sizeBytes },
+    })
+    expect(db.sessions).toHaveLength(1)
+
+    await expect(
+      lowered.create({
+        ...request,
+        idempotencyKey: '31111111-1111-4111-8111-111111111112',
+      })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(db.sessions).toHaveLength(1)
+
+    await expect(
+      lowered.create({ ...request, name: 'conflicting-name.bin' })
+    ).rejects.toMatchObject({
+      code: 'idempotency_conflict',
+    })
+    expect(db.sessions).toHaveLength(1)
+
+    const lookupsBeforeUnauthorizedAttempt = db.idempotencyLookupCount
+    const guarded = service(
+      db,
+      { ...CONFIG, productMaxFileBytes: 100 * 1024 * 1024 },
+      {
+        authorize: async input => {
+          if (input.ownerSubject !== principal.ownerSubject) throw new Error('not authorized')
+        },
+      }
+    )
+    await expect(
+      guarded.create({
+        ...request,
+        ownerSubject: 'user-2',
+        primarySubject: 'user-2',
+        sizeBytes: 1,
+      })
+    ).rejects.toThrow('not authorized')
+    expect(db.idempotencyLookupCount).toBe(lookupsBeforeUnauthorizedAttempt)
+    expect(db.sessions).toHaveLength(1)
+  })
 
   it('does not double-decrement active parts after an unknown commit and failed reconciliation', async () => {
     tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-'))

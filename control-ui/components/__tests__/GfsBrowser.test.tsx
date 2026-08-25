@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GFS_FILE_UPLOAD_MAX_BYTES } from '@constants/gfsFileUpload'
+import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import {
@@ -16,7 +16,12 @@ import {
   gfsFetchFileBlob,
   putGfsGrant,
 } from '@lib/api'
-import { GfsUploadCapabilityError, createGfsUploadJob, uploadGfsFile } from '@lib/gfsFileUpload'
+import {
+  GfsUploadCapabilityError,
+  createGfsUploadJob,
+  normalizeUploadProductMaxBytes,
+  uploadGfsFile,
+} from '@lib/gfsFileUpload'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { GfsBrowser } from '../GfsBrowser'
 import { ToastProvider } from '../Toast'
@@ -137,8 +142,8 @@ describe('GfsBrowser', () => {
     mockUploadGfsFile.mockReset()
     window.localStorage.clear()
     mockUploadGfsFile.mockImplementation(async ({ file }: { file: File }) => {
-      if (file.size > GFS_FILE_UPLOAD_MAX_BYTES) {
-        throw new Error('GFS uploads are limited to 200 MB per file.')
+      if (file.size > GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES) {
+        throw new Error('GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.')
       }
       return { state: 'completed' }
     })
@@ -250,7 +255,9 @@ describe('GfsBrowser', () => {
 
     fireEvent.click(newFile)
     const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
-    expect(within(uploadDialog).getByText(/limited to 200 MiB per file/i)).toBeTruthy()
+    expect(
+      within(uploadDialog).getByText(/writer advertises the Upload v2 file limit/i)
+    ).toBeTruthy()
     expect(within(uploadDialog).getByText(/drag and drop, or click to browse/i)).toBeTruthy()
     fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Cancel' }))
 
@@ -457,7 +464,11 @@ describe('GfsBrowser', () => {
     )
     mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
     mockCreateGfsUploadJob.mockImplementationOnce(() => ({
-      start: vi.fn().mockRejectedValue(new GfsUploadCapabilityError('writer unavailable')),
+      start: vi
+        .fn()
+        .mockRejectedValue(
+          new GfsUploadCapabilityError('writer unavailable', { allowLegacyFallback: true })
+        ),
       snapshot: vi.fn(() => ({ state: 'failed' })),
       pause: vi.fn(),
       resume: vi.fn(),
@@ -484,6 +495,40 @@ describe('GfsBrowser', () => {
     ).toMatchObject({
       uploadId,
     })
+  })
+
+  it('fails loudly without legacy fallback for malformed resumable capabilities', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
+    let malformed: unknown
+    try {
+      normalizeUploadProductMaxBytes(0)
+    } catch (error) {
+      malformed = error
+    }
+    expect(malformed).toBeInstanceOf(GfsUploadCapabilityError)
+    mockCreateGfsUploadJob.mockImplementationOnce(() => ({
+      start: vi.fn().mockRejectedValue(malformed),
+      snapshot: vi.fn(() => ({ state: 'failed' })),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      cancel: vi.fn(),
+    }))
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    fireEvent.drop(browser.querySelector('.cu-gfs-card')!, {
+      dataTransfer: {
+        dropEffect: 'none',
+        files: [new File(['payload'], 'payload.bin')],
+        types: ['Files'],
+      },
+    })
+
+    await waitFor(() => expect(screen.getByText((malformed as Error).message)).toBeTruthy())
+    expect(mockApiSend).not.toHaveBeenCalled()
+    expect(screen.queryByText(/using the legacy 16 MiB path/i)).toBeNull()
   })
 
   it('shows byte progress and exposes pause/resume/cancel through the visible upload modal', async () => {
@@ -602,7 +647,7 @@ describe('GfsBrowser', () => {
     renderBrowser()
     await screen.findByText('No resources are visible in this folder.')
     const oversized = new File(['small fixture'], 'oversized.md', { type: 'text/markdown' })
-    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_MAX_BYTES + 1 })
+    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES + 1 })
     const arrayBuffer = vi.spyOn(oversized, 'arrayBuffer')
 
     const browser = screen.getByRole('region', { name: 'Global File System browser' })
@@ -610,7 +655,9 @@ describe('GfsBrowser', () => {
       dataTransfer: { dropEffect: 'none', files: [oversized], types: ['Files'] },
     })
 
-    expect(await screen.findByText('GFS uploads are limited to 200 MB per file.')).toBeTruthy()
+    expect(
+      await screen.findByText('GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.')
+    ).toBeTruthy()
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(mockApiSend).not.toHaveBeenCalled()
   })
@@ -846,7 +893,9 @@ describe('GfsBrowser', () => {
       items: [child('report.md', 'file', 2)],
       nextCursor: null,
     })
-    const capabilityError = new GfsUploadCapabilityError('writer unavailable')
+    const capabilityError = new GfsUploadCapabilityError('writer unavailable', {
+      allowLegacyFallback: true,
+    })
     mockCreateGfsUploadJob.mockImplementationOnce(() => ({
       start: vi.fn().mockRejectedValue(capabilityError),
       snapshot: vi.fn(() => ({ state: 'failed' })),

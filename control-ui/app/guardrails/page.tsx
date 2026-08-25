@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { useConfirmDialog } from '../../components/ConfirmDialog'
 import { DashboardLayout } from '../../components/DashboardLayout'
 import { GuardrailHooksTable } from '../../components/GuardrailHooksTable'
@@ -8,8 +9,11 @@ import type { LlmHookRef } from '../../components/GuardrailHooksTable.types'
 import { useToast } from '../../components/Toast'
 import { deleteLlmHook, getLlmHooks, isSilentApiError } from '../../lib/api'
 import type { LlmHookResource } from '../../lib/api'
+import { GUARDRAIL_ENTRY_TYPE } from '../constants/marketplaceEntryTypes'
+import { CONTROL_ROUTES } from '../constants/routes'
 
 export default function GuardrailsPage() {
+  const router = useRouter()
   const { showToast } = useToast()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -62,6 +66,11 @@ export default function GuardrailsPage() {
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
       <GuardrailHooksTable
         items={hooks}
+        // Same destination as "Add hook" on an agent: the org marketplace
+        // entries list narrowed to guardrail hooks.
+        onInstall={() =>
+          router.push(CONTROL_ROUTES.marketplace.orgEntriesFiltered({ type: GUARDRAIL_ENTRY_TYPE }))
+        }
         onUninstall={handleUninstall}
         uninstallingKey={uninstallingKey}
         onRefresh={loadAll}

@@ -4,9 +4,13 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { CONTROL_ROUTES } from '../../../app/constants/routes'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
+import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
+import { CreatePageHeader } from '../../../components/CreatePageHeader'
 import { DashboardLayout } from '../../../components/DashboardLayout'
+import { KebabMenu } from '../../../components/KebabMenu'
+import { IconShield } from '../../../components/Sidebar/icons'
 import { useToast } from '../../../components/Toast'
-import { Button, FormSection } from '../../../components/ui'
+import { FormSection } from '../../../components/ui'
 import { deleteLlmHook, getHosts, getLlmHook, isSilentApiError } from '../../../lib/api'
 import type { HostResource, LlmHookResource, LlmHookStatus } from '../../../lib/api'
 
@@ -168,16 +172,36 @@ export default function GuardrailDetailPage() {
   }
 
   return (
-    <DashboardLayout>
-      <div style={{ marginBottom: 'var(--cu-space-2)' }}>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => router.push(CONTROL_ROUTES.guardrails.root)}
-        >
-          ← Installed Guardrails
-        </Button>
-      </div>
+    <DashboardLayout isDetailPage>
+      <CreateFlowPanel
+        className="cu-detail-flow-panel"
+        header={
+          <CreatePageHeader
+            icon={<IconShield />}
+            title={name || 'Guardrail'}
+            subtitle="Guardrail details and runtime status."
+            backLabel="Back to guardrails"
+            onBack={() => router.push(CONTROL_ROUTES.guardrails.root)}
+            titleActions={
+              hook ? (
+                <KebabMenu
+                  ariaLabel="More guardrail actions"
+                  items={[
+                    {
+                      label: uninstalling ? 'Uninstalling…' : 'Uninstall',
+                      disabled: uninstalling,
+                      danger: true,
+                      onClick: () => void handleUninstall(),
+                    },
+                  ]}
+                />
+              ) : undefined
+            }
+          />
+        }
+      >
+        {null}
+      </CreateFlowPanel>
 
       {error ? (
         <div className="cu-banner cu-banner--error" role="alert">
@@ -185,104 +209,109 @@ export default function GuardrailDetailPage() {
         </div>
       ) : null}
 
-      {loading && !hook ? (
-        <div className="cu-card">
-          <div className="cu-card__body cu-muted">Loading guardrail…</div>
-        </div>
-      ) : !hook ? (
-        <div className="cu-empty">Guardrail not found.</div>
-      ) : (
-        <>
-          <FormSection title={name} description="Installed guardrail hook.">
-            <div className="cu-summary-list">
-              <Row label="Status">
-                <StatusBadge status={hook.status} />
-              </Row>
-              <Row label={target.kind}>
-                <strong className="cu-expandable-field__code">{target.value}</strong>
-              </Row>
-              <Row label="Path">{spec.path || '/'}</Row>
-              <Row label="Lifecycle points">{(spec.lifecyclePoints || []).join(', ') || '—'}</Row>
-              <Row label="Fail mode">{spec.failMode || '—'}</Row>
-              <Row label="Capabilities">
-                {spec.capabilities && spec.capabilities.length > 0 ? (
-                  <span className="cu-expandable-tags">
-                    {spec.capabilities.map(c => (
-                      <span key={c} className="cu-registry-tag">
-                        {c}
-                      </span>
-                    ))}
-                  </span>
-                ) : (
-                  <span className="cu-muted">None declared</span>
-                )}
-              </Row>
-              <Row label="Observed digest">
-                <strong className="cu-expandable-field__code">
-                  {hook.status?.observedDigest || '—'}
-                </strong>
-              </Row>
-              <Row label="Ready replicas">
-                {typeof hook.status?.readyReplicas === 'number' ? hook.status.readyReplicas : '—'}
-              </Row>
-            </div>
-            <div style={{ marginTop: 'var(--cu-space-3)' }}>
-              <Button variant="danger" size="sm" onClick={handleUninstall} disabled={uninstalling}>
-                {uninstalling ? 'Uninstalling…' : 'Uninstall'}
-              </Button>
-            </div>
-          </FormSection>
+      {/* The header panel squares off its bottom edge and expects the content
+          stack directly below it, so the first section fuses with it instead of
+          floating as a separate rounded card. */}
+      <div className="cu-detail-content-stack">
+        {loading && !hook ? (
+          <div className="cu-card">
+            <div className="cu-card__body cu-muted">Loading guardrail…</div>
+          </div>
+        ) : !hook ? (
+          <div className="cu-empty">Guardrail not found.</div>
+        ) : (
+          <>
+            <FormSection
+              title="Details"
+              description="Runtime configuration reported by the installed hook."
+            >
+              <div className="cu-summary-list cu-summary-list--flush">
+                <Row label="Status">
+                  <StatusBadge status={hook.status} />
+                </Row>
+                <Row label={target.kind}>
+                  <strong className="cu-expandable-field__code">{target.value}</strong>
+                </Row>
+                <Row label="Path">{spec.path || '/'}</Row>
+                <Row label="Lifecycle points">{(spec.lifecyclePoints || []).join(', ') || '—'}</Row>
+                <Row label="Fail mode">{spec.failMode || '—'}</Row>
+                <Row label="Capabilities">
+                  {spec.capabilities && spec.capabilities.length > 0 ? (
+                    <span className="cu-expandable-tags">
+                      {spec.capabilities.map(c => (
+                        <span key={c} className="cu-registry-tag">
+                          {c}
+                        </span>
+                      ))}
+                    </span>
+                  ) : (
+                    <span className="cu-muted">None declared</span>
+                  )}
+                </Row>
+                <Row label="Observed digest">
+                  <strong className="cu-expandable-field__code">
+                    {hook.status?.observedDigest || '—'}
+                  </strong>
+                </Row>
+                <Row label="Ready replicas">
+                  {typeof hook.status?.readyReplicas === 'number' ? hook.status.readyReplicas : '—'}
+                </Row>
+              </div>
+            </FormSection>
 
-          <FormSection
-            title={`Agents using this guardrail (${agents.length})`}
-            description="Agents whose guardrails reference this hook, and the lifecycle phases they use it in."
-          >
-            {agents.length === 0 ? (
-              <div className="cu-empty">No agents reference this guardrail.</div>
-            ) : (
-              <div className="cu-table-wrap">
-                <table className="cu-table cu-table--header-band">
-                  <thead>
-                    <tr>
-                      <th>Agent</th>
-                      <th>Phases</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {agents.map(a => (
-                      <tr
-                        key={a.name}
-                        className="cu-table__row cu-table__row--clickable"
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => router.push(CONTROL_ROUTES.agents.tab(a.name, 'guardrails'))}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
+            <FormSection
+              title={`Agents using this guardrail (${agents.length})`}
+              description="Agents whose guardrails reference this hook, and the lifecycle phases they use it in."
+            >
+              {agents.length === 0 ? (
+                <div className="cu-empty">No agents reference this guardrail.</div>
+              ) : (
+                <div className="cu-table-wrap">
+                  <table className="cu-table cu-table--header-band">
+                    <thead>
+                      <tr>
+                        <th>Agent</th>
+                        <th>Phases</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {agents.map(a => (
+                        <tr
+                          key={a.name}
+                          className="cu-table__row cu-table__row--clickable"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() =>
                             router.push(CONTROL_ROUTES.agents.tab(a.name, 'guardrails'))
                           }
-                        }}
-                        aria-label={`Open agent ${a.name} guardrails`}
-                      >
-                        <td>{a.name}</td>
-                        <td>
-                          <span className="cu-expandable-tags">
-                            {a.phases.map(p => (
-                              <span key={p} className="cu-registry-tag">
-                                {PHASE_LABEL[p] || p}
-                              </span>
-                            ))}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </FormSection>
-        </>
-      )}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              router.push(CONTROL_ROUTES.agents.tab(a.name, 'guardrails'))
+                            }
+                          }}
+                          aria-label={`Open agent ${a.name} guardrails`}
+                        >
+                          <td>{a.name}</td>
+                          <td>
+                            <span className="cu-expandable-tags">
+                              {a.phases.map(p => (
+                                <span key={p} className="cu-registry-tag">
+                                  {PHASE_LABEL[p] || p}
+                                </span>
+                              ))}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </FormSection>
+          </>
+        )}
+      </div>
       {confirmDialog}
     </DashboardLayout>
   )

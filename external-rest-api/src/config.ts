@@ -198,7 +198,10 @@ export const config: Config = {
   // Coherent GFS-only tiers: token IP <= client IP < process aggregate. The
   // Control API's distributed 10/min token and 30/min session/actor budgets
   // remain authoritative.
-  ...externalGfsEdgeRateLimits,
+  externalGfsEdgeAggregateRlPerMin: externalGfsEdgeRateLimits.externalGfsEdgeAggregateRlPerMin,
+  externalGfsEdgeAuthenticatedIpRlPerMin:
+    externalGfsEdgeRateLimits.externalGfsEdgeAuthenticatedIpRlPerMin,
+  externalGfsEdgeTokenIpRlPerMin: externalGfsEdgeRateLimits.externalGfsEdgeTokenIpRlPerMin,
 }
 
 if (process.env.NODE_ENV === 'production' && config.corsOrigin === '*') {
