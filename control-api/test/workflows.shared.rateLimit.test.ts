@@ -12,6 +12,8 @@ import {
   workflowGrantReadRateLimit,
   workflowGrantReadRateLimits,
   workflowGrantWriteRateLimits,
+  workflowTriggerRateLimit,
+  workflowTriggerRateLimitCredential,
 } from '../src/routes/workflows/shared/rateLimit.js'
 
 const mockCheckAndIncrement = vi.hoisted(() => vi.fn())
@@ -409,5 +411,102 @@ describe('routes/workflows/shared/rateLimit', () => {
 
     expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_grants_read:[0-9a-f]{32}$/)
+  })
+
+  it('workflowTriggerRateLimitCredential prefers user session over service bearer', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        if (name.toLowerCase() === 'x-user-session-token') return 'user-session-a'
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('user-session-a')
+  })
+
+  it('workflowTriggerRateLimitCredential ignores whitespace user tokens and falls back to bearer', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        if (name.toLowerCase() === 'x-user-session-token') return '   '
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('service-token')
+  })
+
+  it('workflowTriggerRateLimitCredential uses bearer when no user token is present', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('service-token')
+  })
+
+  it('workflowTriggerRateLimit keys independent buckets for two users behind the same service bearer', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-b')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(3)
+    const [keyA, keyB, keyAAgain] = mockCheckAndIncrement.mock.calls.map(call => call[0])
+    expect(keyA).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(keyB).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(keyA).not.toBe(keyB)
+    expect(keyAAgain).toBe(keyA)
+  })
+
+  it('workflowTriggerRateLimit falls back to the service bearer without a user token', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app).post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+    await request(app).post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
   })
 })

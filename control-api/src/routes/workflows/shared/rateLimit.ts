@@ -149,19 +149,25 @@ export function adminWorkflowTriggerRateLimit() {
   })
 }
 
-function workflowTriggerRateLimitCredential(req: Request): string | null {
+/**
+ * Prefer the end-user session when external-rest-api forwards both a service
+ * bearer and x-user-session-token. Otherwise every Profile user shares one
+ * 10/min bucket keyed to the service identity.
+ */
+export function workflowTriggerRateLimitCredential(req: Request): string | null {
+  const userSessionToken = String(req.header('x-user-session-token') || '').trim()
+  if (userSessionToken) return userSessionToken
+
+  const cookie = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+  const cookieSubject = verifiedAdminRateLimitSubject(cookie)
+  if (cookieSubject) return cookieSubject
+  if (cookie) {
+    return `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+  }
+
   const bearer = extractBearerToken(req)
   if (bearer) {
     return verifiedAdminRateLimitSubject(bearer) || bearer
-  }
-  const userSessionToken = String(req.header('x-user-session-token') || '').trim()
-  if (userSessionToken) return userSessionToken
-  const cookieSubject = verifiedAdminRateLimitSubject(
-    readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
-  )
-  if (cookieSubject) return cookieSubject
-  if (readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)) {
-    return `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
   }
   return null
 }

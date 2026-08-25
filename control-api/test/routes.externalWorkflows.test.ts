@@ -570,6 +570,91 @@ describe('routes/external/workflows', () => {
         .send({ inputs: { topic: 'alpha' } })
         .expect(403)
     })
+
+    function rateLimitBucketKeys(): string[] {
+      return mockPoolQuery.mock.calls
+        .filter(call => String(call[0]).includes('INSERT INTO rate_limit_buckets'))
+        .map(call => String((call[1] as unknown[] | undefined)?.[0] ?? ''))
+    }
+
+    it('keys independent trigger buckets for two user sessions behind the same service bearer', async () => {
+      mockVerifyExternalSessionToken.mockImplementation(token => {
+        if (token === 'user-session-token') return USER_SESSION_CLAIMS
+        if (token === 'user-session-token-b') {
+          return { ...USER_SESSION_CLAIMS, userId: 'user-456' }
+        }
+        return null
+      })
+
+      await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
+      mockRateLimiterAllowed()
+      mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      })
+      mockRateLimiterAllowed()
+      mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      })
+
+      const app = makeApp(gateway)
+      await request(app)
+        .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-token')
+        .set('Idempotency-Key', 'external-key-user-a')
+        .send({ inputs: { topic: 'alpha' } })
+        .expect(403)
+      await request(app)
+        .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-token-b')
+        .set('Idempotency-Key', 'external-key-user-b')
+        .send({ inputs: { topic: 'alpha' } })
+        .expect(403)
+
+      const keys = rateLimitBucketKeys()
+      expect(keys).toHaveLength(2)
+      expect(keys[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+      expect(keys[1]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+      expect(keys[0]).not.toBe(keys[1])
+    })
+
+    it('reuses one trigger bucket for the same user session and service bearer', async () => {
+      await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
+      mockRateLimiterAllowed()
+      mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      })
+      mockRateLimiterAllowed()
+      mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      })
+
+      const app = makeApp(gateway)
+      await request(app)
+        .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-token')
+        .set('Idempotency-Key', 'external-key-same-a')
+        .send({ inputs: { topic: 'alpha' } })
+        .expect(403)
+      await request(app)
+        .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-token')
+        .set('Idempotency-Key', 'external-key-same-b')
+        .send({ inputs: { topic: 'alpha' } })
+        .expect(403)
+
+      const keys = rateLimitBucketKeys()
+      expect(keys).toHaveLength(2)
+      expect(keys[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+      expect(keys[0]).toBe(keys[1])
+    })
   })
 
   describe('GET /external/workflows/:ns/:name/health', () => {
