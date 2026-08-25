@@ -32,6 +32,8 @@ expect_code() {
   }
 }
 
+"$ROOT/scripts/tests/test-minikube-profile-owner.sh"
+
 repo="$tmp/evenfire"
 mkdir -p "$repo"
 repo="$(cd "$repo" && pwd -P)"
@@ -55,7 +57,29 @@ profile_root="$tmp/profiles/$profile"
 mkdir -p "$profile_root"
 printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
   "$profile" "$(git -C "$repo" rev-parse --short=8 HEAD)" "$repo" >"$profile_root/profile.env"
-printf 'PORT_BASE=23117\nCONTROL_API_URL=profile-owned-url\n' >"$profile_root/ports.env"
+local_loopback_url() { printf 'http://%s:%s' 127.0.0.1 "$1"; }
+cat >"$profile_root/ports.env" <<EOF_PORTS
+PORT_BASE=23117
+CONTROL_UI_PORT=23117
+PROFILE_UI_PORT=23118
+MCP_HOST_PORT=23197
+REGISTRY_API_PORT=23202
+CONTROL_API_PORT=23207
+EXTERNAL_REST_API_PORT=23208
+MEMBER_REGISTRATION_SERVICE_PORT=23209
+RPC_PROXY_PORT=23211
+WORKFLOW_APPROVAL_READER_PORT=23215
+CONTROL_UI_URL=$(local_loopback_url 23117)
+PROFILE_UI_URL=$(local_loopback_url 23118)
+PROFILE_UI_BASE_URL=$(local_loopback_url 23118)
+CONTROL_API_URL=$(local_loopback_url 23207)
+EXTERNAL_REST_API_URL=$(local_loopback_url 23208)
+MEMBER_REGISTRATION_SERVICE_URL=$(local_loopback_url 23209)
+RPC_PROXY_URL=$(local_loopback_url 23211)
+REGISTRY_API_URL=$(local_loopback_url 23202)
+WORKFLOW_APPROVAL_READER_URL=$(local_loopback_url 23215)
+MCP_HOST_URL=$(local_loopback_url 23197)
+EOF_PORTS
 
 repo_env=(
   T2_PROJECT_DIR="$repo"
@@ -82,7 +106,7 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED protected-branch protected-branch \
 git -C "$repo" switch -q feat/scenario
 
 missing_profile_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/missing-profile.env")
-expect_code DEVELOPMENT_SCOPE_REQUIRED missing-profile missing-profile \
+expect_code PROFILE_OWNERSHIP_MISMATCH missing-profile missing-profile \
   env "${missing_profile_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
 
 expect_code DEVELOPMENT_SCOPE_REQUIRED shared-profile shared-profile \
@@ -110,6 +134,7 @@ case "$*" in
     done
     printf '%s' "${FAKE_CONTEXT:-}" ;;
   *"config view"*) printf '%s://%s:6443' https "${FAKE_ENDPOINT:-10.0.0.1}" ;;
+  *"get configmap"*) printf '%s' "${FAKE_MARKER:-}" ;;
   *) exit 0 ;;
 esac
 EOF
@@ -142,6 +167,9 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED wrong-profile-identity wrong-profile-iden
 missing_profile_state="$(env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_profile_status; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
 [ "$missing_profile_state" = full-bootstrap ] || fail "missing profile selected $missing_profile_state instead of full-bootstrap"
 
+expect_code PROFILE_UNHEALTHY status-probe-timeout status-probe-timeout \
+  env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ return 124; }; t2_profile_status' bash "$COMMON"
+
 healthy_profile_state="$(env T2_PROJECT_DIR="$repo" MINIKUBE_PROFILE="$profile" T2_CONTEXT="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" T2_PROFILE_ROOT="$tmp/profiles" T2_PROFILE_ENV="$profile_root/profile.env" T2_PORTS_ENV="$profile_root/ports.env" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader T2_BRANCH=feat/scenario T2_HEAD="$feature_sha" T2_LOCK_ROOT="$tmp/locks" T2_EVIDENCE_ROOT="$tmp/evidence" bash -c 'source "$1"; t2_mk(){ printf "%s" "host: Running\nkubelet: Running\napiserver: Running"; }; t2_profile_status; printf "%s:%s" "$T2_PROFILE_STATUS" "$T2_PROFILE_HEALTHY"' bash "$COMMON")"
 [ "$healthy_profile_state" = healthy:true ] || fail "healthy profile selected $healthy_profile_state instead of healthy:true"
 
@@ -158,9 +186,37 @@ expect_code PROFILE_OWNERSHIP_MISMATCH profile-ownership profile-ownership \
   env "${ownership_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
 
 stale_profile_env="$tmp/stale-profile.env"
-printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=oldsha1\nDIRTY=false\nREPO_DIR=%s\n' \
+printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=deadbeef\nDIRTY=false\nREPO_DIR=%s\n' \
   "$profile" "$repo" >"$stale_profile_env"
 env "${repo_env[@]}" T2_PROFILE_ENV="$stale_profile_env" \
+  bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
+worktree_id="$(bash -c 'source "$1"; t2_worktree_id "$2"' bash "$ROOT/scripts/minikube/t2-worktree-id.sh" "$repo")"
+owner_id="$(bash -c 'source "$1"; t2_profile_owner_id "$2" "$3"' bash "$ROOT/scripts/minikube/t2-worktree-id.sh" "$repo" feat/scenario)"
+v2_profile_env="$tmp/v2-profile.env"
+cat >"$v2_profile_env" <<EOF
+PROFILE_SCHEMA_VERSION=2
+WORKTREE_ID=$worktree_id
+OWNER_ID=$owner_id
+CREATED_HEAD=$feature_sha
+PROFILE=$profile
+REPO_DIR=$repo
+BRANCH=feat/scenario
+EOF
+env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
+  bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
+bad_v2_owner_env="$tmp/bad-v2-owner.env"
+sed 's/^OWNER_ID=.*/OWNER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$v2_profile_env" >"$bad_v2_owner_env"
+expect_code PROFILE_OWNERSHIP_MISMATCH v2-owner-mismatch v2-owner-mismatch \
+  env "${repo_env[@]}" T2_PROFILE_ENV="$bad_v2_owner_env" \
+  bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
+bad_ports_env="$tmp/bad-ports.env"
+printf 'PORT_BASE=not-a-port\n' >"$bad_ports_env"
+expect_code PROFILE_OWNERSHIP_MISMATCH corrupt-profile-ports corrupt-profile-ports \
+  env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" T2_PORTS_ENV="$bad_ports_env" \
   bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
 
 marker_env=("${repo_env[@]}" T2_HEAD="$feature_sha" T2_WORKTREE_ID=worktree-a)
@@ -171,6 +227,12 @@ expect_code HEAD_MARKER_MISMATCH stale-marker stale-marker \
 expect_code PROFILE_OWNERSHIP_MISMATCH marker-ownership marker-ownership \
   env "${marker_env[@]}" FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"feature","worktreeId":"worktree-b","imageSource":"local","imageTag":"test"}}' \
   bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check' bash "$COMMON"
+
+missing_marker_state="$(env "${marker_env[@]}" bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ printf "%s" "{}"; }; t2_marker_check; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
+[ "$missing_marker_state" = full-bootstrap ] || fail "empty marker selected $missing_marker_state instead of full-bootstrap"
+
+expect_code PROFILE_UNHEALTHY marker-read-timeout marker-read-timeout \
+  env "${marker_env[@]}" bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ return 124; }; t2_marker_check' bash "$COMMON"
 
 manifest="$tmp/image-manifest.json"
 printf '{"imageSource":"local","imageTag":"new"}\n' >"$manifest"
@@ -185,7 +247,7 @@ bootstrap_manifest_state="$(env "${repo_env[@]}" T2_IMAGE_MANIFEST="$invalid_man
 [ "$bootstrap_manifest_state" = full-bootstrap ] || fail "invalid bootstrap manifest selected $bootstrap_manifest_state instead of full-bootstrap"
 
 local_manifest="$tmp/local-image-manifest.json"
-printf '{"imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$local_manifest"
+printf '{"generated":"manifest-generated","imageSource":"local","imageTag":"","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$local_manifest"
 env "${repo_env[@]}" T2_IMAGE_MANIFEST="$local_manifest" T2_IMAGE_SOURCE=local T2_IMAGE_TAG= \
   bash -c 'source "$1"; T2_IMAGE_SOURCE=local; T2_IMAGE_TAG=""; t2_image_check' bash "$COMMON"
 
@@ -269,6 +331,27 @@ already_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIR
   T2_ORIGIN_DEV="$base_sha" T2_HEAD="$infra_sha" \
   bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; T2_MARKER_MATCHES_HEAD=true; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$infra_sha")"
 [ "$already_state" = already-synced ] || fail "matching marker selected $already_state instead of already-synced"
+
+# A new image acquisition can replace the digest while Git HEAD stays the
+# same. The marker must carry the manifest's generated stamp; otherwise the
+# planner would incorrectly choose already-synced/T2-runtime against the new
+# image set.
+stamp_manifest="$tmp/stamp-image-manifest.json"
+printf '{"generated":"new-generated","imageSource":"local","imageTag":"test","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$stamp_manifest"
+stamp_state="$(env T2_PROJECT_DIR="$repo" MINIKUBE_PROFILE="$profile" \
+  T2_CONTEXT="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" \
+  T2_PROFILE_ROOT="$tmp/profiles" T2_PROFILE_ENV="$profile_root/profile.env" \
+  T2_PORTS_ENV="$profile_root/ports.env" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader \
+  T2_BRANCH=feat/scenario T2_HEAD="$feature_sha" T2_ORIGIN_DEV="$base_sha" \
+  T2_LOCK_ROOT="$tmp/locks" T2_EVIDENCE_ROOT="$tmp/evidence" \
+  T2_IMAGE_MANIFEST="$stamp_manifest" \
+  FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"'"$feature_sha"'","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"old-generated"}}' \
+  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD="$3"; T2_ORIGIN_DEV="$2"; T2_PLAN_MODE=true; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; t2_image_check; t2_classify_transition; printf "%s|%s" "$T2_PLAN_STATE" "$T2_PLAN_REASON"' bash "$COMMON" "$base_sha" "$feature_sha")"
+case "$stamp_state" in
+  already-synced*) fail "a changed image acquisition was treated as already-synced: $stamp_state" ;;
+  targeted-sync*|full-reconcile*) ;;
+  *) fail "changed image acquisition selected an unexpected plan: $stamp_state" ;;
+esac
 
 # A bootstrapped profile with an unready required deployment must not stop
 # the orchestrator planner before a transition exists (PROFILE_UNHEALTHY was
@@ -357,6 +440,21 @@ plan_mode_head="$(env "${marker_env[@]}" T2_PLAN_MODE=true FAKE_MARKER='{"data":
   bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=true; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON")"
 [ "$plan_mode_head" = false ] || fail "planner mode still treated a stale marker as matching HEAD"
 
+# The bounded kubectl runner writes HARNESS_DEADLINE diagnostics to stderr.
+# They must remain outside the captured JSON so a valid exact-head marker keeps
+# the already-synced fast path.
+marker_stderr="$tmp/marker-deadline.stderr"
+marker_fast_path_status=0
+marker_fast_path="$(env "${marker_env[@]}" T2_PLAN_MODE=false \
+  PATH="$fake_bin:$PATH" \
+  FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"feature","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"generated"}}' \
+  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=false; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON" 2>"$marker_stderr")" || marker_fast_path_status=$?
+if [ "$marker_fast_path_status" -ne 0 ] || [ "$marker_fast_path" != true ]; then
+  fail "stderr from the bounded marker read broke the valid-marker fast path (status=$marker_fast_path_status result=$marker_fast_path)"
+fi
+grep -Fq '[HARNESS_DEADLINE] label=t2-kubectl event=exit' "$marker_stderr" ||
+  fail 'marker deadline diagnostics were not preserved on stderr'
+
 evidence="$tmp/evidence.json"
 detail_value="$(printf '%s://%s:%s@%s' postgresql user marker local-db)"
 env "${repo_env[@]}" T2_EVIDENCE_FILE="$evidence" T2_EVIDENCE_DIR="$tmp/evidence-dir" \
@@ -394,112 +492,11 @@ grep -Fq 'T2_LOCK_ROOT' "$COMMON"
 grep -Fq 't2_mutation_lock' "$COMMON"
 grep -Fq 't2_lock_validate_inherited' "$COMMON"
 grep -Fq 'PORT_FORWARD_CONFLICT' "$COMMON"
-grep -Fq 'while read -r uid pid ppid rest' "$COMMON" || fail 't2_process_check must split ps -ef fields'
-grep -Fq 'IFS= read -r uid pid ppid rest' "$COMMON" && fail 'IFS= read disables PID split and silences PORT_FORWARD_CONFLICT'
-grep -Fq '([^[:space:]]*\/)?kubectl([[:space:]]|$)' "$COMMON" || fail 't2_process_check awk must match a kubectl argv0/path token'
-grep -Fq '[[:space:]]port-forward([[:space:]]|$)' "$COMMON" || fail 't2_process_check awk must match a standalone port-forward token'
-grep -Fq 'kubectl[[:space:]]+port-forward' "$COMMON" && fail 't2_process_check awk still requires kubectl/port-forward adjacency'
-grep -Fq '[0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?' "$COMMON" && fail 't2_process_check awk still anchors on a TIME-column regex'
-
-# Real launcher argv (flags between kubectl and port-forward). TIME prefixes
-# are only ps -ef wrappers. The dead adjacency regex must miss these lines.
-pf_profile="clerum-t2-pf-fixture"
-pf_all='user 4242 1 0 10:00 ttys000 0:00 kubectl --context='"${pf_profile}"' -n control-plane port-forward --address=127.0.0.1 svc/control-ui 3000:3000'
-pf_ctl='user 4243 1 0 10:00 ttys000 0:00.03 kubectl -n control-plane port-forward svc/control-api 8090:8090'
-pf_e2e='user 4244 1 0 10:00 pts/0 00:00:00 kubectl --context '"${pf_profile}"' port-forward svc/control-ui -n control-plane 3000:3000'
-bare_pf='user 4245 1 0 10:00 ttys000 0:00 kubectl port-forward --context='"${pf_profile}"' svc/x 8080:80'
-path_pf='user 4246 1 0 10:00 pts/0 00:00:00 /usr/local/bin/kubectl --context='"${pf_profile}"' -n control-plane port-forward --address=127.0.0.1 svc/control-api 8090:8090'
-wrapper_pf='user 4247 1 0 10:00 ttys000 0:00 bash -c echo kubectl port-forward --context='"${pf_profile}"
-awk_pf="$(sed -n '/^t2_process_check()/,/^}/p' "$COMMON" | sed -n "s/.*awk '\\(.*\\)' .*/\\1/p")"
-[ -n "$awk_pf" ] || fail 'could not extract t2_process_check awk program'
-printf '%s\n' "$awk_pf" | grep -Fq 'kubectl[[:space:]]+port-forward' && fail 'extracted awk still requires kubectl/port-forward adjacency'
-dead_awk='/[[:space:]][0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?[[:space:]]+([^[:space:]]*\/)?kubectl[[:space:]]+port-forward([[:space:]]|$)/ {print}'
-printf '%s\n' "$pf_all" "$pf_ctl" "$pf_e2e" | awk "$dead_awk" >"$tmp/pf-dead-awk.out"
-[ ! -s "$tmp/pf-dead-awk.out" ] || fail 'real-launcher fixtures still match the dead adjacency regex — fixtures are wrong'
-printf '%s\n' "$pf_all" "$pf_ctl" "$pf_e2e" "$bare_pf" "$path_pf" "$wrapper_pf" | awk "$awk_pf" >"$tmp/pf-awk.out"
-grep -Fq -- "--context=${pf_profile} -n control-plane port-forward --address=127.0.0.1" "$tmp/pf-awk.out" || fail 'awk missed pf-all-stack real launcher'
-grep -Fq 'kubectl -n control-plane port-forward svc/control-api' "$tmp/pf-awk.out" || fail 'awk missed pf-control-stack real launcher'
-grep -Fq -- "--context ${pf_profile} port-forward svc/control-ui" "$tmp/pf-awk.out" || fail 'awk missed run-e2e real launcher'
-grep -Fq 'kubectl port-forward --context=' "$tmp/pf-awk.out" || fail 'awk missed a bare kubectl port-forward'
-grep -Fq '/usr/local/bin/kubectl --context=' "$tmp/pf-awk.out" || fail 'awk missed a path kubectl with flags before port-forward'
-read -r _ pid _ _ <<<"$pf_all"
-[ "$pid" = 4242 ] || fail "ps field split left pid='$pid' instead of 4242"
-
-pf_root="$tmp/pf-check-profiles"
-mkdir -p "$pf_root/$pf_profile/pids"
-pf_bin="$tmp/pf-ps-bin"
-mkdir -p "$pf_bin"
-cat >"$pf_bin/ps" <<'EOF'
-#!/usr/bin/env bash
-if [ "${1:-}" = "-ef" ]; then
-  cat "${T2_PS_EF_FILE:?}"
-  exit 0
-fi
-pid=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -p)
-      pid="$2"
-      shift 2
-      ;;
-    -p*)
-      pid="${1#-p}"
-      shift
-      ;;
-    *)
-      shift
-      ;;
-  esac
-done
-case "$pid" in
-  4242|4243|4244|4245|4246) printf '%s\n' kubectl ;;
-  4247) printf '%s\n' bash ;;
-  *) printf '\n' ;;
-esac
-EOF
-chmod +x "$pf_bin/ps"
-
-run_process_check() {
-  local ef_file="$1" out="$2"
-  T2_PS_EF_FILE="$ef_file" PATH="$pf_bin:$PATH" \
-    T2_PROFILE="$pf_profile" T2_CONTEXT="$pf_profile" \
-    MINIKUBE_PROFILE="$pf_profile" \
-    T2_PROFILE_ROOT="$pf_root" \
-    T2_PROJECT_DIR="$ROOT" \
-    T2_LOCK_ROOT="$tmp/locks" \
-    bash -c 'source "$1"; t2_process_check' bash "$COMMON" >"$out" 2>&1
-}
-
-printf '%s\n' "$pf_all" >"$tmp/ps-ef-real.out"
-if run_process_check "$tmp/ps-ef-real.out" "$tmp/pf-real.err"; then
-  fail 't2_process_check did not fail a foreign real launcher (PORT_FORWARD_CONFLICT)'
-fi
-grep -Fq 'PORT_FORWARD_CONFLICT' "$tmp/pf-real.err" || fail 'foreign real launcher did not report PORT_FORWARD_CONFLICT'
-
-printf '%s\n' "$wrapper_pf" >"$tmp/ps-ef-wrap.out"
-if ! run_process_check "$tmp/ps-ef-wrap.out" "$tmp/pf-wrap.err"; then
-  fail 't2_process_check failed on a wrapper that only mentions kubectl (comm=bash)'
-fi
-
-printf '%s\n' "$pf_ctl" >"$tmp/ps-ef-contextless.out"
-if ! run_process_check "$tmp/ps-ef-contextless.out" "$tmp/pf-contextless.err"; then
-  fail 't2_process_check rejected an unrelated context-less port-forward'
-fi
+grep -Fq 'port-forward-owner.sh' "$COMMON" || fail 'T2 must load the shared exact port-forward owner'
+grep -Fq 'matching_records' "$COMMON" || fail 'T2 must require exactly one structured ownership record'
+bash "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
-
-forward_tmp="$tmp/port-forward-check"
-mkdir -p "$forward_tmp/bin" "$forward_tmp/profile-cache/profile-a/pids"
-cat >"$forward_tmp/bin/ps" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' 'root 4242 1 0 00:00 ? 00:00:00 kubectl --context=profile-a -n control-plane port-forward svc/control-api 30100:8090'
-EOF
-chmod +x "$forward_tmp/bin/ps"
-printf '4242\nPROCESS_START=unavailable\n' >"/tmp/pf-profile-a-control-api.pid"
-forward_check="$(env PATH="$forward_tmp/bin:$PATH" T2_PROFILE=profile-a T2_CONTEXT=profile-a \
-  T2_PROFILE_ROOT="$forward_tmp/profile-cache" bash -c 'source "$1"; t2_process_check; printf PASS' bash "$COMMON")"
-rm -f "/tmp/pf-profile-a-control-api.pid"
-[ "$forward_check" = PASS ] || fail "canonical /tmp port-forward ownership was rejected: $forward_check"
 
 printf 'PASS: local Minikube T0/T1/T2 scenario checks\n'

@@ -154,7 +154,9 @@ for upgrade_path in Makefile scripts/minikube/pre-gate-sync.sh scripts/minikube/
   grep -q 'get secret gfs-controller-db' "$upgrade_path" || fail "$upgrade_path does not distinguish partial bootstrap"
 done
 assert_minikube_upgrade_classifier() {
-  local path="$1" start="$2" end="$3" block dsn classify ready abort reconcile fallback fresh
+  local path="$1" start="$2" end="$3" block block_start dsn classify ready abort reconcile fallback fresh
+  block_start="$(grep -nF -- "$start" "$path" | head -1 | cut -d: -f1)"
+  [[ -n "$block_start" ]] || fail "$path is missing the upgrade classifier anchor"
   block="$(awk -v start="$start" -v end="$end" '
     index($0, start) { active=1 }
     active { print }
@@ -167,11 +169,76 @@ assert_minikube_upgrade_classifier() {
   reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' <<<"$block" | head -1 | cut -d: -f1)"
   fallback="$(grep -nE '^[[:space:]]*else' <<<"$block" | tail -1 | cut -d: -f1)"
   fresh="$(grep -ni 'fresh bootstrap' <<<"$block" | tail -1 | cut -d: -f1)"
-  [[ -n "$dsn" && -n "$classify" && -n "$ready" && -n "$abort" && -n "$reconcile" && -n "$fallback" && -n "$fresh" ]] \
-    || fail "$path upgrade classifier is incomplete"
-  [[ "$dsn" -lt "$classify" && "$classify" -lt "$ready" && "$ready" -lt "$abort" && \
-     "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
-    || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
+  classifier_start="$dsn"
+  for line_name in dsn classify ready abort reconcile fallback fresh; do
+    line_value="${!line_name}"
+    if [[ -n "$line_value" ]]; then
+      printf -v "$line_name" '%d' "$((block_start + line_value - 1))"
+    fi
+  done
+  if [[ "$path" == *"scripts/minikube/full-setup.sh" ]]; then
+    local readiness_probe writer_flag partial_flag fence_call policy_apply migration roles recovery_overlay restore_api post_ready post_reconcile restore_writers
+    readiness_probe="$(grep -n 'if control_api_is_ready' <<<"$block" | head -1 | cut -d: -f1)"
+    if [[ -n "$readiness_probe" ]]; then
+      readiness_probe=$((block_start + readiness_probe - 1))
+    fi
+    # The durable resume classifier is defined before the executable upgrade
+    # branch. Select the first recovery assignment/fence after the writer
+    # Secret read so this contract checks mutation order, not helper details.
+    writer_flag="$(grep -n 'WRITER_RECOVERY=true' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
+    partial_flag="$(grep -n 'PARTIAL_BOOTSTRAP_RECOVERY=true' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
+    fence_call="$(grep -nE '^[[:space:]]+fence_partial_bootstrap_writers$' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
+    policy_apply="$(grep -nE '^[[:space:]]+apply_refreshed_k8s_api_network_policies$' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
+    migration="$(grep -n 'run-control-api-db-migration.sh' "$path" | head -1 | cut -d: -f1)"
+    roles="$(grep -n 'provision-control-api-runtime-roles.sh' "$path" | head -1 | cut -d: -f1)"
+    restore_api="$(grep -nE '^[[:space:]]+restore_partial_control_api$' "$path" | tail -1 | cut -d: -f1)"
+    recovery_overlay="$(grep -nE '^[[:space:]]+apply_fenced_recovery_overlay$' "$path" | tail -1 | cut -d: -f1)"
+    post_ready="$(grep -n 'rollout status deployment/control-api.*timeout=180s' "$path" | tail -1 | cut -d: -f1)"
+    post_reconcile="$(grep -nE '^[[:space:]]+reconcile_existing_gfs_credentials$' "$path" | tail -1 | cut -d: -f1)"
+    restore_writers="$(grep -nE '^[[:space:]]+restore_partial_non_api_writers$' "$path" | tail -1 | cut -d: -f1)"
+    for line_name in writer_flag partial_flag fence_call policy_apply; do
+      line_value="${!line_name}"
+      if [[ -n "$line_value" ]]; then
+        printf -v "$line_name" '%d' "$((block_start + line_value - 1))"
+      fi
+    done
+    [[ -n "$dsn" && -n "$classify" && -n "$readiness_probe" && -n "$writer_flag" && \
+       -n "$partial_flag" && -n "$fence_call" && -n "$policy_apply" && \
+       -n "$fallback" && -n "$fresh" && -n "$migration" && \
+       -n "$roles" && -n "$recovery_overlay" && -n "$restore_api" && \
+       -n "$post_ready" && -n "$post_reconcile" && -n "$restore_writers" ]] \
+      || fail "$path recovery classifier is incomplete"
+    [[ "$dsn" -lt "$classify" && "$classify" -lt "$readiness_probe" && \
+       "$readiness_probe" -lt "$writer_flag" && "$writer_flag" -lt "$partial_flag" && \
+       "$partial_flag" -lt "$fence_call" && "$fence_call" -lt "$policy_apply" && \
+       "$partial_flag" -lt "$fallback" && "$fallback" -lt "$fresh" && \
+       "$migration" -lt "$roles" && "$roles" -lt "$recovery_overlay" && \
+       "$recovery_overlay" -lt "$restore_api" && "$restore_api" -lt "$post_reconcile" && \
+       "$post_reconcile" -lt "$restore_writers" && "$post_ready" -lt "$post_reconcile" ]] \
+      || fail "$path does not apply a fenced overlay before restoring API, GFS, and the remaining writers"
+    grep -Fq 'Existing GFS writer detected but control-api is not Ready; refusing HCC cutover' "$path" \
+      || fail "$path no longer retains the fail-closed guard for an unrecognized unready upgrade"
+    grep -Fq 'app=control-api,!clerum.io/component' "$path" \
+      || fail "$path does not exclude migration Jobs from the control-api writer fence"
+    grep -Fq 'WRITER_RECOVERY_MIGRATIONS_COMPLETE=true' "$path" \
+      || fail "$path does not mark post-migration recovery as complete"
+    grep -Fq 'WRITER_RECOVERY_FENCE_PENDING=true' "$path" \
+      || fail "$path does not re-fence every durable post-migration resume"
+    grep -Fq 'if writer_recovery_policy_ready && [ "$K8S_API_EGRESS_POLICY_DRIFT" != true ]; then' "$path" \
+      || fail "$path can skip a refreshed Kubernetes API egress policy after endpoint drift"
+    grep -Fq 'render-fenced-writer-deployments.rb' "$path" \
+      || fail "$path does not render a fenced recovery overlay"
+    grep -Fq 'writer_recovery_state_phase overlay-applying' "$path" \
+      || fail "$path does not persist the overlay-application boundary"
+    grep -Fq 'writer_recovery_state_phase api-restoring' "$path" \
+      || fail "$path does not persist the control-api restore boundary"
+  else
+    [[ -n "$dsn" && -n "$classify" && -n "$ready" && -n "$abort" && -n "$reconcile" && -n "$fallback" && -n "$fresh" ]] \
+      || fail "$path upgrade classifier is incomplete"
+    [[ "$dsn" -lt "$classify" && "$classify" -lt "$ready" && "$ready" -lt "$abort" && \
+       "$abort" -lt "$reconcile" && "$reconcile" -lt "$fallback" && "$fallback" -lt "$fresh" ]] \
+      || fail "$path does not reconcile ready upgrades, abort unready upgrades, and defer only empty bootstraps"
+  fi
 }
 assert_pre_gate_defers_gfs_reconcile() {
   local block
@@ -197,11 +264,16 @@ assert_pre_gate_defers_gfs_reconcile() {
 # anchor.
 assert_minikube_upgrade_classifier Makefile '# Upgrade path: adopt/validate writer' 'image-mode.sh --render-dir'
 assert_minikube_upgrade_classifier scripts/minikube/full-setup.sh '# Upgrade path: stage the additive reader' 'Applying kustomize overlay'
+full_setup_identity_line="$(grep -nF 't2_profile_context_identity_check' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
+full_setup_recovery_guard_line="$(grep -nF 'guard_interrupted_writer_recovery || exit 1' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+[[ -n "$full_setup_identity_line" && -n "$full_setup_recovery_guard_line" && \
+   "$full_setup_identity_line" -lt "$full_setup_recovery_guard_line" ]] \
+  || fail 'full-setup can fence recovery writers before verifying exact context/profile identity'
 assert_pre_gate_defers_gfs_reconcile 'apply-gfs-writer-secret.sh' 'incremental_build_images' scripts/minikube/pre-gate-sync.sh
 full_setup_classifier="$(sed -n '/# Upgrade path: stage the additive reader/,/Applying kustomize overlay/p' scripts/minikube/full-setup.sh)"
 reset_classifier="$(grep -n 'if \[ "$RESET_DB" = true \]; then' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
 reset_classifier_defer="$(grep -n 'HCC cutover deferred until post-convergence verification' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
-reset_classifier_else="$(grep -n '^else$' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
+reset_classifier_else="$(awk -v start="$reset_classifier" 'NR > start && /^else$/ { print NR; exit }' <<<"$full_setup_classifier")"
 reset_classifier_dsn="$(grep -n 'writer_dsn=.*get secret gfs-controller-db' <<<"$full_setup_classifier" | head -1 | cut -d: -f1)"
 [[ -n "$reset_classifier" && -n "$reset_classifier_defer" && -n "$reset_classifier_else" && -n "$reset_classifier_dsn" ]] && \
   [[ "$reset_classifier" -lt "$reset_classifier_defer" && "$reset_classifier_defer" -lt "$reset_classifier_else" && \
@@ -211,7 +283,7 @@ full_setup_reset="$(sed -n '/# 6a. Optional DB reset/,/# 6c. Re-apply generated 
 reset_defer="$(grep -n 'HCC cutover deferred until post-convergence verification' <<<"$full_setup_reset" | head -1 | cut -d: -f1)"
 reset_postgres_only="$(grep -n 'apply -k .* -l app=control-postgres' <<<"$full_setup_reset" | head -1 | cut -d: -f1)"
 reset_converge="$(grep -n 'converge-control-db-after-reset.sh' <<<"$full_setup_reset" | head -1 | cut -d: -f1)"
-reset_full_overlay="$(grep -n 'kubectl kustomize .* | .* apply -f -' <<<"$full_setup_reset" | tail -1 | cut -d: -f1)"
+reset_full_overlay="$(grep -nE '(kubectl|\$KC) kustomize .* \| .* apply -f -' <<<"$full_setup_reset" | tail -1 | cut -d: -f1)"
 [[ -n "$reset_defer" && -n "$reset_postgres_only" && -n "$reset_converge" && -n "$reset_full_overlay" ]] && \
   [[ "$reset_defer" -lt "$reset_postgres_only" && "$reset_postgres_only" -lt "$reset_converge" && "$reset_converge" -lt "$reset_full_overlay" ]] \
   || fail 'full-setup reset can require ready control-api or cut over HCC before convergence'
