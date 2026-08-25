@@ -427,7 +427,7 @@ export class McpAuthorizationService {
     } catch {
       throw new McpAuthorizationError('authorization_unavailable')
     }
-    return servers.map(server => {
+    return servers.filter(server => Boolean(server.contextRef)).map(server => {
       const targetUrl = liveForwardUrl(server) ?? ''
       return {
         name: server.name,

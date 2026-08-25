@@ -28,6 +28,7 @@ describe("HccClient", () => {
   let baseUrl: string;
   let responseBody: unknown;
   let responseStatus: number;
+  let responseHeaders: Record<string, string>;
   let compatibilityBody: unknown;
   let compatibilityStatus: number | undefined;
   let requests: Array<{ method: string; path: string; headers: http.IncomingHttpHeaders }>;
@@ -36,6 +37,7 @@ describe("HccClient", () => {
   beforeEach(async () => {
     responseBody = { schemaVersion: 1, servers: [], timestamp: new Date().toISOString() };
     responseStatus = 200;
+    responseHeaders = {};
     compatibilityBody = undefined;
     compatibilityStatus = undefined;
     requests = [];
@@ -52,7 +54,7 @@ describe("HccClient", () => {
           isCompatibilityRequest && compatibilityStatus !== undefined
             ? compatibilityStatus
             : responseStatus,
-          { "Content-Type": "application/json" }
+          { "Content-Type": "application/json", ...responseHeaders }
         );
         const body =
           isCompatibilityRequest && compatibilityBody !== undefined
@@ -373,5 +375,15 @@ describe("HccClient", () => {
       expect.objectContaining({ code })
     );
     expect(requests[0].path).toBe("/api/v2/system/mcpservers/authorize");
+  });
+
+  it("maps an HCC system-bearer rejection to unavailable instead of a Host rejection", async () => {
+    responseStatus = 401;
+    responseHeaders = { "X-Clerum-Mcp-Proxy-Auth-Failure": "system" };
+    const client = new HccClient(makeConfig({ hccApiUrl: baseUrl }), async () => systemIdentity);
+
+    await expect(client.authorizeForward("mongo-mcp", "fixture-host-bearer")).rejects.toMatchObject({
+      code: "unavailable",
+    });
   });
 });

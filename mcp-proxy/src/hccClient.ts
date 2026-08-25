@@ -15,6 +15,12 @@ export type HccAuthorizationErrorCode =
   | 'forbidden'
   | 'unavailable'
 
+type HccHttpResponse = {
+  statusCode: number
+  body: string
+  headers: http.IncomingHttpHeaders
+}
+
 export class HccAuthorizationError extends Error {
   constructor(readonly code: HccAuthorizationErrorCode) {
     super(code)
@@ -32,6 +38,7 @@ export interface HccForwardAuthorization {
 export type SystemIdentityReader = () => Promise<string>
 
 const BEARER_SCHEME = 'Bearer'
+const SYSTEM_AUTH_FAILURE_HEADER = 'x-clerum-mcp-proxy-auth-failure'
 const MAX_HCC_RESPONSE_BYTES = 1_048_576
 const SERVER_NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/
 
@@ -300,6 +307,12 @@ export class HccClient {
       body
     )
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (
+        response.statusCode === 401 &&
+        response.headers[SYSTEM_AUTH_FAILURE_HEADER] === 'system'
+      ) {
+        throw new HccAuthorizationError('unavailable')
+      }
       throw new HccAuthorizationError(this.statusToCode(response.statusCode))
     }
     try {
@@ -321,7 +334,7 @@ export class HccClient {
     path: string,
     headers: Record<string, string>,
     body?: string
-  ): Promise<{ statusCode: number; body: string }> {
+  ): Promise<HccHttpResponse> {
     return new Promise((resolve, reject) => {
       let parsed: URL
       try {
@@ -364,6 +377,7 @@ export class HccClient {
           resolve({
             statusCode: response.statusCode ?? 0,
             body: Buffer.concat(chunks).toString('utf8'),
+            headers: response.headers,
           })
         })
         response.on('error', () => reject(new HccAuthorizationError('unavailable')))

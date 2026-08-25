@@ -33,6 +33,7 @@ const readinessLog = hccLogger.child({ module: 'readiness' })
 
 const MCP_SELECTOR_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/
 const MCP_REQUEST_BODY_LIMIT = 1024
+const MCP_PROXY_AUTH_FAILURE_HEADER = 'X-Clerum-Mcp-Proxy-Auth-Failure'
 const mcpApiLog = hccLogger.child({ module: 'mcp-host-api' })
 type McpHostApiAction = 'inventory' | 'credential' | 'proxy_authorize'
 
@@ -507,7 +508,10 @@ export class ContextMapperServer {
           res,
           401,
           { error: 'unauthorized' },
-          { 'WWW-Authenticate': 'Bearer realm="host-context-controller"' }
+          {
+            'WWW-Authenticate': 'Bearer realm="host-context-controller"',
+            [MCP_PROXY_AUTH_FAILURE_HEADER]: 'system',
+          }
         )
       }
       return null

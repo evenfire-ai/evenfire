@@ -3,7 +3,11 @@ import { Readable } from 'node:stream'
 import type { McpServerProvider } from './k8sClient'
 import type { LiveForwardTarget, SystemMcpServerInfo } from './mcpAuthorization'
 import { McpAuthorizationError, type McpAuthorizationService } from './mcpAuthorization'
-import type { McpProxyAuthenticator, VerifiedMcpProxySystemPrincipal } from './mcpProxyAuthentication'
+import {
+  McpProxyAuthenticationError,
+  type McpProxyAuthenticator,
+  type VerifiedMcpProxySystemPrincipal,
+} from './mcpProxyAuthentication'
 import { ContextMapperServer, McpHostApiRateLimiter } from './server'
 import type { McpServerInfo } from './types'
 
@@ -179,6 +183,42 @@ describe('ContextMapperServer system MCP proxy routes', () => {
       expect.objectContaining({ hostName: 'host-a' }),
       'server-a'
     )
+  })
+
+  it('marks a system-bearer rejection internally without changing the generic public body', async () => {
+    const systemAuthenticator: McpProxyAuthenticator = {
+      authenticateSystem: vi.fn(async () => {
+        throw new McpProxyAuthenticationError('unauthorized')
+      }),
+      authenticateHost: vi.fn(),
+    } as unknown as McpProxyAuthenticator
+    server = new ContextMapperServer(
+      new Provider(),
+      0,
+      undefined,
+      undefined,
+      () => true,
+      () => true,
+      undefined,
+      { listSystemServers: vi.fn(async () => directory) } as McpAuthorizationService,
+      systemAuthenticator
+    )
+    server.setReady(true)
+
+    const response = await invoke(server, '/api/v2/system/mcpservers/authorize', {
+      method: 'POST',
+      headers: {
+        authorization: 'fixture-system',
+        'x-clerum-host-authorization': 'fixture-host',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ serverName: 'server-a' }),
+    })
+
+    expect(response.statusCode).toBe(401)
+    expect(JSON.parse(response.body)).toEqual({ error: 'unauthorized' })
+    expect(response.headers['X-Clerum-Mcp-Proxy-Auth-Failure']).toBe('system')
+    expect((systemAuthenticator.authenticateHost as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled()
   })
 
   it('normalizes system route method, media-type, and body failures to 400', async () => {

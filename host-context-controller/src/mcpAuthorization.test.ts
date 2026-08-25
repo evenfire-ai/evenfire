@@ -148,7 +148,11 @@ async function expectCredentialFailure(
 describe('McpAuthorizationService', () => {
   it('keeps descriptions out of the global system inventory DTO', async () => {
     const store = new FakeStore()
-    const describedServer = { ...server, description: ['fixture', 'description'].join(' ') }
+    const describedServer = {
+      ...server,
+      contextRef: 'context-a',
+      description: ['fixture', 'description'].join(' '),
+    }
     store.listMcpServers = async () => [describedServer]
     const service = new McpAuthorizationService(store)
 
@@ -162,6 +166,18 @@ describe('McpAuthorizationService', () => {
       'name',
       'status',
       'transport',
+    ])
+  })
+
+  it('omits McpServers that are not attached to any Context from the system inventory', async () => {
+    const store = new FakeStore()
+    const orphan = { ...server, name: 'orphan-server', contextRef: undefined }
+    const attached = { ...server, contextRef: 'context-a' }
+    store.listMcpServers = async () => [orphan, attached]
+    const service = new McpAuthorizationService(store)
+
+    await expect(service.listSystemServers()).resolves.toEqual([
+      expect.objectContaining({ name: 'server-a', contextRef: 'context-a' }),
     ])
   })
 
