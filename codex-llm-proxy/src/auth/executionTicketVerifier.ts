@@ -22,6 +22,7 @@ export function verifyExecutionTicket(
     })
     if (typeof verified !== 'object' || verified === null) return null
     const claims = verified as jwt.JwtPayload
+    if (typeof claims.exp !== 'number') return null
     if (claims.typ !== 'codex-execution-ticket') return null
     if (typeof claims.jti !== 'string' || typeof claims.hostRef !== 'string') return null
     if (typeof claims.model !== 'string' || typeof claims.requestHash !== 'string') return null

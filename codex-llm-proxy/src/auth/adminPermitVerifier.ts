@@ -22,6 +22,7 @@ export function verifyAdminPermit(
     })
     if (typeof verified !== 'object' || verified === null) return null
     const claims = verified as jwt.JwtPayload
+    if (typeof claims.exp !== 'number') return null
     if (claims.typ !== 'codex-admin-permit' || typeof claims.sub !== 'string') return null
     if (claims.operation !== 'catalog_list' && claims.operation !== 'connection_test') return null
     if (operation && claims.operation !== operation) return null

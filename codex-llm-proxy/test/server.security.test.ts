@@ -2,6 +2,8 @@ import { generateKeyPairSync } from 'node:crypto'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { describe, expect, it } from 'vitest'
+import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
+import { verifyExecutionTicket } from '../src/auth/executionTicketVerifier.js'
 import { loadConfig, type CodexLlmProxyConfig } from '../src/config.js'
 import { createProxyApps } from '../src/server.js'
 
@@ -185,6 +187,29 @@ describe('codex-llm-proxy security surface', () => {
         request: {},
       })
     expect(res.status).toBe(401)
+  })
+
+  it('rejects execution tickets and admin permits without a numeric exp', () => {
+    const cfg = config()
+    const ticketNoExp = jwt.sign(
+      {
+        jti: '11111111-1111-4111-8111-111111111111',
+        typ: 'codex-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash: 'a'.repeat(64),
+        providerAttemptId: 'att-1',
+      },
+      privateKey,
+      { algorithm: 'RS256', issuer: 'control-api', audience: 'codex-llm-proxy' }
+    )
+    const permitNoExp = jwt.sign(
+      { sub: 'admin-1', typ: 'codex-admin-permit', operation: 'catalog_list' },
+      privateKey,
+      { algorithm: 'RS256', issuer: 'control-api', audience: 'codex-llm-proxy-admin' }
+    )
+    expect(verifyExecutionTicket(ticketNoExp, cfg)).toBeNull()
+    expect(verifyAdminPermit(permitNoExp, cfg)).toBeNull()
   })
 
   it('rejects an admin permit whose operation does not match the route', async () => {
